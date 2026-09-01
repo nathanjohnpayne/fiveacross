@@ -11,6 +11,7 @@ import type { ItemDoc } from '../types';
 // "pending review".
 
 const H = vi.hoisted(() => ({
+  eventId: 'ev-1',
   user: { uid: 'u1' } as { uid: string } | null,
   items: [] as ItemDoc[],
   myPending: [] as ItemDoc[],
@@ -48,7 +49,11 @@ vi.mock('../data/api', () => ({
 }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 // #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
-vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
+vi.mock('../firebase', () => ({
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
 
 import ItemPool, { APPROVAL_GRACE_MS, vacatedPendingIds } from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
@@ -70,6 +75,7 @@ const item = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  H.eventId = 'ev-1';
   H.user = { uid: 'u1' };
   H.items = [];
   H.myPending = [];
@@ -84,7 +90,7 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
       target: { value: 'A new prompt' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false);
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false, undefined, 'ev-1');
   });
 
   // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
@@ -418,7 +424,7 @@ describe('the first-time 🔞 explainer (#610)', () => {
       target: { value: 'A spicy prompt' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true);
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true, undefined, 'ev-1');
   });
 });
 
@@ -505,7 +511,7 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     // Still pending — `addItem` has not resolved yet.
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false);
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false, undefined, 'ev-1');
 
     H.user = { uid: 'u2' };
     await act(async () => {
@@ -654,5 +660,72 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
 
     expect(track).toHaveBeenCalledWith('add_item');
     expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', expect.objectContaining({ hasTargetDay: false }));
+  });
+});
+
+describe('ItemPool Event-scope transitions (#807)', () => {
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
+  }
+
+  let storage: Storage;
+  beforeEach(() => {
+    storage = createStorageStub();
+    vi.stubGlobal('localStorage', storage);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('replaces tracked rows and compose state when the Event changes for the same uid', async () => {
+    storage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'event-a-item', text: 'Only Event A', submittedAt: 1 }]),
+    );
+    storage.setItem(
+      'gcb.mySuggestions.ev-2.u1',
+      JSON.stringify([{ id: 'event-b-item', text: 'Only Event B', submittedAt: 2 }]),
+    );
+    const view = render(<ItemPool />);
+    expect(screen.getByText('Only Event A')).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Event A draft' } });
+
+    H.eventId = 'ev-2';
+    await act(async () => view.rerender(<ItemPool />));
+
+    expect(screen.queryByText('Only Event A')).not.toBeInTheDocument();
+    expect(screen.getByText('Only Event B')).toBeInTheDocument();
+    expect(input.value).toBe('');
+  });
+
+  it('does not let an Event A add completion mutate Event B state for the same uid', async () => {
+    let resolveAdd: (value: { id: string }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    const view = render(<ItemPool />);
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Submitted in Event A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    H.eventId = 'ev-2';
+    await act(async () => view.rerender(<ItemPool />));
+    fireEvent.change(input, { target: { value: 'Event B draft' } });
+    await act(async () => resolveAdd({ id: 'event-a-item' }));
+
+    expect(input.value).toBe('Event B draft');
+    expect(screen.queryByText('Submitted in Event A')).not.toBeInTheDocument();
+    expect(JSON.parse(storage.getItem('gcb.mySuggestions.ev-1.u1') ?? '[]')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'event-a-item' })]),
+    );
+    expect(storage.getItem('gcb.mySuggestions.ev-2.u1')).toBeNull();
   });
 });

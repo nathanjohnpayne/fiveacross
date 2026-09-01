@@ -3,7 +3,16 @@ import { render, screen, fireEvent } from '@testing-library/react';
 // The default export's live container pulls useNotices → firebase; stub the hook so
 // importing the module doesn't boot Firebase. The tests drive the pure View directly.
 vi.mock('../hooks/useData', () => ({ useNotices: () => ({ notices: [] }) }));
-import { NoticeBannerView } from './NoticeBanner'; // specs/admin-messages.md (#439)
+const H = vi.hoisted(() => ({ eventId: 'event-a' }));
+vi.mock('../firebase', () => ({
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
+import {
+  __resetNoticeBannerDismissalsForTests,
+  NoticeBannerView,
+} from './NoticeBanner'; // specs/admin-messages.md (#439)
 import type { NoticeDoc } from '../types';
 
 // The presentational + dismissal half is pure over its `notices` prop, so the
@@ -32,6 +41,8 @@ describe('NoticeBanner (specs/admin-messages.md)', () => {
   let storage: Storage;
 
   beforeEach(() => {
+    __resetNoticeBannerDismissalsForTests();
+    H.eventId = 'event-a';
     storage = createStorageStub();
     vi.stubGlobal('localStorage', storage);
   });
@@ -55,11 +66,11 @@ describe('NoticeBanner (specs/admin-messages.md)', () => {
     render(<NoticeBannerView notices={[notice('n1', true)]} />);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
     expect(screen.queryByText('n1 title')).not.toBeInTheDocument();
-    expect(storage.getItem('gcb.notice.n1.dismissedAt')).not.toBeNull();
+    expect(storage.getItem('gcb.notice.event-a.n1.dismissedAt')).not.toBeNull();
   });
 
   it('a remount with that Notice dismissed does not render, but a DIFFERENT notice id still does', () => {
-    storage.setItem('gcb.notice.n1.dismissedAt', String(Date.now()));
+    storage.setItem('gcb.notice.event-a.n1.dismissedAt', String(Date.now()));
     const { unmount } = render(<NoticeBannerView notices={[notice('n1', true)]} />);
     expect(screen.queryByText('n1 title')).not.toBeInTheDocument(); // persists across "reload"
     unmount();
@@ -73,5 +84,40 @@ describe('NoticeBanner (specs/admin-messages.md)', () => {
     expect(screen.getByText('n2 title')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
     expect(screen.getByText('n1 title')).toBeInTheDocument();
+  });
+
+  it('isolates the same notice id and in-mount dismissal state across Events', () => {
+    const view = render(<NoticeBannerView notices={[notice('shared', true)]} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
+    expect(storage.getItem('gcb.notice.event-a.shared.dismissedAt')).not.toBeNull();
+
+    H.eventId = 'event-b';
+    view.rerender(<NoticeBannerView notices={[notice('shared', true)]} />);
+    expect(screen.getByText('shared title')).toBeInTheDocument();
+    expect(storage.getItem('gcb.notice.event-b.shared.dismissedAt')).toBeNull();
+  });
+
+  it('retains each Event dismissal across A to B to A when storage is unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('storage unavailable');
+      },
+      setItem: () => {
+        throw new Error('storage unavailable');
+      },
+    });
+    const eventA = render(<NoticeBannerView notices={[notice('shared', true)]} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
+    expect(screen.queryByText('shared title')).not.toBeInTheDocument();
+    eventA.unmount();
+
+    H.eventId = 'event-b';
+    const eventB = render(<NoticeBannerView notices={[notice('shared', true)]} />);
+    expect(screen.getByText('shared title')).toBeInTheDocument();
+    eventB.unmount();
+
+    H.eventId = 'event-a';
+    render(<NoticeBannerView notices={[notice('shared', true)]} />);
+    expect(screen.queryByText('shared title')).not.toBeInTheDocument();
   });
 });

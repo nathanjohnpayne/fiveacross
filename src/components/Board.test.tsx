@@ -15,6 +15,7 @@ import { saveCardSnapshot } from '../data/cardCache';
 // write path (`setMark`) reachable from any of its Squares.
 
 const H = vi.hoisted(() => ({
+  eventId: 'test-event',
   user: { uid: 'u1', displayName: 'Deck Daddy', photoURL: null } as {
     uid: string;
     displayName: string | null;
@@ -31,10 +32,15 @@ const H = vi.hoisted(() => ({
   boardPending: false,
   pinDayFirstBingo: vi.fn((..._args: unknown[]) => Promise.resolve()),
   enqueueHeldHonorPin: vi.fn(),
-  takeHeldHonorPins: vi.fn(() => [] as Array<{ uid: string; dayIndex: number; at: number }>),
+  takeHeldHonorPins: vi.fn(
+    () => [] as Array<{ uid: string; dayIndex: number; at: number; eventId: string }>,
+  ),
   dropHeldHonorPins: vi.fn(),
   getDoc: vi.fn(),
   retryDeal: vi.fn(),
+  dealDayCard: vi.fn(() => Promise.resolve(false)),
+  subscribeDirectMarkAnalytics: vi.fn(() => vi.fn()),
+  authReads: 0,
 }));
 
 vi.mock('../hooks/useData', () => ({
@@ -104,7 +110,7 @@ vi.mock('../data/api', () => ({
   // Lazy per-Day deal (#246): the suite pre-sets `H.board`, so the deal effect's
   // `if (board) return` guard short-circuits and this is never actually invoked;
   // stubbed so the import resolves.
-  dealDayCard: vi.fn(() => Promise.resolve(false)),
+  dealDayCard: H.dealDayCard,
   // Open-time echo reconcile (specs/echo-marks.md): a no-op stub — the reconcile
   // write path is proven in src/data/echo-marks.test.ts.
   reconcileEchoes: vi.fn(() =>
@@ -118,6 +124,9 @@ vi.mock('../data/api', () => ({
       ? profile.displayName
       : (fallback ?? 'Anonymous'),
 }));
+vi.mock('../data/directMarkAnalytics', () => ({
+  subscribeDirectMarkAnalytics: H.subscribeDirectMarkAnalytics,
+}));
 vi.mock('../data/proofs', () => ({ attachProof: H.attachProof }));
 vi.mock('../data/dayMeta', () => ({
   pinDayFirstBingo: H.pinDayFirstBingo,
@@ -127,14 +136,17 @@ vi.mock('../data/dayMeta', () => ({
 }));
 vi.mock('../analytics', () => ({ track: H.track }));
 vi.mock('../auth/AuthContext', () => ({
-  useAuth: () => ({
-    user: H.user,
-    loading: false,
-    signIn: vi.fn(),
-    signOutUser: vi.fn(),
-    retryDeal: H.retryDeal,
-    dealing: false,
-  }),
+  useAuth: () => {
+    H.authReads += 1;
+    return {
+      user: H.user,
+      loading: false,
+      signIn: vi.fn(),
+      signOutUser: vi.fn(),
+      retryDeal: H.retryDeal,
+      dealing: false,
+    };
+  },
 }));
 vi.mock('firebase/firestore', () => ({
   getDoc: H.getDoc,
@@ -147,9 +159,15 @@ vi.mock('firebase/firestore', () => ({
 }));
 // CoachOverlay (#214) imports EVENT_ID from '../firebase' — mocked so
 // mounting Board here never touches the real Firebase app init.
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
 
 import Board, { shareCardBingoNumber } from './Board';
+import { __resetCoachOverlayDismissalsForTests } from './CoachOverlay';
 import { drainRetractions } from '../data/moments';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -259,6 +277,13 @@ function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 't
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetCoachOverlayDismissalsForTests();
+  H.eventId = 'test-event';
+  H.authReads = 0;
+  H.dealDayCard.mockReset();
+  H.dealDayCard.mockResolvedValue(false);
+  H.subscribeDirectMarkAnalytics.mockReset();
+  H.subscribeDirectMarkAnalytics.mockImplementation(() => vi.fn());
   H.dayMeta = null;
   H.boardFromCache = false;
   H.boardPending = false;
@@ -269,6 +294,240 @@ beforeEach(() => {
   H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false });
   H.attachProof.mockResolvedValue(undefined);
   H.getDoc.mockResolvedValue({ exists: () => false, data: () => ({}) });
+});
+
+describe('Event-scoped Board lifecycle (#807)', () => {
+  it('cold-starts Event B instead of retaining Event A\'s viewed Day or open sheet', async () => {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.event-a.dismissedAt', '1');
+    store.setItem('gcb.coachOverlay.event-b.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+    const now = Date.now();
+
+    H.eventId = 'event-a';
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'glamiators', unlockAt: now - 2 * DAY_MS }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: now - DAY_MS }),
+      ],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 1, seed: 807_010, createdAt: 0, cells: dealt('a') };
+    const view = render(<Board />);
+    await act(async () => {});
+
+    const aTabs = screen.getAllByRole('tab');
+    expect(aTabs[1]).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.grid .cell-claim')[0]);
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    H.eventId = 'event-b';
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_011, createdAt: 0, cells: dealt('b') };
+    view.rerender(<Board />);
+    await act(async () => {});
+
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+    const bTabs = screen.getAllByRole('tab');
+    expect(bTabs).toHaveLength(1);
+    expect(bTabs[0]).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Prompt b0')).toBeInTheDocument();
+  });
+
+  it('keeps a delayed Event A bingo pin on Event A identity after Event B mounts', async () => {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.event-a.dismissedAt', '1');
+    store.setItem('gcb.coachOverlay.event-b.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+    const now = Date.now();
+    let resolveMark: ((value: {
+      cells: Cell[];
+      bingo: boolean;
+      blackout: boolean;
+      bingoTransition: boolean;
+      blackoutTransition: boolean;
+    }) => void) | undefined;
+    H.setMark.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveMark = resolve; }),
+    );
+
+    H.eventId = 'event-a';
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_012, createdAt: 0, cells: dealt('a') };
+    H.player = {
+      uid: 'u1', displayName: 'Event A Name', photoURL: 'a.jpg',
+      bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false,
+    } as unknown as PlayerDoc;
+    const view = render(<Board />);
+
+    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.grid .cell-claim')[3]);
+    fireEvent.click(screen.getByText(/Cross My Heart/));
+    expect(resolveMark).toBeDefined();
+
+    H.eventId = 'event-b';
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_013, createdAt: 0, cells: dealt('b') };
+    H.player = {
+      uid: 'u1', displayName: 'Event B Name', photoURL: 'b.jpg',
+      bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false,
+    } as unknown as PlayerDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+
+    const winningCells = dealt('a').map((cell, index) =>
+      [0, 1, 2, 3, 4].includes(index)
+        ? { ...cell, marked: true, markedAt: (index + 1) * 10, status: 'confirmed' as const }
+        : cell,
+    );
+    await act(async () => {
+      resolveMark!({
+        cells: winningCells,
+        bingo: true,
+        blackout: false,
+        bingoTransition: true,
+        blackoutTransition: false,
+      });
+    });
+
+    expect(H.pinDayFirstBingo).toHaveBeenCalledTimes(1);
+    expect(H.pinDayFirstBingo).toHaveBeenCalledWith(
+      0,
+      { uid: 'u1', displayName: 'Event A Name', photoURL: 'a.jpg' },
+      50,
+      'event-a',
+    );
+    expect(H.enqueueHeldHonorPin).not.toHaveBeenCalled();
+  });
+
+  it('restarts direct analytics for the same user when the Event changes', async () => {
+    H.eventId = 'event-a';
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(H.subscribeDirectMarkAnalytics).toHaveBeenCalledTimes(1);
+    expect(H.subscribeDirectMarkAnalytics).toHaveBeenLastCalledWith('u1', 'event-a');
+    const unsubscribeA = H.subscribeDirectMarkAnalytics.mock.results[0].value;
+
+    H.eventId = 'event-b';
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(unsubscribeA).toHaveBeenCalledTimes(1);
+    expect(H.subscribeDirectMarkAnalytics).toHaveBeenCalledTimes(2);
+    expect(H.subscribeDirectMarkAnalytics).toHaveBeenLastCalledWith('u1', 'event-b');
+  });
+
+  it('starts B\'s same-Day deal while A is in flight and hides A\'s late failure', async () => {
+    const readyDay = day({
+      index: 0,
+      theme: 'get-sporty',
+      unlockAt: Date.now() - DAY_MS,
+      snapshotItemIds: [],
+    });
+    let rejectA: ((reason?: unknown) => void) | undefined;
+    H.dealDayCard.mockImplementationOnce(
+      () => new Promise<boolean>((_resolve, reject) => { rejectA = reject; }),
+    );
+    H.eventId = 'event-a';
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: [readyDay] } as unknown as EventDoc;
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    H.eventId = 'event-b';
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: [{ ...readyDay }] } as unknown as EventDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+
+    await act(async () => rejectA!(new Error('late Event A failure')));
+    expect(screen.queryByText(/couldn’t deal this day’s card/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Dealing your card/i)).toBeInTheDocument();
+  });
+
+  it('treats the same card identity in Event B as a fresh deal cascade', async () => {
+    H.eventId = 'event-cascade-a';
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_001, createdAt: 0, cells: dealt() };
+    const first = render(<Board />);
+    await act(async () => {});
+    first.unmount();
+
+    const returning = render(<Board />);
+    await act(async () => {});
+    expect(document.querySelector('.bingo-head')).toHaveClass('bingo-head-dealt');
+    H.eventId = 'event-cascade-b';
+    returning.rerender(<Board />);
+    expect(document.querySelector('.bingo-head')).not.toHaveClass('bingo-head-dealt');
+  });
+
+  it('does not let a hung Event A reconcile mutate Event B lifecycle state', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveA: ((value: ReconcileResult) => void) | undefined;
+    let resolveB: ((value: ReconcileResult) => void) | undefined;
+    mocked
+      .mockImplementationOnce(() => new Promise<ReconcileResult>((resolve) => { resolveA = resolve; }))
+      .mockImplementationOnce(() => new Promise<ReconcileResult>((resolve) => { resolveB = resolve; }));
+    try {
+      const days = [day({ index: 0, theme: 'get-sporty', unlockAt: Date.now() - DAY_MS })];
+      H.eventId = 'event-a';
+      H.event = { claimMode: 'honor', timezone: 'UTC', days } as unknown as EventDoc;
+      H.player = {
+        uid: 'u1', bingoCount: 0, squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 807_002, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // Arm A's deferred row-lag retry while its reconcile is still hung.
+      H.player = {
+        uid: 'u1', bingoCount: 0, squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // B opens the same uid/Day/seed. A retained, non-attributable player row
+      // leaves the late-A settle branch as the adversary while B reconciles.
+      H.eventId = 'event-b';
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: [...days] } as unknown as EventDoc;
+      H.player = { uid: 'retained-a-row' } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+      const rendersBeforeLateA = H.authReads;
+
+      await act(async () => {
+        resolveA!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+      });
+      expect(H.authReads).toBe(rendersBeforeLateA);
+      expect(mocked).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        resolveB!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+      });
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
 });
 
 describe('published Moment retraction drain gate (#377)', () => {
@@ -320,7 +579,7 @@ describe('published Moment retraction drain gate (#377)', () => {
       dayIndex: 0,
       bingoStands: false,
       blackoutStands: false,
-    });
+    }, 'test-event');
   });
 });
 
@@ -1579,6 +1838,90 @@ describe('Feed → Board square-opening intent (#261)', () => {
     expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
     __resetOpenSquareForTests();
   });
+
+  it('does not consume an Event A intent on Event B, then resumes it on A', async () => {
+    __resetOpenSquareForTests();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: Date.now() - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_003, createdAt: 0, cells: dealt() };
+    requestOpenSquare({ eventId: 'event-a', dayIndex: 0, itemId: 'i5' });
+
+    H.eventId = 'event-b';
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+
+    H.eventId = 'event-a';
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+    expect(screen.getByText(/Cross My Heart/)).toBeInTheDocument();
+    __resetOpenSquareForTests();
+  });
+
+  it('does not emit a late Event A BINGO with Event B analytics dimensions', async () => {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.event-a.dismissedAt', '1');
+    store.setItem('gcb.coachOverlay.event-b.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+    const now = Date.now();
+    H.eventId = 'event-a';
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_020, createdAt: 0, cells: dealt('a') };
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      bingoCount: 0,
+      squaresMarked: 0,
+      firstBingoAt: null,
+      blackout: false,
+    } as unknown as PlayerDoc;
+    let finishMark!: (value: {
+      cells: Cell[];
+      bingo: boolean;
+      blackout: boolean;
+      bingoTransition: boolean;
+      blackoutTransition: boolean;
+    }) => void;
+    H.setMark.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishMark = resolve;
+        }),
+    );
+
+    const view = render(<Board />);
+    fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.grid .cell-claim')[3]);
+    fireEvent.click(screen.getByText(/Cross My Heart/));
+    await vi.waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+
+    H.eventId = 'event-b';
+    H.board = { uid: 'u1', dayIndex: 0, seed: 807_021, createdAt: 0, cells: dealt('b') };
+    view.rerender(<Board />);
+    await act(async () => {
+      finishMark({
+        cells: withMarked([0, 1, 2, 3, 4]),
+        bingo: true,
+        blackout: false,
+        bingoTransition: true,
+        blackoutTransition: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(H.track).not.toHaveBeenCalledWith('bingo');
+    vi.unstubAllGlobals();
+  });
 });
 
 // --- #264: per-Day First to BINGO — pin write + daybar honor line ------------
@@ -1688,7 +2031,9 @@ describe('per-Day First to BINGO (#264)', () => {
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
     H.player = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null, bingoCount: 0, squaresMarked: 0, firstBingoAt: null } as unknown as PlayerDoc;
-    H.takeHeldHonorPins.mockReturnValue([{ uid: 'u1', dayIndex: 1, at: now }]);
+    H.takeHeldHonorPins.mockReturnValue([
+      { uid: 'u1', dayIndex: 1, at: now, eventId: 'test-event' },
+    ]);
     H.getDoc.mockResolvedValue({ exists: () => true, data: () => ({ cells: dealt('held') }) });
 
     render(<Board />);
@@ -1710,14 +2055,16 @@ describe('per-Day First to BINGO (#264)', () => {
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
     H.player = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null, bingoCount: 0, squaresMarked: 0, firstBingoAt: null } as unknown as PlayerDoc;
-    H.takeHeldHonorPins.mockReturnValue([{ uid: 'u1', dayIndex: 1, at: now }]);
+    H.takeHeldHonorPins.mockReturnValue([
+      { uid: 'u1', dayIndex: 1, at: now, eventId: 'test-event' },
+    ]);
     H.getDoc.mockRejectedValue(new Error('offline'));
 
     render(<Board />);
     await act(async () => {});
 
     expect(H.pinDayFirstBingo).not.toHaveBeenCalled();
-    expect(H.enqueueHeldHonorPin).toHaveBeenCalledWith('u1', 1, now);
+    expect(H.enqueueHeldHonorPin).toHaveBeenCalledWith('u1', 1, now, 'test-event');
   });
 
   it('keeps the port in the daybar when the Day has no pinned honor', () => {

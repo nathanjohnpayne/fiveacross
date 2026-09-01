@@ -12,21 +12,22 @@ import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './com
 import { normalizePool } from '../game/pool';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
-const evt = () => doc(db, 'events', EVENT_ID);
-const item = (id: string) => doc(db, 'events', EVENT_ID, 'items', id);
+const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
+const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
 const itemsRaw = () => collection(db, 'events', EVENT_ID, 'items');
-const proof = (id: string) => doc(db, 'events', EVENT_ID, 'proofs', id);
-const claim = (id: string) => doc(db, 'events', EVENT_ID, 'claims', id);
-const board = (uid: string) => doc(db, 'events', EVENT_ID, 'boards', uid);
+const proof = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'proofs', id);
+const claim = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'claims', id);
+const board = (uid: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'boards', uid);
 // The day-scoped board a daily-mode claim resolves against (#246).
-const dayBoard = (dayIndex: number, uid: string) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
-const dayMeta = (dayIndex: number) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'meta', String(dayIndex));
-const player = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
+const dayBoard = (dayIndex: number, uid: string, eventId = EVENT_ID) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+const dayMeta = (dayIndex: number, eventId = EVENT_ID) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex));
+const player = (uid: string, eventId = EVENT_ID) =>
+  doc(db, 'events', eventId, 'players', uid);
 // A per-Prompt Tally marker (ADR 0002): the same path setMark/attachProof write.
-const marker = (itemId: string, uid: string) =>
-  doc(db, 'events', EVENT_ID, 'tally', itemId, 'markers', uid);
+const marker = (itemId: string, uid: string, eventId = EVENT_ID) =>
+  doc(db, 'events', eventId, 'tally', itemId, 'markers', uid);
 
 export const hideItem = (id: string) => updateDoc(item(id), { status: 'hidden' });
 export const restoreItem = (id: string) => updateDoc(item(id), { status: 'active' });
@@ -168,21 +169,25 @@ function approvalSpicy(
 export async function approveItems(
   items: readonly ApprovableItem[],
   adminUid: string,
+  eventId: string = EVENT_ID,
 ): Promise<ApprovalPlacement[]> {
   if (items.length === 0) return [];
+  const eventRef = evt(eventId);
+  const itemRefs = items.map((it) => item(it.id, eventId));
   return runTransaction(db, async (tx) => {
     // EVERY read first: Firestore requires a transaction's reads to precede its
     // writes, so the item reads cannot live inside the write loop below.
-    const evSnap = await tx.get(evt());
+    const evSnap = await tx.get(eventRef);
     const rows: (ItemDoc | undefined)[] = [];
-    for (const it of items) {
-      const snap = await tx.get(item(it.id));
+    for (const ref of itemRefs) {
+      const snap = await tx.get(ref);
       rows.push(snap.exists() ? (snap.data() as ItemDoc) : undefined);
     }
     const days = evSnap.exists() ? ((evSnap.data().days as DayDef[] | undefined) ?? []) : [];
     const approvedAt = Date.now();
     const placements: ApprovalPlacement[] = [];
     for (const [i, it] of items.entries()) {
+      const ref = itemRefs[i];
       const row = rows[i];
       // STALE APPROVAL GUARD. The queue row is a client snapshot, and two
       // organisers can hold the same one: the first approval routes the Prompt
@@ -266,7 +271,7 @@ export async function approveItems(
         // the honest record rather than a gap: there are no Days, so "every Day"
         // is the single legacy board and narrowing it would mean nothing.
         if (days.length === 0) {
-          tx.update(item(it.id), placed);
+          tx.update(ref, placed);
           placements.push({ itemId: it.id, dayIndex: null, retained: false, outcome: 'untargeted' });
           continue;
         }
@@ -275,11 +280,11 @@ export async function approveItems(
           // A schedule exists but nothing in it can still take a Prompt. Retained
           // is the honest outcome, and the same one a targeted Prompt with
           // nowhere left to go gets.
-          tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+          tx.update(ref, { ...base, retainedAt: approvedAt });
           placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
           continue;
         }
-        tx.update(item(it.id), { ...placed, targetDayIndex: resolved });
+        tx.update(ref, { ...placed, targetDayIndex: resolved });
         placements.push({ itemId: it.id, dayIndex: resolved, retained: false, outcome: 'placed' });
         continue;
       }
@@ -291,7 +296,7 @@ export async function approveItems(
         // every Day while it is live on none (Phase 4b P2, PR #812). The
         // malformed value is left in place rather than repaired: this write is a
         // merge, and guessing which Day was meant would be inventing one.
-        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        tx.update(ref, { ...base, retainedAt: approvedAt });
         placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
         continue;
       }
@@ -300,11 +305,11 @@ export async function approveItems(
         // Retained: the original target is LEFT in place. Clearing it would make
         // the Prompt untargeted, which reads as "every Day" — the one outcome
         // this ticket exists to prevent.
-        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        tx.update(ref, { ...base, retainedAt: approvedAt });
         placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
         continue;
       }
-      tx.update(item(it.id), { ...placed, targetDayIndex: routed });
+      tx.update(ref, { ...placed, targetDayIndex: routed });
       placements.push({ itemId: it.id, dayIndex: routed, retained: false, outcome: 'placed' });
     }
     return placements;
@@ -319,8 +324,11 @@ export async function approveItems(
  * `pool`/`spicy` are the explicit #558 approval-time classification decision,
  * validated and persisted only if that authoritative row is still pending.
  */
-export const approveItem = (row: ApprovableItem, adminUid: string) =>
-  approveItems([row], adminUid).then((placements) => placements[0]);
+export const approveItem = (
+  row: ApprovableItem,
+  adminUid: string,
+  eventId: string = EVENT_ID,
+) => approveItems([row], adminUid, eventId).then((placements) => placements[0]);
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
@@ -379,8 +387,9 @@ export async function setItemSpicy(id: string, spicy: boolean): Promise<number |
 export function bulkApproveItems(
   items: readonly ApprovableItem[],
   adminUid: string,
+  eventId: string = EVENT_ID,
 ): Promise<ApprovalPlacement[]> {
-  return approveItems(items, adminUid);
+  return approveItems(items, adminUid, eventId);
 }
 export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
 export const restoreProof = (id: string) => updateDoc(proof(id), { status: 'active' });
@@ -474,15 +483,18 @@ export const setEasyMixRatio = (ratio: number): Promise<void> =>
 // the single `theme` swap onto the CURRENT array, not the caller's copy, keeps
 // this edit surgical under concurrency. The `days` param is retained as the
 // fallback when the doc is somehow missing.
-export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): Promise<void> =>
-  runTransaction(db, async (tx) => {
-    const snap = await tx.get(evt());
+export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): Promise<void> => {
+  const eventId = EVENT_ID;
+  const eventRef = evt(eventId);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(eventRef);
     const current =
       (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
-    tx.update(evt(), {
+    tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
     });
   });
+};
 
 function normalizeTonightEntries(tonight: string[]): string[] {
   return tonight.map((entry) => entry.trim());
@@ -502,12 +514,14 @@ function isValidTonight(tonight: string[]): boolean {
  * already-unlocked Days 1–3 are corrected by the one-time owner migration, not
  * this control.
  */
-export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[]): Promise<void> =>
-  runTransaction(db, async (tx) => {
+export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[]): Promise<void> => {
+  const eventId = EVENT_ID;
+  const eventRef = evt(eventId);
+  return runTransaction(db, async (tx) => {
     if (!isValidTonight(tonight)) {
       throw new Error('Tonight must contain exactly two non-empty entries.');
     }
-    const snap = await tx.get(evt());
+    const snap = await tx.get(eventRef);
     const current = snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined;
     if (!Array.isArray(current)) {
       throw new Error('Cannot edit Tonight: event schedule is missing.');
@@ -520,10 +534,11 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
       throw new Error(`Cannot edit Tonight: Day ${dayIndex + 1} has already unlocked.`);
     }
     const nextTonight = normalizeTonightEntries(tonight);
-    tx.update(evt(), {
+    tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
     });
   });
+};
 
 /** What `unlockDayNow` reports back — mirrors `SnapshotResult` in `functions/src/unlockDay.ts`. */
 export type UnlockDayNowResult = 'stamped' | 'already-stamped' | 'not-due' | 'no-event' | 'no-day';
@@ -673,13 +688,16 @@ function itemTextLockedByUnlockedSnapshot(days: DayDef[] | undefined, id: string
  * cannot change text once an unlocked Day's snapshot can still deal that item.
  */
 export async function adminUpdateItemText(id: string, text: string): Promise<void> {
+  const eventId = EVENT_ID;
   const t = text.trim();
   if (!t) return;
+  const eventRef = evt(eventId);
+  const itemRef = item(id, eventId);
   await runTransaction(db, async (tx) => {
-    const evSnap = await tx.get(evt());
+    const evSnap = await tx.get(eventRef);
     const days = evSnap.exists() ? (evSnap.data().days as DayDef[] | undefined) : undefined;
     if (itemTextLockedByUnlockedSnapshot(days, id)) return;
-    tx.update(item(id), { text: t.slice(0, 80) });
+    tx.update(itemRef, { text: t.slice(0, 80) });
   });
 }
 
@@ -711,6 +729,10 @@ async function resolve(
   adminUid: string,
   status: 'confirmed' | 'rejected',
 ): Promise<ResolveResult> {
+  // Claims can finish after hostname/Event resolution changes. Capture the
+  // acted Event before the first await and keep every read, write and durable
+  // analytics identity inside that one Event for the whole resolution.
+  const eventId = EVENT_ID;
   // One stable identity outside the retryable transaction. The server trigger
   // observes the actual pending→confirmed edge and ignores this token unless
   // that edge commits, so a closed admin tab cannot lose or invent an event.
@@ -721,6 +743,7 @@ async function resolve(
           marked: true,
           mode: 'admin_confirmed',
           source: 'admin_confirm',
+          eventId,
         })
       : undefined;
   // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
@@ -730,7 +753,9 @@ async function resolve(
   // the cruise-wide first-bingo exclusion is read once, outside the atomic txn
   // (stable config, not part of the board/player invariant).
   const daily = typeof c.dayIndex === 'number';
-  const boardRef = daily ? dayBoard(c.dayIndex as number, c.uid) : board(c.uid);
+  const boardRef = daily
+    ? dayBoard(c.dayIndex as number, c.uid, eventId)
+    : board(c.uid, eventId);
   let isTutorialDay: ((i: number) => boolean) | undefined;
   let isCeremonialDay: ((i: number) => boolean) | undefined;
   // The claim owner's OTHER Day indexes (specs/echo-marks.md, #446): a CONFIRM
@@ -745,7 +770,7 @@ async function resolve(
   // fold with the post-boundary truth on retry/commit, not a pre-read capture.
   let isStatsFrozen: () => boolean = () => false;
   if (daily) {
-    const evSnap = await getDoc(evt());
+    const evSnap = await getDoc(evt(eventId));
     const days = (evSnap?.data()?.days as DayDef[] | undefined) ?? [];
     const set = tutorialDayIndexSet(days);
     isTutorialDay = (i: number) => set.has(i);
@@ -771,11 +796,11 @@ async function resolve(
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
     if (!bSnap.exists()) return { transitioned: false };
-    const pSnap = await tx.get(player(c.uid));
+    const pSnap = await tx.get(player(c.uid, eventId));
     // The owner's sibling Day Cards, read in the SAME transaction (before any
     // write, per Firestore's reads-first contract) so a retry re-derives the
     // echo set from committed state (specs/echo-marks.md).
-    const echoSiblingRefs = echoSiblingDays.map((i) => dayBoard(i, c.uid));
+    const echoSiblingRefs = echoSiblingDays.map((i) => dayBoard(i, c.uid, eventId));
     const echoSiblingSnaps = await Promise.all(echoSiblingRefs.map((ref) => tx.get(ref)));
     const boardData = bSnap.data() as { cells?: unknown; seed?: number };
     const cells = cellsFromData(boardData.cells);
@@ -811,7 +836,7 @@ async function resolve(
       bingoTransition &&
       typeof firstBingoAt === 'number' &&
       dayHonorName !== null;
-    const metaRef = shouldPinDayHonor ? dayMeta(c.dayIndex as number) : null;
+    const metaRef = shouldPinDayHonor ? dayMeta(c.dayIndex as number, eventId) : null;
     const metaSnap = metaRef ? await tx.get(metaRef) : null;
 
     // Echo Marks (specs/echo-marks.md, #446): a CONFIRM is the moment the
@@ -848,7 +873,7 @@ async function resolve(
           cells: stampEchoAnalyticsTransitions({
             cells: rawRes.cells,
             changed: changedCells(sibCells, rawRes.cells),
-            eventId: EVENT_ID,
+            eventId,
             uid: c.uid,
             dayIndex: echoSiblingDays[idx],
             boardSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
@@ -876,7 +901,7 @@ async function resolve(
     const pinnableEchoDays = echoPinDays.filter((d) => !isStatsFrozen() || !!isCeremonialDay?.(d));
     const echoMetaSnaps: Array<{ dayIndex: number; exists: boolean }> = [];
     for (const d of pinnableEchoDays) {
-      const snap = await tx.get(dayMeta(d));
+      const snap = await tx.get(dayMeta(d, eventId));
       echoMetaSnaps.push({ dayIndex: d, exists: snap.exists() });
     }
 
@@ -893,7 +918,7 @@ async function resolve(
     }
     for (const { dayIndex: echoDay, exists } of echoMetaSnaps) {
       if (exists) continue; // the write-once honor is already claimed
-      tx.set(dayMeta(echoDay), {
+      tx.set(dayMeta(echoDay, eventId), {
         firstBingo: {
           uid: c.uid,
           displayName: dayHonorName!,
@@ -943,10 +968,10 @@ async function resolve(
           if (isCeremonialDay?.(Number(k))) ceremonialBuckets[Number(k)] = v;
         }
         if (Object.keys(ceremonialBuckets).length > 0) {
-          tx.set(player(c.uid), { dayStats: ceremonialBuckets }, { merge: true });
+          tx.set(player(c.uid, eventId), { dayStats: ceremonialBuckets }, { merge: true });
         }
       } else {
-        tx.set(player(c.uid), aggregatedWrite, { merge: true });
+        tx.set(player(c.uid, eventId), aggregatedWrite, { merge: true });
       }
       if (canWriteStats && shouldPinDayHonor) {
         if (metaRef && !metaSnap?.exists()) {
@@ -960,7 +985,11 @@ async function resolve(
         }
       }
     } else {
-      tx.set(player(c.uid), { squaresMarked: squares, bingoCount, blackout, firstBingoAt }, { merge: true });
+      tx.set(
+        player(c.uid, eventId),
+        { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
+        { merge: true },
+      );
     }
     // Tally symmetry (ADR 0002): wherever a write flips a cell marked→unmarked it
     // must delete that cell's per-Prompt Tally marker, and wherever it flips
@@ -983,15 +1012,15 @@ async function resolve(
           ),
       );
       if (before.marked && !after.marked && before.itemId && !siblingStillCarriesMarker) {
-        tx.delete(marker(before.itemId, c.uid));
+        tx.delete(marker(before.itemId, c.uid, eventId));
       }
     });
-    tx.set(claim(c.id), { status, resolvedBy: adminUid }, { merge: true });
+    tx.set(claim(c.id, eventId), { status, resolvedBy: adminUid }, { merge: true });
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
     if (status === 'confirmed' && c.proofId) {
-      tx.set(proof(c.proofId), { status: 'active' }, { merge: true });
+      tx.set(proof(c.proofId, eventId), { status: 'active' }, { merge: true });
     }
     return { transitioned: transitionedToConfirmed };
   });

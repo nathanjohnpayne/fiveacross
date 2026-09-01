@@ -156,14 +156,14 @@ describe('#387 — a Mark on a past Day commits and persists', () => {
     // server-committed snapshot has confirmed — mount the production
     // `useMyDayBoards` fan's equivalent for the current Day and wait for the
     // trust latch before marking.
-    const releaseWatch = beginDayBoardSeedWatch(CURRENT_DAY, tab.uid);
+    const releaseWatch = beginDayBoardSeedWatch(EVENT_ID, CURRENT_DAY, tab.uid);
     const unsubWatch = onSnapshot(
       doc(tab.db, currentBoardPath),
       { includeMetadataChanges: true },
-      (snap) => recordDayBoardSeedSnapshot(CURRENT_DAY, tab.uid, snap),
+      (snap) => recordDayBoardSeedSnapshot(EVENT_ID, CURRENT_DAY, tab.uid, snap),
     );
     const trustDeadline = Date.now() + 15_000;
-    while (trustedDayBoardSeed(CURRENT_DAY, tab.uid).seed !== 111) {
+    while (trustedDayBoardSeed(EVENT_ID, CURRENT_DAY, tab.uid).seed !== 111) {
       if (Date.now() > trustDeadline) throw new Error('echo trust never latched');
       await new Promise((r) => setTimeout(r, 50));
     }

@@ -2,6 +2,7 @@ import { doc, getDoc, getDocFromCache, getDocFromServer, setDoc, writeBatch } fr
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
 import { dropHeldHonorPins } from './dayMeta';
+import { eventScopeKey } from './eventScope';
 import { cellsFromData } from '../game/cells';
 import { hasBingo, isBlackout } from '../game/logic';
 import type { Cell, MomentDoc, MomentKind } from '../types';
@@ -21,7 +22,7 @@ import type { Cell, MomentDoc, MomentKind } from '../types';
 // Raw (converter-free) moment ref for writes, matching api.ts's rawPlayer/rawBoard
 // and proofs.ts's rawProof — the read side attaches `momentConverter` via
 // `momentsCol`/`momentRef` (src/data/paths.ts).
-const rawMoment = (id: string) => doc(db, 'events', EVENT_ID, 'moments', id);
+const rawMoment = (eventId: string, id: string) => doc(db, 'events', eventId, 'moments', id);
 
 /**
  * The RETRACTION TOMBSTONE ref for a Moment id (#377). Same id as the Moment it
@@ -33,7 +34,8 @@ const rawMoment = (id: string) => doc(db, 'events', EVENT_ID, 'moments', id);
  * `getDocFromCache` snapshot with `exists() === false`), which is a local SDK
  * artifact; this is a real, server-side, publicly readable doc.
  */
-const rawMomentRetraction = (id: string) => doc(db, 'events', EVENT_ID, 'momentRetractions', id);
+const rawMomentRetraction = (eventId: string, id: string) =>
+  doc(db, 'events', eventId, 'momentRetractions', id);
 
 /** The two Moment kinds a Player can retract (#377) — the PER-CARD wins. The
  *  ceremonial `first_bingo` singleton is deliberately not retractable: it is the
@@ -97,7 +99,8 @@ export interface MomentActor {
 // Round-4 of PR #99 kept that waiting state in a COMPONENT ref in Board.tsx, so a
 // Player who left the Card route before the gate opened lost the Moment forever
 // (the ref died with the unmount, and the returning board baselined the already
-// standing win). This queue lifts that state to MODULE scope — keyed by app+uid,
+// standing win). This queue lifts that state to MODULE scope — keyed by
+// Event+app+uid,
 // the same durability pattern `markChains` uses in api.ts — so it survives Board
 // unmounts and route changes: whichever Board mount next sees the gate open drains
 // it. The deterministic Moment doc id keeps a held-then-fired broadcast idempotent,
@@ -157,8 +160,8 @@ const pendingMoments = new Map<string, StoredPendingFlags>();
 const hydratedPending = new Set<string>();
 const pendingStorageKeys = new Set<string>();
 
-function pendingStorageKey(uid: string): string {
-  return `gcb:pending-moments:${EVENT_ID}:${uid}`;
+function pendingStorageKey(eventId: string, uid: string): string {
+  return `gcb:pending-moments:${eventId}:${uid}`;
 }
 
 function pendingStore(): Storage | null {
@@ -174,13 +177,13 @@ function safeDayIndexes(value: unknown): number[] | undefined {
   return [...new Set(value)];
 }
 
-function restorePending(uid: string): void {
-  const key = pendingKey(uid);
+function restorePending(eventId: string, uid: string): void {
+  const key = pendingKey(eventId, uid);
   if (hydratedPending.has(key)) return;
   hydratedPending.add(key);
   const store = pendingStore();
   if (!store) return;
-  const storageKey = pendingStorageKey(uid);
+  const storageKey = pendingStorageKey(eventId, uid);
   pendingStorageKeys.add(storageKey);
   try {
     const parsed = JSON.parse(store.getItem(storageKey) ?? 'null') as {
@@ -221,11 +224,11 @@ function restorePending(uid: string): void {
   }
 }
 
-function persistPending(uid: string): void {
-  const key = pendingKey(uid);
+function persistPending(eventId: string, uid: string): void {
+  const key = pendingKey(eventId, uid);
   const store = pendingStore();
   if (!store) return;
-  const storageKey = pendingStorageKey(uid);
+  const storageKey = pendingStorageKey(eventId, uid);
   pendingStorageKeys.add(storageKey);
   try {
     const flags = pendingMoments.get(key);
@@ -250,7 +253,7 @@ function persistPending(uid: string): void {
   }
 }
 
-// The per-uid ACTION GENERATION (Codex P1 on PR #110): a monotonically increasing
+// The per-(Event, uid) ACTION GENERATION (Codex P1 on PR #110): a monotonically increasing
 // token bumped by every OBSERVED BINGO FALL (`dropPendingWins` with fell.bingo —
 // round 4 narrowed it from every-unmark: only what changes whether the bingo
 // stands may stale the ceremonial machinery).
@@ -290,23 +293,22 @@ const pendingGenerations = new Map<string, number>();
 // the exact doc it describes. Cleared with `pendingGenerations` in
 // `resetPendingMoments`.
 const selfBingoWriteGenerations = new Map<string, number>();
-function selfWriteKey(uid: string, momentId: string): string {
-  return `${pendingKey(uid)}#${momentId}`;
+function selfWriteKey(eventId: string, uid: string, momentId: string): string {
+  return eventScopeKey(eventId, 'moment-self-write', pendingKey(eventId, uid), momentId);
 }
 
-// Key by app + uid (mirrors `markChains` in api.ts). The moment writers always
-// use the module `db` singleton, so the app segment is effectively constant here;
-// keying on uid is what actually isolates two identities sharing a browser (a
-// held win for one account must never drain under the other), and the app prefix
-// keeps the shape identical to the mark-chain key for anyone reading both.
-function pendingKey(uid: string): string {
+// Key by Event + app + uid. The Event segment is load-bearing now that EVENT_ID
+// is a mutable live binding (#807): work captured for Event A must stay parked in
+// A while Event B is active, even when both Events share the same Firebase app
+// and signed-in uid.
+function pendingKey(eventId: string, uid: string): string {
   const appName = (db as unknown as { app?: { name?: string } }).app?.name ?? 'default';
-  return `${appName}/${uid}`;
+  return eventScopeKey(eventId, 'moments', appName, uid);
 }
 
-function ensurePending(uid: string): StoredPendingFlags {
-  const key = pendingKey(uid);
-  restorePending(uid);
+function ensurePending(eventId: string, uid: string): StoredPendingFlags {
+  const key = pendingKey(eventId, uid);
+  restorePending(eventId, uid);
   let flags = pendingMoments.get(key);
   if (!flags) {
     flags = { bingo: false, blackout: false, firstBingo: false, firstBingoGeneration: 0 };
@@ -315,9 +317,9 @@ function ensurePending(uid: string): StoredPendingFlags {
   return flags;
 }
 
-function readPending(uid: string): StoredPendingFlags | undefined {
-  restorePending(uid);
-  return pendingMoments.get(pendingKey(uid));
+function readPending(eventId: string, uid: string): StoredPendingFlags | undefined {
+  restorePending(eventId, uid);
+  return pendingMoments.get(pendingKey(eventId, uid));
 }
 
 /**
@@ -339,10 +341,12 @@ export function enqueueWinMoments(params: {
   bingoTransition: boolean;
   blackoutTransition: boolean;
   dayIndex?: number;
+  /** Event captured by an async caller before its first await (#807). */
+  eventId?: string;
 }): void {
-  const { uid, bingoTransition, blackoutTransition, dayIndex } = params;
+  const { uid, bingoTransition, blackoutTransition, dayIndex, eventId = EVENT_ID } = params;
   if (!bingoTransition && !blackoutTransition) return;
-  const flags = ensurePending(uid);
+  const flags = ensurePending(eventId, uid);
   if (bingoTransition) {
     flags.bingo = true;
     if (dayIndex !== undefined) {
@@ -357,7 +361,7 @@ export function enqueueWinMoments(params: {
       if (!flags.blackoutDayIndexes.includes(dayIndex)) flags.blackoutDayIndexes.push(dayIndex);
     }
   }
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 /**
@@ -370,14 +374,14 @@ export function enqueueWinMoments(params: {
  * STAMPED with the current action generation (PR #110 round 2 finding 3): the
  * drain fires it only while that stamp is current (`firstBingoCandidateCurrent`).
  */
-export function enqueueFirstBingoMoment(uid: string, dayIndex?: number): void {
-  const flags = ensurePending(uid);
+export function enqueueFirstBingoMoment(uid: string, dayIndex?: number, eventId = EVENT_ID): void {
+  const flags = ensurePending(eventId, uid);
   flags.firstBingo = true;
-  flags.firstBingoGeneration = pendingActionGeneration(uid);
+  flags.firstBingoGeneration = pendingActionGenerationForEvent(eventId, uid);
   // The candidate's own Day (#262; Codex P3 on #286 round 2) — a re-enqueue is
   // a NEW candidate (new generation), so it overwrites rather than first-wins.
   flags.firstBingoDayIndex = dayIndex;
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 /**
@@ -387,8 +391,8 @@ export function enqueueFirstBingoMoment(uid: string, dayIndex?: number): void {
  * fire-time revalidation, broadcasts, then clears each fired kind via
  * `clearPendingMoment`.
  */
-export function peekPendingMoments(uid: string): PendingMomentFlags {
-  const flags = readPending(uid);
+export function peekPendingMoments(uid: string, eventId = EVENT_ID): PendingMomentFlags {
+  const flags = readPending(eventId, uid);
   return flags
     ? { bingo: flags.bingo, blackout: flags.blackout, firstBingo: flags.firstBingo }
     : { bingo: false, blackout: false, firstBingo: false };
@@ -402,8 +406,8 @@ export function peekPendingMoments(uid: string): PendingMomentFlags {
  * blackout can sit pending behind the identity gate for a while, and the
  * Player may have switched Days in that window.
  */
-export function pendingBlackoutDayIndexes(uid: string): number[] {
-  return [...(readPending(uid)?.blackoutDayIndexes ?? [])];
+export function pendingBlackoutDayIndexes(uid: string, eventId = EVENT_ID): number[] {
+  return [...(readPending(eventId, uid)?.blackoutDayIndexes ?? [])];
 }
 
 /**
@@ -414,14 +418,14 @@ export function pendingBlackoutDayIndexes(uid: string): number[] {
  * to be VIEWED at fire time, because a bingo can sit pending behind the identity
  * gate while the Player switches Days.
  */
-export function pendingBingoDayIndexes(uid: string): number[] {
-  return [...(readPending(uid)?.bingoDayIndexes ?? [])];
+export function pendingBingoDayIndexes(uid: string, eventId = EVENT_ID): number[] {
+  return [...(readPending(eventId, uid)?.bingoDayIndexes ?? [])];
 }
 
 /** The still-pending ceremonial candidate's OWN Day (#262; Codex P3 on #286
  *  round 2) — `undefined` when no candidate is queued or it carried no Day. */
-export function pendingFirstBingoDayIndex(uid: string): number | undefined {
-  return readPending(uid)?.firstBingoDayIndex;
+export function pendingFirstBingoDayIndex(uid: string, eventId = EVENT_ID): number | undefined {
+  return readPending(eventId, uid)?.firstBingoDayIndex;
 }
 
 /**
@@ -431,9 +435,9 @@ export function pendingFirstBingoDayIndex(uid: string): number | undefined {
  * sibling queued Days stay pending. The `blackout` flag clears only when the
  * queue empties (the flag means "something is still owed").
  */
-export function removePendingBlackoutDay(uid: string, dayIndex: number): void {
-  const key = pendingKey(uid);
-  const flags = readPending(uid);
+export function removePendingBlackoutDay(uid: string, dayIndex: number, eventId = EVENT_ID): void {
+  const key = pendingKey(eventId, uid);
+  const flags = readPending(eventId, uid);
   if (!flags?.blackoutDayIndexes) return;
   flags.blackoutDayIndexes = flags.blackoutDayIndexes.filter((d) => d !== dayIndex);
   if (flags.blackoutDayIndexes.length === 0) {
@@ -441,7 +445,7 @@ export function removePendingBlackoutDay(uid: string, dayIndex: number): void {
     flags.blackout = false;
     if (!flags.bingo && !flags.firstBingo) pendingMoments.delete(key);
   }
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 /**
@@ -452,9 +456,9 @@ export function removePendingBlackoutDay(uid: string, dayIndex: number): void {
  * sibling queued Days stay pending. The `bingo` flag clears only when the queue
  * empties (the flag means "something is still owed").
  */
-export function removePendingBingoDay(uid: string, dayIndex: number): void {
-  const key = pendingKey(uid);
-  const flags = readPending(uid);
+export function removePendingBingoDay(uid: string, dayIndex: number, eventId = EVENT_ID): void {
+  const key = pendingKey(eventId, uid);
+  const flags = readPending(eventId, uid);
   if (!flags?.bingoDayIndexes) return;
   flags.bingoDayIndexes = flags.bingoDayIndexes.filter((d) => d !== dayIndex);
   if (flags.bingoDayIndexes.length === 0) {
@@ -462,7 +466,7 @@ export function removePendingBingoDay(uid: string, dayIndex: number): void {
     flags.bingo = false;
     if (!flags.blackout && !flags.firstBingo) pendingMoments.delete(key);
   }
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 /**
@@ -474,10 +478,10 @@ export function removePendingBingoDay(uid: string, dayIndex: number): void {
  * is the drain-time witness re-check in Board's drain — see specs/w2-feed-moments.md
  * § PR #110 hardening.
  */
-export function firstBingoCandidateCurrent(uid: string): boolean {
-  const flags = readPending(uid);
+export function firstBingoCandidateCurrent(uid: string, eventId = EVENT_ID): boolean {
+  const flags = readPending(eventId, uid);
   if (!flags?.firstBingo) return false;
-  return flags.firstBingoGeneration === pendingActionGeneration(uid);
+  return flags.firstBingoGeneration === pendingActionGenerationForEvent(eventId, uid);
 }
 
 /**
@@ -488,9 +492,13 @@ export function firstBingoCandidateCurrent(uid: string): boolean {
  * falling edge — PR #110 round 4 narrowed the bump to actual bingo falls), so
  * the ceremonial enqueue is refused (Codex P1, PR #110).
  */
-export function pendingActionGeneration(uid: string): number {
-  restorePending(uid);
-  return pendingGenerations.get(pendingKey(uid)) ?? 0;
+export function pendingActionGeneration(uid: string, eventId = EVENT_ID): number {
+  return pendingActionGenerationForEvent(eventId, uid);
+}
+
+function pendingActionGenerationForEvent(eventId: string, uid: string): number {
+  restorePending(eventId, uid);
+  return pendingGenerations.get(pendingKey(eventId, uid)) ?? 0;
 }
 
 /**
@@ -521,9 +529,18 @@ export function dropPendingWins(
   // the queue, leaving sibling Days' still-valid pending wins intact. A legacy
   // (day-less) fall keeps the full clear.
   fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
+  eventId = EVENT_ID,
 ): void {
-  const key = pendingKey(uid);
-  restorePending(uid);
+  dropPendingWinsForEvent(eventId, uid, fell);
+}
+
+function dropPendingWinsForEvent(
+  eventId: string,
+  uid: string,
+  fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
+): void {
+  const key = pendingKey(eventId, uid);
+  restorePending(eventId, uid);
   if (fell.bingo) {
     pendingGenerations.set(key, (pendingGenerations.get(key) ?? 0) + 1);
   }
@@ -573,7 +590,7 @@ export function dropPendingWins(
     }
   }
   if (!flags.bingo && !flags.blackout && !flags.firstBingo) pendingMoments.delete(key);
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 // --- Retraction of a PUBLISHED win (#377) ------------------------------------
@@ -655,14 +672,14 @@ export function dropPendingWins(
 // server-committed snapshot. Failing toward PARKED (silence) is the designed
 // direction for every ambiguous outcome.
 //
-// The intent map is MODULE scope, uid-keyed like the pending-Moment queue above, so
+// The intent map is MODULE scope, Event+uid-keyed like the pending-Moment queue above, so
 // it survives Board unmounts and route changes. Deliberately memory-only (no
 // localStorage, unlike the pending queue): an intent lost to a full page reload
 // leaves the Moment standing until the next observed fall — the same bounded,
 // silence-not-falsehood residual the pending queue already documents, and the safe
 // direction for an irreversible write.
 
-// Queued retraction intents, keyed by uid → a set of `${kind}:${day}` tokens
+// Queued retraction intents, keyed by Event+uid → a set of `${kind}:${day}` tokens
 // (`legacy` for the day-less form). A Set because a Player can hold intents for
 // several Days and both kinds at once, exactly like the per-Day pending queues.
 const pendingRetractions = new Map<string, Set<string>>();
@@ -671,8 +688,13 @@ const DAY_LESS = 'legacy';
 const retractionToken = (kind: RetractableKind, dayIndex?: number): string =>
   `${kind}:${dayIndex ?? DAY_LESS}`;
 
-const addRetractionIntent = (uid: string, kind: RetractableKind, dayIndex?: number): void => {
-  const key = pendingKey(uid);
+const addRetractionIntent = (
+  eventId: string,
+  uid: string,
+  kind: RetractableKind,
+  dayIndex?: number,
+): void => {
+  const key = pendingKey(eventId, uid);
   let intents = pendingRetractions.get(key);
   if (!intents) {
     intents = new Set();
@@ -698,22 +720,28 @@ const addRetractionIntent = (uid: string, kind: RetractableKind, dayIndex?: numb
 // Raw board refs for the retry's server read, converter-free like every other
 // ref in this module; `cellsFromData` is the read boundary that normalizes the
 // #457 wire map (or a legacy array) back to Cell[].
-const rawBoard = (uid: string) => doc(db, 'events', EVENT_ID, 'boards', uid);
-const rawDayBoard = (dayIndex: number, uid: string) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
+const rawBoard = (eventId: string, uid: string) => doc(db, 'events', eventId, 'boards', uid);
+const rawDayBoard = (eventId: string, dayIndex: number, uid: string) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
 
 /** Re-adjudicate one requeued token against a FRESH server read of its board.
  *  Every failure path parks (silence): the retraction machinery re-checks
  *  everything on the next attempt, so nothing here needs to be clever. */
-async function retryRetractionAgainstServer(uid: string, dayIndex?: number): Promise<void> {
+async function retryRetractionAgainstServer(
+  eventId: string,
+  uid: string,
+  dayIndex?: number,
+): Promise<void> {
   try {
-    const snap = await getDocFromServer(dayIndex === undefined ? rawBoard(uid) : rawDayBoard(dayIndex, uid));
+    const snap = await getDocFromServer(
+      dayIndex === undefined ? rawBoard(eventId, uid) : rawDayBoard(eventId, dayIndex, uid),
+    );
     if (!snap.exists()) return; // no board — no evidence, park
     const data = snap.data() as { uid?: unknown; cells?: unknown };
     if (data.uid !== uid) return; // not this account's board — no evidence
     const cells = cellsFromData(data.cells);
     if (cells.length === 0) return; // never adjudicate vacuously (isBlackout([]) is true)
-    drainRetractions(uid, {
+    drainRetractionsForEvent(eventId, uid, {
       dayIndex,
       bingoStands: hasBingo(cells),
       blackoutStands: isBlackout(cells),
@@ -734,13 +762,14 @@ async function retryRetractionAgainstServer(uid: string, dayIndex?: number): Pro
 const RETRACTION_RETRY_DELAYS_MS: readonly number[] = [2_000, 10_000, 30_000];
 const retractionRetryAttempts = new Map<string, number>();
 const retractionRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const retryKey = (uid: string, token: string): string => `${pendingKey(uid)}#${token}`;
+const retryKey = (eventId: string, uid: string, token: string): string =>
+  eventScopeKey(eventId, 'moment-retraction-retry', pendingKey(eventId, uid), token);
 
 /** Forget a token's retry budget and cancel its scheduled retry — called when the
  *  token reaches ANY resolved state (committed, proven never-published, dropped
  *  as still-standing) and when a FRESH fall observation re-enqueues it. */
-const clearRetractionRetryState = (uid: string, token: string): void => {
-  const key = retryKey(uid, token);
+const clearRetractionRetryState = (eventId: string, uid: string, token: string): void => {
+  const key = retryKey(eventId, uid, token);
   retractionRetryAttempts.delete(key);
   const timer = retractionRetryTimers.get(key);
   if (timer !== undefined) {
@@ -756,10 +785,15 @@ const clearRetractionRetryState = (uid: string, token: string): void => {
  * re-check is structural and always against fresh state. Past the budget the
  * token parks for the next organic server-committed snapshot.
  */
-const requeueRetraction = (uid: string, kind: RetractableKind, dayIndex?: number): void => {
-  addRetractionIntent(uid, kind, dayIndex);
+const requeueRetraction = (
+  eventId: string,
+  uid: string,
+  kind: RetractableKind,
+  dayIndex?: number,
+): void => {
+  addRetractionIntent(eventId, uid, kind, dayIndex);
   const token = retractionToken(kind, dayIndex);
-  const key = retryKey(uid, token);
+  const key = retryKey(eventId, uid, token);
   // One scheduled retry per token, checked BEFORE the budget increments (Codex
   // P2, round 1 on PR #494): Board and the route-independent observer can both
   // start the same retraction, and a duplicate failure landing while a retry is
@@ -771,7 +805,7 @@ const requeueRetraction = (uid: string, kind: RetractableKind, dayIndex?: number
   if (delay === undefined) return; // budget exhausted — park (silence, never a loop)
   const timer = setTimeout(() => {
     retractionRetryTimers.delete(key);
-    void retryRetractionAgainstServer(uid, dayIndex);
+    void retryRetractionAgainstServer(eventId, uid, dayIndex);
   }, delay);
   retractionRetryTimers.set(key, timer);
 };
@@ -788,25 +822,34 @@ const requeueRetraction = (uid: string, kind: RetractableKind, dayIndex?: number
 export function enqueueRetraction(
   uid: string,
   fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
+  eventId = EVENT_ID,
+): void {
+  enqueueRetractionForEvent(eventId, uid, fell);
+}
+
+function enqueueRetractionForEvent(
+  eventId: string,
+  uid: string,
+  fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
 ): void {
   if (!fell.bingo && !fell.blackout) return;
   // A FRESH fall observation resets the token's retry budget (#485): this is a
   // new adjudication of new evidence, not attempt N of the old one. (The
   // internal failure path re-adds via `requeueRetraction`, which counts.)
   if (fell.bingo) {
-    addRetractionIntent(uid, 'bingo', fell.bingoDayIndex);
-    clearRetractionRetryState(uid, retractionToken('bingo', fell.bingoDayIndex));
+    addRetractionIntent(eventId, uid, 'bingo', fell.bingoDayIndex);
+    clearRetractionRetryState(eventId, uid, retractionToken('bingo', fell.bingoDayIndex));
   }
   if (fell.blackout) {
-    addRetractionIntent(uid, 'blackout', fell.blackoutDayIndex);
-    clearRetractionRetryState(uid, retractionToken('blackout', fell.blackoutDayIndex));
+    addRetractionIntent(eventId, uid, 'blackout', fell.blackoutDayIndex);
+    clearRetractionRetryState(eventId, uid, retractionToken('blackout', fell.blackoutDayIndex));
   }
 }
 
 /** The queued retraction intents for `uid`, as raw `${kind}:${day}` tokens.
  *  Exported for tests and for Board's own assertions; app code drains. */
-export function peekRetractions(uid: string): string[] {
-  return [...(pendingRetractions.get(pendingKey(uid)) ?? [])];
+export function peekRetractions(uid: string, eventId = EVENT_ID): string[] {
+  return [...(pendingRetractions.get(pendingKey(eventId, uid)) ?? [])];
 }
 
 /**
@@ -828,8 +871,17 @@ export function peekRetractions(uid: string): string[] {
 export function drainRetractions(
   uid: string,
   board: { dayIndex?: number; bingoStands: boolean; blackoutStands: boolean },
+  eventId = EVENT_ID,
 ): void {
-  const key = pendingKey(uid);
+  drainRetractionsForEvent(eventId, uid, board);
+}
+
+function drainRetractionsForEvent(
+  eventId: string,
+  uid: string,
+  board: { dayIndex?: number; bingoStands: boolean; blackoutStands: boolean },
+): void {
+  const key = pendingKey(eventId, uid);
   const intents = pendingRetractions.get(key);
   if (!intents) return;
   const consider = (kind: RetractableKind, stands: boolean) => {
@@ -839,18 +891,18 @@ export function drainRetractions(
     if (stands) {
       // The server says the win is fine — spend nothing, and forget the retry
       // budget: the intent is resolved, not failed.
-      clearRetractionRetryState(uid, token);
+      clearRetractionRetryState(eventId, uid, token);
       return;
     }
-    void retractWin(uid, kind, board.dayIndex).then(
+    void retractWin(eventId, uid, kind, board.dayIndex).then(
       (consumed) => {
-        if (consumed) clearRetractionRetryState(uid, token);
-        else requeueRetraction(uid, kind, board.dayIndex);
+        if (consumed) clearRetractionRetryState(eventId, uid, token);
+        else requeueRetraction(eventId, uid, kind, board.dayIndex);
       },
       // #480: `retractWin` is written to never reject, but an intent token is
       // the only memory this lifecycle has — an unexpected throw must restore
       // it (and schedule the bounded retry), never leak it with the rejection.
-      () => requeueRetraction(uid, kind, board.dayIndex),
+      () => requeueRetraction(eventId, uid, kind, board.dayIndex),
     );
   };
   consider('bingo', board.bingoStands);
@@ -904,6 +956,7 @@ export function drainRetractions(
 export function createRetractionFallObserver(
   uid: string,
   dayIndex?: number,
+  eventId = EVENT_ID,
 ): (snap: {
   fromCache: boolean;
   hasPendingWrites: boolean;
@@ -913,6 +966,10 @@ export function createRetractionFallObserver(
 }) => void {
   let baseline: { bingo: boolean; blackout: boolean } | null = null;
   return (snap) => {
+    // An unsubscribed listener can still have one delivery queued. Once another
+    // Event is active, that old delivery is history and must not mutate either
+    // Event's client state or call dayMeta through its live EVENT_ID binding.
+    if (EVENT_ID !== eventId) return;
     if (snap.hasPendingWrites) return; // an optimistic fold can neither arm nor adjudicate
     if (snap.boardUid !== uid || snap.cells.length === 0) return; // no evidence — hold
     const stands = { bingo: hasBingo(snap.cells), blackout: isBlackout(snap.cells) };
@@ -940,13 +997,13 @@ export function createRetractionFallObserver(
         if (dayIndex !== undefined) fell.blackoutDayIndex = dayIndex;
       }
       if (fell.bingo || fell.blackout) {
-        dropPendingWins(uid, fell);
-        enqueueRetraction(uid, fell);
-        if (fell.bingo && dayIndex !== undefined) dropHeldHonorPins(uid, dayIndex);
+        dropPendingWinsForEvent(eventId, uid, fell);
+        enqueueRetractionForEvent(eventId, uid, fell);
+        if (fell.bingo && dayIndex !== undefined) dropHeldHonorPins(uid, dayIndex, eventId);
       }
     }
     baseline = stands;
-    drainRetractions(uid, {
+    drainRetractionsForEvent(eventId, uid, {
       dayIndex,
       bingoStands: stands.bingo,
       blackoutStands: stands.blackout,
@@ -977,9 +1034,9 @@ type MomentProbe =
 /** Probe a candidate Moment through the server-only read path. A miss is
  *  authoritative enough to consume the intent without minting a tombstone; a read
  *  failure is not, so the caller keeps the intent for a later drain. */
-async function serverMomentData(id: string): Promise<MomentProbe> {
+async function serverMomentData(eventId: string, id: string): Promise<MomentProbe> {
   try {
-    const snap = await getDocFromServer(rawMoment(id));
+    const snap = await getDocFromServer(rawMoment(eventId, id));
     return snap.exists()
       ? { status: 'exists', data: (snap.data() as Record<string, unknown>) ?? {} }
       : { status: 'missing' };
@@ -1000,9 +1057,9 @@ async function serverMomentData(id: string): Promise<MomentProbe> {
  * missing and the set is included best-effort — at worst the batch is denied and
  * logged, never a silent half-retraction (the batch is all-or-nothing).
  */
-async function tombstoneExists(id: string): Promise<boolean> {
+async function tombstoneExists(eventId: string, id: string): Promise<boolean> {
   try {
-    return (await getDoc(rawMomentRetraction(id))).exists();
+    return (await getDoc(rawMomentRetraction(eventId, id))).exists();
   } catch {
     return false;
   }
@@ -1031,6 +1088,7 @@ async function tombstoneExists(id: string): Promise<boolean> {
  * drains on reconnect, and an ONLINE rejection is logged rather than surfaced.
  */
 async function commitRetraction(
+  eventId: string,
   uid: string,
   kind: RetractableKind,
   momentIds: string[],
@@ -1047,9 +1105,11 @@ async function commitRetraction(
   const tombstoneIds = [winMomentId(uid, kind)];
   if (dayIndex !== undefined) tombstoneIds.push(winMomentId(uid, kind, dayIndex));
   const batch = writeBatch(db);
-  for (const momentId of momentIds) batch.delete(rawMoment(momentId));
+  for (const momentId of momentIds) batch.delete(rawMoment(eventId, momentId));
   for (const id of tombstoneIds) {
-    if (!(await tombstoneExists(id))) batch.set(rawMomentRetraction(id), tombstone);
+    if (!(await tombstoneExists(eventId, id))) {
+      batch.set(rawMomentRetraction(eventId, id), tombstone);
+    }
   }
   return batch.commit().then(
     () => true,
@@ -1093,17 +1153,22 @@ async function commitRetraction(
  * is known the batch spends BOTH forms (Codex round 2 on PR #467; enforced by the
  * owner-delete rule) — see commitRetraction.
  */
-async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number): Promise<boolean> {
+async function retractWin(
+  eventId: string,
+  uid: string,
+  kind: RetractableKind,
+  dayIndex?: number,
+): Promise<boolean> {
   const momentIds: string[] = [];
   let hasUnknownProbe = false;
   if (dayIndex !== undefined) {
     const perCardId = winMomentId(uid, kind, dayIndex);
-    const perCard = await serverMomentData(perCardId);
+    const perCard = await serverMomentData(eventId, perCardId);
     if (perCard.status === 'exists') momentIds.push(perCardId);
     if (perCard.status === 'unknown') hasUnknownProbe = true;
   }
   const legacyId = winMomentId(uid, kind);
-  const legacyProbe = await serverMomentData(legacyId);
+  const legacyProbe = await serverMomentData(eventId, legacyId);
   if (legacyProbe.status === 'unknown') hasUnknownProbe = true;
   const legacy = legacyProbe.status === 'exists' ? legacyProbe.data : undefined;
   // On a daily Event the legacy doc must NAME this Day to be the one that fell.
@@ -1116,7 +1181,7 @@ async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number)
   // ONE batch for however many docs hold this win, spending BOTH id forms when
   // the Day is known — see commitRetraction for why the sibling form must be
   // spent even when no Moment sits at it.
-  return commitRetraction(uid, kind, momentIds, dayIndex);
+  return commitRetraction(eventId, uid, kind, momentIds, dayIndex);
 }
 
 /**
@@ -1126,9 +1191,13 @@ async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number)
  * stands is dropped via `dropPendingWins`, which also bumps the action
  * generation. The map entry is deleted once empty to keep it from growing per uid.
  */
-export function clearPendingMoment(uid: string, kind: keyof PendingMomentFlags): void {
-  const key = pendingKey(uid);
-  const flags = readPending(uid);
+export function clearPendingMoment(
+  uid: string,
+  kind: keyof PendingMomentFlags,
+  eventId = EVENT_ID,
+): void {
+  const key = pendingKey(eventId, uid);
+  const flags = readPending(eventId, uid);
   if (!flags) return;
   flags[kind] = false;
   if (kind === 'blackout') flags.blackoutDayIndexes = undefined; // fired — nothing left to protect
@@ -1140,7 +1209,7 @@ export function clearPendingMoment(uid: string, kind: keyof PendingMomentFlags):
   if (kind === 'bingo') flags.bingoDayIndexes = undefined; // fired — nothing left to protect
   if (kind === 'firstBingo') flags.firstBingoDayIndex = undefined;
   if (!flags.bingo && !flags.blackout && !flags.firstBingo) pendingMoments.delete(key);
-  persistPending(uid);
+  persistPending(eventId, uid);
 }
 
 /**
@@ -1204,8 +1273,14 @@ export function __resetPendingMomentsMemoryForTests(): void {
  * and social surfaces": "a per-card blackout posts a Moment naming the day",
  * e.g. "blacked out Day 4 · Glamiators"), so the Feed can render the Day chip.
  */
-function broadcast(id: string, kind: MomentKind, who: MomentActor, dayIndex?: number): void {
-  void writeMomentOnce(id, kind, who, dayIndex);
+function broadcast(
+  eventId: string,
+  id: string,
+  kind: MomentKind,
+  who: MomentActor,
+  dayIndex?: number,
+): void {
+  void writeMomentOnce(eventId, id, kind, who, dayIndex);
 }
 
 /**
@@ -1227,12 +1302,13 @@ function broadcast(id: string, kind: MomentKind, who: MomentActor, dayIndex?: nu
  * explicit `undefined` — Firestore's `setDoc` rejects that outright.
  */
 async function writeMomentOnce(
+  eventId: string,
   id: string,
   kind: MomentKind,
   who: MomentActor,
   dayIndex?: number,
 ): Promise<void> {
-  const ref = rawMoment(id);
+  const ref = rawMoment(eventId, id);
   try {
     const cached = await getDocFromCache(ref);
     if (cached.exists()) {
@@ -1270,8 +1346,8 @@ async function writeMomentOnce(
   // win this device retracted), and `getDoc` falls back to the cache offline, so
   // the offline flash suppression this pre-check exists for is untouched.
   try {
-    if ((await getDocFromCache(rawMomentRetraction(id))).exists()) {
-      const live = await getDoc(rawMomentRetraction(id));
+    if ((await getDocFromCache(rawMomentRetraction(eventId, id))).exists()) {
+      const live = await getDoc(rawMomentRetraction(eventId, id));
       if (live.exists()) {
         console.debug('[moments] broadcast skipped — this win was retracted (#377)', {
           id,
@@ -1293,7 +1369,10 @@ async function writeMomentOnce(
   // Stamped against the DOC ID being written (#372), so the per-card ids each
   // carry their own stamp — see `selfBingoWriteGenerations`.
   if (kind === 'bingo') {
-    selfBingoWriteGenerations.set(selfWriteKey(who.uid, id), pendingActionGeneration(who.uid));
+    selfBingoWriteGenerations.set(
+      selfWriteKey(eventId, who.uid, id),
+      pendingActionGenerationForEvent(eventId, who.uid),
+    );
   }
   const payload: Omit<MomentDoc, 'id'> = {
     kind,
@@ -1375,15 +1454,18 @@ export async function hasPriorBingoWitness(
     // a legacy (day-less) Event, where the single `${uid}-bingo` id is
     // unambiguous.
     selfWriteDayIndex?: number;
+    /** Event captured by a caller that must keep a larger async action pinned. */
+    eventId?: string;
   },
 ): Promise<boolean> {
+  const eventId = opts?.eventId ?? EVENT_ID;
   // Shared singleton consult (cache-only, Codex P1 on #288 round 5): the
   // headline honor already claimed — by this player or anyone else — reads as
   // witnessed; an uncached/absent singleton reads witness-clean, leaving the
   // drain-time roster gate as the decider.
   const singletonWitness = async (): Promise<boolean> => {
     try {
-      const singleton = await getDocFromCache(rawMoment(FIRST_BINGO_MOMENT_ID));
+      const singleton = await getDocFromCache(rawMoment(eventId, FIRST_BINGO_MOMENT_ID));
       return singleton.exists();
     } catch {
       return false; // singleton not cached — witness-clean, roster gate decides
@@ -1402,7 +1484,7 @@ export async function hasPriorBingoWitness(
   const isSelfWrite = (momentId: string): boolean =>
     opts?.selfWriteGeneration !== undefined &&
     momentId === selfWriteId &&
-    selfBingoWriteGenerations.get(selfWriteKey(uid, momentId)) === opts.selfWriteGeneration;
+    selfBingoWriteGenerations.get(selfWriteKey(eventId, uid, momentId)) === opts.selfWriteGeneration;
 
   // Per-card witnesses (#372) — cache-only and bounded by the schedule (ten Days
   // on the seeded sailing), so this is ten local reads at worst, no network.
@@ -1411,7 +1493,7 @@ export async function hasPriorBingoWitness(
     if (opts?.excludeDayIndexes?.has(day)) continue;
     const perCardId = `${uid}-bingo-d${day}`;
     try {
-      const perCard = await getDocFromCache(rawMoment(perCardId));
+      const perCard = await getDocFromCache(rawMoment(eventId, perCardId));
       if (perCard.exists()) {
         // The #332 race, now on the day-scoped id: a concurrent drain can write
         // THIS win's own per-card bingo while this read is in flight. Skip it
@@ -1431,7 +1513,7 @@ export async function hasPriorBingoWitness(
   // Player who bingoed before #372 shipped owns one, and it is durable proof of
   // a prior win. Its tutorial-exclusion and #332 logic are unchanged below.
   try {
-    const snap = await getDocFromCache(rawMoment(`${uid}-bingo`));
+    const snap = await getDocFromCache(rawMoment(eventId, `${uid}-bingo`));
     if (snap.exists()) {
       if (opts?.excludeDayIndexes) {
         const witnessedDay = (snap.data() as { dayIndex?: number } | undefined)?.dayIndex;
@@ -1493,9 +1575,9 @@ export async function hasPriorBingoWitness(
  * and threads it through `pendingBingoDayIndexes` to the drain — never re-derived
  * from whatever Day is on screen when a held bingo finally fires.
  */
-export function broadcastBingo(who: MomentActor, dayIndex?: number): void {
+export function broadcastBingo(who: MomentActor, dayIndex?: number, eventId = EVENT_ID): void {
   if (dayIndex === undefined) {
-    broadcast(`${who.uid}-bingo`, 'bingo', who);
+    broadcast(eventId, `${who.uid}-bingo`, 'bingo', who);
     return;
   }
   // Legacy same-day dedupe, mirroring broadcastBlackout's (Codex P2 on #275
@@ -1510,7 +1592,7 @@ export function broadcastBingo(who: MomentActor, dayIndex?: number): void {
   // broadcast dedup model).
   void (async () => {
     try {
-      const legacy = await getDocFromCache(rawMoment(`${who.uid}-bingo`));
+      const legacy = await getDocFromCache(rawMoment(eventId, `${who.uid}-bingo`));
       if (legacy.exists() && (legacy.data() as { dayIndex?: number }).dayIndex === dayIndex) {
         console.debug('[moments] per-card bingo skipped — legacy day-less Moment already covers this Day', {
           uid: who.uid,
@@ -1521,7 +1603,7 @@ export function broadcastBingo(who: MomentActor, dayIndex?: number): void {
     } catch {
       // No legacy Moment in the local cache — nothing to dedupe against.
     }
-    await writeMomentOnce(`${who.uid}-bingo-d${dayIndex}`, 'bingo', who, dayIndex);
+    await writeMomentOnce(eventId, `${who.uid}-bingo-d${dayIndex}`, 'bingo', who, dayIndex);
   })();
 }
 
@@ -1541,9 +1623,9 @@ export function broadcastBingo(who: MomentActor, dayIndex?: number): void {
  * whatever Day happens to be on screen when a held blackout finally fires
  * (Codex finding 2, fix/d15-blackout-day-naming).
  */
-export function broadcastBlackout(who: MomentActor, dayIndex?: number): void {
+export function broadcastBlackout(who: MomentActor, dayIndex?: number, eventId = EVENT_ID): void {
   if (dayIndex === undefined) {
-    broadcast(`${who.uid}-blackout`, 'blackout', who);
+    broadcast(eventId, `${who.uid}-blackout`, 'blackout', who);
     return;
   }
   // Legacy same-day dedupe (Codex P2 on #275 round 2): a card that already
@@ -1556,7 +1638,7 @@ export function broadcastBlackout(who: MomentActor, dayIndex?: number): void {
   // existing broadcast dedup model.
   void (async () => {
     try {
-      const legacy = await getDocFromCache(rawMoment(`${who.uid}-blackout`));
+      const legacy = await getDocFromCache(rawMoment(eventId, `${who.uid}-blackout`));
       if (legacy.exists() && (legacy.data() as { dayIndex?: number }).dayIndex === dayIndex) {
         console.debug('[moments] per-card blackout skipped — legacy day-less Moment already covers this Day', {
           uid: who.uid,
@@ -1567,7 +1649,7 @@ export function broadcastBlackout(who: MomentActor, dayIndex?: number): void {
     } catch {
       // No legacy Moment in the local cache — nothing to dedupe against.
     }
-    await writeMomentOnce(`${who.uid}-blackout-d${dayIndex}`, 'blackout', who, dayIndex);
+    await writeMomentOnce(eventId, `${who.uid}-blackout-d${dayIndex}`, 'blackout', who, dayIndex);
   })();
 }
 
@@ -1577,10 +1659,10 @@ export function broadcastBlackout(who: MomentActor, dayIndex?: number): void {
  * shows, no other Player has bingoed yet. The event-singleton id (above) makes it
  * structurally once-per-Event even under the honest race.
  */
-export function broadcastFirstBingo(who: MomentActor, dayIndex?: number): void {
+export function broadcastFirstBingo(who: MomentActor, dayIndex?: number, eventId = EVENT_ID): void {
   // Payload-only `dayIndex` (#262), same as broadcastBingo — the singleton id
   // is untouched.
-  broadcast(FIRST_BINGO_MOMENT_ID, 'first_bingo', who, dayIndex);
+  broadcast(eventId, FIRST_BINGO_MOMENT_ID, 'first_bingo', who, dayIndex);
 }
 
 /**
@@ -1668,7 +1750,7 @@ export function planConfirmBroadcasts(params: {
   return { bingo: bingoTransition, blackout: blackoutTransition, firstBingo, firstBingoHeld };
 }
 
-// --- Confirm-path listener state (issue #41), uid-keyed like the pending queue --
+// --- Confirm-path listener state (issue #41), Event+uid-keyed like the pending queue --
 //
 // The `ConfirmWinMoments` listener holds per-Player working state: which Claims it
 // has observed PENDING (the fresh-confirm witness — a confirm counts as fresh only
@@ -1676,12 +1758,14 @@ export function planConfirmBroadcasts(params: {
 // confirmed at first sight is baselined as history), which confirmed Claims it has
 // already enqueued, the confirms whose board flip has not yet landed, and a
 // first_bingo candidate parked at the roster gate. Codex #116 finding 4: this state
-// is lifted to MODULE scope keyed by uid (mirroring the pending-Moment queue above)
+// is lifted to MODULE scope keyed by Event+uid (mirroring the pending-Moment queue above)
 // so an ACCOUNT SWITCH parks the work instead of discarding it — switching back
 // resumes a held win (including a roster-held first_bingo) for the original uid
 // rather than baselining the now-confirmed Claim away. Same reload residual as the
 // pending queue: module state is per-page-load.
 export interface ConfirmListenerState {
+  /** Event that owns every Claim/board/candidate in this state (#807). */
+  readonly eventId: string;
   // Claim ids this listener has observed in the PENDING state — the witness that a
   // later `confirmed` is a fresh transition, not history (Codex #116 finding 3).
   seenPending: Set<string>;
@@ -1711,13 +1795,21 @@ export interface ConfirmListenerState {
 
 const confirmStates = new Map<string, ConfirmListenerState>();
 
-/** The per-uid confirm-listener state (created empty on first access), keyed the
- *  SAME way as the pending-Moment queue so the two never cross identities. */
-export function getConfirmState(uid: string): ConfirmListenerState {
-  const key = pendingKey(uid);
+/** The per-(Event, uid) confirm-listener state (created empty on first access),
+ *  keyed the SAME way as the pending-Moment queue so neither Events nor accounts
+ *  cross identities. Pass a captured `eventId` from an async continuation. */
+export function getConfirmState(uid: string, eventId = EVENT_ID): ConfirmListenerState {
+  const key = pendingKey(eventId, uid);
   let state = confirmStates.get(key);
   if (!state) {
-    state = { seenPending: new Set(), handled: new Set(), awaiting: new Map(), heldCeremony: null, inFlight: false };
+    state = {
+      eventId,
+      seenPending: new Set(),
+      handled: new Set(),
+      awaiting: new Map(),
+      heldCeremony: null,
+      inFlight: false,
+    };
     confirmStates.set(key, state);
   }
   return state;

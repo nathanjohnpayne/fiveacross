@@ -26,7 +26,7 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 // default rejection below.
 type FakeSnap = { exists: () => boolean; data: () => unknown };
 
-const { setSpy, commitSpy, getDocFromCacheSpy, trackSpy } = vi.hoisted(() => ({
+const { setSpy, commitSpy, getDocFromCacheSpy, trackSpy, eventScope } = vi.hoisted(() => ({
   setSpy: vi.fn(),
   commitSpy: vi.fn(() => Promise.resolve()),
   // Rejects by default (nothing cached), matching a fresh test double with no
@@ -36,13 +36,19 @@ const { setSpy, commitSpy, getDocFromCacheSpy, trackSpy } = vi.hoisted(() => ({
   // Captures the #387 mark_rejected observability event setMark fires (via a
   // dynamic import of ../analytics) when a commit is rejected online.
   trackSpy: vi.fn(),
+  eventScope: { eventId: 'med-2026' },
 }));
 
 // Keep the module graph loadable but the write path inspectable: real
 // firebase/firestore except `doc` (→ a bare { path }), `writeBatch` (→ our
 // spies), `getDocFromCache` (→ our spy), and the write fns we assert are NEVER
 // called.
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 // The #387 rejection handler dynamically imports ../analytics (whose real
 // module drags in the firebase singleton + PostHog); stub it to the spy.
 vi.mock('../analytics', () => ({ track: trackSpy }));
@@ -61,6 +67,10 @@ vi.mock('firebase/firestore', async (importOriginal) => {
 import { computeMark, setMark } from './api';
 import { knownFirstBingoAt } from '../components/Board';
 import { addDoc, FieldPath, runTransaction } from 'firebase/firestore';
+
+beforeEach(() => {
+  eventScope.eventId = EVENT_ID;
+});
 
 // A dealt board: every non-free Square unmarked, the free center (12) "on".
 function dealt(): Cell[] {
@@ -724,6 +734,34 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
         daily: true,
       }),
     );
+    errorSpy.mockRestore();
+  });
+
+  it('does not attribute Event A\'s delayed Mark rejection to Event B (#807)', async () => {
+    let rejectCommit!: (reason: unknown) => void;
+    const committed = new Promise<void>((_resolve, reject) => {
+      rejectCommit = reject;
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    commitSpy.mockReturnValueOnce(committed);
+
+    const result = await setMark({
+      uid: 'u1',
+      cells: dealt(),
+      index: 3,
+      nextMarked: true,
+      claimMode: 'honor',
+      currentFirstBingoAt: null,
+    });
+
+    eventScope.eventId = 'event-b';
+    rejectCommit(Object.assign(new Error('permission-denied'), { code: 'permission-denied' }));
+    await result.committed.catch(() => {});
+    await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    // Let the rejection handler's dynamic import and continuation settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(trackSpy).not.toHaveBeenCalledWith('mark_rejected', expect.anything());
     errorSpy.mockRestore();
   });
 });

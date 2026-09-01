@@ -23,6 +23,11 @@ import {
   shareCardAppName,
   type FarewellShareCardData,
 } from './ShareCard';
+
+// localStorage is the durable once-per-device guard. When storage is
+// unavailable, retain every Event seen during this JavaScript session outside
+// the Event-keyed Board subtree so A -> B -> A still fires only once for A.
+const mostLovedTrackedWithoutStorage = new Set<string>();
 import { leaderboardShareCopy } from './Leaderboard';
 import { EmojiText } from './EmojiText';
 import { editionBrand, editionLexicon } from '../editions';
@@ -413,29 +418,28 @@ function FarewellPodiumAwarded(
     bannedUids: props.event.bannedUids ?? [],
   });
   const { award } = props;
-  // Once per device per event; the ref backs the localStorage guard up within
-  // a session when storage is unavailable (private mode). The no-award record
+  const eventId = EVENT_ID;
+  // Once per device per Event; module session state backs the localStorage
+  // guard up when storage is unavailable (private mode). The no-award record
   // fires too — `award: false` is signal, not noise.
-  const firedRef = useRef(false);
   useEffect(() => {
-    if (firedRef.current) return;
-    const key = `most_loved_frozen_tracked:${EVENT_ID}`;
+    if (mostLovedTrackedWithoutStorage.has(eventId)) return;
+    const key = `most_loved_frozen_tracked:${eventId}`;
     try {
       if (window.localStorage.getItem(key) != null) {
-        firedRef.current = true;
         return;
       }
     } catch {
-      /* storage unavailable — fall through to the session-scoped ref guard */
+      /* storage unavailable — fall through to the session-scoped guard */
+      mostLovedTrackedWithoutStorage.add(eventId);
     }
-    firedRef.current = true;
     track('most_loved_photo_frozen', mostLovedFrozenEventPayload(award));
     try {
       window.localStorage.setItem(key, String(Date.now()));
     } catch {
-      /* storage unavailable — the ref already guards this session */
+      mostLovedTrackedWithoutStorage.add(eventId);
     }
-  }, [award]);
+  }, [award, eventId]);
   return <FarewellPodiumInner {...props} proofs={proofs} proofsLoaded={!loading} />;
 }
 
@@ -601,6 +605,7 @@ function FarewellPodiumInner({
   };
 
   const shareFinalStandings = async () => {
+    const actedEventId = EVENT_ID;
     // NOTHING is awaited before `shareCardBlob` (#712 round 3). Start (or
     // reuse) the render, then take its blob ONLY if it has already settled:
     // an unsettled render costs the image, never the share. `shareCardBlob`
@@ -625,7 +630,9 @@ function FarewellPodiumInner({
     } catch {
       // shareCardBlob never throws by design; belt-and-braces regardless.
     } finally {
-      track('share_click', { surface: 'farewell' });
+      if (EVENT_ID === actedEventId) {
+        track('share_click', { surface: 'farewell' });
+      }
     }
   };
 

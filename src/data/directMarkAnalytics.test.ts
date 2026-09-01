@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const H = vi.hoisted(() => ({
   Timestamp: class {
@@ -17,6 +17,7 @@ const H = vi.hoisted(() => ({
   analyticsInitializationSettled: Promise.resolve(),
   onPostHogReady: vi.fn<(listener: () => void) => () => void>(() => () => {}),
   isLocalDirectMarkRequest: vi.fn(() => false),
+  eventId: 'event',
 }));
 
 vi.mock('firebase/firestore', () => H);
@@ -25,10 +26,19 @@ vi.mock('../analytics', () => ({
   trackToAnalyticsSinks: H.trackToAnalyticsSinks,
 }));
 vi.mock('../posthog', () => ({ onPostHogReady: H.onPostHogReady }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
 vi.mock('./markAnalytics', () => ({ isLocalDirectMarkRequest: H.isLocalDirectMarkRequest }));
 
 import { parseDirectMarkAnalyticsEvent, subscribeDirectMarkAnalytics } from './directMarkAnalytics';
+
+beforeEach(() => {
+  H.eventId = 'event';
+});
 
 describe('durable direct-mark analytics delivery', () => {
   it('accepts only the server-record shape for a direct mark', () => {
@@ -171,7 +181,9 @@ describe('durable direct-mark analytics delivery', () => {
           {
             id: 'row-10',
             data: () => ({
-              name: 'unmark_square',
+              name: 'mark_square',
+              source: 'pledge',
+              marked: true,
               mode: 'honor',
               uid: 'u1',
               requestId: 'request-10',
@@ -479,6 +491,115 @@ describe('durable direct-mark analytics delivery', () => {
       await vi.advanceTimersByTimeAsync(10 * 60_000);
 
       expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsBeforeUnsubscribe);
+      vi.unstubAllGlobals();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a queued Event A snapshot callback after its subscription is torn down', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    H.trackToAnalyticsSinks.mockReturnValue({ ga4: true, posthog: true });
+    let deliver!: (snapshot: unknown) => void;
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      deliver = onNext;
+      return () => {};
+    });
+
+    const unsubscribe = subscribeDirectMarkAnalytics('u1', 'event-a');
+    unsubscribe();
+    const callsAfterTeardown = H.trackToAnalyticsSinks.mock.calls.length;
+
+    deliver({
+      metadata: { fromCache: false },
+      docs: [
+        {
+          id: 'row-after-teardown',
+          data: () => ({
+            name: 'unmark_square',
+            mode: 'honor',
+            uid: 'u1',
+            requestId: 'request-after-teardown',
+            transitionId: 'transition-after-teardown',
+            commitOrder: '0000000000000018:000000000',
+            recordedAt: { seconds: 18, nanoseconds: 0 },
+          }),
+        },
+      ],
+    });
+    await H.analyticsInitializationSettled;
+
+    expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsAfterTeardown);
+    expect(storage.size).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it('parks Event A delivery while B is active, then drains it when A returns', async () => {
+    vi.useFakeTimers();
+    try {
+      H.trackToAnalyticsSinks.mockClear();
+      H.isLocalDirectMarkRequest.mockClear();
+      const storage = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      });
+      let deliverA!: (snapshot: unknown) => void;
+      H.onSnapshot
+        .mockImplementationOnce((_query, onNext) => {
+          deliverA = onNext;
+          return () => {};
+        })
+        .mockImplementationOnce(() => () => {});
+      H.trackToAnalyticsSinks.mockReturnValue({ ga4: true, posthog: true });
+
+      H.eventId = 'event-a';
+      const unsubscribeA = subscribeDirectMarkAnalytics('u1', 'event-a');
+      H.eventId = 'event-b';
+      const unsubscribeB = subscribeDirectMarkAnalytics('u1', 'event-b');
+      deliverA({
+        metadata: { fromCache: false },
+        docs: [
+          {
+            id: 'row-event-a',
+            data: () => ({
+              name: 'mark_square',
+              source: 'pledge',
+              marked: true,
+              mode: 'honor',
+              uid: 'u1',
+              requestId: 'request-event-a',
+              transitionId: 'transition-event-a',
+              commitOrder: '0000000000000019:000000000',
+              recordedAt: { seconds: 19, nanoseconds: 0 },
+            }),
+          },
+        ],
+      });
+      await H.analyticsInitializationSettled;
+
+      expect(H.collection.mock.calls.slice(-2).map((call) => call.slice(1))).toEqual([
+        ['events', 'event-a', 'players', 'u1', 'analyticsTransitions'],
+        ['events', 'event-b', 'players', 'u1', 'analyticsTransitions'],
+      ]);
+      expect(storage.get('five-across:board-analytics-outbox:event-a:u1')).toContain('transition-event-a');
+      expect(storage.get('five-across:board-analytics-outbox:event-b:u1')).toBeUndefined();
+      expect(H.trackToAnalyticsSinks).not.toHaveBeenCalled();
+      expect(H.isLocalDirectMarkRequest).not.toHaveBeenCalled();
+
+      H.eventId = 'event-a';
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(1);
+      expect(H.isLocalDirectMarkRequest).toHaveBeenCalledWith('request-event-a', 'event-a');
+      expect(storage.get('five-across:board-analytics:event-a:u1')).toContain('transition-event-a');
+      expect(storage.get('five-across:board-analytics:event-b:u1')).toBeUndefined();
+      unsubscribeA();
+      unsubscribeB();
       vi.unstubAllGlobals();
     } finally {
       vi.useRealTimers();

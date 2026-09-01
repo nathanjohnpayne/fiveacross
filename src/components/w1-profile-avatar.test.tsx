@@ -18,6 +18,7 @@ const { docMock, setDocMock, updateDocMock } = vi.hoisted(() => ({
     throw Object.assign(new Error('No document to update'), { code: 'not-found' });
   }),
 }));
+const eventScope = vi.hoisted(() => ({ eventId: 'test-event' }));
 vi.mock('firebase/firestore', () => ({ doc: docMock, setDoc: setDocMock, updateDoc: updateDocMock }));
 
 const { refMock, uploadBytesMock } = vi.hoisted(() => ({
@@ -31,7 +32,13 @@ vi.mock('firebase/storage', () => ({
   deleteObject: vi.fn(),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, storage: {}, EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  storage: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 
 type AuthUser = { uid: string; displayName: string | null; photoURL: string | null } | null;
 const authState = vi.hoisted(() => ({ current: { user: null as AuthUser, loading: false } }));
@@ -109,6 +116,7 @@ vi.mock('../hooks/useData', async () => {
 });
 
 function resetMocks() {
+  eventScope.eventId = 'test-event';
   docMock.mockClear();
   setDocMock.mockClear();
   updateDocMock.mockClear();
@@ -187,6 +195,32 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
     );
   });
 
+  it('keeps a delayed Event A display-name mirror under A after B activates', async () => {
+    let finishGlobalWrite!: () => void;
+    setDocMock.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          finishGlobalWrite = () => resolve(undefined);
+        }),
+    );
+    updateDocMock.mockResolvedValueOnce(undefined);
+
+    const pending = updateDisplayName('u1', 'Event A Name');
+    await waitFor(() => expect(setDocMock).toHaveBeenCalledTimes(1));
+    eventScope.eventId = 'event-b';
+    finishGlobalWrite();
+    await pending;
+
+    expect(updateDocMock).toHaveBeenCalledWith(
+      { path: 'events/test-event/players/u1' },
+      { displayName: 'Event A Name' },
+    );
+    expect(updateDocMock).not.toHaveBeenCalledWith(
+      { path: 'events/event-b/players/u1' },
+      expect.anything(),
+    );
+  });
+
   it('reuses uploadAvatar (avatars/{uid}.jpg, image/jpeg) then flips customPhoto + photoURL', async () => {
     const url = await updateAvatar('u1', new Blob(['x'], { type: 'image/png' }));
     expect(refMock).toHaveBeenCalledWith({}, 'avatars/u1.jpg');
@@ -197,6 +231,32 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
       { photoURL: url },
     );
     expect(url).toBe('https://cdn.example/avatars/u1.jpg');
+  });
+
+  it('keeps a delayed Event A avatar mirror under A after B activates', async () => {
+    let finishUpload!: () => void;
+    uploadBytesMock.mockImplementationOnce(
+      () =>
+        new Promise<Record<string, never>>((resolve) => {
+          finishUpload = () => resolve({});
+        }),
+    );
+    updateDocMock.mockResolvedValueOnce(undefined);
+
+    const pending = updateAvatar('u1', new Blob(['x'], { type: 'image/png' }));
+    await waitFor(() => expect(uploadBytesMock).toHaveBeenCalledTimes(1));
+    eventScope.eventId = 'event-b';
+    finishUpload();
+    await pending;
+
+    expect(updateDocMock).toHaveBeenCalledWith(
+      { path: 'events/test-event/players/u1' },
+      { photoURL: 'https://cdn.example/avatars/u1.jpg' },
+    );
+    expect(updateDocMock).not.toHaveBeenCalledWith(
+      { path: 'events/event-b/players/u1' },
+      expect.anything(),
+    );
   });
 });
 

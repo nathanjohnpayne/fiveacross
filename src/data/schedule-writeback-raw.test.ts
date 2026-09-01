@@ -27,19 +27,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 type Ref = { __kind: 'doc'; path: string; withConverter: () => Ref };
 
-const { updateMock, eventDataMock } = vi.hoisted(() => ({
+const { updateMock, eventDataMock, txGetMock, eventScope } = vi.hoisted(() => ({
   updateMock: vi.fn(),
   eventDataMock: vi.fn((): Record<string, unknown> | undefined => undefined),
+  txGetMock: vi.fn(),
+  eventScope: { eventId: 'med-2026' },
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', functions: {} }));
+vi.mock('../firebase', () => ({
+  db: {},
+  functions: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 vi.mock('firebase/functions', () => ({ httpsCallable: () => async () => ({ data: {} }) }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
-  const snap = () => {
-    const data = eventDataMock();
-    return { exists: () => data !== undefined, data: () => data };
-  };
   return {
     ...actual,
     doc: (_db: unknown, ...rest: string[]): Ref => {
@@ -49,13 +53,13 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     collection: (_db: unknown, ...rest: string[]) => ({ path: rest.join('/') }),
     runTransaction: (_db: unknown, fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        get: () => Promise.resolve(snap()),
+        get: (ref: Ref) => txGetMock(ref),
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
       }),
   };
 });
 
-import { setDayTheme, setDayTonight } from './admin';
+import { adminUpdateItemText, setDayTheme, setDayTonight } from './admin';
 import { migrateDayFields } from './converters';
 import type { DayDef } from '../types';
 
@@ -81,8 +85,30 @@ const writtenDays = (): Array<Record<string, unknown>> => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventScope.eventId = 'med-2026';
   eventDataMock.mockReturnValue({ days: STORED_LEGACY_DAYS });
+  txGetMock.mockImplementation(() => {
+    const data = eventDataMock();
+    return Promise.resolve({ exists: () => data !== undefined, data: () => data });
+  });
 });
+
+async function switchEventDuringFirstRead(start: () => Promise<void>): Promise<void> {
+  let finishRead:
+    | ((snap: { exists: () => boolean; data: () => Record<string, unknown> | undefined }) => void)
+    | undefined;
+  txGetMock.mockImplementationOnce(
+    () => new Promise((resolve) => { finishRead = resolve; }),
+  );
+  eventScope.eventId = 'event-a';
+  const pending = start();
+
+  expect((txGetMock.mock.calls[0][0] as Ref).path).toBe('events/event-a');
+  eventScope.eventId = 'event-b';
+  const data = eventDataMock();
+  finishRead!({ exists: () => data !== undefined, data: () => data });
+  await pending;
+}
 
 describe('admin schedule writeback stays RAW (ADR 0011)', () => {
   // The premise check: the converter really does add the field, so the test
@@ -131,5 +157,39 @@ describe('admin schedule writeback stays RAW (ADR 0011)', () => {
     const days = writtenDays();
     expect(days.map((d) => d.scoring)).toEqual(['ceremonial', 'competitive']);
     expect(days[0]).toEqual(stored[0]);
+  });
+
+  it('keeps a delayed Event A theme edit read and write entirely in A', async () => {
+    await switchEventDuringFirstRead(() =>
+      setDayTheme(convertedDays(), 1, 'neon-pink-playground'),
+    );
+
+    expect(txGetMock.mock.calls.map((call) => (call[0] as Ref).path)).toEqual([
+      'events/event-a',
+    ]);
+    expect(updateMock.mock.calls.at(-1)?.[0]).toBe('events/event-a');
+  });
+
+  it('keeps a delayed Event A Tonight edit read and write entirely in A', async () => {
+    await switchEventDuringFirstRead(() =>
+      setDayTonight(convertedDays(), 1, ['🎭 Show', '🌌 Party']),
+    );
+
+    expect(txGetMock.mock.calls.map((call) => (call[0] as Ref).path)).toEqual([
+      'events/event-a',
+    ]);
+    expect(updateMock.mock.calls.at(-1)?.[0]).toBe('events/event-a');
+  });
+
+  it('keeps a delayed Event A Prompt-text guard and item write entirely in A', async () => {
+    await switchEventDuringFirstRead(() => adminUpdateItemText('editable', 'Sharper wording'));
+
+    expect(txGetMock.mock.calls.map((call) => (call[0] as Ref).path)).toEqual([
+      'events/event-a',
+    ]);
+    expect(updateMock.mock.calls.at(-1)).toEqual([
+      'events/event-a/items/editable',
+      { text: 'Sharper wording' },
+    ]);
   });
 });

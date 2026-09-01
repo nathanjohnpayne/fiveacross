@@ -233,11 +233,27 @@ describe('dayMeta.pinDayFirstBingo (write-once per-Day honor)', () => {
     enqueueHeldHonorPin('u1', 2, 222);
     enqueueHeldHonorPin('u2', 1, 333);
 
-    expect(takeHeldHonorPins('u1', 1)).toEqual([{ uid: 'u1', dayIndex: 1, at: 111 }]);
+    expect(takeHeldHonorPins('u1', 1)).toEqual([{ eventId: EVENT_ID, uid: 'u1', dayIndex: 1, at: 111 }]);
     dropHeldHonorPins('u1', 2);
 
     expect(takeHeldHonorPins('u1')).toEqual([]);
-    expect(takeHeldHonorPins('u2')).toEqual([{ uid: 'u2', dayIndex: 1, at: 333 }]);
+    expect(takeHeldHonorPins('u2')).toEqual([{ eventId: EVENT_ID, uid: 'u2', dayIndex: 1, at: 333 }]);
+  });
+
+  it('pins to the Event captured by the operation instead of the ambient Event', async () => {
+    await pinDayFirstBingo(4, { uid: 'u1', displayName: 'Alice', photoURL: null }, 1234, 'event-a');
+
+    expect(setDocSpy).toHaveBeenCalledTimes(1);
+    expect(setDocSpy.mock.calls[0][0].path).toBe('events/event-a/days/4/meta/4');
+  });
+
+  it('keeps held honors isolated when the same User and Day exist in Events A and B', () => {
+    enqueueHeldHonorPin('u1', 1, 111, 'event-a');
+    enqueueHeldHonorPin('u1', 1, 222, 'event-b');
+
+    expect(takeHeldHonorPins('u1', 1, 'event-a')).toEqual([{ eventId: 'event-a', uid: 'u1', dayIndex: 1, at: 111 }]);
+    dropHeldHonorPins('u1', 1, 'event-a');
+    expect(takeHeldHonorPins('u1', 1, 'event-b')).toEqual([{ eventId: 'event-b', uid: 'u1', dayIndex: 1, at: 222 }]);
   });
 });
 

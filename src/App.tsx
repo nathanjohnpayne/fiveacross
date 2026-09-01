@@ -17,8 +17,19 @@ import { TABS, FALLBACK_PATH, type TabId } from './components/tabs';
 import LoadingState from './components/LoadingState';
 import { editionBrand } from './editions';
 import SetupWizard from './components/setup/SetupWizard';
+import { EVENT_ID } from './firebase';
 
 export default function App() {
+  // One hard boundary for every Event-owned route and overlay. Listener hooks
+  // still neutralize their first mismatched frame, while this keyed remount
+  // clears local UI that is not itself a subscription: an open Feed who-list,
+  // a half-composed Notice, paging windows, sheets, and retry controls. The
+  // Auth/Theme providers live above App, so global identity and preferences
+  // deliberately survive the same A → B transition.
+  return <EventApp key={EVENT_ID} />;
+}
+
+function EventApp() {
   const { user, loading, dealError, dealErrorReason, dealing, retryDeal, canRenderEventContent } = useAuth();
   // The tab-switch transition's key (specs/motion-polish.md): the TOP-LEVEL
   // route segment only, so `.route-view` replays its entrance when the tab

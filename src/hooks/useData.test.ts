@@ -16,11 +16,13 @@ import { renderHook, act } from '@testing-library/react';
 // latch tests below drive the captured onSnapshot callback with cache/server
 // snapshots against the real hooks.
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), eventId: 'event-a' }));
 
 vi.mock('../firebase', () => ({
   db: {},
-  EVENT_ID: 'test-event',
+  get EVENT_ID() {
+    return H.eventId;
+  },
   storage: {},
   auth: {},
   googleProvider: {},
@@ -43,9 +45,10 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard } from './useData';
+import { useItems, useBoard, useMyUser } from './useData';
 
 beforeEach(() => {
+  H.eventId = 'event-a';
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {}); // unsubscribe fn
 });
@@ -75,6 +78,87 @@ const docSnap = (fromCache: boolean) => ({
   exists: () => false,
   data: () => undefined,
   metadata: { fromCache },
+});
+
+const presentDocSnap = (value: object) => ({
+  exists: () => true,
+  data: () => value,
+  metadata: { fromCache: false, hasPendingWrites: false },
+});
+
+describe('Event-scoped subscription lifecycle (#807)', () => {
+  it('hides Event A synchronously, unsubscribes it, subscribes B, and ignores a queued A callback', () => {
+    const subscriptions: Array<{
+      target: { args?: unknown[] };
+      onNext: SnapCb;
+      unsubscribe: ReturnType<typeof vi.fn>;
+    }> = [];
+    H.onSnapshot.mockImplementation(
+      (target: { args?: unknown[] }, _options: unknown, onNext: SnapCb) => {
+        const unsubscribe = vi.fn();
+        subscriptions.push({ target, onNext, unsubscribe });
+        return unsubscribe;
+      },
+    );
+
+    const frames: Array<ReturnType<typeof useBoard>> = [];
+    const view = renderHook(() => {
+      const frame = useBoard('u1');
+      frames.push(frame);
+      return frame;
+    });
+    expect(subscriptions[0].target.args).toContain('event-a');
+    act(() => subscriptions[0].onNext(presentDocSnap({ uid: 'u1', event: 'A' })));
+    expect(view.result.current.data).toMatchObject({ event: 'A' });
+
+    H.eventId = 'event-b';
+    const beforeSwitch = frames.length;
+    view.rerender();
+
+    // The very first render evaluated under B is neutral. This assertion does
+    // not rely on the passive effect's reset render, which is too late to
+    // prevent one painted frame of A under B.
+    expect(frames[beforeSwitch].data).toBeNull();
+    expect(view.result.current.data).toBeNull();
+    expect(subscriptions[0].unsubscribe).toHaveBeenCalledTimes(1);
+    expect(subscriptions[1].target.args).toContain('event-b');
+
+    act(() => subscriptions[0].onNext(presentDocSnap({ uid: 'u1', event: 'A-late' })));
+    expect(view.result.current.data).toBeNull();
+
+    act(() => subscriptions[1].onNext(presentDocSnap({ uid: 'u1', event: 'B' })));
+    expect(view.result.current.data).toMatchObject({ event: 'B' });
+
+    H.eventId = 'event-a';
+    view.rerender();
+    expect(view.result.current.data).toBeNull();
+    expect(subscriptions).toHaveLength(3);
+
+    // The retired first A subscription cannot repopulate the newly selected A
+    // scope; only the fresh third subscription is authoritative.
+    act(() => subscriptions[0].onNext(presentDocSnap({ uid: 'u1', event: 'A-stale' })));
+    expect(view.result.current.data).toBeNull();
+    act(() => subscriptions[2].onNext(presentDocSnap({ uid: 'u1', event: 'A-fresh' })));
+    expect(view.result.current.data).toMatchObject({ event: 'A-fresh' });
+  });
+
+  it('keeps the global users/{uid} profile subscribed across an Event change', () => {
+    const callbacks: SnapCb[] = [];
+    H.onSnapshot.mockImplementation(
+      (_target: unknown, _options: unknown, onNext: SnapCb) => {
+        callbacks.push(onNext);
+        return vi.fn();
+      },
+    );
+    const view = renderHook(() => useMyUser('u1'));
+    act(() => callbacks[0](presentDocSnap({ uid: 'u1', displayName: 'Global profile' })));
+
+    H.eventId = 'event-b';
+    view.rerender();
+
+    expect(H.onSnapshot).toHaveBeenCalledTimes(1);
+    expect(view.result.current.data).toMatchObject({ displayName: 'Global profile' });
+  });
 });
 
 describe('useItems enabled gate (Codex P3)', () => {

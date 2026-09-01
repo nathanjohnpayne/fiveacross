@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useReducer, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, type CSSProperties } from 'react';
 import { Lock, Shuffle } from 'lucide-react';
 import { getDoc } from 'firebase/firestore';
+import { EVENT_ID } from '../firebase';
 import { useAuth } from '../auth/AuthContext';
 import { useBoard, useDayBoard, useDayMeta, useMyPlayer, useEventDoc, useItems, useTally, useLeaderboard, useDoubts, useMyProofs, useProofsForItemText, useDayMetasStatus, isBanned } from '../hooks/useData';
 import { setMark, dealDayCard, reconcileEchoes, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
@@ -655,8 +656,25 @@ function LockedDayPreview({
 }
 
 export default function Board() {
+  const eventId = EVENT_ID;
+  // Every piece of Board-local UI state belongs to one Event: viewed Day,
+  // open sheets, coach/launch gates, animations, and reconcile bookkeeping.
+  // Keying the implementation remounts that whole state machine atomically on
+  // an in-session Event transition, so the first committed B frame cannot
+  // inherit an A-only index, overlay, or delayed interaction.
+  return <EventBoard key={eventId} eventId={eventId} />;
+}
+
+function EventBoard({ eventId }: { eventId: string }) {
   const { user, retryDeal, dealing } = useAuth();
   const uid = user?.uid;
+  const liveEventIdRef = useRef(eventId);
+  // Commit the active Event in the layout phase. Mutating this guard while
+  // rendering lets an abandoned concurrent render poison callbacks owned by
+  // the still-committed tree.
+  useLayoutEffect(() => {
+    liveEventIdRef.current = eventId;
+  }, [eventId]);
   // Direct mark/unmark analytics is server-observed rather than emitted from
   // an optimistic Board callback: a durable record appears after an offline
   // queue drains even if this tab was closed before acknowledgement. Dynamic
@@ -668,16 +686,16 @@ export default function Board() {
     let active = true;
     void import('../data/directMarkAnalytics')
       .then(({ subscribeDirectMarkAnalytics }) => {
-        const nextUnsubscribe = subscribeDirectMarkAnalytics(uid);
-        if (active) unsubscribe = nextUnsubscribe;
-        else nextUnsubscribe();
+        if (!active) return;
+        const nextUnsubscribe = subscribeDirectMarkAnalytics(uid, eventId);
+        unsubscribe = nextUnsubscribe;
       })
       .catch(() => {});
     return () => {
       active = false;
       unsubscribe();
     };
-  }, [uid]);
+  }, [uid, eventId]);
   // The single legacy Board (pre-1.5 events with no `days[]` schedule). In daily-
   // cards mode the rendered Board is the DAY-SCOPED one below; this stays the
   // source only for legacy events (#246).
@@ -880,7 +898,7 @@ export default function Board() {
   // repeatedly-denied write), so the render can surface a retry instead of sitting
   // on "Dealing…" forever (Codex #247 P2). `dealNonce` bumps on a manual retry so
   // the deal effect re-fires even though nothing else in its deps changed.
-  const [dayDealError, setDayDealError] = useState<number | null>(null);
+  const [dayDealError, setDayDealError] = useState<{ eventId: string; dayIndex: number } | null>(null);
   const [dealNonce, setDealNonce] = useState(0);
   useEffect(() => {
     if (!hasDays || !user) return;
@@ -898,7 +916,7 @@ export default function Board() {
       hasBoard: false,
     });
     if (state !== 'ready') return;
-    const key = `${user.uid}:${day.index}`;
+    const key = `${eventId}:${user.uid}:${day.index}`;
     if (dealingDaysRef.current.has(key)) return;
     dealingDaysRef.current.add(key);
     const dealIndex = day.index;
@@ -907,11 +925,11 @@ export default function Board() {
         // A denied/failed deal leaves the board null; surface a retry for the
         // viewed Day rather than an indefinite "Dealing…" spinner. Scoped to the
         // acted Day so switching away/among Days never shows a stale error.
-        setDayDealError(dealIndex);
+        if (liveEventIdRef.current === eventId) setDayDealError({ eventId, dayIndex: dealIndex });
       })
       .finally(() => dealingDaysRef.current.delete(key));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days`/`day` derive from event?.days; deps track the fields the deal actually reads.
-  }, [hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce]);
+  }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce]);
   // Open-time echo reconcile (specs/echo-marks.md, #446): once per board
   // identity per session, bring the opened Day Card up to date against the
   // Player's achieved set — the lazy backfill that self-heals pre-feature
@@ -974,7 +992,7 @@ export default function Board() {
   // inconsistency and reset when the row reads consistent again, so an
   // inconsistent row that a failed heal leaves standing cannot re-trigger a
   // pass per snapshot (the per-visit incomplete block owns that retry).
-  const reconcileRowLagEpisodeRef = useRef<{ uid: string; active: boolean } | null>(null);
+  const reconcileRowLagEpisodeRef = useRef<{ eventId: string; uid: string; active: boolean } | null>(null);
   // Whether the active episode still OWES its one heal pass. The heal is
   // ROW-scoped, not board-scoped — every board's pass evaluates the same
   // row predicate — so the debt follows the player to whatever board is
@@ -992,6 +1010,19 @@ export default function Board() {
   // nonce; the re-armed run then serves the still-owed heal on whatever
   // board is open at that moment.
   const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
+  // A completion from a retired Event may clean up its own Event-qualified
+  // in-flight key, but must not consume the current Event's row-lag debt, pin
+  // its visit, or schedule a retry render.
+  const reconcileEventRef = useRef(eventId);
+  useLayoutEffect(() => {
+    if (reconcileEventRef.current === eventId) return;
+    reconcileEventRef.current = eventId;
+    incompleteReconcileVisitRef.current = null;
+    reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
+    reconcileRowLagEpisodeRef.current = null;
+    reconcileRowLagOwedRef.current = false;
+    reconcileRowLagRearmKeyRef.current = null;
+  }, [eventId]);
   useEffect(() => {
     const schedule = event?.days ?? [];
     // #506/#508: the once-per-board guard is retained for the session, but
@@ -1042,10 +1073,13 @@ export default function Board() {
           (i: number) => ceremonialDayIndexSet(schedule).has(i),
           (i: number) => tutorialDayIndexSet(schedule).has(i),
         );
-      if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
-        // Account switch: episode state is per-uid; the previous account's
-        // latch (or debt) must never gate — or leak into — this one's.
-        reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
+      if (
+        reconcileRowLagEpisodeRef.current?.eventId !== eventId ||
+        reconcileRowLagEpisodeRef.current.uid !== user.uid
+      ) {
+        // Event/account switch: the prior scope's latch (or debt) must never
+        // gate — or leak into — this one.
+        reconcileRowLagEpisodeRef.current = { eventId, uid: user.uid, active: false };
         reconcileRowLagOwedRef.current = false;
         reconcileRowLagRearmKeyRef.current = null;
       }
@@ -1074,7 +1108,7 @@ export default function Board() {
       reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
       return;
     }
-    const key = `${user.uid}:${board.dayIndex}:${board.seed}`;
+    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}`;
     if (reconcileVisitRef.current.key !== key) {
       reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
       // Any pin belongs to an ended visit now — inert by generation, dropped
@@ -1128,6 +1162,7 @@ export default function Board() {
     //   • different card → nothing; the old card's next open retries.
     const settle = (complete: boolean) => {
       reconcileInFlightRef.current.delete(key);
+      if (reconcileEventRef.current !== eventId) return;
       if (reconcileRowLagRearmKeyRef.current === key) {
         // A row lag surfaced DURING this pass, and this pass may have raced
         // past its own predicate on the previously consistent row — the
@@ -1163,7 +1198,7 @@ export default function Board() {
       // A synchronous failure (nothing written) may retry on the next open.
       .catch(() => settle(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads, plus the explicit retry nonce.
-  }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
+  }, [eventId, hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
   // Edge refs for the COSMETIC Celebration UI only (issue #104). The public Moment
   // broadcast moved OFF this snapshot-diffing machinery and ONTO the action path —
   // doMark reads `setMark`'s synchronous win-transition verdict and enqueues into a
@@ -1194,7 +1229,9 @@ export default function Board() {
   // its OWN Board, so switching Days is a board-identity change just like an
   // account switch — re-baseline the celebration edges so a Day that already holds
   // a standing bingo/blackout on first view never spuriously re-animates the win.
-  const edgeStateKey = hasDays ? `${uid ?? 'none'}:${viewedIndex}` : (uid ?? 'none');
+  const edgeStateKey = hasDays
+    ? `${eventId}:${uid ?? 'none'}:${viewedIndex}`
+    : `${eventId}:${uid ?? 'none'}`;
   const edgeStateUid = useRef(edgeStateKey);
   if (edgeStateUid.current !== edgeStateKey) {
     edgeStateUid.current = edgeStateKey;
@@ -1309,6 +1346,7 @@ export default function Board() {
   // rules rollback lands as a passive snapshot — so a drain must never publish
   // without re-checking the win against the board as it stands at fire time.
   const feedCtx = useRef<{
+    eventId: string;
     uid: string | undefined;
     displayName: string;
     photoURL: string | null;
@@ -1321,6 +1359,7 @@ export default function Board() {
     // queued Day that IS this board, never sibling Days it cannot see.
     boardDayIndex: number | undefined;
   }>({
+    eventId,
     uid: undefined,
     displayName: 'Anonymous',
     photoURL: null,
@@ -1331,6 +1370,7 @@ export default function Board() {
     boardDayIndex: undefined,
   });
   feedCtx.current = {
+    eventId,
     uid,
     displayName,
     // `?? null` guards the undefined case, not just null: `dealDayCard` can create
@@ -1403,6 +1443,7 @@ export default function Board() {
   // safe: nothing publishes for it.
   const drainMoments = useCallback((cellsOverride?: Cell[], dayOverride?: number) => {
     const {
+      eventId: cEventId,
       uid: cUid,
       displayName: cName,
       photoURL: cPhoto,
@@ -1413,7 +1454,7 @@ export default function Board() {
       boardDayIndex,
     } = feedCtx.current;
     if (!cUid || !idKnown) return; // identity gate: hold every kind
-    const pending = peekPendingMoments(cUid);
+    const pending = peekPendingMoments(cUid, cEventId);
     if (!pending.bingo && !pending.blackout && !pending.firstBingo) return;
     const cellsNow = cellsOverride ?? cellsRendered;
     if (cellsNow.length === 0) return; // no attributable board → hold; never adjudicate vacuously
@@ -1423,7 +1464,7 @@ export default function Board() {
     // #262/#372: the plain bingo's queued Day(s) — a SET since bingo became
     // per-card (the ceremonial first_bingo carries its OWN `firstBingoDayIndex`
     // stamp — see below).
-    const bingoDays = pendingBingoDayIndexes(cUid);
+    const bingoDays = pendingBingoDayIndexes(cUid, cEventId);
     // The witnessed Day must MATCH the witnessed cells (Codex P2, #275 round 4):
     // an action/proof continuation passes the ACTED board's cells, and the
     // Player may have switched the rendered Day while that await was in flight —
@@ -1444,11 +1485,11 @@ export default function Board() {
     // broadcast (one card the whole Event — the rendered board IS the card).
     if (pending.bingo && bingoNow) {
       if (bingoDays.length === 0) {
-        broadcastBingo(actor);
-        clearPendingMoment(cUid, 'bingo');
+        broadcastBingo(actor, undefined, cEventId);
+        clearPendingMoment(cUid, 'bingo', cEventId);
       } else if (witnessDay !== undefined && bingoDays.includes(witnessDay)) {
-        broadcastBingo(actor, witnessDay);
-        removePendingBingoDay(cUid, witnessDay);
+        broadcastBingo(actor, witnessDay, cEventId);
+        removePendingBingoDay(cUid, witnessDay, cEventId);
       }
     }
     if (pending.blackout && blackoutNow) {
@@ -1465,13 +1506,13 @@ export default function Board() {
       // the rendered board IS the card).
       // `witnessDay` (above) rides the override for the same reason it does on
       // the bingo path.
-      const blackoutDays = pendingBlackoutDayIndexes(cUid);
+      const blackoutDays = pendingBlackoutDayIndexes(cUid, cEventId);
       if (blackoutDays.length === 0) {
-        broadcastBlackout(actor);
-        clearPendingMoment(cUid, 'blackout');
+        broadcastBlackout(actor, undefined, cEventId);
+        clearPendingMoment(cUid, 'blackout', cEventId);
       } else if (witnessDay !== undefined && blackoutDays.includes(witnessDay)) {
-        broadcastBlackout(actor, witnessDay);
-        removePendingBlackoutDay(cUid, witnessDay);
+        broadcastBlackout(actor, witnessDay, cEventId);
+        removePendingBlackoutDay(cUid, witnessDay, cEventId);
       }
     }
     // Ceremonial decision — fully SYNCHRONOUS at publish time (PR #110 round 3
@@ -1490,14 +1531,14 @@ export default function Board() {
     // The ceremony's Day is the CANDIDATE's own stamp — decoupled from the
     // plain bingo's (Codex P3 on #286 round 2) — with the same witnessed-board
     // match as the other kinds.
-    const firstBingoDay = pendingFirstBingoDayIndex(cUid);
+    const firstBingoDay = pendingFirstBingoDayIndex(cUid, cEventId);
     const firstBingoDayWitnessed = firstBingoDay === undefined || witnessDay === firstBingoDay;
     if (pending.firstBingo && bingoNow && firstBingoDayWitnessed && rosterOk) {
-      if (!firstBingoCandidateCurrent(cUid)) {
+      if (!firstBingoCandidateCurrent(cUid, cEventId)) {
         // Stale candidate (round 2 finding 3a): an observed BINGO fall bumped
         // the generation since this candidate was enqueued — the win context it
         // described no longer holds. KILLED, never fired.
-        clearPendingMoment(cUid, 'firstBingo');
+        clearPendingMoment(cUid, 'firstBingo', cEventId);
       } else {
         // Ceremonial + self-reported (ADR 0001): claim First-to-BINGO only when,
         // as far as this client's CONFIRMED known-players view shows AT PUBLISH
@@ -1510,10 +1551,10 @@ export default function Board() {
         // board, standing-ness) never consume.
         const othersBingoed = roster.some((p) => p.uid !== cUid && p.firstBingoAt != null);
         if (!othersBingoed) {
-          if (firstBingoDay === undefined) broadcastFirstBingo(actor);
-          else broadcastFirstBingo(actor, firstBingoDay);
+          if (firstBingoDay === undefined) broadcastFirstBingo(actor, undefined, cEventId);
+          else broadcastFirstBingo(actor, firstBingoDay, cEventId);
         }
-        clearPendingMoment(cUid, 'firstBingo');
+        clearPendingMoment(cUid, 'firstBingo', cEventId);
       }
     }
   }, []);
@@ -1556,20 +1597,22 @@ export default function Board() {
         // bingo (#372, the twin of the blackout day-scoping below); legacy
         // (no schedule) keeps the full clear.
         const fell = { bingo: true, bingoDayIndex: hasDays ? board?.dayIndex : undefined };
-        dropPendingWins(uid, fell);
+        dropPendingWins(uid, fell, eventId);
         // Cross-source fall (another tab/device unmarked, a rules rollback
         // landed): record the published-side intent too, so Feed truth does not
         // depend on which tab observed the fall. Writes nothing — the drain
         // below adjudicates it against the server.
-        enqueueRetraction(uid, fell);
-        if (hasDays && board?.dayIndex !== undefined) dropHeldHonorPins(uid, board.dayIndex);
+        enqueueRetraction(uid, fell, eventId);
+        if (hasDays && board?.dayIndex !== undefined) {
+          dropHeldHonorPins(uid, board.dayIndex, eventId);
+        }
       }
       if (wasBlackout.current && !black) {
         // The fall is witnessed by THIS board — drop only its Day's queued
         // blackout (#267); legacy (no schedule) keeps the full clear.
         const fell = { blackout: true, blackoutDayIndex: hasDays ? board?.dayIndex : undefined };
-        dropPendingWins(uid, fell);
-        enqueueRetraction(uid, fell);
+        dropPendingWins(uid, fell, eventId);
+        enqueueRetraction(uid, fell, eventId);
       }
       // Retraction drain (#377, Codex P1 round 1 on #467): the IRREVERSIBLE half,
       // and the only place it happens. A retraction spends the (Player, Day) win
@@ -1586,7 +1629,7 @@ export default function Board() {
           dayIndex: hasDays ? board?.dayIndex : undefined,
           bingoStands: bingoLines > 0,
           blackoutStands: black,
-        });
+        }, eventId);
       }
     }
     // Baseline vs detection (round 2 finding C, kept for the animation): under the
@@ -1624,7 +1667,7 @@ export default function Board() {
     // usually delivers IDENTICAL cells (the optimistic snapshot already had them),
     // so a `[cells]`-only effect would never re-run to drain the retraction intent
     // that unmark queued — the write would hang until some later cells change.
-  }, [cells, cellsAttributable, boardConfirmed, boardServerCommitted, uid, drainMoments]);
+  }, [cells, cellsAttributable, boardConfirmed, boardServerCommitted, uid, eventId, drainMoments]);
 
   // The mark-stamp animation's edge detector (specs/motion-polish.md): a
   // Square whose marked flag RISES between attributable snapshots wears
@@ -1680,7 +1723,7 @@ export default function Board() {
   // the pledge row). The intent is dropped — not retried — if the Prompt is
   // no longer on the viewer's card by the time the board arrives.
   useEffect(() => {
-    if (!openSquareIntent || !hasDays) return;
+    if (!openSquareIntent || openSquareIntent.eventId !== eventId || !hasDays) return;
     if (viewedIndex !== openSquareIntent.dayIndex) {
       setViewedIndex(openSquareIntent.dayIndex);
       return;
@@ -1696,7 +1739,7 @@ export default function Board() {
       setProofTarget(cell);
     }
     clearOpenSquare();
-  }, [openSquareIntent, hasDays, viewedIndex, cells, cellsAttributable]);
+  }, [openSquareIntent, eventId, hasDays, viewedIndex, cells, cellsAttributable]);
 
   // Release held day-honor pins once the identity resolves (#280 round 2).
   // Holds are uid-keyed, so another account's stay queued for its return. Drain
@@ -1705,7 +1748,7 @@ export default function Board() {
   // pins whose bingo no longer stands.
   useEffect(() => {
     if (!identityKnown || !uid) return;
-    const mine = takeHeldHonorPins(uid);
+    const mine = takeHeldHonorPins(uid, undefined, eventId);
     if (!mine.length) return;
     const actor = {
       uid,
@@ -1719,23 +1762,23 @@ export default function Board() {
           stillHasBingo = hasBingo(cells);
         } else {
           let readFailed = false;
-          const snap = await getDoc(dayBoardRef(h.dayIndex, uid)).catch(() => {
+          const snap = await getDoc(dayBoardRef(h.dayIndex, uid, h.eventId)).catch(() => {
             readFailed = true;
             return null;
           });
           if (readFailed) {
-            enqueueHeldHonorPin(h.uid, h.dayIndex, h.at);
+            enqueueHeldHonorPin(h.uid, h.dayIndex, h.at, h.eventId);
             continue;
           }
           const heldCells = snap?.exists() ? ((snap.data().cells ?? []) as Cell[]) : [];
           stillHasBingo = hasBingo(heldCells);
         }
-        if (stillHasBingo) void pinDayFirstBingo(h.dayIndex, actor, h.at);
+        if (stillHasBingo) void pinDayFirstBingo(h.dayIndex, actor, h.at, h.eventId);
       }
     };
     void release();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [identityKnown, uid]);
+  }, [identityKnown, uid, eventId]);
 
   if (!uid) return null;
 
@@ -1942,7 +1985,7 @@ export default function Board() {
     // or a repeatedly-denied write) surfaces a retry instead of an indefinite
     // "Dealing…" spinner (Codex #247 P2). Retry clears the in-flight guard + error
     // and bumps the deal nonce so the effect re-attempts.
-    if (hasDays && dayDealError === viewedIndex) {
+    if (hasDays && dayDealError?.eventId === eventId && dayDealError.dayIndex === viewedIndex) {
       return (
         <>
           {daySwitcher}
@@ -1953,7 +1996,7 @@ export default function Board() {
             <button
               className="btn"
               onClick={() => {
-                if (uid) dealingDaysRef.current.delete(`${uid}:${viewedIndex}`);
+                if (uid) dealingDaysRef.current.delete(`${eventId}:${uid}:${viewedIndex}`);
                 setDayDealError(null);
                 setDealNonce((n) => n + 1);
               }}
@@ -2151,7 +2194,10 @@ export default function Board() {
       // observes the committed before/after Board state and records a durable
       // transition only for a real edge. The Board-wide listener installed
       // above delivers that record after a reload or offline queue drain.
-      if (nextMarked && res.bingo) track('bingo');
+      // The write is pinned to this Event, but analytics defaults follow the
+      // currently active Event. A late A completion must never be emitted with
+      // B's dimensions after the keyed Board has retired this continuation.
+      if (nextMarked && res.bingo && EVENT_ID === eventId) track('bingo');
       if (nextMarked) {
         // Feed Moment broadcast on the ACTION path (issue #104): the win is tied
         // to the mark that COMPLETED it — setMark's synchronous transition
@@ -2180,7 +2226,7 @@ export default function Board() {
           bingoDayIndex: hasDays ? viewedIndex : undefined,
           blackoutDayIndex: hasDays ? viewedIndex : undefined,
         };
-        dropPendingWins(uid, fell);
+        dropPendingWins(uid, fell, eventId);
         // The same fall on the PUBLISHED side (#377) — but only as an INTENT.
         // The SAME `fell` verdict drives both halves, so the pre- and
         // post-publish paths can never disagree about what fell. The irreversible
@@ -2188,13 +2234,13 @@ export default function Board() {
         // drain in the cells effect): this verdict is a LOCAL fold and setMark's
         // batch is still pending, so a rejected unmark would otherwise spend a
         // win the server rolls back to standing (Codex P1, round 1 on #467).
-        enqueueRetraction(uid, fell);
-        if (hasDays && !res.bingo) dropHeldHonorPins(uid, viewedIndex);
+        enqueueRetraction(uid, fell, eventId);
+        if (hasDays && !res.bingo) dropHeldHonorPins(uid, viewedIndex, eventId);
         // Drain with the action's own folded cells AND its own Day (see
         // broadcastWinVerdict) — skipped if the account switched while the
         // await was in flight (the shared post-await revalidation; no
         // generation to compare — this very action just bumped it).
-        if (revalidateAfterAwait(uid).isCurrentAccount)
+        if (revalidateAfterAwait(uid, eventId).isCurrentScope)
           drainMoments(res.cells, hasDays ? viewedIndex : board?.dayIndex);
       }
     } catch {
@@ -2225,10 +2271,16 @@ export default function Board() {
   //     uid under a switched account cannot leak — it simply waits, and drains
   //     when that account returns. A skipped drain therefore destroys nothing:
   //     consumption happens only at the drain's synchronous decision point.
-  const revalidateAfterAwait = (actedUid: string, capturedGeneration?: number) => ({
+  const revalidateAfterAwait = (
+    actedUid: string,
+    actedEventId: string,
+    capturedGeneration?: number,
+  ) => ({
     generationUnchanged:
-      capturedGeneration === undefined || pendingActionGeneration(actedUid) === capturedGeneration,
-    isCurrentAccount: feedCtx.current.uid === actedUid,
+      capturedGeneration === undefined ||
+      pendingActionGeneration(actedUid, actedEventId) === capturedGeneration,
+    isCurrentScope:
+      feedCtx.current.uid === actedUid && feedCtx.current.eventId === actedEventId,
   });
 
   // ONE completing-action broadcast pipeline for BOTH mark paths (issue #104 +
@@ -2249,6 +2301,7 @@ export default function Board() {
     bingoTransition: boolean;
     blackoutTransition: boolean;
   }) => {
+    const actedEventId = eventId;
     // The ACTED Day, captured synchronously with the verdict (before any await
     // below) — the drain override and the enqueue both use THIS, never the
     // render-time day a mid-flight switch could change.
@@ -2271,6 +2324,7 @@ export default function Board() {
       // from — `board?.dayIndex` defaulting to 0 would otherwise read as a
       // misleading "Day 1").
       dayIndex: hasDays ? viewedIndex : undefined,
+      eventId: actedEventId,
     });
     // The per-Day First to BINGO pin (#264, daily-cards-spec § "Scoring and
     // social surfaces"): fired on the rising edge by the achieving Player
@@ -2287,12 +2341,17 @@ export default function Board() {
       // `identityKnown` may be stale — the row can have resolved mid-flight,
       // in which case a held pin would idle until an unrelated flip.
       const live = feedCtx.current;
-      if (live.identityKnown && live.uid === uid) {
-        void pinDayFirstBingo(actedDay, {
-          uid,
-          displayName: live.displayName,
-          photoURL: live.photoURL,
-        }, actedAt);
+      if (live.eventId === actedEventId && live.identityKnown && live.uid === uid) {
+        void pinDayFirstBingo(
+          actedDay,
+          {
+            uid,
+            displayName: live.displayName,
+            photoURL: live.photoURL,
+          },
+          actedAt,
+          actedEventId,
+        );
       } else {
         // Identity still resolving (#280 round 2): hold the pin — MODULE
         // state keyed to the acted account (rounds 3-4), so it survives Board
@@ -2300,7 +2359,7 @@ export default function Board() {
         // honor. `at` is the WIN's own time. Reload loses the hold
         // (in-memory), an accepted residual the strip's derived fallback
         // covers.
-        enqueueHeldHonorPin(uid, actedDay, actedAt);
+        enqueueHeldHonorPin(uid, actedDay, actedAt, actedEventId);
       }
     }
     // The BIRTH-TIME witness (round 2 finding D; made the SOLE witness site by
@@ -2343,7 +2402,7 @@ export default function Board() {
     const actedTutorialDay =
       hasDays && actedDay !== undefined && (tutorialDayIndexes?.includes(actedDay) ?? false);
     if (res.bingoTransition && !isStatsFrozen() && !actedTutorialDay) {
-      const generation = pendingActionGeneration(uid);
+      const generation = pendingActionGeneration(uid, actedEventId);
       // Tutorial-Day wins are excluded from the prior-win witness (Codex P1 on
       // #288): the legacy once-per-Player `${uid}-bingo` doc is written by
       // warm-up wins too, and reading one as a prior win would permanently
@@ -2368,8 +2427,12 @@ export default function Board() {
         // identify it: it bumps only on a bingo fall, so an earlier Day's win
         // shares this generation and would otherwise be waved through.
         selfWriteDayIndex: hasDays ? actedDay : undefined,
+        eventId: actedEventId,
       });
-      if (!witnessed && revalidateAfterAwait(uid, generation).generationUnchanged) {
+      if (
+        !witnessed &&
+        revalidateAfterAwait(uid, actedEventId, generation).generationUnchanged
+      ) {
         // The candidate carries its OWN Day (#262; Codex P3 on #286 round 2):
         // a snapshot drain can fire the plain bingo — day included — while the
         // witness read above is in flight, so the ceremony never borrows the
@@ -2377,7 +2440,7 @@ export default function Board() {
         // above: `undefined` on a non-daily Event (board.dayIndex defaults to
         // 0 there, which would both mislabel the chip AND never match the
         // drain's undefined legacy witnessDay — holding the ceremony forever).
-        enqueueFirstBingoMoment(uid, hasDays ? actedDay : undefined);
+        enqueueFirstBingoMoment(uid, hasDays ? actedDay : undefined, actedEventId);
       }
     }
     // Draining touches the CURRENT actor/gates, so it does require the acted
@@ -2385,7 +2448,8 @@ export default function Board() {
     // override rides with ITS OWN Day (Codex P2, #275 round 4) — actedDay was
     // captured before the awaits above, so a mid-flight Day switch cannot
     // relabel the witness.
-    if (revalidateAfterAwait(uid).isCurrentAccount) drainMoments(res.cells, actedDay);
+    if (revalidateAfterAwait(uid, actedEventId).isCurrentScope)
+      drainMoments(res.cells, actedDay);
   };
 
   // `overlayOpen` (and its `coachOverlayUp`/`launchIntroUp` inputs) is

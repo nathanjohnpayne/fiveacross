@@ -22,7 +22,8 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown };
 
-const { txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy, purgeCacheSpy } = vi.hoisted(() => ({
+const { activeEvent, txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy, purgeCacheSpy } = vi.hoisted(() => ({
+  activeEvent: { id: 'med-2026' },
   txGet: vi.fn(),
   txSet: vi.fn(),
   txDelete: vi.fn(),
@@ -32,7 +33,13 @@ const { txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy, purgeCacheSp
   purgeCacheSpy: vi.fn(),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', storage: {} }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return activeEvent.id;
+  },
+  storage: {},
+}));
 // storage.ts talks to Cloud Storage; stub the two functions proofs.ts uses so we
 // never touch a real bucket (uploadProofMedia is exercised for real against the
 // emulator by tests/rules/w0-storage-rules.test.ts).
@@ -104,6 +111,7 @@ function setPayload(frag: string): Record<string, unknown> | undefined {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  activeEvent.id = EVENT_ID;
   autoSeq = 0;
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   boardState = { cells: dealt() };
@@ -139,6 +147,37 @@ const baseArgs = {
 };
 
 describe('attachProof — posts an active Proof to the Feed and marks the cell (ADR 0002)', () => {
+  it('keeps a delayed Event A media attach and every transaction ref under A', async () => {
+    let releaseUpload!: (value: { path: string; url: string }) => void;
+    uploadSpy.mockImplementationOnce(
+      () =>
+        new Promise<{ path: string; url: string }>((resolve) => {
+          releaseUpload = resolve;
+        }),
+    );
+    activeEvent.id = 'event-a';
+    const attaching = attachProof({
+      ...baseArgs,
+      claimMode: 'proof_required',
+      proof: { type: 'photo', blob: new Blob(['x'], { type: 'image/jpeg' }) },
+    });
+    await vi.waitFor(() => expect(uploadSpy).toHaveBeenCalledTimes(1));
+
+    activeEvent.id = 'event-b';
+    releaseUpload({
+      path: 'proofs/event-a/u1/uploaded.jpg',
+      url: 'https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2Fevent-a%2Fu1%2Fuploaded.jpg?alt=media',
+    });
+    await attaching;
+
+    expect(uploadSpy.mock.calls[0][4]).toMatchObject({ eventId: 'event-a' });
+    const eventPaths = [...txGet.mock.calls, ...txSet.mock.calls]
+      .map(([ref]) => (ref as Ref).path)
+      .filter((path) => path.startsWith('events/'));
+    expect(eventPaths.length).toBeGreaterThan(0);
+    expect(eventPaths.every((path) => path.startsWith('events/event-a/'))).toBe(true);
+  });
+
   it('writes an active, Feed-visible photo Proof with the Player name + Prompt text, and marks the cell', async () => {
     await attachProof({
       ...baseArgs,
@@ -149,7 +188,10 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     // Media uploaded under the owner's folder, keyed by the proof's own id. The
     // 5th arg is the #211 EXIF-strip options bag (undefined stripExif here — the
     // strip default lives in uploadProofMedia; see src/data/d15-claim-sheet-photo.test.ts).
-    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', { stripExif: undefined });
+    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', {
+      stripExif: undefined,
+      eventId: EVENT_ID,
+    });
 
     const proof = setPayload('/proofs/')!;
     // Feed-visible immediately, and it carries the name + prompt the Feed renders.
@@ -248,7 +290,10 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     });
 
     // 5th arg = the #211 strip options bag; inert for audio (no EXIF).
-    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'audio', { stripExif: undefined });
+    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'audio', {
+      stripExif: undefined,
+      eventId: EVENT_ID,
+    });
     const proof = setPayload('/proofs/')!;
     expect(proof.type).toBe('audio');
     expect(proof.storagePath).toBe(`proofs/${EVENT_ID}/u1/UPLOADED.webm`);
@@ -319,7 +364,10 @@ describe('attachProof — #211: source / dayIndex stamp + EXIF-strip flag pass-t
     const proof = setPayload('/proofs/')!;
     expect(proof.source).toBe('library');
     expect(proof.dayIndex).toBe(2);
-    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', { stripExif: true });
+    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', {
+      stripExif: true,
+      eventId: EVENT_ID,
+    });
   });
 
   it('leaves source/dayIndex null when omitted and threads stripExif:false to leave the existing re-encode', async () => {
@@ -332,7 +380,10 @@ describe('attachProof — #211: source / dayIndex stamp + EXIF-strip flag pass-t
     const proof = setPayload('/proofs/')!;
     expect(proof.source).toBeNull();
     expect(proof.dayIndex).toBeNull();
-    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', { stripExif: false });
+    expect(uploadSpy).toHaveBeenCalledWith('u1', expect.any(String), expect.any(Blob), 'photo', {
+      stripExif: false,
+      eventId: EVENT_ID,
+    });
   });
 });
 
@@ -541,6 +592,33 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
 });
 
 describe('deleteProof — resolves the backing cell by the proof doc cellIndex (PR #75)', () => {
+  it('keeps a delete that waits on Event A storage cleanup under Event A', async () => {
+    let releaseStorageDelete!: () => void;
+    deleteStorageSpy.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStorageDelete = resolve;
+        }),
+    );
+    activeEvent.id = 'event-a';
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: 'proofs/event-a/u1/P.jpg' };
+    const board = dealt();
+    board[5] = { ...board[5], marked: true, markedAt: 9, proofId: 'P', status: 'confirmed' };
+    boardState = { cells: board };
+
+    const deleting = deleteProof('P', 'proofs/event-a/u1/P.jpg');
+    await vi.waitFor(() => expect(deleteStorageSpy).toHaveBeenCalledTimes(1));
+    activeEvent.id = 'event-b';
+    releaseStorageDelete();
+    await deleting;
+
+    const eventPaths = [...txGet.mock.calls, ...txSet.mock.calls, ...txDelete.mock.calls]
+      .map(([ref]) => (ref as Ref).path)
+      .filter((path) => path.startsWith('events/'));
+    expect(eventPaths.length).toBeGreaterThan(0);
+    expect(eventPaths.every((path) => path.startsWith('events/event-a/'))).toBe(true);
+  });
+
   it('deletes the storage object + doc and unmarks the cell the proof backs (found via cellIndex)', async () => {
     proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
     const board = dealt();

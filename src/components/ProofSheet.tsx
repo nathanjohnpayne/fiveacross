@@ -3,6 +3,7 @@ import { Camera, Mic, PenLine, Images, X } from 'lucide-react';
 import { attachProof, type AttachProofResult } from '../data/proofs';
 import { fetchDisplayName } from '../data/api';
 import { track } from '../analytics';
+import { EVENT_ID } from '../firebase';
 import { safeMediaUrl } from './safeMediaUrl';
 import type { Cell, ClaimMode, ProofType } from '../types';
 
@@ -339,6 +340,7 @@ export default function ProofSheet(props: Props) {
 
   const submit = async () => {
     if (!valid || type === null) return;
+    const actedEventId = EVENT_ID;
     setBusy(true);
     try {
       const proof =
@@ -367,7 +369,9 @@ export default function ProofSheet(props: Props) {
         stripExif,
         proof,
       });
-      track('attach_proof', { type, ...(type === 'photo' && photoSource ? { source: photoSource } : {}) });
+      if (EVENT_ID === actedEventId) {
+        track('attach_proof', { type, ...(type === 'photo' && photoSource ? { source: photoSource } : {}) });
+      }
       // `attachProof` stamps a stable request only when its own live
       // transaction observed the false→true edge; the server recorder then
       // delivers that proof-source mark durably after the commit.

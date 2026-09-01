@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNotices } from '../hooks/useData';
+import { EVENT_ID } from '../firebase';
 import type { NoticeDoc } from '../types';
 
 /**
@@ -12,27 +13,42 @@ import type { NoticeDoc } from '../types';
  * fall open on a storage error (private mode), never throwing.
  */
 
-const dismissKey = (noticeId: string): string => `gcb.notice.${noticeId}.dismissedAt`;
+const dismissKey = (eventId: string, noticeId: string): string =>
+  `gcb.notice.${eventId}.${noticeId}.dismissedAt`;
+const dismissedWithoutStorage = new Set<string>();
 
 /**
  * Whether this device has dismissed the banner for `noticeId`. try/catch —
  * storage-unavailable falls open (returns false), the same fallback CoachOverlay.tsx
  * and InstallPrompt.tsx use for their keys.
  */
-export function isNoticeBannerDismissed(noticeId: string): boolean {
+export function isNoticeBannerDismissed(noticeId: string, eventId = EVENT_ID): boolean {
+  const key = dismissKey(eventId, noticeId);
+  if (dismissedWithoutStorage.has(key)) return true;
   try {
-    return localStorage.getItem(dismissKey(noticeId)) !== null;
+    const dismissed = localStorage.getItem(key) !== null;
+    if (dismissed) dismissedWithoutStorage.add(key);
+    return dismissed;
   } catch {
     return false;
   }
 }
 /** Persist this device's dismissal of the banner for `noticeId` (no-op on error). */
-function markNoticeDismissed(noticeId: string): void {
+function markNoticeDismissed(noticeId: string, eventId: string): void {
+  const key = dismissKey(eventId, noticeId);
+  // The App subtree is keyed by Event, so this module fallback—not component
+  // state—is what retains a private-mode dismissal across A → B → A remounts.
+  dismissedWithoutStorage.add(key);
   try {
-    localStorage.setItem(dismissKey(noticeId), String(Date.now()));
+    localStorage.setItem(key, String(Date.now()));
   } catch {
     /* nothing to persist */
   }
+}
+
+/** Test-only. */
+export function __resetNoticeBannerDismissalsForTests(): void {
+  dismissedWithoutStorage.clear();
 }
 
 /**
@@ -44,15 +60,26 @@ function markNoticeDismissed(noticeId: string): void {
  * renders nothing.
  */
 export function NoticeBannerView({ notices }: { notices: NoticeDoc[] }) {
-  const [dismissedThisMount, setDismissedThisMount] = useState<readonly string[]>([]);
+  const eventId = EVENT_ID;
+  const [dismissedByEvent, setDismissedByEvent] = useState<ReadonlyMap<string, readonly string[]>>(
+    () => new Map(),
+  );
+  const dismissedThisMount = dismissedByEvent.get(eventId) ?? [];
   const active = notices.find(
-    (n) => n.pinned && !dismissedThisMount.includes(n.id) && !isNoticeBannerDismissed(n.id),
+    (n) =>
+      n.pinned &&
+      !dismissedThisMount.includes(n.id) &&
+      !isNoticeBannerDismissed(n.id, eventId),
   );
   if (!active) return null;
 
   const handleDismiss = () => {
-    markNoticeDismissed(active.id);
-    setDismissedThisMount((prev) => [...prev, active.id]);
+    markNoticeDismissed(active.id, eventId);
+    setDismissedByEvent((previous) => {
+      const next = new Map(previous);
+      next.set(eventId, [...(previous.get(eventId) ?? []), active.id]);
+      return next;
+    });
   };
 
   return (

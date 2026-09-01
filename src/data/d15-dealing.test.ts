@@ -29,12 +29,16 @@ const H = vi.hoisted(() => ({
   // ../analytics, mirroring the existing #387 mark_rejected call — see
   // src/data/w1-board-mark-win.test.ts's identical harness shape).
   trackSpy: vi.fn(),
+  eventId: 'test-event',
+  afterTransaction: vi.fn(),
 }));
 
 vi.mock('../analytics', () => ({ track: H.trackSpy }));
 vi.mock('../firebase', () => ({
   db: {},
-  EVENT_ID: 'test-event',
+  get EVENT_ID() {
+    return H.eventId;
+  },
   storage: {},
   auth: {},
   googleProvider: {},
@@ -67,7 +71,9 @@ vi.mock('firebase/firestore', () => {
         },
         set: H.txSet,
       };
-      return fn(tx);
+      const result = await fn(tx);
+      H.afterTransaction();
+      return result;
     },
     setDoc: vi.fn(),
     updateDoc: vi.fn(),
@@ -160,6 +166,7 @@ function daysWith(target: DayDef): DayDef[] {
 }
 
 beforeEach(() => {
+  H.eventId = EVENT_ID;
   resetAdultContentForTests();
   H.event = null;
   H.itemsById.clear();
@@ -174,6 +181,7 @@ beforeEach(() => {
   H.txSet.mockReset();
   H.txGet.mockReset();
   H.trackSpy.mockReset();
+  H.afterTransaction.mockReset();
 });
 
 // The last board write's (ref, data) — the day-scoped Board doc, if any.
@@ -255,6 +263,29 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     await vi.waitFor(() => expect(H.trackSpy).toHaveBeenCalledWith('community_prompt_dealt', { dayIndex: 2, count: 1 }));
     for (const call of H.trackSpy.mock.calls) {
       expect(JSON.stringify(call)).not.toContain('prompt 0');
+    }
+  });
+
+  it('does not attribute Event A community-Prompt delivery to B after A commits', async () => {
+    const ids = seedPool(30);
+    H.itemsById.set(ids[0], { ...H.itemsById.get(ids[0]), targetDayIndex: 2, createdBy: 'u-suggester' });
+    H.event = {
+      days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })),
+      settings: {},
+    };
+    H.afterTransaction.mockImplementationOnce(() => {
+      H.eventId = 'event-b';
+    });
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(H.trackSpy).not.toHaveBeenCalledWith('community_prompt_dealt', expect.anything());
+    for (const call of H.txSet.mock.calls) {
+      const path = (call[0] as { args?: unknown[] }).args?.filter((part): part is string => typeof part === 'string');
+      expect(path).toContain('test-event');
+      expect(path).not.toContain('event-b');
     }
   });
 

@@ -1,10 +1,21 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   __resetBoardFreshnessForTests,
-  beginDayBoardSeedWatch,
-  recordDayBoardSeedSnapshot,
-  trustedDayBoardSeed,
+  beginDayBoardSeedWatch as beginScopedWatch,
+  recordDayBoardSeedSnapshot as recordScopedSnapshot,
+  trustedDayBoardSeed as trustedScopedSeed,
 } from './board-freshness';
+
+const EVENT_ID = 'event-a';
+const beginDayBoardSeedWatch = (dayIndex: number, uid: string) =>
+  beginScopedWatch(EVENT_ID, dayIndex, uid);
+const recordDayBoardSeedSnapshot = (
+  dayIndex: number,
+  uid: string,
+  snapshot: Parameters<typeof recordScopedSnapshot>[3],
+) => recordScopedSnapshot(EVENT_ID, dayIndex, uid, snapshot);
+const trustedDayBoardSeed = (dayIndex: number, uid: string) =>
+  trustedScopedSeed(EVENT_ID, dayIndex, uid);
 
 // #474 — the Echo seed-freshness registry: trust a sibling Day board's cached
 // seed only while a live watch has delivered a fully server-committed
@@ -72,7 +83,7 @@ describe('board-freshness registry (#474)', () => {
     recordDayBoardSeedSnapshot(5, 'u1', {
       exists: () => true,
       data: () => ({ seed: 1 }),
-    } as unknown as Parameters<typeof recordDayBoardSeedSnapshot>[2]);
+    } as unknown as Parameters<typeof recordScopedSnapshot>[3]);
     expect(trustedDayBoardSeed(5, 'u1').trusted).toBe(false);
   });
 
@@ -81,5 +92,12 @@ describe('board-freshness registry (#474)', () => {
     recordDayBoardSeedSnapshot(6, 'u1', snap(false, false, { seed: 42 }));
     expect(trustedDayBoardSeed(6, 'u2').trusted).toBe(false);
     expect(trustedDayBoardSeed(7, 'u1').trusted).toBe(false);
+  });
+
+  it('keys per Event — the same uid and Day never inherit another Event\'s trust', () => {
+    beginScopedWatch('event-a', 6, 'u1');
+    recordScopedSnapshot('event-a', 6, 'u1', snap(false, false, { seed: 42 }));
+    expect(trustedScopedSeed('event-b', 6, 'u1').trusted).toBe(false);
+    expect(trustedScopedSeed('event-a', 6, 'u1')).toEqual({ trusted: true, seed: 42 });
   });
 });

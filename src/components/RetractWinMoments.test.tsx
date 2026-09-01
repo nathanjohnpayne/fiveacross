@@ -23,14 +23,25 @@ interface FakeSnap {
 type SnapListener = (snap: FakeSnap) => void;
 
 const H = vi.hoisted(() => ({
+  eventId: 'event-a',
   uid: 'u1' as string | undefined,
   event: null as Partial<EventDoc> | null,
   // Every onSnapshot call: its ref path, options, listener, and unsubscribe spy.
   subs: [] as { path: string; options: unknown; listener: SnapListener; unsub: ReturnType<typeof vi.fn> }[],
-  observers: [] as { uid: string; dayIndex: number | undefined; observe: ReturnType<typeof vi.fn> }[],
+  observers: [] as {
+    uid: string;
+    dayIndex: number | undefined;
+    eventId: string;
+    observe: ReturnType<typeof vi.fn>;
+  }[],
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
 vi.mock('../auth/AuthContext', () => ({
   useAuth: () => ({ user: H.uid ? { uid: H.uid } : null }),
 }));
@@ -38,8 +49,10 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: H.event }),
 }));
 vi.mock('../data/paths', () => ({
-  boardRef: (uid: string) => ({ path: `boards/${uid}` }),
-  dayBoardRef: (dayIndex: number, uid: string) => ({ path: `days/${dayIndex}/boards/${uid}` }),
+  boardRef: (uid: string, eventId: string) => ({ path: `events/${eventId}/boards/${uid}` }),
+  dayBoardRef: (dayIndex: number, uid: string, eventId: string) => ({
+    path: `events/${eventId}/days/${dayIndex}/boards/${uid}`,
+  }),
 }));
 vi.mock('firebase/firestore', () => ({
   onSnapshot: (
@@ -54,9 +67,9 @@ vi.mock('firebase/firestore', () => ({
   },
 }));
 vi.mock('../data/moments', () => ({
-  createRetractionFallObserver: (uid: string, dayIndex?: number) => {
+  createRetractionFallObserver: (uid: string, dayIndex: number | undefined, eventId: string) => {
     const observe = vi.fn();
-    H.observers.push({ uid, dayIndex, observe });
+    H.observers.push({ uid, dayIndex, eventId, observe });
     return observe;
   },
 }));
@@ -72,6 +85,7 @@ const boardDoc = (uid: string): BoardDoc =>
   ({ uid, cells: [{ index: 0, itemId: 'i', text: 't', free: false, marked: true, markedAt: null }] }) as BoardDoc;
 
 beforeEach(() => {
+  H.eventId = 'event-a';
   H.uid = 'u1';
   H.event = null;
   H.subs = [];
@@ -89,9 +103,9 @@ describe('RetractWinMoments — app-shell wiring for the #479 fall observers', (
     H.event = { days: [{ index: 0 }, { index: 3 }, { index: 7 }] } as Partial<EventDoc>;
     render(<RetractWinMoments />);
     expect(H.subs.map((s) => s.path)).toEqual([
-      'days/0/boards/u1',
-      'days/3/boards/u1',
-      'days/7/boards/u1',
+      'events/event-a/days/0/boards/u1',
+      'events/event-a/days/3/boards/u1',
+      'events/event-a/days/7/boards/u1',
     ]);
     // `includeMetadataChanges` is load-bearing: a server ack for an unmark
     // usually delivers byte-identical cells, and only a metadata event tells the
@@ -107,7 +121,7 @@ describe('RetractWinMoments — app-shell wiring for the #479 fall observers', (
   it('legacy mode (a loaded Event with no days): exactly the single legacy board, with a day-less observer', () => {
     H.event = {} as Partial<EventDoc>;
     render(<RetractWinMoments />);
-    expect(H.subs.map((s) => s.path)).toEqual(['boards/u1']);
+    expect(H.subs.map((s) => s.path)).toEqual(['events/event-a/boards/u1']);
     expect(H.observers.map((o) => [o.uid, o.dayIndex])).toEqual([['u1', undefined]]);
   });
 
@@ -145,7 +159,10 @@ describe('RetractWinMoments — app-shell wiring for the #479 fall observers', (
     rerender(<RetractWinMoments />);
     for (const s of firstSubs) expect(s.unsub).toHaveBeenCalledTimes(1);
     const secondSubs = H.subs.slice(2);
-    expect(secondSubs.map((s) => s.path)).toEqual(['days/0/boards/u2', 'days/1/boards/u2']);
+    expect(secondSubs.map((s) => s.path)).toEqual([
+      'events/event-a/days/0/boards/u2',
+      'events/event-a/days/1/boards/u2',
+    ]);
     // Fresh observers → fresh baselines: falls from before the switch are never
     // adjudicated against the new account's boards.
     expect(H.observers.slice(2).map((o) => o.uid)).toEqual(['u2', 'u2']);
@@ -160,5 +177,21 @@ describe('RetractWinMoments — app-shell wiring for the #479 fall observers', (
     const { container } = render(<RetractWinMoments />);
     expect(container.firstChild).toBeNull();
     expect(H.subs).toHaveLength(0);
+  });
+
+  it('rebuilds for Event B and ignores a queued Event A callback after cleanup', () => {
+    H.event = { days: [{ index: 0 }] } as Partial<EventDoc>;
+    const view = render(<RetractWinMoments />);
+    const aSub = H.subs[0];
+    const aObserver = H.observers[0].observe;
+
+    H.eventId = 'event-b';
+    view.rerender(<RetractWinMoments />);
+    expect(aSub.unsub).toHaveBeenCalledTimes(1);
+    expect(H.subs[1].path).toBe('events/event-b/days/0/boards/u1');
+    expect(H.observers[1]).toMatchObject({ uid: 'u1', dayIndex: 0, eventId: 'event-b' });
+
+    act(() => aSub.listener(snap(boardDoc('u1'))));
+    expect(aObserver).not.toHaveBeenCalled();
   });
 });

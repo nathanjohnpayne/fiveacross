@@ -1,4 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   getRedirectResult,
   onAuthStateChanged,
@@ -7,7 +16,7 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { auth, googleProvider } from '../firebase';
+import { auth, EVENT_ID, googleProvider } from '../firebase';
 import {
   attestAdult,
   ensureUserProfile,
@@ -627,6 +636,17 @@ function dealErrorMessage(err: unknown): string {
 // lockstep — see `failDeal`/`clearDealError`).
 export type DealErrorReason = 'pool-shortfall' | 'connection' | 'permanent';
 
+type EventDealState = {
+  eventId: string;
+  dealError: string | null;
+  dealErrorReason: DealErrorReason | null;
+  dealing: boolean;
+};
+
+function neutralDealState(eventId: string): EventDealState {
+  return { eventId, dealError: null, dealErrorReason: null, dealing: false };
+}
+
 // The SINGLE classification of a deal/bootstrap failure. Every consumer that has
 // to decide "may cached state stand in for this failure?" reads THIS, so the
 // answer cannot differ between them: `failDeal` publishes it as `dealErrorReason`
@@ -661,15 +681,19 @@ function claimPostUpdateGrace(err: unknown): boolean {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const eventId = EVENT_ID;
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [dealError, setDealError] = useState<string | null>(null);
+  const [storedDealState, setStoredDealState] = useState<EventDealState>(() => neutralDealState(eventId));
+  // An Event switch can render before effects retire the previous Event's async
+  // work. Select a neutral state synchronously for that first render so Event A's
+  // error/spinner can never flash in Event B.
+  const dealState = storedDealState.eventId === eventId ? storedDealState : neutralDealState(eventId);
+  const { dealError, dealErrorReason, dealing } = dealState;
   // The typed cause of `dealError` (#70), mirrored into context so the pool-recovery
   // watcher arms on the reason, never the Player-worded copy. Maintained ONLY through
   // `failDeal`/`clearDealError` below so it can never drift out of lockstep with the
   // message: every deal/bootstrap failure sets both, every clear clears both.
-  const [dealErrorReason, setDealErrorReason] = useState<DealErrorReason | null>(null);
-  const [dealing, setDealing] = useState(false);
   // False from the moment a signed-in User is published until THAT User's
   // ensureUserProfile bootstrap settles (#77) — see the interface note.
   const [profileReady, setProfileReady] = useState(false);
@@ -770,6 +794,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Monotonic id of the latest deal attempt; runDeal captures it and re-checks
   // before each setState so a superseded attempt's late result is dropped (P2).
   const dealAttemptRef = useRef(0);
+  // EVENT_ID is a live binding. Keep an imperative mirror of the Event whose
+  // committed tree owns async deal/recovery work; a render for Event B retires
+  // Event A in a layout effect before any passive deal effect can start.
+  const activeEventIdRef = useRef(eventId);
+  const pendingEventBootstrapRef = useRef<string | null>(null);
   // The CURRENT signed-in uid, mirrored from the auth listener for non-render
   // closures (#409): runDeal's join_event net must attribute a late-winning
   // join to the session that actually performed it — never to whoever happens
@@ -781,6 +810,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // from dealAttemptRef on purpose: runDeal bumps dealAttemptRef mid-sign-in,
   // which must not read as the profile bootstrap being superseded.
   const profileAttemptRef = useRef(0);
+  const updateDealStateFor = useCallback(
+    (ownedEventId: string, update: (state: EventDealState) => EventDealState) => {
+      if (activeEventIdRef.current !== ownedEventId) return;
+      setStoredDealState((stored) => {
+        if (activeEventIdRef.current !== ownedEventId) return stored;
+        const scoped = stored.eventId === ownedEventId ? stored : neutralDealState(ownedEventId);
+        return update(scoped);
+      });
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    if (activeEventIdRef.current === eventId) return;
+    activeEventIdRef.current = eventId;
+    // Retire both the join and its recovery/bootstrap continuations. Their
+    // Event-tagged setters also fail closed, while the counters keep them from
+    // mutating identity-adjacent authority state after a newer Event takes over.
+    dealAttemptRef.current += 1;
+    profileAttemptRef.current += 1;
+    pendingEventBootstrapRef.current = eventId;
+    setStoredDealState(neutralDealState(eventId));
+  }, [eventId]);
   // TWO-TIER same-session attestation (Codex #117 round 7): keep the OPTIMISTIC-UI
   // tier and the DURABLE-AUTHORITY tier strictly separate — optimistic-for-UI is
   // NOT authoritative-for-writes.
@@ -850,11 +901,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // pair) and every clear through `clearDealError`, so the reason can never drift
   // from the message — the pool-recovery watcher arms on the reason, so a
   // stale/desynced reason would arm (or silently fail to arm) it wrongly. Stable
-  // identities (`[]` deps: they touch only stable state setters + module-scope
-  // classifiers), so wiring them into the deal/bootstrap callbacks' deps below does
-  // not change those callbacks' identity — no #117 effect re-runs.
-  const failDeal = useCallback((err: unknown) => {
-    setDealError(dealErrorMessage(err));
+  // identities (their only dependency is the stable scoped-state updater), so
+  // wiring them into the deal/bootstrap callbacks' deps below does not change
+  // those callbacks' identity — no #117 effect re-runs.
+  const failDeal = useCallback((err: unknown, ownedEventId: string) => {
+    const reason = dealErrorReasonFor(err);
+    const message = dealErrorMessage(err);
     // Three-way (#434, Codex #438), via the shared `dealErrorReasonFor` so this
     // publication and every other consumer of the classification agree by
     // construction: a PERMANENT rules/schema/permission or unknown-coded failure
@@ -862,12 +914,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the error rather than let App swap in a cached card. Mirrors the #403
     // swallow, which likewise refuses to hide a permanent failure behind a
     // Firestore-cached board.
-    setDealErrorReason(dealErrorReasonFor(err));
-  }, []);
-  const clearDealError = useCallback(() => {
-    setDealError(null);
-    setDealErrorReason(null);
-  }, []);
+    updateDealStateFor(ownedEventId, (state) => ({
+      ...state,
+      dealError: message,
+      dealErrorReason: reason,
+    }));
+  }, [updateDealStateFor]);
+  const clearDealError = useCallback((ownedEventId: string) => {
+    updateDealStateFor(ownedEventId, (state) => ({
+      ...state,
+      dealError: null,
+      dealErrorReason: null,
+    }));
+  }, [updateDealStateFor]);
+  const setDealingFor = useCallback((ownedEventId: string, next: boolean) => {
+    updateDealStateFor(ownedEventId, (state) => ({ ...state, dealing: next }));
+  }, [updateDealStateFor]);
 
   // The connectivity-aware profile/attestation bootstrap, run OFF the render path
   // (#115). The cache lifts the gate PROVISIONALLY offline; the server read is
@@ -901,7 +963,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Every settle is guarded by `attempt` vs `profileAttemptRef` so a superseded
   // auth change / reconnect leaves the signal to whoever owns it now — the deal's
   // stale-attempt discipline, and what makes reconnect recovery deterministic.
-  const bootstrapUser = useCallback(async (u: User, attempt: number) => {
+  const bootstrapUser = useCallback(async (u: User, attempt: number, ownedEventId: string) => {
     if (!isOnline()) {
       // NO AGE GATE ON THIS EVENT (#608) — there is nothing to prove offline, so
       // there is nothing to hold for. The whole cache-first dance below exists to
@@ -913,7 +975,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!adultContentRequired()) {
         if (profileAttemptRef.current !== attempt) return;
         setLoading(false);
-        clearDealError();
+        clearDealError(ownedEventId);
         return;
       }
       // OFFLINE: settle the gate CACHE-FIRST and RELEASE the render only with
@@ -944,7 +1006,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Board whenever dealError is non-null, so a prior online failure would
         // otherwise strand this proven-18+ User on the error panel instead of the
         // cached Board this branch is meant to render.
-        clearDealError();
+        clearDealError(ownedEventId);
       }
       // else UNKNOWN → hold on "Loading…" (do NOT release), never render un-proven.
       // A stale dealError left set here keeps the retry surface RETRYABLE offline
@@ -1033,7 +1095,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // bootstrap still owns the error — a deal attempt that started AFTER this
       // read began owns whatever error it sets, and this late settle must not
       // erase it.
-      if (dealAttemptRef.current === dealAttemptAtBootstrap) clearDealError();
+      if (dealAttemptRef.current === dealAttemptAtBootstrap) clearDealError(ownedEventId);
       // The authoritative read landed — the deal may proceed on an Event that
       // asks for no attestation. Set ONLY here, never in the failure arm below.
       setProfileBootstrapOk(true);
@@ -1088,7 +1150,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // to downgrade this confirmed 'permanent' classification back to
           // 'connection'. See `permanentFailureConfirmed`'s declaration.
           permanentFailureConfirmed = true;
-          failDeal(err);
+          failDeal(err, ownedEventId);
           // TRI-STATE, NOT A DEFINITE `false` (Codex P2 round 3 on #762,
           // specs/w1-attestation.md § Failure state): a REJECTED read is not
           // evidence the server profile lacks a stamp — it is UNKNOWN, exactly
@@ -1190,14 +1252,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // nothing left to clear it. A settled authority retires this work.
         setAttested(true);
         const failure = bootstrapFailure.err;
-        void hasCachedBoard(u.uid).then((boarded) => {
+        void hasCachedBoard(u.uid, ownedEventId).then((boarded) => {
           // Also guarded on `permanentFailureConfirmed` (Codex P2 round 4 on
           // #762): `failure` is whatever `bootstrapFailure` holds NOW, which
           // — after a #519 grace repeat — can be the repeat's OWN mere
           // timeout, weaker evidence than an already-confirmed permanent
           // rejection. A weaker failure must never downgrade a confirmed one.
           if (!authorityApplied && !permanentFailureConfirmed && profileAttemptRef.current === attempt && !boarded) {
-            failDeal(failure);
+            failDeal(failure, ownedEventId);
           }
         });
       } else if (!permanentFailureConfirmed) {
@@ -1211,7 +1273,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // (`provisionalLiftRetired`); nothing else in this branch is safe to
         // run over it. A genuine authoritative SUCCESS is unaffected — it
         // lands in the `else` below, not here.
-        failDeal(bootstrapFailure.err);
+        failDeal(bootstrapFailure.err, ownedEventId);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
         // cache-first proof the OFFLINE branch uses (#521). `navigator.onLine`
         // said true, but the authority read never landed — which IS the
@@ -1266,8 +1328,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }, [failDeal, clearDealError, setAttestedAuthoritative]);
 
+  // A transition can retire an Event A bootstrap before it settles. Identity and
+  // attestation are global, so an already-successful bootstrap remains valid; if
+  // it had not succeeded, start a fresh Event B-owned recovery rather than leave
+  // B waiting on an attempt the layout transition deliberately invalidated.
+  useEffect(() => {
+    if (pendingEventBootstrapRef.current !== eventId) return;
+    pendingEventBootstrapRef.current = null;
+    if (!user || profileBootstrapOk) return;
+    setProfileReady(false);
+    setLoading(true);
+    void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
+  }, [bootstrapUser, eventId, profileBootstrapOk, user]);
+
   useEffect(() => {
     return onAuthStateChanged(auth, (u) => {
+      const ownedEventId = activeEventIdRef.current;
       // Whether THIS is the very first auth-state callback this mount has
       // ever seen — checked and cleared unconditionally, before any other
       // branch, so it reflects mount lifecycle regardless of outcome.
@@ -1292,8 +1368,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authUidRef.current = u?.uid ?? null;
       const profileAttempt = (profileAttemptRef.current += 1);
       dealAttemptRef.current += 1;
-      clearDealError();
-      setDealing(false);
+      clearDealError(ownedEventId);
+      setDealingFor(ownedEventId, false);
       // The incoming User's profile bootstrap has not settled yet (#77), so the
       // 18+ attestation is UNKNOWN — never `false` — until it does (#23), and its
       // authority is un-established until an authoritative read/attest settles it.
@@ -1381,7 +1457,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Bootstrap runs OFF the render path — fire-and-forget. Returning the
       // promise keeps the auth-change unit tests deterministic (Firebase ignores
       // an onAuthStateChanged callback's return value).
-      return bootstrapUser(u, profileAttempt);
+      return bootstrapUser(u, profileAttempt, ownedEventId);
     });
     // `persistAttestation` and `completeRedirectReturn` are deliberately NOT in
     // this array. Both are declared further down this same component body, so
@@ -1390,7 +1466,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // complete render has assigned both stable callbacks. Re-subscribing on every
     // callback identity change would also recreate the auth-listener churn that
     // `redirectReturnPendingRef` exists to avoid.
-  }, [bootstrapUser, clearDealError, handoffSignedOutWebApp, setAttestedAuthoritative]);
+  }, [bootstrapUser, clearDealError, handoffSignedOutWebApp, setAttestedAuthoritative, setDealingFor]);
 
   // Mirror connectivity into React state AND complete the DEFERRED offline
   // bootstrap when the network returns (#115). `online` flipping true re-runs the
@@ -1411,20 +1487,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // in-flight retry's late resolution returns early on the attempt mismatch and
     // never clears `dealing` itself.
     const goOnline = () => {
+      const ownedEventId = activeEventIdRef.current;
       setOnline(true);
       const u = auth.currentUser;
       if (!u) return;
-      setDealing(false); // supersede: don't strand an invalidated retry's spinner
+      setDealingFor(ownedEventId, false); // supersede: don't strand an invalidated retry's spinner
       // Finish the deferred authoritative work; `online` flipping true also re-runs
       // the deal effect so a confirmed-attested User who booted offline deals once
       // — but only AFTER this fresh read re-confirms authority (see goOffline).
-      void bootstrapUser(u, (profileAttemptRef.current += 1));
+      void bootstrapUser(u, (profileAttemptRef.current += 1), ownedEventId);
     };
     const goOffline = () => {
+      const ownedEventId = activeEventIdRef.current;
       setOnline(false);
       const u = auth.currentUser;
       if (!u) return;
-      setDealing(false); // supersede: clear an invalidated retry's spinner (r5 finding B)
+      setDealingFor(ownedEventId, false); // supersede: clear an invalidated retry's spinner (r5 finding B)
       // RETIRE any in-flight joinAndDeal (Codex #117 round 6, finding B): the deal
       // path has its OWN supersede ref (dealAttemptRef), which the offline handler
       // did not bump, so a runDeal already in flight stayed "current" — its late
@@ -1451,7 +1529,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // (whose ensureUserProfile transaction may never settle offline and would
       // otherwise strand "Loading…") and switches to the cache-first path: release
       // to the cached Board if proof-of-18+ is cached, else hold (finding B/C).
-      void bootstrapUser(u, (profileAttemptRef.current += 1));
+      void bootstrapUser(u, (profileAttemptRef.current += 1), ownedEventId);
     };
     window.addEventListener('online', goOnline);
     window.addEventListener('offline', goOffline);
@@ -1459,16 +1537,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('online', goOnline);
       window.removeEventListener('offline', goOffline);
     };
-  }, [bootstrapUser, setAttestedAuthoritative]);
+  }, [bootstrapUser, setAttestedAuthoritative, setDealingFor]);
 
   // Deal a Board once the User is known; failures surface via `dealError` so
   // App renders a retry surface, not a blank Board. `dealError` is replaced only
   // when THIS attempt settles — clearing it up front would unmount the retry
   // surface mid-retry and flash the blank Board (P3) — and a superseded attempt
   // (sign-out / account switch mid-deal) is dropped entirely (P2).
-  const runDeal = useCallback(async (u: User) => {
+  const runDeal = useCallback(async (u: User, ownedEventId: string) => {
+    if (activeEventIdRef.current !== ownedEventId) return;
     const attempt = (dealAttemptRef.current += 1);
-    setDealing(true);
+    const isCurrentAttempt = () =>
+      activeEventIdRef.current === ownedEventId && dealAttemptRef.current === attempt;
+    setDealingFor(ownedEventId, true);
     // Bound the deal (#403): joinAndDeal is a network read+write that never
     // completes offline and can HANG on flaky wifi. A timeout rejects into the
     // catch below (classified as a connection failure, not pool-shortfall — the
@@ -1491,10 +1572,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // degrades to a no-op instead of double-writing. This ref-based supersede
     // guard stays load-bearing for CLIENT state (join_event, dealing/dealError)
     // — the transaction bounds the writes, not which attempt reports them.
-    const dealPromise = joinAndDeal(u);
+    const dealPromise = joinAndDeal(u, ownedEventId);
     void dealPromise.then(
       (dealt) => {
-        if (dealAttemptRef.current === attempt) clearDealError();
+        if (isCurrentAttempt()) clearDealError(ownedEventId);
         // Record `join_event` ONLY on an actual join — a NEW board/row (Codex
         // #117 round 8, finding B): joinAndDeal no-ops (returns false) for an
         // already-boarded Player, so a ship-wifi reconnect records nothing.
@@ -1507,7 +1588,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // join exactly once; the uid guard keeps a join that lands after a
         // sign-out/account switch from attributing to the wrong session (the
         // rare silent drop is the conservative direction).
-        if (dealt === true && authUidRef.current === u.uid) track('join_event');
+        if (
+          dealt === true &&
+          activeEventIdRef.current === ownedEventId &&
+          authUidRef.current === u.uid
+        ) {
+          track('join_event');
+        }
       },
       () => {},
     );
@@ -1516,10 +1603,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // race resolves the SAME promise, so the net covers this branch too
       // without double-firing.
       await withTimeout(dealPromise, DEAL_TIMEOUT_MS, 'Deal timed out');
-      if (dealAttemptRef.current !== attempt) return;
-      clearDealError();
+      if (!isCurrentAttempt()) return;
+      clearDealError(ownedEventId);
     } catch (err) {
-      if (dealAttemptRef.current !== attempt) return;
+      if (!isCurrentAttempt()) return;
       // A TRANSIENT connection failure must not tear down a card the Player already
       // has (#403). The Board renders from the persistent Firestore cache
       // independently of this deal, and App swaps that cached Board for the
@@ -1542,12 +1629,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // failed-precondition /…, Codex #408 P2 — a rules/schema misconfiguration must
       // not be hidden behind the cached Board forever; it wants the retry surface).
       if (!isPoolShortfall(err) && isTransientDealError(err)) {
-        const hasCard = await hasCachedCard(u.uid);
+        const hasCard = await hasCachedCard(u.uid, ownedEventId);
         // Re-check the supersede guard after the awaited cache probe (P2): a
         // sign-out / account switch mid-probe must still drop this result.
-        if (dealAttemptRef.current !== attempt) return;
+        if (!isCurrentAttempt()) return;
         if (hasCard) {
-          clearDealError();
+          clearDealError(ownedEventId);
           return;
         }
         // #519: the FIRST deal after a service-worker update reload gets ONE
@@ -1568,22 +1655,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // pool-shortfall, and spent by its first taker — which may have been the
         // bootstrap half of this same race, in which case this failure surfaces.
         if (claimPostUpdateGrace(err)) {
-          void runDealRef.current(u);
+          void runDealRef.current(u, ownedEventId);
           return;
         }
       }
-      failDeal(err);
+      failDeal(err, ownedEventId);
     } finally {
-      if (dealAttemptRef.current === attempt) setDealing(false);
+      if (isCurrentAttempt()) setDealingFor(ownedEventId, false);
     }
-  }, [failDeal, clearDealError]);
+  }, [failDeal, clearDealError, setDealingFor]);
   // Self-reference for the one silent re-deal the #519 grace fires: `runDeal` is a
   // `useCallback` and cannot name itself. Re-pointed every render at the current
-  // closure, the same way `PoolRecoveryWatcher` holds `retryDeal`. Which closure
-  // wins does not matter — the attempt counter, not the closure identity, is what
-  // supersedes — so this needs no effect to be correct.
+  // closure, the same way `PoolRecoveryWatcher` holds `retryDeal`. Publish only
+  // committed closures: an abandoned concurrent render for Event B must not make
+  // Event A's grace retry write into B's paths.
   const runDealRef = useRef(runDeal);
-  runDealRef.current = runDeal;
+  useLayoutEffect(() => {
+    runDealRef.current = runDeal;
+  }, [runDeal]);
 
   // Deal a Board only once the 18+ attestation is settled TRUE (#23, Finding 1):
   // the gate must gate the SIDE EFFECT, not just the UI. A signed-in returning
@@ -1626,8 +1715,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // besides.
   const mayDeal = attestationRequired ? attested === true && attestedAuthoritative : profileBootstrapOk;
   useEffect(() => {
-    if (user && mayDeal && online) void runDeal(user);
-  }, [user, mayDeal, online, runDeal]);
+    if (user && mayDeal && online) void runDeal(user, eventId);
+  }, [eventId, user, mayDeal, online, runDeal]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
@@ -1639,9 +1728,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // full-screen re-prompt, so the stale error and in-flight flag are dropped. A
   // repeat failure re-arms the same honest error+retry surface — never the
   // silent spinner this replaces.
-  const retryBootstrap = useCallback(async (u: User) => {
+  const retryBootstrap = useCallback(async (u: User, ownedEventId: string) => {
+    if (activeEventIdRef.current !== ownedEventId) return;
     const attempt = (profileAttemptRef.current += 1);
-    setDealing(true);
+    setDealingFor(ownedEventId, true);
     // The retry's OWN terminal-settle latch, the exact analogue of the one in
     // `bootstrapUser`'s online branch: whichever server answer lands first — the
     // in-time race result or the late one below — is authority for this attempt,
@@ -1695,8 +1785,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // own settle (see `runDeal`'s `finally`) is what retires `dealing` for it,
         // and this late "no authority" answer must not erase its fresher error.
         if (dealAttemptRef.current === dealAttemptAtRetry) {
-          clearDealError();
-          setDealing(false);
+          clearDealError(ownedEventId);
+          setDealingFor(ownedEventId, false);
         }
       }
     };
@@ -1737,7 +1827,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // above — latching `authorityApplied` here is safe: there is no
           // later, more current answer this could ever suppress.
           authorityApplied = true;
-          failDeal(err);
+          failDeal(err, ownedEventId);
           // TRI-STATE, NOT A DEFINITE `false` (Codex P2 round 3 on #762,
           // specs/w1-attestation.md § Failure state): a REJECTED read is not
           // evidence the profile lacks a stamp — it is UNKNOWN. Settling it to
@@ -1746,17 +1836,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // SignIn re-prompt, the same stranding bootstrapUser's sibling fix
           // avoids.
           setAttested(attestedUidsRef.current.has(u.uid) ? true : undefined);
-          setDealing(false);
+          setDealingFor(ownedEventId, false);
         },
       );
       if (profileAttemptRef.current !== attempt) return;
       settleRetry(read);
     } catch (err) {
       if (profileAttemptRef.current !== attempt) return;
-      failDeal(err);
-      setDealing(false);
+      failDeal(err, ownedEventId);
+      setDealingFor(ownedEventId, false);
     }
-  }, [failDeal, clearDealError, setAttestedAuthoritative]);
+  }, [failDeal, clearDealError, setAttestedAuthoritative, setDealingFor]);
 
   // Retry the current User's path to a dealt Board, in place (no reload). The
   // manual retry must honor the SAME write-safety gate as the automatic deal
@@ -1780,15 +1870,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // branch instead settles from cache immediately (proof-of-18+ → render the
       // cached Board and clear the stale error; else stay held/retryable), and
       // never awaits the transaction. It also never deals (offline gate).
-      void bootstrapUser(user, (profileAttemptRef.current += 1));
+      void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
     } else if (mayDeal) {
       // Online + authoritative → re-deal in place.
-      void runDeal(user);
+      void runDeal(user, eventId);
     } else {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
-      void retryBootstrap(user);
+      void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the

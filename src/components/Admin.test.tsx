@@ -214,7 +214,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     renderAdmin('/more/admin/queue');
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(H.approveItem).toHaveBeenCalledWith(row, 'admin-uid');
+    expect(H.approveItem).toHaveBeenCalledWith(row, 'admin-uid', 'test-event');
   });
 
   it('lets the Admin classify a Prompt as Easy before approving it', () => {
@@ -239,6 +239,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     expect(H.approveItem).toHaveBeenCalledWith(
       { ...row, pool: 'easy', spicy: false },
       'admin-uid',
+      'test-event',
     );
   });
 
@@ -255,6 +256,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     expect(H.approveItem).toHaveBeenCalledWith(
       { ...row, pool: 'main', spicy: true },
       'admin-uid',
+      'test-event',
     );
   });
 
@@ -271,7 +273,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     renderAdmin('/more/admin/queue');
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve all' }));
-    expect(H.bulkApproveItems).toHaveBeenCalledWith(H.pendingItems, 'admin-uid');
+    expect(H.bulkApproveItems).toHaveBeenCalledWith(H.pendingItems, 'admin-uid', 'test-event');
   });
 
   it('bulk approval carries each row’s independently selected difficulty', () => {
@@ -294,6 +296,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
         { ...second, pool: 'main' },
       ],
       'admin-uid',
+      'test-event',
     );
   });
 
@@ -317,6 +320,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
         { ...ticked, pool: 'main', spicy: true },
       ],
       'admin-uid',
+      'test-event',
     );
   });
 

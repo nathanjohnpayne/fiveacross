@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { readFileSync } from 'node:fs';
@@ -26,8 +26,16 @@ vi.mock('../analytics', () => ({ track }));
 
 // Defensive stand-in kept for any transitive `../firebase` module-scope
 // import in this suite's graph (mirrors the w2-feed-moments.test.tsx
-// precedent) — nothing here calls Firestore.
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+// precedent) — nothing here calls Firestore. Mutable so the share-handler
+// regressions can move the live Event while an Event-A render continuation is
+// suspended.
+const eventScope = vi.hoisted(() => ({ eventId: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 
 type AuthUser = { uid: string; displayName: string | null; photoURL: string | null } | null;
 
@@ -134,6 +142,7 @@ function latestToBlobNode(): HTMLElement {
 }
 
 beforeEach(() => {
+  eventScope.eventId = 'test-event';
   toBlobMock.mockReset();
   toBlobMock.mockResolvedValue(new Blob(['fake-png-bytes'], { type: 'image/png' }));
   track.mockReset();
@@ -1858,6 +1867,48 @@ describe('Celebration — image share + fallback', () => {
     expect(track).toHaveBeenCalledTimes(1);
   });
 
+  it('does not open Event A\'s share sheet or emit its analytics after Event B activates', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    eventScope.eventId = 'event-a';
+    render(<Celebration kind="bingo" cells={cells} playerName="Deck Daddy" onClose={vi.fn()} />);
+    const shareButton = await readyShareButton();
+
+    // Even a settled card promise yields once in the click handler. Move the
+    // live Event in that gap, before the native share leg can begin.
+    fireEvent.click(shareButton);
+    eventScope.eventId = 'event-b';
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(shareMock).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+  });
+
+  it('does not emit Event A\'s share analytics when its native share completes under Event B', async () => {
+    let finishShare!: () => void;
+    const shareMock = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishShare = resolve;
+        }),
+    );
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    eventScope.eventId = 'event-a';
+    render(<Celebration kind="bingo" cells={cells} playerName="Deck Daddy" onClose={vi.fn()} />);
+    fireEvent.click(await readyShareButton());
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    eventScope.eventId = 'event-b';
+    finishShare();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(track).not.toHaveBeenCalled();
+  });
+
   // Codex P2, PR #111 finding 1 (regression): Celebration used to open its
   // OWN useBoard(uid) listener, which — per the permanently-empty stub in
   // the ../hooks/useData mock above — never resolves any data. Had that code
@@ -2161,6 +2212,55 @@ describe('Leaderboard — share affordance', () => {
     expect(track).toHaveBeenCalledTimes(1);
   });
 
+  it('does not open Event A\'s warmed share sheet or emit its analytics after Event B activates', async () => {
+    let finishRender!: (blob: Blob) => void;
+    toBlobMock.mockImplementationOnce(
+      () =>
+        new Promise<Blob>((resolve) => {
+          finishRender = resolve;
+        }),
+    );
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    eventScope.eventId = 'event-a';
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share leaderboard' }));
+    expect(toBlobMock).toHaveBeenCalledTimes(1);
+
+    eventScope.eventId = 'event-b';
+    finishRender(new Blob(['event-a-card'], { type: 'image/png' }));
+    await waitFor(() => expect(document.querySelector('.share-card-host')).toBeNull());
+    await Promise.resolve();
+
+    expect(shareMock).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+  });
+
+  it('does not emit Event A\'s leaderboard analytics when its native share completes under Event B', async () => {
+    let finishShare!: () => void;
+    const shareMock = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishShare = resolve;
+        }),
+    );
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    eventScope.eventId = 'event-a';
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share leaderboard' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    eventScope.eventId = 'event-b';
+    finishShare();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(track).not.toHaveBeenCalled();
+  });
+
   // Codex P2, PR #111 round 2 finding 2 — the Leaderboard's warm-on-intent
   // pre-render (deliberately NOT mount-eager: this component re-renders on
   // every roster snapshot, so rasterizing per snapshot would burn CPU for a
@@ -2416,6 +2516,29 @@ describe('FarewellPodium — share affordance', () => {
 
     await waitFor(() => expect(track).toHaveBeenCalledWith('share_click', { surface: 'farewell' }));
     expect(track).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attribute Event A farewell-share analytics after Event B takes over during native share', async () => {
+    let resolveShare: () => void = () => {};
+    const shareMock = vi.fn(
+      () => new Promise<void>((resolve) => {
+        resolveShare = resolve;
+      }),
+    );
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledOnce());
+
+    eventScope.eventId = 'event-b';
+    await act(async () => {
+      resolveShare();
+    });
+
+    expect(track).not.toHaveBeenCalledWith('share_click', { surface: 'farewell' });
   });
 
   // #607: entry-point origin, never the analytics-canonical host — same

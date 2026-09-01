@@ -250,7 +250,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     // (the folded res.cells carry the standing win the drain revalidates against).
     await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
 
     // A passive snapshot reflecting the mark (the live listener's echo) is NOT a
     // fresh action — it must not re-broadcast.
@@ -277,7 +281,14 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
     // Legacy (no schedule): no tutorial exclusion rides the witness read (#288).
-    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith('u1', { excludeDayIndexes: undefined, selfWriteGeneration: expect.any(Number) }); // the witness-gated candidate
+    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith(
+      'u1',
+      expect.objectContaining({
+        excludeDayIndexes: undefined,
+        selfWriteGeneration: expect.any(Number),
+        eventId: 'test-event',
+      }),
+    ); // the witness-gated candidate
   });
 
   it('does NOT claim First-to-BINGO when another Player already has a firstBingoAt', async () => {
@@ -311,7 +322,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     // pending-queue layer — src/data/w2-feed-moments.test.ts's
     // `pendingBlackoutDayIndexes` suite — since this fixture's mocks don't
     // model a Day schedule.
-    expect(H.broadcastBlackout).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBlackout).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1); // not re-announced (bingoTransition false)
   });
 
@@ -343,7 +358,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     rerender(<Board />);
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
   });
 
   it('the held broadcast SURVIVES a Board unmount and drains on remount — the headline #104 fix', async () => {
@@ -370,7 +389,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     render(<Board />);
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
   });
 
   it('HOLDS First-to-BINGO while the roster is unconfirmed, then does NOT claim it if the confirmed roster shows an earlier bingo (PR #99 finding 2)', async () => {
@@ -471,7 +494,14 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith('u1', { excludeDayIndexes: undefined, selfWriteGeneration: expect.any(Number) });
+    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith(
+      'u1',
+      expect.objectContaining({
+        excludeDayIndexes: undefined,
+        selfWriteGeneration: expect.any(Number),
+        eventId: 'test-event',
+      }),
+    );
 
     // The player unmarks the line (firstBingoAt is volatile and clears with it)…
     await clickMark('p0', { bingo: false, bingoTransition: false });
@@ -496,7 +526,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     const { rerender } = render(<Board />);
     await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
 
     // Reconnect: the server confirmation of the SAME standing win is a PASSIVE
     // snapshot, not a mark — nothing fires twice.
@@ -729,9 +763,20 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     });
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1); // witness clean + roster clean
-    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith('u1', { excludeDayIndexes: undefined, selfWriteGeneration: expect.any(Number) }); // same ceremonial gauntlet
+    expect(H.hasPriorBingoWitness).toHaveBeenCalledWith(
+      'u1',
+      expect.objectContaining({
+        excludeDayIndexes: undefined,
+        selfWriteGeneration: expect.any(Number),
+        eventId: 'test-event',
+      }),
+    ); // same ceremonial gauntlet
   });
 
   it('a proofed Mark that completes no line broadcasts nothing (finding 1)', async () => {
@@ -977,7 +1022,11 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     rerender(<Board />);
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null });
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'test-event',
+    );
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
   });
 });

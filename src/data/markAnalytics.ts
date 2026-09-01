@@ -1,4 +1,5 @@
 import type { ClaimMode } from '../types';
+import { EVENT_ID } from '../firebase';
 
 /**
  * A fresh request token accompanies every direct Board toggle. It is NOT an
@@ -15,12 +16,13 @@ export interface DirectMarkAnalyticsRequest {
   source: 'pledge' | 'proof' | 'admin_confirm';
 }
 
-const localRequestStorageKey = 'five-across:local-direct-mark-requests';
+const localRequestStorageKey = (eventId: string) =>
+  `five-across:local-direct-mark-requests:${eventId}`;
 const MAX_LOCAL_REQUEST_IDS = 100;
 
-function localRequestIds(): string[] {
+function localRequestIds(eventId: string): string[] {
   try {
-    const raw = localStorage.getItem(localRequestStorageKey);
+    const raw = localStorage.getItem(localRequestStorageKey(eventId));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
   } catch {
@@ -28,11 +30,14 @@ function localRequestIds(): string[] {
   }
 }
 
-function rememberLocalMarkRequest(id: string): void {
+function rememberLocalMarkRequest(eventId: string, id: string): void {
   try {
-    const ids = localRequestIds().filter((known) => known !== id);
+    const ids = localRequestIds(eventId).filter((known) => known !== id);
     ids.push(id);
-    localStorage.setItem(localRequestStorageKey, JSON.stringify(ids.slice(-MAX_LOCAL_REQUEST_IDS)));
+    localStorage.setItem(
+      localRequestStorageKey(eventId),
+      JSON.stringify(ids.slice(-MAX_LOCAL_REQUEST_IDS)),
+    );
   } catch {
     // The server-observed event remains valid. This only decides whether this
     // browser, rather than another tab for the same player, gets the local
@@ -41,8 +46,8 @@ function rememberLocalMarkRequest(id: string): void {
 }
 
 /** True only for a mark request issued by this browser profile. */
-export function isLocalDirectMarkRequest(id: string): boolean {
-  return localRequestIds().includes(id);
+export function isLocalDirectMarkRequest(id: string, eventId: string = EVENT_ID): boolean {
+  return localRequestIds(eventId).includes(id);
 }
 
 function requestId(): string {
@@ -59,6 +64,8 @@ export function directMarkAnalyticsRequest(params: {
   mode: ClaimMode;
   source?: DirectMarkAnalyticsRequest['source'];
   id?: string;
+  /** Event captured by the action before any asynchronous continuation. */
+  eventId?: string;
 }): DirectMarkAnalyticsRequest {
   const request = {
     id: params.id ?? requestId(),
@@ -67,6 +74,6 @@ export function directMarkAnalyticsRequest(params: {
     mode: params.mode,
     source: params.source ?? 'pledge',
   };
-  if (request.marked) rememberLocalMarkRequest(request.id);
+  if (request.marked) rememberLocalMarkRequest(params.eventId ?? EVENT_ID, request.id);
   return request;
 }

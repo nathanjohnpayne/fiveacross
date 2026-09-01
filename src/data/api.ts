@@ -55,20 +55,24 @@ import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
+import { eventScopeKey } from './eventScope';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
 const rawUser = (uid: string) => doc(db, 'users', uid);
-const rawBoard = (uid: string) => doc(db, 'events', EVENT_ID, 'boards', uid);
+const rawBoard = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'boards', uid);
 // A Player's Day Card write ref: events/{EVENT_ID}/days/{dayIndex}/boards/{uid}
 // (daily-cards-spec § "Data model"). `String(dayIndex)` is the canonical decimal
 // segment the day-scoped firestore.rules gate accepts (#201).
-const rawDayBoard = (dayIndex: number, uid: string) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
-const rawPlayer = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
-const rawItems = () => collection(db, 'events', EVENT_ID, 'items');
-const rawItem = (id: string) => doc(db, 'events', EVENT_ID, 'items', id);
-const rawEvent = () => doc(db, 'events', EVENT_ID);
+const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'players', uid);
+const rawItems = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'items');
+const rawItem = (id: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'items', id);
+const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 
 /**
  * True only for a well-formed `https://` URL — the only photo shape the public
@@ -143,11 +147,20 @@ export async function fetchDisplayName(uid: string): Promise<string> {
  * above: keeps this Firestore-only module free of an eager analytics import,
  * and never throws out of a deal's success path.
  */
-function trackCommunityPromptDeal(cells: readonly Cell[], dayIndex: number | undefined): void {
+function trackCommunityPromptDeal(
+  cells: readonly Cell[],
+  dayIndex: number | undefined,
+  eventId: string,
+): void {
   const count = cells.filter((c) => c.communityPrompt === true).length;
   if (count === 0) return;
   void import('../analytics')
-    .then(({ track }) => track('community_prompt_dealt', { dayIndex, count }))
+    .then(({ track }) => {
+      // Analytics dimensions follow the active Event and cannot be rebound for
+      // a late dynamic-import continuation. Never report A's committed deal as
+      // a B action after navigation; the Firestore write remains correctly A.
+      if (EVENT_ID === eventId) track('community_prompt_dealt', { dayIndex, count });
+    })
     .catch(() => {});
 }
 
@@ -324,9 +337,9 @@ export async function readAdultAttestationFromServer(uid: string): Promise<numbe
  * optimistic-only attestation gets a Retry instead of being stranded on
  * "Dealing…".
  */
-export async function hasCachedBoard(uid: string): Promise<boolean> {
+export async function hasCachedBoard(uid: string, eventId: string = EVENT_ID): Promise<boolean> {
   try {
-    return (await getDocFromCache(rawBoard(uid))).exists();
+    return (await getDocFromCache(rawBoard(uid, eventId))).exists();
   } catch {
     return false; // not in this device's cache → no local board
   }
@@ -360,9 +373,9 @@ export async function hasCachedBoard(uid: string): Promise<boolean> {
  * the current `events/${EVENT_ID}/` ancestor path AND the uid. Cache miss / read
  * error → `false`, exactly like `hasCachedBoard`.
  */
-export async function hasCachedCard(uid: string): Promise<boolean> {
+export async function hasCachedCard(uid: string, eventId: string = EVENT_ID): Promise<boolean> {
   try {
-    const prefix = `events/${EVENT_ID}/`;
+    const prefix = `events/${eventId}/`;
     const snap = await getDocsFromCache(collectionGroup(db, 'boards'));
     return snap.docs.some(
       (d) => d.ref.path.startsWith(prefix) && (d.data() as { uid?: unknown }).uid === uid,
@@ -398,7 +411,11 @@ export async function hasCachedCard(uid: string): Promise<boolean> {
  * online-only nature changes nothing for the offline story (it rejects fast
  * where the old plain write would hang until the #403 timeout).
  */
-export async function joinAndDeal(u: User): Promise<boolean> {
+export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<boolean> {
+  // A join spans several reads and a transaction. Keep every Event-owned ref
+  // pinned to the scope active when the operation began; changing the live
+  // binding while an Event A read is in flight must never split the eventual
+  // write across Event B.
   // Decide the MODE from the Event before touching any board (#246): the Phase 1.5
   // day-scoped firestore.rules removed the top-level events/{eventId}/boards/{uid}
   // path entirely, so reading OR writing the legacy board when the Event carries a
@@ -415,7 +432,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // runDeal surfaces the retryable dealError, exactly like any other deal failure.
   // A readable-but-empty/missing event (no `days[]`) is a legitimate legacy signal;
   // the threshold/ban fields then fall open on the absent keys as before.
-  const joinEventSnap = await getDoc(rawEvent());
+  const joinEventSnap = await getDoc(rawEvent(eventId));
   const joinEventData = joinEventSnap.exists() ? (joinEventSnap.data() as Partial<EventDoc>) : null;
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
@@ -455,7 +472,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
     // the transaction the loser retries, re-reads the committed row, and its
     // guards degrade it to an identity-only merge with `alreadyJoined` true.
     return await runTransaction(db, async (tx) => {
-      const existingPlayer = await tx.get(rawPlayer(u.uid));
+      const existingPlayer = await tx.get(rawPlayer(u.uid, eventId));
       const existing = existingPlayer.exists() ? (existingPlayer.data() as Partial<UserDoc & { joinedAt: number; bingoCount: number; squaresMarked: number; firstBingoAt: number | null; blackout: boolean; reshufflesUsed: number }>) : null;
       const alreadyJoined = existing != null && typeof existing.joinedAt === 'number';
       // Identity always merged; aggregates only for fields not already present, so a
@@ -472,12 +489,12 @@ export async function joinAndDeal(u: User): Promise<boolean> {
       // which firestore.rules would deny outright (the counter is monotonic), and
       // which would fail the whole join write, not just this field.
       if (typeof existing?.reshufflesUsed !== 'number') seed.reshufflesUsed = 0;
-      tx.set(rawPlayer(u.uid), seed, { merge: true });
+      tx.set(rawPlayer(u.uid, eventId), seed, { merge: true });
       return !alreadyJoined; // a genuine first join (no prior identity) is the analytic-worthy event
     });
   }
 
-  const existing = await getDoc(rawBoard(u.uid));
+  const existing = await getDoc(rawBoard(u.uid, eventId));
   if (existing.exists()) return false;
 
   // Denormalize the Player's SAVED identity, not the raw Google one (Codex P2
@@ -491,7 +508,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // profile falls back to the auth values rather than blocking the deal.
   const [profileSnap, snap] = await Promise.all([
     getDoc(rawUser(u.uid)).catch(() => null),
-    getDocs(query(itemsCol(), where('status', '==', 'active'))),
+    getDocs(query(rawItems(eventId), where('status', '==', 'active'))),
   ]);
   const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
   // Validate before denormalizing (Codex P2 on PR #66 round 3): users/{uid} is
@@ -590,14 +607,17 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // stay outside: a query cannot run in a transaction, and the deal is
   // deterministic from the uid, so a retry recomputes identical cells.
   const dealtNew = await runTransaction(db, async (tx) => {
-    const latestBoard = await tx.get(rawBoard(u.uid));
+    const latestBoard = await tx.get(rawBoard(u.uid, eventId));
     if (latestBoard.exists()) return false;
     const now = Date.now();
     // dayIndex: 0 honors the now-required BoardDoc.dayIndex — today there is one
     // Board per Player per Event, read as Day 0; the day-scoped board path is #204.
-    tx.set(rawBoard(u.uid), { uid: u.uid, dayIndex: 0, seed, createdAt: now, cells });
     tx.set(
-      rawPlayer(u.uid),
+      rawBoard(u.uid, eventId),
+      { uid: u.uid, dayIndex: 0, seed, createdAt: now, cells },
+    );
+    tx.set(
+      rawPlayer(u.uid, eventId),
       {
         uid: u.uid,
         displayName,
@@ -615,7 +635,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // AFTER the transaction settles, never inside it — a transaction retries on
   // contention, and firing here (rather than from the loser's abandoned
   // attempts) fires exactly once per genuinely committed deal (#559).
-  if (dealtNew) trackCommunityPromptDeal(cells, 0);
+  if (dealtNew) trackCommunityPromptDeal(cells, 0, eventId);
   return dealtNew;
 }
 
@@ -635,9 +655,10 @@ export async function joinAndDeal(u: User): Promise<boolean> {
  *     existing-board early return; re-opening never re-deals).
  */
 export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
+  const eventId = EVENT_ID;
   const [existing, eventSnap] = await Promise.all([
-    getDoc(rawDayBoard(dayIndex, u.uid)),
-    getDoc(rawEvent()).catch(() => null),
+    getDoc(rawDayBoard(dayIndex, u.uid, eventId)),
+    getDoc(rawEvent(eventId)).catch(() => null),
   ]);
   // Existing Day Card → no-op, exactly like joinAndDeal's board-exists guard.
   if (existing.exists()) return false;
@@ -665,7 +686,9 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // specific item docs — NOT a live `status: 'active'` collection query. Pool
   // MEMBERSHIP is the snapshot alone; this only hydrates the text/spicy the deal
   // needs. A snapshot id whose doc is missing or is the free space is dropped.
-  const itemSnaps = await Promise.all(snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)));
+  const itemSnaps = await Promise.all(
+    snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
+  );
   // The Day Snapshot freezes membership, but it must not bypass the same
   // approval→hostname-stamp race guard as the legacy deal. Capture the posture
   // once: false→true while these reads run may withhold extra Prompts for this
@@ -708,7 +731,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   const otherBoardRefs = days
     .map((d) => d.index)
     .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, u.uid));
+    .map((i) => rawDayBoard(i, u.uid, eventId));
   const otherCards = await Promise.all(otherBoardRefs.map((ref) => getDoc(ref).catch(() => null)));
   const excludeIds = new Set<string>();
   const otherCardCells: Cell[][] = [];
@@ -743,8 +766,8 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     stratify,
     easyMixRatio,
   });
-  const boardRef = rawDayBoard(dayIndex, u.uid);
-  const playerRef = rawPlayer(u.uid);
+  const boardRef = rawDayBoard(dayIndex, u.uid, eventId);
+  const playerRef = rawPlayer(u.uid, eventId);
   // The deal-time echo's win transitions, captured OUTSIDE the transaction
   // callback (a retry recomputes them) and acted on only after a successful
   // commit — a card can arrive with echo-completed lines, and those wins route
@@ -761,7 +784,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   const dealt = await runTransaction(db, async (tx) => {
     dealtEcho = null;
     const [latestEventSnap, latestBoardSnap, playerSnap, ...latestOtherCardSnaps] = await Promise.all([
-      tx.get(rawEvent()),
+      tx.get(rawEvent(eventId)),
       tx.get(boardRef),
       tx.get(playerRef),
       ...otherBoardRefs.map((ref) => tx.get(ref)),
@@ -796,7 +819,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       cells: stampEchoAnalyticsTransitions({
         cells: rawEchoRes.cells,
         changed: changedCells(cells, rawEchoRes.cells),
-        eventId: EVENT_ID,
+        eventId,
         uid: u.uid,
         dayIndex,
         boardSeed: seed,
@@ -889,18 +912,24 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         bingoTransition: echo.bingoTransition,
         blackoutTransition: echo.blackoutTransition,
         dayIndex,
+        eventId,
       });
     }
     // The write-once Day-honor pin for a card that ARRIVED winning (Codex P2
     // on #447) — fired after the commit so a retried transaction can't pin
     // twice (the create-once rule backstops besides).
     if (echo.pinAs) {
-      void pinDayFirstBingo(dayIndex, { uid: u.uid, displayName: echo.pinAs, photoURL: null }, echo.at);
+      void pinDayFirstBingo(
+        dayIndex,
+        { uid: u.uid, displayName: echo.pinAs, photoURL: null },
+        echo.at,
+        eventId,
+      );
     }
   }
   // Independent of the echo branch above (#559) — a card dealing zero echoes
   // can still carry Community Prompt Squares.
-  if (dealt) trackCommunityPromptDeal(cells, dayIndex);
+  if (dealt) trackCommunityPromptDeal(cells, dayIndex, eventId);
   return dealt;
 }
 
@@ -991,12 +1020,13 @@ export async function reshuffleBoard(params: {
   expectedSeed: number;
 }): Promise<number> {
   const { uid, dayIndex, expectedSeed } = params;
+  const eventId = EVENT_ID;
   // The Event schedule and the Day Snapshot's items are read outside: neither is
   // written here, and neither changes under a retry, so re-reading them per attempt
   // would cost a round trip and buy nothing. Everything that CAN change — this
   // Board, the counter, and the peer cards the exclusion set is built from — is
   // read inside.
-  const eventSnap = await getDoc(rawEvent());
+  const eventSnap = await getDoc(rawEvent(eventId));
   const eventData = eventSnap.exists() ? (eventSnap.data() as Partial<EventDoc>) : null;
   const days = Array.isArray(eventData?.days) ? (eventData.days as DayDef[]) : [];
   const day = days[dayIndex];
@@ -1022,7 +1052,7 @@ export async function reshuffleBoard(params: {
   // must not be able to sneak onto a rerolled card.
   const snapshotIds = day.snapshotItemIds ?? [];
   const itemSnaps = await Promise.all(
-    snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)),
+    snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
   // A reshuffle is another frozen-card publish path. During the asynchronous
   // window between approving the first explicit Prompt and publishing the 18+
@@ -1058,7 +1088,7 @@ export async function reshuffleBoard(params: {
   const peerRefs = days
     .map((d) => d.index)
     .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, uid));
+    .map((i) => rawDayBoard(i, uid, eventId));
 
   // Same composition rules as the first deal (daily-cards-spec § "Unlock
   // mechanics"): tutorial pools are all-tame so they deal unstratified; main Days
@@ -1076,8 +1106,8 @@ export async function reshuffleBoard(params: {
   // Reads before writes (Firestore's transaction contract); eligibility is judged
   // against what the transaction itself read, so a retry re-judges rather than
   // committing a verdict formed against stale state.
-  const boardRef = rawDayBoard(dayIndex, uid);
-  const playerRef = rawPlayer(uid);
+  const boardRef = rawDayBoard(dayIndex, uid, eventId);
+  const playerRef = rawPlayer(uid, eventId);
   // The re-deal echo's win transitions (specs/echo-marks.md § Deal-time),
   // captured per attempt and acted on only after the transaction commits.
   // `pinAs` mirrors dealDayCard's Day-honor pin identity (Codex P2 on #447).
@@ -1225,7 +1255,7 @@ export async function reshuffleBoard(params: {
       cells: stampEchoAnalyticsTransitions({
         cells: rawEchoRes.cells,
         changed: changedCells(cells, rawEchoRes.cells),
-        eventId: EVENT_ID,
+        eventId,
         uid,
         dayIndex,
         boardSeed: seed,
@@ -1258,7 +1288,7 @@ export async function reshuffleBoard(params: {
         discarded.itemId &&
         !peerMarkedItems.has(discarded.itemId)
       ) {
-        tx.delete(doc(db, 'events', EVENT_ID, 'tally', discarded.itemId, 'markers', uid));
+        tx.delete(doc(db, 'events', eventId, 'tally', discarded.itemId, 'markers', uid));
       }
     }
     const priorDayStats = player?.dayStats as DayStats | undefined;
@@ -1305,7 +1335,7 @@ export async function reshuffleBoard(params: {
     // `reshuffles/{uid}-{nextUsed}` naming this Day — the token this spend
     // consumes exactly once. Create-only and immutable server-side; the id is
     // fresh per spend because the counter is monotonic.
-    tx.set(doc(db, 'events', EVENT_ID, 'reshuffles', `${uid}-${nextUsed}`), {
+    tx.set(doc(db, 'events', eventId, 'reshuffles', `${uid}-${nextUsed}`), {
       uid,
       n: nextUsed,
       dayIndex,
@@ -1347,15 +1377,21 @@ export async function reshuffleBoard(params: {
         bingoTransition: echo.bingoTransition,
         blackoutTransition: echo.blackoutTransition,
         dayIndex,
+        eventId,
       });
     }
     if (echo.pinAs) {
-      void pinDayFirstBingo(dayIndex, { uid, displayName: echo.pinAs, photoURL: null }, echo.at);
+      void pinDayFirstBingo(
+        dayIndex,
+        { uid, displayName: echo.pinAs, photoURL: null },
+        echo.at,
+        eventId,
+      );
     }
   }
   // Independent of the echo branch (#559) — a reshuffle deals a genuinely NEW
   // card, so it gets its own `community_prompt_dealt` count even with no echo.
-  if (spend > 0 && dealtCells) trackCommunityPromptDeal(dealtCells, dayIndex);
+  if (spend > 0 && dealtCells) trackCommunityPromptDeal(dealtCells, dayIndex, eventId);
   return spend;
 }
 
@@ -1520,13 +1556,21 @@ export function computeMark(params: {
 // call's read runs only after the previous call has issued its batch.
 const markChains = new Map<string, Promise<unknown>>();
 
-function markChainKey(database: Firestore, uid: string): string {
-  return `${(database as unknown as { app?: { name?: string } }).app?.name ?? 'default'}/${uid}`;
+function markChainKey(database: Firestore, eventId: string, uid: string): string {
+  return eventScopeKey(
+    eventId,
+    'mark-chain',
+    (database as unknown as { app?: { name?: string } }).app?.name ?? 'default',
+    uid,
+  );
 }
 
-const pendingMarkerRepairs = new Set<string>();
-const markerRepairKey = (uid: string, itemId: string) => `${uid}:${itemId}`;
-const markerRepairStorageKey = (repairKey: string) => `gcb:echo-marker-repair:${EVENT_ID}:${repairKey}`;
+type MarkerRepair = { eventId: string; uid: string; itemId: string };
+const pendingMarkerRepairs = new Map<string, MarkerRepair>();
+const markerRepairKey = (eventId: string, uid: string, itemId: string) =>
+  eventScopeKey(eventId, 'echo-marker-repair', uid, itemId);
+const markerRepairStorageKey = (eventId: string, uid: string, itemId: string) =>
+  `gcb:echo-marker-repair:${eventId}:${uid}:${itemId}`;
 
 function markerRepairStore(): Storage | null {
   try {
@@ -1536,29 +1580,31 @@ function markerRepairStore(): Storage | null {
   }
 }
 
-function rememberMarkerRepair(repairKey: string): void {
-  pendingMarkerRepairs.add(repairKey);
+function rememberMarkerRepair(eventId: string, uid: string, itemId: string): void {
+  const repair = { eventId, uid, itemId };
+  pendingMarkerRepairs.set(markerRepairKey(eventId, uid, itemId), repair);
   try {
-    markerRepairStore()?.setItem(markerRepairStorageKey(repairKey), '1');
+    markerRepairStore()?.setItem(markerRepairStorageKey(eventId, uid, itemId), '1');
   } catch {
     // Storage is an enhancement over the in-memory candidate (private mode etc.).
   }
 }
 
-function forgetMarkerRepair(repairKey: string): void {
-  pendingMarkerRepairs.delete(repairKey);
+function forgetMarkerRepair(eventId: string, uid: string, itemId: string): void {
+  pendingMarkerRepairs.delete(markerRepairKey(eventId, uid, itemId));
   try {
-    markerRepairStore()?.removeItem(markerRepairStorageKey(repairKey));
+    markerRepairStore()?.removeItem(markerRepairStorageKey(eventId, uid, itemId));
   } catch {
     // Storage is best-effort; the in-memory candidate is already cleared.
   }
 }
 
-function hasMarkerRepair(repairKey: string): boolean {
+function hasMarkerRepair(eventId: string, uid: string, itemId: string): boolean {
+  const repairKey = markerRepairKey(eventId, uid, itemId);
   if (pendingMarkerRepairs.has(repairKey)) return true;
   try {
-    if (markerRepairStore()?.getItem(markerRepairStorageKey(repairKey)) === '1') {
-      pendingMarkerRepairs.add(repairKey);
+    if (markerRepairStore()?.getItem(markerRepairStorageKey(eventId, uid, itemId)) === '1') {
+      pendingMarkerRepairs.set(repairKey, { eventId, uid, itemId });
       return true;
     }
   } catch {
@@ -1569,7 +1615,9 @@ function hasMarkerRepair(repairKey: string): boolean {
 
 /** Test-only. */
 export function __resetPendingMarkerRepairsForTests(): void {
-  for (const repairKey of [...pendingMarkerRepairs]) forgetMarkerRepair(repairKey);
+  for (const repair of pendingMarkerRepairs.values()) {
+    forgetMarkerRepair(repair.eventId, repair.uid, repair.itemId);
+  }
 }
 
 // The shared marker-attribution helper (`markerDisplayName`) lives in the
@@ -1658,11 +1706,12 @@ export async function setMark(params: {
 }> {
   const { uid } = params;
   const database = params.database ?? db;
-  const chainKey = markChainKey(database, uid);
+  const eventId = EVENT_ID;
+  const chainKey = markChainKey(database, eventId, uid);
   const prev = markChains.get(chainKey) ?? Promise.resolve();
   const next = prev.then(
-    () => runSetMark(params, database),
-    () => runSetMark(params, database),
+    () => runSetMark(params, database, eventId),
+    () => runSetMark(params, database, eventId),
   );
   // The stored tail never rejects, so one failed Mark cannot poison the chain.
   markChains.set(
@@ -1695,6 +1744,7 @@ async function runSetMark(
     echoDayIndexes?: number[];
   },
   database: Firestore,
+  eventId: string,
 ): Promise<{
   cells: Cell[];
   bingo: boolean;
@@ -1713,9 +1763,9 @@ async function runSetMark(
   // mode the caller (Board) always passes the viewed `dayIndex`, so the board path
   // is known up front without reading the cache. Legacy mode is unchanged.
   const boardRef = params.daily === true
-    ? doc(database, 'events', EVENT_ID, 'days', String(params.dayIndex ?? 0), 'boards', uid)
-    : doc(database, 'events', EVENT_ID, 'boards', uid);
-  const playerRef = doc(database, 'events', EVENT_ID, 'players', uid);
+    ? doc(database, 'events', eventId, 'days', String(params.dayIndex ?? 0), 'boards', uid)
+    : doc(database, 'events', eventId, 'boards', uid);
+  const playerRef = doc(database, 'events', eventId, 'players', uid);
 
   let baseCells = params.cells;
   let markSeed = params.boardSeed;
@@ -1790,11 +1840,12 @@ async function runSetMark(
   // means an offline queue survives a reload, while a stale tab's true→true
   // rewrite carries a new request but produces no false second event.
   const analyticsRequestToken = markTransition
-    ? directMarkAnalyticsRequest({
-        cellIndex: params.index,
-        marked: params.nextMarked,
-        mode: params.claimMode,
-      })
+      ? directMarkAnalyticsRequest({
+          cellIndex: params.index,
+          marked: params.nextMarked,
+          mode: params.claimMode,
+          eventId,
+        })
     : undefined;
 
   const toggled = cells.find((c) => c.index === params.index);
@@ -1807,7 +1858,7 @@ async function runSetMark(
   if (!params.nextMarked && priorRootBlackout && echoDayIndexes.length > 0) {
     const siblingSnaps = await Promise.allSettled(
       echoDayIndexes.map((d) =>
-        getDocFromCache(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+        getDocFromCache(doc(database, 'events', eventId, 'days', String(d), 'boards', uid)),
       ),
     );
     siblingBlackout = siblingSnaps.some(
@@ -1865,7 +1916,7 @@ async function runSetMark(
     const achieved = new Set([echoItemId]);
     const sibSnaps = await Promise.allSettled(
       echoDayIndexes.map((d) =>
-        getDocFromCache(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+        getDocFromCache(doc(database, 'events', eventId, 'days', String(d), 'boards', uid)),
       ),
     );
     sibSnaps.forEach((snap, i) => {
@@ -1881,7 +1932,7 @@ async function runSetMark(
       // confirmed (the board-freshness registry, fed by useMyDayBoards);
       // anything else is skipped and the open-time reconcile self-heals it,
       // exactly like a cache-missed sibling.
-      const trust = trustedDayBoardSeed(sibDay, uid);
+      const trust = trustedDayBoardSeed(eventId, sibDay, uid);
       const sibSeed = typeof sib.seed === 'number' ? sib.seed : undefined;
       if (!trust.trusted || trust.seed !== sibSeed) return;
       const sibCells = cellsFromData(sib.cells);
@@ -1891,7 +1942,7 @@ async function runSetMark(
         cells: stampEchoAnalyticsTransitions({
           cells: rawRes.cells,
           changed: changedCells(sibCells, rawRes.cells),
-          eventId: EVENT_ID,
+          eventId,
           uid,
           dayIndex: sibDay,
           boardSeed: sibSeed,
@@ -1953,7 +2004,7 @@ async function runSetMark(
   // and reusing the source board's seed would be rejected (specs/echo-marks.md).
   for (const echoBoard of echoBoards) {
     batch.set(
-      doc(database, 'events', EVENT_ID, 'days', String(echoBoard.dayIndex), 'boards', uid),
+      doc(database, 'events', eventId, 'days', String(echoBoard.dayIndex), 'boards', uid),
       ...cellsMergeSet(echoBoard.cellsPatch, {
         ...(typeof echoBoard.markSeed === 'number' ? { markSeed: echoBoard.markSeed } : {}),
       }),
@@ -1997,7 +2048,7 @@ async function runSetMark(
   const tallyItemId = toggled && !toggled.free ? toggled.itemId : null;
   let markerRepairCandidate: string | null = null;
   if (tallyItemId) {
-    const markerRef = doc(database, 'events', EVENT_ID, 'tally', tallyItemId, 'markers', uid);
+    const markerRef = doc(database, 'events', eventId, 'tally', tallyItemId, 'markers', uid);
     if (params.nextMarked) {
       // Day-scoped Tally Cards (#216): stamp the viewed `dayIndex` and the Prompt
       // TEXT onto the marker so the Feed can group markers of the SAME
@@ -2024,7 +2075,7 @@ async function runSetMark(
       // marker. Forgetting is the conservative direction — at worst it costs
       // a repair, never resurrects one wrongly (the same posture as the
       // rejected-commit cleanup below).
-      forgetMarkerRepair(markerRepairKey(uid, tallyItemId));
+      forgetMarkerRepair(eventId, uid, tallyItemId);
     } else {
       // Echo Marks (specs/echo-marks.md): the marker slot is ONE per
       // (Prompt, Player) — the doc id IS the marker uid, rules-enforced — so
@@ -2041,7 +2092,7 @@ async function runSetMark(
       if (echoDayIndexes.length > 0) {
         const sibSnaps = await Promise.allSettled(
           echoDayIndexes.map((d) =>
-            getDocFromCache(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+            getDocFromCache(doc(database, 'events', eventId, 'days', String(d), 'boards', uid)),
           ),
         );
         siblingKnowledgeIncomplete = sibSnaps.some((snap) => snap.status !== 'fulfilled');
@@ -2056,12 +2107,11 @@ async function runSetMark(
       }
       if (!stillAchievedElsewhere) {
         batch.delete(markerRef);
-        const repairKey = markerRepairKey(uid, tallyItemId);
         if (siblingKnowledgeIncomplete) {
-          rememberMarkerRepair(repairKey);
-          markerRepairCandidate = repairKey;
+          rememberMarkerRepair(eventId, uid, tallyItemId);
+          markerRepairCandidate = tallyItemId;
         } else {
-          forgetMarkerRepair(repairKey);
+          forgetMarkerRepair(eventId, uid, tallyItemId);
         }
       }
     }
@@ -2081,6 +2131,7 @@ async function runSetMark(
     void committed
       .then(() =>
         reconcileEchoStatsFromServer({
+          eventId,
           uid,
           dayIndexes: echoedDayIndexes,
           tutorialDayIndexes: params.tutorialDayIndexes,
@@ -2092,7 +2143,7 @@ async function runSetMark(
       .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {
-    if (markerRepairCandidate) forgetMarkerRepair(markerRepairCandidate);
+    if (markerRepairCandidate) forgetMarkerRepair(eventId, uid, markerRepairCandidate);
     // A rejection here is NOT the offline case. Offline, commit() PENDS — it
     // neither resolves nor rejects in this tab's lifetime — while the write sits
     // durably in the persistent cache and drains on reconnect (ADR 0006). So a
@@ -2120,15 +2171,19 @@ async function runSetMark(
     // both the import and the call are guarded — observability must never
     // throw out of a fire-and-forget commit handler.
     void import('../analytics')
-      .then(({ track }) =>
+      .then(({ track }) => {
+        // The failed batch still belongs to the Event captured by setMark.
+        // Analytics dimensions are ambient, so a late rejection must not be
+        // reported as activity in whichever Event is active by then.
+        if (EVENT_ID !== eventId) return;
         track('mark_rejected', {
           code: (err as { code?: string } | null)?.code ?? 'unknown',
           index: params.index,
           marked: params.nextMarked,
           dayIndex,
           daily: params.daily === true,
-        }),
-      )
+        });
+      })
       .catch(() => {});
   });
 
@@ -2165,6 +2220,7 @@ async function runSetMark(
             bingoTransition: echoBoard.bingoTransition,
             blackoutTransition: echoBoard.blackoutTransition,
             dayIndex: echoBoard.dayIndex,
+            eventId,
           }),
         )
         .catch(() => undefined);
@@ -2178,7 +2234,14 @@ async function runSetMark(
       // whole batch. Wait for the board batch's server acknowledgement so a
       // rejected Echo can never keep the honor it appeared to earn locally.
       void committed
-        .then(() => pinDayFirstBingo(echoBoard.dayIndex, { uid, displayName: pinName, photoURL: null }, now))
+        .then(() =>
+          pinDayFirstBingo(
+            echoBoard.dayIndex,
+            { uid, displayName: pinName, photoURL: null },
+            now,
+            eventId,
+          ),
+        )
         .catch(() => undefined);
     }
   }
@@ -2230,6 +2293,7 @@ async function runSetMark(
  * freshly committed stamp.
  */
 async function reconcileEchoStatsFromServer(params: {
+  eventId: string;
   uid: string;
   /** The echo-touched Days whose buckets to re-derive from server state. */
   dayIndexes: number[];
@@ -2238,17 +2302,17 @@ async function reconcileEchoStatsFromServer(params: {
   statsFrozen?: boolean;
   database: Firestore;
 }): Promise<{ dayStats: Record<number, StatWrite> } | null> {
-  const { uid, database } = params;
+  const { eventId, uid, database } = params;
   const days = params.statsFrozen
     ? params.dayIndexes.filter((d) => params.ceremonialDayIndexes?.includes(d))
     : params.dayIndexes;
   if (days.length === 0) return null;
-  const playerRef = doc(database, 'events', EVENT_ID, 'players', uid);
+  const playerRef = doc(database, 'events', eventId, 'players', uid);
   return runTransaction(database, async (tx) => {
     const [playerSnap, ...boardSnaps] = await Promise.all([
       tx.get(playerRef),
       ...days.map((d) =>
-        tx.get(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+        tx.get(doc(database, 'events', eventId, 'days', String(d), 'boards', uid)),
       ),
     ]);
     const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
@@ -2319,11 +2383,12 @@ export async function reconcileEchoes(params: {
   database?: Firestore;
 }): Promise<{ changed: boolean; bingoTransition: boolean; blackoutTransition: boolean; complete: boolean }> {
   const database = params.database ?? db;
-  const chainKey = markChainKey(database, params.uid);
+  const eventId = EVENT_ID;
+  const chainKey = markChainKey(database, eventId, params.uid);
   const prev = markChains.get(chainKey) ?? Promise.resolve();
   const next = prev.then(
-    () => runReconcileEchoes(params, database),
-    () => runReconcileEchoes(params, database),
+    () => runReconcileEchoes(params, database, eventId),
+    () => runReconcileEchoes(params, database, eventId),
   );
   markChains.set(
     chainKey,
@@ -2345,16 +2410,17 @@ async function runReconcileEchoes(
     statsFrozen?: boolean;
   },
   database: Firestore,
+  eventId: string,
 ): Promise<{ changed: boolean; bingoTransition: boolean; blackoutTransition: boolean; complete: boolean }> {
   const { uid, dayIndex } = params;
-  const boardRef = doc(database, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
-  const playerRef = doc(database, 'events', EVENT_ID, 'players', uid);
+  const boardRef = doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+  const playerRef = doc(database, 'events', eventId, 'players', uid);
   const siblingDays = params.dayIndexes.filter((d) => d !== dayIndex);
   const [boardSnap, playerSnap, ...sibSnaps] = await Promise.allSettled([
     getDocFromCache(boardRef),
     getDocFromCache(playerRef),
     ...siblingDays.map((d) =>
-      getDocFromCache(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+      getDocFromCache(doc(database, 'events', eventId, 'days', String(d), 'boards', uid)),
     ),
   ]);
   // COMPLETENESS (Codex P2 on #447): a REJECTED cache read is an unknowable
@@ -2389,7 +2455,7 @@ async function runReconcileEchoes(
     cells: stampEchoAnalyticsTransitions({
       cells: rawRes.cells,
       changed: changedCells(boardCells, rawRes.cells),
-      eventId: EVENT_ID,
+      eventId,
       uid,
       dayIndex,
       boardSeed: board.seed,
@@ -2421,17 +2487,20 @@ async function runReconcileEchoes(
   const carrierCells = res.cells.filter((c) => !c.free && c.marked && c.itemId);
   const markerReads = await Promise.allSettled(
     carrierCells.map((c) =>
-      getDocFromCache(doc(database, 'events', EVENT_ID, 'tally', c.itemId as string, 'markers', uid)),
+      getDocFromCache(doc(database, 'events', eventId, 'tally', c.itemId as string, 'markers', uid)),
     ),
   );
   const markerRepairs = carrierCells.filter((c, i) => {
     const read = markerReads[i];
-    const repairKey = markerRepairKey(uid, c.itemId as string);
     if (read.status === 'fulfilled' && read.value.exists()) {
-      forgetMarkerRepair(repairKey);
+      forgetMarkerRepair(eventId, uid, c.itemId as string);
       return false;
     }
-    return read.status === 'fulfilled' && !read.value.exists() && hasMarkerRepair(repairKey);
+    return (
+      read.status === 'fulfilled' &&
+      !read.value.exists() &&
+      hasMarkerRepair(eventId, uid, c.itemId as string)
+    );
   });
 
   // REPAIR-PIN for an echo win whose ack-gated pin died in a reload (Phase 4b
@@ -2451,9 +2520,12 @@ async function runReconcileEchoes(
     if (typeof priorStamp === 'number' && completedLines(res.cells).length > 0) {
       const pinName = honorDisplayName(undefined, cachedPlayerData?.displayName);
       if (pinName) {
-        void pinDayFirstBingo(dayIndex, { uid, displayName: pinName, photoURL: null }, priorStamp).catch(
-          () => undefined,
-        );
+        void pinDayFirstBingo(
+          dayIndex,
+          { uid, displayName: pinName, photoURL: null },
+          priorStamp,
+          eventId,
+        ).catch(() => undefined);
       }
     }
   }
@@ -2513,6 +2585,7 @@ async function runReconcileEchoes(
     if (bucketLag || rootLag) {
       try {
         const healed = await reconcileEchoStatsFromServer({
+          eventId,
           uid,
           dayIndexes: [dayIndex],
           tutorialDayIndexes: params.tutorialDayIndexes,
@@ -2534,6 +2607,7 @@ async function runReconcileEchoes(
               dayIndex,
               { uid, displayName: pinName, photoURL: null },
               healedStamp,
+              eventId,
             ).catch(() => undefined);
           }
         }
@@ -2565,7 +2639,7 @@ async function runReconcileEchoes(
     );
   }
   for (const cell of markerRepairs) {
-    batch.set(doc(database, 'events', EVENT_ID, 'tally', cell.itemId as string, 'markers', uid), {
+    batch.set(doc(database, 'events', eventId, 'tally', cell.itemId as string, 'markers', uid), {
       uid,
       displayName: markerDisplayName(undefined, cachedPlayerData?.displayName),
       markedAt: cell.markedAt ?? now,
@@ -2586,6 +2660,7 @@ async function runReconcileEchoes(
     void committed
       .then(() =>
         reconcileEchoStatsFromServer({
+          eventId,
           uid,
           dayIndexes: [dayIndex],
           tutorialDayIndexes: params.tutorialDayIndexes,
@@ -2597,7 +2672,11 @@ async function runReconcileEchoes(
       .catch(() => undefined);
   }
   if (markerRepairs.length > 0) {
-    void committed.then(() => markerRepairs.forEach((cell) => forgetMarkerRepair(markerRepairKey(uid, cell.itemId as string)))).catch(() => undefined);
+    void committed
+      .then(() =>
+        markerRepairs.forEach((cell) => forgetMarkerRepair(eventId, uid, cell.itemId as string)),
+      )
+      .catch(() => undefined);
   }
 
   if (res.bingoTransition || res.blackoutTransition) {
@@ -2613,6 +2692,7 @@ async function runReconcileEchoes(
           bingoTransition: res.bingoTransition,
           blackoutTransition: res.blackoutTransition,
           dayIndex,
+          eventId,
         }),
       )
       .catch(() => undefined);
@@ -2630,6 +2710,7 @@ async function runReconcileEchoes(
             dayIndex,
             { uid, displayName: pinName, photoURL: null },
             now,
+            eventId,
           ),
         )
         .catch(() => undefined);
@@ -2734,6 +2815,10 @@ export async function addItem(
   // one, NO target is written at all and the Prompt keeps the untargeted every-Day
   // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
   targetDayIndex?: number,
+  // Capture the Event at the UI action boundary. The default preserves every
+  // existing caller, while an Event-aware surface can pass its rendered scope
+  // so the schedule read and later write cannot split across Events.
+  eventId: string = EVENT_ID,
   // Returns the new item's id and the target it was ACTUALLY committed with
   // (or `undefined` for the blank-text no-op below) — never a caller-side
   // recomputation. `ItemPool.tsx` uses the id to track its own submission for
@@ -2762,8 +2847,8 @@ export async function addItem(
       `addItem: targetDayIndex must be a non-negative integer, received ${String(targetDayIndex)}`,
     );
   }
-  const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex());
-  const ref = await addDoc(rawItems(), {
+  const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex(eventId));
+  const ref = await addDoc(rawItems(eventId), {
     text: t.slice(0, 80),
     createdBy: uid,
     createdAt: Date.now(),
@@ -2810,8 +2895,8 @@ export async function addItem(
  * Those are known states rather than unknown ones, and untargeted is the honest
  * record of them.
  */
-async function resolveDefaultTargetDayIndex(): Promise<number | null> {
-  const snap = await getDoc(eventRef());
+async function resolveDefaultTargetDayIndex(eventId: string): Promise<number | null> {
+  const snap = await getDoc(doc(db, 'events', eventId));
   const days = snap.exists() ? snap.data().days : undefined;
   return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
 }
@@ -2821,8 +2906,8 @@ async function resolveDefaultTargetDayIndex(): Promise<number | null> {
  * admin/threshold). Same rate-limit posture as `addItem` above — throttled by
  * the caller, not in here.
  */
-export async function reportItem(id: string): Promise<void> {
-  await updateDoc(rawItem(id), { reportCount: increment(1) });
+export async function reportItem(id: string, eventId: string = EVENT_ID): Promise<void> {
+  await updateDoc(rawItem(id, eventId), { reportCount: increment(1) });
 }
 
 /** Let a player set a display theme preference on their player row. */

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 // specs/reshuffle.md — the confirm sheet (#378, wireframes #frame-reshuffle).
 // The copy is asserted VERBATIM: it is the sheet's whole job to make a
@@ -7,8 +7,14 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 // reword is a regression, not a tweak.
 
 const H = vi.hoisted(() => ({ track: vi.fn() }));
+const EVENT_H = vi.hoisted(() => ({ eventId: 'test-event' }));
 vi.mock('../analytics', () => ({ track: H.track }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return EVENT_H.eventId;
+  },
+}));
 vi.mock('../data/api', () => ({
   RESHUFFLE_ALLOWANCE: 3,
   reshuffleBoard: vi.fn(),
@@ -21,6 +27,7 @@ const GO = /Reshuffle it/;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  EVENT_H.eventId = 'test-event';
 });
 
 function setup(over: Partial<Parameters<typeof ReshuffleSheet>[0]> = {}) {
@@ -107,6 +114,28 @@ describe('ReshuffleSheet — confirming', () => {
     expect(reshuffle).toHaveBeenCalledWith({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
     expect(H.track).toHaveBeenCalledWith('reshuffle_card', { dayIndex: 1, reshufflesUsed: 2 });
     expect(onReshuffled).toHaveBeenCalledWith(2);
+  });
+
+  it('does not attribute Event A reshuffle analytics after Event B takes over during the write', async () => {
+    let resolveReshuffle: (nextUsed: number) => void = () => {};
+    const reshuffle = vi.fn(
+      () => new Promise<number>((resolve) => {
+        resolveReshuffle = resolve;
+      }),
+    );
+    const { onClose, onReshuffled } = setup({ reshuffle: reshuffle as never });
+
+    fireEvent.click(screen.getByRole('button', { name: GO }));
+    await waitFor(() => expect(reshuffle).toHaveBeenCalledOnce());
+
+    EVENT_H.eventId = 'event-b';
+    await act(async () => {
+      resolveReshuffle(2);
+    });
+
+    expect(onReshuffled).toHaveBeenCalledWith(2);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(H.track).not.toHaveBeenCalledWith('reshuffle_card', expect.anything());
   });
 
   it('surfaces a failure and does NOT close or track', async () => {

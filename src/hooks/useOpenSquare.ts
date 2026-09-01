@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { EVENT_ID } from '../firebase';
 
 /**
  * Feed → Board square-opening bridge (#261, daily-cards-spec § "Tally
@@ -12,6 +13,7 @@ import { useSyncExternalStore } from 'react';
  * signal: in-memory, one pending intent (last write wins), never persisted.
  */
 export interface OpenSquareIntent {
+  eventId: string;
   dayIndex: number;
   itemId: string;
 }
@@ -19,8 +21,10 @@ export interface OpenSquareIntent {
 let pending: OpenSquareIntent | null = null;
 const listeners = new Set<() => void>();
 
-export function requestOpenSquare(intent: OpenSquareIntent): void {
-  pending = intent;
+export function requestOpenSquare(
+  intent: Omit<OpenSquareIntent, 'eventId'> & { eventId?: string },
+): void {
+  pending = { ...intent, eventId: intent.eventId ?? EVENT_ID };
   listeners.forEach((l) => l());
 }
 
@@ -38,9 +42,10 @@ export function __resetOpenSquareForTests(): void {
 }
 
 export function useOpenSquareIntent(): OpenSquareIntent | null {
+  const current = () => (pending?.eventId === EVENT_ID ? pending : null);
   return useSyncExternalStore(
     (l) => (listeners.add(l), () => listeners.delete(l)),
-    () => pending,
-    () => pending,
+    current,
+    current,
   );
 }

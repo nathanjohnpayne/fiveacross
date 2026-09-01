@@ -1,7 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { render, renderHook, act } from '@testing-library/react';
 import SuggestPanelBridge from './SuggestPanelBridge';
-import { requestOpenSuggestPanel, __resetOpenSuggestPanelForTests } from '../hooks/useOpenSuggestPanel';
+import {
+  requestOpenSuggestPanel,
+  __resetOpenSuggestPanelForTests,
+  useOpenSuggestPanelIntent,
+} from '../hooks/useOpenSuggestPanel';
+
+const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
+
+vi.mock('../firebase', () => ({
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 
 // #559, Codex P2 on PR #845 round 4: under `BrowserRouter`, `useNavigate()`
 // returns a NEW function identity once the pathname changes — so the SAME
@@ -16,6 +28,7 @@ vi.mock('react-router', () => ({
 }));
 
 beforeEach(() => {
+  eventScope.eventId = 'event-a';
   callIndex = 0;
   __resetOpenSuggestPanelForTests();
   navFns.forEach((f) => f.mockClear());
@@ -44,5 +57,38 @@ describe('SuggestPanelBridge (#559)', () => {
     render(<SuggestPanelBridge />);
     const totalNavigateCalls = navFns.reduce((n, f) => n + f.mock.calls.length, 0);
     expect(totalNavigateCalls).toBe(0);
+  });
+
+  it('returns neutral instead of exposing an Event A intent while Event B is active', () => {
+    const view = renderHook(() => useOpenSuggestPanelIntent());
+
+    act(() => requestOpenSuggestPanel());
+    expect(view.result.current).toBe(true);
+
+    eventScope.eventId = 'event-b';
+    view.rerender();
+    expect(view.result.current).toBe(false);
+
+    act(() => requestOpenSuggestPanel());
+    expect(view.result.current).toBe(true);
+
+    eventScope.eventId = 'event-a';
+    view.rerender();
+    expect(view.result.current).toBe(false);
+  });
+
+  it('does not consume a queued Event A intent as navigation for Event B', () => {
+    act(() => requestOpenSuggestPanel());
+    eventScope.eventId = 'event-b';
+
+    const view = render(<SuggestPanelBridge />);
+    view.rerender(<SuggestPanelBridge />);
+
+    expect(navFns.reduce((n, f) => n + f.mock.calls.length, 0)).toBe(0);
+
+    eventScope.eventId = 'event-a';
+    view.rerender(<SuggestPanelBridge />);
+
+    expect(navFns.reduce((n, f) => n + f.mock.calls.length, 0)).toBe(1);
   });
 });

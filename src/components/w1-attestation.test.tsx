@@ -33,7 +33,7 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
-vi.mock('../firebase', () => ({ auth: mocks.auth, googleProvider: {} }));
+vi.mock('../firebase', () => ({ auth: mocks.auth, EVENT_ID: 'test-event', googleProvider: {} }));
 vi.mock('../data/api', () => ({
   ensureUserProfile: mocks.ensureUserProfile,
   attestAdult: mocks.attestAdult,

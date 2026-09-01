@@ -47,8 +47,11 @@ export async function uploadProofMedia(
   kind: 'photo' | 'audio',
   // #211: strip EXIF/GPS from photo proofs so a library pick's geotags never
   // leave the phone. Default true (event `stripPhotoExif`); inert for audio.
-  opts: { stripExif?: boolean } = {},
+  opts: { stripExif?: boolean; eventId?: string } = {},
 ): Promise<{ path: string; url: string }> {
+  // `EVENT_ID` is a live binding. Capture the action's scope before image
+  // decoding or any other await so a delayed Event A upload cannot land under B.
+  const eventId = opts.eventId ?? EVENT_ID;
   const stripExif = opts.stripExif ?? true;
   let payload: Blob = blob;
   if (kind === 'photo') {
@@ -64,7 +67,7 @@ export async function uploadProofMedia(
   }
   const { ext, contentType } =
     kind === 'photo' ? { ext: 'jpg', contentType: 'image/jpeg' } : audioExtAndContentType(payload.type);
-  const path = `proofs/${EVENT_ID}/${uid}/${proofId}.${ext}`;
+  const path = `proofs/${eventId}/${uid}/${proofId}.${ext}`;
   const r = ref(storage, path);
   // #363: without an explicit cacheControl, Firebase Storage serves media as
   // `private, max-age=0` and the Feed refetches every photo on every visit.
