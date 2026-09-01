@@ -67,7 +67,7 @@ The sixth hub door (`Megaphone` icon, no badge) in `AdminHub.tsx`; `'messages'` 
 
 ### Card-tab banner (`NoticeBanner.tsx`)
 
-While a Notice is pinned, the Card tab shows it once as a dismissible banner (✕) above the Board (mounted in `App.tsx`'s `card` page). Dismissal is PER-DEVICE—`localStorage`, keyed `gcb.notice.<id>.dismissedAt`, mirroring the CoachOverlay / InstallPrompt pattern (read/write fall open on a storage error)—and hides ONLY the banner; the Feed copy stays for latecomers. Of the pinned Notices (newest-first), the banner shows the newest one this device has not dismissed.
+While a Notice is pinned, the Card tab shows it once as a dismissible banner (✕) above the Board (mounted in `App.tsx`'s `card` page). Dismissal is PER-DEVICE and PER-EVENT—`localStorage`, keyed `gcb.notice.<eventId>.<noticeId>.dismissedAt`, mirroring the CoachOverlay / InstallPrompt pattern (read/write fall open on a storage error)—and hides ONLY that Event's banner; the Feed copy stays for latecomers. The in-memory banner state resets with the Event scope. Of the active Event's pinned Notices (newest-first), the banner shows the newest one this device has not dismissed there.
 
 ## Feed merge (`mergeFeed`, `src/hooks/useData.ts`)
 
@@ -76,7 +76,7 @@ While a Notice is pinned, the Card tab shows it once as a dismissible banner (�
 ## Decisions (from the ticket, resolved)
 
 - **Name**—"Notice" (glossary-distinct from Moment).
-- **Dismissal persistence**—per-device `localStorage` (zero schema, matches theme/coach persistence; an Event-length product favors local over per-user Firestore).
+- **Dismissal persistence**—per-device, per-Event `localStorage` (zero schema, matches theme/coach persistence; an Event-length product favors local over per-user Firestore without letting one Event's notice id dismiss another's).
 - **Multiple pins**—allowed; newest pinned first in both the Feed masthead and the banner selection.
 - **First-Notice copy**—"Final stretch 🏁" / the final-days body, posted through the shipped UI (the feature's own acceptance test), not seeded by script.
 

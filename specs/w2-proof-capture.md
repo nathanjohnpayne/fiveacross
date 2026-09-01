@@ -11,6 +11,8 @@ Every claim below maps to a real assertion. Layers and runners: `src/data/w2-pro
 
 ## Proof capture: photo, audio, and text all post to the Feed (ADR 0002)
 
+**Event-scope amendment (#807).** `attachProof` captures the initiating Event before the first media upload or transaction await and passes it through the Storage path, proof/board/player refs, tally writes, and analytics request. `uploadProofMedia` likewise captures its default Event before image decoding. A photo/audio conversion started in A may finish in A after the app switches to B, but it can never upload or attach under B.
+
 - A photo Proof uploads its media (`uploadProofMedia(uid, proofId, blob, 'photo')`) and writes an `active`, Feed-visible proof doc carrying the Player's `displayName`, the Prompt `itemText`, `type: 'photo'`, a numeric `createdAt` (the field the Feed sorts on), `reportCount: 0`, and the server-only moderation fields left null (`visionFlag`, `thumbURL`); the backing cell is marked-confirmed and references the proof—`src/data/w2-proof-capture.test.ts`.
 - A text Proof uploads no media (`storagePath`/`mediaURL` null) and carries the callout text—`src/data/w2-proof-capture.test.ts`.
 - An audio Proof uploads a clip and writes `type: 'audio'`—`src/data/w2-proof-capture.test.ts`. The uploaded extension/Content-Type follow the recording browser's ACTUAL MediaRecorder output (`.webm` where the platform supports WebM/Opus, `.m4a` where it does not—iOS Safari records MP4/AAC only, #295), never a hardcoded `.webm`; see `src/data/w2-audio-mimetype.test.ts` and `src/components/w2-proof-capture.test.tsx`.
