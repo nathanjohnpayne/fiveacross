@@ -8,18 +8,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  initializeApp: vi.fn(),
+  deleteApp: vi.fn(),
+  initializeAuth: vi.fn(),
+  connectAuthEmulator: vi.fn(),
+  inMemoryPersistence: { type: 'NONE' },
   httpsCallable: vi.fn(),
   signInWithCustomToken: vi.fn(),
-  signOut: vi.fn(),
+  updateCurrentUser: vi.fn(),
   attestAdult: vi.fn(),
+  primaryApp: { options: { apiKey: 'test-api-key', projectId: 'test-project' } },
+  primaryAuth: {
+    authStateReady: vi.fn(),
+    currentUser: null as unknown,
+    emulatorConfig: null as unknown,
+    tenantId: null as string | null,
+  },
+  persistedSession: { user: null as unknown },
 }));
 
+vi.mock('firebase/app', () => ({
+  initializeApp: mocks.initializeApp,
+  deleteApp: mocks.deleteApp,
+}));
 vi.mock('firebase/functions', () => ({ httpsCallable: mocks.httpsCallable }));
 vi.mock('firebase/auth', () => ({
+  initializeAuth: mocks.initializeAuth,
+  connectAuthEmulator: mocks.connectAuthEmulator,
+  inMemoryPersistence: mocks.inMemoryPersistence,
   signInWithCustomToken: mocks.signInWithCustomToken,
-  signOut: mocks.signOut,
+  updateCurrentUser: mocks.updateCurrentUser,
 }));
-vi.mock('../firebase', () => ({ auth: {}, functions: {} }));
+vi.mock('../firebase', () => ({ app: mocks.primaryApp, auth: mocks.primaryAuth, functions: {} }));
 vi.mock('../data/api', () => ({ attestAdult: mocks.attestAdult }));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
@@ -57,18 +77,59 @@ function callables(impl: Record<string, (payload: unknown) => Promise<{ data: un
   });
 }
 
+/** Model the installed SDK: the target Auth is persisted before sign-in resolves. */
+function firebaseSignInResult(targetAuth: unknown, user: unknown): { user: unknown } {
+  (targetAuth as { currentUser: unknown }).currentUser = user;
+  if (targetAuth === mocks.primaryAuth) mocks.persistedSession.user = user;
+  return { user };
+}
+
+function deferredFirebaseSignIn() {
+  let settle: (user: unknown) => void = () => {
+    throw new Error('sign-in has not started');
+  };
+  return {
+    implementation: (targetAuth: unknown) =>
+      new Promise((resolve) => {
+        settle = (user) => resolve(firebaseSignInResult(targetAuth, user));
+      }),
+    land: (user: unknown) => settle(user),
+  };
+}
+
 beforeEach(() => {
   sessionStorage.clear();
   vi.stubGlobal('localStorage', memoryStorage());
+  mocks.initializeApp.mockReset().mockImplementation((options: unknown, name: string) => ({ name, options }));
+  mocks.deleteApp.mockReset().mockResolvedValue(undefined);
+  mocks.initializeAuth.mockReset().mockImplementation((isolatedApp: unknown, deps: unknown) => ({
+    app: isolatedApp,
+    currentUser: null,
+    emulatorConfig: null,
+    tenantId: null,
+    persistence: (deps as { persistence: unknown }).persistence,
+  }));
+  mocks.connectAuthEmulator.mockReset();
   mocks.httpsCallable.mockReset();
-  mocks.signInWithCustomToken.mockReset().mockResolvedValue({ user: { uid: 'u1' } });
-  mocks.signOut.mockReset().mockResolvedValue(undefined);
+  mocks.signInWithCustomToken.mockReset().mockImplementation(async (targetAuth: unknown) => {
+    return firebaseSignInResult(targetAuth, { uid: 'u1' });
+  });
+  mocks.updateCurrentUser.mockReset().mockImplementation(async (targetAuth: unknown, user: unknown) => {
+    (targetAuth as { currentUser: unknown }).currentUser = user;
+    if (targetAuth === mocks.primaryAuth) mocks.persistedSession.user = user;
+  });
   mocks.attestAdult.mockReset().mockResolvedValue(undefined);
+  mocks.primaryAuth.authStateReady.mockReset().mockResolvedValue(undefined);
+  mocks.primaryAuth.currentUser = null;
+  mocks.primaryAuth.emulatorConfig = null;
+  mocks.primaryAuth.tenantId = null;
+  mocks.persistedSession.user = null;
   consumeHandoffFailure();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe('mintAuthHandoff', () => {
@@ -137,8 +198,59 @@ describe('completeAuthHandoff', () => {
       transactionVerifier: 'V'.repeat(43),
       origin: ORIGIN,
     });
-    expect(mocks.signInWithCustomToken).toHaveBeenCalledWith({}, 'ct-1');
+    expect(mocks.signInWithCustomToken).toHaveBeenCalledWith(
+      expect.objectContaining({ persistence: mocks.inMemoryPersistence }),
+      'ct-1',
+    );
+    expect(mocks.updateCurrentUser).toHaveBeenCalledWith(mocks.primaryAuth, { uid: 'u1' });
+    expect(mocks.deleteApp).toHaveBeenCalledOnce();
     expect(consumeHandoffFailure()).toBeNull();
+  });
+
+  it('mirrors the primary tenant and Auth Emulator before sign-in in an e2e build', async () => {
+    const emulator = {
+      protocol: 'http',
+      host: '127.0.0.1',
+      port: 9099,
+      options: { disableWarnings: true },
+    };
+    vi.stubEnv('MODE', 'e2e');
+    vi.stubEnv('VITE_FIREBASE_PROJECT_ID', 'demo-test');
+    mocks.primaryAuth.tenantId = 'tenant-1';
+    mocks.primaryAuth.emulatorConfig = emulator;
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+
+    const isolatedAuth = mocks.initializeAuth.mock.results[0]?.value as { tenantId: string | null };
+    expect(mocks.initializeAuth).toHaveBeenCalledWith(expect.anything(), {
+      persistence: mocks.inMemoryPersistence,
+      popupRedirectResolver: undefined,
+    });
+    expect(isolatedAuth.tenantId).toBe('tenant-1');
+    expect(mocks.connectAuthEmulator).toHaveBeenCalledWith(
+      isolatedAuth,
+      'http://127.0.0.1:9099',
+      emulator.options,
+    );
+    expect(mocks.connectAuthEmulator.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.signInWithCustomToken.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it('does not connect the isolated Auth to an emulator outside an e2e build', async () => {
+    mocks.primaryAuth.emulatorConfig = {
+      protocol: 'http',
+      host: '127.0.0.1',
+      port: 9099,
+      options: { disableWarnings: true },
+    };
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.connectAuthEmulator).not.toHaveBeenCalled();
   });
 
   it('persists a collected acknowledgement for the exact user returned by this handoff', async () => {
@@ -188,7 +300,7 @@ describe('completeAuthHandoff', () => {
     mocks.attestAdult.mockRejectedValue(new Error('offline'));
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
     expect(consumeHandoffFailure()).toBeNull();
   });
 
@@ -239,6 +351,17 @@ describe('completeAuthHandoff', () => {
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
   });
 
+  it('fails and deletes the isolated app when the primary session commit rejects', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.updateCurrentUser.mockRejectedValue(new Error('primary persistence failed'));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
+    expect(mocks.persistedSession.user).toBeNull();
+    expect(mocks.deleteApp).toHaveBeenCalledOnce();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
   // Single use is enforced server-side; the client simply must not hold anything
   // that would let it try twice.
   it('cannot be replayed from the client, because the verifier is already gone', async () => {
@@ -278,6 +401,19 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
     expect(readHandoffTransaction(Date.now())).toBeNull();
   });
 
+  it('gives up before exchange when primary Auth never becomes ready', async () => {
+    armTransaction();
+    const exchange = vi.fn();
+    callables({ exchangeAuthHandoff: exchange });
+    mocks.primaryAuth.authStateReady.mockImplementation(() => new Promise(() => {}));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(exchange).not.toHaveBeenCalled();
+    expect(mocks.signInWithCustomToken).not.toHaveBeenCalled();
+    expect(readHandoffTransaction(Date.now())).toBeNull();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
   it('gives up on a sign-in that never settles', async () => {
     armTransaction();
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
@@ -295,7 +431,7 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
       mocks.attestAdult.mockImplementation(() => new Promise(() => {}));
 
       expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(true);
-      expect(mocks.signOut).not.toHaveBeenCalled();
+      expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
       expect(consumeHandoffFailure()).toBeNull();
     },
     150,
@@ -306,11 +442,10 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
   });
 });
 
-// Codex P2, round 1. `bounded` REJECTS, it does not CANCEL — so a slow
-// signInWithCustomToken can still succeed after we have given up. By then
-// main.tsx has mounted the app signed out and the player is on a retry prompt,
-// so a session materialising underneath is either a surprise entry into the app
-// or a race against the second handoff they just started.
+// `bounded` REJECTS, it does not CANCEL. The Firebase SDK persists the Auth it
+// receives before signInWithCustomToken resolves, so the only safe boundary for
+// abandonable work is a secondary Auth whose persistence is memory-only. A
+// timely credential is copied to the primary Auth; a late one never is.
 describe('a timed-out sign-in cannot mutate auth state later', () => {
   function armTransaction() {
     rememberHandoffTransaction({
@@ -322,45 +457,41 @@ describe('a timed-out sign-in cannot mutate auth state later', () => {
     });
   }
 
-  it('signs out an attempt that lands after the bound gave up', async () => {
+  it('keeps an attempt that lands after the bound out of shared auth', async () => {
     armTransaction();
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
-    let land: (v: unknown) => void = () => {};
-    mocks.signInWithCustomToken.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          land = resolve;
-        }),
-    );
+    const lateSignIn = deferredFirebaseSignIn();
+    mocks.signInWithCustomToken.mockImplementation(lateSignIn.implementation);
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
-    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+    expect(mocks.persistedSession.user).toBeNull();
+    expect(mocks.deleteApp).toHaveBeenCalledOnce();
 
     // …and now the abandoned operation completes.
-    land({ user: { uid: 'u1' } });
+    lateSignIn.land({ uid: 'u1' });
     await Promise.resolve();
     await Promise.resolve();
-    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+    expect(mocks.persistedSession.user).toBeNull();
   });
 
-  it('leaves a sign-in that lands inside the bound completely alone', async () => {
+  it('commits a sign-in that lands inside the bound to shared auth', async () => {
     armTransaction();
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.updateCurrentUser).toHaveBeenCalledOnce();
+    expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
   });
 });
 
-// Phase 4b P1. The failure surface invites an immediate retry, so the likely
-// sequence is: attempt 1 times out, the player taps again, attempt 2 SUCCEEDS,
-// and only then does attempt 1's abandoned promise resolve. An unconditional
-// sign-out at that point destroys the good session attempt 2 just established.
-describe('late reconciliation is generation-aware', () => {
+// #913. A module-local generation can serialize retries in one tab but each tab
+// has its own module realm. Firebase persistence is origin-wide, so the proof
+// must use separate module instances and assert the persisted session itself.
+describe('late sign-in isolation is cross-tab safe', () => {
   function armTransaction(acknowledgedAdultContent = false) {
     rememberHandoffTransaction({
       verifier: 'V'.repeat(43),
@@ -371,17 +502,12 @@ describe('late reconciliation is generation-aware', () => {
     });
   }
 
-  it('does NOT sign out when a newer attempt has already succeeded', async () => {
+  it('preserves a newer attempt in the same tab', async () => {
     armTransaction(true);
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
-    let landFirst: (v: unknown) => void = () => {};
-    mocks.signInWithCustomToken.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          landFirst = resolve;
-        }),
-    );
+    const lateSignIn = deferredFirebaseSignIn();
+    mocks.signInWithCustomToken.mockImplementationOnce(lateSignIn.implementation);
 
     // Attempt 1 times out.
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
@@ -389,32 +515,81 @@ describe('late reconciliation is generation-aware', () => {
 
     // The player retries; attempt 2 succeeds.
     armTransaction();
-    mocks.signInWithCustomToken.mockResolvedValue({ user: { uid: 'u1' } });
+    const newerUser = { uid: 'same-user', refreshToken: 'newer-refresh-token' };
+    mocks.signInWithCustomToken.mockImplementationOnce(async (targetAuth: unknown) => {
+      return firebaseSignInResult(targetAuth, newerUser);
+    });
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.persistedSession.user).toBe(newerUser);
 
     // Only NOW does attempt 1's abandoned promise land.
-    landFirst({ user: { uid: 'u1' } });
+    lateSignIn.land({ uid: 'same-user', refreshToken: 'older-refresh-token' });
     await Promise.resolve();
     await Promise.resolve();
-    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.persistedSession.user).toBe(newerUser);
+    expect(mocks.updateCurrentUser).toHaveBeenCalledTimes(1);
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
-  it('still signs out when no newer attempt intervened', async () => {
+  it('leaves shared auth signed out when no newer attempt intervened', async () => {
     armTransaction();
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
-    let land: (v: unknown) => void = () => {};
-    mocks.signInWithCustomToken.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          land = resolve;
-        }),
-    );
+    const lateSignIn = deferredFirebaseSignIn();
+    mocks.signInWithCustomToken.mockImplementation(lateSignIn.implementation);
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
-    land({ user: { uid: 'u1' } });
+    lateSignIn.land({ uid: 'u1' });
     await Promise.resolve();
     await Promise.resolve();
-    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+    expect(mocks.persistedSession.user).toBeNull();
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it('cannot overwrite a newer handoff session established in another tab', async () => {
+    const exchange = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { customToken: 'ct-old' } })
+      .mockResolvedValueOnce({ data: { customToken: 'ct-new' } });
+    callables({ exchangeAuthHandoff: exchange });
+
+    // Each dynamic import after a module reset models a separate tab/module
+    // realm. The mocked persistence remains shared across both.
+    vi.resetModules();
+    const oldTab = await import('./handoffExchange');
+    armTransaction();
+    const oldTabSignIn = deferredFirebaseSignIn();
+    mocks.signInWithCustomToken.mockImplementationOnce(oldTabSignIn.implementation);
+
+    expect(await oldTab.completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+
+    vi.resetModules();
+    const newerTab = await import('./handoffExchange');
+    armTransaction();
+    const newerUser = { uid: 'same-user', refreshToken: 'newer-refresh-token' };
+    mocks.signInWithCustomToken.mockImplementationOnce(async (targetAuth: unknown) => {
+      return firebaseSignInResult(targetAuth, newerUser);
+    });
+    expect(await newerTab.completeAuthHandoff({ code: 'N'.repeat(43), origin: ORIGIN })).toBe(true);
+    expect(mocks.persistedSession.user).toBe(newerUser);
+
+    // Only now does the abandoned operation in the old tab settle. It mutates
+    // its isolated Auth exactly as Firebase does, but cannot touch the shared
+    // Auth session the newer tab committed.
+    oldTabSignIn.land({ uid: 'same-user', refreshToken: 'older-refresh-token' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.signInWithCustomToken).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ persistence: mocks.inMemoryPersistence }),
+      'ct-old',
+    );
+    expect(mocks.signInWithCustomToken).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ persistence: mocks.inMemoryPersistence }),
+      'ct-new',
+    );
+    expect(mocks.persistedSession.user).toBe(newerUser);
+    expect(mocks.updateCurrentUser).toHaveBeenCalledTimes(1);
   });
 });

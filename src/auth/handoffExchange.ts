@@ -9,11 +9,23 @@
  * in tests that never boot Firebase.
  */
 import { httpsCallable } from 'firebase/functions';
-import { signInWithCustomToken, signOut } from 'firebase/auth';
-import { auth, functions } from '../firebase';
+import { deleteApp, initializeApp, type FirebaseApp } from 'firebase/app';
+import {
+  connectAuthEmulator,
+  initializeAuth,
+  inMemoryPersistence,
+  signInWithCustomToken,
+  updateCurrentUser,
+  type Auth,
+} from 'firebase/auth';
+import { app, auth, functions } from '../firebase';
 import { attestAdult } from '../data/api';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
-import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
+import {
+  createVerifier,
+  forgetHandoffTransaction,
+  readHandoffTransaction,
+} from './handoffTransaction';
 
 /**
  * How long the return leg may take before it gives up, in milliseconds.
@@ -32,21 +44,49 @@ import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTrans
  */
 export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 
+function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig']>): string {
+  return `${protocol}://${host}${port === null ? '' : `:${port}`}`;
+}
+
 /**
- * Which completion attempt is the current one.
+ * A one-attempt Auth instance whose state can never enter origin-wide Firebase
+ * persistence (#913).
  *
- * Reconciling a timed-out sign-in cannot be unconditional (Phase 4b P1). The
- * failure surface invites an immediate retry, so the likely sequence is:
- * attempt 1 times out, the player taps again, attempt 2 SUCCEEDS — and only
- * then does attempt 1's abandoned promise resolve. An unconditional
- * `signOut(auth)` at that point destroys the perfectly good session attempt 2
- * just established, which is worse than the race it was meant to close.
- *
- * Every attempt takes a generation on entry. A late reconciliation only touches
- * global auth state if it is still the newest attempt — otherwise the session
- * it would be signing out belongs to somebody else's turn.
+ * `signInWithCustomToken` updates and persists its Auth instance before its
+ * promise resolves. Running an abandonable request against the main `auth`
+ * therefore cannot be repaired safely after timeout: the late operation has
+ * already overwritten any newer cross-tab session before a continuation can
+ * inspect it. The request runs against an in-memory secondary app instead. Only
+ * an in-bound credential is copied to the main Auth via `updateCurrentUser`.
  */
-let attemptGeneration = 0;
+function isolatedHandoffAuth(): { auth: Auth; app: FirebaseApp } {
+  const isolatedApp = initializeApp(app.options, `fa-handoff-${createVerifier()}`);
+  try {
+    const isolatedAuth = initializeAuth(isolatedApp, {
+      persistence: inMemoryPersistence,
+      popupRedirectResolver: undefined,
+    });
+    isolatedAuth.tenantId = auth.tenantId;
+
+    // Keep the same compile-time emulator gate as `src/firebase.ts`. Production
+    // builds fold this branch away, including the connector implementation and
+    // emulator host strings; e2e builds must wire the secondary before sign-in.
+    if (
+      import.meta.env.MODE === 'e2e' &&
+      import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-')
+    ) {
+      const emulator = auth.emulatorConfig;
+      if (emulator !== null) {
+        connectAuthEmulator(isolatedAuth, emulatorUrl(emulator), emulator.options);
+      }
+    }
+
+    return { auth: isolatedAuth, app: isolatedApp };
+  } catch (error) {
+    void deleteApp(isolatedApp).catch(() => {});
+    throw error;
+  }
+}
 
 /**
  * `work`, or a rejection once `ms` has passed.
@@ -111,8 +151,6 @@ export async function completeAuthHandoff(input: {
   /** Overridable so tests do not have to wait out the real bound. */
   timeoutMs?: number;
 }): Promise<boolean> {
-  attemptGeneration += 1;
-  const generation = attemptGeneration;
   const transaction = readHandoffTransaction(input.now ?? Date.now());
   if (transaction === null) {
     forgetHandoffTransaction();
@@ -129,6 +167,20 @@ export async function completeAuthHandoff(input: {
     return false;
   }
 
+  const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
+  try {
+    // `updateCurrentUser` queues behind primary Auth initialization. Settle that
+    // queue under the deadline before any code is spent or isolated sign-in is
+    // started; the later shared-auth commit is then short and deliberately not
+    // raced, because returning failure while it continued would recreate the
+    // late global mutation this isolation exists to prevent.
+    await bounded(auth.authStateReady(), timeoutMs);
+  } catch {
+    forgetHandoffTransaction();
+    recordHandoffFailure('sign-in-failed');
+    return false;
+  }
+
   let customToken: string;
   try {
     const callable = httpsCallable<
@@ -141,7 +193,7 @@ export async function completeAuthHandoff(input: {
         transactionVerifier: transaction.verifier,
         origin: input.origin,
       }),
-      input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS,
+      timeoutMs,
     );
     customToken = result.data.customToken;
   } catch {
@@ -157,35 +209,14 @@ export async function completeAuthHandoff(input: {
     forgetHandoffTransaction();
   }
 
-  // The sign-in is bounded like the exchange, but a bound alone is not enough
-  // here: `bounded` rejects, it does not CANCEL, so a slow
-  // `signInWithCustomToken` can still succeed after we have given up (Codex P2,
-  // round 1). By then `main.tsx` has mounted the app signed out and the player
-  // is looking at a retry prompt — a session materialising underneath that is
-  // either a surprise entry into the app or a race against the second handoff
-  // they just started.
-  //
-  // So a timed-out attempt is explicitly reconciled rather than left running:
-  // if it lands late, sign it straight back out. That makes the outcome
-  // deterministic in both directions — either the handoff completed inside its
-  // bound, or the player is signed out and the retry in front of them is the
-  // real path. Losing a session the player never saw costs one re-sign-in;
-  // letting it appear unannounced costs a race nobody can reproduce.
-  let abandoned = false;
-  const signIn = signInWithCustomToken(auth, customToken);
-  signIn.then(
-    () => {
-      // Only if this attempt is BOTH abandoned and still the newest. A newer
-      // attempt having started means any session now present is its business,
-      // not ours — signing out here would destroy it.
-      if (abandoned && attemptGeneration === generation) void signOut(auth).catch(() => {});
-    },
-    () => {},
-  );
-
+  let isolatedApp: FirebaseApp | null = null;
   try {
-    const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
-    const credential = await bounded(signIn, timeoutMs);
+    const isolated = isolatedHandoffAuth();
+    isolatedApp = isolated.app;
+    const credential = await bounded(signInWithCustomToken(isolated.auth, customToken), timeoutMs);
+    // This is the only shared-auth mutation. A credential that arrives after
+    // the bound never reaches this line, even if another tab has since signed in.
+    await updateCurrentUser(auth, credential.user);
     if (transaction.acknowledgedAdultContent) {
       try {
         await bounded(attestAdult(credential.user), timeoutMs);
@@ -193,13 +224,14 @@ export async function completeAuthHandoff(input: {
         // Authentication already succeeded. A failed acknowledgement write
         // leaves the settled profile unstamped, so AuthProvider's existing
         // re-prompt safely collects it again instead of treating sign-in as
-        // failed or signing the new session back out.
+        // failed after the shared session was already committed.
       }
     }
     return true;
   } catch {
-    abandoned = true;
     recordHandoffFailure('sign-in-failed');
     return false;
+  } finally {
+    if (isolatedApp !== null) await deleteApp(isolatedApp).catch(() => {});
   }
 }
