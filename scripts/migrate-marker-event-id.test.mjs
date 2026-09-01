@@ -159,6 +159,22 @@ describe("marker Event-id migration pure contract", () => {
     ).toThrow(/before 2100/);
   });
 
+  it.each([
+    "2027-02-29T00:00:00Z",
+    "2028-02-30T00:00:00Z",
+    "2026-09-31T00:00:00Z",
+    "2026-09-02T24:00:00Z",
+  ])("rejects normalized invalid calendar timestamp %s", (raw) => {
+    expect(() => parseAcceptLegacyUntil(raw, NOW)).toThrow(
+      /exact ISO calendar timestamp/,
+    );
+  });
+
+  it("accepts a valid leap day with an explicit offset", () => {
+    const raw = "2028-02-29T12:34:56.7+05:30";
+    expect(parseAcceptLegacyUntil(raw, NOW)).toBe(Date.parse(raw));
+  });
+
   it("accepts only the exact Event/Tally marker path", () => {
     expect(parseMarkerPath("events/a/tally/prompt/markers/user")).toEqual({
       eventId: "a",

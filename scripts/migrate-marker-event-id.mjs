@@ -54,13 +54,36 @@ export function parseAcceptLegacyUntil(raw, now = Date.now()) {
   // Date.parse accepts friendly prose such as "tomorrow" in some runtimes.
   // Require an ISO date/time shape as well as a finite parse so the reviewed
   // command names the same instant on every machine.
-  if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(?:Z|[+-]\d{2}:\d{2})$/.exec(
       raw,
-    )
-  ) {
+    );
+  if (!match) {
     throw new Error(
       "marker-event-id: --accept-legacy-until must be an ISO timestamp.",
+    );
+  }
+  const [, year, month, day, hour, minute, second, fraction = ""] = match;
+  const millisecond = Number(fraction.padEnd(3, "0"));
+  const calendarCheck = new Date(0);
+  calendarCheck.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  calendarCheck.setUTCHours(
+    Number(hour),
+    Number(minute),
+    Number(second),
+    millisecond,
+  );
+  if (
+    calendarCheck.getUTCFullYear() !== Number(year) ||
+    calendarCheck.getUTCMonth() !== Number(month) - 1 ||
+    calendarCheck.getUTCDate() !== Number(day) ||
+    calendarCheck.getUTCHours() !== Number(hour) ||
+    calendarCheck.getUTCMinutes() !== Number(minute) ||
+    calendarCheck.getUTCSeconds() !== Number(second) ||
+    calendarCheck.getUTCMilliseconds() !== millisecond
+  ) {
+    throw new Error(
+      "marker-event-id: --accept-legacy-until must be an exact ISO calendar timestamp.",
     );
   }
   const value = Date.parse(raw);
