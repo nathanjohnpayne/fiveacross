@@ -1,6 +1,8 @@
 // @vitest-environment node
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  assertReviewedDeployCredential,
   assertReviewedMainCheckout,
   BODEGA_EVENT_ID,
   BODEGA_HOSTS,
@@ -9,6 +11,12 @@ import {
   LEGACY_HOST,
   planCanonicalHostMigration,
 } from './migrate-bodega-canonical-host.mjs';
+
+const reviewedDeployEnvironment = () => ({
+  GOOGLE_APPLICATION_CREDENTIALS: '/tmp/fiveacross-firebase-deployer.json',
+  OP_PREFLIGHT_FIREBASE_SA_TMPFILE: '/tmp/fiveacross-firebase-deployer.json',
+  OP_PREFLIGHT_FIREBASE_PROJECT: 'fiveacross',
+});
 
 const canonicalDocuments = () => [
   {
@@ -109,6 +117,20 @@ function executionFixture({
 }
 
 describe('Bodega canonical-host migration plan', () => {
+  it('keeps normative analytics examples on the migrated canonical host', () => {
+    const pathAddressingSpec = readFileSync(
+      new URL('../specs/path-addressing-and-root.md', import.meta.url),
+      'utf8',
+    );
+
+    expect(pathAddressingSpec).toContain(
+      'reports `https://bodega-bay.fiveacross.app/feed`',
+    );
+    expect(pathAddressingSpec).toContain(
+      'becomes `bodega-bay.fiveacross.app/feed`',
+    );
+  });
+
   it('pins the complete serving inventory and exact two-field correction', () => {
     expect(BODEGA_HOSTS).toEqual([CANONICAL_HOST, LEGACY_HOST, 'fiveacross.app']);
 
@@ -186,6 +208,58 @@ describe('Bodega canonical-host migration plan', () => {
 });
 
 describe('Bodega canonical-host migration execution', () => {
+  it('accepts only the exact Five Across deployer service-account identity', () => {
+    const credential = {
+      type: 'service_account',
+      project_id: 'fiveacross',
+      client_email: 'firebase-deployer@fiveacross.iam.gserviceaccount.com',
+    };
+    const readCredential = vi.fn(() => JSON.stringify(credential));
+
+    expect(
+      assertReviewedDeployCredential({
+        environment: reviewedDeployEnvironment(),
+        readCredential,
+      }),
+    ).toBe('/tmp/fiveacross-firebase-deployer.json');
+    expect(readCredential).toHaveBeenCalledWith('/tmp/fiveacross-firebase-deployer.json', 'utf8');
+  });
+
+  it.each([
+    ['invalid JSON', '{'],
+    [
+      'ambient user ADC',
+      JSON.stringify({
+        type: 'authorized_user',
+        project_id: 'fiveacross',
+        client_email: 'firebase-deployer@fiveacross.iam.gserviceaccount.com',
+      }),
+    ],
+    [
+      'another Firebase project',
+      JSON.stringify({
+        type: 'service_account',
+        project_id: 'gaycruisebingo',
+        client_email: 'firebase-deployer@gaycruisebingo.iam.gserviceaccount.com',
+      }),
+    ],
+    [
+      'another service account',
+      JSON.stringify({
+        type: 'service_account',
+        project_id: 'fiveacross',
+        client_email: 'different@fiveacross.iam.gserviceaccount.com',
+      }),
+    ],
+  ])('refuses %s as an apply credential', (_label, rawCredential) => {
+    expect(() =>
+      assertReviewedDeployCredential({
+        environment: reviewedDeployEnvironment(),
+        readCredential: () => rawCredential,
+      }),
+    ).toThrow('exact Five Across deploy preflight credential');
+  });
+
   it.each([
     ["current branch is 'codex/unreviewed', not 'main'"],
     ['local main does not exactly match origin/main'],
@@ -233,6 +307,21 @@ describe('Bodega canonical-host migration execution', () => {
     expect(initializeFirestore).not.toHaveBeenCalled();
   });
 
+  it('refuses apply without the exact Five Across deploy-preflight credential before Firestore init', async () => {
+    const initializeFirestore = vi.fn();
+
+    await expect(
+      executeCanonicalHostMigration({
+        apply: true,
+        initializeFirestore,
+        verifyReviewedSource: vi.fn(),
+        environment: {},
+      }),
+    ).rejects.toThrow('Five Across deploy preflight');
+
+    expect(initializeFirestore).not.toHaveBeenCalled();
+  });
+
   it('keeps dry-run read-only while reporting the exact planned correction', async () => {
     const fixture = executionFixture();
     const verifyReviewedSource = vi.fn();
@@ -268,12 +357,16 @@ describe('Bodega canonical-host migration execution', () => {
         apply: true,
         initializeFirestore: fixture.initializeFirestore,
         verifyReviewedSource,
+        verifyReviewedCredential: vi.fn(),
         environment: {},
         log: vi.fn(),
       }),
     ).resolves.toEqual({ changed: true, wrote: true });
 
     expect(verifyReviewedSource).toHaveBeenCalledOnce();
+    expect(fixture.initializeFirestore).toHaveBeenCalledWith({
+      allowLocalServiceAccountKey: false,
+    });
     expect(fixture.db.getAll).toHaveBeenCalledTimes(2);
     expect(fixture.db.runTransaction).toHaveBeenCalledOnce();
     const transaction = fixture.transactions[0];
@@ -296,6 +389,7 @@ describe('Bodega canonical-host migration execution', () => {
         apply: true,
         initializeFirestore: fixture.initializeFirestore,
         verifyReviewedSource: vi.fn(),
+        verifyReviewedCredential: vi.fn(),
         environment: {},
         log: vi.fn(),
       }),
@@ -315,6 +409,7 @@ describe('Bodega canonical-host migration execution', () => {
         apply: true,
         initializeFirestore: fixture.initializeFirestore,
         verifyReviewedSource: vi.fn(),
+        verifyReviewedCredential: vi.fn(),
         environment: {},
         log,
       }),
@@ -334,6 +429,7 @@ describe('Bodega canonical-host migration execution', () => {
         apply: true,
         initializeFirestore: fixture.initializeFirestore,
         verifyReviewedSource: vi.fn(),
+        verifyReviewedCredential: vi.fn(),
         environment: {},
         log: vi.fn(),
       }),

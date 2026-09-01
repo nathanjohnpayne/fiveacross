@@ -24,6 +24,7 @@
 //   npm run migrate:bodega-canonical-host
 //   npm run migrate:bodega-canonical-host -- --apply
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { initFirestore } from './seed.mjs';
 
@@ -214,21 +215,68 @@ export function assertReviewedMainCheckout({
   );
 }
 
+export function assertReviewedDeployCredential({
+  environment = process.env,
+  readCredential = readFileSync,
+} = {}) {
+  const credentialPath = environment.GOOGLE_APPLICATION_CREDENTIALS;
+  const preflightPath = environment.OP_PREFLIGHT_FIREBASE_SA_TMPFILE;
+  const preflightProject = environment.OP_PREFLIGHT_FIREBASE_PROJECT;
+  if (
+    !credentialPath ||
+    !preflightPath ||
+    credentialPath !== preflightPath ||
+    preflightProject !== BODEGA_PROJECT_ID
+  ) {
+    throw new Error(
+      'bodega-canonical-host: --apply requires the exact Five Across deploy preflight credential. ' +
+      'No write performed.',
+    );
+  }
+
+  let credential;
+  try {
+    credential = JSON.parse(readCredential(credentialPath, 'utf8'));
+  } catch {
+    credential = null;
+  }
+  if (
+    credential?.type !== 'service_account' ||
+    credential?.project_id !== BODEGA_PROJECT_ID ||
+    credential?.client_email !==
+      `firebase-deployer@${BODEGA_PROJECT_ID}.iam.gserviceaccount.com`
+  ) {
+    throw new Error(
+      'bodega-canonical-host: --apply requires the exact Five Across deploy preflight credential. ' +
+        'No write performed.',
+    );
+  }
+  return credentialPath;
+}
+
 export async function executeCanonicalHostMigration({
   apply,
   initializeFirestore = initFirestore,
   verifyReviewedSource = assertReviewedMainCheckout,
+  verifyReviewedCredential = assertReviewedDeployCredential,
   environment = process.env,
   log = console.log,
 } = {}) {
-  if (apply) verifyReviewedSource();
+  if (apply) {
+    verifyReviewedSource();
+    verifyReviewedCredential({ environment });
+  }
 
   // Pin both values consumed by seed.mjs's shared Admin-SDK initializer. An
   // ambient project or Event from another maintenance task cannot redirect this
   // migration, and the returned identity is checked before the first read.
   environment.GOOGLE_CLOUD_PROJECT = BODEGA_PROJECT_ID;
   environment.VITE_EVENT_ID = BODEGA_EVENT_ID;
-  const { db, projectId, EVENT_ID } = await initializeFirestore();
+  const { db, projectId, EVENT_ID } = await initializeFirestore({
+    // `--apply` already proved GOOGLE_APPLICATION_CREDENTIALS is the reviewed
+    // preflight file. Never let a repo-root key silently take precedence.
+    allowLocalServiceAccountKey: !apply,
+  });
   if (projectId !== BODEGA_PROJECT_ID || EVENT_ID !== BODEGA_EVENT_ID) {
     throw new Error(
       `bodega-canonical-host: refusing destination ${projectId || '(none)'}/${EVENT_ID || '(none)'}.`,

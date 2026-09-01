@@ -156,10 +156,10 @@ const BRANDS: Record<string, EditionBrand> = {
     appShortName: 'Vacay Bingo',
     appDescription: 'Live multiplayer bingo for the trip.',
     metaDescription: 'Live multiplayer bingo for the trip.',
-    // The Event canonical host, not the vacaybingo.com apex: the apex serves
-    // nothing today, and og:url is the one tag whose per-Event truth the #546
-    // Worker will own — see the field note on `EditionBrand.ogUrl`.
-    ogUrl: 'https://bodega-bay.vacaybingo.com/',
+    // The Event canonical host, not either Vacay alias: og:url is the one tag
+    // whose per-Event truth the #546 Worker will own — see the field note on
+    // `EditionBrand.ogUrl`.
+    ogUrl: 'https://bodega-bay.fiveacross.app/',
     // Served by the fiveacross project (ADR 0008), which hosts every Five
     // Across Edition — vacaybingo.com hostnames included.
     ogImage: 'https://fiveacross.web.app/og-vacay.png',

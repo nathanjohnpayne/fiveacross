@@ -130,6 +130,9 @@ describe('Five Across production origin', () => {
       const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.webmanifest'), 'utf8'));
       expect(html).toContain('<title>Vacay Bingo</title>');
       expect(html).toContain('content="Vacay Bingo"');
+      expect(html).toContain(
+        'property="og:url" content="https://bodega-bay.fiveacross.app/"',
+      );
       expect(manifest).toMatchObject({ name: 'Vacay Bingo', short_name: 'Vacay Bingo' });
 
       const bundledJavaScript = readdirSync(join(outDir, 'assets'))

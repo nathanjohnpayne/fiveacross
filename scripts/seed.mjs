@@ -433,7 +433,7 @@ export function verifySeedPool(
 // script runs directly. The specifiers are computed + @vite-ignore so Vite (which transforms
 // this module when a test imports the pure payload/verify builders) never tries
 // to resolve them at transform time — Node resolves them normally at run time.
-export async function initFirestore() {
+export async function initFirestore({ allowLocalServiceAccountKey = true } = {}) {
   const { readFileSync, existsSync } = await import('node:fs');
   const adminAppModule = 'firebase-admin/app';
   const adminFirestoreModule = 'firebase-admin/firestore';
@@ -494,7 +494,7 @@ export async function initFirestore() {
 
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
   initializeApp({
-    ...(existsSync(keyUrl)
+    ...(allowLocalServiceAccountKey && existsSync(keyUrl)
       ? { credential: cert(JSON.parse(readFileSync(keyUrl))) }
       : { credential: applicationDefault() }),
     ...(projectId ? { projectId } : {}),
