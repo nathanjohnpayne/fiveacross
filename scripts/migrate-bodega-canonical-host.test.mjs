@@ -123,12 +123,32 @@ describe('Bodega canonical-host migration plan', () => {
       new URL('../specs/path-addressing-and-root.md', import.meta.url),
       'utf8',
     );
+    const rulesContract = readFileSync(
+      new URL('../tests/rules/hostnames-lookup.test.ts', import.meta.url),
+      'utf8',
+    );
+    const ogRenderer = readFileSync(
+      new URL('./og/render-og-editions.mjs', import.meta.url),
+      'utf8',
+    );
+    const wireframes = readFileSync(
+      new URL('../plans/daily-cards-wireframes.html', import.meta.url),
+      'utf8',
+    );
 
     expect(pathAddressingSpec).toContain(
       'reports `https://bodega-bay.fiveacross.app/feed`',
     );
     expect(pathAddressingSpec).toContain(
       'becomes `bodega-bay.fiveacross.app/feed`',
+    );
+    expect(rulesContract).toContain("const CANONICAL = 'bodega-bay.fiveacross.app';");
+    expect(rulesContract).toContain("const ALIAS = 'bodega-bay.vacaybingo.com';");
+    expect(ogRenderer).toContain(
+      '(bodega-bay.fiveacross.app) until the #546 Worker rewrites it per',
+    );
+    expect(wireframes).toContain(
+      '<code>bodega-bay.fiveacross.app</code>) until the #546 Worker owns it per hostname',
     );
   });
 
