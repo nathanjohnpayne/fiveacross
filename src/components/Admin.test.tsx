@@ -252,7 +252,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     fireEvent.click(within(rendered).getByRole('checkbox'));
     fireEvent.click(within(rendered).getByRole('button', { name: 'Approve' }));
 
-    expect(H.setItemSpicy).toHaveBeenCalledWith('p1', true);
+    expect(H.setItemSpicy).toHaveBeenCalledWith('p1', true, 'test-event');
     expect(H.approveItem).toHaveBeenCalledWith(
       { ...row, pool: 'main', spicy: true },
       'admin-uid',
@@ -346,7 +346,7 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
 
     const row = screen.getByText('Toggle me').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('checkbox'));
-    expect(H.setItemSpicy).toHaveBeenCalledWith('p1', true);
+    expect(H.setItemSpicy).toHaveBeenCalledWith('p1', true, 'test-event');
   });
 });
 

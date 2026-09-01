@@ -415,13 +415,14 @@ export default function ReviewQueue({
     Object.hasOwn(optimisticSpicy, it.id) ? optimisticSpicy[it.id].value : it.spicy === true;
   const isSpicy = (it: ItemDoc) => difficultyFor(it) === 'main' && selectedSpicyFor(it);
   const toggleSpicy = async (id: string, spicy: boolean) => {
+    const ownedEventId = EVENT_ID;
     const requestId = ++spicyRequestSequence.current;
     setOptimisticSpicy((prev) => ({
       ...prev,
       [id]: { value: spicy, requestId },
     }));
     try {
-      const committedRevision = await setItemSpicy(id, spicy);
+      const committedRevision = await setItemSpicy(id, spicy, ownedEventId);
       setOptimisticSpicy((prev) => {
         const current = prev[id];
         if (current?.requestId !== requestId) return prev;

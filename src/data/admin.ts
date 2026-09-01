@@ -347,9 +347,15 @@ export const rejectItem = (id: string, adminUid: string) =>
 // as authorship. Legacy rows have no revision and therefore start at 0. `null`
 // means the authoritative row was missing or no longer eligible, so no write
 // occurred and the caller must drop any optimistic overlay.
-export async function setItemSpicy(id: string, spicy: boolean): Promise<number | null> {
+export async function setItemSpicy(
+  id: string,
+  spicy: boolean,
+  eventId: string = EVENT_ID,
+): Promise<number | null> {
+  // Firestore can invoke or retry the callback after the app has switched
+  // Events. Resolve the acted document once, before entering that lifecycle.
+  const ref = item(id, eventId);
   return runTransaction(db, async (tx) => {
-    const ref = item(id);
     const snap = await tx.get(ref);
     if (!snap.exists()) return null;
     const row = snap.data() as Partial<ItemDoc>;

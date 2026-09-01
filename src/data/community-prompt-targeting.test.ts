@@ -21,7 +21,16 @@ type Ref = {
   withConverter: () => Ref;
 };
 
-const { addDocMock, updateMock, eventDataMock, getDocMock, txGetMock, itemDocs, eventScope } =
+const {
+  addDocMock,
+  updateMock,
+  eventDataMock,
+  getDocMock,
+  txGetMock,
+  itemDocs,
+  eventScope,
+  transactionGate,
+} =
   vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
   updateMock: vi.fn(),
@@ -33,6 +42,7 @@ const { addDocMock, updateMock, eventDataMock, getDocMock, txGetMock, itemDocs, 
   // the stale-approval guard, so these two can deliberately disagree in tests.
   itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
   eventScope: { eventId: 'med-2026' },
+  transactionGate: { beforeCallback: null as Promise<void> | null },
 }));
 
 /** Seed the stored item a later `approveItems` will read. */
@@ -85,11 +95,13 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     // The transaction seam approval routing depends on: the callback reads the
     // Event through `tx.get` (the schedule read set), reads each ITEM through
     // `tx.get` (the stale guard's authoritative state) and writes only items.
-    runTransaction: (_db: unknown, fn: (tx: unknown) => Promise<unknown>) =>
-      fn({
+    runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
+      if (transactionGate.beforeCallback) await transactionGate.beforeCallback;
+      return fn({
         get: (ref: Ref) => txGetMock(ref),
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
-      }),
+      });
+    },
   };
 });
 
@@ -117,6 +129,7 @@ const openDay = (index: number, over: Partial<TargetableDay> = {}): TargetableDa
 beforeEach(() => {
   vi.clearAllMocks();
   eventScope.eventId = 'med-2026';
+  transactionGate.beforeCallback = null;
   for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
   txGetMock.mockImplementation((ref: Ref) => {
@@ -744,5 +757,27 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       spicyRevision: 8,
     });
     expect(revision).toBe(8);
+  });
+
+  it('keeps a spicy correction in its acted Event when the transaction callback starts after A to B', async () => {
+    putItem('p1', {
+      status: 'pending',
+      pool: 'main',
+      spicy: false,
+    });
+    let releaseTransaction!: () => void;
+    transactionGate.beforeCallback = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+
+    const correction = setItemSpicy('p1', true, 'med-2026');
+    eventScope.eventId = 'pacific-2026';
+    releaseTransaction();
+
+    await expect(correction).resolves.toBe(1);
+    expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+      spicy: true,
+      spicyRevision: 1,
+    });
   });
 });
