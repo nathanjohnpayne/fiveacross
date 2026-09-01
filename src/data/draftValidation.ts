@@ -31,17 +31,14 @@ import { validateSlug } from '../slug';
 // The SAME bound `parseEventDraft` enforces on the stored blob, so the
 // in-memory gate and the persistence gate cannot drift apart.
 import { MAX_PROMPT_TEXT } from './eventDraft';
+import { MAX_DAYS } from './eventLimits';
 // The SAME conversion the Day header uses, so "which calendar day is this
 // instant on" has one answer across the gate and its consumers.
 import { isoDateInTz } from './tzDate';
 
-/**
- * The ten-Day ceiling. `daysThemeLockOk` (`firestore.rules`) unrolls its
- * schedule lock over indexes 0–9 ONLY, so an eleventh Day sits outside the
- * lock and stays editable after it has unlocked. A rules fact, not a
- * preference (#785).
- */
-export const MAX_DAYS = 10;
+// Preserve draftValidation's public import surface while the dependency-free
+// definition also serves Firestore writers without pulling in the setup graph.
+export { MAX_DAYS } from './eventLimits';
 
 export type DraftIssueCode =
   | 'pool-below-minimum'

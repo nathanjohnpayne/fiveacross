@@ -65,13 +65,13 @@ spec_test_map:
     - scripts/deploy-main-guard.test.mjs
     - scripts/auth-handoff-deploy-readiness.test.mjs
     - tests/test_deploy.sh
-  # event-membership's coverage is module-named (the pure admission predicates),
-  # so it does not share the spec basename — map it explicitly. The emulator
-  # layer that proves the DEPLOYED rules agree with those predicates is #804's
-  # and #806's, not this spec's; until it exists, the pure suite is the whole
-  # coverage and the spec says so.
+  # event-membership's coverage is module-named: the pure admission predicates
+  # plus #1079's fail-closed Mark/Echo preview of the canonical Firestore helper.
+  # The full deployed Firestore inventory remains #804's and Storage remains
+  # #806's, so map this prerequisite layer explicitly.
   event-membership:
     - src/data/eventMembership.test.ts
+    - tests/rules/membership-mark-batch-budget.test.ts
   # event-setup-wizard's coverage is module-named (the draft store seam, the
   # occasion matrix, and the shared validation predicates), so none of the
   # three share the spec basename — map them explicitly.

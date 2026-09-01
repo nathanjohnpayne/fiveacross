@@ -4,10 +4,39 @@ service cloud.firestore {
 
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
-    // Admin uids listed in the event doc's `admins` array.
+    function eventData(eventId) {
+      return get(/databases/$(database)/documents/events/$(eventId)).data;
+    }
+    // Admin uids listed in the already-read event doc's `admins` array.
+    function isAdminWithEvent(event) {
+      return signedIn() && request.auth.uid in event.admins;
+    }
     function isAdmin(eventId) {
-      return signedIn() &&
-        request.auth.uid in get(/databases/$(database)/documents/events/$(eventId)).data.admins;
+      return isAdminWithEvent(eventData(eventId));
+    }
+    function membershipDoc(eventId, uid) {
+      return /databases/$(database)/documents/events/$(eventId)/memberships/$(uid);
+    }
+    function isEventMember(eventId, uid) {
+      return exists(membershipDoc(eventId, uid))
+        && get(membershipDoc(eventId, uid)).data.status == 'active';
+    }
+    // Canonical transitional Decision D-A predicate (#801/#802/#1079).
+    // This scaffold is deliberately unused by production allow arms until
+    // #804 enables the complete Event inventory. Keeping the Event data
+    // threaded makes the enforcement switch and Admin bypass one access;
+    // the membership path remains exists()-then-get() so absence is a clean
+    // false instead of an evaluation error.
+    function admittedWithEvent(eventId, event) {
+      return signedIn()
+        && (event.get('membershipEnforcement', 'off') != 'enforced'
+            // TRANSITIONAL (Decision D-A): remove with the storage.rules form
+            // after #805 verifies the backfill on both live Events.
+            || isAdminWithEvent(event)
+            || isEventMember(eventId, request.auth.uid));
+    }
+    function admitted(eventId) {
+      return admittedWithEvent(eventId, eventData(eventId));
     }
     // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
     // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'
