@@ -13,7 +13,7 @@ import {
   alternateNamespaceApex,
   CANONICAL_NAMESPACE_APEX,
 } from './editions';
-import { assertEditionRegistryParity, EDITION_IDS } from './edition-registry.mjs';
+import { assertEditionRegistryParity, EDITION_IDS } from './edition-registry.ts';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 // The router's OWN namespace set — the source of truth this table must not drift from.
 import { NAMESPACES } from '../worker/src/host';

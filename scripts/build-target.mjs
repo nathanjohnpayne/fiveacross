@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
-import { isRegisteredEdition } from '../src/edition-registry.mjs';
+import { isRegisteredEdition } from '../src/edition-registry.ts';
 
 export const REQUIRED_NONBLANK_PRODUCTION_VITE_KEYS = Object.freeze([
   'VITE_FIREBASE_API_KEY',
@@ -99,6 +99,9 @@ export function validateTargetOperationalMetadata(target, config) {
   }
   if (typeof config.skipCloudflarePurge !== 'boolean') {
     throw new Error(`Refusing target ${target}: register skipCloudflarePurge as an explicit boolean.`);
+  }
+  if (!isRegisteredEdition(config.identity?.VITE_EDITION)) {
+    throw new Error(`Refusing target ${target}: identity.VITE_EDITION must name a registered Edition id.`);
   }
   if (
     config.staticFallbackEdition !== undefined &&

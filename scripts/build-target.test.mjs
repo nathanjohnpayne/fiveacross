@@ -337,6 +337,7 @@ describe('build target selection', () => {
     ).toThrow('syntheticUrl');
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: false,
         skipInvokerReconcile: false,
@@ -344,6 +345,7 @@ describe('build target selection', () => {
     ).toThrow('cloudflareZoneId');
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: true,
         skipInvokerReconcile: true,
@@ -355,12 +357,24 @@ describe('build target selection', () => {
   it('rejects an unknown static fallback Edition', () => {
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: true,
         skipInvokerReconcile: true,
         staticFallbackEdition: 'vacayy',
       }),
     ).toThrow('staticFallbackEdition must name a registered Edition id');
+  });
+
+  it('rejects an unknown primary Edition in target identity metadata', () => {
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacayy' },
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+        skipInvokerReconcile: true,
+      }),
+    ).toThrow('identity.VITE_EDITION must name a registered Edition id');
   });
 
   it('requires every registered target to state its invoker-reconciliation choice (#768)', () => {
@@ -370,12 +384,14 @@ describe('build target selection', () => {
     // A silently-wrong default is exactly what this refuses.
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: true,
       }),
     ).toThrow('skipInvokerReconcile');
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: true,
         skipInvokerReconcile: 'true',
@@ -383,6 +399,7 @@ describe('build target selection', () => {
     ).toThrow('skipInvokerReconcile');
     expect(() =>
       validateTargetOperationalMetadata('future', {
+        identity: { VITE_EDITION: 'vacay' },
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: true,
         skipInvokerReconcile: true,

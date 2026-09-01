@@ -26,8 +26,8 @@ import {
   assertEditionRegistryParity,
   EDITION_IDS,
   isRegisteredEdition,
-} from './edition-registry.mjs';
-import type { EditionId } from './edition-registry.mjs';
+} from './edition-registry.ts';
+import type { EditionId } from './edition-registry.ts';
 export type { EditionBrand, EditionLexicon } from './types';
 
 // An Edition is a dialect as well as a name. Token skeletons and whole-string
@@ -267,9 +267,9 @@ const BRANDS: Record<EditionId, EditionBrand> = {
   },
 };
 
-// The declaration-backed Record catches TypeScript drift; this runtime parity
-// check also catches a new ID added to edition-registry.mjs without a matching
-// declaration/BRANDS change, before a lookup could silently fall back to GCB.
+// The EditionId-backed Record catches TypeScript drift; this runtime parity
+// check also catches a new ID added to edition-registry.ts without a matching
+// BRANDS change, before a lookup could silently fall back to GCB.
 assertEditionRegistryParity(Object.keys(BRANDS));
 
 /**
