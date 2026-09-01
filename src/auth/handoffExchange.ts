@@ -9,14 +9,22 @@
  * in tests that never boot Firebase.
  */
 import { httpsCallable } from 'firebase/functions';
-import { signInWithCustomToken, signOut } from 'firebase/auth';
-import { auth, functions } from '../firebase';
-import { attestAdult } from '../data/api';
+import { deleteApp, initializeApp, type FirebaseApp } from 'firebase/app';
+import {
+  connectAuthEmulator,
+  initializeAuth,
+  inMemoryPersistence,
+  signInWithCustomToken,
+  updateCurrentUser,
+  type Auth,
+} from 'firebase/auth';
+import { app, auth, firebaseEmulatorsEnabled, functions } from '../firebase';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
+import { debugHandoff, rememberHandoffAttestation } from './handoffAttestation';
 import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
 
 /**
- * How long the return leg may take before it gives up, in milliseconds.
+ * The cumulative deadline for abandonable pre-commit work, in milliseconds.
  *
  * A BOUND, not a preference, and it protects against a blank screen rather than
  * a slow one. `main.tsx` awaits this before it renders anything, because the
@@ -27,26 +35,68 @@ import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTrans
  * that hangs forever.
  *
  * Fifteen seconds is generous against a slow phone on bad wifi and far inside
- * the patience of someone staring at a blank page. Timing out costs the player
- * one re-sign-in; not timing out costs them the app.
+ * the patience of someone staring at a blank page. Auth readiness, exchange,
+ * and isolated sign-in share this one budget rather than stacking three of it.
+ * The primary session commit is intentionally awaited without a race because
+ * it mutates shared Auth; independent attestation and cleanup never hold mount.
  */
 export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 
+let isolatedHandoffAppSequence = 0;
+
 /**
- * Which completion attempt is the current one.
- *
- * Reconciling a timed-out sign-in cannot be unconditional (Phase 4b P1). The
- * failure surface invites an immediate retry, so the likely sequence is:
- * attempt 1 times out, the player taps again, attempt 2 SUCCEEDS — and only
- * then does attempt 1's abandoned promise resolve. An unconditional
- * `signOut(auth)` at that point destroys the perfectly good session attempt 2
- * just established, which is worse than the race it was meant to close.
- *
- * Every attempt takes a generation on entry. A late reconciliation only touches
- * global auth state if it is still the newest attempt — otherwise the session
- * it would be signing out belongs to somebody else's turn.
+ * Firebase app names need only be unique inside this JavaScript app registry;
+ * they are not credentials. Keep that naming concern separate from the PKCE
+ * transaction verifier, whose entropy and format are security-sensitive.
  */
-let attemptGeneration = 0;
+function nextIsolatedHandoffAppName(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === 'function') return `fa-handoff-${crypto.randomUUID()}`;
+  isolatedHandoffAppSequence += 1;
+  return `fa-handoff-${isolatedHandoffAppSequence}`;
+}
+
+function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig']>): string {
+  const authority = port === null ? host : `${host}:${port}`;
+  return `${protocol}://${authority}`;
+}
+
+/**
+ * A one-attempt Auth instance whose state can never enter origin-wide Firebase
+ * persistence (#913).
+ *
+ * `signInWithCustomToken` updates and persists its Auth instance before its
+ * promise resolves. Running an abandonable request against the main `auth`
+ * therefore cannot be repaired safely after timeout: the late operation has
+ * already overwritten any newer cross-tab session before a continuation can
+ * inspect it. The request runs against an in-memory secondary app instead. Only
+ * an in-bound credential is copied to the main Auth via `updateCurrentUser`.
+ */
+function isolatedHandoffAuth(): { auth: Auth; app: FirebaseApp } {
+  const isolatedApp = initializeApp(app.options, nextIsolatedHandoffAppName());
+  try {
+    const isolatedAuth = initializeAuth(isolatedApp, {
+      persistence: inMemoryPersistence,
+      popupRedirectResolver: undefined,
+    });
+    isolatedAuth.tenantId = auth.tenantId;
+
+    // Keep the same compile-time emulator gate as `src/firebase.ts`. Production
+    // builds fold this branch away, including the connector implementation and
+    // emulator host strings; e2e builds must wire the secondary before sign-in.
+    if (firebaseEmulatorsEnabled()) {
+      const emulator = auth.emulatorConfig;
+      if (emulator !== null) {
+        connectAuthEmulator(isolatedAuth, emulatorUrl(emulator), emulator.options);
+      }
+    }
+
+    return { auth: isolatedAuth, app: isolatedApp };
+  } catch (error) {
+    void deleteApp(isolatedApp).catch(() => debugHandoff('isolated Auth cleanup failed'));
+    throw error;
+  }
+}
 
 /**
  * `work`, or a rejection once `ms` has passed.
@@ -69,6 +119,49 @@ function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/** A monotonic clock keeps a wall-clock correction from extending the budget. */
+function deadlineNow(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
+function requireTimeRemaining(deadlineAt: number): void {
+  if (deadlineNow() >= deadlineAt) throw new Error('handoff-timeout');
+}
+
+/** Start `work` only while the shared pre-commit deadline still has time. */
+function beforeDeadline<T>(deadlineAt: number, work: () => Promise<T>): Promise<T> {
+  const remainingMs = deadlineAt - deadlineNow();
+  if (remainingMs <= 0) return Promise.reject(new Error('handoff-timeout'));
+  return bounded(work(), remainingMs).then((value) => {
+    // Promise fulfillment and a due timer can share one task turn. The work's
+    // reaction may win that scheduling race even though the budget is already
+    // exhausted, so enforce the deadline again before any shared mutation.
+    requireTimeRemaining(deadlineAt);
+    return value;
+  });
+}
+
+/**
+ * Whether primary Auth contains the exact isolated credential this attempt
+ * promoted. In the package-lock-pinned Firebase 12.18.0 / @firebase/auth 1.13.5
+ * implementation, public `updateCurrentUser` clones the User onto target Auth,
+ * `_updateCurrentUser` queues `directlySetCurrentUser`, and that function assigns
+ * `currentUser` before awaiting `assertedPersistence.setCurrentUser`. The
+ * partial-primary-commit regression models that order; re-audit it on SDK
+ * upgrades (#1067). Object identity is only a test/adapter fast path, so the
+ * production comparison is uid + refresh token.
+ */
+function isSameAuthSession(current: Auth['currentUser'], candidate: Auth['currentUser']): boolean {
+  if (current === null || candidate === null) return false;
+  if (current === candidate) return true;
+  return (
+    current.uid === candidate.uid &&
+    typeof current.refreshToken === 'string' &&
+    current.refreshToken.length > 0 &&
+    current.refreshToken === candidate.refreshToken
+  );
 }
 /**
  * LEG 2 — mint, at the central auth origin, for a caller that has just signed in.
@@ -111,8 +204,8 @@ export async function completeAuthHandoff(input: {
   /** Overridable so tests do not have to wait out the real bound. */
   timeoutMs?: number;
 }): Promise<boolean> {
-  attemptGeneration += 1;
-  const generation = attemptGeneration;
+  const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
+  const preCommitDeadline = deadlineNow() + timeoutMs;
   const transaction = readHandoffTransaction(input.now ?? Date.now());
   if (transaction === null) {
     forgetHandoffTransaction();
@@ -129,19 +222,31 @@ export async function completeAuthHandoff(input: {
     return false;
   }
 
+  try {
+    // `updateCurrentUser` queues behind primary Auth initialization. Settle that
+    // queue under the deadline before any code is spent or isolated sign-in is
+    // started; the later shared-auth commit is then short and deliberately not
+    // raced, because returning failure while it continued would recreate the
+    // late global mutation this isolation exists to prevent.
+    await beforeDeadline(preCommitDeadline, () => auth.authStateReady());
+  } catch {
+    forgetHandoffTransaction();
+    recordHandoffFailure('sign-in-failed');
+    return false;
+  }
+
   let customToken: string;
   try {
     const callable = httpsCallable<
       { code: string; transactionVerifier: string; origin: string },
       { customToken: string }
     >(functions, 'exchangeAuthHandoff');
-    const result = await bounded(
+    const result = await beforeDeadline(preCommitDeadline, () =>
       callable({
         code: input.code,
         transactionVerifier: transaction.verifier,
         origin: input.origin,
       }),
-      input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS,
     );
     customToken = result.data.customToken;
   } catch {
@@ -157,49 +262,63 @@ export async function completeAuthHandoff(input: {
     forgetHandoffTransaction();
   }
 
-  // The sign-in is bounded like the exchange, but a bound alone is not enough
-  // here: `bounded` rejects, it does not CANCEL, so a slow
-  // `signInWithCustomToken` can still succeed after we have given up (Codex P2,
-  // round 1). By then `main.tsx` has mounted the app signed out and the player
-  // is looking at a retry prompt — a session materialising underneath that is
-  // either a surprise entry into the app or a race against the second handoff
-  // they just started.
-  //
-  // So a timed-out attempt is explicitly reconciled rather than left running:
-  // if it lands late, sign it straight back out. That makes the outcome
-  // deterministic in both directions — either the handoff completed inside its
-  // bound, or the player is signed out and the retry in front of them is the
-  // real path. Losing a session the player never saw costs one re-sign-in;
-  // letting it appear unannounced costs a race nobody can reproduce.
-  let abandoned = false;
-  const signIn = signInWithCustomToken(auth, customToken);
-  signIn.then(
-    () => {
-      // Only if this attempt is BOTH abandoned and still the newest. A newer
-      // attempt having started means any session now present is its business,
-      // not ours — signing out here would destroy it.
-      if (abandoned && attemptGeneration === generation) void signOut(auth).catch(() => {});
-    },
-    () => {},
-  );
-
+  let isolatedApp: FirebaseApp | null = null;
   try {
-    const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
-    const credential = await bounded(signIn, timeoutMs);
+    const isolated = isolatedHandoffAuth();
+    isolatedApp = isolated.app;
+    const credential = await beforeDeadline(preCommitDeadline, () =>
+      signInWithCustomToken(isolated.auth, customToken),
+    );
+    // This is the only shared-auth mutation. A credential that arrives after
+    // the bound never reaches this line, even if another tab has since signed in.
+    // Recheck at the mutation boundary itself: awaiting `beforeDeadline` adds one
+    // final promise hop after its fulfillment check, and that hop can consume the
+    // last fraction of the budget.
+    requireTimeRemaining(preCommitDeadline);
+    try {
+      // Once this call starts there is no safe timeout boundary: Firebase has
+      // no cancellation API, and it can assign primary `currentUser` before its
+      // persistence promise settles. Racing it would return a failure screen
+      // while this exact session could still land later, recreating #913. The
+      // primary-commit-not-raced test pins that deliberate behavior. #1060 owns
+      // replacing this boundary with a disposable Worker and recovery reload;
+      // until then, this await may hold mount rather than report a false result.
+      await updateCurrentUser(auth, credential.user);
+    } catch (error) {
+      // Firebase Auth assigns currentUser before awaiting its persistence write.
+      // If that write rejects, the exact session can already be live in memory;
+      // reporting failure would mount a retry screen while AuthProvider sees a
+      // signed-in User. Treat only THIS credential as success. A different
+      // same-uid refresh token can belong to a newer tab and must not be claimed.
+      if (!isSameAuthSession(auth.currentUser, credential.user)) throw error;
+      debugHandoff('primary persistence rejected after the session entered memory');
+    }
+    // AuthProvider does not exist yet. Hand the exact promoted session its
+    // collected checkbox so the provider can run the existing optimistic /
+    // committed attestation state machine before its server bootstrap begins.
+    // Nothing network-bound is added back to this pre-mount return path.
     if (transaction.acknowledgedAdultContent) {
+      let staged = false;
       try {
-        await bounded(attestAdult(credential.user), timeoutMs);
+        staged = rememberHandoffAttestation(credential.user);
       } catch {
-        // Authentication already succeeded. A failed acknowledgement write
-        // leaves the settled profile unstamped, so AuthProvider's existing
-        // re-prompt safely collects it again instead of treating sign-in as
-        // failed or signing the new session back out.
+        // The shared session is already live. A bridge failure falls back to the
+        // ordinary settled-profile re-prompt rather than falsifying sign-in.
       }
+      if (!staged) debugHandoff('adult attestation handoff could not be staged');
     }
     return true;
   } catch {
-    abandoned = true;
     recordHandoffFailure('sign-in-failed');
     return false;
+  } finally {
+    // In package-lock-pinned @firebase/app 0.16.1, deleteApp removes the name
+    // from Firebase's app registry synchronously before awaiting provider
+    // cleanup. A hung provider therefore cannot accumulate named app entries.
+    // Cleanup cannot hold the pre-mount promise; rejection is observable without
+    // exposing details.
+    if (isolatedApp !== null) {
+      void deleteApp(isolatedApp).catch(() => debugHandoff('isolated Auth cleanup failed'));
+    }
   }
 }

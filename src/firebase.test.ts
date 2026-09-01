@@ -37,6 +37,22 @@ describe('src/firebase.ts (ADR 0006 offline persistence)', () => {
     expect(configuredCacheKind(db)).toBe('persistent');
   });
 
+  it('uses the Firebase emulators only for an e2e build on a demo project', async () => {
+    vi.stubEnv('VITE_FIREBASE_API_KEY', 'demo-api-key');
+    const { firebaseEmulatorsEnabled } = await import('./firebase');
+
+    vi.stubEnv('MODE', 'e2e');
+    vi.stubEnv('VITE_FIREBASE_PROJECT_ID', 'demo-fiveacross');
+    expect(firebaseEmulatorsEnabled()).toBe(true);
+
+    vi.stubEnv('MODE', 'production');
+    expect(firebaseEmulatorsEnabled()).toBe(false);
+
+    vi.stubEnv('MODE', 'e2e');
+    vi.stubEnv('VITE_FIREBASE_PROJECT_ID', 'fiveacross');
+    expect(firebaseEmulatorsEnabled()).toBe(false);
+  });
+
   it('pins the multi-tab manager in the production config (source guard)', () => {
     // The SDK exposes no runtime handle on the configured tab manager (the
     // cache object carries only kind + opaque component providers), so the
