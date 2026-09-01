@@ -233,7 +233,7 @@ const ART = {
     desc: { size: 26 },
     // The artwork names the Edition's own apex, NOT `ogUrl`'s hostname. Vacay
     // is the one Edition whose og:url is Event-scoped
-    // (bodega-bay.vacaybingo.com) until the #546 Worker rewrites it per
+    // (bodega-bay.fiveacross.app) until the #546 Worker rewrites it per
     // hostname — see the field note on `EditionBrand.ogUrl`. An unfurl is a
     // brand impression, so it wears the brand's address; the other two
     // Editions' apexes and og:url hosts already agree, so only this row has to

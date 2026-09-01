@@ -25,5 +25,9 @@ export const BODEGA_EVENT_ID: string;
 export const BODEGA_PROJECT_ID: string;
 export const BODEGA_PREVIEW_HOSTS: readonly string[];
 export const BODEGA_EVENT_PREVIEW: BodegaPreview;
+export function validateBodegaServingInventory(
+  hostDocs: Iterable<BodegaHostnameRead>,
+  options?: { operation?: string },
+): Map<string, Record<string, unknown>>;
 export function planBodegaPreviewProvisioning(hostDocs: Iterable<BodegaHostnameRead>): BodegaPreviewPlan;
 export function formatBodegaPreviewPlan(plan: BodegaPreviewPlan): string;

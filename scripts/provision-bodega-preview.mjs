@@ -44,6 +44,45 @@ export const BODEGA_EVENT_PREVIEW = Object.freeze({
   ]),
 });
 
+/** Validate the fixed Bodega serving inventory shared by every maintenance path. */
+export function validateBodegaServingInventory(
+  hostDocs,
+  { operation = 'bodega-inventory' } = {},
+) {
+  const rows = new Map();
+  for (const row of hostDocs) {
+    if (!row || typeof row.host !== 'string') {
+      throw new Error(`${operation}: invalid hostname read. No write performed.`);
+    }
+    if (rows.has(row.host)) {
+      throw new Error(
+        `${operation}: duplicate hostname read for ${row.host}. No write performed.`,
+      );
+    }
+    rows.set(row.host, row.data ?? null);
+  }
+
+  for (const host of BODEGA_PREVIEW_HOSTS) {
+    const data = rows.get(host);
+    if (!data || typeof data !== 'object') {
+      throw new Error(`${operation}: hostnames/${host} is missing. No write performed.`);
+    }
+    if (data.eventId !== BODEGA_EVENT_ID) {
+      throw new Error(
+        `${operation}: hostnames/${host} targets ${String(data.eventId)}; expected ${BODEGA_EVENT_ID}. ` +
+          'No write performed.',
+      );
+    }
+    if (data.status !== 'active') {
+      throw new Error(
+        `${operation}: hostnames/${host} is ${String(data.status)}; ` +
+          'only an active serving host may be changed. No write performed.',
+      );
+    }
+  }
+  return rows;
+}
+
 /**
  * Validate the complete hostname set and calculate the strictly-scoped write.
  *
@@ -52,34 +91,12 @@ export const BODEGA_EVENT_PREVIEW = Object.freeze({
  * where `data` is `null` for a document that was not found.
  */
 export function planBodegaPreviewProvisioning(hostDocs) {
-  const rows = new Map();
-  for (const row of hostDocs) {
-    if (!row || typeof row.host !== 'string') {
-      throw new Error('bodega-preview: invalid hostname read in provisioning plan.');
-    }
-    if (rows.has(row.host)) {
-      throw new Error(`bodega-preview: duplicate hostname read for ${row.host}; refusing to write.`);
-    }
-    rows.set(row.host, row.data ?? null);
-  }
+  const rows = validateBodegaServingInventory(hostDocs, { operation: 'bodega-preview' });
 
   const updates = [];
   const alreadyCorrect = [];
   for (const host of BODEGA_PREVIEW_HOSTS) {
     const data = rows.get(host);
-    if (!data || typeof data !== 'object') {
-      throw new Error(`bodega-preview: hostnames/${host} is missing; refusing to create a routing document.`);
-    }
-    if (data.eventId !== BODEGA_EVENT_ID) {
-      throw new Error(
-        `bodega-preview: hostnames/${host} targets ${String(data.eventId)}; expected ${BODEGA_EVENT_ID}. No write performed.`,
-      );
-    }
-    if (data.status !== 'active') {
-      throw new Error(
-        `bodega-preview: hostnames/${host} is ${String(data.status)}; only an active serving host may receive the postcard.`,
-      );
-    }
     if (isDeepStrictEqual(data.preview, BODEGA_EVENT_PREVIEW)) {
       alreadyCorrect.push(host);
     } else {

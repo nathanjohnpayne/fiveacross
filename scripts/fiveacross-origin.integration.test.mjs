@@ -47,24 +47,27 @@ let localValues;
 const hostnameDocs = {
   'bodega-bay.fiveacross.app': {
     eventId: 'bodega-bay-2026',
-    canonicalHost: 'bodega-bay.vacaybingo.com',
+    canonicalHost: 'bodega-bay.fiveacross.app',
     edition: 'vacay',
     adultContent: false,
     status: 'active',
+    isCanonical: true,
   },
   'bodega-bay.vacaybingo.com': {
     eventId: 'bodega-bay-2026',
-    canonicalHost: 'bodega-bay.vacaybingo.com',
+    canonicalHost: 'bodega-bay.fiveacross.app',
     edition: 'vacay',
     adultContent: false,
     status: 'active',
+    isCanonical: false,
   },
   'fiveacross.app': {
     eventId: 'bodega-bay-2026',
-    canonicalHost: 'bodega-bay.vacaybingo.com',
-    edition: 'vacay',
+    canonicalHost: 'bodega-bay.fiveacross.app',
+    edition: 'fiveacross',
     adultContent: false,
     status: 'active',
+    isCanonical: false,
   },
   'reunion.fiveacross.app': {
     eventId: 'reunion-2027',
@@ -72,6 +75,7 @@ const hostnameDocs = {
     edition: 'fiveacross',
     adultContent: true,
     status: 'active',
+    isCanonical: true,
   },
 };
 
@@ -126,6 +130,9 @@ describe('Five Across production origin', () => {
       const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.webmanifest'), 'utf8'));
       expect(html).toContain('<title>Vacay Bingo</title>');
       expect(html).toContain('content="Vacay Bingo"');
+      expect(html).toContain(
+        'property="og:url" content="https://bodega-bay.fiveacross.app/"',
+      );
       expect(manifest).toMatchObject({ name: 'Vacay Bingo', short_name: 'Vacay Bingo' });
 
       const bundledJavaScript = readdirSync(join(outDir, 'assets'))
@@ -144,6 +151,7 @@ describe('Five Across production origin', () => {
       const resolution = await bootstrapEventResolution(hostname);
 
       expect(resolution).toMatchObject({ kind: 'event', eventId: doc.eventId, edition: doc.edition });
+      expect(mocks.applyResolvedCanonicalHost).toHaveBeenLastCalledWith(doc.canonicalHost);
       expect(firebaseIdentity.EVENT_ID).toBe(doc.eventId);
       cardCache.saveCardSnapshot({
         uid: 'identity-probe',

@@ -1663,7 +1663,7 @@ describe('sendAdminDigestForEvent', () => {
       const send = vi.fn(async () => true);
       const db = seeded(
         [pendingAlert('a1')],
-        [{ eventId: 'med-2026', canonicalHost: 'bodega-bay.vacaybingo.com', edition: 'vacay', isCanonical: true, status: 'active' }],
+        [{ eventId: 'med-2026', canonicalHost: 'bodega-bay.fiveacross.app', edition: 'vacay', isCanonical: true, status: 'active' }],
       );
       await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { vacay: 'Vacay Bingo <hello@vacaybingo.com>' }));
       expect((send.mock.calls[0][0] as { from: string }).from).toBe('Vacay Bingo <hello@vacaybingo.com>');
