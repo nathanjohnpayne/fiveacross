@@ -10,16 +10,19 @@ import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import type { Cell, ClaimMode, ProofDoc, ProofType } from '../types';
 
-const rawProofs = () => collection(db, 'events', EVENT_ID, 'proofs');
-const rawProof = (id: string) => doc(db, 'events', EVENT_ID, 'proofs', id);
-const rawClaims = () => collection(db, 'events', EVENT_ID, 'claims');
-const rawBoard = (uid: string) => doc(db, 'events', EVENT_ID, 'boards', uid);
+const rawProofs = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'proofs');
+const rawProof = (id: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'proofs', id);
+const rawClaims = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'claims');
+const rawBoard = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'boards', uid);
 // The day-scoped Board write ref (#246, daily-cards-spec § "Data model"): one
 // Board per Player per Day at events/{eventId}/days/{dayIndex}/boards/{uid}.
 // `String(dayIndex)` is the canonical decimal segment the rules gate accepts (#201).
-const rawDayBoard = (dayIndex: number, uid: string) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
-const rawPlayer = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
+const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'players', uid);
 
 /**
  * The `{ merge: true }` player-stats write a proofed Mark / proof deletion
@@ -61,8 +64,8 @@ function playerStatWrite(params: {
 // A per-Prompt Tally marker: events/{EVENT_ID}/tally/{itemId}/markers/{uid} (ADR
 // 0002) — the SAME path setMark's honor-Mark marker uses. Raw ref (converter-free),
 // matching the board/player/proof writes in these transactions and setMark's write.
-const rawMarker = (itemId: string, markerUid: string) =>
-  doc(db, 'events', EVENT_ID, 'tally', itemId, 'markers', markerUid);
+const rawMarker = (itemId: string, markerUid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'tally', itemId, 'markers', markerUid);
 
 export interface AttachProofArgs {
   uid: string;
@@ -178,15 +181,19 @@ export interface AttachProofResult {
 export async function attachProof(args: AttachProofArgs): Promise<AttachProofResult> {
   const { uid, displayName, photoURL, cells, cellIndex, itemId, itemText, claimMode, currentFirstBingoAt, source, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, proof } =
     args;
+  const eventId = EVENT_ID;
   const now = Date.now();
-  const pRef = doc(rawProofs());
+  const pRef = doc(rawProofs(eventId));
   const proofId = pRef.id;
 
   let storagePath: string | null = null;
   let mediaURL: string | null = null;
   if ((proof.type === 'photo' || proof.type === 'audio') && proof.blob) {
     // Only photos carry EXIF/GPS; the strip flag is inert for audio.
-    const up = await uploadProofMedia(uid, proofId, proof.blob, proof.type, { stripExif });
+    const up = await uploadProofMedia(uid, proofId, proof.blob, proof.type, {
+      stripExif,
+      eventId,
+    });
     storagePath = up.path;
     mediaURL = up.url;
   }
@@ -200,6 +207,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     marked: true,
     mode: claimMode,
     source: 'proof',
+    eventId,
   });
 
   // Recompute cells from the live board inside a transaction so a concurrent
@@ -213,9 +221,11 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // into that Day's bucket — the SAME routing the honor Mark (`setMark`) uses, so
     // a proofed claim on the viewed Day never writes the (now rules-denied) legacy
     // board nor double-credits another Day. Legacy mode is unchanged.
-    const boardRef = daily === true ? rawDayBoard(dayIndex ?? 0, uid) : rawBoard(uid);
-    const playerRef = rawPlayer(uid);
-    const markerRef = itemId ? rawMarker(itemId, uid) : null;
+    const boardRef = daily === true
+      ? rawDayBoard(dayIndex ?? 0, uid, eventId)
+      : rawBoard(uid, eventId);
+    const playerRef = rawPlayer(uid, eventId);
+    const markerRef = itemId ? rawMarker(itemId, uid, eventId) : null;
     // Read board + player before any write — a Firestore transaction requires ALL
     // reads before the FIRST write. The existing Tally marker is read HERE with
     // them (never down at its write below): attaching a Proof to an ALREADY-marked
@@ -345,7 +355,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       });
     }
     if (pendingClaim) {
-      tx.set(doc(rawClaims()), {
+      tx.set(doc(rawClaims(eventId)), {
         uid,
         displayName,
         cellIndex,
@@ -395,6 +405,7 @@ export async function deleteProof(
     statsFrozen?: boolean | (() => boolean);
   },
 ): Promise<void> {
+  const eventId = EVENT_ID;
   // Storage first (ordering preserved): if the blob delete throws we keep the
   // doc so the media isn't orphaned.
   if (storagePath) await deleteStoragePath(storagePath);
@@ -407,7 +418,7 @@ export async function deleteProof(
   let mediaURL: string | null | undefined;
 
   await runTransaction(db, async (tx) => {
-    const proofRef = rawProof(id);
+    const proofRef = rawProof(id, eventId);
     const proofSnap = await tx.get(proofRef);
     const proof = proofSnap.data() as ProofDoc | undefined;
     mediaURL = proof?.mediaURL;
@@ -418,8 +429,10 @@ export async function deleteProof(
       // backing cell and recompute the owner's derived stats in the same txn.
       const daily = opts?.daily === true;
       const proofDayIndex = typeof proof.dayIndex === 'number' ? proof.dayIndex : 0;
-      const boardRef = daily ? rawDayBoard(proofDayIndex, proof.uid) : rawBoard(proof.uid);
-      const playerRef = rawPlayer(proof.uid);
+      const boardRef = daily
+        ? rawDayBoard(proofDayIndex, proof.uid, eventId)
+        : rawBoard(proof.uid, eventId);
+      const playerRef = rawPlayer(proof.uid, eventId);
       const boardSnap = await tx.get(boardRef);
       const boardData = boardSnap.data() as { cells?: unknown; seed?: number } | undefined;
       const normalized = cellsFromData(boardData?.cells);
@@ -454,7 +467,7 @@ export async function deleteProof(
             ? await Promise.all(
                 (opts?.dayIndexes ?? [])
                   .filter((dayIndex) => dayIndex !== proofDayIndex)
-                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid))),
+                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId))),
               )
             : [];
         const existingFirst = (playerSnap.data()?.firstBingoAt as number | null | undefined) ?? null;
@@ -521,7 +534,9 @@ export async function deleteProof(
             (cell) => !cell.free && cell.marked && cell.itemId === backing.itemId,
           ),
         );
-        if (backing.itemId && !markedOnSibling) tx.delete(rawMarker(backing.itemId, proof.uid));
+        if (backing.itemId && !markedOnSibling) {
+          tx.delete(rawMarker(backing.itemId, proof.uid, eventId));
+        }
       }
     }
 

@@ -5,6 +5,7 @@ import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playe
 import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '../data/moderation';
 import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
+import { eventScopeKey } from '../data/eventScope';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -18,10 +19,26 @@ import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofD
 // consumers (Board's thin-pool guard) can tell "the server really says this"
 // from "the local cache says this so far". Errors leave it false — failing
 // toward the neutral loading state, never toward a false alert.
+type DocSubscriptionState<T> = {
+  key: string;
+  data: T | null;
+  loading: boolean;
+  hasServerData: boolean;
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+};
+
+const emptyDocState = <T,>(key: string, loading: boolean): DocSubscriptionState<T> => ({
+  key,
+  data: null,
+  loading,
+  hasServerData: false,
+  fromCache: true,
+  hasPendingWrites: false,
+});
+
 function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [hasServerData, setHasServerData] = useState(false);
+  const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
   // discipline `useColSub` below already exposes, and for the same reason:
   // `hasServerData` is a LATCH ("the server has spoken at least once for this
@@ -36,48 +53,80 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
   // showed the win gone. Acting on that would irreversibly silence a STANDING
   // win. Waiting for both flags to clear means the rollback snapshot (win
   // standing) is what the drain sees.
-  const [fromCache, setFromCache] = useState(true);
-  const [hasPendingWrites, setHasPendingWrites] = useState(false);
   useEffect(() => {
+    let active = true;
     // Drop the previous ref's document so stale data from another subscription
     // (e.g. a different signed-in uid) can't render under the new key.
-    setData(null);
-    setHasServerData(false);
-    setFromCache(true);
-    setHasPendingWrites(false);
+    setState(emptyDocState(key, ref !== null));
     if (!ref) {
-      setLoading(false);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    setLoading(true);
     const unsub = onSnapshot(
       ref,
       { includeMetadataChanges: true },
       (snap) => {
-        setData(snap.exists() ? (snap.data() as T) : null);
-        setLoading(false);
-        setFromCache(snap.metadata.fromCache);
-        setHasPendingWrites(snap.metadata.hasPendingWrites);
-        if (!snap.metadata.fromCache) setHasServerData(true);
+        if (!active) return;
+        setState((previous) => ({
+          key,
+          data: snap.exists() ? (snap.data() as T) : null,
+          loading: false,
+          hasServerData: previous.key === key && previous.hasServerData
+            ? true
+            : !snap.metadata.fromCache,
+          fromCache: snap.metadata.fromCache,
+          hasPendingWrites: snap.metadata.hasPendingWrites,
+        }));
       },
-      () => setLoading(false),
+      () => {
+        if (!active) return;
+        setState((previous) =>
+          previous.key === key ? { ...previous, loading: false } : emptyDocState(key, false),
+        );
+      },
     );
-    return unsub;
+    return () => {
+      active = false;
+      unsub();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  return { data, loading, hasServerData, fromCache, hasPendingWrites };
+  // Effects run after render. Tagging state with its effective key prevents the
+  // first render for Event B from exposing Event A while React is still waiting
+  // to run A's cleanup and B's subscription effect.
+  return state.key === key
+    ? state
+    : emptyDocState<T>(key, ref !== null);
 }
 
+type CollectionSubscriptionState<T> = {
+  key: string;
+  data: T[];
+  loading: boolean;
+  hasServerData: boolean;
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+};
+
+const emptyCollectionState = <T,>(key: string, loading: boolean): CollectionSubscriptionState<T> => ({
+  key,
+  data: [],
+  loading,
+  hasServerData: false,
+  fromCache: true,
+  hasPendingWrites: false,
+});
+
 function useColSub<T>(q: Query<T> | null, key: string) {
-  const [data, setData] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [hasServerData, setHasServerData] = useState(false);
+  const [state, setState] = useState<CollectionSubscriptionState<T>>(() =>
+    emptyCollectionState(key, q !== null),
+  );
   // `fromCache` is the LATEST snapshot's origin (per-snapshot, unlike the
   // `hasServerData` latch): true when the rows came from the persistent IndexedDB
   // cache, false when server-backed. Consumers that must distinguish an in-session
   // server-backed observation from a stale cache replay (e.g. `useMyClaims` seeding
   // the confirm-path freshness witness, #41 / Codex #116 R2 finding 2) read this.
-  const [fromCache, setFromCache] = useState(true);
   // `hasPendingWrites` is the LATEST snapshot's OPTIMISTIC-write flag (per-snapshot):
   // true when the snapshot reflects a LOCAL write this client issued that the server
   // has NOT yet acked. It is the OTHER half of the `{ includeMetadataChanges: true }`
@@ -87,43 +136,62 @@ function useColSub<T>(q: Query<T> | null, key: string) {
   // needs this: a local optimistic prompt-add arrives with `fromCache === false` AND
   // `hasPendingWrites === true`, so a `fromCache`-only gate would treat that
   // not-yet-committed local echo as a server crossing and fire before the write acks.
-  const [hasPendingWrites, setHasPendingWrites] = useState(false);
   useEffect(() => {
+    let active = true;
     // Drop the previous query's rows when the key changes so stale results can't
     // render against the new subscription.
-    setData([]);
-    setHasServerData(false);
-    setFromCache(true);
-    setHasPendingWrites(false);
+    setState(emptyCollectionState(key, q !== null));
     if (!q) {
-      setLoading(false);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    setLoading(true);
     const unsub = onSnapshot(
       q,
       { includeMetadataChanges: true },
       (snap) => {
-        setData(snap.docs.map((d) => d.data() as T));
-        setLoading(false);
-        setFromCache(snap.metadata.fromCache);
-        setHasPendingWrites(snap.metadata.hasPendingWrites);
-        if (!snap.metadata.fromCache) setHasServerData(true);
+        if (!active) return;
+        setState((previous) => ({
+          key,
+          data: snap.docs.map((d) => d.data() as T),
+          loading: false,
+          hasServerData: previous.key === key && previous.hasServerData
+            ? true
+            : !snap.metadata.fromCache,
+          fromCache: snap.metadata.fromCache,
+          hasPendingWrites: snap.metadata.hasPendingWrites,
+        }));
       },
-      () => setLoading(false),
+      () => {
+        if (!active) return;
+        setState((previous) =>
+          previous.key === key ? { ...previous, loading: false } : emptyCollectionState(key, false),
+        );
+      },
     );
-    return unsub;
+    return () => {
+      active = false;
+      unsub();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  return { data, loading, hasServerData, fromCache, hasPendingWrites };
+  return state.key === key
+    ? state
+    : emptyCollectionState<T>(key, q !== null);
 }
+
+const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
+  eventScopeKey(EVENT_ID, ...parts);
 
 export function useEventDoc(enabled = true) {
   // `enabled` lets a pre-auth caller (main.tsx) skip the subscription: events
   // require sign-in, so subscribing while signed out only yields a
   // permission-denied error. Toggle the key (not just the ref) so the effect
   // re-runs and subscribes once auth arrives — useDocSub is keyed on `key`.
-  return useDocSub<EventDoc>(enabled ? eventRef() : null, enabled ? 'event' : 'event:disabled');
+  return useDocSub<EventDoc>(
+    enabled ? eventRef() : null,
+    eventSubscriptionKey(enabled ? 'event' : 'event:disabled'),
+  );
 }
 
 // The ADR 0004 Phase 0 community auto-hide predicate lives in the Firestore-free,
@@ -192,7 +260,7 @@ export function useItems(enabled = true) {
   // (Admin) stays unconstrained and reads all statuses via the isAdmin arm.
   const { data, loading, hasServerData, fromCache, hasPendingWrites } = useColSub<ItemDoc>(
     enabled ? query(itemsCol(), where('status', '==', 'active')) : null,
-    enabled ? 'items' : 'items:disabled',
+    eventSubscriptionKey(enabled ? 'items' : 'items:disabled'),
   );
   // Two further presentational hides drop a Prompt from the live pool on top of the
   // now server-authoritative `status` gate (#43): the ADR 0004 community auto-hide
@@ -228,7 +296,10 @@ export function useItems(enabled = true) {
 }
 
 export function useBoard(uid: string | undefined) {
-  return useDocSub<BoardDoc>(uid ? boardRef(uid) : null, `board:${uid ?? 'none'}`);
+  return useDocSub<BoardDoc>(
+    uid ? boardRef(uid) : null,
+    eventSubscriptionKey('board', uid ?? 'none'),
+  );
 }
 
 /**
@@ -243,7 +314,7 @@ export function useDayBoard(uid: string | undefined, dayIndex: number | undefine
   const enabled = uid !== undefined && dayIndex !== undefined;
   return useDocSub<BoardDoc>(
     enabled ? dayBoardRef(dayIndex, uid) : null,
-    `dayboard:${uid ?? 'none'}:${dayIndex ?? 'none'}`,
+    eventSubscriptionKey('dayboard', uid ?? 'none', dayIndex ?? 'none'),
   );
 }
 
@@ -257,20 +328,11 @@ export function useDayBoard(uid: string | undefined, dayIndex: number | undefine
  * an effect, one paint too late for this).
  */
 export function useDayMeta(dayIndex: number | undefined): { data: DayMetaDoc | null } {
-  const [state, setState] = useState<{ forDay: number; data: DayMetaDoc | null } | null>(null);
-  useEffect(() => {
-    if (dayIndex === undefined) {
-      setState(null);
-      return;
-    }
-    const unsub = onSnapshot(
-      dayMetaRef(dayIndex),
-      (snap) => setState({ forDay: dayIndex, data: snap.exists() ? (snap.data() as DayMetaDoc) : null }),
-      () => {},
-    );
-    return () => unsub();
-  }, [dayIndex]);
-  return { data: state && state.forDay === dayIndex ? state.data : null };
+  const { data } = useDocSub<DayMetaDoc>(
+    dayIndex === undefined ? null : dayMetaRef(dayIndex),
+    eventSubscriptionKey('day-meta', dayIndex ?? 'none'),
+  );
+  return { data };
 }
 
 /**
@@ -287,41 +349,59 @@ export function useDayMetasStatus(dayCount: number): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
 } {
-  const [metas, setMetas] = useState<ReadonlyMap<number, DayMetaDoc>>(new Map());
-  const [seen, setSeen] = useState<ReadonlySet<number>>(new Set());
+  const eventId = EVENT_ID;
+  const key = eventScopeKey(eventId, 'day-metas', dayCount);
+  type State = {
+    key: string;
+    metas: ReadonlyMap<number, DayMetaDoc>;
+    seen: ReadonlySet<number>;
+  };
+  const empty = (): State => ({ key, metas: new Map(), seen: new Set() });
+  const [state, setState] = useState<State>(empty);
   useEffect(() => {
-    setMetas(new Map());
-    setSeen(new Set());
-    if (dayCount <= 0) return;
+    let active = true;
+    setState(empty());
+    if (dayCount <= 0) {
+      return () => {
+        active = false;
+      };
+    }
     const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
       onSnapshot(
-        dayMetaRef(dayIndex),
+        dayMetaRef(dayIndex, eventId),
         (snap) => {
-          setMetas((prev) => {
-            const next = new Map(prev);
-            if (snap.exists()) next.set(dayIndex, snap.data() as DayMetaDoc);
-            else next.delete(dayIndex);
-            return next;
-          });
-          setSeen((prev) => {
-            const next = new Set(prev);
-            next.add(dayIndex);
-            return next;
+          if (!active) return;
+          setState((previous) => {
+            const current = previous.key === key ? previous : empty();
+            const metas = new Map(current.metas);
+            if (snap.exists()) metas.set(dayIndex, snap.data() as DayMetaDoc);
+            else metas.delete(dayIndex);
+            const seen = new Set(current.seen);
+            seen.add(dayIndex);
+            return { key, metas, seen };
           });
         },
         () => {
+          if (!active) return;
           /* permission-denied (signed out mid-flight) — leave the day absent */
-          setSeen((prev) => {
-            const next = new Set(prev);
-            next.add(dayIndex);
-            return next;
+          setState((previous) => {
+            const current = previous.key === key ? previous : empty();
+            const seen = new Set(current.seen);
+            seen.add(dayIndex);
+            return { ...current, seen };
           });
         },
       ),
     );
-    return () => unsubs.forEach((u) => u());
-  }, [dayCount]);
-  return { metas, loaded: dayCount <= 0 || seen.size >= dayCount };
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
+    // `key` carries both Event identity and dayCount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const current = state.key === key ? state : empty();
+  return { metas: current.metas, loaded: dayCount <= 0 || current.seen.size >= dayCount };
 }
 
 /**
@@ -353,25 +433,36 @@ export function useMyDayBoards(
   uid: string | undefined,
   dayIndexes: readonly number[],
 ): ReadonlyMap<number, BoardDoc> {
-  const [boards, setBoards] = useState<ReadonlyMap<number, BoardDoc>>(new Map());
   // Effect-key the CONTENT of the index list, not the array identity —
   // callers rebuild the array every render.
   const fanKey = dayIndexes.join(',');
+  const eventId = EVENT_ID;
+  const key = eventScopeKey(eventId, 'my-day-boards', uid ?? 'none', fanKey);
+  const [state, setState] = useState<{
+    key: string;
+    boards: ReadonlyMap<number, BoardDoc>;
+  }>(() => ({ key, boards: new Map() }));
   useEffect(() => {
-    setBoards(new Map());
-    if (!uid || dayIndexes.length === 0) return;
+    let active = true;
+    setState({ key, boards: new Map() });
+    if (!uid || dayIndexes.length === 0) {
+      return () => {
+        active = false;
+      };
+    }
     const unsubs = dayIndexes.map((dayIndex) => {
-      const releaseWatch = beginDayBoardSeedWatch(dayIndex, uid);
+      const releaseWatch = beginDayBoardSeedWatch(eventId, dayIndex, uid);
       const unsub = onSnapshot(
-        dayBoardRef(dayIndex, uid),
+        dayBoardRef(dayIndex, uid, eventId),
         { includeMetadataChanges: true },
         (snap) => {
-          recordDayBoardSeedSnapshot(dayIndex, uid, snap);
-          setBoards((prev) => {
-            const next = new Map(prev);
-            if (snap.exists()) next.set(dayIndex, snap.data() as BoardDoc);
-            else next.delete(dayIndex);
-            return next;
+          if (!active) return;
+          recordDayBoardSeedSnapshot(eventId, dayIndex, uid, snap);
+          setState((previous) => {
+            const boards = new Map(previous.key === key ? previous.boards : []);
+            if (snap.exists()) boards.set(dayIndex, snap.data() as BoardDoc);
+            else boards.delete(dayIndex);
+            return { key, boards };
           });
         },
         () => {
@@ -387,10 +478,13 @@ export function useMyDayBoards(
         unsub();
       };
     });
-    return () => unsubs.forEach((u) => u());
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, fanKey]);
-  return boards;
+  }, [key]);
+  return state.key === key ? state.boards : new Map();
 }
 
 /**
@@ -422,7 +516,10 @@ export function useDayCard(
 }
 
 export function useMyPlayer(uid: string | undefined) {
-  return useDocSub<PlayerDoc>(uid ? playerRef(uid) : null, `player:${uid ?? 'none'}`);
+  return useDocSub<PlayerDoc>(
+    uid ? playerRef(uid) : null,
+    eventSubscriptionKey('player', uid ?? 'none'),
+  );
 }
 
 /**
@@ -438,7 +535,7 @@ export function useTally(itemId: string | null | undefined) {
   const { bannedUids } = useEventModeration(!!itemId);
   const { data, loading, hasServerData } = useColSub<TallyEntry>(
     itemId ? tallyMarkersCol(itemId) : null,
-    itemId ? `tally:${itemId}` : 'tally:none',
+    eventSubscriptionKey('tally', itemId ?? 'none'),
   );
   // The Admin ban (#108): a banned marker's entry drops from the PUBLIC who-list
   // AND from the derived `count` the Square badge shows — a banned Player's mark is
@@ -452,6 +549,7 @@ export function useTally(itemId: string | null | undefined) {
 
 /** The signed-in User's global profile (`users/{uid}`) — display name + avatar. */
 export function useMyUser(uid: string | undefined) {
+  // Identity is global by contract: users/{uid} carries across Events.
   return useDocSub<UserDoc>(uid ? userRef(uid) : null, `user:${uid ?? 'none'}`);
 }
 
@@ -471,7 +569,10 @@ export function useLeaderboard() {
   // is a PRESENTATIONAL filter applied by the Leaderboard COMPONENT for display only
   // (src/components/Leaderboard.tsx, via `isBanned`), while this hook stays raw so
   // Board's ceremony reads the true roster. See specs/w2-ban-console.md § Leaderboard.
-  const { data, loading, hasServerData } = useColSub<PlayerDoc>(playersCol(), 'players');
+  const { data, loading, hasServerData } = useColSub<PlayerDoc>(
+    playersCol(),
+    eventSubscriptionKey('players'),
+  );
   return { players: sortPlayers(data), loading, hasServerData };
 }
 
@@ -511,7 +612,7 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   const bannedUids = moderation === undefined ? liveModeration.bannedUids : moderation.bannedUids;
   const { data, loading } = useColSub<ProofDoc>(
     query(proofsCol(), where('status', '==', 'active')),
-    'proofs',
+    eventSubscriptionKey('proofs'),
   );
   // `bannedUids` is a fresh array every render (`useEventModeration` returns
   // `event?.bannedUids ?? []`), so a plain array dep would defeat this memo on
@@ -544,7 +645,7 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
  */
 export function useMoments(max = 60) {
   const { bannedUids } = useEventModeration();
-  const { data, loading } = useColSub<MomentDoc>(momentsCol(), 'moments');
+  const { data, loading } = useColSub<MomentDoc>(momentsCol(), eventSubscriptionKey('moments'));
   // Same fresh-array problem as `useProofFeed` — join to a stable dep key.
   const bannedKey = bannedUids.join(',');
   // The Admin ban (#108): a banned Player's broadcast beats drop from the public
@@ -572,7 +673,7 @@ export function useMoments(max = 60) {
  * pinned-first), the Card-tab `NoticeBanner`, and the admin `MessagesPanel` history.
  */
 export function useNotices() {
-  const { data, loading } = useColSub<NoticeDoc>(noticesCol(), 'notices');
+  const { data, loading } = useColSub<NoticeDoc>(noticesCol(), eventSubscriptionKey('notices'));
   const notices = useMemo(() => [...data].sort((a, b) => b.createdAt - a.createdAt), [data]);
   return { notices, loading };
 }
@@ -758,16 +859,32 @@ export function deriveTallyCards(
  */
 export function useTallyCards() {
   const { bannedUids } = useEventModeration();
-  const displayedRef = useRef<Record<string, number>>({});
-  const [cards, setCards] = useState<TallyCard[]>([]);
-  const [loading, setLoading] = useState(true);
+  const eventId = EVENT_ID;
+  const key = eventScopeKey(eventId, 'tally-cards');
+  const displayedRef = useRef<{ eventId: string; displayed: Record<string, number> }>({
+    eventId,
+    displayed: {},
+  });
+  const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean }>(() => ({
+    key,
+    cards: [],
+    loading: true,
+  }));
   // Re-derive whenever the ban roster changes so a newly-banned marker drops.
   const bannedKey = bannedUids.join(',');
   useEffect(() => {
+    let active = true;
+    if (displayedRef.current.eventId !== eventId) {
+      displayedRef.current = { eventId, displayed: {} };
+    }
+    setState((previous) =>
+      previous.key === key ? { ...previous, loading: true } : { key, cards: [], loading: true },
+    );
     const unsub = onSnapshot(
       collectionGroup(db, 'markers'),
       { includeMetadataChanges: true },
       (snap) => {
+        if (!active) return;
         const rows: TallyMarkerRow[] = [];
         for (const d of snap.docs) {
           // Guard the collection group to THIS Event's Tally markers only:
@@ -776,22 +893,29 @@ export function useTallyCards() {
           // same project), merging two events' marks into one card.
           const tallyDoc = d.ref.parent.parent;
           if (!tallyDoc || tallyDoc.parent.id !== 'tally') continue;
-          if (tallyDoc.parent.parent?.id !== EVENT_ID) continue;
+          if (tallyDoc.parent.parent?.id !== eventId) continue;
           const data = d.data() as TallyEntry;
           if (isBanned(data.uid, bannedUids)) continue;
           rows.push({ ...data, itemId: tallyDoc.id });
         }
-        const { cards: next, displayed } = deriveTallyCards(rows, displayedRef.current);
-        displayedRef.current = displayed;
-        setCards(next);
-        setLoading(false);
+        const { cards, displayed } = deriveTallyCards(rows, displayedRef.current.displayed);
+        displayedRef.current = { eventId, displayed };
+        setState({ key, cards, loading: false });
       },
-      () => setLoading(false),
+      () => {
+        if (!active) return;
+        setState((previous) =>
+          previous.key === key ? { ...previous, loading: false } : { key, cards: [], loading: false },
+        );
+      },
     );
-    return unsub;
+    return () => {
+      active = false;
+      unsub();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bannedKey]);
-  return { cards, loading };
+  }, [key, bannedKey]);
+  return state.key === key ? state : { key, cards: [], loading: true };
 }
 
 /**
@@ -846,7 +970,7 @@ export function useFeed(max = 60) {
 }
 
 export function usePendingClaims() {
-  const { data, loading } = useColSub<ClaimDoc>(claimsCol(), 'claims');
+  const { data, loading } = useColSub<ClaimDoc>(claimsCol(), eventSubscriptionKey('claims'));
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
   return { claims, loading };
 }
@@ -865,7 +989,7 @@ export function usePendingClaims() {
 export function usePendingItems() {
   const { data, loading } = useColSub<ItemDoc>(
     query(itemsCol(), where('status', '==', 'pending')),
-    'items-pending',
+    eventSubscriptionKey('items-pending'),
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading };
@@ -892,7 +1016,7 @@ export function useMyPendingItems(uid: string | null | undefined) {
   // doc comment.
   const { data, loading, hasServerData } = useColSub<ItemDoc>(
     uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'pending')) : null,
-    uid ? `items-pending-mine:${uid}` : 'items-pending-mine:none',
+    eventSubscriptionKey('items-pending-mine', uid ?? 'none'),
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading, hasServerData };
@@ -918,7 +1042,7 @@ export function useMyPendingItems(uid: string | null | undefined) {
 export function useMyActiveItems(uid: string | null | undefined) {
   const { data, loading, hasServerData } = useColSub<ItemDoc>(
     uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'active')) : null,
-    uid ? `items-active-mine:${uid}` : 'items-active-mine:none',
+    eventSubscriptionKey('items-active-mine', uid ?? 'none'),
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading, hasServerData };
@@ -937,7 +1061,7 @@ export function useMyActiveItems(uid: string | null | undefined) {
 export function useMyClaims(uid: string | undefined) {
   const { data, loading, hasServerData, fromCache } = useColSub<ClaimDoc>(
     uid ? query(claimsCol(), where('uid', '==', uid)) : null,
-    `my-claims:${uid ?? 'none'}`,
+    eventSubscriptionKey('my-claims', uid ?? 'none'),
   );
   // `fromCache` lets `ConfirmWinMoments` seed its freshness witness ONLY from a
   // server-backed pending observation (Codex #116 R2 finding 2): a cache-only
@@ -962,7 +1086,7 @@ export function useMyClaims(uid: string | undefined) {
 export function usePendingItemCount(enabled = true) {
   const { data, loading } = useColSub<ItemDoc>(
     enabled ? query(itemsCol(), where('status', '==', 'pending')) : null,
-    enabled ? 'items-pending' : 'items-pending:disabled',
+    eventSubscriptionKey(enabled ? 'items-pending' : 'items-pending:disabled'),
   );
   return { count: data.length, loading };
 }
@@ -977,7 +1101,7 @@ export function usePendingItemCount(enabled = true) {
  * too and no Admin could ever act on it — the exact failure ADR 0004 warns of.
  */
 export function useAllItems() {
-  const { data, loading } = useColSub<ItemDoc>(itemsCol(), 'items-admin');
+  const { data, loading } = useColSub<ItemDoc>(itemsCol(), eventSubscriptionKey('items-admin'));
   return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading };
 }
 
@@ -1001,7 +1125,7 @@ export function useAllItems() {
  * no second listener, no composite index.
  */
 export function useReportedProofs() {
-  const { data, loading } = useColSub<ProofDoc>(proofsCol(), 'proofs-admin');
+  const { data, loading } = useColSub<ProofDoc>(proofsCol(), eventSubscriptionKey('proofs-admin'));
   const flagged = data
     .filter((p) => p.reportCount > 0 || p.status === 'flagged' || p.status === 'hidden')
     .sort((a, b) => b.reportCount - a.reportCount);
@@ -1040,14 +1164,17 @@ export function useReportedProofs() {
 export function useAllHearts(enabled = true) {
   const { data, loading, hasServerData } = useColSub<HeartDoc>(
     enabled ? heartsCol() : null,
-    enabled ? 'hearts:all' : 'hearts:none',
+    eventSubscriptionKey(enabled ? 'hearts:all' : 'hearts:none'),
   );
   return { hearts: data, loading, hasServerData };
 }
 
 export function useAllDoubts(viewerUid?: string | null) {
   const { bannedUids } = useEventModeration();
-  const { data, loading, hasServerData } = useColSub<DoubtDoc>(doubtsCol(), 'doubts:all');
+  const { data, loading, hasServerData } = useColSub<DoubtDoc>(
+    doubtsCol(),
+    eventSubscriptionKey('doubts:all'),
+  );
   const doubts = data.filter(
     (d) =>
       !isBanned(d.fromUid, bannedUids) &&
@@ -1060,7 +1187,7 @@ export function useDoubts(itemId: string | null | undefined, viewerUid?: string 
   const { bannedUids } = useEventModeration(!!itemId);
   const { data, loading, hasServerData } = useColSub<DoubtDoc>(
     itemId ? query(doubtsCol(), where('itemId', '==', itemId)) : null,
-    itemId ? `doubts:${itemId}` : 'doubts:none',
+    eventSubscriptionKey('doubts', itemId ?? 'none'),
   );
   // The Admin ban (#108), with the own-content exception mirroring `useMyProofs`
   // (Codex P2, PR #122 round 2): a ban hides content from OTHERS, not from oneself.
@@ -1114,7 +1241,7 @@ export function useMyProofs(uid: string | null | undefined) {
   const { threshold } = useEventModeration();
   const { data, loading, hasServerData } = useColSub<ProofDoc>(
     uid ? query(proofsCol(), where('uid', '==', uid), where('status', '==', 'active')) : null,
-    uid ? `proofs:mine:${uid}` : 'proofs:mine:none',
+    eventSubscriptionKey('proofs:mine', uid ?? 'none'),
   );
   const proofs = data.filter((p) => !isReportHidden(p.reportCount, threshold));
   return { proofs, loading, hasServerData };
@@ -1142,7 +1269,7 @@ export function useProofsForItemText(itemText: string | null | undefined) {
     itemText
       ? query(proofsCol(), where('itemText', '==', itemText), where('status', '==', 'active'))
       : null,
-    itemText ? `proofs:item:${itemText}` : 'proofs:item:none',
+    eventSubscriptionKey('proofs:item', itemText ?? 'none'),
   );
   // This is a PUBLIC-facing read — the Tally sheet renders it for EVERY viewer to
   // show which markers have shown a Proof — so unlike `useMyProofs` it DOES apply

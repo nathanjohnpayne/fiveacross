@@ -12,6 +12,7 @@ import {
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
+import { EVENT_ID } from '../firebase';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
@@ -314,9 +315,11 @@ export default function Leaderboard() {
   // switching filters can never change what a shared card shows, and a banned
   // Player never appears on a shared card.
   const shareLeaderboard = async () => {
+    const actedEventId = EVENT_ID;
     // Reuses the warmed render when its inputs still match, else renders
     // fresh (the cold-tap path — same behavior as before the warm-up).
     const blob = await warmShareCard();
+    if (EVENT_ID !== actedEventId) return;
     try {
       await shareCardBlob({
         blob,
@@ -334,7 +337,9 @@ export default function Leaderboard() {
       // shareCardBlob is designed to never throw, but a share failure must
       // never crash the Leaderboard regardless.
     } finally {
-      track('share_click', { surface: 'leaderboard' });
+      if (EVENT_ID === actedEventId) {
+        track('share_click', { surface: 'leaderboard' });
+      }
     }
   };
 

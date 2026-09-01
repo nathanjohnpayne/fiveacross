@@ -21,19 +21,42 @@ import type { Cell, ClaimDoc } from '../types';
 //      structural (deterministic-id, create-only, immutable writers — pinned in
 //      src/data/w2-feed-moments.test.ts and tests/rules/w2-feed-moments.test.ts).
 
-const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is unset
-
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown; exists: () => boolean };
 
-const { txGet, txSet, txDelete, runTx } = vi.hoisted(() => ({
+const { txGet, txSet, txDelete, runTx, eventScope, markRequest } = vi.hoisted(() => ({
   txGet: vi.fn(),
   txSet: vi.fn(),
   txDelete: vi.fn(),
   runTx: vi.fn(),
+  eventScope: { eventId: 'med-2026' },
+  markRequest: vi.fn(
+    (params: {
+      cellIndex: number;
+      marked: boolean;
+      mode: string;
+      source?: string;
+      eventId?: string;
+    }) => ({
+      id: 'admin-confirm-request',
+      cellIndex: params.cellIndex,
+      marked: params.marked,
+      mode: params.mode,
+      source: params.source ?? 'pledge',
+    }),
+  ),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
+vi.mock('./markAnalytics', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./markAnalytics')>()),
+  directMarkAnalyticsRequest: markRequest,
+}));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -145,6 +168,14 @@ function setPayload(frag: string): Record<string, unknown> | undefined {
   return call ? (call[1] as Record<string, unknown>) : undefined;
 }
 
+function transactionPaths(): string[] {
+  return [
+    ...txGet.mock.calls.map((call) => (call[0] as Ref).path),
+    ...txSet.mock.calls.map((call) => (call[0] as Ref).path),
+    ...txDelete.mock.calls.map((call) => (call[0] as Ref).path),
+  ];
+}
+
 const pendingClaim = (over: Partial<ClaimDoc> = {}): ClaimDoc => ({
   id: 'claim-1',
   uid: 'u1',
@@ -160,6 +191,7 @@ const pendingClaim = (over: Partial<ClaimDoc> = {}): ClaimDoc => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventScope.eventId = 'med-2026';
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   getDocMock.mockResolvedValue({
     data: () => ({
@@ -265,6 +297,142 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
 
     expect(runTx).not.toHaveBeenCalled();
     expect(txSet).not.toHaveBeenCalled();
+  });
+
+  it('keeps a delayed Event A confirm, sibling echoes, honors, and analytics entirely in A', async () => {
+    const days = [
+      {
+        index: 0,
+        date: '2026-07-16',
+        place: 'Split',
+        placeEmoji: '🇭🇷',
+        theme: 'get-sporty',
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 0,
+      },
+      {
+        index: 1,
+        date: '2026-07-17',
+        place: 'Dubrovnik',
+        placeEmoji: '🇭🇷',
+        theme: 'glamiators',
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 0,
+      },
+    ];
+    const primary = boardWith([0, 1, 2, 3]);
+    primary[4] = { ...primary[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
+    const sibling = boardWith([0, 1, 2, 3]);
+    txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path.endsWith('/days/0/boards/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => ({ cells: primary, seed: 10 }) });
+      }
+      if (ref.path.endsWith('/days/1/boards/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => ({ cells: sibling, seed: 11 }) });
+      }
+      if (ref.path.endsWith('/players/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => playerState });
+      }
+      return Promise.resolve({ exists: () => false, data: () => undefined });
+    });
+
+    let finishEventRead: ((snap: Awaited<ReturnType<typeof getDoc>>) => void) | undefined;
+    getDocMock.mockReturnValueOnce(
+      new Promise((resolve) => { finishEventRead = resolve; }),
+    );
+    eventScope.eventId = 'event-a';
+    const pending = confirmClaim(pendingClaim({ dayIndex: 0 }), 'admin-1');
+
+    expect((getDocMock.mock.calls[0][0] as unknown as Ref).path).toBe('events/event-a');
+    eventScope.eventId = 'event-b';
+    finishEventRead!({ data: () => ({ days }) } as Awaited<ReturnType<typeof getDoc>>);
+    await pending;
+
+    expect(markRequest).toHaveBeenCalledTimes(1);
+    expect(markRequest).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: 'event-a',
+      source: 'admin_confirm',
+    }));
+    const paths = transactionPaths();
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.every((path) => path.startsWith('events/event-a/'))).toBe(true);
+    expect(paths).toEqual(expect.arrayContaining([
+      'events/event-a/days/0/boards/u1',
+      'events/event-a/days/1/boards/u1',
+      'events/event-a/players/u1',
+      'events/event-a/days/0/meta/0',
+      'events/event-a/days/1/meta/1',
+      'events/event-a/claims/claim-1',
+      'events/event-a/proofs/P',
+    ]));
+    const siblingWrite = txSet.mock.calls.find(
+      (call) => (call[0] as Ref).path === 'events/event-a/days/1/boards/u1',
+    );
+    const siblingPatch = (siblingWrite?.[1] as { cells?: Record<string, Cell> }).cells;
+    expect(siblingPatch?.['4'].echoAnalyticsId).toContain('echo-v1:event-a:');
+  });
+
+  it('keeps a delayed Event A rejection marker delete in A after switching to B', async () => {
+    const days = [
+      {
+        index: 0,
+        date: '2026-07-16',
+        place: 'Split',
+        placeEmoji: '🇭🇷',
+        theme: 'get-sporty',
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 0,
+      },
+      {
+        index: 1,
+        date: '2026-07-17',
+        place: 'Dubrovnik',
+        placeEmoji: '🇭🇷',
+        theme: 'glamiators',
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 0,
+      },
+    ];
+    const primary = boardWith([]);
+    primary[4] = { ...primary[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
+    const sibling = dealt();
+    txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path.endsWith('/days/0/boards/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => ({ cells: primary, seed: 20 }) });
+      }
+      if (ref.path.endsWith('/days/1/boards/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => ({ cells: sibling, seed: 21 }) });
+      }
+      if (ref.path.endsWith('/players/u1')) {
+        return Promise.resolve({ exists: () => true, data: () => playerState });
+      }
+      return Promise.resolve({ exists: () => false, data: () => undefined });
+    });
+
+    let finishEventRead: ((snap: Awaited<ReturnType<typeof getDoc>>) => void) | undefined;
+    getDocMock.mockReturnValueOnce(
+      new Promise((resolve) => { finishEventRead = resolve; }),
+    );
+    eventScope.eventId = 'event-a';
+    const pending = rejectClaim(pendingClaim({ dayIndex: 0 }), 'admin-1');
+
+    expect((getDocMock.mock.calls[0][0] as unknown as Ref).path).toBe('events/event-a');
+    eventScope.eventId = 'event-b';
+    finishEventRead!({ data: () => ({ days }) } as Awaited<ReturnType<typeof getDoc>>);
+    await pending;
+
+    expect(txDelete).toHaveBeenCalledTimes(1);
+    expect((txDelete.mock.calls[0][0] as Ref).path).toBe(
+      'events/event-a/tally/i4/markers/u1',
+    );
+    const paths = transactionPaths();
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.every((path) => path.startsWith('events/event-a/'))).toBe(true);
+    expect(paths).toContain('events/event-a/claims/claim-1');
   });
 
   it('rejectClaim unmarks the claim cell and does NOT credit it', async () => {

@@ -23,6 +23,7 @@ const H = vi.hoisted(() => ({
 }));
 
 vi.mock('../analytics', () => ({ track: vi.fn() }));
+vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
   useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),

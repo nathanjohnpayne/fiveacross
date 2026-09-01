@@ -69,7 +69,7 @@ Pinned by `src/components/w2-share-cards.test.tsx` (the named-co-winner wording,
 
 ## Analytics
 
-`most_loved_photo_frozen` is registered in `GA4_EVENTS` (`src/analytics.ts`) and fired CLIENT-SIDE on first observation of the persisted award (once per device per event via a localStorage guard, the #561 call site in `FarewellPodium`)—functions emit no PostHog/GA4 events today and building a first-ever server capture path days before a live freeze is unjustified risk (§ Deviations #5). Params come from `mostLovedFrozenEventPayload`: `winnersCount`, `heartCount`, `tie`, `award`, `proofId` (winners[0] or null), `dayIndex`—ids and counts only, never `mediaURL`/`thumbURL`/`storagePath`/display names, unit-tested to contain no media keys. The no-award record fires too (`award: false` is signal).
+`most_loved_photo_frozen` is registered in `GA4_EVENTS` (`src/analytics.ts`) and fired CLIENT-SIDE on first observation of the persisted award (once per device per Event via an Event-keyed localStorage guard and an Event-keyed module-session set, the #561 call site in `FarewellPodium`; one mounted session may therefore fire once for A and once for B)—functions emit no PostHog/GA4 events today and building a first-ever server capture path days before a live freeze is unjustified risk (§ Deviations #5). Params come from `mostLovedFrozenEventPayload`: `winnersCount`, `heartCount`, `tie`, `award`, `proofId` (winners[0] or null), `dayIndex`—ids and counts only, never `mediaURL`/`thumbURL`/`storagePath`/display names, unit-tested to contain no media keys. The no-award record fires too (`award: false` is signal).
 
 ## Deviations, vocabulary mappings, and flags
 

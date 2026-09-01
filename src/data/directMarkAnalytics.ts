@@ -33,9 +33,9 @@ export type EchoAnalyticsEvent = {
 
 export type BoardAnalyticsEvent = DirectMarkAnalyticsEvent | EchoAnalyticsEvent;
 
-const deliveredStorageKey = (uid: string) => `five-across:board-analytics:${EVENT_ID}:${uid}`;
-const cursorStorageKey = (uid: string) => `five-across:board-analytics-cursor:${EVENT_ID}:${uid}`;
-const outboxStorageKey = (uid: string) => `five-across:board-analytics-outbox:${EVENT_ID}:${uid}`;
+const deliveredStorageKey = (eventId: string, uid: string) => `five-across:board-analytics:${eventId}:${uid}`;
+const cursorStorageKey = (eventId: string, uid: string) => `five-across:board-analytics-cursor:${eventId}:${uid}`;
+const outboxStorageKey = (eventId: string, uid: string) => `five-across:board-analytics-outbox:${eventId}:${uid}`;
 
 // #764: a sink that throws AFTER both one-shot readiness signals
 // (`analyticsInitializationSettled`, `onPostHogReady`) have already fired
@@ -49,9 +49,9 @@ const RETRY_MAX_DELAY_MS = 120_000;
 type DeliveryCursor = { seconds: number; nanoseconds: number; id: string };
 type PendingDelivery = { event: BoardAnalyticsEvent; pending: AnalyticsSinkSelection };
 
-function storedIds(uid: string): Set<string> {
+function storedIds(eventId: string, uid: string): Set<string> {
   try {
-    const raw = localStorage.getItem(deliveredStorageKey(uid));
+    const raw = localStorage.getItem(deliveredStorageKey(eventId, uid));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []);
   } catch {
@@ -59,21 +59,21 @@ function storedIds(uid: string): Set<string> {
   }
 }
 
-function storeIds(uid: string, ids: Set<string>): void {
+function storeIds(eventId: string, uid: string, ids: Set<string>): void {
   try {
     // Do not rotate this acknowledgement set: rotating made an old immutable
     // row become a fresh delivery after enough marks. If storage is exhausted,
     // the sink still receives at-least-once events keyed by transitionId.
-    localStorage.setItem(deliveredStorageKey(uid), JSON.stringify([...ids]));
+    localStorage.setItem(deliveredStorageKey(eventId, uid), JSON.stringify([...ids]));
   } catch {
     // Browser storage is an optimization only. Transition IDs remain durable
     // and sink-side reconciliation still groups an at-least-once replay.
   }
 }
 
-function storedCursor(uid: string): DeliveryCursor | null {
+function storedCursor(eventId: string, uid: string): DeliveryCursor | null {
   try {
-    const raw = localStorage.getItem(cursorStorageKey(uid));
+    const raw = localStorage.getItem(cursorStorageKey(eventId, uid));
     const value = raw ? (JSON.parse(raw) as Partial<DeliveryCursor>) : null;
     if (
       !value ||
@@ -111,9 +111,9 @@ function rowCursor(value: unknown, id: string): DeliveryCursor | null {
   return { seconds: timestamp.seconds, nanoseconds: timestamp.nanoseconds, id };
 }
 
-function storeCursor(uid: string, cursor: DeliveryCursor): void {
+function storeCursor(eventId: string, uid: string, cursor: DeliveryCursor): void {
   try {
-    localStorage.setItem(cursorStorageKey(uid), JSON.stringify(cursor));
+    localStorage.setItem(cursorStorageKey(eventId, uid), JSON.stringify(cursor));
   } catch {
     // The next mount will replay at least once if a browser cannot persist its
     // cursor. Sinks still deduplicate that retry on transitionId.
@@ -133,9 +133,9 @@ function parsePendingDelivery(value: unknown): PendingDelivery | null {
   return { event, pending: { ga4: true, posthog: true } };
 }
 
-function storedOutbox(uid: string): Map<string, PendingDelivery> {
+function storedOutbox(eventId: string, uid: string): Map<string, PendingDelivery> {
   try {
-    const raw = localStorage.getItem(outboxStorageKey(uid));
+    const raw = localStorage.getItem(outboxStorageKey(eventId, uid));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     const events = Array.isArray(parsed)
       ? parsed.map(parsePendingDelivery).filter((entry): entry is PendingDelivery => entry !== null)
@@ -148,17 +148,17 @@ function storedOutbox(uid: string): Map<string, PendingDelivery> {
 
 /** A transition is cursor-safe only once this write read-backs. A termination
  * between this point and `track()` replays the outbox on the next mount. */
-function storeOutbox(uid: string, outbox: Map<string, PendingDelivery>): boolean {
+function storeOutbox(eventId: string, uid: string, outbox: Map<string, PendingDelivery>): boolean {
   try {
     const encoded = JSON.stringify([...outbox.values()]);
-    localStorage.setItem(outboxStorageKey(uid), encoded);
-    return localStorage.getItem(outboxStorageKey(uid)) === encoded;
+    localStorage.setItem(outboxStorageKey(eventId, uid), encoded);
+    return localStorage.getItem(outboxStorageKey(eventId, uid)) === encoded;
   } catch {
     return false;
   }
 }
 
-function dispatch(delivery: PendingDelivery): PendingDelivery {
+function dispatch(delivery: PendingDelivery, eventId: string): PendingDelivery {
   const { event, pending } = delivery;
   let acknowledged: AnalyticsSinkSelection;
   if (event.name === 'echo_mark') {
@@ -189,7 +189,7 @@ function dispatch(delivery: PendingDelivery): PendingDelivery {
           event.name === 'mark_square' &&
           pending.ga4 &&
           pending.posthog &&
-          isLocalDirectMarkRequest(event.requestId),
+          isLocalDirectMarkRequest(event.requestId, eventId),
         posthogOptions: { durableOutbox: true },
       },
       pending,
@@ -253,10 +253,13 @@ export function parseDirectMarkAnalyticsEvent(value: unknown): BoardAnalyticsEve
  * arrival time, so a rapid mark → unmark → mark can be reconstructed in its
  * actual committed sequence even when Functions executions overlap.
  */
-export function subscribeDirectMarkAnalytics(uid: string): () => void {
-  const delivered = storedIds(uid);
-  const outbox = storedOutbox(uid);
-  const cursor = storedCursor(uid);
+export function subscribeDirectMarkAnalytics(uid: string, eventId: string = EVENT_ID): () => void {
+  // `EVENT_ID` is a live binding. Capture its value at subscription entry so
+  // every ref, storage key and deferred retry remains owned by this Event even
+  // if the active Event changes before a callback runs.
+  const delivered = storedIds(eventId, uid);
+  const outbox = storedOutbox(eventId, uid);
+  const cursor = storedCursor(eventId, uid);
   let unsubscribed = false;
   let pendingCursor: DeliveryCursor | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -282,22 +285,29 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
     }, delay);
   };
   const attemptDrain = () => {
+    // Sink dimensions follow the currently active Event and cannot be rebound
+    // for an older subscription. Keep A's durable outbox parked while B is
+    // active; its retry (or a later A remount) can drain once A is active again.
+    if (EVENT_ID !== eventId) return false;
     for (const delivery of [...outbox.values()]) {
-      const updated = dispatch(delivery);
+      // A sink call is synchronous, but re-check between rows so no later row
+      // can start after an Event transition triggered by the preceding call.
+      if (EVENT_ID !== eventId) return false;
+      const updated = dispatch(delivery, eventId);
       outbox.set(updated.event.transitionId, updated);
       // Persistence is the preferred crash boundary, but constrained browsers
       // can block or exhaust localStorage. Keep retrying in memory there;
       // because the cursor does not advance until every sink acknowledges,
       // Firestore replays the immutable transition on the next mount.
-      storeOutbox(uid, outbox);
+      storeOutbox(eventId, uid, outbox);
       if (!fullyAcknowledged(updated)) return false;
       outbox.delete(updated.event.transitionId);
-      storeOutbox(uid, outbox);
+      storeOutbox(eventId, uid, outbox);
       delivered.add(updated.event.transitionId);
-      storeIds(uid, delivered);
+      storeIds(eventId, uid, delivered);
     }
     if (pendingCursor) {
-      storeCursor(uid, pendingCursor);
+      storeCursor(eventId, uid, pendingCursor);
       pendingCursor = null;
     }
     return true;
@@ -318,7 +328,7 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
     return drained;
   };
   try {
-    const rows = collection(db, 'events', EVENT_ID, 'players', uid, 'analyticsTransitions');
+    const rows = collection(db, 'events', eventId, 'players', uid, 'analyticsTransitions');
     const transitions = cursor
       ? query(
           rows,
@@ -334,6 +344,10 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
     const unsubscribe = onSnapshot(
       transitions,
       (snapshot) => {
+        // Firestore may already have queued a callback when unsubscribe runs.
+        // Retiring the subscription is synchronous; such a callback belongs to
+        // the old Event scope and must not refill or dispatch its outbox.
+        if (unsubscribed) return;
         // A cache-only snapshot can be newer at one position but older at
         // another. Never use it to advance the high-water cursor: doing so
         // would make `startAfter` skip a server row this tab never saw.
@@ -355,7 +369,7 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
           if (nextCursor) lastCursor = nextCursor;
         }
         if (lastCursor) pendingCursor = lastCursor;
-        storeOutbox(uid, outbox);
+        storeOutbox(eventId, uid, outbox);
         flushOutbox();
       },
       () => {

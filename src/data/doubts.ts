@@ -16,10 +16,11 @@ import type { DoubtDoc, ProofDoc } from '../types';
 // Raw (converter-free) doubts ref for writes, matching api.ts's rawPlayer/rawBoard,
 // proofs.ts's rawProof, and moments.ts's rawMoment — the read side attaches
 // `doubtConverter` via `doubtsCol`/`doubtRef` (src/data/paths.ts).
-const rawDoubts = () => collection(db, 'events', EVENT_ID, 'doubts');
+const rawDoubts = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'doubts');
 // Raw player-row ref for the cached-identity fallback (Codex P2, PR #106 round 2
 // finding 3) — the same doc setMark reads its fallback attribution from (api.ts).
-const rawPlayer = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'players', uid);
 
 /**
  * The deterministic Doubt doc id — ONE slot per (doubter, target, Prompt) triple
@@ -45,9 +46,9 @@ export function doubtDocId(fromUid: string, targetUid: string, itemId: string): 
  * the right public name, and only a genuine cache miss falls through to
  * `markerDisplayName`'s 'Anonymous'. Never rejects.
  */
-async function cachedPlayerName(uid: string): Promise<unknown> {
+async function cachedPlayerName(uid: string, eventId: string): Promise<unknown> {
   try {
-    const snap = await getDocFromCache(rawPlayer(uid));
+    const snap = await getDocFromCache(rawPlayer(uid, eventId));
     return snap.exists() ? (snap.data() as { displayName?: unknown }).displayName : undefined;
   } catch {
     return undefined; // not cached on this device
@@ -131,6 +132,7 @@ export interface RaiseDoubtArgs {
  */
 export async function raiseDoubt(args: RaiseDoubtArgs): Promise<void> {
   const { fromUid, targetUid, itemId, cellIndex, currentlyOpen } = args;
+  const eventId = EVENT_ID;
   // No self-doubt (ADR 0001 + rules `targetUid != auth.uid`): a no-op, so neither
   // a write nor the analytics event fires for a nonsensical raise.
   if (fromUid === targetUid) return;
@@ -146,7 +148,7 @@ export async function raiseDoubt(args: RaiseDoubtArgs): Promise<void> {
     return;
   }
 
-  const ref = doc(rawDoubts(), doubtDocId(fromUid, targetUid, itemId));
+  const ref = doc(rawDoubts(eventId), doubtDocId(fromUid, targetUid, itemId));
   // Write-once cache pre-check (round 2 finding 2), mirroring writeMomentOnce
   // (src/data/moments.ts): the rules deny a duplicate slot server-side, but
   // Firestore applies latency compensation FIRST — a duplicate setDoc would
@@ -176,7 +178,7 @@ export async function raiseDoubt(args: RaiseDoubtArgs): Promise<void> {
     // The cached player row is the fallback identity (round 2 finding 3) — the
     // same second argument setMark passes markerDisplayName (api.ts): preferred
     // saved name first, this device's cached row next, 'Anonymous' last.
-    fromDisplayName: markerDisplayName(args.fromDisplayName, await cachedPlayerName(fromUid)),
+    fromDisplayName: markerDisplayName(args.fromDisplayName, await cachedPlayerName(fromUid, eventId)),
     targetUid,
     targetDisplayName: markerDisplayName(args.targetDisplayName, undefined),
     createdAt: Date.now(),
@@ -192,7 +194,9 @@ export async function raiseDoubt(args: RaiseDoubtArgs): Promise<void> {
       // queued Doubt's setDoc settles at reconnect drain, so demand_proof now
       // tracks then rather than at tap time — and not at all if the app closes
       // first. Accurate-but-delayed beats inflated for a counting metric.
-      track('demand_proof', { itemId });
+      // Startup dimensions cannot be rebound safely after an in-session Event
+      // transition. Never attribute an Event-A write to the now-active Event B.
+      if (EVENT_ID === eventId) track('demand_proof', { itemId });
     },
     (err: unknown) => {
       // Not the offline case: offline the write PENDS in the persistent cache and

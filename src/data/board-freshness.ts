@@ -31,8 +31,10 @@
 // is accepted and documented in the spec's Residuals.
 //
 // The registry is deliberately Firestore-free (plain module state, keyed by
-// `${dayIndex}:${uid}`) so the mock-Firestore unit suites and the emulator
+// `(eventId, dayIndex, uid)`) so the mock-Firestore unit suites and the emulator
 // suites drive it the same way the hooks do.
+
+import { eventScopeKey } from './eventScope';
 
 type Entry = {
   /** Live `onSnapshot` subscriptions currently feeding this board. */
@@ -45,15 +47,16 @@ type Entry = {
 
 const entries = new Map<string, Entry>();
 
-const keyOf = (dayIndex: number, uid: string) => `${dayIndex}:${uid}`;
+const keyOf = (eventId: string, dayIndex: number, uid: string) =>
+  eventScopeKey(eventId, 'board-seed-watch', dayIndex, uid);
 
 /**
  * Register a live watch on a Day board. Returns an idempotent release
  * function; when the LAST watcher releases, the board's trust entry is
  * dropped entirely (fail closed — see module comment).
  */
-export function beginDayBoardSeedWatch(dayIndex: number, uid: string): () => void {
-  const key = keyOf(dayIndex, uid);
+export function beginDayBoardSeedWatch(eventId: string, dayIndex: number, uid: string): () => void {
+  const key = keyOf(eventId, dayIndex, uid);
   const entry = entries.get(key) ?? { watchers: 0, serverSeen: false, seed: undefined };
   entry.watchers += 1;
   entries.set(key, entry);
@@ -78,6 +81,7 @@ export function beginDayBoardSeedWatch(dayIndex: number, uid: string): () => voi
  * that still claims a seed.
  */
 export function recordDayBoardSeedSnapshot(
+  eventId: string,
   dayIndex: number,
   uid: string,
   snap: {
@@ -86,7 +90,7 @@ export function recordDayBoardSeedSnapshot(
     data(): unknown;
   },
 ): void {
-  const entry = entries.get(keyOf(dayIndex, uid));
+  const entry = entries.get(keyOf(eventId, dayIndex, uid));
   if (!entry || entry.watchers <= 0) return;
   // Absent metadata (a test double) reads as untrusted — fail closed.
   if (!snap.metadata || snap.metadata.fromCache !== false || snap.metadata.hasPendingWrites !== false)
@@ -103,10 +107,11 @@ export function recordDayBoardSeedSnapshot(
  * the caller must match against the cached one.
  */
 export function trustedDayBoardSeed(
+  eventId: string,
   dayIndex: number,
   uid: string,
 ): { trusted: boolean; seed: number | undefined } {
-  const entry = entries.get(keyOf(dayIndex, uid));
+  const entry = entries.get(keyOf(eventId, dayIndex, uid));
   if (!entry || !entry.serverSeen) return { trusted: false, seed: undefined };
   return { trusted: true, seed: entry.seed };
 }

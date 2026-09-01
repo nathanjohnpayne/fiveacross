@@ -54,7 +54,7 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
-vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
+vi.mock('../firebase', () => ({ auth: {}, EVENT_ID: 'test-event', googleProvider: {} }));
 // AuthProvider also mounts ConfirmWinMoments (#41); stub it — this suite is about the
 // pool-recovery watcher, which is real below.
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));

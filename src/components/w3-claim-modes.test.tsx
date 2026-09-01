@@ -18,6 +18,7 @@ import type { BoardDoc, Cell, ClaimDoc, EventDoc, PlayerDoc } from '../types';
 // that already stood at mount is baseline (history), never re-announced.
 
 const H = vi.hoisted(() => ({
+  eventId: 'test-event',
   // shared auth
   user: null as User | null,
   // ConfirmWinMoments inputs
@@ -48,7 +49,14 @@ const H = vi.hoisted(() => ({
   rejectClaim: vi.fn(),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+const TEST_EVENT = 'test-event';
+
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return H.eventId;
+  },
+}));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user, loading: false }) }));
 vi.mock('../hooks/useData', () => ({
@@ -190,6 +198,7 @@ const claim = (over: Partial<ClaimDoc> = {}): ClaimDoc => {
 beforeEach(() => {
   vi.clearAllMocks();
   resetConfirmStates(); // the listener state is module-scope + uid-keyed — clear it per case
+  H.eventId = TEST_EVENT;
   H.user = { uid: 'u1', displayName: 'Sailor', photoURL: null } as unknown as User;
   H.board = null;
   H.player = { displayName: 'Deck Daddy', photoURL: null, firstBingoAt: null } as unknown as PlayerDoc;
@@ -269,9 +278,17 @@ describe('ConfirmWinMoments — the confirm-path Moment emitter (issue #41)', ()
     // never the confirming Admin, and fires exactly once.
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
     // Legacy single-board event: no Day rides the broadcast (#274).
-    expect(H.broadcastBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null }, undefined);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      TEST_EVENT,
+    );
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith({ uid: 'u1', displayName: 'Deck Daddy', photoURL: null }, undefined);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      TEST_EVENT,
+    );
   });
 
   it('NO false singleton: a confirm racing another Player’s live first-BINGO posts the bingo but not the ceremony', async () => {
@@ -636,6 +653,50 @@ describe('ConfirmWinMoments — the confirm-path Moment emitter (issue #41)', ()
     expect(H.broadcastBingo).not.toHaveBeenCalled();
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
   });
+
+  it('parks an in-flight Event A confirm while B is active, then resumes it only after returning to A', async () => {
+    let releaseWitness!: (value: boolean) => void;
+    const witness = new Promise<boolean>((resolve) => {
+      releaseWitness = resolve;
+    });
+    H.hasPriorBingoWitness.mockImplementationOnce(() => witness);
+    H.eventId = 'event-a';
+    H.board = boardDoc(cellsWith([0, 1, 2, 3], [4]));
+    H.claims = [claim({ status: 'pending', resolvedBy: null })];
+    const { rerender } = render(<ConfirmWinMoments />);
+    await flushAsync();
+
+    H.claims = [claim({ status: 'confirmed' })];
+    H.board = boardDoc(cellsWith(ROW0));
+    rerender(<ConfirmWinMoments />);
+    await flushAsync();
+
+    H.eventId = 'event-b';
+    H.claims = [];
+    H.board = null;
+    rerender(<ConfirmWinMoments />);
+    releaseWitness(false);
+    await flushAsync();
+    expect(H.broadcastBingo).not.toHaveBeenCalled();
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+
+    H.eventId = 'event-a';
+    H.claims = [claim({ status: 'confirmed' })];
+    H.board = boardDoc(cellsWith(ROW0));
+    rerender(<ConfirmWinMoments />);
+    await flushAsync();
+
+    expect(H.broadcastBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'event-a',
+    );
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(
+      { uid: 'u1', displayName: 'Deck Daddy', photoURL: null },
+      undefined,
+      'event-a',
+    );
+  });
 });
 
 describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim’s own Day board (#274)', () => {
@@ -665,9 +726,9 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     await flushAsync();
 
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
   });
 
   it('a daily blackout confirm broadcasts with its Day (the per-card id contract, #267)', async () => {
@@ -686,7 +747,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     await flushAsync();
 
     expect(H.broadcastBlackout).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBlackout).toHaveBeenCalledWith(ACTOR, 2);
+    expect(H.broadcastBlackout).toHaveBeenCalledWith(ACTOR, 2, TEST_EVENT);
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
   });
 
@@ -718,7 +779,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     // Exactly ONE bingo — day 0's — stamped with ITS day; day 1's non-completing
     // confirm emits nothing.
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 0);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 0, TEST_EVENT);
   });
 
   it('a confirm whose Day board has not arrived HOLDS, then fires when that board loads', async () => {
@@ -738,7 +799,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     rerender(<ConfirmWinMoments />);
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
   });
 
   it('a roster-HELD daily ceremony publishes with its Day — and fall-clears against that Day’s board', async () => {
@@ -753,7 +814,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     H.dayBoards = new Map([[1, boardDoc(cellsWith(ROW0))]]);
     rerender(<ConfirmWinMoments />);
     await flushAsync();
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // held at the roster gate
 
     // Roster confirms → the ceremony publishes carrying the HELD win's Day.
@@ -762,7 +823,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     rerender(<ConfirmWinMoments />);
     await flushAsync();
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
   });
 
   it('a held daily ceremony whose win FALLS on its own Day board is voided — a later regain never fires it', async () => {
@@ -802,7 +863,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     H.board = boardDoc(cellsWith(ROW0));
     rerender(<ConfirmWinMoments />);
     await flushAsync();
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, undefined);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, undefined, TEST_EVENT);
   });
 
   it('a TUTORIAL-Day confirm posts its plain bingo but NEVER the cruise-wide first_bingo — fired or parked (Codex P1 on #287)', async () => {
@@ -823,7 +884,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     H.dayBoards = new Map([[0, boardDoc(cellsWith(ROW0))]]);
     rerender(<ConfirmWinMoments />);
     await flushAsync();
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 0); // the plain beat still posts
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 0, TEST_EVENT); // the plain beat still posts
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
 
     // The roster confirming later must not release a parked tutorial ceremony —
@@ -856,8 +917,9 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     expect(H.hasPriorBingoWitness).toHaveBeenCalledWith('u1', {
       excludeDayIndexes: new Set([0]),
       dayIndexes: [0, 1, 2],
+      eventId: TEST_EVENT,
     });
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
   });
 
   it('a BATCH crossing bingos on TWO main-game Days posts a bingo PER Day but claims the event singleton ONCE (#372; Codex P2 on #288)', async () => {
@@ -889,13 +951,13 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     // same once-per-Player id and could only churn the cache before the server
     // denied it), and exactly the #372 bug once the ids went per-card.
     expect(H.broadcastBingo).toHaveBeenCalledTimes(2);
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1);
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 2);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 2, TEST_EVENT);
     // …while the event-singleton ceremony still fires exactly ONCE, for the
     // earliest-claimed group (equal createdAt here → day tiebreak). That gate is
     // what stays once-per-Event; only the plain bingo went per-card.
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
   });
 
   it('the batch singleton goes to the EARLIEST-claimed win, not the lowest Day (Codex P3 on #288 round 3)', async () => {
@@ -923,7 +985,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     rerender(<ConfirmWinMoments />);
     await flushAsync();
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 3);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 3, TEST_EVENT);
   });
 
   it('a held daily ceremony is VOIDED when the freeze lands before the roster gate opens (Codex P2 on #288 round 3)', async () => {
@@ -937,7 +999,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     H.dayBoards = new Map([[1, boardDoc(cellsWith(ROW0))]]);
     rerender(<ConfirmWinMoments />);
     await flushAsync();
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1);
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // parked at the roster gate
 
     // The finale freeze stamps while the candidate is parked; the roster then
@@ -992,7 +1054,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     rerender(<ConfirmWinMoments />);
     await flushAsync();
     expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
-    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 2);
+    expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 2, TEST_EVENT);
   });
 
   it('a POST-FREEZE confirm posts its plain bingo but never mints the ceremony (Codex P1 on #287, mirrors the live verdict-time gate)', async () => {
@@ -1008,7 +1070,7 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     H.dayBoards = new Map([[1, boardDoc(cellsWith(ROW0))]]);
     rerender(<ConfirmWinMoments />);
     await flushAsync();
-    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1); // celebrates, day chip intact
+    expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT); // celebrates, day chip intact
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // the headline honor is settled
   });
 });

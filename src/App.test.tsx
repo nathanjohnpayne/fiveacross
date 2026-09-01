@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ReactNode } from 'react';
-import { render, screen } from '@testing-library/react';
+import { useState, type ReactNode } from 'react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { saveCardSnapshot } from './data/cardCache';
 import type { Cell } from './types';
@@ -8,6 +8,12 @@ import type { Cell } from './types';
 // A mutable auth stub so each test drives {dealError, dealing} without a real
 // AuthProvider. The default is a signed-in Player with no deal error.
 const authState: { value: Record<string, unknown> } = { value: {} };
+const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
+vi.mock('./firebase', () => ({
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 vi.mock('./auth/AuthContext', () => ({
   useAuth: () => ({
     user: { uid: 'sailor-1' },
@@ -28,7 +34,9 @@ vi.mock('./auth/AuthContext', () => ({
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
 vi.mock('./components/NoticeBanner', () => ({ default: () => null }));
 vi.mock('./components/Leaderboard', () => ({ default: () => <div data-testid="ranks" /> }));
-vi.mock('./components/ProofFeed', () => ({ default: () => <div data-testid="feed" /> }));
+vi.mock('./components/ProofFeed', () => ({
+  default: () => <input data-testid="feed" aria-label="Feed-local draft" defaultValue="" />,
+}));
 vi.mock('./components/More', () => ({ default: () => <div data-testid="more" /> }));
 vi.mock('./components/Nav', () => ({ default: () => <nav data-testid="nav" /> }));
 vi.mock('./components/PullToRefresh', () => ({ default: () => null }));
@@ -76,11 +84,21 @@ function cells(): Cell[] {
   }));
 }
 
-function renderApp() {
+function renderApp(initialEntry = '/') {
   return render(
-    <MemoryRouter initialEntries={['/']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <App />
     </MemoryRouter>,
+  );
+}
+
+function GlobalShellProbe() {
+  const [value, setValue] = useState('');
+  return (
+    <>
+      <input aria-label="Global shell state" value={value} onChange={(event) => setValue(event.target.value)} />
+      <App />
+    </>
   );
 }
 
@@ -114,12 +132,38 @@ describe('App — Card route deal-error routing (#434)', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', new MemoryStorage());
     authState.value = {};
+    eventScope.eventId = 'event-a';
   });
   afterEach(() => vi.unstubAllGlobals());
 
   it('renders the live Board when there is no deal error', () => {
     renderApp();
     expect(screen.getByTestId('board')).toBeInTheDocument();
+  });
+
+  it('remounts Event-local route state across A → B while preserving state owned above App', () => {
+    const view = render(
+      <MemoryRouter initialEntries={['/feed']}>
+        <GlobalShellProbe />
+      </MemoryRouter>,
+    );
+    const globalState = screen.getByLabelText('Global shell state');
+    const eventADraft = screen.getByLabelText('Feed-local draft');
+    fireEvent.change(globalState, { target: { value: 'Global state' } });
+    fireEvent.change(eventADraft, { target: { value: 'Event A state' } });
+    expect(globalState).toHaveValue('Global state');
+    expect(eventADraft).toHaveValue('Event A state');
+
+    eventScope.eventId = 'event-b';
+    view.rerender(
+      <MemoryRouter initialEntries={['/feed']}>
+        <GlobalShellProbe />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('Feed-local draft')).toHaveValue('');
+    expect(screen.getByLabelText('Global shell state')).toHaveValue('Global state');
+    expect(screen.getByTestId('nav')).toBeInTheDocument();
   });
 
   it('shows the durable cached card (not the reload screen) on a CONNECTION-class failure with a snapshot', () => {

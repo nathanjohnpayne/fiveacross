@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { EVENT_ID } from '../firebase';
 
 /**
  * Card/Feed → More "Suggest a square" bridge (#559) — the SAME module-store
@@ -10,34 +11,35 @@ import { useSyncExternalStore } from 'react';
  * the intent through its OWN `panel` state, so this never forks or
  * reimplements ItemPool's suggestion box.
  *
- * In-memory, one pending intent (last write wins), never persisted — same
- * shape as `useOpenSquare.ts`.
+ * In-memory, one Event-scoped pending intent (last write wins), never
+ * persisted — same shape as `useOpenSquare.ts`.
  */
-let pending = false;
+let pendingEventId: string | null = null;
 const listeners = new Set<() => void>();
 
 export function requestOpenSuggestPanel(): void {
-  pending = true;
+  pendingEventId = EVENT_ID;
   listeners.forEach((l) => l());
 }
 
 /** More calls this once it has acted on (or dropped) the intent. */
 export function clearOpenSuggestPanel(): void {
-  if (!pending) return;
-  pending = false;
+  if (pendingEventId === null) return;
+  pendingEventId = null;
   listeners.forEach((l) => l());
 }
 
 /** Test-only. */
 export function __resetOpenSuggestPanelForTests(): void {
-  pending = false;
+  pendingEventId = null;
   listeners.clear();
 }
 
 export function useOpenSuggestPanelIntent(): boolean {
+  const current = () => pendingEventId === EVENT_ID;
   return useSyncExternalStore(
     (l) => (listeners.add(l), () => listeners.delete(l)),
-    () => pending,
-    () => pending,
+    current,
+    current,
   );
 }

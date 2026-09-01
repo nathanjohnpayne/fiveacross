@@ -42,7 +42,7 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
-vi.mock('../firebase', () => ({ auth: mocks.auth, googleProvider: {} }));
+vi.mock('../firebase', () => ({ auth: mocks.auth, EVENT_ID: 'test-event', googleProvider: {} }));
 vi.mock('../data/api', () => ({
   ensureUserProfile: mocks.ensureUserProfile,
   attestAdult: mocks.attestAdult,
@@ -1069,7 +1069,7 @@ describe('offline cold boot (#115)', () => {
       await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
     });
     // The probe is in flight and no error has been posted yet.
-    expect(mocks.hasCachedBoard).toHaveBeenCalledWith(RETURNING_USER.uid);
+    expect(mocks.hasCachedBoard).toHaveBeenCalledWith(RETURNING_USER.uid, 'test-event');
     expect(dealErrorShown()).toBe(false);
 
     // The orphaned server read lands CONFIRMING the stamp: authority granted, the

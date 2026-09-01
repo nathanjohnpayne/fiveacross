@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { BoardDoc, Cell, EventDoc, PlayerDoc } from '../types';
 
@@ -27,6 +27,7 @@ const H = vi.hoisted(() => ({
   attachProof: vi.fn(),
   track: vi.fn(),
 }));
+const EVENT_H = vi.hoisted(() => ({ eventId: 'test-event' }));
 
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
@@ -125,7 +126,11 @@ vi.mock('../auth/AuthContext', () => ({
 }));
 // CoachOverlay (#214) imports EVENT_ID from '../firebase' — mocked so
 // mounting Board here never touches the real Firebase app init.
-vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({
+  get EVENT_ID() {
+    return EVENT_H.eventId;
+  },
+}));
 
 import Board from './Board';
 import ProofSheet from './ProofSheet';
@@ -202,6 +207,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  EVENT_H.eventId = 'test-event';
   H.user = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null };
   H.board = null;
   H.player = null;
@@ -265,6 +271,31 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
     expect(H.attachProof.mock.calls[0][0].proof).toEqual({ type: 'text', text: 'he did NOT' });
     expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it('does not attribute Event A proof analytics after Event B takes over during the attach', async () => {
+    const user = userEvent.setup();
+    const props = baseProps();
+    let resolveAttach!: (value: undefined) => void;
+    const attach = new Promise<undefined>((resolve) => {
+      resolveAttach = resolve;
+    });
+    H.attachProof.mockReturnValueOnce(attach);
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'Event A proof');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledOnce());
+
+    EVENT_H.eventId = 'event-b';
+    await act(async () => {
+      resolveAttach(undefined);
+      await attach;
+    });
+
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(H.track).not.toHaveBeenCalledWith('attach_proof', expect.anything());
   });
 
   it('a submit that marks a previously-unmarked Square delegates its durable proof transition to attachProof (#727)', async () => {

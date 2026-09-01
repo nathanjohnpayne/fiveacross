@@ -208,8 +208,8 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     fireEvent.click(checkbox);
     await waitFor(() => expect(within(row).queryByRole('alert')).toBeNull());
     expect(checkbox.checked).toBe(true);
-    expect(H.setItemSpicy).toHaveBeenNthCalledWith(1, 'i1', true);
-    expect(H.setItemSpicy).toHaveBeenNthCalledWith(2, 'i1', true);
+    expect(H.setItemSpicy).toHaveBeenNthCalledWith(1, 'i1', true, 'test-event');
+    expect(H.setItemSpicy).toHaveBeenNthCalledWith(2, 'i1', true, 'test-event');
   });
 
   it('retires a successful spicy overlay after its snapshot echo so a later Admin correction wins', async () => {
@@ -219,7 +219,9 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
 
     const row = screen.getByText('Shared classification').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('checkbox'));
-    await waitFor(() => expect(H.setItemSpicy).toHaveBeenCalledWith('i1', true));
+    await waitFor(() =>
+      expect(H.setItemSpicy).toHaveBeenCalledWith('i1', true, 'test-event'),
+    );
     expect(within(row).getByRole('checkbox')).toBeChecked();
 
     H.pendingItems = [

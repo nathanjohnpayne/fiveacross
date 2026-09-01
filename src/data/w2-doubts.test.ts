@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // wiring proof is src/components/w2-doubts.test.tsx.
 
 const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is unset
+const EVENT_H = vi.hoisted(() => ({ eventId: 'med-2026' }));
 
 const { setDocSpy, trackSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
   // Typed params so `.mock.calls[i]` carries the (ref, data) tuple types.
@@ -43,7 +44,12 @@ const { setDocSpy, trackSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
 
 // Inline the id literal — a vi.mock factory is hoisted above the module-level
 // `EVENT_ID` const, so referencing it here would hit its temporal dead zone.
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return EVENT_H.eventId;
+  },
+}));
 vi.mock('../analytics', () => ({ track: trackSpy }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
@@ -73,6 +79,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  EVENT_H.eventId = EVENT_ID;
   // Re-pin the defaults (clearAllMocks clears calls, not implementations set by a
   // previous test's mockImplementation).
   setDocSpy.mockImplementation(() => Promise.resolve());
@@ -173,6 +180,46 @@ describe('raiseDoubt — self-published Doubt + demand_proof (specs/w2-doubts.md
     await raiseDoubt({ fromUid: 'alice', targetUid: 'bob', itemId: 'i1', cellIndex: 1 });
     expect(setDocSpy).toHaveBeenCalledTimes(1);
     expect(setDocSpy.mock.calls[0][1]).toMatchObject({ fromDisplayName: 'Saved Alice' });
+  });
+
+  it('keeps both cache reads and the write in Event A when the active Event changes mid-raise', async () => {
+    let rejectSlotRead!: () => void;
+    let resolvePlayerRead!: () => void;
+    getDocFromCacheSpy.mockImplementation((ref: { path: string }) => {
+      if (ref.path.includes('/doubts/')) {
+        return new Promise((_resolve, reject) => {
+          rejectSlotRead = () => reject(new Error('cache miss'));
+        });
+      }
+      return new Promise((resolve) => {
+        resolvePlayerRead = () =>
+          resolve({ exists: () => true, data: () => ({ displayName: 'Saved Event A Alice' }) });
+      });
+    });
+
+    const settled = raiseDoubt({
+      fromUid: 'alice',
+      targetUid: 'bob',
+      itemId: 'i1',
+      cellIndex: 1,
+    });
+    await vi.waitFor(() => expect(getDocFromCacheSpy).toHaveBeenCalledTimes(1));
+    EVENT_H.eventId = 'event-b';
+    rejectSlotRead();
+    await vi.waitFor(() => expect(getDocFromCacheSpy).toHaveBeenCalledTimes(2));
+    expect(getDocFromCacheSpy.mock.calls[1][0].path).toBe(
+      `events/${EVENT_ID}/players/alice`,
+    );
+    resolvePlayerRead();
+    await settled;
+
+    expect(setDocSpy.mock.calls[0][0].path).toBe(
+      `events/${EVENT_ID}/doubts/alice_bob_i1`,
+    );
+    expect(setDocSpy.mock.calls[0][1]).toMatchObject({
+      fromDisplayName: 'Saved Event A Alice',
+    });
+    expect(trackSpy).not.toHaveBeenCalled();
   });
 
   it('a self-doubt is a no-op — no write, no analytics (ADR 0001, rules deny it too)', async () => {

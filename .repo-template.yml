@@ -10,6 +10,23 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  # event-scoped-client-state spans the shared key primitive, manual listener
+  # lifecycles, Moment/retraction registries, and the two cross-tab intents; none
+  # shares the spec basename, so map the contract's primary isolation suites.
+  event-scoped-client-state:
+    - src/data/eventScope.test.ts
+    - src/hooks/event-scope-lifecycle.test.tsx
+    - src/data/moments-event-scope.test.ts
+    - src/hooks/useOpenSquare.test.tsx
+    - src/components/SuggestPanelBridge.test.tsx
+    - src/App.test.tsx
+    - src/auth/AuthContext.test.tsx
+    - src/data/hearts-event-scope.test.ts
+    - src/components/CoachOverlay.test.tsx
+    - src/components/NoticeBanner.test.tsx
+    - src/components/w1-profile-avatar.test.tsx
+    - src/components/w2-share-cards.test.tsx
+    - src/components/admin/adult-content-confirm.test.tsx
   # auth-handoff-client's coverage is module-named (the mode/strategy table, the
   # transaction store, the boundary primitives, the two callable legs, the
   # client/server parity pin, the exact-session attestation bridge and provider

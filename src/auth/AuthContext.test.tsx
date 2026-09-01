@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   joinAndDeal: vi.fn(),
   track: vi.fn(),
 }));
+const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
 
 vi.mock('firebase/auth', () => ({
   onAuthStateChanged: mocks.onAuthStateChanged,
@@ -43,7 +44,13 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
-vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
+vi.mock('../firebase', () => ({
+  auth: {},
+  googleProvider: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 // AuthProvider now mounts the confirm-path listener (#41) beside the attestation
 // gate; stub it — this suite exercises deal-error / stale-attempt hardening only.
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
@@ -206,6 +213,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventScope.eventId = 'event-a';
   localStorage.clear();
   forgetHandoffAttestation();
   emitAuth = () => {};
@@ -455,7 +463,7 @@ describe('AuthContext deal-error hardening', () => {
 
     await waitFor(() => expect(screen.getByTestId('dealing')).toHaveTextContent('idle'));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(mocks.hasCachedCard).toHaveBeenCalledWith(FAKE_USER.uid);
+    expect(mocks.hasCachedCard).toHaveBeenCalledWith(FAKE_USER.uid, 'event-a');
   });
 
   it('does NOT swallow when only a player row is cached but no card is (Codex #408 P2)', async () => {
@@ -2110,6 +2118,99 @@ describe('AuthContext deal-error hardening', () => {
 });
 
 describe('AuthContext stale-attempt + retry hardening', () => {
+  it('starts Event B recovery when Event A\'s profile bootstrap is still delayed', async () => {
+    const eventABootstrap = deferred<void>();
+    mocks.ensureUserProfile
+      .mockReturnValueOnce(eventABootstrap.promise)
+      .mockResolvedValueOnce(undefined);
+    mocks.joinAndDeal.mockResolvedValue(false);
+    const rendered = mount();
+    act(() => {
+      void emitAuth(FAKE_USER);
+    });
+    await waitFor(() => expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(1));
+
+    eventScope.eventId = 'event-b';
+    rendered.rerender(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+    expect(mocks.joinAndDeal).toHaveBeenCalledWith(FAKE_USER, 'event-b');
+
+    await act(async () => {
+      eventABootstrap.settle();
+      await eventABootstrap.promise;
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledOnce();
+  });
+
+  it('starts a fresh deal for Event B and does not render Event A\'s error there', async () => {
+    const eventBDeal = deferred<boolean>();
+    mocks.joinAndDeal
+      .mockRejectedValueOnce(new Error('the active pool is below the 24 prompts a card needs'))
+      .mockReturnValueOnce(eventBDeal.promise)
+      .mockResolvedValueOnce(false);
+    const rendered = mount();
+    await signInUser();
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    eventScope.eventId = 'event-b';
+    rendered.rerender(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2));
+    expect(mocks.joinAndDeal).toHaveBeenNthCalledWith(1, FAKE_USER, 'event-a');
+    expect(mocks.joinAndDeal).toHaveBeenNthCalledWith(2, FAKE_USER, 'event-b');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dealing')).toHaveTextContent('dealing');
+
+    await act(async () => {
+      eventBDeal.fail(new Error('the active pool is below the 24 prompts a card needs'));
+      await eventBDeal.promise.catch(() => {});
+    });
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('retry'));
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(3));
+    expect(mocks.joinAndDeal).toHaveBeenNthCalledWith(3, FAKE_USER, 'event-b');
+  });
+
+  it('drops Event A\'s delayed failure after Event B has started dealing', async () => {
+    const eventADeal = deferred<boolean>();
+    const eventBDeal = deferred<boolean>();
+    mocks.joinAndDeal.mockReturnValueOnce(eventADeal.promise).mockReturnValueOnce(eventBDeal.promise);
+    const rendered = mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+
+    eventScope.eventId = 'event-b';
+    rendered.rerender(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      eventADeal.fail(new Error('the active pool is below the 24 prompts a card needs'));
+      await eventADeal.promise.catch(() => {});
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dealing')).toHaveTextContent('dealing');
+
+    await act(async () => {
+      eventBDeal.settle(false);
+      await eventBDeal.promise;
+    });
+  });
+
   it('drops a stale deal rejection from a signed-out account after a new account has dealt (P2)', async () => {
     const stale = deferred<void>();
     mocks.joinAndDeal.mockReturnValueOnce(stale.promise).mockResolvedValueOnce(undefined);

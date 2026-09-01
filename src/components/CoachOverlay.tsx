@@ -11,22 +11,34 @@ import { EVENT_ID } from '../firebase';
  */
 
 const dismissKey = (eventId: string): string => `gcb.coachOverlay.${eventId}.dismissedAt`;
+const dismissedEventsThisSession = new Set<string>();
 
-// try/catch — private-mode/storage-unavailable falls open (isDismissed →
-// false; markDismissed a no-op), same fallback as InstallPrompt.tsx's key.
+// try/catch — private-mode/storage-unavailable falls open on the first visit,
+// but a successful dismissal still lasts for this session. The Event-keyed
+// memory fallback survives Board's A→B→A keyed remount without letting A's
+// dismissal suppress B's own first-open coach.
 function isDismissed(eventId: string): boolean {
+  if (dismissedEventsThisSession.has(eventId)) return true;
   try {
-    return localStorage.getItem(dismissKey(eventId)) !== null;
+    const dismissed = localStorage.getItem(dismissKey(eventId)) !== null;
+    if (dismissed) dismissedEventsThisSession.add(eventId);
+    return dismissed;
   } catch {
     return false;
   }
 }
 function markDismissed(eventId: string): void {
+  dismissedEventsThisSession.add(eventId);
   try {
     localStorage.setItem(dismissKey(eventId), String(Date.now()));
   } catch {
-    /* nothing to persist */
+    /* the session fallback above remains authoritative for this tab */
   }
+}
+
+/** Test-only. */
+export function __resetCoachOverlayDismissalsForTests(): void {
+  dismissedEventsThisSession.clear();
 }
 
 /**

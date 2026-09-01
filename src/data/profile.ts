@@ -5,7 +5,8 @@ import { uploadAvatar } from './storage';
 // Raw (converter-free) ref for writes — mirrors the private `rawUser` each
 // writing data module keeps locally (see data/api.ts).
 const rawUser = (uid: string) => doc(db, 'users', uid);
-const rawPlayer = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'players', uid);
 
 export const MAX_DISPLAY_NAME = 40;
 
@@ -21,8 +22,12 @@ export const MAX_DISPLAY_NAME = 40;
 export async function updateDisplayName(uid: string, displayName: string): Promise<void> {
   const trimmed = displayName.trim().slice(0, MAX_DISPLAY_NAME);
   if (!trimmed) return;
+  // The user profile is deliberately global, while its public Player mirror is
+  // Event-local. Capture the acted Event before the global write can yield so a
+  // late Event A save never refreshes Event B's Player row.
+  const eventId = EVENT_ID;
   await setDoc(rawUser(uid), { displayName: trimmed }, { merge: true });
-  await updateExistingPlayer(uid, { displayName: trimmed });
+  await updateExistingPlayer(uid, { displayName: trimmed }, eventId);
 }
 
 /**
@@ -30,15 +35,20 @@ export async function updateDisplayName(uid: string, displayName: string): Promi
  * Merge `setDoc` for the same missing-doc recovery reason as `updateDisplayName` above.
  */
 export async function updateAvatar(uid: string, blob: Blob): Promise<string> {
+  const eventId = EVENT_ID;
   const url = await uploadAvatar(uid, blob);
   await setDoc(rawUser(uid), { photoURL: url, customPhoto: true }, { merge: true });
-  await updateExistingPlayer(uid, { photoURL: url });
+  await updateExistingPlayer(uid, { photoURL: url }, eventId);
   return url;
 }
 
-async function updateExistingPlayer(uid: string, patch: { displayName?: string; photoURL?: string }): Promise<void> {
+async function updateExistingPlayer(
+  uid: string,
+  patch: { displayName?: string; photoURL?: string },
+  eventId: string,
+): Promise<void> {
   try {
-    await updateDoc(rawPlayer(uid), patch);
+    await updateDoc(rawPlayer(uid, eventId), patch);
   } catch (err) {
     if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'not-found') return;
     throw err;

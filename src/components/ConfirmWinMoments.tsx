@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useBoard, useEventDoc, useMyDayBoards, useMyPlayer, useLeaderboard, useMyClaims } from '../hooks/useData';
 import { resolveDisplayName } from '../data/api';
@@ -13,6 +13,7 @@ import {
 } from '../data/moments';
 import { hasBingo, standingsFrozen, tutorialDayIndexSet } from '../game/logic';
 import type { BoardDoc, Cell, EventDoc, PlayerDoc } from '../types';
+import { EVENT_ID } from '../firebase';
 
 /** A confirm awaiting its board write: the Claim's cell AND the proof it resolves on. */
 interface AwaitingConfirm {
@@ -102,6 +103,7 @@ function cellReflectsConfirm(cells: Cell[], entry: AwaitingConfirm): boolean {
 export default function ConfirmWinMoments() {
   const { user } = useAuth();
   const uid = user?.uid;
+  const eventId = EVENT_ID;
   const { data: board } = useBoard(uid);
   // Daily-cards mode (#274): a confirmed Claim's board write lands on the
   // DAY-SCOPED board for the Claim's own dayIndex — subscribe the viewer's
@@ -126,6 +128,7 @@ export default function ConfirmWinMoments() {
   // Latest actor + gates + attributable board, in a ref so the stable callbacks and
   // the async witness continuation always read CURRENT state, never a stale closure.
   const ctx = useRef<{
+    eventId: string;
     uid: string | undefined;
     displayName: string;
     photoURL: string | null;
@@ -138,6 +141,7 @@ export default function ConfirmWinMoments() {
     event: EventDoc | null;
     tutorialDays: ReadonlySet<number>;
   }>({
+    eventId,
     uid: undefined,
     displayName: 'Anonymous',
     photoURL: null,
@@ -150,20 +154,6 @@ export default function ConfirmWinMoments() {
     event: null,
     tutorialDays: new Set(),
   });
-  ctx.current = {
-    uid,
-    displayName,
-    photoURL: player ? player.photoURL : (user?.photoURL ?? null),
-    players,
-    rosterConfirmed,
-    identityKnown,
-    cells: board?.cells ?? [],
-    boardOwned: board != null && board.uid === uid,
-    dayBoards,
-    event: event ?? null,
-    tutorialDays: tutorialDayIndexSet(event?.days),
-  };
-
   // The cells a Day's confirms adjudicate against (#274): that Day's own board
   // in daily mode (owned by construction — useMyDayBoards subscribes only the
   // viewer's docs, and a foreign uid is re-checked), the attributable legacy
@@ -177,7 +167,26 @@ export default function ConfirmWinMoments() {
     return c.boardOwned && c.cells.length > 0 ? c.cells : null;
   };
   const cellsForDayRef = useRef(cellsForDay);
-  cellsForDayRef.current = cellsForDay;
+  // Async routing refs describe the latest COMMITTED app-shell view. Updating
+  // them during render lets an abandoned concurrent Event-B render poison an
+  // Event-A witness that still belongs to the visible tree.
+  useLayoutEffect(() => {
+    ctx.current = {
+      eventId,
+      uid,
+      displayName,
+      photoURL: player ? player.photoURL : (user?.photoURL ?? null),
+      players,
+      rosterConfirmed,
+      identityKnown,
+      cells: board?.cells ?? [],
+      boardOwned: board != null && board.uid === uid,
+      dayBoards,
+      event: event ?? null,
+      tutorialDays: tutorialDayIndexSet(event?.days),
+    };
+    cellsForDayRef.current = cellsForDay;
+  });
 
   // Self-reference so the async settle continuation can loop the drain until the
   // queue is empty (finding 2) without capturing a stale callback.
@@ -189,7 +198,7 @@ export default function ConfirmWinMoments() {
   const drain = useCallback(() => {
     const c = ctx.current;
     if (!c.uid || !c.identityKnown) return;
-    const st = getConfirmState(c.uid);
+    const st = getConfirmState(c.uid, c.eventId);
     if (st.inFlight || st.awaiting.size === 0) return;
     // A confirm is "reflected" only once the resolve() board write has LANDED for its
     // OWN cell — marked + status 'confirmed' + matching proofId (cellReflectsConfirm,
@@ -202,6 +211,7 @@ export default function ConfirmWinMoments() {
     });
     if (!anyReflected) return;
     const actedUid = c.uid;
+    const actedEventId = c.eventId;
     st.inFlight = true;
     // Tutorial-Day wins are excluded from the prior-win witness (Codex P1 on
     // #288, mirroring the live path): an admin-approved warm-up bingo writes
@@ -214,9 +224,10 @@ export default function ConfirmWinMoments() {
     void hasPriorBingoWitness(actedUid, {
       excludeDayIndexes: c.tutorialDays,
       dayIndexes: c.event?.days?.map((d) => d.index),
+      eventId: actedEventId,
     })
       .then((witnessed) => {
-        const st2 = getConfirmState(actedUid);
+        const st2 = getConfirmState(actedUid, actedEventId);
         st2.inFlight = false;
         const cc = ctx.current;
         // Account switched away mid-read (finding 4): leave the awaiting entries in
@@ -224,7 +235,7 @@ export default function ConfirmWinMoments() {
         // wrong actor or against another account's board. The board-availability
         // check is per-entry now (#274) — cellsFor holds an entry whose board
         // isn't attributable/present.
-        if (cc.uid === actedUid) {
+        if (cc.uid === actedUid && cc.eventId === actedEventId) {
           // Recompute reflected from the CURRENT post-await state, NOT a pre-await
           // snapshot (Codex #116 R4 finding 1): a sibling confirm that landed while the
           // witness read was in flight is now in `st2.awaiting` and its cell is on
@@ -296,13 +307,13 @@ export default function ConfirmWinMoments() {
             // (Codex P2 on #288 round 4). Exactly the blackout shape (#267).
             if (plan.bingo) {
               if (day !== undefined) {
-                broadcastBingo(actor, day);
+                broadcastBingo(actor, day, actedEventId);
               } else if (plainBingoOpen) {
-                broadcastBingo(actor, day); // `day` is undefined here — the legacy id
+                broadcastBingo(actor, day, actedEventId); // `day` is undefined here — the legacy id
                 plainBingoOpen = false;
               }
             }
-            if (plan.blackout) broadcastBlackout(actor, day);
+            if (plan.blackout) broadcastBlackout(actor, day, actedEventId);
             // The ceremonial event singleton is anchored to MAIN-GAME Days only
             // (Codex P1 on #287; daily-cards-spec § "Scoring and social
             // surfaces": the embark card is live pre-cruise and trivially easy
@@ -315,7 +326,7 @@ export default function ConfirmWinMoments() {
             const ceremonyEligible =
               (dayKey == null || !cc.tutorialDays.has(dayKey)) && !standingsFrozen(cc.event) && ceremonyOpen;
             if (plan.firstBingo && ceremonyEligible) {
-              broadcastFirstBingo(actor, day);
+              broadcastFirstBingo(actor, day, actedEventId);
               ceremonyOpen = false;
             } else if (plan.firstBingoHeld && ceremonyEligible) {
               st2.heldCeremony = actor;
@@ -331,7 +342,7 @@ export default function ConfirmWinMoments() {
         }
       })
       .catch(() => {
-        getConfirmState(actedUid).inFlight = false;
+        getConfirmState(actedUid, actedEventId).inFlight = false;
       });
   }, []);
   drainRef.current = drain;
@@ -353,7 +364,7 @@ export default function ConfirmWinMoments() {
   const resolveHeldCeremony = useCallback(() => {
     const c = ctx.current;
     if (!c.uid) return;
-    const st = getConfirmState(c.uid);
+    const st = getConfirmState(c.uid, c.eventId);
     const actor = st.heldCeremony;
     if (!actor || actor.uid !== c.uid) return;
     // Fall-clear against the board the held win STOOD on (#274): its own Day
@@ -382,7 +393,7 @@ export default function ConfirmWinMoments() {
     // The win still stands — publish only once the identity + roster gates open.
     if (!c.identityKnown || !c.rosterConfirmed) return; // still held
     const othersBingoed = c.players.some((p) => p.uid !== c.uid && p.firstBingoAt != null);
-    if (!othersBingoed) broadcastFirstBingo(actor, heldDay ?? undefined);
+    if (!othersBingoed) broadcastFirstBingo(actor, heldDay ?? undefined, c.eventId);
     st.heldCeremony = null;
     st.heldCeremonyDay = null;
   }, []);
@@ -406,7 +417,7 @@ export default function ConfirmWinMoments() {
   // so it seeds normally and its reconnect `confirmed` is a genuine fresh transition.
   useEffect(() => {
     if (!uid) return;
-    const st = getConfirmState(uid);
+    const st = getConfirmState(uid, eventId);
     let added = false;
     for (const c of claims) {
       // Cross-account guard (Codex #116 R3 finding 1): on an account switch, useColSub
@@ -434,7 +445,7 @@ export default function ConfirmWinMoments() {
       }
     }
     if (added) drain();
-  }, [claims, claimsFromCache, uid, drain]);
+  }, [claims, claimsFromCache, uid, eventId, drain]);
 
   // Re-attempt on a board snapshot (the confirm's board write can lag its claim) or
   // when a gate opens (identity resolves / the roster becomes server-confirmed).

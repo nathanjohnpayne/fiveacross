@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActiveAdultContent } from '../../adultContent';
 import { DEFAULT_EDITION, setActiveEdition } from '../../editions';
@@ -28,9 +28,13 @@ const approveItem = vi.fn(
 );
 const bulkApproveItems = vi.fn(async () => {});
 
+const eventScope = vi.hoisted(() => ({ eventId: 'test-event' }));
+
 vi.mock('../../firebase', () => ({
   db: {},
-  EVENT_ID: 'test-event',
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
   storage: {},
   auth: {},
   googleProvider: {},
@@ -81,6 +85,7 @@ function queue(pendingItems: ItemDoc[]) {
 }
 
 beforeEach(() => {
+  eventScope.eventId = 'test-event';
   approveItem.mockClear();
   bulkApproveItems.mockClear();
   vi.mocked(track).mockClear();
@@ -139,7 +144,13 @@ describe('approving the first explicit Prompt', () => {
     queue([item('a', true)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
+    await waitFor(() =>
+      expect(approveItem).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'a' }),
+        'admin',
+        'test-event',
+      ),
+    );
   });
 
   // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
@@ -168,10 +179,47 @@ describe('approving the first explicit Prompt', () => {
     expect(track).not.toHaveBeenCalledWith('prompt_suggestion_approved', expect.anything());
   });
 
+  it('does not attribute Event A\'s delayed approval to Event B (#807)', async () => {
+    eventScope.eventId = 'event-a';
+    let resolveApproval!: (placement: {
+      itemId: string;
+      dayIndex: number | null;
+      retained: boolean;
+      outcome: string;
+    }) => void;
+    const pending = new Promise<{
+      itemId: string;
+      dayIndex: number | null;
+      retained: boolean;
+      outcome: string;
+    }>((resolve) => {
+      resolveApproval = resolve;
+    });
+    approveItem.mockReturnValueOnce(pending);
+    queue([item('a', false)]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(approveItem).toHaveBeenCalled());
+    expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin', 'event-a');
+    eventScope.eventId = 'event-b';
+    await act(async () => {
+      resolveApproval({ itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' });
+      await pending;
+    });
+
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_approved', expect.anything());
+  });
+
   it('says nothing about a tame Prompt', async () => {
     queue([item('a', false)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
+    await waitFor(() =>
+      expect(approveItem).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'a' }),
+        'admin',
+        'test-event',
+      ),
+    );
     expect(screen.queryByText('This makes the whole Event 18+')).toBeNull();
   });
 
@@ -181,7 +229,13 @@ describe('approving the first explicit Prompt', () => {
     setActiveAdultContent(true);
     queue([item('a', true)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
+    await waitFor(() =>
+      expect(approveItem).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'a' }),
+        'admin',
+        'test-event',
+      ),
+    );
     expect(screen.queryByText('This makes the whole Event 18+')).toBeNull();
   });
 });

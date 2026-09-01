@@ -21,15 +21,28 @@ type Ref = {
   withConverter: () => Ref;
 };
 
-const { addDocMock, updateMock, eventDataMock, getDocMock, itemDocs } = vi.hoisted(() => ({
+const {
+  addDocMock,
+  updateMock,
+  eventDataMock,
+  getDocMock,
+  txGetMock,
+  itemDocs,
+  eventScope,
+  transactionGate,
+} =
+  vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
   updateMock: vi.fn(),
   eventDataMock: vi.fn((): Record<string, unknown> | undefined => ({ days: [] })),
   getDocMock: vi.fn(),
+  txGetMock: vi.fn(),
   // The AUTHORITATIVE item state the approval transaction reads. Approval routes
   // on what is stored here, never on the queue row the caller passes — that is
   // the stale-approval guard, so these two can deliberately disagree in tests.
   itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
+  eventScope: { eventId: 'med-2026' },
+  transactionGate: { beforeCallback: null as Promise<void> | null },
 }));
 
 /** Seed the stored item a later `approveItems` will read. */
@@ -37,7 +50,13 @@ const putItem = (id: string, data: Record<string, unknown> = {}) => {
   itemDocs[id] = { status: 'pending', ...data };
 };
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', functions: {} }));
+vi.mock('../firebase', () => ({
+  db: {},
+  functions: {},
+  get EVENT_ID() {
+    return eventScope.eventId;
+  },
+}));
 vi.mock('firebase/functions', () => ({ httpsCallable: () => async () => ({ data: {} }) }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
@@ -76,16 +95,13 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     // The transaction seam approval routing depends on: the callback reads the
     // Event through `tx.get` (the schedule read set), reads each ITEM through
     // `tx.get` (the stale guard's authoritative state) and writes only items.
-    runTransaction: (_db: unknown, fn: (tx: unknown) => Promise<unknown>) =>
-      fn({
-        get: (ref: Ref) => {
-          const at = ref.path.indexOf('/items/');
-          if (at < 0) return Promise.resolve(snap());
-          const data = itemDocs[ref.path.slice(at + '/items/'.length)];
-          return Promise.resolve({ exists: () => data !== undefined, data: () => data });
-        },
+    runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
+      if (transactionGate.beforeCallback) await transactionGate.beforeCallback;
+      return fn({
+        get: (ref: Ref) => txGetMock(ref),
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
-      }),
+      });
+    },
   };
 });
 
@@ -112,8 +128,16 @@ const openDay = (index: number, over: Partial<TargetableDay> = {}): TargetableDa
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventScope.eventId = 'med-2026';
+  transactionGate.beforeCallback = null;
   for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
+  txGetMock.mockImplementation((ref: Ref) => {
+    const at = ref.path.indexOf('/items/');
+    const data =
+      at < 0 ? eventDataMock() : itemDocs[ref.path.slice(at + '/items/'.length)];
+    return Promise.resolve({ exists: () => data !== undefined, data: () => data });
+  });
 });
 
 describe('isDayTargetable — which Days can still take a Community Prompt', () => {
@@ -366,6 +390,30 @@ describe('approveItems — routing an approval into one Day', () => {
       approvedBy: 'admin-uid',
       targetDayIndex: 2,
     });
+  });
+
+  it('keeps a delayed Event A approval read set and item write entirely in A', async () => {
+    let finishEventRead:
+      | ((snap: { exists: () => boolean; data: () => Record<string, unknown> | undefined }) => void)
+      | undefined;
+    txGetMock.mockImplementationOnce(
+      () => new Promise((resolve) => { finishEventRead = resolve; }),
+    );
+    eventScope.eventId = 'event-a';
+    const pending = approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+
+    expect((txGetMock.mock.calls[0][0] as Ref).path).toBe('events/event-a');
+    eventScope.eventId = 'event-b';
+    const data = eventDataMock();
+    finishEventRead!({ exists: () => data !== undefined, data: () => data });
+    await pending;
+
+    expect(txGetMock.mock.calls.map((call) => (call[0] as Ref).path)).toEqual([
+      'events/event-a',
+      'events/event-a/items/p1',
+    ]);
+    expect(written()).toHaveLength(1);
+    expect(written()[0].path).toBe('events/event-a/items/p1');
   });
 
   it('atomically persists the Admin-selected easy classification with approval', async () => {
@@ -709,5 +757,27 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       spicyRevision: 8,
     });
     expect(revision).toBe(8);
+  });
+
+  it('keeps a spicy correction in its acted Event when the transaction callback starts after A to B', async () => {
+    putItem('p1', {
+      status: 'pending',
+      pool: 'main',
+      spicy: false,
+    });
+    let releaseTransaction!: () => void;
+    transactionGate.beforeCallback = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+
+    const correction = setItemSpicy('p1', true, 'med-2026');
+    eventScope.eventId = 'pacific-2026';
+    releaseTransaction();
+
+    await expect(correction).resolves.toBe(1);
+    expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+      spicy: true,
+      spicyRevision: 1,
+    });
   });
 });

@@ -3,7 +3,9 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 // CoachOverlay imports EVENT_ID from '../firebase' — mocked like every suite stubs it.
 vi.mock('../firebase', () => ({ EVENT_ID: 'unused-default-event' }));
-import CoachOverlay from './CoachOverlay'; // specs/d15-coach-overlay.md (#214)
+import CoachOverlay, {
+  __resetCoachOverlayDismissalsForTests,
+} from './CoachOverlay'; // specs/d15-coach-overlay.md (#214)
 
 function createStorageStub(): Storage {
   const store = new Map<string, string>();
@@ -17,6 +19,7 @@ describe('CoachOverlay', () => {
   let storage: Storage;
 
   beforeEach(() => {
+    __resetCoachOverlayDismissalsForTests();
     storage = createStorageStub();
     vi.stubGlobal('localStorage', storage);
   });
@@ -69,5 +72,27 @@ describe('CoachOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Got it—deal me in.' }));
     expect(onDismiss).toHaveBeenCalledTimes(1);
     expect(storage.getItem('gcb.coachOverlay.cruise-a.dismissedAt')).not.toBe('1');
+  });
+
+  it('retains only Event A\'s dismissal across A→B→A when storage is unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('Storage unavailable');
+      },
+      setItem: () => {
+        throw new DOMException('Storage unavailable');
+      },
+    });
+
+    const a = render(<CoachOverlay eventId="cruise-a" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Got it—deal me in.' }));
+    a.unmount();
+
+    const b = render(<CoachOverlay eventId="cruise-b" />);
+    expect(screen.getByText('Tally count')).toBeInTheDocument();
+    b.unmount();
+
+    render(<CoachOverlay eventId="cruise-a" />);
+    expect(screen.queryByText('Tally count')).not.toBeInTheDocument();
   });
 });

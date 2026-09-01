@@ -5,6 +5,7 @@ import { useEventDoc } from '../hooks/useData';
 import { boardRef, dayBoardRef } from '../data/paths';
 import { createRetractionFallObserver } from '../data/moments';
 import type { BoardDoc } from '../types';
+import { EVENT_ID } from '../firebase';
 
 /**
  * The route-independent retraction fall observer (#479) — the retraction twin of
@@ -46,6 +47,7 @@ import type { BoardDoc } from '../types';
 export default function RetractWinMoments() {
   const { user } = useAuth();
   const uid = user?.uid;
+  const eventId = EVENT_ID;
   const { data: event } = useEventDoc(!!uid);
   const days = event?.days;
   const hasDays = (days?.length ?? 0) > 0;
@@ -55,16 +57,21 @@ export default function RetractWinMoments() {
   const eventKnown = event != null;
 
   useEffect(() => {
+    let active = true;
     if (!uid || !eventKnown) return;
     const targets = hasDays
-      ? (days ?? []).map((d) => ({ dayIndex: d.index as number | undefined, ref: dayBoardRef(d.index, uid) }))
-      : [{ dayIndex: undefined as number | undefined, ref: boardRef(uid) }];
+      ? (days ?? []).map((d) => ({
+          dayIndex: d.index as number | undefined,
+          ref: dayBoardRef(d.index, uid, eventId),
+        }))
+      : [{ dayIndex: undefined as number | undefined, ref: boardRef(uid, eventId) }];
     const unsubs = targets.map(({ dayIndex, ref }) => {
-      const observe = createRetractionFallObserver(uid, dayIndex);
+      const observe = createRetractionFallObserver(uid, dayIndex, eventId);
       return onSnapshot(
         ref,
         { includeMetadataChanges: true },
         (snap) => {
+          if (!active) return;
           const data = snap.exists() ? (snap.data() as BoardDoc) : null;
           observe({
             fromCache: snap.metadata.fromCache,
@@ -74,15 +81,19 @@ export default function RetractWinMoments() {
           });
         },
         () => {
+          if (!active) return;
           /* permission-denied (signed out mid-flight) — the observer simply
              stops seeing snapshots; nothing enqueues, nothing retracts. */
         },
       );
     });
-    return () => unsubs.forEach((u) => u());
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
     // `days` participates via fanKey (content, not identity) — see useMyDayBoards.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uid, eventKnown, hasDays, fanKey]);
+  }, [uid, eventId, eventKnown, hasDays, fanKey]);
 
   return null;
 }

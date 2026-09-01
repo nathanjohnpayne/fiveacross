@@ -11,6 +11,7 @@ import type { Cell, ClaimDoc, DayDef } from '../types';
 const EVENT_ID = 'test-event';
 
 const H = vi.hoisted(() => ({
+  eventId: 'test-event',
   event: null as Record<string, unknown> | null,
   itemsById: new Map<string, Record<string, unknown>>(),
   dayBoards: new Map<number, Record<string, unknown> | null>(),
@@ -43,7 +44,9 @@ const H = vi.hoisted(() => ({
 
 vi.mock('../firebase', () => ({
   db: {},
-  EVENT_ID: 'test-event',
+  get EVENT_ID() {
+    return H.eventId;
+  },
   functions: {},
   storage: {},
   auth: {},
@@ -155,6 +158,7 @@ import {
   __resetPendingMarkerRepairsForTests,
   computeMark,
   dealDayCard,
+  joinAndDeal,
   reconcileEchoes,
   reshuffleBoard,
   setMark,
@@ -174,8 +178,8 @@ import {
  * snapshot confirming the seed. Returns the watch's release fn.
  */
 function trustDayBoard(dayIndex: number, uid: string, seed: number | undefined): () => void {
-  const release = beginDayBoardSeedWatch(dayIndex, uid);
-  recordDayBoardSeedSnapshot(dayIndex, uid, {
+  const release = beginDayBoardSeedWatch('test-event', dayIndex, uid);
+  recordDayBoardSeedSnapshot('test-event', dayIndex, uid, {
     metadata: { fromCache: false, hasPendingWrites: false },
     exists: () => true,
     data: () => (typeof seed === 'number' ? { seed } : {}),
@@ -220,6 +224,7 @@ const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  H.eventId = EVENT_ID;
   resetPendingMoments();
   H.event = { days: [day(0), day(1), day(2), day(3)], settings: { spicyRatio: 0.4 } };
   H.itemsById.clear();
@@ -229,6 +234,87 @@ beforeEach(() => {
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
   __resetBoardFreshnessForTests();
+});
+
+describe('Event-scoped mark operation lifecycles (#807)', () => {
+  it('keeps a delayed Event A join transaction entirely under Event A', async () => {
+    const { getDoc } = await import('firebase/firestore');
+    let releaseEventRead!: () => void;
+    const eventReadGate = new Promise<void>((resolve) => {
+      releaseEventRead = resolve;
+    });
+    vi.mocked(getDoc).mockImplementationOnce(async (ref) => {
+      await eventReadGate;
+      return route(ref as { args?: unknown[] }) as never;
+    });
+
+    H.eventId = 'event-a';
+    const joining = joinAndDeal({
+      uid: 'scope-user',
+      displayName: 'Scope User',
+      photoURL: null,
+    } as never);
+    await vi.waitFor(() => expect(getDoc).toHaveBeenCalledTimes(1));
+
+    H.eventId = 'event-b';
+    releaseEventRead();
+    await joining;
+
+    const writtenPaths = H.txSet.mock.calls.map((call) => segs(call));
+    expect(writtenPaths).toContainEqual(['events', 'event-a', 'players', 'scope-user']);
+    expect(writtenPaths.flat()).not.toContain('event-b');
+  });
+
+  it('keeps every queued Event A mark ref pinned to A after the live scope changes to B', async () => {
+    const { getDocFromCache } = await import('firebase/firestore');
+    const mocked = vi.mocked(getDocFromCache);
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let reads = 0;
+    mocked.mockImplementation(async (ref) => {
+      reads += 1;
+      if (reads === 1) await firstReadGate;
+      return H.defaultGetDocFromCache(ref as { args?: unknown[] }) as never;
+    });
+
+    const cells = card((i) => `scope-${i}`);
+    H.eventId = 'event-a';
+    const common = {
+      uid: 'scope-user',
+      cells,
+      nextMarked: true,
+      claimMode: 'honor' as const,
+      currentFirstBingoAt: null,
+      displayName: 'Scope User',
+      dayIndex: 0,
+      daily: true,
+      boardSeed: 1,
+    };
+    const first = setMark({ ...common, index: 1 });
+    await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(1));
+    // This call is queued while A is still selected. Its execution begins only
+    // after the scope has changed, so only an entry-time capture can keep it on A.
+    const queued = setMark({ ...common, index: 2 });
+    H.eventId = 'event-b';
+    releaseFirstRead();
+    await Promise.all([first, queued]);
+
+    const scopedWrites = H.batchSet.mock.calls.filter((call) => segs(call).includes('scope-user'));
+    expect(scopedWrites.length).toBeGreaterThan(0);
+    expect(scopedWrites.every((call) => segs(call)[1] === 'event-a')).toBe(true);
+    expect(
+      mocked.mock.calls
+        .filter((call) => ((call[0] as { args?: unknown[] }).args ?? []).includes('scope-user'))
+        .every((call) => {
+          const strings = ((call[0] as { args?: unknown[] }).args ?? []).filter(
+            (value): value is string => typeof value === 'string',
+          );
+          return strings[1] === 'event-a';
+        }),
+    ).toBe(true);
+  });
 });
 
 describe('computeMark preserves an Echo opt-out on manual unmark (spec § No unmark cascades)', () => {
@@ -988,6 +1074,47 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
     };
   };
+
+  it('keeps an Event A reconcile pinned to A while its cache reads settle after B is selected', async () => {
+    seedReconcile();
+    const { getDocFromCache } = await import('firebase/firestore');
+    const mocked = vi.mocked(getDocFromCache);
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let reads = 0;
+    mocked.mockImplementation(async (ref) => {
+      reads += 1;
+      if (reads === 1) await firstReadGate;
+      return H.defaultGetDocFromCache(ref as { args?: unknown[] }) as never;
+    });
+
+    H.eventId = 'event-a';
+    const pending = reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [1, 2] });
+    await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(1));
+    H.eventId = 'event-b';
+    releaseFirstRead();
+    await pending;
+
+    const refsForUser = mocked.mock.calls.filter((call) =>
+      ((call[0] as { args?: unknown[] }).args ?? []).includes('u1'),
+    );
+    expect(refsForUser.length).toBeGreaterThan(0);
+    expect(
+      refsForUser.every((call) => {
+        const strings = ((call[0] as { args?: unknown[] }).args ?? []).filter(
+          (value): value is string => typeof value === 'string',
+        );
+        return strings[1] === 'event-a';
+      }),
+    ).toBe(true);
+    expect(
+      H.batchSet.mock.calls
+        .filter((call) => segs(call).includes('u1'))
+        .every((call) => segs(call)[1] === 'event-a'),
+    ).toBe(true);
+  });
 
   it('writes the missing echo onto the opened board (its own markSeed); the stats write derives from SERVER state after the ack (#491)', async () => {
     seedReconcile();

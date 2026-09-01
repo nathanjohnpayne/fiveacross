@@ -158,11 +158,11 @@ function dayCard(uid: string, dayIndex: number, seed: number, sharedIndex: numbe
  * byte-identical cached data still notifies). Returns a teardown fn.
  */
 function watchDayBoardSeed(dbx: Firestore, dayIndex: number, uid: string): () => void {
-  const release = beginDayBoardSeedWatch(dayIndex, uid);
+  const release = beginDayBoardSeedWatch(EVENT_ID, dayIndex, uid);
   const unsub = onSnapshot(
     doc(dbx, `events/${EVENT_ID}/days/${dayIndex}/boards/${uid}`),
     { includeMetadataChanges: true },
-    (snap) => recordDayBoardSeedSnapshot(dayIndex, uid, snap),
+    (snap) => recordDayBoardSeedSnapshot(EVENT_ID, dayIndex, uid, snap),
   );
   return () => {
     release();
@@ -174,7 +174,7 @@ function watchDayBoardSeed(dbx: Firestore, dayIndex: number, uid: string): () =>
 async function untilTrustedSeed(dayIndex: number, uid: string, seed: number): Promise<void> {
   const deadline = Date.now() + 15_000;
   for (;;) {
-    const trust = trustedDayBoardSeed(dayIndex, uid);
+    const trust = trustedDayBoardSeed(EVENT_ID, dayIndex, uid);
     if (trust.trusted && trust.seed === seed) return;
     if (Date.now() > deadline) throw new Error(`trust for seed ${seed} never arrived`);
     await new Promise((r) => setTimeout(r, 50));

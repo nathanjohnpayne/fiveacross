@@ -20,6 +20,7 @@ import {
 } from '../../data/admin';
 import { deleteProof } from '../../data/proofs';
 import { track } from '../../analytics';
+import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
@@ -414,13 +415,14 @@ export default function ReviewQueue({
     Object.hasOwn(optimisticSpicy, it.id) ? optimisticSpicy[it.id].value : it.spicy === true;
   const isSpicy = (it: ItemDoc) => difficultyFor(it) === 'main' && selectedSpicyFor(it);
   const toggleSpicy = async (id: string, spicy: boolean) => {
+    const ownedEventId = EVENT_ID;
     const requestId = ++spicyRequestSequence.current;
     setOptimisticSpicy((prev) => ({
       ...prev,
       [id]: { value: spicy, requestId },
     }));
     try {
-      const committedRevision = await setItemSpicy(id, spicy);
+      const committedRevision = await setItemSpicy(id, spicy, ownedEventId);
       setOptimisticSpicy((prev) => {
         const current = prev[id];
         if (current?.requestId !== requestId) return prev;
@@ -479,12 +481,12 @@ export default function ReviewQueue({
   // immediately with `undefined` and defers the real call to `pending.run()`
   // inside the dialog's own confirm handler — attaching here means the
   // event fires on whichever path actually runs the approval.
-  const trackApproval = (p: ApprovalPlacement): ApprovalPlacement => {
+  const trackApproval = (p: ApprovalPlacement, ownedEventId: string): ApprovalPlacement => {
     // Defensive against a nullish placement, not just the real `approveItem`
     // contract (which always resolves one): test doubles for `data/admin`
     // commonly stub a bare `async () => {}`, and analytics is presentational
     // — it must never turn a mocked-away approval into a rejected promise.
-    if (p && p.outcome !== 'stale' && p.outcome !== 'missing') {
+    if (EVENT_ID === ownedEventId && p && p.outcome !== 'stale' && p.outcome !== 'missing') {
       track('prompt_suggestion_approved', {
         outcome: p.outcome,
         ...(p.dayIndex != null ? { dayIndex: p.dayIndex } : {}),
@@ -496,8 +498,13 @@ export default function ReviewQueue({
   // check above: a test double for `bulkApproveItems` commonly stubs a bare
   // `vi.fn()` (undefined, not even a Promise) rather than an
   // ApprovalPlacement[].
-  const trackApprovals = (placements: ApprovalPlacement[]): ApprovalPlacement[] =>
-    Array.isArray(placements) ? placements.map(trackApproval) : placements;
+  const trackApprovals = (
+    placements: ApprovalPlacement[],
+    ownedEventId: string,
+  ): ApprovalPlacement[] =>
+    Array.isArray(placements)
+      ? placements.map((placement) => trackApproval(placement, ownedEventId))
+      : placements;
   // Pass the ROW, not the id (#557/#558): approval routes from the authoritative
   // stored target while atomically carrying the Admin's difficulty/spicy choice.
   // `Promise.resolve(...)` wraps each call rather than chaining `.then`
@@ -505,10 +512,17 @@ export default function ReviewQueue({
   // explicit resolved value) returns `undefined`, not a thenable, and a raw
   // `.then` on that throws synchronously before the mocked "approval" ever
   // gets a chance to no-op harmlessly.
-  const approveOne = (it: ItemDoc) =>
-    guard(isSpicy(it), 'approve', () => Promise.resolve(approveItem(it, adminUid)).then(trackApproval));
-  const approveAll = () =>
-    guard(
+  const approveOne = (it: ItemDoc) => {
+    const ownedEventId = EVENT_ID;
+    return guard(isSpicy(it), 'approve', () =>
+      Promise.resolve(approveItem(it, adminUid, ownedEventId)).then((placement) =>
+        trackApproval(placement, ownedEventId),
+      ),
+    );
+  };
+  const approveAll = () => {
+    const ownedEventId = EVENT_ID;
+    return guard(
       explicitPending.length > 0,
       'bulk-approve',
       () =>
@@ -523,10 +537,12 @@ export default function ReviewQueue({
               };
             }),
             adminUid,
+            ownedEventId,
           ),
-        ).then(trackApprovals),
+        ).then((placements) => trackApprovals(placements, ownedEventId)),
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
     );
+  };
 
   // The empty state and the flip confirm render TOGETHER, and the dialog is
   // deliberately outside the early return (Phase 4b P2). Confirming the last

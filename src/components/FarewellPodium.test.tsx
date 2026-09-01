@@ -11,7 +11,13 @@ import type { Podium } from '../data/finale';
 // FarewellPodiumView plus the #561 Most-Loved data shaping in the wrapper, so
 // the module boundary gets inert stand-ins — the w2-share-cards.test.tsx
 // precedent; the share behavior itself is pinned there, not here.
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+const EVENT_H = vi.hoisted(() => ({ eventId: 'test-event' }));
+vi.mock('../firebase', () => ({
+  db: {},
+  get EVENT_ID() {
+    return EVENT_H.eventId;
+  },
+}));
 const { track } = vi.hoisted(() => ({ track: vi.fn() }));
 vi.mock('../analytics', () => ({ track }));
 // #561: the wrapper opens the Feed's own proof hook ONLY when the persisted
@@ -322,6 +328,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
   }
 
   beforeEach(() => {
+    EVENT_H.eventId = 'test-event';
     track.mockReset();
     M.proofs = [];
     M.proofsLoading = false;
@@ -477,6 +484,52 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     // A later session (fresh mount, same device) is guarded by localStorage.
     render(<FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />);
     expect(track.mock.calls.filter(([name]) => name === 'most_loved_photo_frozen')).toHaveLength(1);
+  });
+
+  it('fires once for each Event when the same mounted finale surface changes scope', () => {
+    M.proofs = [proofDoc({ id: 'w1', uid: 'ana', createdAt: 1000 })];
+    const view = render(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
+    );
+    expect(track.mock.calls.filter(([name]) => name === 'most_loved_photo_frozen')).toHaveLength(1);
+
+    EVENT_H.eventId = 'next-event';
+    view.rerender(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
+    );
+    expect(track.mock.calls.filter(([name]) => name === 'most_loved_photo_frozen')).toHaveLength(2);
+    expect(window.localStorage.getItem('most_loved_frozen_tracked:test-event')).not.toBeNull();
+    expect(window.localStorage.getItem('most_loved_frozen_tracked:next-event')).not.toBeNull();
+  });
+
+  it('keeps the once-per-Event session fallback across A to B to A when storage is unavailable', () => {
+    EVENT_H.eventId = 'storage-offline-a';
+    Object.defineProperty(window, 'localStorage', {
+      value: {
+        getItem: () => {
+          throw new Error('storage unavailable');
+        },
+        setItem: () => {
+          throw new Error('storage unavailable');
+        },
+      },
+      configurable: true,
+    });
+    M.proofs = [proofDoc({ id: 'w1', uid: 'ana', createdAt: 1000 })];
+    const view = render(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
+    );
+
+    EVENT_H.eventId = 'storage-offline-b';
+    view.rerender(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
+    );
+    EVENT_H.eventId = 'storage-offline-a';
+    view.rerender(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
+    );
+
+    expect(track.mock.calls.filter(([name]) => name === 'most_loved_photo_frozen')).toHaveLength(2);
   });
 
   it('the no-award record still fires the beat — award: false is signal', () => {

@@ -16,6 +16,7 @@ import LoadingState from './LoadingState';
 import { editionBrand } from '../editions';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { EVENT_ID } from '../firebase';
+import { eventScopeKey } from '../data/eventScope';
 
 // Pre-sail framing (ADR 0003): a Board freezes the moment a Player joins, so
 // a Prompt added afterward can never land on THAT Player's own card — it only
@@ -138,6 +139,8 @@ export default function ItemPool() {
   // call), and depending on the whole object here would re-run this effect,
   // and re-`setTracked`, on EVERY render, forever.
   const uid = user?.uid;
+  const eventId = EVENT_ID;
+  const scopeKey = eventScopeKey(eventId, 'item-pool', uid ?? 'none');
   // Latest-uid ref (#861): `add`'s async continuation below closes over
   // whichever `user` was signed in when the SUBMIT happened, which is
   // correct for the Firestore write and for keying `trackSuggestion`'s
@@ -154,6 +157,7 @@ export default function ItemPool() {
   // without needing to skip the (correctly-attributed) Firestore write or
   // localStorage persist.
   const uidRef = useRef(uid);
+  const scopeRef = useRef(scopeKey);
   // `useLayoutEffect`, not a raw render-phase write (Codex P1, PR #890
   // round 4, correcting round 2's own "fix"). Round 2 tried assigning this
   // ref UNCONDITIONALLY in the render body, reasoning that the render phase
@@ -179,10 +183,12 @@ export default function ItemPool() {
   // an authenticated-tree remount and emit under a later ambient identity.
   useLayoutEffect(() => {
     uidRef.current = uid;
+    scopeRef.current = scopeKey;
     return () => {
       uidRef.current = undefined;
+      if (scopeRef.current === scopeKey) scopeRef.current = '';
     };
-  }, [uid]);
+  }, [uid, scopeKey]);
   const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
   // Loaded on the uid TRANSITION itself, DURING RENDER — not in a passive
   // `useEffect` (CodeRabbit, PR #890 round 2, re-verifying round 2's OWN
@@ -194,14 +200,17 @@ export default function ItemPool() {
   // it is safe to call directly in the render body — the same "adjusting
   // state when a prop changes" pattern already used for `composeResetForUid`
   // just below and for `issuesShownForStep` in WizardChrome.tsx.
-  const [trackedLoadedForUid, setTrackedLoadedForUid] = useState<string | undefined>(undefined);
-  if (uid !== trackedLoadedForUid) {
-    setTrackedLoadedForUid(uid);
-    setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
+  const [trackedLoadedForScope, setTrackedLoadedForScope] = useState<string | undefined>(undefined);
+  if (scopeKey !== trackedLoadedForScope) {
+    setTrackedLoadedForScope(scopeKey);
+    setTracked(uid ? loadTrackedSuggestions(eventId, uid) : []);
   }
   // The previous render's `myPending` ids (#559, Codex P2, PR #845 rounds 8
   // + 9) — see the `graceIds` effect below, just above where this is read.
-  const prevPendingIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const prevPendingIdsRef = useRef<{
+    scopeKey: string;
+    ids: ReadonlySet<string>;
+  }>({ scopeKey, ids: new Set() });
   // Ids currently within their post-pending grace window (#559, Codex P2,
   // PR #845 round 8), and the live timer that will expire each one. Real
   // STATE, not a ref (Codex P2, PR #845 round 9): round 8's first cut kept
@@ -212,7 +221,11 @@ export default function ItemPool() {
   // later render at all, and could keep showing "pending review" forever.
   // `setGraceIds` on the timer's own fire is what guarantees the window
   // actually closes on its own.
-  const [graceIds, setGraceIds] = useState<ReadonlySet<string>>(new Set());
+  const [graceState, setGraceState] = useState<{
+    scopeKey: string;
+    ids: ReadonlySet<string>;
+  }>(() => ({ scopeKey, ids: new Set() }));
+  const graceIds = graceState.scopeKey === scopeKey ? graceState.ids : new Set<string>();
   const graceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // A ticking clock (#559, Codex P2 round 2, PR #845), shared with
   // Board.tsx/ProofFeed.tsx's identical need (Codex P2, PR #845 round 5 —
@@ -236,11 +249,11 @@ export default function ItemPool() {
   // persists one normalized/capped snapshot rather than replaying stale rows.
   useEffect(() => {
     if (!uid) return;
-    const refreshed = refreshAndPersistLastKnownStatuses(EVENT_ID, uid, tracked, activeMine, days, now);
+    const refreshed = refreshAndPersistLastKnownStatuses(eventId, uid, tracked, activeMine, days, now);
     if (refreshed === tracked) return;
     setTracked([...refreshed]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days ?? []` (a fresh [] literal each render); this effect's own `setTracked` is what re-evaluates it on every genuine change to `tracked`/`activeMine`/`now`, matching the established pattern elsewhere in this file.
-  }, [tracked, activeMine, now, uid]);
+  }, [tracked, activeMine, now, uid, eventId]);
   // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have
   // delivered a SERVER-CONFIRMED snapshot — not merely cleared `loading` —
   // before an absent tracked id can honestly mean "not selected". `loading`
@@ -281,51 +294,58 @@ export default function ItemPool() {
   useLayoutEffect(() => {
     const currentPendingIds = new Set(myPending.map((it) => it.id));
     const activeIds = new Set(activeMine.map((it) => it.id));
-    const vacated = vacatedPendingIds(prevPendingIdsRef.current, currentPendingIds, activeIds);
-    prevPendingIdsRef.current = currentPendingIds;
+    const previous = prevPendingIdsRef.current.scopeKey === scopeKey
+      ? prevPendingIdsRef.current.ids
+      : new Set<string>();
+    const vacated = vacatedPendingIds(previous, currentPendingIds, activeIds);
+    prevPendingIdsRef.current = { scopeKey, ids: currentPendingIds };
     if (vacated.length === 0) return;
-    setGraceIds((prev) => {
-      const next = new Set(prev);
+    setGraceState((prior) => {
+      const next = new Set(prior.scopeKey === scopeKey ? prior.ids : []);
       for (const id of vacated) next.add(id);
-      return next;
+      return { scopeKey, ids: next };
     });
     for (const id of vacated) {
-      if (graceTimersRef.current.has(id)) continue;
+      const timerKey = eventScopeKey(eventId, 'approval-grace', uid ?? 'none', id);
+      if (graceTimersRef.current.has(timerKey)) continue;
       const timer = setTimeout(() => {
-        graceTimersRef.current.delete(id);
-        setGraceIds((prev) => {
-          if (!prev.has(id)) return prev;
-          const next = new Set(prev);
+        graceTimersRef.current.delete(timerKey);
+        setGraceState((prior) => {
+          if (prior.scopeKey !== scopeKey || !prior.ids.has(id)) return prior;
+          const next = new Set(prior.ids);
           next.delete(id);
-          return next;
+          return { scopeKey, ids: next };
         });
       }, APPROVAL_GRACE_MS);
-      graceTimersRef.current.set(id, timer);
+      graceTimersRef.current.set(timerKey, timer);
     }
-  }, [myPending, activeMine]);
+  }, [myPending, activeMine, scopeKey, eventId, uid]);
   useEffect(() => {
     if (graceIds.size === 0) return;
     const activeIds = new Set(activeMine.map((it) => it.id));
     const resolved = [...graceIds].filter((id) => activeIds.has(id));
     if (resolved.length === 0) return;
-    setGraceIds((prev) => {
-      const next = new Set(prev);
+    setGraceState((prior) => {
+      if (prior.scopeKey !== scopeKey) return prior;
+      const next = new Set(prior.ids);
       for (const id of resolved) {
         next.delete(id);
-        const timer = graceTimersRef.current.get(id);
+        const timerKey = eventScopeKey(eventId, 'approval-grace', uid ?? 'none', id);
+        const timer = graceTimersRef.current.get(timerKey);
         if (timer) {
           clearTimeout(timer);
-          graceTimersRef.current.delete(id);
+          graceTimersRef.current.delete(timerKey);
         }
       }
-      return next;
+      return { scopeKey, ids: next };
     });
-  }, [activeMine, graceIds]);
-  useEffect(
+  }, [activeMine, graceIds, scopeKey, eventId, uid]);
+  useLayoutEffect(
     () => () => {
       for (const timer of graceTimersRef.current.values()) clearTimeout(timer);
+      graceTimersRef.current.clear();
     },
-    [],
+    [scopeKey],
   );
   const mySubmissions = deriveMySubmissions(
     tracked,
@@ -343,6 +363,14 @@ export default function ItemPool() {
   const poolItems = items.filter((it) => !mySubmissionIds.has(it.id));
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
+  // The first-time explainer (#610). State, not a render-time storage read:
+  // it opens on the TICK (the moment of first use), not on mount — a player
+  // who never touches the tag never sees it.
+  const [showExplicitIntro, setShowExplicitIntro] = useState(false);
+  const [addThrottled, setAddThrottled] = useState(false);
+  const [reportThrottled, setReportThrottled] = useState(false);
+  const addTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reportTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Reset on the uid TRANSITION itself (#861 round 2, Codex P1): guarding
   // the OLD account's completion from clearing this state (CodeRabbit,
   // round 1) is not sufficient on its own. If the NEW account never types
@@ -362,21 +390,15 @@ export default function ItemPool() {
   // again immediately, before committing anything, so the very FIRST commit
   // the new uid ever produces already has a blank compose box — with no
   // dependency on an effect ever running at all.
-  const [composeResetForUid, setComposeResetForUid] = useState(uid);
-  if (uid !== composeResetForUid) {
-    setComposeResetForUid(uid);
+  const [composeResetForScope, setComposeResetForScope] = useState(scopeKey);
+  if (scopeKey !== composeResetForScope) {
+    setComposeResetForScope(scopeKey);
     setText('');
     setSpicy(false);
+    setShowExplicitIntro(false);
+    setAddThrottled(false);
+    setReportThrottled(false);
   }
-  // The first-time explainer (#610). State, not a render-time storage read:
-  // it opens on the TICK (the moment of first use), not on mount — a player
-  // who never touches the tag never sees it.
-  const [showExplicitIntro, setShowExplicitIntro] = useState(false);
-  const [addThrottled, setAddThrottled] = useState(false);
-  const [reportThrottled, setReportThrottled] = useState(false);
-  const addTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reportTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Un-throttle timers are real (not just presentational math) so the button
   // re-enables on its own once the window passes — clear them on unmount so a
   // throttled ItemPool that unmounts mid-window never calls setState after
@@ -397,8 +419,10 @@ export default function ItemPool() {
     // must stay attributed to whoever actually submitted, regardless of who
     // is signed in by the time the write resolves.
     const submittingUid = user.uid;
+    const submittingEventId = eventId;
+    const submittingScope = scopeKey;
     const now = Date.now();
-    const key = `add:${submittingUid}`;
+    const key = `add:${submittingEventId}:${submittingUid}`;
     if (!checkItemRateLimit(key, now)) {
       setAddThrottled(true);
       if (addTimer.current) clearTimeout(addTimer.current);
@@ -406,11 +430,19 @@ export default function ItemPool() {
       // last SUCCESSFUL add), not a full re-armed ITEM_RATE_LIMIT_MS from
       // THIS blocked attempt — the latter would drift the control's re-enable
       // later than checkItemRateLimit itself expires (Codex P2, PR #92).
-      addTimer.current = setTimeout(() => setAddThrottled(false), itemRateLimitRemainingMs(key, now));
+      addTimer.current = setTimeout(() => {
+        if (scopeRef.current === submittingScope) setAddThrottled(false);
+      }, itemRateLimitRemainingMs(key, now));
       return;
     }
     try {
-      const result = await addItem(submittingUid, text, adult && spicy);
+      const result = await addItem(
+        submittingUid,
+        text,
+        adult && spicy,
+        undefined,
+        submittingEventId,
+      );
       // Analytics attribution is ALSO guarded (#861 round 2, Codex P2):
       // firing unconditionally after the awaited write would attribute
       // whatever identity the analytics SDK is CURRENTLY identified as
@@ -420,7 +452,7 @@ export default function ItemPool() {
       // than trying to override the SDK's ambient identity for one event,
       // and losing one event for this narrow timing overlap is a much
       // smaller cost than misattributing it.
-      if (uidRef.current === submittingUid) {
+      if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
         track('add_item');
         // `prompt_suggestion_submitted` (#559): NO Prompt text in the
         // payload — just whether a Day could be named. Reports the target
@@ -438,7 +470,7 @@ export default function ItemPool() {
         const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
         // Persisted under the SUBMITTING uid regardless of who is current —
         // this write is always correct, auth change or not.
-        trackSuggestion(EVENT_ID, submittingUid, submitted);
+        trackSuggestion(submittingEventId, submittingUid, submitted);
         // But the in-memory `tracked` STATE is shared, component-wide, and
         // the account-switch effect above already resets it the instant
         // `uid` changes. If auth changed while this write was in flight
@@ -448,7 +480,7 @@ export default function ItemPool() {
         // NEW account's on-screen list — the exact leak #861 describes. Skip
         // the state update in that case; the persisted write above is
         // already correct and complete on its own.
-        if (uidRef.current === submittingUid) {
+        if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
           setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
         }
       }
@@ -458,7 +490,7 @@ export default function ItemPool() {
       // the switch — the same leak #861 describes, just for the compose
       // fields instead of the tracked-submissions list. Only the account
       // that actually submitted gets to clear its own form.
-      if (uidRef.current === submittingUid) {
+      if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
         setText('');
         setSpicy(false);
       }
@@ -470,15 +502,18 @@ export default function ItemPool() {
   const report = (id: string) => {
     if (!user) return;
     const now = Date.now();
-    const key = `report:${user.uid}`;
+    const reportingScope = scopeKey;
+    const key = `report:${eventId}:${user.uid}`;
     if (!checkItemRateLimit(key, now)) {
       setReportThrottled(true);
       if (reportTimer.current) clearTimeout(reportTimer.current);
       // Same real-remaining-time arming as `add` above, for the same reason.
-      reportTimer.current = setTimeout(() => setReportThrottled(false), itemRateLimitRemainingMs(key, now));
+      reportTimer.current = setTimeout(() => {
+        if (scopeRef.current === reportingScope) setReportThrottled(false);
+      }, itemRateLimitRemainingMs(key, now));
       return;
     }
-    reportItem(id).catch(console.error);
+    reportItem(id, eventId).catch(console.error);
     track('report_item');
   };
 
@@ -521,7 +556,7 @@ export default function ItemPool() {
                 // gate in front of it. Only a CHECK can open it: unticking
                 // needs no explanation.
                 setSpicy(next);
-                if (next && !hasSeenExplicitTag(EVENT_ID)) setShowExplicitIntro(true);
+                if (next && !hasSeenExplicitTag(eventId)) setShowExplicitIntro(true);
               }}
             />{' '}
             🔞 Spicy
@@ -618,7 +653,7 @@ export default function ItemPool() {
                   // Mark seen on DISMISS, not on open (the CoachOverlay
                   // pattern): a sheet the player never acknowledged — tab
                   // closed mid-read — shows again next time.
-                  markExplicitTagSeen(EVENT_ID);
+                  markExplicitTagSeen(eventId);
                   setShowExplicitIntro(false);
                 }}
               >

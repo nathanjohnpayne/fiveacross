@@ -24,8 +24,8 @@ import type { DayMetaDoc } from '../types';
 // doc id IS the dayIndex (a `meta` subcollection holding one document per Day —
 // see DayMetaDoc / firestore.rules § days/{dayIndex}/meta), so the payload has no
 // id field.
-const rawDayMeta = (dayIndex: number) =>
-  doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'meta', String(dayIndex));
+const rawDayMeta = (eventId: string, dayIndex: number) =>
+  doc(db, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex));
 
 /**
  * Pin a Day's First to BINGO honor, WRITE-ONCE (daily-cards-spec § "Data model").
@@ -46,8 +46,12 @@ export async function pinDayFirstBingo(
   dayIndex: number,
   who: MomentActor,
   at: number = Date.now(),
+  eventId: string = EVENT_ID,
 ): Promise<void> {
-  const ref = rawDayMeta(dayIndex);
+  // `EVENT_ID` is a live binding. Capture it through this entry parameter and
+  // build the ref before the first await, so a later Event switch cannot send
+  // this held/async honor to the newly active Event.
+  const ref = rawDayMeta(eventId, dayIndex);
   try {
     const cached = await getDocFromCache(ref);
     if (cached.exists()) {
@@ -79,10 +83,12 @@ export async function pinDayFirstBingo(
 // HELD and released the moment that account's identity resolves. MODULE state
 // — not a component ref — for the same reason the pending-Moment queue is
 // (specs/w2-feed-moments.md, issue #104): the hold must survive Board
-// unmounts and route changes. Keyed to the acted account; in-memory only (a
-// reload loses it — the honors strip's derived fallback covers the residual).
+// unmounts and route changes. Keyed to the captured Event and acted account;
+// in-memory only (a reload loses it — the honors strip's derived fallback
+// covers the residual).
 
-interface HeldHonorPin {
+export interface HeldHonorPin {
+  eventId: string;
   uid: string;
   dayIndex: number;
   at: number;
@@ -90,21 +96,24 @@ interface HeldHonorPin {
 
 let heldHonorPins: HeldHonorPin[] = [];
 
-export function enqueueHeldHonorPin(uid: string, dayIndex: number, at: number): void {
-  heldHonorPins.push({ uid, dayIndex, at });
+export function enqueueHeldHonorPin(uid: string, dayIndex: number, at: number, eventId: string = EVENT_ID): void {
+  heldHonorPins.push({ eventId, uid, dayIndex, at });
 }
 
-/** Drain and return the given account's holds (other accounts' stay queued). */
-export function takeHeldHonorPins(uid: string, dayIndex?: number): HeldHonorPin[] {
-  const matches = (h: HeldHonorPin) => h.uid === uid && (dayIndex === undefined || h.dayIndex === dayIndex);
+/** Drain and return one Event/account's holds (other scopes stay queued). */
+export function takeHeldHonorPins(uid: string, dayIndex?: number, eventId: string = EVENT_ID): HeldHonorPin[] {
+  const matches = (h: HeldHonorPin) =>
+    h.eventId === eventId && h.uid === uid && (dayIndex === undefined || h.dayIndex === dayIndex);
   const mine = heldHonorPins.filter(matches);
   heldHonorPins = heldHonorPins.filter((h) => !matches(h));
   return mine;
 }
 
 /** Drop held pins whose underlying bingo no longer stands. */
-export function dropHeldHonorPins(uid: string, dayIndex?: number): void {
-  heldHonorPins = heldHonorPins.filter((h) => h.uid !== uid || (dayIndex !== undefined && h.dayIndex !== dayIndex));
+export function dropHeldHonorPins(uid: string, dayIndex?: number, eventId: string = EVENT_ID): void {
+  heldHonorPins = heldHonorPins.filter(
+    (h) => h.eventId !== eventId || h.uid !== uid || (dayIndex !== undefined && h.dayIndex !== dayIndex),
+  );
 }
 
 /** Test-only. */

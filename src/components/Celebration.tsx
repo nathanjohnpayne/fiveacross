@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
+import { EVENT_ID } from '../firebase';
 import { useEventDoc } from '../hooks/useData';
 import {
   confettiPieces,
@@ -150,6 +151,7 @@ export default function Celebration({
   }, [kind, playerName, eventName, cells, contextLine, statLine]);
 
   const share = async () => {
+    const actedEventId = EVENT_ID;
     const pending = cardBlob.current;
     // The disabled button (identity known + render settled) is the real
     // gate; this is belt-and-braces against a programmatic call.
@@ -163,6 +165,7 @@ export default function Celebration({
     // settled, so this await resolves on the microtask queue and
     // navigator.share below runs within the tap's activation window.
     const blob = await pending;
+    if (EVENT_ID !== actedEventId) return;
 
     try {
       await shareCardBlob({
@@ -176,11 +179,13 @@ export default function Celebration({
       // shareCardBlob is designed to never throw, but a share failure must
       // never crash the celebration UI regardless.
     } finally {
-      // Fires on every path — image share, cancelled share, every fallback
-      // leg, or a render failure — so a cancelled share still counts as a
-      // tap (Codex P2, PR #111 finding 3): shareCardBlob's return value is
-      // what distinguishes the outcomes, not whether this event fires.
-      track('share_click', { surface: 'celebration' });
+      // Fires on every same-Event path — image share, cancelled share, every
+      // fallback leg, or a render failure — so a cancelled share still counts
+      // as a tap (Codex P2, PR #111 finding 3). A completion under another
+      // Event is stale, however, and must not emit analytics into that Event.
+      if (EVENT_ID === actedEventId) {
+        track('share_click', { surface: 'celebration' });
+      }
     }
   };
 

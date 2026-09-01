@@ -83,6 +83,12 @@ describe('addItem — main-pool submissions land pending (specs/d15-approvals.md
     await addItem('u1', '   ');
     expect(addDocMock).not.toHaveBeenCalled();
   });
+
+  it('writes through the Event scope captured by the caller', async () => {
+    await addItem('u1', 'Event A prompt', false, undefined, 'event-a');
+    const [ref] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
+    expect(ref.path).toBe('events/event-a/items');
+  });
 });
 
 describe('hasCachedCard — cached-card probe for the #403 deal-failure fallback', () => {
@@ -115,6 +121,13 @@ describe('hasCachedCard — cached-card probe for the #403 deal-failure fallback
       snapshotOf([boardDoc('me', 'events/old-cruise-2025/boards/me')]),
     );
     expect(await hasCachedCard('me')).toBe(false);
+  });
+
+  it('uses the Event captured by the recovery caller, not the later live binding', async () => {
+    getDocsFromCacheMock.mockResolvedValueOnce(
+      snapshotOf([boardDoc('me', 'events/event-a/days/0/boards/me')]),
+    );
+    expect(await hasCachedCard('me', 'event-a')).toBe(true);
   });
 
   it('is false (fail-closed) when the cache read throws — no local card', async () => {
