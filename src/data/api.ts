@@ -56,6 +56,7 @@ import { pinDayFirstBingo } from './dayMeta';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { eventScopeKey } from './eventScope';
+import { assertSupportedDayIndexes } from './eventLimits';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
@@ -1704,6 +1705,7 @@ export async function setMark(params: {
   // without holding the Board interaction open.
   committed: Promise<void>;
 }> {
+  assertSupportedDayIndexes(params.echoDayIndexes, 'setMark');
   const { uid } = params;
   const database = params.database ?? db;
   const eventId = EVENT_ID;
@@ -2382,6 +2384,7 @@ export async function reconcileEchoes(params: {
   statsFrozen?: boolean;
   database?: Firestore;
 }): Promise<{ changed: boolean; bingoTransition: boolean; blackoutTransition: boolean; complete: boolean }> {
+  assertSupportedDayIndexes(params.dayIndexes, 'reconcileEchoes');
   const database = params.database ?? db;
   const eventId = EVENT_ID;
   const chainKey = markChainKey(database, eventId, params.uid);

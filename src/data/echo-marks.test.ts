@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Cell, ClaimDoc, DayDef } from '../types';
+import { MAX_DAYS } from './eventLimits';
 
 // specs/echo-marks.md — the three propagation write paths (mark-time in
 // setMark, deal-time in dealDayCard + reshuffleBoard, open-time in
@@ -85,7 +86,7 @@ vi.mock('firebase/firestore', () => {
     getDocFromServer: vi.fn(async (ref: { args?: unknown[] }) => route(ref)),
     getDocs: vi.fn(),
     getDocsFromCache: vi.fn(),
-    writeBatch: () => ({ set: H.batchSet, delete: H.batchDelete, commit: H.batchCommit }),
+    writeBatch: vi.fn(() => ({ set: H.batchSet, delete: H.batchDelete, commit: H.batchCommit })),
     addDoc: vi.fn(),
     increment: vi.fn(),
     deleteField: vi.fn(),
@@ -392,6 +393,85 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       echoDayIndexes: [0, 1, 2, 3],
       ...over,
     });
+
+  it('fails closed above the Event Day maximum before reading cache or constructing a batch', async () => {
+    const { getDocFromCache, writeBatch } = await import('firebase/firestore');
+
+    await expect(
+      markShared({
+        echoDayIndexes: Array.from({ length: MAX_DAYS + 1 }, (_unused, index) => index),
+      }),
+    ).rejects.toThrow(
+      `setMark cannot process ${MAX_DAYS + 1} Day indexes; the Event maximum is ${MAX_DAYS}.`,
+    );
+
+    expect(getDocFromCache).not.toHaveBeenCalled();
+    expect(writeBatch).not.toHaveBeenCalled();
+  });
+
+  it('emits the full supported ten-Day Mark batch: ten Boards, one Player, and the acted marker', async () => {
+    const dayIndexes = Array.from({ length: MAX_DAYS }, (_unused, index) => index);
+    const sourceCells = card((index) => (index === 5 ? 'shared' : `day-0-${index}`));
+    for (const dayIndex of dayIndexes) {
+      const seed = 1_000 + dayIndex;
+      H.dayBoards.set(dayIndex, {
+        uid: 'u1',
+        seed,
+        dayIndex,
+        cells:
+          dayIndex === 0
+            ? sourceCells
+            : card((index) => (index === 5 ? 'shared' : `day-${dayIndex}-${index}`)),
+      });
+      trustDayBoard(dayIndex, 'u1', seed);
+    }
+    H.player = {
+      uid: 'u1',
+      displayName: 'Alice',
+      bingoCount: 0,
+      squaresMarked: 0,
+      firstBingoAt: null,
+      dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    };
+    const { writeBatch } = await import('firebase/firestore');
+
+    const result = await setMark({
+      uid: 'u1',
+      cells: sourceCells,
+      index: 5,
+      nextMarked: true,
+      claimMode: 'honor',
+      currentFirstBingoAt: null,
+      displayName: 'Alice',
+      dayIndex: 0,
+      daily: true,
+      boardSeed: 1_000,
+      echoDayIndexes: dayIndexes,
+    });
+    await result.committed;
+
+    expect(writeBatch).toHaveBeenCalledTimes(1);
+    expect(H.batchCommit).toHaveBeenCalledTimes(1);
+    expect(H.batchDelete).not.toHaveBeenCalled();
+
+    const boardWrites = H.batchSet.mock.calls.filter((call) => {
+      const path = segs(call);
+      return path[2] === 'days' && path[4] === 'boards';
+    });
+    expect(boardWrites).toHaveLength(MAX_DAYS);
+    expect(boardWrites.map((call) => Number(segs(call)[3])).sort((a, b) => a - b)).toEqual(dayIndexes);
+    for (const call of boardWrites) {
+      const dayIndex = Number(segs(call)[3]);
+      expect(call[1]).toMatchObject({ markSeed: 1_000 + dayIndex });
+    }
+
+    expect(H.batchSet.mock.calls.filter(isPlayerWrite)).toHaveLength(1);
+    const markerWrites = H.batchSet.mock.calls.filter(isMarkerWrite);
+    expect(markerWrites).toHaveLength(1);
+    expect(segs(markerWrites[0])).toEqual(['events', EVENT_ID, 'tally', 'shared', 'markers', 'u1']);
+    expect(markerWrites[0][1]).toMatchObject({ uid: 'u1', itemText: 'Prompt 5', dayIndex: 0 });
+    expect(H.batchSet).toHaveBeenCalledTimes(MAX_DAYS + 2);
+  });
 
   it('echoes the confirmed Prompt onto the sibling carrier in the SAME batch, with ITS OWN markSeed', async () => {
     seedBoards();
@@ -1074,6 +1154,126 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
     };
   };
+
+  it('fails closed above the Event Day maximum before reading cache or constructing a batch', async () => {
+    const { getDocFromCache, writeBatch } = await import('firebase/firestore');
+
+    await expect(
+      reconcileEchoes({
+        uid: 'u1',
+        dayIndex: 2,
+        dayIndexes: Array.from({ length: MAX_DAYS + 1 }, (_unused, index) => index),
+      }),
+    ).rejects.toThrow(
+      `reconcileEchoes cannot process ${MAX_DAYS + 1} Day indexes; the Event maximum is ${MAX_DAYS}.`,
+    );
+
+    expect(getDocFromCache).not.toHaveBeenCalled();
+    expect(writeBatch).not.toHaveBeenCalled();
+  });
+
+  it('emits the full supported reconcile batch once: one Board plus all 24 marker repairs', async () => {
+    const dayIndexes = Array.from({ length: MAX_DAYS }, (_unused, index) => index);
+    const targetDayIndex = MAX_DAYS - 1;
+    const itemIdAt = (index: number) => `max-reconcile-${index}`;
+    const markedOverrides: Partial<Record<number, Partial<Cell>>> = {};
+    for (let index = 0; index < 25; index += 1) {
+      if (index === 0 || index === 12) continue;
+      markedOverrides[index] = { marked: true, markedAt: 10 + index, status: 'confirmed' };
+    }
+    const openedBefore = card(itemIdAt, markedOverrides);
+    const openedAfter = card(itemIdAt, {
+      ...markedOverrides,
+      0: { marked: true, markedAt: 100, status: 'confirmed', echo: true },
+    });
+    H.dayBoards.set(targetDayIndex, {
+      uid: 'u1',
+      seed: 909,
+      dayIndex: targetDayIndex,
+      cells: openedBefore,
+    });
+    H.dayBoards.set(0, {
+      uid: 'u1',
+      seed: 100,
+      dayIndex: 0,
+      cells: card((index) => (index === 1 ? itemIdAt(0) : `source-${index}`), {
+        1: { marked: true, markedAt: 1, status: 'confirmed' },
+      }),
+    });
+    H.player = { uid: 'u1', displayName: 'Alice' };
+
+    const carrierItemIds = openedAfter
+      .filter((cell) => !cell.free)
+      .map((cell) => cell.itemId as string);
+    const repairWitnesses = new Map(
+      carrierItemIds.map((itemId) => [`gcb:echo-marker-repair:${EVENT_ID}:u1:${itemId}`, '1']),
+    );
+    for (const itemId of carrierItemIds) H.markerCache.set(itemId, false);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => repairWitnesses.get(key) ?? null,
+      setItem: (key: string, value: string) => repairWitnesses.set(key, value),
+      removeItem: (key: string) => repairWitnesses.delete(key),
+    });
+    const { writeBatch } = await import('firebase/firestore');
+
+    try {
+      const result = await reconcileEchoes({
+        uid: 'u1',
+        dayIndex: targetDayIndex,
+        dayIndexes,
+        // Keep this write-shape test focused on the batch: post-freeze,
+        // non-ceremonial reconciliation has no stats or honor continuation.
+        statsFrozen: true,
+      });
+
+      expect(result).toMatchObject({ changed: true, complete: true });
+      expect(writeBatch).toHaveBeenCalledTimes(1);
+      expect(H.batchCommit).toHaveBeenCalledTimes(1);
+      expect(H.batchDelete).not.toHaveBeenCalled();
+
+      const boardWrites = H.batchSet.mock.calls.filter((call) => isDayBoardWrite(call, targetDayIndex));
+      const markerWrites = H.batchSet.mock.calls.filter(isMarkerWrite);
+      expect(boardWrites).toHaveLength(1);
+      expect(markerWrites).toHaveLength(24);
+      expect(markerWrites.map((call) => segs(call)[3]).sort()).toEqual([...carrierItemIds].sort());
+      expect(markerWrites.every((call) => (call[1] as { dayIndex?: number }).dayIndex === targetDayIndex)).toBe(
+        true,
+      );
+      expect(H.batchSet).toHaveBeenCalledTimes(25);
+
+      // Model Firestore's latency-compensated cache after that atomic commit.
+      // A retry must see every repair and the Echo as standing, then emit no
+      // duplicate batch — proving the 25 writes are neither truncated nor
+      // silently replayed.
+      H.dayBoards.set(targetDayIndex, {
+        uid: 'u1',
+        seed: 909,
+        dayIndex: targetDayIndex,
+        cells: openedAfter,
+      });
+      for (const itemId of carrierItemIds) H.markerCache.set(itemId, true);
+      vi.clearAllMocks();
+
+      const retry = await reconcileEchoes({
+        uid: 'u1',
+        dayIndex: targetDayIndex,
+        dayIndexes,
+        statsFrozen: true,
+      });
+
+      expect(retry).toEqual({
+        changed: false,
+        bingoTransition: false,
+        blackoutTransition: false,
+        complete: true,
+      });
+      expect(writeBatch).not.toHaveBeenCalled();
+      expect(H.batchSet).not.toHaveBeenCalled();
+      expect(H.batchCommit).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
   it('keeps an Event A reconcile pinned to A while its cache reads settle after B is selected', async () => {
     seedReconcile();
