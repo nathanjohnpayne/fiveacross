@@ -207,7 +207,7 @@ export function rememberHandoffTransaction(record: HandoffTransactionRecord): bo
  * and distinguishing them would only add branches that all end in "sign in
  * again".
  */
-function parseRecord(raw: string | null, now: number): HandoffTransactionRecord | null {
+function parseRecordShape(raw: string | null): HandoffTransactionRecord | null {
   if (raw === null) return null;
 
   let parsed: unknown;
@@ -226,9 +226,6 @@ function parseRecord(raw: string | null, now: number): HandoffTransactionRecord 
   if (typeof targetOrigin !== 'string' || targetOrigin.length === 0) return null;
   if (typeof returnPath !== 'string' || !returnPath.startsWith('/')) return null;
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return null;
-  // A record from the future is as untrustworthy as an expired one (a clock
-  // change during the round trip), and both fail the same way.
-  if (now < createdAt || now - createdAt > HANDOFF_TRANSACTION_TTL_MS) return null;
 
   // Records created before #895 have no acknowledgement field. They remain
   // usable for sign-in but can never authorize an attestation; only literal
@@ -240,6 +237,25 @@ function parseRecord(raw: string | null, now: number): HandoffTransactionRecord 
     acknowledgedAdultContent: acknowledgedAdultContent === true,
     createdAt,
   };
+}
+
+function parseRecord(raw: string | null, now: number): HandoffTransactionRecord | null {
+  const record = parseRecordShape(raw);
+  if (record === null) return null;
+  // A record from the future is as untrustworthy as an expired one (a clock
+  // change during the round trip), and both fail the same way.
+  if (now < record.createdAt || now - record.createdAt > HANDOFF_TRANSACTION_TTL_MS) return null;
+  return record;
+}
+
+function sameRecord(left: HandoffTransactionRecord | null, right: HandoffTransactionRecord): boolean {
+  return (
+    left?.verifier === right.verifier &&
+    left.targetOrigin === right.targetOrigin &&
+    left.returnPath === right.returnPath &&
+    left.acknowledgedAdultContent === right.acknowledgedAdultContent &&
+    left.createdAt === right.createdAt
+  );
 }
 
 export function readHandoffTransaction(now: number): HandoffTransactionRecord | null {
@@ -259,4 +275,30 @@ export function readHandoffTransaction(now: number): HandoffTransactionRecord | 
 export function forgetHandoffTransaction(): void {
   clearStore('sessionStorage');
   clearStore('localStorage');
+}
+
+/**
+ * Delete only copies that still belong to `expected`.
+ *
+ * The localStorage half is shared by same-origin tabs. A return that kept an
+ * older record in memory must not erase a replacement transaction another tab
+ * has written since then. The Web Lock used by the return coordinator makes
+ * each compare/delete indivisible relative to other participating returns;
+ * this semantic comparison supplies the ownership check inside that boundary.
+ */
+export function forgetHandoffTransactionIf(expected: HandoffTransactionRecord): boolean {
+  let removed = false;
+  for (const name of ['sessionStorage', 'localStorage'] as const) {
+    try {
+      const storage = storeNamed(name);
+      if (!storage) continue;
+      if (!sameRecord(parseRecordShape(storage.getItem(HANDOFF_TRANSACTION_KEY)), expected)) continue;
+      storage.removeItem(HANDOFF_TRANSACTION_KEY);
+      removed = true;
+    } catch {
+      // An unavailable store cannot be cleaned, but the other store may still
+      // hold the exact record. Never widen this to an unconditional clear.
+    }
+  }
+  return removed;
 }
