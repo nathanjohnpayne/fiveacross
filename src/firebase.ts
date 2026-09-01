@@ -1,5 +1,3 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, connectAuthEmulator } from 'firebase/auth';
 import {
   initializeFirestore,
   persistentLocalCache,
@@ -7,27 +5,14 @@ import {
   connectFirestoreEmulator,
 } from 'firebase/firestore';
 import { getStorage, connectStorageEmulator } from 'firebase/storage';
-import { getFunctions, connectFunctionsEmulator } from 'firebase/functions';
-import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 import { initializeAnalytics, isSupported, type Analytics } from 'firebase/analytics';
 import { isSyntheticProbe } from './synthetic-probe';
-import { resolveAuthDomain } from './auth-domain';
 import { installFirestorePoisonRecovery } from './firestoreRecovery';
 import { isUrlSafeForTelemetry } from './handoffBoot';
+import { app, firebaseConfig, firebaseEmulatorsEnabled, functions } from './firebaseCore';
+import { auth, googleProvider } from './firebaseAuth';
 
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: resolveAuthDomain(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname),
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
-};
-
-export const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
+export { app, auth, firebaseEmulatorsEnabled, functions, googleProvider };
 // ADR 0006: a persistent (IndexedDB) local cache so the last-seen Board/Feed/
 // Tally render offline and Marks made in a dead zone queue durably and sync on
 // reconnect — not the default in-memory cache, which loses queued writes on
@@ -56,13 +41,6 @@ export const db = initializeFirestore(app, {
 if (!isSyntheticProbe()) installFirestorePoisonRecovery();
 
 export const storage = getStorage(app);
-export const functions = getFunctions(app, 'us-central1');
-
-/** The one production/e2e boundary shared by every Firebase service instance. */
-export function firebaseEmulatorsEnabled(): boolean {
-  return import.meta.env.MODE === 'e2e' && import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-');
-}
-
 // Local Emulator Suite wiring for the Playwright e2e layer
 // (specs/x-e2e-happy-path.md). The suite serves a `vite build --mode e2e` +
 // `vite preview` of the app rather than `vite dev`, because the ADR 0006
@@ -79,22 +57,8 @@ export function firebaseEmulatorsEnabled(): boolean {
 // tests/offline and tests/rules use). Ports mirror firebase.json's `emulators`
 // block (auth 9099, firestore 8080, storage 9199) and tests/e2e/support/env.ts.
 if (firebaseEmulatorsEnabled()) {
-  connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
   connectStorageEmulator(storage, '127.0.0.1', 9199);
-  connectFunctionsEmulator(functions, '127.0.0.1', 5001);
-}
-
-// App Check (abuse protection). No-op unless a reCAPTCHA Enterprise site key is set.
-if (import.meta.env.VITE_RECAPTCHA_SITE_KEY) {
-  try {
-    initializeAppCheck(app, {
-      provider: new ReCaptchaEnterpriseProvider(import.meta.env.VITE_RECAPTCHA_SITE_KEY),
-      isTokenAutoRefreshEnabled: true,
-    });
-  } catch {
-    /* App Check optional in dev */
-  }
 }
 
 /**
