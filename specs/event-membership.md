@@ -143,9 +143,7 @@ function isAdminWithEvent(event) {
 }
 
 function isAdmin(eventId) {
-  // Firestore Rules evaluates function arguments eagerly. This outer guard
-  // prevents eventData() from running for an unauthenticated caller.
-  return signedIn() && isAdminWithEvent(eventData(eventId));
+  return isAdminWithEvent(eventData(eventId));
 }
 
 function membershipDoc(eventId, uid) {
@@ -176,8 +174,7 @@ function admittedWithEvent(eventId, event) {
 }
 
 function admitted(eventId) {
-  // Keep the auth guard outside the eager eventData() argument.
-  return signedIn() && admittedWithEvent(eventId, eventData(eventId));
+  return admittedWithEvent(eventId, eventData(eventId));
 }
 ```
 
@@ -245,7 +242,7 @@ Firestore's published limits are **10 `exists()`/`get()`/`getAfter()` calls per 
 
 Firestore's caching note is *"some document access calls may be cached, and cached calls do not count towards the limits"* — a "may", not a blanket production guarantee. #1079 therefore pins the behavior this rollout relies on at the Firestore emulator: a 25-operation batch whose operations all read the same Event and Membership paths succeeds, while the control shape with distinct Event and Membership paths succeeds at six operations and is denied at seven when its twenty-first access would be evaluated. The regression is the compatibility alarm: #804 may rely on request-wide reuse of those two identical paths only while that executable boundary continues to pass.
 
-Predicate cost, worst case, is now the same in the transitional and final postures because the Event document is read once and threaded through the switch and the D-A Admin disjunct: **0 calls** when the caller is unauthenticated (the outer `signedIn()` short-circuits before Firestore Rules eagerly evaluates the Event argument), **1** when the Event is unenforced, **1** when enforced and the caller is an Admin, **2** when enforced and the caller is not a member, and **3** when enforced and they are. Decision D-A adds a comparison, not a document access. Distinct documents are the Event plus `memberships/{uid}`; only the latter is new to today's rules. The ordinary admitted non-Admin evaluates three textual accesses in one operation, but the emulator excludes the repeated same-path calls from the multi-operation aggregate.
+Predicate cost, worst case, is now the same in the transitional and final postures because the Event document is read once and threaded through the switch and the D-A Admin disjunct: **1 call** when the Event is unenforced, **1** when enforced and the caller is an Admin, **2** when enforced and the caller is not a member, and **3** when enforced and they are. Decision D-A adds a comparison, not a document access. Distinct documents are the Event plus `memberships/{uid}`; only the latter is new to today's rules. The ordinary admitted non-Admin evaluates three textual accesses in one operation, but the emulator excludes the repeated same-path calls from the multi-operation aggregate.
 
 | Rule | Lines | Today (textual / distinct) | + predicate, worst case | Verdict |
 |---|---|---|---|---|
@@ -424,6 +421,6 @@ Epic #801 surfaced nine. Four are answered here because the code forces them, tw
 
 - `src/data/eventMembership.test.ts` — the whole pure surface. The path is computable from `(eventId, uid)` with the uid as the document id and no query; the Storage absolute form carries the literal `(default)`; `status == 'active'` is the only admission, including against truthy near-misses a JS-only reading might let through. The versioned parse round-trips, carries the revocation audit fields, and reads version drift, corruption and shape drift as a miss. The parity property: a version-drifted but active record still admits while failing to parse. The role lattice both ways. The switch reading absent as `'off'`, enforcing only on a literal `'enforced'`, and degrading an unrecognised value rather than failing closed into an outage. `admits()` across all five outcomes, including that a `PlayerDoc`-shaped object is **not** evidence of admission, that a banned member is still admitted, and that an Admin without a membership is not — **in the final posture**, alongside the seven cases pinning D-A's transitional disjunct in both directions, including that it admits a REVOKED Admin while deployed and denies that same Admin the moment it comes out. `adminsMissingMembership()` on the empty, missing, revoked, duplicate and malformed cases.
 - `src/data/eventMembership.test.ts` also pins the two parity properties Codex round 1 turned up on PR #891: an unauthenticated caller is denied **before** the enforcement switch is consulted (so an unenforced Event is not an open one), and rejecting an internally inconsistent record is a parse decision that leaves the admission answer untouched in both directions.
-- `tests/rules/membership-mark-batch-budget.test.ts` — #1079's fail-closed Firestore preview. It loads the real `firestore.rules`, invokes the one canonical `admitted(eventId)` helper only at the Player, Daily Board and nested marker Mark/Echo arms, and exact-counts every source transformation. It pins the outer unauthenticated short-circuit before the eager Event argument, the D-A clause ordering through unenforced, missing, revoked, active and Admin-bypass outcomes, Mark and unmark, the real ten-Day / twelve-write Mark maximum, the real twenty-five-write reconciliation maximum, shared-path request caching, and the six-pass/seven-deny distinct-path control at the twenty-call aggregate boundary. Production allow decisions stay unchanged until #804 applies admission to the full inventory; #804 must keep this preview as the executable prerequisite while replacing its exact splice anchors with the deployed inventory.
+- `tests/rules/membership-mark-batch-budget.test.ts` — #1079's fail-closed Firestore preview. It loads the real `firestore.rules`, invokes the one canonical `admitted(eventId)` helper only at the Player, Daily Board and nested marker Mark/Echo arms, and exact-counts every source transformation. It pins the D-A clause ordering through unenforced, missing, revoked, active and Admin-bypass outcomes; Mark and unmark; the real ten-Day / twelve-write Mark maximum; the real twenty-five-write reconciliation maximum; shared-path request caching; and the six-pass/seven-deny distinct-path control at the twenty-call aggregate boundary. Production allow decisions stay unchanged until #804 applies admission to the full inventory.
 - `src/data/echo-marks.test.ts` — the runtime ten-Day ceiling. Both `setMark` and `reconcileEchoes` reject eleven supplied Day indexes before cache reads or batch construction and retain the supported ten-Day behavior.
 - **Still not covered here, by design.** No Functions-side coverage: nothing on that side consumes these predicates yet, and § One document requires #803 to reach ONE implementation rather than a second copy — if it nonetheless lands a generated mirror, the generation check is its test, not a fixture comparison. The full deployed Firestore inventory belongs to #804 (`tests/rules/event-membership.test.ts`) and Storage belongs to #806 (`tests/rules/w0-storage-rules.test.ts`). The two-cohort adversarial gate is #809. Until those land, only the Mark/Echo preview exercises admission and no production allow arm calls it.
