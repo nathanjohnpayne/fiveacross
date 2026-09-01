@@ -110,16 +110,13 @@ function shouldRedirectSignIn(
 
 // A random per-attempt identifier (Phase 4b P1 round 3 on #836), generated
 // once at redirect start and threaded through every durable AND session
-// record this attempt writes. The origin-wide localStorage singletons below
-// (the pending and acknowledgement records) can be overwritten by a
-// DIFFERENT same-origin tab's own concurrent redirect attempt; without a
-// token to compare against, a later completion has no way to tell "the
-// record I'm reading is still MINE" from "a different tab already replaced
-// it with its own." Prefers `crypto.randomUUID` (supported by every browser
-// this app targets); the fallback only matters where it is somehow
-// unavailable, and a collision there costs, at worst, a false cross-attempt
-// match within the same TTL window — the existing fail-toward-re-prompt
-// direction every record here already uses, not a new failure mode.
+// record this attempt writes. Durable records use this token in their keys,
+// so concurrent same-origin tabs never overwrite or delete one another's
+// attempt state. Prefers `crypto.randomUUID` (supported by every browser this
+// app targets); the fallback only matters where it is somehow unavailable,
+// and a collision there costs, at worst, a false cross-attempt match within
+// the same TTL window — the existing fail-toward-re-prompt direction every
+// record here already uses, not a new failure mode.
 function generateAttemptToken(): string {
   const c = (globalThis as { crypto?: Crypto }).crypto;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
@@ -134,21 +131,27 @@ function markPendingRedirectAttestation(token: string): void {
   }
 }
 
-// Consumes (reads + clears) the SESSION-scoped attempt token exactly once.
-// TAB-scoped by construction — sessionStorage is never shared across tabs —
-// which is what makes it trustworthy for per-attempt correlation (Phase 4b
-// P1 round 3 on #836) where the origin-wide durable records below are not: a
-// DIFFERENT same-origin tab can never have written or read this specific
-// value. May still be lost across the cross-origin round trip to Google
-// (#346) — that loss costs the attestation specifically (see
-// `completeRedirectReturn`), never a FALSE one.
-function consumePendingRedirectAttestation(): string | null {
+// Reads the SESSION-scoped attempt token without consuming it. TAB-scoped by
+// construction — sessionStorage is never shared across tabs — which is what
+// makes it trustworthy for per-attempt correlation where the origin-wide
+// durable records below are not. An unverified signal (b) must leave this
+// proof standing across a reload; only a Firebase-verified result or confirmed
+// failure is terminal enough to clear it (#905).
+function peekPendingRedirectAttestationToken(): string | null {
   try {
-    const token = sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
-    sessionStorage.removeItem(PENDING_REDIRECT_ATTESTATION_KEY);
-    return token;
+    return sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
   } catch {
     return null;
+  }
+}
+
+function clearPendingRedirectAttestationIfToken(token: string): void {
+  try {
+    if (sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY) === token) {
+      sessionStorage.removeItem(PENDING_REDIRECT_ATTESTATION_KEY);
+    }
+  } catch {
+    // no-op
   }
 }
 
@@ -176,16 +179,16 @@ function consumePendingRedirectAttestation(): string | null {
 export const SIGNIN_ADULT_ACK_KEY = 'gcb.signin.adultAck';
 const SIGNIN_ADULT_ACK_TTL_MS = 10 * 60 * 1000;
 
-// Every durable record in this file is stored as `${timestamp}:${token}`
-// (Phase 4b P1 round 3 on #836): the timestamp is the existing TTL
-// discipline, and the token is `generateAttemptToken()`'s per-attempt id,
-// which is what lets a later completion tell "the record I'm reading is
-// still MINE" from "a different same-origin tab already overwrote this
-// singleton with its own attempt." `liveStampedToken` parses and TTL-checks
-// in one step; `rawStampedToken` extracts the token with NO ttl check, for
-// the compare-and-delete helpers below, which must still recognize (and
-// clean up) their own already-expired record as theirs.
-function liveStampedToken(raw: string | null, ttlMs: number, now: number): string | null {
+type StampedToken = { at: number; token: string };
+type AttemptRecordEntry = { key: string; token: string; liveRecord: StampedToken | null };
+
+// Every durable record in this file is stored as `${timestamp}:${token}`.
+// Current records additionally live under `${baseKey}:${token}`: the token is
+// part of the key, so terminal cleanup removes one attempt's exact key instead
+// of comparing and then deleting a shared singleton (#907). The unsuffixed
+// keys remain read-only migration inputs for redirects already in flight when
+// this format ships; they expire naturally and are never deleted by new code.
+function liveStampedRecord(raw: string | null, ttlMs: number, now: number): StampedToken | null {
   if (raw === null) return null;
   const sep = raw.indexOf(':');
   if (sep < 0) return null;
@@ -197,15 +200,7 @@ function liveStampedToken(raw: string | null, ttlMs: number, now: number): strin
   // indefinitely fresh until the wall clock catches up. Corrupt, expired,
   // and clock-skewed records all fail toward the safe recovery path.
   if (age < 0 || age > ttlMs) return null;
-  return token;
-}
-
-function rawStampedToken(raw: string | null): string | null {
-  if (raw === null) return null;
-  const sep = raw.indexOf(':');
-  if (sep < 0) return null;
-  const token = raw.slice(sep + 1);
-  return token || null;
+  return { at, token };
 }
 
 function writeStampedToken(key: string, token: string): void {
@@ -216,34 +211,100 @@ function writeStampedToken(key: string, token: string): void {
   }
 }
 
-// Compare-and-delete (Phase 4b P1 round 3 on #836): removes `key` ONLY if it
-// currently holds THIS SAME token. A plain unconditional removeItem would
-// delete a DIFFERENT, newer attempt's record if a different same-origin tab
-// wrote its own value to this same singleton key after this completion's
-// snapshot was taken but before it got around to clearing — exactly the
-// cross-tab collision the token exists to detect.
-function clearIfTokenMatches(key: string, token: string): void {
+function attemptRecordKey(baseKey: string, token: string): string {
+  return `${baseKey}:${token}`;
+}
+
+function writeAttemptRecord(baseKey: string, token: string): void {
+  writeStampedToken(attemptRecordKey(baseKey, token), token);
+}
+
+function removeAttemptRecord(baseKey: string, token: string): void {
   try {
-    if (rawStampedToken(localStorage.getItem(key)) === token) localStorage.removeItem(key);
+    // No read first: a newer attempt has a different key and cannot be removed
+    // even if it starts at this exact point in the old attempt's cleanup.
+    localStorage.removeItem(attemptRecordKey(baseKey, token));
   } catch {
     // no-op
   }
 }
 
-function markCollectedAcknowledgement(token: string): void {
-  writeStampedToken(SIGNIN_ADULT_ACK_KEY, token);
-}
-
-function clearCollectedAcknowledgement(): void {
+function readAttemptRecord(baseKey: string, token: string, ttlMs: number, now: number): StampedToken | null {
   try {
-    localStorage.removeItem(SIGNIN_ADULT_ACK_KEY);
+    const current = liveStampedRecord(localStorage.getItem(attemptRecordKey(baseKey, token)), ttlMs, now);
+    if (current?.token === token) return current;
+
+    // Upgrade compatibility: an already-started redirect may still use the
+    // former unsuffixed singleton. It is readable but never removed, because
+    // compare-then-remove on that shared key is the #907 race.
+    const legacy = liveStampedRecord(localStorage.getItem(baseKey), ttlMs, now);
+    return legacy?.token === token ? legacy : null;
   } catch {
-    // Private mode / disabled storage already fails toward re-prompting.
+    return null;
   }
 }
 
+// The one traversal for token-addressed records. Both discovery and pruning
+// consume these parsed entries so their namespace and token/key validation
+// cannot drift apart. `null` means storage itself failed and callers fail
+// closed; an empty array means the traversal succeeded and found nothing.
+function attemptRecordEntries(baseKey: string, ttlMs: number, now: number): AttemptRecordEntry[] | null {
+  const entries: AttemptRecordEntry[] = [];
+  try {
+    const prefix = `${baseKey}:`;
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key === null || !key.startsWith(prefix)) continue;
+      const token = key.slice(prefix.length);
+      entries.push({
+        key,
+        token,
+        liveRecord: liveStampedRecord(localStorage.getItem(key), ttlMs, now),
+      });
+    }
+  } catch {
+    return null;
+  }
+  return entries;
+}
+
+function liveAttemptRecords(baseKey: string, ttlMs: number, now: number): StampedToken[] {
+  const entries = attemptRecordEntries(baseKey, ttlMs, now);
+  if (entries === null) return [];
+  const records = entries.flatMap(({ token, liveRecord }) =>
+    liveRecord?.token === token ? [liveRecord] : [],
+  );
+  try {
+    const legacy = liveStampedRecord(localStorage.getItem(baseKey), ttlMs, now);
+    if (legacy !== null) records.push(legacy);
+  } catch {
+    return [];
+  }
+  return records;
+}
+
+function pruneExpiredAttemptRecords(baseKey: string, ttlMs: number, now: number): void {
+  const entries = attemptRecordEntries(baseKey, ttlMs, now);
+  if (entries === null) return;
+  const expiredKeys = entries.flatMap(({ key, token, liveRecord }) =>
+    liveRecord?.token === token ? [] : [key],
+  );
+  try {
+    // Each entry names one attempt's immutable random token. Collect before
+    // deleting so Storage's index compaction cannot skip a later stale key;
+    // a concurrent newer attempt has a different key and is never targeted.
+    for (const key of expiredKeys) localStorage.removeItem(key);
+  } catch {
+    // Private mode / disabled storage: failed cleanup must not block sign-in.
+  }
+}
+
+function markCollectedAcknowledgement(token: string): void {
+  writeAttemptRecord(SIGNIN_ADULT_ACK_KEY, token);
+}
+
 function clearCollectedAcknowledgementIfToken(token: string): void {
-  clearIfTokenMatches(SIGNIN_ADULT_ACK_KEY, token);
+  removeAttemptRecord(SIGNIN_ADULT_ACK_KEY, token);
 }
 
 // Read WITHOUT consuming, TTL-checked (Codex P2 round 2 on #836 — the same
@@ -258,24 +319,8 @@ function clearCollectedAcknowledgementIfToken(token: string): void {
 // (terminal success) or the redirect-result effect's `.catch()` (terminal
 // failure) below — and even then, only if it still carries the SAME token
 // this completion consumed (Phase 4b P1 round 3 on #836).
-function peekCollectedAcknowledgement(now: number = Date.now()): string | null {
-  try {
-    return liveStampedToken(localStorage.getItem(SIGNIN_ADULT_ACK_KEY), SIGNIN_ADULT_ACK_TTL_MS, now);
-  } catch {
-    return null;
-  }
-}
-
-// Read the marker WITHOUT consuming it. Evaluated during the first render —
-// before any effect can subscribe to auth or arm the settle timer — so the
-// pending-redirect-return guard (#357) is in place before either could fire;
-// the redirect-result effect still consumes the marker exactly once.
-function peekPendingRedirectAttestation(): boolean {
-  try {
-    return sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY) !== null;
-  } catch {
-    return false;
-  }
+function peekCollectedAcknowledgement(token: string, now: number = Date.now()): string | null {
+  return readAttemptRecord(SIGNIN_ADULT_ACK_KEY, token, SIGNIN_ADULT_ACK_TTL_MS, now)?.token ?? null;
 }
 
 /**
@@ -290,13 +335,10 @@ function peekPendingRedirectAttestation(): boolean {
  * read as "no redirect happened" rather than "a redirect happened and Safari
  * lost the receipt." This record is the second, independent signal the
  * redirect-return effect races against `getRedirectResult`: written at
- * redirect START (`signIn`, alongside `markCollectedAcknowledgement`) and
- * cleared only on a terminal, Firebase-verified outcome for the transaction
- * it tracks — a non-null redirect result or a confirmed getRedirectResult
- * rejection (see `completeRedirectReturn` and the redirect-result effect
- * below) — never merely because a mount READ it, and never if the record no
- * longer carries the SAME token the clearing completion consumed (Phase 4b
- * P1 round 3 on #836 — see `clearIfTokenMatches`). The durable signal can log
+ * redirect START (`signIn`, alongside `markCollectedAcknowledgement`) under
+ * a token-addressed key and cleared only on a terminal, Firebase-verified
+ * outcome for that exact transaction — a non-null redirect result or a
+ * confirmed getRedirectResult rejection. The durable signal can log
  * an unverified completion, but leaves the record intact so a later verified
  * result can finish the security-sensitive work. A mount that reads it live
  * but never reaches a terminal outcome (e.g. it reloads before
@@ -307,37 +349,46 @@ function peekPendingRedirectAttestation(): boolean {
  */
 export const REDIRECT_PENDING_KEY = 'gcb.signin.redirectPending';
 const REDIRECT_PENDING_TTL_MS = SIGNIN_ADULT_ACK_TTL_MS;
+const REDIRECT_LOGIN_LOGGED_KEY = 'gcb.signin.redirectLoginLogged';
+const REDIRECT_TERMINAL_KEY = 'gcb.signin.redirectTerminal';
 
-function markRedirectPending(token: string): void {
-  writeStampedToken(REDIRECT_PENDING_KEY, token);
+function isRedirectAttemptTerminal(token: string, now: number = Date.now()): boolean {
+  return readAttemptRecord(REDIRECT_TERMINAL_KEY, token, REDIRECT_PENDING_TTL_MS, now) !== null;
 }
 
-function clearRedirectPending(): void {
-  try {
-    localStorage.removeItem(REDIRECT_PENDING_KEY);
-  } catch {
-    // no-op — nothing was durably recorded in the first place.
-  }
+function markRedirectPending(token: string): void {
+  writeAttemptRecord(REDIRECT_PENDING_KEY, token);
 }
 
 function clearRedirectPendingIfToken(token: string): void {
-  clearIfTokenMatches(REDIRECT_PENDING_KEY, token);
+  // Terminalize first so a legacy unsuffixed record from an in-flight upgrade
+  // cannot be mistaken for a fresh signal (b) on the next mount. The legacy
+  // key itself is deliberately left untouched; deleting it safely is
+  // impossible once another tab can replace its value between read and remove.
+  writeAttemptRecord(REDIRECT_TERMINAL_KEY, token);
+  removeAttemptRecord(REDIRECT_PENDING_KEY, token);
 }
 
 // Read WITHOUT consuming, TTL-checked and re-checked live on every call (not
-// cached) so a mount that stays alive past the record's TTL, or across a
-// cross-tab record replacement, never trusts a stale snapshot (Codex P2
+// cached) so a mount that stays alive past the record's TTL, or while another
+// tab adds a newer attempt record, never trusts a stale snapshot (Codex P2
 // round 6 on #836). Used both by the `redirectReturnPending` guard's
 // mount-time initializer (#357) alongside the sessionStorage peek, so that
 // guard also survives on the surface that loses the marker; and by the two
 // completion signals below, which deliberately never clear this specific
 // record merely on read (Codex P2 on #836) — see its own comment for why.
 function peekRedirectPending(now: number = Date.now()): string | null {
-  try {
-    return liveStampedToken(localStorage.getItem(REDIRECT_PENDING_KEY), REDIRECT_PENDING_TTL_MS, now);
-  } catch {
-    return null;
-  }
+  const live = liveAttemptRecords(REDIRECT_PENDING_KEY, REDIRECT_PENDING_TTL_MS, now)
+    .filter(({ token }) => !isRedirectAttemptTerminal(token, now))
+    .sort((a, b) => b.at - a.at || b.token.localeCompare(a.token));
+  return live[0]?.token ?? null;
+}
+
+function hasLiveRedirectPending(token: string, now: number = Date.now()): boolean {
+  return (
+    !isRedirectAttemptTerminal(token, now) &&
+    readAttemptRecord(REDIRECT_PENDING_KEY, token, REDIRECT_PENDING_TTL_MS, now) !== null
+  );
 }
 
 // Durable, cross-mount record of which attempt's `login` has already been
@@ -346,13 +397,15 @@ function peekRedirectPending(now: number = Date.now()): string | null {
 // result can still consume it — but a per-mount latch alone can't stop a
 // SECOND reload, within the same TTL window, from finding that same live
 // record plus the (now genuinely) signed-in user and logging `login` again.
-// Stores just the token of the attempt already logged; a mismatch (including
-// absence) reads as NOT logged, so a new attempt is never blocked by a
-// leftover entry from an old, unrelated one.
-const REDIRECT_LOGIN_LOGGED_KEY = 'gcb.signin.redirectLoginLogged';
+// Stored under the attempt token too: terminal cleanup can never erase a
+// different tab's newer dedup marker.
 
 function hasLoggedRedirectLogin(token: string): boolean {
   try {
+    if (readAttemptRecord(REDIRECT_LOGIN_LOGGED_KEY, token, REDIRECT_PENDING_TTL_MS, Date.now()) !== null) {
+      return true;
+    }
+    // Previous releases stored the bare token at the unsuffixed key.
     return localStorage.getItem(REDIRECT_LOGIN_LOGGED_KEY) === token;
   } catch {
     return false;
@@ -360,20 +413,18 @@ function hasLoggedRedirectLogin(token: string): boolean {
 }
 
 function markRedirectLoginLogged(token: string): void {
-  try {
-    localStorage.setItem(REDIRECT_LOGIN_LOGGED_KEY, token);
-  } catch {
-    // no-op — worst case within the TTL, a reload logs `login` again; bounded
-    // and low-stakes, the same direction every other write-failure here fails.
-  }
+  writeAttemptRecord(REDIRECT_LOGIN_LOGGED_KEY, token);
 }
 
 function clearRedirectLoginLoggedIfToken(token: string): void {
-  try {
-    if (localStorage.getItem(REDIRECT_LOGIN_LOGGED_KEY) === token) localStorage.removeItem(REDIRECT_LOGIN_LOGGED_KEY);
-  } catch {
-    // no-op
-  }
+  removeAttemptRecord(REDIRECT_LOGIN_LOGGED_KEY, token);
+}
+
+function pruneExpiredRedirectAttemptRecords(now: number = Date.now()): void {
+  pruneExpiredAttemptRecords(REDIRECT_PENDING_KEY, REDIRECT_PENDING_TTL_MS, now);
+  pruneExpiredAttemptRecords(SIGNIN_ADULT_ACK_KEY, SIGNIN_ADULT_ACK_TTL_MS, now);
+  pruneExpiredAttemptRecords(REDIRECT_LOGIN_LOGGED_KEY, REDIRECT_PENDING_TTL_MS, now);
+  pruneExpiredAttemptRecords(REDIRECT_TERMINAL_KEY, REDIRECT_PENDING_TTL_MS, now);
 }
 
 function trackSignInFailure(err: unknown): void {
@@ -652,6 +703,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // target from the live location at navigation time, preserving the active
   // route instead of replaying the mount-time one.
   const [onFallbackAuthOrigin] = useState(() => firebaseAuthOriginRedirectUrl(window.location) !== null);
+  // Snapshot this tab's mount-owned attempt synchronously during the initial
+  // render, before effects can start getRedirectResult or any later sign-in can
+  // replace the live session marker. A null snapshot is a real captured value,
+  // not a cue to re-read storage later (#905 follow-up review).
+  const [mountOwnedRedirectToken] = useState(() => peekPendingRedirectAttestationToken());
   // An app-owned redirect sign-in return is completing on THIS origin (#357):
   // the same-origin marker was present at mount and getRedirectResult has not
   // settled yet. While true, no signed-out handoff may navigate — a cross-origin
@@ -667,7 +723,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // guard exists to protect, so checking only it would let the guard itself
   // drop on the surface it matters most for.
   const [redirectReturnPending, setRedirectReturnPending] = useState(
-    () => peekPendingRedirectAttestation() || peekRedirectPending() !== null,
+    () => mountOwnedRedirectToken !== null || peekRedirectPending() !== null,
   );
   const redirectReturnPendingRef = useRef(redirectReturnPending);
   // Whether `attested === true` is AUTHORITATIVE (server-settled or a same-session
@@ -1770,24 +1826,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (u) await persistAttestation(u);
   }, [persistAttestation]);
 
-  // Consumes the SESSION-scoped attempt token exactly once per mount,
-  // regardless of which of the two completion signals below reaches it
-  // first (Phase 4b P1 round 3 on #836). Idempotent: whichever signal loses
-  // the race gets the SAME already-consumed value back instead of a second,
-  // now-empty read (sessionStorage.getItem/removeItem is destructive).
-  const appOwnedRedirectTokenRef = useRef<string | null | undefined>(undefined);
+  // Return only the immutable initial-render snapshot above. Signal (b) may use
+  // it for low-stakes login dedup, but it never consumes the browser record; a
+  // reload can still precede the Firebase-verified result that needs this proof
+  // for cleanup and attestation. A later same-tab sign-in can replace the live
+  // marker, but no continuation owned by this mount can adopt that newer token.
+  const peekAppOwnedRedirectTokenOnce = useCallback(
+    (): string | null => mountOwnedRedirectToken,
+    [mountOwnedRedirectToken],
+  );
+
   const consumeAppOwnedRedirectTokenOnce = useCallback((): string | null => {
-    if (appOwnedRedirectTokenRef.current === undefined) {
-      appOwnedRedirectTokenRef.current = consumePendingRedirectAttestation();
-    }
-    return appOwnedRedirectTokenRef.current;
-  }, []);
+    const token = peekAppOwnedRedirectTokenOnce();
+    if (token !== null) clearPendingRedirectAttestationIfToken(token);
+    return token;
+  }, [peekAppOwnedRedirectTokenOnce]);
 
   // A top-level redirect reloads the app, so finish the Firebase transaction on
   // mount and complete the acknowledgement that gated the original sign-in tap.
-  // The marker is same-origin session state and is consumed exactly once — but
-  // completion does NOT require it (#346): Safari can drop sessionStorage
-  // across the provider round-trip while Firebase still restores the session,
+  // The marker is same-origin session state and is consumed exactly once by a
+  // terminal outcome — but completion does NOT require it (#346): Safari can
+  // drop sessionStorage across the provider round-trip while Firebase still restores the session,
   // and gating on the marker skipped the redirect `login` event and the checked
   // 18+ attestation exactly then.
   //
@@ -1817,24 +1876,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const redirectOutcomeRef = useRef<'pending' | 'unverified-success' | 'verified-success' | 'failure'>(
     'pending',
   );
-  // The pending record's TOKEN, established ONCE for this mount, from a
-  // fresh, TTL-checked read (Phase 4b P1 round 3 on #836, preserving Codex
-  // P2 round 6's live-recheck guarantee for THAT read), EAGERLY at the top
-  // of the getRedirectResult effect below rather than lazily on first use —
-  // see that effect's own comment for the ordering. That EAGER read only
-  // ever protects a narrow same-tick race, though (Codex P2 round 4 on
-  // #836, correcting this comment's own earlier, broader claim): a
-  // different same-origin tab can overwrite this origin-wide singleton at
-  // ANY point during the whole time this tab is away at Google — a window
-  // of real seconds, not one tick — so `pendingTokenRef` is NEVER treated
-  // as a proven "this is my own attempt" identity for anything
-  // security-sensitive. It is used ONLY for the durable login-logged dedup
-  // in `completeRedirectReturn` below, where a wrong read costs at most a
-  // harmless extra or missing analytics event. The verified-completion
-  // cleanup and the attestation gate key on `appOwnedRedirectToken` instead
-  // (the session-storage token — tab-scoped, so no other tab could ever
-  // have written or read it), which is the only identity this tab can
-  // actually prove is its own.
+  // The latest live pending TOKEN, established once for this mount from a
+  // fresh, TTL-checked read. Multiple same-origin attempts can coexist under
+  // token-addressed keys, so this is deliberately only a fallback identifier
+  // for the low-stakes login dedup when Safari lost the session marker (#346).
+  // It is never treated as proof that the published User belongs to that
+  // attempt. Verified cleanup and attestation instead key on
+  // `appOwnedRedirectToken` (the tab-scoped session token), the only attempt
+  // identity this tab can prove is its own.
   const pendingTokenRef = useRef<string | null | undefined>(undefined);
   // `verifiedByFirebase` (Phase 4b P1 round 2 on #836 — corrects the round-1
   // fix's flawed premise): whether `u` is KNOWN to be the credential THIS
@@ -1856,47 +1905,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   //
   // `verifiedByFirebase` alone is STILL not enough to persist the
   // acknowledgement (Phase 4b P1 round 3 on #836): it correlates `u`, but the
-  // acknowledgement record is a SEPARATE origin-wide singleton with no
-  // attempt identifier of its own — a DIFFERENT same-origin tab that starts
-  // its own redirect (acknowledged or not) OVERWRITES it, so even a
-  // correctly-verified `u` could end up attested with a different tab's
-  // checkbox state. The attestation write additionally requires the
-  // acknowledgement record's embedded token to match the pending token this
-  // completion is tracking, AND the session-storage token (the one piece of
-  // state no other tab can ever have written or read) to ALSO match — either
-  // gate failing is exactly right to fall through to nothing:
+  // checkbox state must also be proven to belong to this tab's attempt. The
+  // attestation write therefore requires live pending and acknowledgement
+  // records under the exact session-storage token (the one piece of state no
+  // other tab can ever have written or read). Either gate failing is exactly
+  // right to fall through to nothing:
   // `needsAttestation` settles against the current posture and the existing
   // re-prompt collects it properly, rather than risking a wrong-account
   // attestation. If the session token was lost (#346), the acknowledgement
   // cannot be verified either way and is withheld — the existing
   // fail-toward-re-prompt direction, now also the fail-safe one.
   //
-  // The durable-record clears are compare-and-delete, not unconditional
-  // (Phase 4b P1 round 3 on #836): a different tab may have started a NEWER
-  // attempt on these same origin-wide keys since this mount's own token was
-  // established, and an unconditional removeItem would destroy that newer
-  // attempt's own in-flight recovery state.
+  // Durable cleanup removes only keys addressed by the session-proven token.
+  // There is no compare-then-delete window on a shared key, so a newer attempt
+  // can start in another tab at any point without becoming a cleanup target
+  // (#907).
   const completeRedirectReturn = useCallback(
     (u: User, verifiedByFirebase: boolean) => {
       if (redirectOutcomeRef.current === 'failure' || redirectOutcomeRef.current === 'verified-success') return;
 
       if (pendingTokenRef.current === undefined) pendingTokenRef.current = peekRedirectPending();
       const pendingToken = pendingTokenRef.current;
-      // Consumed here, unconditionally and early (Codex P2 round 5 on
-      // #836), not only inside the verified branch below: the login-logged
-      // dedup needs it too. If tab B overwrites the origin-wide pending
-      // record while tab A is away and A's mount snapshots B's token as
-      // `pendingToken`, A's OWN verified login must still mark ITS OWN
-      // (session-proven) token as logged — marking B's token instead would
-      // silently suppress B's later, genuinely separate `login` event when
-      // B returns. Prefer the session-scoped token (provably this tab's
-      // own) for the dedup key; fall back to the possibly-foreign
-      // `pendingToken` only when the session token was lost (#346) and
-      // there is no better option — a wrong read there costs at most a
-      // harmless duplicate or missing analytics event, the same accepted
-      // tradeoff as elsewhere, never a misattributed security-sensitive
-      // write.
-      const appOwnedRedirectToken = consumeAppOwnedRedirectTokenOnce();
+      // Read here for the login-logged dedup, without consuming the browser
+      // marker. If tab B starts later and A's mount snapshots B's newer token
+      // as `pendingToken`, A's OWN verified login must still mark ITS OWN
+      // session-proven token as logged — marking B's token instead would
+      // silently suppress B's later, genuinely separate `login` event. Prefer
+      // the session-scoped token for the dedup key; fall back to the possibly
+      // foreign `pendingToken` only when Safari lost the session token (#346)
+      // and there is no better option. A wrong fallback costs at most a harmless
+      // duplicate or missing analytics event, never a security-sensitive write.
+      const appOwnedRedirectToken = peekAppOwnedRedirectTokenOnce();
       const dedupToken = appOwnedRedirectToken ?? pendingToken;
 
       if (redirectOutcomeRef.current === 'pending') {
@@ -1921,36 +1960,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!verifiedByFirebase) return;
 
-      // The transaction is Firebase-verified — `u` is proven to be THIS
-      // tab's own return. But the origin-wide `pendingToken` read above is
-      // NOT proven to still be this tab's own record (Codex P2 round 4 on
-      // #836, correcting the round-3 fix's own residual): the overwrite
-      // window is not a narrow same-tick race — it spans the ENTIRE time
-      // this tab was away at Google, during which any other same-origin tab
-      // could have started its own redirect and overwritten these singleton
-      // keys, regardless of how early `pendingToken` was read. The ONLY
-      // identity this tab can PROVE is its own is the session-storage
-      // token — tab-scoped, so no other tab could ever have written or read
-      // it — already consumed into `appOwnedRedirectToken` above. Cleanup
-      // and the attestation gate are keyed on THAT, not on `pendingToken`;
-      // `pendingToken` feeds only the durable login-logged dedup's fallback
-      // above, whose worst case on a wrong read is a harmless extra/missing
-      // analytics event, never a wrongly-deleted or wrongly-attested record
-      // belonging to a different tab.
+      // Signal (a) is terminal: now, and only now, consume this tab's marker.
+      // The cached token remains available for the exact-attempt durable cleanup
+      // below, while a different same-tab marker is left untouched.
+      consumeAppOwnedRedirectTokenOnce();
+
+      // The transaction is Firebase-verified — `u` is proven to be THIS tab's
+      // own return. The latest origin-wide `pendingToken` read above is still
+      // not proof of which attempt produced it when several token-addressed
+      // records coexist. The ONLY identity this tab can prove is its own is the
+      // session-storage token — tab-scoped, so no other tab could ever have
+      // written or read it — cached in `appOwnedRedirectToken` above. Cleanup
+      // and attestation key on THAT. `pendingToken` feeds only the login-dedup
+      // fallback, whose worst case on a wrong read is a harmless extra/missing
+      // analytics event, never a wrongly-deleted or wrongly-attested record.
       if (appOwnedRedirectToken !== null) {
+        const ownsPendingRecord = hasLiveRedirectPending(appOwnedRedirectToken);
+        const ackToken = peekCollectedAcknowledgement(appOwnedRedirectToken);
         clearRedirectPendingIfToken(appOwnedRedirectToken);
         clearRedirectLoginLoggedIfToken(appOwnedRedirectToken);
 
         // Persist ONLY an acknowledgement that was actually collected
-        // (Phase 4b round 4) for THIS SAME attempt, confirmed by the FULL
-        // three-way correlation (Codex P2 round 6 on #836 — the gate
-        // previously checked only ack-vs-session, leaving the documented
-        // pending-vs-session pairing unenforced in code even though every
-        // legitimate write sets all three together, so an incomplete or
-        // mismatched durable pending record now also fails the gate rather
-        // than relying on that always holding): the acknowledgement
-        // record's own token, the pending record's own token, and this
-        // tab's proven session token must all agree. The posture is read
+        // (Phase 4b round 4) for THIS SAME attempt. Both token-addressed
+        // durable records must be live under this tab's proven session token;
+        // an incomplete or mismatched record set fails toward re-prompting.
+        // The posture is read
         // when the redirect STARTS, not when it returns: an Event that
         // turns adult while the player is away at Google would otherwise
         // have this branch stamp a durable, cross-Event `attestedAdultAt`
@@ -1962,8 +1996,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // rejects — its own try/catch has no rethrow — but this keeps that
         // an implementation detail of THIS call site, not an invariant a
         // future edit could silently violate into an unhandled rejection).
-        const ackToken = peekCollectedAcknowledgement();
-        if (ackToken === appOwnedRedirectToken && pendingToken === appOwnedRedirectToken) {
+        if (ackToken === appOwnedRedirectToken && ownsPendingRecord) {
           clearCollectedAcknowledgementIfToken(appOwnedRedirectToken);
           void persistAttestation(u).catch(() => {});
         }
@@ -1973,7 +2006,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // different tab's data must never be guessed at) and withhold the
       // attestation. `login` has already been logged above regardless.
     },
-    [consumeAppOwnedRedirectTokenOnce, persistAttestation],
+    [consumeAppOwnedRedirectTokenOnce, peekAppOwnedRedirectTokenOnce, persistAttestation],
   );
 
   // Signal (a). getRedirectResult settles once per mount, nothing
@@ -1988,15 +2021,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
-    // Established HERE, synchronously, at mount, before either completion
-    // signal can possibly fire (Phase 4b P1 round 3 on #836). This closes
-    // only a narrow same-tick race, though — see `pendingTokenRef`'s own
-    // declaration comment (corrected in round 4) for why a different tab
-    // can still overwrite this origin-wide key at any point during the
-    // WHOLE time this tab is away at Google, well beyond one tick. This
-    // read is used only for the durable login-logged dedup, never treated
-    // as a proven "mine" identity for clearing or attestation — that uses
-    // `appOwnedRedirectToken` (session-scoped) instead.
+    // Established synchronously at mount, before either completion signal can
+    // fire. This latest-token read is used only for the durable login-logged
+    // fallback, never treated as a proven "mine" identity for cleanup or
+    // attestation — those use `appOwnedRedirectToken` (session-scoped) instead.
     if (pendingTokenRef.current === undefined) pendingTokenRef.current = peekRedirectPending();
 
     void getRedirectResult(auth)
@@ -2021,12 +2049,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // rejection cannot report `login_failed`; once a confirmed rejection
         // wins, neither success signal can report `login`.
         //
-        // Gated on the SESSION-STORAGE token, NOT the durable record (Codex
-        // P2 on the merged HEAD — the round after the round-2 fix this
-        // comment used to describe): the marker proves THIS rejection
-        // belongs to THIS app's own redirect attempt, so it is safe to treat
-        // as definitively dead and clear both durable records below by
-        // token. When the marker is lost but the durable record still
+        // Gated on the INITIAL-RENDER snapshot of the session-storage token,
+        // NOT the live marker or durable record. That snapshot proves THIS
+        // rejection belongs to the attempt this mount began handling, so it is
+        // safe to treat that exact attempt as definitively dead and clear its
+        // durable records by token. A later same-tab attempt may replace the
+        // live marker, but the conditional clear below leaves it untouched.
+        // When the mount-owned marker was lost but the durable record still
         // stands, this rejection is NOT proof of failure — it is exactly the
         // "Firebase's own helper threw, but the session it restored is still
         // landing" case signal (b) exists to rescue (#346) — so clearing
@@ -2091,15 +2120,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // mobile tab and the installed desktop PWA (#395) both need. See
         // shouldRedirectSignIn; the popup path below still serves desktop browser
         // tabs and installed iOS PWAs.
-        // A failed or abandoned prior attempt must not authorize this one.
-        // Clear first, then write only the acknowledgement collected for this
-        // exact redirect transaction.
-        clearCollectedAcknowledgement();
         // One random id for this attempt (Phase 4b P1 round 3 on #836),
-        // threaded through the session marker and both durable records
-        // below — see `generateAttemptToken` for why this is what lets a
-        // later completion tell its OWN record apart from a different
-        // same-origin tab's concurrent attempt on the same origin-wide keys.
+        // threaded through the session marker and token-addressed durable
+        // records below. A failed or abandoned prior attempt lives under a
+        // different key and therefore cannot authorize or be erased by this
+        // one (#907).
+        pruneExpiredRedirectAttemptRecords();
         const attemptToken = generateAttemptToken();
         markPendingRedirectAttestation(attemptToken);
         // The durable #346 signal (b) companion to the marker above — written
@@ -2116,16 +2142,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // A failed START (signInWithRedirect rejects before navigating away)
           // is a terminal outcome for THIS attempt — clear the records it
           // wrote so they cannot be mistaken for an in-flight redirect by a
-          // later attempt on this same, still-live page. Token-matched
-          // compare-and-delete (Codex P2 round 4 on #836), NOT a plain
-          // unconditional clear: `signInWithRedirect` is awaited, so there
-          // is a real async window during which a DIFFERENT same-origin tab
-          // could start its OWN redirect and overwrite these origin-wide
-          // singleton keys before this promise settles — an earlier version
-          // of this comment wrongly assumed no such window existed. The
-          // session-storage marker itself is tab-scoped (never written by
-          // another tab), so consuming it unconditionally remains safe.
-          consumePendingRedirectAttestation();
+          // later attempt on this same page. Every durable removal names this
+          // attempt's exact key; a different tab can start between any two
+          // statements here without exposing its newer records to deletion.
+          // The session marker is tab-scoped and cleared only if it still
+          // carries this attempt's token.
+          clearPendingRedirectAttestationIfToken(attemptToken);
           clearCollectedAcknowledgementIfToken(attemptToken);
           clearRedirectPendingIfToken(attemptToken);
           clearRedirectLoginLoggedIfToken(attemptToken);
