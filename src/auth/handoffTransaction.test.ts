@@ -13,6 +13,7 @@ import {
   base64url,
   createVerifier,
   forgetHandoffTransaction,
+  forgetHandoffTransactionIf,
   readHandoffTransaction,
   rememberHandoffTransaction,
 } from './handoffTransaction';
@@ -181,6 +182,18 @@ describe('remember / read / forget', () => {
     expect(sessionStorage.getItem(HANDOFF_TRANSACTION_KEY)).toBeNull();
     expect(localStorage.getItem(HANDOFF_TRANSACTION_KEY)).toBeNull();
     expect(readHandoffTransaction(NOW)).toBeNull();
+  });
+
+  it('does not let an older return delete a newer tab\'s fallback transaction', () => {
+    const older = record({ verifier: 'A'.repeat(43) });
+    const newer = record({ verifier: 'B'.repeat(43), createdAt: NOW + 1 });
+    rememberHandoffTransaction(older);
+    rememberHandoffTransaction(newer);
+
+    expect(forgetHandoffTransactionIf(older)).toBe(false);
+    expect(readHandoffTransaction(NOW + 1)).toEqual(newer);
+    expect(forgetHandoffTransactionIf(newer)).toBe(true);
+    expect(readHandoffTransaction(NOW + 1)).toBeNull();
   });
 
   // Reporting failure is what lets the caller abort BEFORE navigating. Leaving

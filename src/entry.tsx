@@ -18,7 +18,12 @@
  * than the boot seam: either would reintroduce the leak this file exists to
  * close.
  */
-import { captureHandoffFromUrl } from './handoffBoot';
+import {
+  captureHandoffFromUrl,
+  pendingHandoffCode,
+  renderBootstrapFailure,
+  runApplicationBootstrap,
+} from './handoffBoot';
 
 captureHandoffFromUrl();
 
@@ -33,24 +38,14 @@ captureHandoffFromUrl();
  * the chunk that just failed to load. It is deliberately the only thing this
  * file knows how to render.
  */
-void import('./main').catch(() => {
-  const root = document.getElementById('root');
-  if (!root) return;
-  root.textContent = '';
-  const wrap = document.createElement('main');
-  wrap.setAttribute('role', 'alert');
-  wrap.style.cssText =
-    'min-height:100dvh;display:grid;place-items:center;padding:2rem 1.5rem;background:#0b0f14;color:#eef2f6;font-family:system-ui,-apple-system,sans-serif;text-align:center';
-  const inner = document.createElement('div');
-  inner.style.maxWidth = '32rem';
-  const h = document.createElement('h1');
-  h.style.cssText = 'font-size:1.5rem;line-height:1.25;margin:0 0 0.75rem';
-  h.textContent = "This didn't load";
-  const p = document.createElement('p');
-  p.style.cssText = 'margin:0;line-height:1.55;color:#a9b7c4';
-  p.textContent =
-    'Something went wrong loading the app. Check your connection and reload the page, then tap Sign in again.';
-  inner.append(h, p);
-  wrap.append(inner);
-  root.append(wrap);
+void runApplicationBootstrap({
+  code: pendingHandoffCode(),
+  completeHandoff: async (code) => {
+    const { completeHandoffReturn } = await import('./auth/handoffReturn');
+    return completeHandoffReturn({ code, origin: window.location.origin });
+  },
+  loadMain: () => import('./main'),
+  // The return module may already have touched primary Auth. The boot seam
+  // therefore maps any unexpected return failure to recovery, never app mount.
+  renderFailure: renderBootstrapFailure,
 });

@@ -1,0 +1,28 @@
+{
+  "// why": "Dedicated Firebase Auth handoff commit Worker (#1060). Its WebWorker globals conflict with the app DOM program, so npm run typecheck runs this separate program alongside tsconfig.json and the service-worker program.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "WebWorker"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/auth/handoffCommit.worker.ts",
+    "src/auth/handoffCommitProtocol.ts",
+    "src/auth/handoffCommitWorker.ts",
+    "src/auth/firebaseHandoffCommitWorkerAdapter.ts",
+    "src/auth/handoffIndexedDbProbe.ts",
+    "src/auth/handoffSessionFingerprint.ts",
+    "src/auth/handoffAttemptFence.ts",
+    "src/vite-env.d.ts"
+  ]
+}
