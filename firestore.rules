@@ -12,7 +12,9 @@ service cloud.firestore {
       return signedIn() && request.auth.uid in event.admins;
     }
     function isAdmin(eventId) {
-      return isAdminWithEvent(eventData(eventId));
+      // Function arguments are eager in Firestore Rules. Keep this outer
+      // guard so an unauthenticated caller never evaluates eventData().
+      return signedIn() && isAdminWithEvent(eventData(eventId));
     }
     function membershipDoc(eventId, uid) {
       return /databases/$(database)/documents/events/$(eventId)/memberships/$(uid);
@@ -36,7 +38,8 @@ service cloud.firestore {
             || isEventMember(eventId, request.auth.uid));
     }
     function admitted(eventId) {
-      return admittedWithEvent(eventId, eventData(eventId));
+      // As above, short-circuit before the eager Event argument is evaluated.
+      return signedIn() && admittedWithEvent(eventId, eventData(eventId));
     }
     // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
     // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'

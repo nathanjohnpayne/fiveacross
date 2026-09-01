@@ -39,6 +39,12 @@ function requireOccurrences(source: string, label: string, needle: string, expec
 }
 
 function membershipMarkPreviewRules(source: string): string {
+  const isAdminDefinition = `function isAdmin(eventId) {
+      // Function arguments are eager in Firestore Rules. Keep this outer
+      // guard so an unauthenticated caller never evaluates eventData().
+      return signedIn() && isAdminWithEvent(eventData(eventId));
+    }`;
+  requireOccurrences(source, 'outer-auth-gated isAdmin() body', isAdminDefinition, 1);
   const helperAnchor = 'function admitted(eventId) {';
   requireOccurrences(source, `canonical ${helperAnchor}`, helperAnchor, 1);
   const threadedAnchor = 'function admittedWithEvent(eventId, event) {';
@@ -73,9 +79,10 @@ function membershipMarkPreviewRules(source: string): string {
   requireOccurrences(memberBody, 'membership exists()', 'exists(membershipDoc(eventId, uid))', 1);
   requireOccurrences(memberBody, 'membership get()', 'get(membershipDoc(eventId, uid))', 1);
   const admittedDefinition = `function admitted(eventId) {
-      return admittedWithEvent(eventId, eventData(eventId));
+      // As above, short-circuit before the eager Event argument is evaluated.
+      return signedIn() && admittedWithEvent(eventId, eventData(eventId));
     }`;
-  requireOccurrences(source, 'canonical admitted() body', admittedDefinition, 1);
+  requireOccurrences(source, 'outer-auth-gated admitted() body', admittedDefinition, 1);
 
   let preview = source;
   preview = replaceExactlyOnce(
