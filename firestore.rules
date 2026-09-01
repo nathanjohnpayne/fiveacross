@@ -21,6 +21,26 @@ service cloud.firestore {
     function validItemPool() {
       return request.resource.data.pool in ['main', 'easy', 'closing', 'embark', 'farewell'];
     }
+    // Adult-content posture is derived from MAIN-pool Prompt data only
+    // (specs/event-setup-wizard.md). Easy/closing content therefore has a
+    // stronger resulting-state invariant: it is always tame. This protects the
+    // #558 atomic Easy approval from old/stale clients too — an admin spicy
+    // update landing afterward cannot recreate ungated explicit content.
+    function validSpicyForItemPool() {
+      return !('pool' in request.resource.data)
+        || request.resource.data.pool == 'main'
+        || request.resource.data.spicy == false;
+    }
+    // Update-side compatibility: old Prompt docs may have no pool at all and
+    // app reads normalize that absence to main. Unrelated admin edits and the
+    // report-only arm must keep working on those rows. Validate the resulting
+    // pool/spicy pair only when an admin actually changes either key.
+    function itemPoolSpicyUnchangedOrValid() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['pool', 'spicy'])
+        || ((!('pool' in request.resource.data) || validItemPool())
+            && request.resource.data.spicy is bool
+            && validSpicyForItemPool());
+    }
     // Day targeting (#557, specs/community-prompt-targeting.md): a Community
     // Prompt may name the Day it is meant for. OPTIONAL — an absent field is the
     // untargeted every-Day contract every pre-#557 Prompt already satisfies — but
@@ -61,10 +81,16 @@ service cloud.firestore {
     // was retained and dealt nowhere (Phase 4b P1, PR #812). `approveItems` also
     // clears the field whenever it places a Prompt, so the two ends agree: only a
     // retention stamps it, and anything else unstamps it.
+    //
+    // `spicyRevision` is likewise Admin-authored. The Approvals queue treats it
+    // as a monotonic acknowledgement fence for transactional spicy corrections;
+    // letting a submitter pre-seed an arbitrary or exhausted value could make the
+    // first legitimate correction acknowledge against attacker-chosen ordering.
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'
         && request.resource.data.pool == 'main'
-        && !('retainedAt' in request.resource.data);
+        && !('retainedAt' in request.resource.data)
+        && !('spicyRevision' in request.resource.data);
     }
     function adminActiveItemCreate(eventId) {
       return isAdmin(eventId)
@@ -1081,6 +1107,7 @@ service cloud.firestore {
           && validItemPool()
           && request.resource.data.reportCount == 0
           && request.resource.data.spicy is bool
+          && validSpicyForItemPool()
           && validTargetDayIndex()
           && (nonAdminPendingMainItemCreate() || adminActiveItemCreate(eventId));
         // Report = increment reportCount by 1 only; admins can do anything.
@@ -1095,7 +1122,9 @@ service cloud.firestore {
         // manual hide/restore via the `isAdmin(eventId)` branch. This is the
         // authoritative promotion of the Phase-0 presentational `isReportHidden`
         // filter — pinned by tests/rules/w4-server-authoritative-hide.test.ts.
-        allow update: if (isAdmin(eventId) && targetDayIndexUnchangedOrValid())
+        allow update: if (isAdmin(eventId)
+            && targetDayIndexUnchangedOrValid()
+            && itemPoolSpicyUnchangedOrValid())
           || (signedIn()
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
               && request.resource.data.reportCount == resource.data.reportCount + 1);

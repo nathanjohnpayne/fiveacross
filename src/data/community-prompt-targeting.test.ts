@@ -65,6 +65,10 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       return ref;
     },
     addDoc: (...args: unknown[]) => addDocMock(...args),
+    updateDoc: (ref: Ref, data: unknown) => {
+      updateMock(ref.path, data);
+      return Promise.resolve();
+    },
     getDoc: (...args: unknown[]) => {
       getDocMock(...args);
       return Promise.resolve(snap());
@@ -94,7 +98,7 @@ import {
   type TargetableDay,
 } from './communityPrompts';
 import { addItem } from './api';
-import { approveItems, approveItem, bulkApproveItems } from './admin';
+import { approveItems, approveItem, bulkApproveItems, setItemSpicy } from './admin';
 
 const NOW = 1_000_000;
 const HOUR = 3_600_000;
@@ -364,6 +368,53 @@ describe('approveItems — routing an approval into one Day', () => {
     });
   });
 
+  it('atomically persists the Admin-selected easy classification with approval', async () => {
+    putItem('p1', { targetDayIndex: 2, pool: 'main', spicy: true });
+
+    await approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'easy' }], 'admin-uid');
+
+    expect(written()).toHaveLength(1);
+    expect(written()[0].data).toMatchObject({
+      status: 'active',
+      approvedBy: 'admin-uid',
+      targetDayIndex: 2,
+      // Writes keep using the live documents' transitional persisted spelling.
+      pool: 'embark',
+      // Easy content is never adult-gated; approval clears a stale/ticked flag
+      // in this same transaction rather than leaking it onto an ungated card.
+      spicy: false,
+    });
+  });
+
+  it.each([
+    { stored: false, selected: true },
+    { stored: true, selected: false },
+  ])(
+    'atomically persists an immediate Exploratory spicy choice ($stored → $selected)',
+    async ({ stored, selected }) => {
+      putItem('p1', { targetDayIndex: 2, pool: 'main', spicy: stored });
+
+      await approveItems(
+        [{ id: 'p1', targetDayIndex: 2, pool: 'main', spicy: selected }],
+        'admin-uid',
+      );
+
+      expect(written()).toHaveLength(1);
+      expect(written()[0].data).toMatchObject({
+        status: 'active',
+        pool: 'main',
+        spicy: selected,
+      });
+    },
+  );
+
+  it('rejects a closing classification before writing a still-pending Prompt', async () => {
+    await expect(
+      approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'closing' }], 'admin-uid'),
+    ).rejects.toThrow(/easy or exploratory classification/);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
   it('rolls a Prompt approved after its Day closed forward to the next open Day', async () => {
     putItem('p1', { targetDayIndex: 1 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 1 }], 'admin-uid');
@@ -498,7 +549,10 @@ describe('approveItems — routing an approval into one Day', () => {
     // Day is mutated on the way there so nothing downstream would catch it
     // (Phase 4b P1, PR #812).
     putItem('p1', { status: 'active', targetDayIndex: 2 });
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+    const placements = await approveItems(
+      [{ id: 'p1', targetDayIndex: 2, pool: 'easy' }],
+      'admin-uid',
+    );
     expect(placements).toEqual([
       { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'stale' },
     ]);
@@ -552,10 +606,10 @@ describe('approveItems — routing an approval into one Day', () => {
   it('routes every row of a bulk approve, sharing ONE approvedAt instant', async () => {
     const placements = await bulkApproveItems(
       [
-        { id: 'a', targetDayIndex: 2 },
-        { id: 'b', targetDayIndex: 1 },
-        { id: 'c', targetDayIndex: 9 },
-        { id: 'd' },
+        { id: 'a', targetDayIndex: 2, pool: 'easy' },
+        { id: 'b', targetDayIndex: 1, pool: 'main' },
+        { id: 'c', targetDayIndex: 9, pool: 'easy' },
+        { id: 'd', pool: 'main' },
       ],
       'admin-uid',
     );
@@ -569,11 +623,91 @@ describe('approveItems — routing an approval into one Day', () => {
     ]);
     const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
     expect(stamps.size).toBe(1);
+    expect(written().map(({ data }) => (data as { pool: string }).pool)).toEqual([
+      'embark',
+      'main',
+      'embark',
+      'main',
+    ]);
+  });
+
+  it('ignores malformed classification hints on stale/missing bulk rows and still approves a valid row', async () => {
+    putItem('stale-classification', { status: 'active', targetDayIndex: 2 });
+
+    const placements = await bulkApproveItems(
+      [
+        { id: 'stale-classification', pool: 'closing' },
+        { id: 'missing-classification', spicy: 'not-a-boolean' as never },
+        { id: 'p1', targetDayIndex: 2, pool: 'easy' },
+      ],
+      'admin-uid',
+    );
+
+    expect(placements).toEqual([
+      { itemId: 'stale-classification', dayIndex: 2, retained: false, outcome: 'stale' },
+      { itemId: 'missing-classification', dayIndex: null, retained: false, outcome: 'missing' },
+      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
+    expect(written()).toHaveLength(1);
+    expect(written()[0]).toMatchObject({
+      path: 'events/med-2026/items/p1',
+      data: { status: 'active', pool: 'embark', spicy: false },
+    });
   });
 
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
     putItem('p1', { targetDayIndex: 3 });
     const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
     expect(placement).toEqual({ itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' });
+  });
+});
+
+describe('setItemSpicy — approval-race fence (#558)', () => {
+  it('refuses a late stale toggle after Easy approval has made the row active', async () => {
+    putItem('p1', {
+      status: 'active',
+      pool: 'embark',
+      spicy: false,
+      targetDayIndex: 2,
+    });
+
+    const revision = await setItemSpicy('p1', true);
+
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(revision).toBeNull();
+  });
+
+  it('still lets the queue correct a pending exploratory Prompt', async () => {
+    putItem('p1', {
+      status: 'pending',
+      pool: 'main',
+      spicy: false,
+      targetDayIndex: 2,
+    });
+
+    const revision = await setItemSpicy('p1', true);
+
+    expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+      spicy: true,
+      spicyRevision: 1,
+    });
+    expect(revision).toBe(1);
+  });
+
+  it('increments the authoritative correction revision in the same transaction', async () => {
+    putItem('p1', {
+      status: 'pending',
+      pool: 'main',
+      spicy: true,
+      spicyRevision: 7,
+    });
+
+    const revision = await setItemSpicy('p1', false);
+
+    expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+      spicy: false,
+      spicyRevision: 8,
+    });
+    expect(revision).toBe(8);
   });
 });
