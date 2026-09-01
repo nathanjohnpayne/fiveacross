@@ -314,6 +314,50 @@ describe('idempotent bug-report intake orchestration', () => {
     expect(memory.saves).toHaveLength(1);
   });
 
+  it('follows a healthy owner past the old five-second bound without duplicating work', async () => {
+    const memory = new MemoryIntake();
+    let nowMs = 1_000;
+    let releaseLookup!: () => void;
+    let lookupReleased = false;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const sleep = vi.fn(async (ms: number) => {
+      nowMs += ms;
+      if (!lookupReleased && nowMs >= 7_000) {
+        lookupReleased = true;
+        releaseLookup();
+      }
+      await Promise.resolve();
+    });
+    const deps = dependencies(memory, {
+      nowMs: () => nowMs,
+      resolveEscalation: vi.fn(async () => { await lookupGate; return { member: true, eventActive: true }; }),
+      sleep,
+    });
+    const report = { ...base(), screenshot: Buffer.from('evidence') };
+    const ownerPromise = submitValidatedBugReport('user-123', report, deps);
+    await vi.waitFor(() => expect(deps.resolveEscalation).toHaveBeenCalledTimes(1));
+    const followerPromise = submitValidatedBugReport('user-123', report, deps);
+
+    let failure: unknown;
+    let receipts: Awaited<typeof ownerPromise>[] | undefined;
+    try {
+      receipts = await Promise.all([ownerPromise, followerPromise]);
+    } catch (error) {
+      failure = error;
+    } finally {
+      if (!lookupReleased) releaseLookup();
+      await ownerPromise;
+    }
+
+    expect(failure).toBeUndefined();
+    expect(receipts?.[1]).toEqual(receipts?.[0]);
+    expect(nowMs).toBeGreaterThanOrEqual(7_000);
+    expect(memory.docs.get('bugReportRateLimits/fcdec6df4d44dbc637c7')?.submissionMs).toEqual([1_000]);
+    expect(deps.resolveEscalation).toHaveBeenCalledTimes(1);
+    expect(memory.saves).toHaveLength(1);
+    expect([...memory.docs.keys()].filter((path) => path.startsWith('bugReports/'))).toHaveLength(1);
+  });
+
   it('rejects an interleaved mismatched retry before it can combine metadata with owner evidence', async () => {
     const memory = new MemoryIntake();
     let releaseLookup!: () => void;
@@ -500,6 +544,7 @@ describe('idempotent bug-report intake orchestration', () => {
 
   it('bounds an ALREADY_EXISTS follower wait without escalation, upload, or another charge', async () => {
     const memory = new MemoryIntake();
+    let nowMs = 1_000;
     const report = { ...base(), screenshot: Buffer.from('evidence') };
     const reportId = deriveBugReportId('user-123', report.submissionId!);
     const hash = deriveBugReportRequestHash(report);
@@ -511,20 +556,59 @@ describe('idempotent bug-report intake orchestration', () => {
       intakeState: 'pending',
       intakeStartedAt: 900,
       leaseId: 'other-owner',
-      leaseExpiresAt: 2_000,
+      leaseExpiresAt: 61_000,
     });
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (ms: number) => { nowMs += ms; });
     const deps = dependencies(memory, {
       db: {
         ...memory.db,
         runTransaction: async () => { throw Object.assign(new Error('already exists'), { code: 6 }); },
       } as never,
+      nowMs: () => nowMs,
       sleep,
     });
     await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
-    expect(sleep).toHaveBeenCalledTimes(50);
+    expect(sleep).toHaveBeenCalledTimes(200);
+    expect(sleep.mock.calls.every(([ms]) => ms === 100)).toBe(true);
+    expect(nowMs).toBe(21_000);
     expect(deps.resolveEscalation).not.toHaveBeenCalled();
     expect(memory.saves).toEqual([]);
+    expect(memory.docs.has('bugReportRateLimits/fcdec6df4d44dbc637c7')).toBe(false);
+  });
+
+  it('rereads a shortened lease boundary and never sleeps past it', async () => {
+    const memory = new MemoryIntake();
+    let nowMs = 1_000;
+    const report = base();
+    const reportId = deriveBugReportId('user-123', report.submissionId!);
+    const hash = deriveBugReportRequestHash(report);
+    const reportPath = `bugReports/${reportId}`;
+    memory.docs.set(reportPath, {
+      submissionId: report.submissionId,
+      reporterHash: 'fcdec6df4d44dbc637c7',
+      requestHashVersion: hash.version,
+      requestHash: hash.value,
+      intakeState: 'pending',
+      intakeStartedAt: 900,
+      leaseId: 'other-owner',
+      leaseExpiresAt: 61_000,
+    });
+    const sleepDurations: number[] = [];
+    const deps = dependencies(memory, {
+      nowMs: () => nowMs,
+      sleep: async (ms: number) => {
+        sleepDurations.push(ms);
+        nowMs += ms;
+        if (sleepDurations.length === 1) {
+          memory.docs.set(reportPath, { ...memory.docs.get(reportPath)!, leaseExpiresAt: 1_250 });
+        }
+      },
+    });
+
+    await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(sleepDurations).toEqual([100, 100, 50]);
+    expect(nowMs).toBe(1_250);
+    expect(deps.resolveEscalation).not.toHaveBeenCalled();
     expect(memory.docs.has('bugReportRateLimits/fcdec6df4d44dbc637c7')).toBe(false);
   });
 

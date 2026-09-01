@@ -114,7 +114,7 @@ type Coordination = {
 
 const INTAKE_LEASE_MS = 60_000;
 const FOLLOWER_POLL_MS = 100;
-const FOLLOWER_MAX_POLLS = 50;
+const FOLLOWER_WAIT_MS = 20_000;
 
 function timestampMs(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -289,16 +289,21 @@ async function followSubmission(
   deps: BugReportIntakeDependencies,
   ref: IntakeDocRef,
   expected: Coordination,
+  deadlineMs: number,
 ): Promise<IntakeReceipt> {
-  for (let poll = 0; poll < FOLLOWER_MAX_POLLS; poll += 1) {
-    await deps.sleep(FOLLOWER_POLL_MS);
+  while (true) {
     const data = await verifiedReadback(ref, expected);
     if (data.intakeState === 'complete') return receiptFrom(data, expected.reportId);
-    if (data.intakeState !== 'pending') {
+    const leaseExpiresAt = timestampMs(data.leaseExpiresAt);
+    if (data.intakeState !== 'pending' || typeof data.leaseId !== 'string' || leaseExpiresAt === null) {
       throw new HttpsError('failed-precondition', 'Stored submission has an invalid intake state.');
     }
+    const remainingMs = Math.min(deadlineMs, leaseExpiresAt) - deps.nowMs();
+    if (remainingMs <= 0) {
+      throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
+    }
+    await deps.sleep(Math.min(FOLLOWER_POLL_MS, remainingMs));
   }
-  throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
 }
 
 export async function submitValidatedBugReport(
@@ -385,7 +390,7 @@ export async function submitValidatedBugReport(
   }
 
   if (role === 'complete') return receiptFrom(await verifiedReadback(reportRef, expected), reportId);
-  if (role === 'follower') return followSubmission(deps, reportRef, expected);
+  if (role === 'follower') return followSubmission(deps, reportRef, expected, nowMs + FOLLOWER_WAIT_MS);
 
   const storagePath = report.screenshot ? `bug-reports/${reporterHash}/${reportId}/screenshot.png` : null;
   try {
