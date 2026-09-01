@@ -38,6 +38,50 @@ service cloud.firestore {
     function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
     }
+    function markerDeliveryCompatibilityDoc() {
+      return /databases/$(database)/documents/markerDeliveryCompatibility/current;
+    }
+    // #1072's bounded bridge for installed clients whose full-set marker write
+    // predates the path-derived `eventId` field. The server owns the cutoff doc;
+    // absence, malformed schema/project/cutoff metadata, and expiry all fail
+    // closed. A single get() supplies the validator: an absent row errors closed,
+    // while one shared path remains cacheable across the real 24-marker legacy
+    // repair batch instead of spending an exists()+get() pair per write.
+    //
+    // Rules expose the database id (`(default)`), not the Firebase project id,
+    // so `projectId` can be shape-checked here but not compared with the runtime
+    // project. This deny-all document is Admin-owned; the migration and retrying
+    // Function enforce its exact project identity at their trusted boundary.
+    function validOpenMarkerDeliveryCompatibility(compatibility) {
+      return compatibility.schemaVersion == 1
+        && compatibility.projectId is string
+        && compatibility.projectId.matches('.*\\S.*')
+        && compatibility.acceptLegacyUntil is number
+        // Rules have no isFinite(). `> 0` rejects NaN/negative infinity; the
+        // 2100 bound rejects positive infinity and an effectively unbounded
+        // bridge, matching the server-side control validators.
+        && compatibility.acceptLegacyUntil > 0
+        && compatibility.acceptLegacyUntil < 4102444800000
+        && request.time.toMillis() <= compatibility.acceptLegacyUntil;
+    }
+    function markerDeliveryCompatibilityOpen() {
+      return validOpenMarkerDeliveryCompatibility(
+        get(markerDeliveryCompatibilityDoc()).data
+      );
+    }
+    function markerWriteHasCompatibleEventId(eventId) {
+      return (('eventId' in request.resource.data)
+              && request.resource.data.eventId is string
+              && request.resource.data.eventId == eventId)
+        || (!('eventId' in request.resource.data)
+            && markerDeliveryCompatibilityOpen());
+    }
+    function markerReadHasCompatibleEventId(eventId) {
+      return resource == null
+        || !('eventId' in resource.data)
+        || (resource.data.eventId is string
+            && resource.data.eventId == eventId);
+    }
     // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
     // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'
     // (= closing) are the pre-#565 persisted spellings, which BOTH live
@@ -801,6 +845,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Server-owned rollout control for #1072. Browsers may neither discover nor
+    // extend the legacy-marker window; trusted Admin SDK writers bypass rules.
+    match /markerDeliveryCompatibility/{document} {
+      allow read, write: if false;
+    }
+
     // Global user profiles.
     match /users/{uid} {
       allow read: if signedIn();
@@ -1503,13 +1553,20 @@ service cloud.firestore {
         // may add/update/remove ONLY their own entry and a forged-attribution write
         // is denied. Reads are public (ADR 0002).
         match /markers/{markerUid} {
-          allow read: if signedIn();
+          // Direct Square/Tally collection scans remain public to signed-in
+          // Players, including legacy rows during rollback. A point get is
+          // stricter: a missing document is observable, field absence is the
+          // explicit legacy shape, an exact field is the canonical shape, and a
+          // present path mismatch is never readable.
+          allow list: if signedIn();
+          allow get: if signedIn() && markerReadHasCompatibleEventId(eventId);
           allow create, update: if isOwner(markerUid)
             && request.resource.data.uid == request.auth.uid
             && request.resource.data.displayName is string
             && request.resource.data.displayName.size() > 0
             && request.resource.data.displayName.size() <= 100
-            && request.resource.data.markedAt is number;
+            && request.resource.data.markedAt is number
+            && markerWriteHasCompatibleEventId(eventId);
           // Unmarking removes exactly that Player's entry; admins can moderate.
           allow delete: if isOwner(markerUid) || isAdmin(eventId);
         }
@@ -1931,19 +1988,18 @@ service cloud.firestore {
       }
     }
 
-    // Collection-group READ for the Feed's Tally Cards (#216/#294): the client
-    // subscribes `collectionGroup('markers')` to fold every Prompt's markers
-    // into per-(Prompt, Day) cards, and Firestore evaluates a collection-group
-    // query ONLY against a `{path=**}` rule — the nested
-    // events/{eventId}/tally/{itemId}/markers rule above never matches it, so
-    // without this rule the subscription is permission-denied and the Feed
-    // shows only the viewer's own latency-compensated markers (the #294
-    // "bare marks intermittently miss the Feed" symptom). The only `markers`
-    // subcollections in this schema live under events/*/tally/* (ADR 0002
-    // public attribution), so signed-in read mirrors the direct-path rule.
-    // Writes stay path-scoped — this grants no create/update/delete.
+    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).
+    // During the bounded compatibility window, old clients may keep their
+    // project-wide unfiltered query while the server normalizes fieldless rows.
+    // After cutoff, `eventId is string` is deliberately query-shaped: Rules are
+    // not filters, so only a query that proves a string Event equality can pass;
+    // the new client uses `where('eventId', '==', capturedEventId)`. This is LIST
+    // only: point reads stay under the exact nested path rule above, and writes
+    // stay owner/path-bound there too.
     match /{path=**}/markers/{markerUid} {
-      allow read: if signedIn();
+      allow list: if signedIn()
+        && (resource.data.eventId is string
+            || markerDeliveryCompatibilityOpen());
     }
   }
 }

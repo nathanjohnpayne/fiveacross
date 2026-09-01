@@ -27,8 +27,9 @@ let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const at = (p: string) => `events/${EVENT}/${p}`;
 const markerPath = (itemId: string, uid: string) => at(`tally/${itemId}/markers/${uid}`);
-// The attributed marker shape setMark writes: { uid, displayName, markedAt }.
+// The attributed marker shape setMark writes, including its Event delivery key.
 const marker = (uid: string, over: Record<string, unknown> = {}) => ({
+  eventId: EVENT,
   uid,
   displayName: uid,
   markedAt: NOW(),

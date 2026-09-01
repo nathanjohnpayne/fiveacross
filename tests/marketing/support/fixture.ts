@@ -495,6 +495,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
       ] as const) {
         await setDoc(doc(db, 'events', HERO_EVENT_ID, 'tally', sharedId, 'markers', p.uid), {
           uid: p.uid,
+          eventId: HERO_EVENT_ID,
           displayName: p.displayName,
           markedAt: now - ago,
           dayIndex: HERO_TODAY_INDEX,
@@ -622,4 +623,3 @@ export async function joinHero(page: Page): Promise<void> {
 
   await expect(page.getByRole('navigation', { name: 'Primary' })).toBeVisible({ timeout: 30_000 });
 }
-

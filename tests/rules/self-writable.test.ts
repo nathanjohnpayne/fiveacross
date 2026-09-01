@@ -92,7 +92,7 @@ describe('firestore.rules — self-writable-by-design guard (w3-security-hardeni
   });
 
   it('ADR 0002: a Mark publishes an attributed Tally entry; forgery denied', async () => {
-    const entry = (uid: string) => ({ uid, displayName: uid, markedAt: NOW() });
+    const entry = (uid: string) => ({ eventId: EVENT, uid, displayName: uid, markedAt: NOW() });
     const mine = doc(db(ALICE), at(`tally/item1/markers/${ALICE}`));
     // Own attributed entry ALLOWED; unmarking removes exactly that entry.
     await assertSucceeds(setDoc(mine, entry(ALICE)));

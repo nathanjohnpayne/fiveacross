@@ -172,6 +172,7 @@ describe('w2 offline Tally marker via setMark (ADR 0002 + ADR 0006)', () => {
     expect(marker.exists()).toBe(true);
     const entry = marker.data() as TallyEntry;
     expect(entry.uid).toBe(tab.uid);
+    expect(entry.eventId).toBe(EVENT_ID);
     expect(entry.displayName).toBe(DISPLAY_NAME); // no anonymity (ADR 0002)
     expect(typeof entry.markedAt).toBe('number');
 

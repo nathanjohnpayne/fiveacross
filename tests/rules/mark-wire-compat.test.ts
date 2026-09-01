@@ -27,11 +27,10 @@ import { FieldPath, doc, setDoc, writeBatch } from 'firebase/firestore';
 // agrees (Codex P1 on PR #470).
 //
 // THE CONTRACT THIS SUITE ENFORCES: a rules change that would deny the wire
-// shape ALREADY IN PLAYERS' HANDS fails here, in CI, before it can ship. If a
-// rules tightening intentionally breaks this shape, updating this fixture in
-// the same PR is the conscious act of accepting a deployment-skew window —
-// do that only with a stale-shell story (deploy order, build-floor force
-// reload, or an incident-window acceptance), and say so in the PR. The
+// shape ALREADY IN PLAYERS' HANDS during an explicitly open compatibility
+// window fails here, in CI, before it can ship. The fixture itself remains
+// frozen and fieldless; markerDeliveryCompatibility/current is the bounded,
+// server-owned stale-shell story that admits it during the rollout. The
 // `mark_rejected` analytics event (src/data/api.ts) is the production-side
 // tripwire if a skew ships anyway.
 
@@ -80,6 +79,11 @@ beforeAll(async () => {
       status: 'active',
       admins: [],
       days: [{ index: DAY, unlockAt: Date.now() - 2 * HOUR, pool: 'main', tutorial: false }],
+    });
+    await setDoc(doc(db, 'markerDeliveryCompatibility', 'current'), {
+      schemaVersion: 1,
+      projectId: 'demo-mark-wire-compat',
+      acceptLegacyUntil: Date.now() + HOUR,
     });
     for (const uid of [ALICE, BOB]) {
       await setDoc(doc(db, 'events', EVENT, 'days', String(DAY), 'boards', uid), {
@@ -178,7 +182,7 @@ function deployedMarkBatch(
 }
 
 describe('deployed-bundle Mark wire compat (#387)', () => {
-  it('the frozen deployed wire shape is ACCEPTED by the repo rules', async () => {
+  it('the frozen deployed wire shape is ACCEPTED while the compatibility window is open', async () => {
     await assertSucceeds(deployedMarkBatch(testEnv).commit());
   });
 

@@ -207,7 +207,7 @@ test('structural parity — every screen against the wireframes', async ({ page 
       const db = ctx.firestore();
       for (const [heatUid, name] of [['fixture-heat-1', 'Heat One'], ['fixture-heat-2', 'Heat Two']] as const) {
         await setDoc(doc(db, 'events', EVENT_ID, 'tally', itemId, 'markers', heatUid), {
-          uid: heatUid, displayName: name, markedAt: PARITY_NOW - 3 * 3_600_000, dayIndex: PARITY_TODAY_INDEX, itemText: target,
+          uid: heatUid, eventId: EVENT_ID, displayName: name, markedAt: PARITY_NOW - 3 * 3_600_000, dayIndex: PARITY_TODAY_INDEX, itemText: target,
         });
       }
     });

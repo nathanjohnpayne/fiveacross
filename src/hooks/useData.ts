@@ -850,7 +850,7 @@ export function deriveTallyCards(
 
 /**
  * The Feed's live Tally Cards (#216): one per `(itemId, dayIndex)` that anyone has
- * marked, derived from a `collectionGroup` scan of every Tally marker in the Event
+ * marked, derived from an Event-filtered `collectionGroup` query over Tally markers
  * (the same "count is the marker set" model the Square badge uses — no admin-
  * maintained aggregate doc). The banned-marker filter mirrors `useTally`: a banned
  * Player's Mark drops from the public card AND its count. The debounced display
@@ -880,8 +880,12 @@ export function useTallyCards() {
     setState((previous) =>
       previous.key === key ? { ...previous, loading: true } : { key, cards: [], loading: true },
     );
+    // #1072: the predicate is part of the server query, so another Event's
+    // markers are never delivered over the wire. Keep the callback's path guard
+    // below through the migration/legacy-client compatibility window as a
+    // fail-closed check against malformed or stale snapshots.
     const unsub = onSnapshot(
-      collectionGroup(db, 'markers'),
+      query(collectionGroup(db, 'markers'), where('eventId', '==', eventId)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;

@@ -182,7 +182,7 @@ describe('firestore.rules — honor-system invariants', () => {
   });
 
   it('ADR 0002: a Mark publishes an attributed Tally entry; forgery denied; reads public', async () => {
-    const entry = (uid: string) => ({ uid, displayName: uid, markedAt: NOW() });
+    const entry = (uid: string) => ({ eventId: EVENT, uid, displayName: uid, markedAt: NOW() });
     const mine = doc(db(ALICE), at(`tally/item1/markers/${ALICE}`));
     await assertSucceeds(setDoc(mine, entry(ALICE))); // own attributed entry
     await assertSucceeds(deleteDoc(mine)); // unmarking removes exactly that entry

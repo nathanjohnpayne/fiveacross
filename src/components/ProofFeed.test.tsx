@@ -30,8 +30,8 @@ vi.mock('firebase/firestore', () => {
     doc: (...args: unknown[]) => makeRef('doc', args),
     collection: (...args: unknown[]) => makeRef('collection', args),
     collectionGroup: (...args: unknown[]) => makeRef('collectionGroup', args),
-    query: (...args: unknown[]) => ({ query: args }),
-    where: (...args: unknown[]) => ({ where: args }),
+    query: (...args: unknown[]) => makeRef('query', args),
+    where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
   };
 });
@@ -63,6 +63,7 @@ import type { BoardDoc } from '../types';
 
 const marker = (uid: string, markedAt: number): TallyEntry => ({
   uid,
+  eventId: EVENT_ID,
   displayName: uid,
   markedAt,
   dayIndex: 0,
@@ -213,13 +214,18 @@ function captureOnNext(): {
     const onNext = (typeof optionsOrNext === 'function' ? optionsOrNext : maybeNext) as (s: unknown) => void;
     const kind = target && typeof target === 'object' ? (target as { kind?: string }).kind : undefined;
     const args = target && typeof target === 'object' ? ((target as { args?: unknown[] }).args ?? []) : [];
-    if (target && typeof target === 'object' && 'query' in (target as object)) captured.proofs = onNext;
+    const querySource = kind === 'query' && args[0] && typeof args[0] === 'object'
+      ? (args[0] as { kind?: string; args?: unknown[] })
+      : undefined;
+    if (kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
+      captured.tally = onNext;
+    }
+    else if (kind === 'query') captured.proofs = onNext;
     else if (kind === 'doc' && args[3] === 'days') captured.boards[Number(args[4])] = onNext;
     // #392: the viewer's own player row — events/{eid}/players/{uid} — routed by
     // its own segment so it doesn't land in the shared event-doc bucket.
     else if (kind === 'doc' && args[3] === 'players') captured.player = onNext;
     else if (kind === 'doc') captured.events.push(onNext);
-    else if (kind === 'collectionGroup') captured.tally = onNext;
     // #262: the Feed also opens the flat doubts subscription; route it by its
     // own path segment so it can't clobber the moments capture.
     else if (kind === 'collection' && args[3] === 'doubts') captured.doubtsAll = onNext;

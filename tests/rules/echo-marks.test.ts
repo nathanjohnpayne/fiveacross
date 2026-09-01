@@ -155,6 +155,7 @@ describe('the multi-board echo batch (spec § Mark-time)', () => {
     );
     // The acted Mark's Tally marker (the single per-(Prompt, Player) slot).
     batch.set(doc(d, `events/${EVENT}/tally/i3/markers/${ALICE}`), {
+      eventId: EVENT,
       uid: ALICE,
       displayName: 'Alice',
       markedAt: NOW(),
@@ -280,6 +281,7 @@ describe('the multi-board echo batch (spec § Mark-time)', () => {
       { merge: true },
     );
     batch.set(doc(d, `events/${EVENT}/tally/i3/markers/${ALICE}`), {
+      eventId: EVENT,
       uid: ALICE,
       displayName: 'Alice',
       markedAt: NOW(),

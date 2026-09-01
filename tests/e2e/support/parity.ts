@@ -163,10 +163,10 @@ export async function seedParityFixture(): Promise<ParityFixture> {
     // The shared Tally: BOTH Players marked the same Prompt on today's Day —
     // the Feed folds these into ONE card reading both names.
     await setDoc(doc(db, 'events', EVENT_ID, 'tally', sharedItemId, 'markers', PLAYER_A.uid), {
-      uid: PLAYER_A.uid, displayName: PLAYER_A.displayName, markedAt: now - 2 * HOUR, dayIndex: PARITY_TODAY_INDEX, itemText: SHARED_ITEM_TEXT,
+      uid: PLAYER_A.uid, eventId: EVENT_ID, displayName: PLAYER_A.displayName, markedAt: now - 2 * HOUR, dayIndex: PARITY_TODAY_INDEX, itemText: SHARED_ITEM_TEXT,
     });
     await setDoc(doc(db, 'events', EVENT_ID, 'tally', sharedItemId, 'markers', PLAYER_B.uid), {
-      uid: PLAYER_B.uid, displayName: PLAYER_B.displayName, markedAt: now - 1 * HOUR, dayIndex: PARITY_TODAY_INDEX, itemText: SHARED_ITEM_TEXT,
+      uid: PLAYER_B.uid, eventId: EVENT_ID, displayName: PLAYER_B.displayName, markedAt: now - 1 * HOUR, dayIndex: PARITY_TODAY_INDEX, itemText: SHARED_ITEM_TEXT,
     });
 
     // One Feed proof of each type (photo/audio/text), all on today's Day. The

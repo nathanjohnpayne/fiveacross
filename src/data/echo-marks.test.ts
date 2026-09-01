@@ -1239,6 +1239,7 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       expect(markerWrites.every((call) => (call[1] as { dayIndex?: number }).dayIndex === targetDayIndex)).toBe(
         true,
       );
+      expect(markerWrites.every((call) => (call[1] as { eventId?: string }).eventId === EVENT_ID)).toBe(true);
       expect(H.batchSet).toHaveBeenCalledTimes(25);
 
       // Model Firestore's latency-compensated cache after that atomic commit.

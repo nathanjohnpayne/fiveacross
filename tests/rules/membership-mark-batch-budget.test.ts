@@ -7,34 +7,63 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, FieldPath, getDoc, setDoc, writeBatch, type Firestore } from 'firebase/firestore';
+import {
+  collectionGroup,
+  doc,
+  FieldPath,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+  writeBatch,
+  type Firestore,
+} from 'firebase/firestore';
 import { MAX_DAYS } from '../../src/data/eventLimits';
 
-// #1079 previews the exact D-A membership predicate at only the Mark/Echo
-// write arms before #804 turns the whole Event inventory on. The source is the
-// REAL firestore.rules file; every replacement is exact-counted so a rules
-// refactor fails closed instead of silently dropping one admission gate.
+// #1079 previews the exact D-A membership predicate at the Mark/Echo write
+// arms, while #1072 also previews #804's Event admission on both direct and
+// collection-group marker reads. The source is the REAL firestore.rules file;
+// every replacement is exact-counted so a rules refactor fails closed instead
+// of silently dropping one admission gate.
 
-const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
+const RULES_PATH = fileURLToPath(
+  new URL('../../firestore.rules', import.meta.url),
+);
 const EVENT = 'membership-budget';
 const ALICE = 'alice';
 const ADMIN = 'admin';
 const SHARED_ITEM = 'shared-prompt';
+const COMPATIBILITY_PATH = 'markerDeliveryCompatibility/current';
 const NOW = () => Date.now();
 const PAST = () => NOW() - 3_600_000;
 
-function replaceExactlyOnce(source: string, label: string, from: string, to: string): string {
+function replaceExactlyOnce(
+  source: string,
+  label: string,
+  from: string,
+  to: string,
+): string {
   const occurrences = source.split(from).length - 1;
   if (occurrences !== 1) {
-    throw new Error(`#1079 preview expected exactly one ${label} anchor; found ${occurrences}`);
+    throw new Error(
+      `#1079 preview expected exactly one ${label} anchor; found ${occurrences}`,
+    );
   }
   return source.replace(from, to);
 }
 
-function requireOccurrences(source: string, label: string, needle: string, expected: number): void {
+function requireOccurrences(
+  source: string,
+  label: string,
+  needle: string,
+  expected: number,
+): void {
   const actual = source.split(needle).length - 1;
   if (actual !== expected) {
-    throw new Error(`#1079 preview expected ${expected} ${label} occurrence(s); found ${actual}`);
+    throw new Error(
+      `#1079 preview expected ${expected} ${label} occurrence(s); found ${actual}`,
+    );
   }
 }
 
@@ -43,7 +72,10 @@ function membershipMarkPreviewRules(source: string): string {
   requireOccurrences(source, `canonical ${helperAnchor}`, helperAnchor, 1);
   const threadedAnchor = 'function admittedWithEvent(eventId, event) {';
   requireOccurrences(source, `canonical ${threadedAnchor}`, threadedAnchor, 1);
-  const threadedBody = source.slice(source.indexOf(threadedAnchor), source.indexOf(helperAnchor));
+  const threadedBody = source.slice(
+    source.indexOf(threadedAnchor),
+    source.indexOf(helperAnchor),
+  );
   const orderedClauses = [
     'return signedIn()',
     "event.get('membershipEnforcement', 'off') != 'enforced'",
@@ -53,7 +85,10 @@ function membershipMarkPreviewRules(source: string): string {
   let clauseCursor = -1;
   for (const clause of orderedClauses) {
     const next = threadedBody.indexOf(clause, clauseCursor + 1);
-    if (next < 0) throw new Error(`#1079 preview lost or reordered canonical clause: ${clause}`);
+    if (next < 0)
+      throw new Error(
+        `#1079 preview lost or reordered canonical clause: ${clause}`,
+      );
     clauseCursor = next;
   }
   for (const clause of orderedClauses) {
@@ -63,19 +98,36 @@ function membershipMarkPreviewRules(source: string): string {
   const memberEnd = source.indexOf(threadedAnchor);
   const memberBody = source.slice(source.indexOf(memberAnchor), memberEnd);
   if (
-    source.split(memberAnchor).length - 1 !== 1
-    || memberBody.indexOf('return exists(membershipDoc(eventId, uid))') < 0
-    || memberBody.indexOf('&& get(membershipDoc(eventId, uid))')
-      < memberBody.indexOf('return exists(membershipDoc(eventId, uid))')
+    source.split(memberAnchor).length - 1 !== 1 ||
+    memberBody.indexOf('return exists(membershipDoc(eventId, uid))') < 0 ||
+    memberBody.indexOf('&& get(membershipDoc(eventId, uid))') <
+      memberBody.indexOf('return exists(membershipDoc(eventId, uid))')
   ) {
-    throw new Error('#1079 preview requires one exists()-then-get() membership predicate');
+    throw new Error(
+      '#1079 preview requires one exists()-then-get() membership predicate',
+    );
   }
-  requireOccurrences(memberBody, 'membership exists()', 'exists(membershipDoc(eventId, uid))', 1);
-  requireOccurrences(memberBody, 'membership get()', 'get(membershipDoc(eventId, uid))', 1);
+  requireOccurrences(
+    memberBody,
+    'membership exists()',
+    'exists(membershipDoc(eventId, uid))',
+    1,
+  );
+  requireOccurrences(
+    memberBody,
+    'membership get()',
+    'get(membershipDoc(eventId, uid))',
+    1,
+  );
   const admittedDefinition = `function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
     }`;
-  requireOccurrences(source, 'canonical admitted() body', admittedDefinition, 1);
+  requireOccurrences(
+    source,
+    'canonical admitted() body',
+    admittedDefinition,
+    1,
+  );
 
   let preview = source;
   preview = replaceExactlyOnce(
@@ -106,12 +158,23 @@ function membershipMarkPreviewRules(source: string): string {
   );
   preview = replaceExactlyOnce(
     preview,
-    'nested tally markers create/update',
+    'nested tally marker read/write arms',
     `        match /markers/{markerUid} {
-          allow read: if signedIn();
+          // Direct Square/Tally collection scans remain public to signed-in
+          // Players, including legacy rows during rollback. A point get is
+          // stricter: a missing document is observable, field absence is the
+          // explicit legacy shape, an exact field is the canonical shape, and a
+          // present path mismatch is never readable.
+          allow list: if signedIn();
+          allow get: if signedIn() && markerReadHasCompatibleEventId(eventId);
           allow create, update: if isOwner(markerUid)`,
     `        match /markers/{markerUid} {
-          allow read: if signedIn();
+          // Direct Square/Tally collection scans remain public to admitted
+          // Event members, including legacy rows during rollback. A point get
+          // additionally validates any present Event identity.
+          allow list: if admitted(eventId);
+          allow get: if admitted(eventId)
+            && markerReadHasCompatibleEventId(eventId);
           allow create, update: if admitted(eventId)
             && isOwner(markerUid)`,
   );
@@ -126,8 +189,20 @@ function membershipMarkPreviewRules(source: string): string {
   );
   preview = replaceExactlyOnce(
     preview,
+    'collection-group tally marker list arm',
+    `    match /{path=**}/markers/{markerUid} {
+      allow list: if signedIn()
+        && (resource.data.eventId is string
+            || markerDeliveryCompatibilityOpen());
+    }`,
+    `    match /{path=**}/markers/{markerUid} {
+      allow list: if admitted(resource.data.eventId);
+    }`,
+  );
+  preview = replaceExactlyOnce(
+    preview,
     'unauthenticated wrapper probes',
-    `    // Collection-group READ for the Feed's Tally Cards (#216/#294):`,
+    `    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).`,
     `    // TEST-ONLY #1079 probes. The negation makes an unauthenticated
     // request succeed only when each wrapper's leading signedIn() prevents
     // its Event argument from being evaluated.
@@ -138,7 +213,7 @@ function membershipMarkPreviewRules(source: string): string {
       allow create: if !admitted(eventId);
     }
 
-    // Collection-group READ for the Feed's Tally Cards (#216/#294):`,
+    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).`,
   );
   return preview;
 }
@@ -146,7 +221,8 @@ function membershipMarkPreviewRules(source: string): string {
 let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const eventPath = (eventId: string) => `events/${eventId}`;
-const playerPath = (eventId: string, uid: string) => `${eventPath(eventId)}/players/${uid}`;
+const playerPath = (eventId: string, uid: string) =>
+  `${eventPath(eventId)}/players/${uid}`;
 const boardPath = (eventId: string, dayIndex: number, uid: string) =>
   `${eventPath(eventId)}/days/${dayIndex}/boards/${uid}`;
 const membershipPath = (eventId: string, uid: string) =>
@@ -172,11 +248,19 @@ function cell(
 ): Record<string, unknown> {
   const free = index === 12;
   const shared = index === 3;
-  const itemId = free ? null : shared ? SHARED_ITEM : `day-${dayIndex}-prompt-${index}`;
+  const itemId = free
+    ? null
+    : shared
+      ? SHARED_ITEM
+      : `day-${dayIndex}-prompt-${index}`;
   return {
     index,
     itemId,
-    text: free ? 'FREE' : shared ? 'Shared prompt' : `Prompt ${dayIndex}-${index}`,
+    text: free
+      ? 'FREE'
+      : shared
+        ? 'Shared prompt'
+        : `Prompt ${dayIndex}-${index}`,
     free,
     marked: free,
     markedAt: null,
@@ -218,13 +302,29 @@ function board(uid: string, dayIndex: number, seed: number) {
   };
 }
 
-function marker(uid: string, itemText: string, dayIndex?: number) {
+function marker(
+  eventId: string,
+  uid: string,
+  itemText: string,
+  dayIndex?: number,
+) {
   return {
+    eventId,
     uid,
     displayName: uid === ALICE ? 'Alice' : uid,
     markedAt: NOW(),
     itemText,
     ...(typeof dayIndex === 'number' ? { dayIndex } : {}),
+  };
+}
+
+function legacyMarker(uid: string, itemText: string, dayIndex: number) {
+  return {
+    uid,
+    displayName: uid === ALICE ? 'Alice' : uid,
+    markedAt: NOW(),
+    itemText,
+    dayIndex,
   };
 }
 
@@ -279,7 +379,10 @@ async function seedPlayerAndBoards(
   });
   await Promise.all(
     Array.from({ length: dayCount }, (_, dayIndex) =>
-      setDoc(doc(database, boardPath(eventId, dayIndex, uid)), board(uid, dayIndex, 100 + dayIndex)),
+      setDoc(
+        doc(database, boardPath(eventId, dayIndex, uid)),
+        board(uid, dayIndex, 100 + dayIndex),
+      ),
     ),
   );
 }
@@ -337,26 +440,41 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const database = ctx.firestore();
       await seedEvent(database, offEvent, { enforcement: 'off', dayCount: 1 });
-      await seedEvent(database, absentEvent, { omitEnforcement: true, dayCount: 1 });
+      await seedEvent(database, absentEvent, {
+        omitEnforcement: true,
+        dayCount: 1,
+      });
     });
     await assertSucceeds(
       // Legacy marker payloads predate the optional Daily Cards `dayIndex`.
-      setDoc(doc(db(ALICE), markerPath(offEvent, 'prompt', ALICE)), marker(ALICE, 'Prompt')),
+      setDoc(
+        doc(db(ALICE), markerPath(offEvent, 'prompt', ALICE)),
+        marker(offEvent, ALICE, 'Prompt'),
+      ),
     );
     await assertSucceeds(
-      setDoc(doc(db(ALICE), markerPath(absentEvent, 'prompt', ALICE)), marker(ALICE, 'Prompt', 0)),
+      setDoc(
+        doc(db(ALICE), markerPath(absentEvent, 'prompt', ALICE)),
+        marker(absentEvent, ALICE, 'Prompt', 0),
+      ),
     );
   });
 
   it('keeps an unenforced Event closed to an unauthenticated caller', async () => {
     const eventId = 'unenforced-unauthenticated';
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
-      await seedEvent(ctx.firestore(), eventId, { enforcement: 'off', dayCount: 1 });
+      await seedEvent(ctx.firestore(), eventId, {
+        enforcement: 'off',
+        dayCount: 1,
+      });
     });
     await assertFails(
       setDoc(
-        doc(testEnv.unauthenticatedContext().firestore(), markerPath(eventId, 'prompt', ALICE)),
-        marker(ALICE, 'Prompt'),
+        doc(
+          testEnv.unauthenticatedContext().firestore(),
+          markerPath(eventId, 'prompt', ALICE),
+        ),
+        marker(eventId, ALICE, 'Prompt'),
       ),
     );
   });
@@ -373,7 +491,9 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
         // None of these Event documents exists. If eventData(eventId) were
         // evaluated before the callee's signedIn() short-circuit, the request
         // would error or exceed the twenty-access aggregate ceiling.
-        batch.set(doc(database, collection, `missing-event-${index}`), { probe: true });
+        batch.set(doc(database, collection, `missing-event-${index}`), {
+          probe: true,
+        });
       }
       await assertSucceeds(batch.commit());
     }
@@ -390,14 +510,77 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     });
 
     await assertSucceeds(
-      setDoc(doc(db(ALICE), markerPath(EVENT, 'active-member', ALICE)), marker(ALICE, 'Active', 0)),
+      setDoc(
+        doc(db(ALICE), markerPath(EVENT, 'active-member', ALICE)),
+        marker(EVENT, ALICE, 'Active', 0),
+      ),
     );
     await assertFails(
-      setDoc(doc(db(ALICE), markerPath(missingEvent, 'missing', ALICE)), marker(ALICE, 'Missing', 0)),
+      setDoc(
+        doc(db(ALICE), markerPath(missingEvent, 'missing', ALICE)),
+        marker(missingEvent, ALICE, 'Missing', 0),
+      ),
     );
     await assertFails(
-      setDoc(doc(db(ALICE), markerPath(revokedEvent, 'revoked', ALICE)), marker(ALICE, 'Revoked', 0)),
+      setDoc(
+        doc(db(ALICE), markerPath(revokedEvent, 'revoked', ALICE)),
+        marker(revokedEvent, ALICE, 'Revoked', 0),
+      ),
     );
+  });
+
+  it('previews #804 admission on both direct and Event-scoped collection-group marker reads', async () => {
+    const otherEvent = 'membership-other-read';
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const database = ctx.firestore();
+      await seedEvent(database, otherEvent, { dayCount: 1 });
+      // Both Events deliberately use the same item and marker ids: the Event
+      // field, not a coincidentally unique descendant path, is the delivery key.
+      await setDoc(
+        doc(database, markerPath(EVENT, SHARED_ITEM, ALICE)),
+        marker(EVENT, ALICE, 'Shared prompt', 0),
+      );
+      await setDoc(
+        doc(database, markerPath(otherEvent, SHARED_ITEM, ALICE)),
+        marker(otherEvent, ALICE, 'Shared prompt', 0),
+      );
+    });
+
+    await assertSucceeds(
+      getDoc(doc(db(ALICE), markerPath(EVENT, SHARED_ITEM, ALICE))),
+    );
+    await expect(
+      getDoc(doc(db(ALICE), markerPath(otherEvent, SHARED_ITEM, ALICE))),
+    ).rejects.toMatchObject({ code: 'permission-denied' });
+    await expect(
+      getDoc(doc(db('nonmember'), markerPath(EVENT, SHARED_ITEM, ALICE))),
+    ).rejects.toMatchObject({ code: 'permission-denied' });
+
+    const memberQuery = query(
+      collectionGroup(db(ALICE), 'markers'),
+      where('eventId', '==', EVENT),
+    );
+    const memberResult = await getDocs(memberQuery);
+    expect(memberResult.docs.map((snapshot) => snapshot.ref.path)).toEqual([
+      markerPath(EVENT, SHARED_ITEM, ALICE),
+    ]);
+
+    await expect(
+      getDocs(
+        query(
+          collectionGroup(db(ALICE), 'markers'),
+          where('eventId', '==', otherEvent),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'permission-denied' });
+    await expect(
+      getDocs(
+        query(
+          collectionGroup(db('nonmember'), 'markers'),
+          where('eventId', '==', EVENT),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'permission-denied' });
   });
 
   it('denies missing and revoked acted-Mark batches atomically', async () => {
@@ -409,7 +592,8 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
       const database = ctx.firestore();
       for (const denied of deniedEvents) {
         await seedEvent(database, denied.eventId, { dayCount: 1 });
-        if (denied.status) await seedMembership(database, denied.eventId, ALICE, denied.status);
+        if (denied.status)
+          await seedMembership(database, denied.eventId, ALICE, denied.status);
         await seedPlayerAndBoards(database, denied.eventId, ALICE, 1);
       }
     });
@@ -429,18 +613,25 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
       );
       batch.set(
         doc(database, markerPath(denied.eventId, SHARED_ITEM, ALICE)),
-        marker(ALICE, 'Shared prompt', 0),
+        marker(denied.eventId, ALICE, 'Shared prompt', 0),
       );
       await assertFails(batch.commit());
 
       await testEnv.withSecurityRulesDisabled(async (ctx) => {
         const readDatabase = ctx.firestore();
-        const boardSnap = await getDoc(doc(readDatabase, boardPath(denied.eventId, 0, ALICE)));
-        const playerSnap = await getDoc(doc(readDatabase, playerPath(denied.eventId, ALICE)));
+        const boardSnap = await getDoc(
+          doc(readDatabase, boardPath(denied.eventId, 0, ALICE)),
+        );
+        const playerSnap = await getDoc(
+          doc(readDatabase, playerPath(denied.eventId, ALICE)),
+        );
         const markerSnap = await getDoc(
           doc(readDatabase, markerPath(denied.eventId, SHARED_ITEM, ALICE)),
         );
-        expect((boardSnap.data()?.cells as Record<string, { marked: boolean }>)['3'].marked).toBe(false);
+        expect(
+          (boardSnap.data()?.cells as Record<string, { marked: boolean }>)['3']
+            .marked,
+        ).toBe(false);
         expect(playerSnap.data()?.squaresMarked).toBe(0);
         expect(markerSnap.exists()).toBe(false);
       });
@@ -450,10 +641,16 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
   it('preserves Decision D-A: an enforced Event admin is admitted without a Membership', async () => {
     const adminEvent = 'transitional-admin';
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
-      await seedEvent(ctx.firestore(), adminEvent, { admins: [ADMIN], dayCount: 1 });
+      await seedEvent(ctx.firestore(), adminEvent, {
+        admins: [ADMIN],
+        dayCount: 1,
+      });
     });
     await assertSucceeds(
-      setDoc(doc(db(ADMIN), markerPath(adminEvent, 'admin-prompt', ADMIN)), marker(ADMIN, 'Admin prompt', 0)),
+      setDoc(
+        doc(db(ADMIN), markerPath(adminEvent, 'admin-prompt', ADMIN)),
+        marker(adminEvent, ADMIN, 'Admin prompt', 0),
+      ),
     );
   });
 
@@ -469,7 +666,9 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     mark.set(
       doc(database, playerPath(EVENT, ALICE)),
       {
-        dayStats: { 0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+        dayStats: {
+          0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        },
         bingoCount: 0,
         squaresMarked: 1,
         firstBingoAt: null,
@@ -479,7 +678,7 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     );
     mark.set(
       doc(database, markerPath(EVENT, SHARED_ITEM, ALICE)),
-      marker(ALICE, 'Shared prompt', 0),
+      marker(EVENT, ALICE, 'Shared prompt', 0),
     );
     await assertSucceeds(mark.commit());
 
@@ -493,7 +692,9 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     unmark.set(
       doc(database, playerPath(EVENT, ALICE)),
       {
-        dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+        dayStats: {
+          0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+        },
         bingoCount: 0,
         squaresMarked: 0,
         firstBingoAt: null,
@@ -525,7 +726,9 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     batch.set(
       doc(database, playerPath(EVENT, ALICE)),
       {
-        dayStats: { 0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+        dayStats: {
+          0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        },
         bingoCount: 0,
         squaresMarked: 1,
         firstBingoAt: null,
@@ -536,7 +739,7 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     writes += 1;
     batch.set(
       doc(database, markerPath(EVENT, SHARED_ITEM, ALICE)),
-      marker(ALICE, 'Shared prompt', 0),
+      marker(EVENT, ALICE, 'Shared prompt', 0),
     );
     writes += 1;
 
@@ -544,11 +747,22 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     await assertSucceeds(batch.commit());
   });
 
-  it('accepts the real maximum reconcile shape: one 24-cell Board repair + 24 marker repairs (25 writes)', async () => {
+  it('accepts the real maximum reconcile shape, including 24 fieldless legacy markers in-window', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), COMPATIBILITY_PATH), {
+        schemaVersion: 1,
+        projectId: 'demo-fa-membership-mark-budget',
+        acceptLegacyUntil: NOW() + 60_000,
+      });
+    });
+
     const database = db(ALICE);
-    const changedIndexes = Array.from({ length: 25 }, (_, index) => index).filter((index) => index !== 12);
+    const changedIndexes = Array.from(
+      { length: 25 },
+      (_, index) => index,
+    ).filter((index) => index !== 12);
     const markedAt = NOW();
-    const makeRepairBatch = () => {
+    const makeRepairBatch = (fieldless = false) => {
       const batch = writeBatch(database);
       const overrides = Object.fromEntries(
         changedIndexes.map((index) => [
@@ -573,7 +787,9 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
         expect(typeof itemId).toBe('string');
         batch.set(
           doc(database, markerPath(EVENT, itemId as string, ALICE)),
-          marker(ALICE, repairedCell.text as string, 0),
+          fieldless
+            ? legacyMarker(ALICE, repairedCell.text as string, 0)
+            : marker(EVENT, ALICE, repairedCell.text as string, 0),
         );
         writes += 1;
       }
@@ -589,11 +805,25 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     const retry = makeRepairBatch();
     expect(retry.writes).toBe(25);
     await assertSucceeds(retry.batch.commit());
+
+    // The old bundle's full-set marker payloads omit eventId. All 24 marker
+    // authorizations share one deny-all compatibility lookup, in addition to
+    // the Event/Membership paths shared by the #804 preview. This maximum
+    // batch proves those cached reads stay below Firestore's aggregate budget.
+    const legacy = makeRepairBatch(true);
+    expect(legacy.writes).toBe(25);
+    await assertSucceeds(legacy.batch.commit());
   });
 
   it('pins the aggregate access boundary: 6 distinct Event/Membership paths pass and 7 deny', async () => {
-    const passEvents = Array.from({ length: 6 }, (_, index) => `distinct-pass-${index}`);
-    const denyEvents = Array.from({ length: 7 }, (_, index) => `distinct-deny-${index}`);
+    const passEvents = Array.from(
+      { length: 6 },
+      (_, index) => `distinct-pass-${index}`,
+    );
+    const denyEvents = Array.from(
+      { length: 7 },
+      (_, index) => `distinct-deny-${index}`,
+    );
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const database = ctx.firestore();
       for (const eventId of [...passEvents, ...denyEvents]) {
@@ -607,7 +837,7 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     for (const eventId of passEvents) {
       six.set(
         doc(database, markerPath(eventId, `prompt-${eventId}`, ALICE)),
-        marker(ALICE, eventId, 0),
+        marker(eventId, ALICE, eventId, 0),
       );
     }
     await assertSucceeds(six.commit());
@@ -616,7 +846,7 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     for (const eventId of denyEvents) {
       seven.set(
         doc(database, markerPath(eventId, `prompt-${eventId}`, ALICE)),
-        marker(ALICE, eventId, 0),
+        marker(eventId, ALICE, eventId, 0),
       );
     }
     await assertFails(seven.commit());

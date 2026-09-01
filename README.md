@@ -30,7 +30,7 @@ Two production Firebase projects back these—`gaycruisebingo` and `fiveacross`�
 
 Vite · React 19 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
 
-The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, three idempotent triggers that derive/reconcile the public adult-content posture from Prompt, Event and hostname writes, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate (`ENABLE_VISION_MODERATION`) and stays off until deliberately enabled—and because the thumbnail write lives inside that same handler, the default off state means proof uploads get **neither** Vision scanning nor server-side thumbnails. Player stats stay client-authoritative by design (ADR 0001).
+The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, three idempotent triggers that derive/reconcile the public adult-content posture from Prompt, Event and hostname writes, a bounded legacy-marker identity normalizer, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate (`ENABLE_VISION_MODERATION`) and stays off until deliberately enabled—and because the thumbnail write lives inside that same handler, the default off state means proof uploads get **neither** Vision scanning nor server-side thumbnails. Player stats stay client-authoritative by design (ADR 0001).
 
 ## Quick start
 
@@ -46,7 +46,7 @@ npm test                       # game-logic unit tests
 npm run typecheck              # tsc --noEmit, app + service worker
 ```
 
-`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions`—scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, and adult-posture derivation/reconciliation), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
+`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions`—scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, adult-posture derivation/reconciliation, and legacy-marker normalization), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
 Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (the 1Password-backed project deploy credential; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
 
@@ -90,7 +90,7 @@ The target files are local and ignored because they contain the client configura
 | Path | Purpose |
 |---|---|
 | `src/` | App code: game logic, Firebase init, Event/Edition resolution, auth, theme, hooks, components |
-| `functions/` | Cloud Functions (unlocks, finale, moderation, email, bug reports—stats stay client-authoritative, ADR 0001) |
+| `functions/` | Cloud Functions (unlocks, finale, moderation, marker normalization, email, bug reports—stats stay client-authoritative, ADR 0001) |
 | `router-publisher/` | Isolated keyless Function codebase that signs private Event-router registry updates without an Admin SDK dependency |
 | `worker/` | Public Event-router code plus the separately configured, unrouted private registry Worker and lookup harness |
 | `public/` | Static assets served verbatim (icons, manifest, `og-default.png`, service worker) |

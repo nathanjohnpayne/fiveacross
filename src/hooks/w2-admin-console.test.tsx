@@ -33,12 +33,12 @@ vi.mock('firebase/firestore', () => {
   return {
     doc: (...args: unknown[]) => makeRef('doc', args),
     collection: (...args: unknown[]) => makeRef('collection', args),
-    // #216: useFeed now composes useTallyCards, which opens a collectionGroup
-    // subscription over every Tally marker. Stubbed so the merged-Feed hook
+    // #216: useFeed now composes useTallyCards, which opens an Event-filtered
+    // query over the markers collection group. Stubbed so the merged-Feed hook
     // renders; the tally stream is delivered empty via the existing `col` slot.
     collectionGroup: (...args: unknown[]) => makeRef('collectionGroup', args),
-    query: (...args: unknown[]) => ({ query: args }),
-    where: (...args: unknown[]) => ({ where: args }),
+    query: (...args: unknown[]) => makeRef('query', args),
+    where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
   };
 });
@@ -69,8 +69,15 @@ function capture() {
   };
   H.onSnapshot.mockImplementation((target: unknown, _o: unknown, onNext: SnapCb) => {
     if (target && typeof target === 'object') {
-      if ('query' in (target as object)) cbs.query = onNext;
-      else if ((target as { kind?: string }).kind === 'doc') cbs.docs.push(onNext);
+      const ref = target as { kind?: string; args?: unknown[] };
+      const querySource = ref.kind === 'query' && ref.args?.[0] && typeof ref.args[0] === 'object'
+        ? (ref.args[0] as { kind?: string; args?: unknown[] })
+        : undefined;
+      if (ref.kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
+        cbs.col = onNext;
+      }
+      else if (ref.kind === 'query') cbs.query = onNext;
+      else if (ref.kind === 'doc') cbs.docs.push(onNext);
       else cbs.col = onNext;
     }
     return () => {};
