@@ -218,6 +218,9 @@ function selectCommunityStratified(
     communitySpicyMax + organiserSpicyMax,
     Math.max(communitySpicyMin + organiserSpicyMin, targetSpicy),
   );
+  // Clamping the total into the sum of both groups' feasible intervals makes
+  // this projected Community interval non-empty: the lower candidates are each
+  // <= both upper candidates, so communitySpicyLower <= communitySpicyUpper.
   const communitySpicyLower = Math.max(communitySpicyMin, feasibleSpicy - organiserSpicyMax);
   const communitySpicyUpper = Math.min(communitySpicyMax, feasibleSpicy - organiserSpicyMin);
   const desiredCommunitySpicy = Math.round(communityTake * spicyRatio);

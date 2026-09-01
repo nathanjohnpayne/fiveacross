@@ -212,6 +212,49 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     expect(H.setItemSpicy).toHaveBeenNthCalledWith(2, 'i1', true);
   });
 
+  it('clears a failed spicy correction when the row changes to Easy, then allows a fresh retry', async () => {
+    H.pendingItems = [item('i1', { text: 'Reclassified prompt', status: 'pending' })];
+    H.setItemSpicy.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Reclassified prompt').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+
+    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'easy' } });
+    expect(within(row).queryByRole('checkbox')).toBeNull();
+    expect(within(row).queryByRole('alert')).toBeNull();
+
+    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'main' } });
+    fireEvent.click(within(row).getByRole('checkbox'));
+    await waitFor(() => expect(H.setItemSpicy).toHaveBeenCalledTimes(2));
+    expect(within(row).queryByRole('alert')).toBeNull();
+  });
+
+  it('does not surface a late spicy-write failure after the row has changed to Easy', async () => {
+    H.pendingItems = [item('i1', { text: 'Pending reclassification', status: 'pending' })];
+    let rejectWrite!: (error: Error) => void;
+    H.setItemSpicy.mockImplementationOnce(
+      () => new Promise<void>((_resolve, reject) => (rejectWrite = reject)),
+    );
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Pending reclassification').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'easy' } });
+    await act(async () => {
+      rejectWrite(new Error('offline'));
+      await Promise.resolve();
+    });
+
+    expect(within(row).queryByRole('checkbox')).toBeNull();
+    expect(within(row).queryByRole('alert')).toBeNull();
+
+    fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'main' } });
+    expect(within(row).getByRole('checkbox')).not.toBeDisabled();
+    expect(within(row).queryByRole('alert')).toBeNull();
+  });
+
   it('a rejected Unban alerts inline in Players', async () => {
     H.event = { ...H.event, bannedUids: ['ghost-uid'] } as unknown as EventDoc;
     H.unbanUser.mockRejectedValueOnce(new Error('offline'));

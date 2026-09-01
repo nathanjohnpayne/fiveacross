@@ -631,6 +631,30 @@ describe('approveItems — routing an approval into one Day', () => {
     ]);
   });
 
+  it('ignores malformed classification hints on stale/missing bulk rows and still approves a valid row', async () => {
+    putItem('stale-classification', { status: 'active', targetDayIndex: 2 });
+
+    const placements = await bulkApproveItems(
+      [
+        { id: 'stale-classification', pool: 'closing' },
+        { id: 'missing-classification', spicy: 'not-a-boolean' as never },
+        { id: 'p1', targetDayIndex: 2, pool: 'easy' },
+      ],
+      'admin-uid',
+    );
+
+    expect(placements).toEqual([
+      { itemId: 'stale-classification', dayIndex: 2, retained: false, outcome: 'stale' },
+      { itemId: 'missing-classification', dayIndex: null, retained: false, outcome: 'missing' },
+      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
+    expect(written()).toHaveLength(1);
+    expect(written()[0]).toMatchObject({
+      path: 'events/med-2026/items/p1',
+      data: { status: 'active', pool: 'embark', spicy: false },
+    });
+  });
+
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
     putItem('p1', { targetDayIndex: 3 });
     const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');

@@ -271,7 +271,18 @@ function ApprovalQueueRow({
         <select
           aria-label={`Difficulty for ${it.text}`}
           value={difficulty}
-          onChange={(e) => onDifficultyChange(it.id, e.target.value as 'main' | 'easy')}
+          onChange={(e) => {
+            const nextDifficulty = e.target.value as 'main' | 'easy';
+            // A spicy-write failure belongs to the classification that exposed
+            // the toggle. Changing classification is a fresh decision, so do
+            // not leave its now-hidden retry error attached to the row. Preserve
+            // `busy`, though: the in-flight write still owns the single-flight
+            // fence until it settles.
+            if (nextDifficulty !== difficulty && spicyWriteState === 'error') {
+              setSpicyWriteState('idle');
+            }
+            onDifficultyChange(it.id, nextDifficulty);
+          }}
         >
           <option value="main">Exploratory</option>
           <option value="easy">Easy</option>
@@ -288,7 +299,7 @@ function ApprovalQueueRow({
           🔞 Spicy
         </label>
       )}
-      {spicyWriteState === 'error' && (
+      {difficulty === 'main' && spicyWriteState === 'error' && (
         <span className="pill pill-error" role="alert">
           Failed—try again.
         </span>
