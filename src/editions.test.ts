@@ -13,11 +13,12 @@ import {
   alternateNamespaceApex,
   CANONICAL_NAMESPACE_APEX,
 } from './editions';
+import { assertEditionRegistryParity, EDITION_IDS } from './edition-registry.ts';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 // The router's OWN namespace set — the source of truth this table must not drift from.
 import { NAMESPACES } from '../worker/src/host';
 
-const EDITIONS = ['gcb', 'vacay', 'fiveacross'];
+const EDITIONS = Object.values(EDITION_IDS);
 
 // Covers the pre-auth Edition brand (#543, ADR 0009 § Consequences). The whole
 // point of this module is that the sign-in gate can be branded BEFORE there is
@@ -25,6 +26,22 @@ const EDITIONS = ['gcb', 'vacay', 'fiveacross'];
 // resolution → brand path without any Firestore or React involved.
 
 afterEach(() => setActiveEdition(DEFAULT_EDITION));
+
+describe('Edition registry and brand-table parity', () => {
+  it('fails closed when a runtime Edition id has no brand row', () => {
+    const incompleteBrandRows = EDITIONS.filter((edition) => edition !== EDITION_IDS.FIVE_ACROSS);
+
+    expect(() => assertEditionRegistryParity(incompleteBrandRows)).toThrow(
+      `missing BRANDS rows: ${EDITION_IDS.FIVE_ACROSS}`,
+    );
+  });
+
+  it('fails closed when a brand row is absent from the runtime registry', () => {
+    expect(() => assertEditionRegistryParity([...EDITIONS, 'not-a-real-edition'])).toThrow(
+      'unregistered BRANDS rows: not-a-real-edition',
+    );
+  });
+});
 
 describe('editions — the pre-auth brand', () => {
   it('defaults to the legacy Edition, so the existing build is unchanged', () => {
