@@ -39,6 +39,10 @@ import {
 import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
 import { handleUnsubscribeRequest } from './emailOptOut';
 import { firestoreCommitOrder, recordDirectMarkAnalytics } from './directMarkAnalytics';
+import {
+  repairLegacyMarkerEventIdentity,
+  type MarkerIdentityFirestore,
+} from './markerEventIdentity';
 
 initializeApp();
 setGlobalOptions({ region: 'us-central1', maxInstances: 10 });
@@ -78,7 +82,8 @@ const visionClient = new vision.ImageAnnotatorClient();
 // VERBATIM into the Cloud Scheduler OIDC token for `unlockDay`, so the raw
 // shorthand would reach Cloud Scheduler as an invalid email and fail the deploy
 // at the scheduler step (found on the sibling fix PR #590, closed for this one).
-const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${resolveProjectId() ?? 'gaycruisebingo'}.iam.gserviceaccount.com`;
+const RUNTIME_PROJECT_ID = resolveProjectId() ?? 'gaycruisebingo';
+const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${RUNTIME_PROJECT_ID}.iam.gserviceaccount.com`;
 
 /**
  * Private, authenticated bug intake; App Check enforcement follows #44's
@@ -504,6 +509,59 @@ export const recordDayDirectMarkAnalytics = onDocumentWritten(
       after: event.data?.after.data(),
       ...(Number.isInteger(dayIndex) && dayIndex >= 0 ? { dayIndex } : {}),
     });
+  },
+);
+
+/**
+ * Time-boxed compatibility for pre-#1072 clients. Those bundles replace a
+ * marker without `eventId`, so a one-off backfill is not durable while any old
+ * tab remains open. This create+update trigger makes that legacy full-set write
+ * converge to the path Event during the server-owned compatibility window.
+ *
+ * The event snapshot is only a cheap no-op/refusal gate. Missing-field repairs
+ * re-read the live marker and cutoff transactionally in
+ * `repairLegacyMarkerEventIdentity`, so an out-of-order retry cannot overwrite a
+ * newer marker and a mismatched identity is never silently "corrected".
+ */
+export const repairLegacyMarkerEventIdentityOnWrite = onDocumentWritten(
+  {
+    document: 'events/{eventId}/tally/{itemId}/markers/{markerUid}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
+  async (event) => {
+    const after = event.data?.after.data();
+    if (!after) return;
+
+    if (Object.prototype.hasOwnProperty.call(after, 'eventId')) {
+      if (after.eventId !== event.params.eventId) {
+        console.error('marker Event identity refused', {
+          eventId: event.params.eventId,
+          itemId: event.params.itemId,
+          markerUid: event.params.markerUid,
+          markerEventId: after.eventId,
+        });
+      }
+      return;
+    }
+
+    const result = await repairLegacyMarkerEventIdentity(
+      db as unknown as MarkerIdentityFirestore,
+      {
+        projectId: RUNTIME_PROJECT_ID,
+        eventId: event.params.eventId,
+        itemId: event.params.itemId,
+        markerUid: event.params.markerUid,
+      },
+    );
+    if (result !== 'repaired' && result !== 'already-scoped' && result !== 'deleted') {
+      console.error('legacy marker Event identity was not repaired', {
+        eventId: event.params.eventId,
+        itemId: event.params.itemId,
+        markerUid: event.params.markerUid,
+        result,
+      });
+    }
   },
 );
 

@@ -766,6 +766,10 @@ export interface ClaimDoc {
 // so unmarking removes exactly that Player's entry. No anonymity (ADR 0002).
 export interface TallyEntry {
   uid: string;
+  // Denormalized from events/{eventId}/... so collection-group listeners can
+  // constrain delivery at the server. Optional during #1072's bounded legacy-
+  // client compatibility window; old markers converge through migration/repair.
+  eventId?: string;
   displayName: string;
   markedAt: number; // ms epoch
   // Day-scoped Tally Cards (#216): the Mark's own attributes, stamped so the

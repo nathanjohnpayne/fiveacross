@@ -38,7 +38,7 @@ Every Firestore subscription that exposes React data below `events/{eventId}` ha
 
 That applies to the shared `useDocSub` / `useColSub` hooks, the Day-meta and Day-board listener fans, and `useTallyCards`; the Day-board fan also keys the board-freshness registry to the captured Event. Side-effect-only observers (`RetractWinMoments` and the durable direct-Mark analytics listener) expose no React data to neutralize, but they capture the Event in their effect/subscription lifetime and synchronously retire callbacks during cleanup. `users/{uid}` remains the deliberate exception: profile identity is global across Events, so its subscription key is uid-scoped rather than Event-scoped.
 
-`useTallyCards` still uses the project-wide `collectionGroup('markers')` query and filters marker paths to the captured Event inside its callback. #807 isolates that listener's lifecycle and displayed-bump state; it does not make the delivery query tenant-safe. [#1072](https://github.com/nathanjohnpayne/fiveacross/issues/1072) owns the marker field, migration, legacy-writer compatibility, Event predicate, collection-group index, and rules rollout required before #804 can narrow the recursive marker rule.
+`useTallyCards` binds the captured listener lifetime to `where('eventId', '==', capturedEventId)`. [#1072](https://github.com/nathanjohnpayne/fiveacross/issues/1072) adds that server-visible delivery predicate, its marker field/index, backfill, and bounded legacy-writer normalizer; the callback path check remains through cutover as defense-in-depth. See [`event-scoped-marker-delivery`](event-scoped-marker-delivery.md). #804 can narrow the recursive marker rule only after this stored identity is authoritative.
 
 ## In-memory and persisted state inventory
 
@@ -80,7 +80,7 @@ Because this ticket ships no in-session switcher, it does not define a product f
 
 ## Explicit exclusions and dependencies
 
-- Marker schema/query/index/rules migration is [#1072](https://github.com/nathanjohnpayne/fiveacross/issues/1072), not #807.
+- Marker schema/query/index/rules migration is [#1072](https://github.com/nathanjohnpayne/fiveacross/issues/1072), specified in [`event-scoped-marker-delivery`](event-scoped-marker-delivery.md), not #807.
 - Firestore/Storage membership enforcement is #804/#806.
 - Proving Firestore cross-operation rule-access caching, and splitting or capping Mark/Echo batches if that proof is negative, is [#1079](https://github.com/nathanjohnpayne/fiveacross/issues/1079), a separate blocking prerequisite of #804. #807 neither assumes caching nor changes batch atomicity.
 - Event-selection UI and the declined cross-Event admin surface are not shipped.
@@ -94,4 +94,4 @@ Because this ticket ships no in-session switcher, it does not define a product f
 - The keyed App boundary clears Event-owned route state while ancestor-owned global state survives, and Auth bootstrap/deal generations cannot cross Events: `src/App.test.tsx` and `src/auth/AuthContext.test.tsx`.
 - Mark/Echo chains, marker repair persistence, Day honors, proof flows, analytics outboxes, ItemPool state, profile mirrors, heart analytics, share actions, deferred approval actions, private-mode Coach/Notice dismissal, and Most-Loved acknowledgement have direct Event-A/Event-B regressions in their owning unit/component suites.
 
-The repository's normal `npm test`, typecheck, offline, rules, and build gates remain authoritative. #807 changes no Firestore or Storage rule and no index; #1072/#804 carry the emulator coverage for their own delivery and authorization changes.
+The repository's normal `npm test`, typecheck, offline, rules, and build gates remain authoritative. #1072/#804 carry the emulator coverage for their own delivery and authorization changes.

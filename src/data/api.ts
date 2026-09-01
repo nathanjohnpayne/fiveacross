@@ -2065,6 +2065,7 @@ async function runSetMark(
       // rejects) when the caller has no Day context.
       batch.set(markerRef, {
         uid,
+        eventId,
         displayName: markerDisplayName(params.displayName, cachedPlayerName),
         markedAt: now,
         itemText: toggled!.text,
@@ -2644,6 +2645,7 @@ async function runReconcileEchoes(
   for (const cell of markerRepairs) {
     batch.set(doc(database, 'events', eventId, 'tally', cell.itemId as string, 'markers', uid), {
       uid,
+      eventId,
       displayName: markerDisplayName(undefined, cachedPlayerData?.displayName),
       markedAt: cell.markedAt ?? now,
       itemText: cell.text,

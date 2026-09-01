@@ -27,6 +27,19 @@ spec_test_map:
     - src/components/w1-profile-avatar.test.tsx
     - src/components/w2-share-cards.test.tsx
     - src/components/admin/adult-content-confirm.test.tsx
+  # event-scoped-marker-delivery spans the client writers/listener, Security
+  # Rules, retrying normalizer, migration, and the offline queue. Its tests are
+  # deliberately layer-named, so the basename heuristic cannot discover them.
+  event-scoped-marker-delivery:
+    - src/data/w2-tally.test.ts
+    - src/data/echo-marks.test.ts
+    - src/data/w2-proof-capture.test.ts
+    - src/hooks/d15-tally-cards.test.ts
+    - tests/rules/marker-event-delivery.test.ts
+    - tests/rules/membership-mark-batch-budget.test.ts
+    - tests/functions/marker-event-identity.test.ts
+    - scripts/migrate-marker-event-id.test.mjs
+    - tests/offline/w2-tally.test.ts
   # auth-handoff-client's coverage is module-named (the mode/strategy table, the
   # transaction store, the boundary primitives, the two callable legs, the
   # client/server parity pin, the exact-session attestation bridge and provider

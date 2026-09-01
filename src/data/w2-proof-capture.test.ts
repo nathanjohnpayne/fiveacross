@@ -494,14 +494,15 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
   // #31 AC 3 + ADR 0002: a Mark is private on the Board but PUBLIC as an attributed
   // per-Prompt Tally; EVERY Mark — proofed or not — publishes a marker. setMark does
   // it for a bare honor Mark; attachProof must do it for a proofed Mark, in the SAME
-  // transaction as the proof + board + player. Path/shape mirror setMark:
-  // events/{EVENT_ID}/tally/{itemId}/markers/{uid} == { uid, displayName, markedAt },
-  // doc id IS the uid (forgery-deniable), name bounded to the rule's non-empty ≤100.
+  // transaction as the proof + board + player. Path/shape mirror setMark and
+  // carry the path Event plus the Feed's denormalized Prompt/Day fields; doc id
+  // IS the uid (forgery-deniable), name bounded to the rule's non-empty ≤100.
   const markerSet = () => txSet.mock.calls.find((c) => (c[0] as Ref).path.includes('/tally/'));
 
   it('proof_required: writes the attributed marker in the SAME transaction as the proof + board + player', async () => {
     await attachProof({
       ...baseArgs, // uid u1, cellIndex 5, itemId i5, displayName 'Deck Daddy'
+      dayIndex: 2,
       claimMode: 'proof_required',
       proof: { type: 'text', text: 'saw it' },
     });
@@ -513,7 +514,14 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
     expect((call![0] as Ref).path).toBe(`events/${EVENT_ID}/tally/i5/markers/u1`);
     // The exact rules-valid shape: uid == doc id, non-empty ≤100 name, numeric stamp.
     // No marker existed (fresh mark), so markedAt is stamped `now` (1000).
-    expect(call![1]).toEqual({ uid: 'u1', displayName: 'Deck Daddy', markedAt: 1000 });
+    expect(call![1]).toEqual({
+      uid: 'u1',
+      eventId: EVENT_ID,
+      displayName: 'Deck Daddy',
+      markedAt: 1000,
+      itemText: 'Saw a sailor in Speedos',
+      dayIndex: 2,
+    });
     // A Firestore transaction requires ALL reads before ANY write, and the marker
     // read (for the preserve-markedAt rule below) must obey it: pin that every
     // tx.get in the transaction ran before its first tx.set.
@@ -537,7 +545,13 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
     const call = markerSet();
     expect(call).toBeDefined();
     expect((call![0] as Ref).path).toBe(`events/${EVENT_ID}/tally/i5/markers/u1`);
-    expect(call![1]).toEqual({ uid: 'u1', displayName: 'Deck Daddy', markedAt: 1000 });
+    expect(call![1]).toEqual({
+      uid: 'u1',
+      eventId: EVENT_ID,
+      displayName: 'Deck Daddy',
+      markedAt: 1000,
+      itemText: 'Saw a sailor in Speedos',
+    });
   });
 
   it('preserves an existing marker’s original markedAt and refreshes its attribution (proof on an already-marked square)', async () => {
@@ -545,19 +559,35 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
     // name) and now attaches a Proof to it. Re-stamping markedAt with `now` would
     // reorder the chronological who-list by proof-attach time (Codex P2, PR #87):
     // the original stamp must survive, while uid/displayName refresh is fine.
-    markerState = { uid: 'u1', displayName: 'Old Salt', markedAt: 111 };
+    markerState = {
+      uid: 'u1',
+      eventId: EVENT_ID,
+      displayName: 'Old Salt',
+      markedAt: 111,
+      itemText: 'Saw a sailor in Speedos',
+      dayIndex: 2,
+    };
     const board = dealt();
     board[5] = { ...board[5], marked: true, markedAt: 111, status: 'confirmed' };
     boardState = { cells: board };
 
     await attachProof({
       ...baseArgs, // displayName 'Deck Daddy'
+      dayIndex: 2,
       claimMode: 'proof_required',
       proof: { type: 'text', text: 'told you' },
     });
 
     const call = markerSet();
-    expect(call![1]).toEqual({ uid: 'u1', displayName: 'Deck Daddy', markedAt: 111 });
+    expect(call![1]).toEqual({
+      uid: 'u1',
+      eventId: EVENT_ID,
+      displayName: 'Deck Daddy',
+      markedAt: 111,
+      itemText: 'Saw a sailor in Speedos',
+      dayIndex: 2,
+    });
+    expect(call![2]).toEqual({ merge: true });
     // The preserve requires reading the marker — and that read still precedes
     // every write, per the transaction contract.
     expect(Math.max(...txGet.mock.invocationCallOrder)).toBeLessThan(

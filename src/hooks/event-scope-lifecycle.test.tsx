@@ -69,6 +69,7 @@ const markerSnapshot = (eventId: string, itemId: string, markedAt = 10) => ({
     {
       data: () => ({
         uid: `${eventId}-uid`,
+        eventId,
         displayName: eventId,
         markedAt,
         dayIndex: 0,
@@ -162,19 +163,33 @@ describe('manual Event-scoped listener lifecycles (#807)', () => {
     expect(view.result.current.size).toBe(0);
   });
 
-  it('keeps the collection-group query shape but isolates its lifecycle and displayed state', () => {
+  it('scopes marker delivery by the captured Event while isolating its lifecycle and displayed state', () => {
     const view = renderHook(() => useTallyCards());
-    const groupSubs = () => H.subscriptions.filter((sub) => sub.target.kind === 'collectionGroup');
-    const a = groupSubs()[0];
+    const tallySubs = () =>
+      H.subscriptions.filter((sub) => {
+        if (sub.target.kind === 'collectionGroup') return sub.target.args?.[1] === 'markers';
+        const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+        return sub.target.kind === 'query' && source?.kind === 'collectionGroup' && source.args?.[1] === 'markers';
+      });
+    const a = tallySubs()[0];
+    expect(a.target.kind).toBe('query');
+    expect(a.target.args?.[1]).toEqual({ kind: 'where', args: ['eventId', '==', 'event-a'] });
     act(() => a.listener(markerSnapshot('event-a', 'same-item', 1_000)));
     expect(view.result.current.cards.map((card) => card.itemId)).toEqual(['same-item']);
 
     H.eventId = 'event-b';
     view.rerender();
-    const b = groupSubs()[1];
+    const b = tallySubs()[1];
     expect(view.result.current.cards).toEqual([]);
     expect(a.unsubscribe).toHaveBeenCalledTimes(1);
     expect(b).toBeDefined();
+    expect(b.target.args?.[1]).toEqual({ kind: 'where', args: ['eventId', '==', 'event-b'] });
+
+    // Keep the callback guard through the staged migration: even if a malformed
+    // or stale SDK snapshot violates the server predicate, its path cannot cross
+    // the captured Event boundary.
+    act(() => b.listener(markerSnapshot('event-a', 'foreign-item', 1_001)));
+    expect(view.result.current.cards).toEqual([]);
 
     act(() => b.listener(markerSnapshot('event-b', 'same-item', 1_001)));
     expect(view.result.current.cards.map((card) => card.itemId)).toEqual(['same-item']);

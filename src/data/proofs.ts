@@ -345,14 +345,23 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // overwriting markedAt with `now` would reorder it by proof-attach time (Codex
     // P2, PR #87). Preserve an existing marker's original markedAt — refreshing
     // uid/displayName is fine — and stamp `now` only when no marker exists yet (a
-    // fresh mark, or a legacy pre-Tally mark that never had one).
+    // fresh mark, or a legacy pre-Tally mark that never had one). The merge also
+    // preserves an existing Day/feed stamp while this write refreshes the
+    // canonical path Event, Prompt text, and supplied Day identity (#1072).
     if (markerRef) {
       const priorMarkedAt = (markerSnap?.data() as { markedAt?: unknown } | undefined)?.markedAt;
-      tx.set(markerRef, {
-        uid,
-        displayName: markerDisplayName(displayName, playerSnap.data()?.displayName),
-        markedAt: typeof priorMarkedAt === 'number' ? priorMarkedAt : now,
-      });
+      tx.set(
+        markerRef,
+        {
+          uid,
+          eventId,
+          displayName: markerDisplayName(displayName, playerSnap.data()?.displayName),
+          markedAt: typeof priorMarkedAt === 'number' ? priorMarkedAt : now,
+          itemText,
+          ...(typeof dayIndex === 'number' ? { dayIndex } : {}),
+        },
+        { merge: true },
+      );
     }
     if (pendingClaim) {
       tx.set(doc(rawClaims(eventId)), {

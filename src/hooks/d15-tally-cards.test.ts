@@ -33,6 +33,7 @@ import { BUMP_DEBOUNCE_MS } from '../game/logic';
 
 const T0 = 1_700_000_000_000;
 const row = (over: Partial<TallyMarkerRow> & Pick<TallyMarkerRow, 'uid' | 'itemId'>): TallyMarkerRow => ({
+  eventId: 'test-event',
   displayName: over.uid,
   markedAt: T0,
   dayIndex: 0,

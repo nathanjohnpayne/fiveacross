@@ -7,7 +7,16 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
+import {
+  collectionGroup,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+} from 'firebase/firestore';
 
 // specs/d15-tally-cards.md — day-scoped Tally Cards (#216). A Mark stamps the
 // viewed `dayIndex` and the Prompt `itemText` as ADDITIVE fields on the same
@@ -18,8 +27,8 @@ import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 // day-scoped marker is still self-writable + attributed + publicly readable, and
 // that the forged-attribution and shape denials still hold with the extra fields.
 // The Feed's stream additionally needs the `{path=**}/markers` collection-group
-// READ rule (#294): a CG query never matches the nested path rule, so without it
-// useTallyCards is permission-denied and bare Marks silently miss the Feed.
+// LIST rule (#294/#1072): a CG query never matches the nested path rule, so the
+// query must prove its captured Event identity with an `eventId` equality.
 // The PERMISSION_DENIED lines the SDK logs are the expected assertFails denials.
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
@@ -35,6 +44,7 @@ const markerPath = (itemId: string, uid: string) => at(`tally/${itemId}/markers/
 // The day-scoped marker shape setMark writes (#216): the per-Prompt entry PLUS
 // the additive dayIndex + itemText the Feed groups/labels on.
 const marker = (uid: string, over: Record<string, unknown> = {}) => ({
+  eventId: EVENT,
   uid,
   displayName: uid,
   markedAt: NOW(),
@@ -95,17 +105,22 @@ describe('firestore.rules — day-scoped Tally Card markers (specs/d15-tally-car
     await assertSucceeds(getDoc(doc(db(BOB), markerPath(ITEM, CAROL))));
   });
 
-  it('the collectionGroup(markers) subscription reads for any signed-in Player (#294 — the Feed stream)', async () => {
+  it('the Event-scoped collectionGroup(markers) subscription reads for any signed-in Player (#294/#1072)', async () => {
     // Firestore evaluates a collection-group query ONLY against a {path=**}
     // rule; without one the Feed's useTallyCards listen is permission-denied
     // and other Players' bare Marks never surface as Tally Cards.
-    const { collectionGroup, getDocs } = await import('firebase/firestore');
-    await assertSucceeds(getDocs(collectionGroup(db(BOB), 'markers')));
+    await assertSucceeds(
+      getDocs(query(collectionGroup(db(BOB), 'markers'), where('eventId', '==', EVENT))),
+    );
   });
 
   it('a signed-out reader gets NO collection-group markers access', async () => {
-    const { collectionGroup, getDocs } = await import('firebase/firestore');
-    await assertFails(getDocs(collectionGroup(testEnv.unauthenticatedContext().firestore(), 'markers')));
+    await assertFails(
+      getDocs(query(
+        collectionGroup(testEnv.unauthenticatedContext().firestore(), 'markers'),
+        where('eventId', '==', EVENT),
+      )),
+    );
   });
 
   it('the collection-group rule grants READ only — writes stay path-scoped and owner-bound', async () => {

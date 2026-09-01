@@ -83,9 +83,9 @@ describe('setMark — per-Prompt Tally marker (specs/w2-tally.md)', () => {
     expect(setSpy).toHaveBeenCalledTimes(3);
     const [ref, data, mergeOpt] = markerWrite();
     expect(ref.path).toBe(`events/${EVENT_ID}/tally/i3/markers/u1`);
-    expect(data).toMatchObject({ uid: 'u1', displayName: 'Alice' });
+    expect(data).toMatchObject({ uid: 'u1', displayName: 'Alice', eventId: EVENT_ID });
     expect(typeof data.markedAt).toBe('number');
-    expect(mergeOpt).toBeUndefined(); // a full set of exactly { uid, displayName, markedAt }
+    expect(mergeOpt).toBeUndefined(); // a full set carrying the path Event identity
     expect(deleteSpy).not.toHaveBeenCalled();
 
     // ADR 0002 / ADR 0006: the Tally is not a Feed post and rides a batch, not a tx.

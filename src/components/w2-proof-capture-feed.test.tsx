@@ -38,8 +38,8 @@ vi.mock('firebase/firestore', () => {
     doc: (...args: unknown[]) => makeRef('doc', args),
     collection: (...args: unknown[]) => makeRef('collection', args),
     collectionGroup: (...args: unknown[]) => makeRef('collectionGroup', args),
-    query: (...args: unknown[]) => ({ query: args }),
-    where: (...args: unknown[]) => ({ where: args }),
+    query: (...args: unknown[]) => makeRef('query', args),
+    where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
   };
 });
@@ -55,7 +55,7 @@ import ProofFeed from './ProofFeed';
 
 type SnapCb = (snap: unknown) => void;
 // ProofFeed subscribes to THREE targets via useFeed + its own useEventDoc: the
-// proofs sub is a query() ({ query: [...] }); the moments sub is a bare
+// proofs sub is a query() over the proofs collection; the moments sub is a bare
 // collection ref (kind 'collection'); and the event doc — read by useMoments's
 // moderation AND by ProofFeed's #211 Day-chip resolution — is a doc ref (kind
 // 'doc'). Route each by shape so the event doc's onNext never lands in the
@@ -78,13 +78,18 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
     const onNext = (typeof optionsOrNext === 'function' ? optionsOrNext : maybeNext) as SnapCb;
     const kind = target && typeof target === 'object' ? (target as { kind?: string }).kind : undefined;
     const args = target && typeof target === 'object' ? ((target as { args?: unknown[] }).args ?? []) : [];
-    if (target && typeof target === 'object' && 'query' in (target as object)) captured.proofs = onNext;
+    const querySource = kind === 'query' && args[0] && typeof args[0] === 'object'
+      ? (args[0] as { kind?: string; args?: unknown[] })
+      : undefined;
+    if (kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
+      captured.tally = onNext;
+    }
+    else if (kind === 'query') captured.proofs = onNext;
     // #262: useAllDoubts' moderation read opens a SECOND event-doc sub — feed
     // them all so none starves the feed's loading gates.
     else if (kind === 'doc') captured.events.push(onNext);
-    // #216: useFeed's third stream (useTallyCards) is a `collectionGroup` sub over
-    // every Tally marker — route it separately so it never clobbers the moments slot.
-    else if (kind === 'collectionGroup') captured.tally = onNext;
+    // #216: useFeed's third stream (useTallyCards) is an Event-filtered query
+    // over the markers collection group, routed above so it cannot clobber proofs.
     // #262: the Feed's flat doubts subscription, routed by its path segment.
     else if (args[3] === 'doubts') captured.doubtsAll = onNext;
     // specs/feed-hearts.md: the flat hearts stream, routed by segment so it

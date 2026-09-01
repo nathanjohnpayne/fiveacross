@@ -207,6 +207,18 @@ describe('moderateProof export gating (#126)', () => {
     expect(endpoint.secretEnvironmentVariables).toContainEqual({ key: 'RESEND_API_KEY' });
   });
 
+  it('exports the legacy-marker normalizer as a retryable path-scoped Admin trigger', async () => {
+    const mod = await importIndex();
+    const endpoint = mod.repairLegacyMarkerEventIdentityOnWrite.__endpoint;
+    expect(endpoint.eventTrigger.retry).toBe(true);
+    expect(endpoint.eventTrigger.eventFilterPathPatterns.document).toBe(
+      'events/{eventId}/tally/{itemId}/markers/{markerUid}',
+    );
+    expect(endpoint.serviceAccountEmail).toBe(
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+    );
+  });
+
   // ADR 0008: this repo deploys to two Firebase projects. A Service Account only
   // exists inside its own project, so a hardcoded `gaycruisebingo` pin failed the
   // `fiveacross` deploy outright with `iam.serviceaccounts.actAs` on a
@@ -229,6 +241,7 @@ describe('moderateProof export gating (#126)', () => {
       // unlockDay is the one the Bodega event actually depends on.
       expect(mod.unlockDay.__endpoint.serviceAccountEmail).toBe(expected);
       expect(mod.unlockDayNow.__endpoint.serviceAccountEmail).toBe(expected);
+      expect(mod.repairLegacyMarkerEventIdentityOnWrite.__endpoint.serviceAccountEmail).toBe(expected);
     } finally {
       process.env.FIREBASE_CONFIG = priorConfig;
       process.env.GCLOUD_PROJECT = priorProject;

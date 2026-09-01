@@ -29,8 +29,8 @@ vi.mock('firebase/firestore', () => {
     doc: (...args: unknown[]) => makeRef('doc', args),
     collection: (...args: unknown[]) => makeRef('collection', args),
     collectionGroup: (...args: unknown[]) => makeRef('collectionGroup', args),
-    query: (...args: unknown[]) => ({ query: args }),
-    where: (...args: unknown[]) => ({ where: args }),
+    query: (...args: unknown[]) => makeRef('query', args),
+    where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
   };
 });
@@ -48,7 +48,8 @@ type SnapCb = (snap: unknown) => void;
 /**
  * Route each subscription by target. `useFeed` opens: two event-doc subs (the
  * moderation read behind useProofFeed AND useMoments), the status-scoped proofs
- * QUERY, the moments and notices COLLECTIONs, and the tally COLLECTIONGROUP.
+ * QUERY, the moments and notices COLLECTIONs, and the Event-filtered tally
+ * COLLECTIONGROUP query.
  * The two collections are told apart by their path segments — routing both to
  * one slot would leave whichever registered first without a snapshot, and
  * `loading` would never settle.
@@ -63,9 +64,14 @@ function capture() {
   H.onSnapshot.mockImplementation((target: unknown, _o: unknown, onNext: SnapCb) => {
     if (target && typeof target === 'object') {
       const ref = target as { kind?: string; args?: unknown[] };
-      if ('query' in (target as object)) cbs.query = onNext;
+      const querySource = ref.kind === 'query' && ref.args?.[0] && typeof ref.args[0] === 'object'
+        ? (ref.args[0] as { kind?: string; args?: unknown[] })
+        : undefined;
+      if (ref.kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
+        cbs.group = onNext;
+      }
+      else if (ref.kind === 'query') cbs.query = onNext;
       else if (ref.kind === 'doc') cbs.docs.push(onNext);
-      else if (ref.kind === 'collectionGroup') cbs.group = onNext;
       else cbs.cols[String(ref.args?.[ref.args.length - 1])] = onNext;
     }
     return () => {};
@@ -95,7 +101,7 @@ const groupSnap = groupSnapOf([]);
  * what `useTallyCards` reads the itemId and the owning Event from
  * (events/{EVENT_ID}/tally/{itemId}/markers/{uid}). */
 const marker = (itemId: string, uid: string, markedAt: number) => ({
-  data: () => ({ uid, displayName: uid, markedAt, dayIndex: 0, itemText: `prompt ${itemId}` }),
+  data: () => ({ uid, eventId: 'test-event', displayName: uid, markedAt, dayIndex: 0, itemText: `prompt ${itemId}` }),
   ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
 });
 
