@@ -21,11 +21,7 @@ import {
 import { app, auth, firebaseEmulatorsEnabled, functions } from '../firebase';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
 import { debugHandoff, rememberHandoffAttestation } from './handoffAttestation';
-import {
-  createVerifier,
-  forgetHandoffTransaction,
-  readHandoffTransaction,
-} from './handoffTransaction';
+import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
 
 /**
  * The cumulative deadline for abandonable pre-commit work, in milliseconds.
@@ -46,6 +42,20 @@ import {
  */
 export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 
+let isolatedHandoffAppSequence = 0;
+
+/**
+ * Firebase app names need only be unique inside this JavaScript app registry;
+ * they are not credentials. Keep that naming concern separate from the PKCE
+ * transaction verifier, whose entropy and format are security-sensitive.
+ */
+function nextIsolatedHandoffAppName(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === 'function') return `fa-handoff-${crypto.randomUUID()}`;
+  isolatedHandoffAppSequence += 1;
+  return `fa-handoff-${isolatedHandoffAppSequence}`;
+}
+
 function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig']>): string {
   const authority = port === null ? host : `${host}:${port}`;
   return `${protocol}://${authority}`;
@@ -63,7 +73,7 @@ function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig'
  * an in-bound credential is copied to the main Auth via `updateCurrentUser`.
  */
 function isolatedHandoffAuth(): { auth: Auth; app: FirebaseApp } {
-  const isolatedApp = initializeApp(app.options, `fa-handoff-${createVerifier()}`);
+  const isolatedApp = initializeApp(app.options, nextIsolatedHandoffAppName());
   try {
     const isolatedAuth = initializeAuth(isolatedApp, {
       persistence: inMemoryPersistence,
@@ -135,8 +145,13 @@ function beforeDeadline<T>(deadlineAt: number, work: () => Promise<T>): Promise<
 
 /**
  * Whether primary Auth contains the exact isolated credential this attempt
- * promoted. Firebase clones a User onto the target Auth, so object identity is
- * only a test/adapter fast path; production identity is uid + refresh token.
+ * promoted. In the package-lock-pinned Firebase 12.18.0 / @firebase/auth 1.13.5
+ * implementation, public `updateCurrentUser` clones the User onto target Auth,
+ * `_updateCurrentUser` queues `directlySetCurrentUser`, and that function assigns
+ * `currentUser` before awaiting `assertedPersistence.setCurrentUser`. The
+ * partial-primary-commit regression models that order; re-audit it on SDK
+ * upgrades (#1067). Object identity is only a test/adapter fast path, so the
+ * production comparison is uid + refresh token.
  */
 function isSameAuthSession(current: Auth['currentUser'], candidate: Auth['currentUser']): boolean {
   if (current === null || candidate === null) return false;
@@ -261,6 +276,13 @@ export async function completeAuthHandoff(input: {
     // last fraction of the budget.
     requireTimeRemaining(preCommitDeadline);
     try {
+      // Once this call starts there is no safe timeout boundary: Firebase has
+      // no cancellation API, and it can assign primary `currentUser` before its
+      // persistence promise settles. Racing it would return a failure screen
+      // while this exact session could still land later, recreating #913. The
+      // primary-commit-not-raced test pins that deliberate behavior. #1060 owns
+      // replacing this boundary with a disposable Worker and recovery reload;
+      // until then, this await may hold mount rather than report a false result.
       await updateCurrentUser(auth, credential.user);
     } catch (error) {
       // Firebase Auth assigns currentUser before awaiting its persistence write.
@@ -290,9 +312,11 @@ export async function completeAuthHandoff(input: {
     recordHandoffFailure('sign-in-failed');
     return false;
   } finally {
-    // deleteApp removes the name from Firebase's app registry synchronously
-    // before awaiting provider cleanup. That cleanup cannot be allowed to hold
-    // the pre-mount promise; failures are observable without exposing details.
+    // In package-lock-pinned @firebase/app 0.16.1, deleteApp removes the name
+    // from Firebase's app registry synchronously before awaiting provider
+    // cleanup. A hung provider therefore cannot accumulate named app entries.
+    // Cleanup cannot hold the pre-mount promise; rejection is observable without
+    // exposing details.
     if (isolatedApp !== null) {
       void deleteApp(isolatedApp).catch(() => debugHandoff('isolated Auth cleanup failed'));
     }

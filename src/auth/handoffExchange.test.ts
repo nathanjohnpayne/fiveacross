@@ -5,6 +5,7 @@
 // rather than assembled (that is what keeps the return leg from being an open
 // redirect), no uid is ever sent to mint, and the verifier is gone on every
 // terminal path — success included.
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -217,6 +218,31 @@ describe('completeAuthHandoff', () => {
     expect(mocks.updateCurrentUser).toHaveBeenCalledWith(mocks.primaryAuth, { uid: 'u1' });
     expect(mocks.deleteApp).toHaveBeenCalledOnce();
     expect(consumeHandoffFailure()).toBeNull();
+  });
+
+  it('uses a naming-only unique id for each isolated Firebase app', async () => {
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    armTransaction();
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    armTransaction();
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+
+    const names = mocks.initializeApp.mock.calls.map(([, name]) => name as string);
+    expect(names).toHaveLength(2);
+    expect(names[0]).toMatch(/^fa-handoff-/);
+    expect(names[1]).toMatch(/^fa-handoff-/);
+    expect(names[0]).not.toBe(names[1]);
+  });
+
+  it('pins the SDK versions behind the partial-commit and detached-cleanup contracts', () => {
+    const lock = JSON.parse(readFileSync('package-lock.json', 'utf8')) as {
+      packages: Record<string, { version?: string }>;
+    };
+
+    expect(lock.packages['node_modules/firebase']?.version).toBe('12.18.0');
+    expect(lock.packages['node_modules/@firebase/auth']?.version).toBe('1.13.5');
+    expect(lock.packages['node_modules/@firebase/app']?.version).toBe('0.16.1');
   });
 
   it('mirrors the primary tenant and Auth Emulator before sign-in in an e2e build', async () => {
@@ -473,6 +499,57 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
+  it('does not race the primary commit after shared Auth mutation begins', async () => {
+    vi.useFakeTimers();
+    armTransaction(true);
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    const returnedUser = { uid: 'u1', refreshToken: 'handoff-refresh-token' };
+    mocks.signInWithCustomToken.mockResolvedValue({ user: returnedUser });
+
+    let announceStarted: () => void = () => {
+      throw new Error('primary commit did not start');
+    };
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    let finishCommit: () => void = () => {
+      throw new Error('primary commit did not start');
+    };
+    mocks.updateCurrentUser.mockImplementation((targetAuth: unknown, user: unknown) => {
+      // Firebase assigns currentUser before awaiting primary persistence. Once
+      // this boundary is crossed, a timer cannot safely report failure.
+      (targetAuth as { currentUser: unknown }).currentUser = { ...(user as object) };
+      announceStarted();
+      return new Promise<void>((resolve) => {
+        finishCommit = () => {
+          mocks.persistedSession.user = user;
+          resolve();
+        };
+      });
+    });
+
+    const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 });
+    await started;
+    let settled = false;
+    void completion.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(settled).toBe(false);
+    expect(mocks.primaryAuth.currentUser).toEqual(returnedUser);
+    expect(consumeHandoffFailure()).toBeNull();
+    expect(mocks.rememberHandoffAttestation).not.toHaveBeenCalled();
+    expect(mocks.deleteApp).not.toHaveBeenCalled();
+
+    finishCommit();
+    await expect(completion).resolves.toBe(true);
+    expect(mocks.persistedSession.user).toBe(returnedUser);
+    expect(mocks.rememberHandoffAttestation).toHaveBeenCalledWith(returnedUser);
+    expect(mocks.deleteApp).toHaveBeenCalledOnce();
   });
 
   it('shares one pre-commit deadline across Auth readiness, exchange, and isolated sign-in', async () => {
