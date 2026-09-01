@@ -11,6 +11,7 @@ import {
   LEGACY_HOST,
   planCanonicalHostMigration,
 } from './migrate-bodega-canonical-host.mjs';
+import { selectFirestoreCredential } from './seed.mjs';
 
 const reviewedDeployEnvironment = () => ({
   GOOGLE_APPLICATION_CREDENTIALS: '/tmp/fiveacross-firebase-deployer.json',
@@ -208,6 +209,50 @@ describe('Bodega canonical-host migration plan', () => {
 });
 
 describe('Bodega canonical-host migration execution', () => {
+  it('ignores a present repo-root key when local service accounts are disabled', () => {
+    const localKeyExists = vi.fn(() => true);
+    const readLocalKey = vi.fn(() => JSON.stringify({ type: 'service_account' }));
+    const certificate = vi.fn(() => ({ source: 'local-key' }));
+    const applicationDefaultCredential = vi.fn(() => ({ source: 'reviewed-preflight' }));
+
+    expect(
+      selectFirestoreCredential({
+        allowLocalServiceAccountKey: false,
+        keyUrl: new URL('file:///repo/serviceAccountKey.json'),
+        localKeyExists,
+        readLocalKey,
+        certificate,
+        applicationDefaultCredential,
+      }),
+    ).toEqual({ source: 'reviewed-preflight' });
+    expect(localKeyExists).not.toHaveBeenCalled();
+    expect(readLocalKey).not.toHaveBeenCalled();
+    expect(certificate).not.toHaveBeenCalled();
+    expect(applicationDefaultCredential).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the shared initializer default for existing seed callers', () => {
+    const keyUrl = new URL('file:///repo/serviceAccountKey.json');
+    const localKeyExists = vi.fn(() => true);
+    const readLocalKey = vi.fn(() => JSON.stringify({ type: 'service_account' }));
+    const certificate = vi.fn(() => ({ source: 'local-key' }));
+    const applicationDefaultCredential = vi.fn(() => ({ source: 'adc' }));
+
+    expect(
+      selectFirestoreCredential({
+        keyUrl,
+        localKeyExists,
+        readLocalKey,
+        certificate,
+        applicationDefaultCredential,
+      }),
+    ).toEqual({ source: 'local-key' });
+    expect(localKeyExists).toHaveBeenCalledWith(keyUrl);
+    expect(readLocalKey).toHaveBeenCalledWith(keyUrl, 'utf8');
+    expect(certificate).toHaveBeenCalledWith({ type: 'service_account' });
+    expect(applicationDefaultCredential).not.toHaveBeenCalled();
+  });
+
   it('accepts only the exact Five Across deployer service-account identity', () => {
     const credential = {
       type: 'service_account',

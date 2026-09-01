@@ -433,6 +433,20 @@ export function verifySeedPool(
 // script runs directly. The specifiers are computed + @vite-ignore so Vite (which transforms
 // this module when a test imports the pure payload/verify builders) never tries
 // to resolve them at transform time — Node resolves them normally at run time.
+export function selectFirestoreCredential({
+  allowLocalServiceAccountKey = true,
+  keyUrl,
+  localKeyExists,
+  readLocalKey,
+  certificate,
+  applicationDefaultCredential,
+}) {
+  if (allowLocalServiceAccountKey && localKeyExists(keyUrl)) {
+    return certificate(JSON.parse(readLocalKey(keyUrl, 'utf8')));
+  }
+  return applicationDefaultCredential();
+}
+
 export async function initFirestore({ allowLocalServiceAccountKey = true } = {}) {
   const { readFileSync, existsSync } = await import('node:fs');
   const adminAppModule = 'firebase-admin/app';
@@ -494,9 +508,14 @@ export async function initFirestore({ allowLocalServiceAccountKey = true } = {})
 
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
   initializeApp({
-    ...(allowLocalServiceAccountKey && existsSync(keyUrl)
-      ? { credential: cert(JSON.parse(readFileSync(keyUrl))) }
-      : { credential: applicationDefault() }),
+    credential: selectFirestoreCredential({
+      allowLocalServiceAccountKey,
+      keyUrl,
+      localKeyExists: existsSync,
+      readLocalKey: readFileSync,
+      certificate: cert,
+      applicationDefaultCredential: applicationDefault,
+    }),
     ...(projectId ? { projectId } : {}),
   });
   // `projectId` rides along for scripts/provision-bodega-preview.mjs (#649),

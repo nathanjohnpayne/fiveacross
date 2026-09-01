@@ -26,13 +26,18 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  BODEGA_EVENT_ID,
+  BODEGA_PREVIEW_HOSTS,
+  BODEGA_PROJECT_ID,
+  validateBodegaServingInventory,
+} from './provision-bodega-preview.mjs';
 import { initFirestore } from './seed.mjs';
 
-export const BODEGA_PROJECT_ID = 'fiveacross';
-export const BODEGA_EVENT_ID = 'bodega-bay-2026';
+export { BODEGA_EVENT_ID, BODEGA_PROJECT_ID };
 export const CANONICAL_HOST = 'bodega-bay.fiveacross.app';
 export const LEGACY_HOST = 'bodega-bay.vacaybingo.com';
-export const BODEGA_HOSTS = Object.freeze([CANONICAL_HOST, LEGACY_HOST, 'fiveacross.app']);
+export const BODEGA_HOSTS = BODEGA_PREVIEW_HOSTS;
 const expectedEditionByHost = Object.freeze({
   [CANONICAL_HOST]: 'vacay',
   [LEGACY_HOST]: 'vacay',
@@ -56,35 +61,12 @@ const sameMetadata = (left, right) =>
  * credentials or firebase-admin.
  */
 export function planCanonicalHostMigration(hostDocuments) {
-  const rows = new Map();
-  for (const row of hostDocuments) {
-    if (!row || typeof row.host !== 'string') {
-      throw new Error('bodega-canonical-host: invalid hostname read. No write performed.');
-    }
-    if (rows.has(row.host)) {
-      throw new Error(
-        `bodega-canonical-host: duplicate hostname read for ${row.host}. No write performed.`,
-      );
-    }
-    rows.set(row.host, row.data ?? null);
-  }
+  const rows = validateBodegaServingInventory(hostDocuments, {
+    operation: 'bodega-canonical-host',
+  });
 
   for (const host of BODEGA_HOSTS) {
     const data = rows.get(host);
-    if (!data || typeof data !== 'object') {
-      throw new Error(`bodega-canonical-host: hostnames/${host} is missing. No write performed.`);
-    }
-    if (data.eventId !== BODEGA_EVENT_ID) {
-      throw new Error(
-        `bodega-canonical-host: hostnames/${host} targets ${String(data.eventId)}; expected ${BODEGA_EVENT_ID}. ` +
-          'No write performed.',
-      );
-    }
-    if (data.status !== 'active') {
-      throw new Error(
-        `bodega-canonical-host: hostnames/${host} is ${String(data.status)}; expected active. No write performed.`,
-      );
-    }
     const expectedEdition = expectedEditionByHost[host];
     if (data.edition !== expectedEdition) {
       throw new Error(
