@@ -251,6 +251,42 @@ describe('reshuffleBoard — the happy path', () => {
     expect(writtenBoard()!.easyMixRatio).toBe(0.25);
   });
 
+  it('inherits the frozen mix while reserving four Community Prompts', async () => {
+    // Eight approved suggestions in each classification, plus adequate organiser
+    // supply. The real reshuffle hydration must carry pool + target through to the
+    // shared dealer; otherwise this becomes a random/unclassified 24-item sample.
+    for (const [index, id] of SNAPSHOT_IDS.entries()) {
+      const easy = index < 8 || (index >= 16 && index < 36);
+      const community = index < 16;
+      H.itemsById.set(id, {
+        text: `Prompt ${id}`,
+        spicy: !easy && (index < 12 || (index >= 36 && index < 48)),
+        isFreeSpace: false,
+        pool: easy ? 'easy' : 'main',
+        ...(community ? { targetDayIndex: 1, createdBy: `player-${index}` } : {}),
+      });
+    }
+    H.event = {
+      days: [day(0), day(1, { snapshotEasyMixRatio: 0.5 })],
+      settings: { spicyRatio: 0.4, easyMixRatio: 0.75 },
+    };
+    H.dayBoards.set(1, {
+      uid: 'u1',
+      seed: 111,
+      easyMixRatio: 0.5,
+      cells: cardFrom(SNAPSHOT_IDS.slice(0, 24)),
+    });
+
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+
+    const cells = writtenBoard()!.cells.filter((cell) => !cell.free && cell.itemId != null);
+    const dealt = cells.map((cell) => H.itemsById.get(cell.itemId as string)!);
+    expect(cells.filter((cell) => cell.communityPrompt)).toHaveLength(4);
+    expect(dealt.filter((item) => item.pool === 'easy')).toHaveLength(12);
+    expect(dealt.filter((item) => item.pool === 'main')).toHaveLength(12);
+    expect(dealt.filter((item) => item.pool === 'main' && item.spicy)).toHaveLength(5);
+  });
+
   it('changes the seed — the rules discriminate a reshuffle on exactly that', async () => {
     await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
     expect(writtenBoard()!.seed).not.toBe(111);

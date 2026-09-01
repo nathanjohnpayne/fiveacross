@@ -20,6 +20,7 @@ const H = vi.hoisted(() => ({
   items: [] as ItemDoc[],
   pendingItems: [] as ItemDoc[],
   deleteItem: vi.fn(),
+  setItemSpicy: vi.fn(),
   confirmClaim: vi.fn(),
   unbanUser: vi.fn(),
   adminAddItem: vi.fn(),
@@ -69,7 +70,7 @@ vi.mock('../data/admin', () => ({
   approveItem: vi.fn(),
   rejectItem: vi.fn(),
   bulkApproveItems: vi.fn(),
-  setItemSpicy: vi.fn(),
+  setItemSpicy: (...a: unknown[]) => H.setItemSpicy(...a),
   adminAddItem: (...a: unknown[]) => H.adminAddItem(...a),
   adminUpdateItemText: (...a: unknown[]) => H.adminUpdateItemText(...a),
   setClaimMode: vi.fn(),
@@ -178,6 +179,37 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     const row = screen.getByText('Alice').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('button', { name: 'Confirm' }));
     expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+  });
+
+  it('a rejected spicy correction alerts, reverts the checkbox, and retries cleanly', async () => {
+    H.pendingItems = [item('i1', { text: 'Fragile classification', status: 'pending' })];
+    let rejectWrite!: (error: Error) => void;
+    H.setItemSpicy
+      .mockImplementationOnce(
+        () => new Promise<void>((_resolve, reject) => (rejectWrite = reject)),
+      )
+      .mockResolvedValueOnce(undefined);
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Fragile classification').closest('.row') as HTMLElement;
+    const checkbox = within(row).getByRole('checkbox') as HTMLInputElement;
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => {
+      rejectWrite(new Error('offline'));
+      await Promise.resolve();
+    });
+
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(within(row).queryByRole('alert')).toBeNull());
+    expect(checkbox.checked).toBe(true);
+    expect(H.setItemSpicy).toHaveBeenNthCalledWith(1, 'i1', true);
+    expect(H.setItemSpicy).toHaveBeenNthCalledWith(2, 'i1', true);
   });
 
   it('a rejected Unban alerts inline in Players', async () => {

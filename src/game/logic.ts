@@ -170,6 +170,139 @@ function stratifiedPicks(pool: DealItem[], spicyRatio: number, rnd: () => number
 }
 
 /**
+ * Select one classification while reserving Community Prompts (#558). Organiser
+ * content fills every slot after the reservation when it can; unselected Community
+ * content is used only when the organiser subset is too thin to fill `count`.
+ *
+ * The spicy target is solved across BOTH source groups. Choosing the Community
+ * subset independently at `spicyRatio` can make an otherwise-feasible total target
+ * impossible (for example, an all-spicy Community reservation plus a tame-heavy
+ * organiser pool), so first derive the feasible total and then apportion it between
+ * the fixed Community/organiser counts.
+ */
+function selectCommunityStratified(
+  pool: DealItem[],
+  count: number,
+  reserveCount: number,
+  spicyRatio: number,
+  rnd: () => number,
+): StratifiedSelection {
+  const community = pool.filter((item) => isUsableDealTarget(item.targetDayIndex));
+  const organisers = pool.filter((item) => !isUsableDealTarget(item.targetDayIndex));
+  const communityTake = Math.min(community.length, Math.max(reserveCount, count - organisers.length));
+  const organiserTake = Math.min(organisers.length, count - communityTake);
+
+  const communitySpicy = shuffle(
+    community.filter((item) => item.spicy),
+    rnd,
+  );
+  const communityTame = shuffle(
+    community.filter((item) => !item.spicy),
+    rnd,
+  );
+  const organiserSpicy = shuffle(
+    organisers.filter((item) => item.spicy),
+    rnd,
+  );
+  const organiserTame = shuffle(
+    organisers.filter((item) => !item.spicy),
+    rnd,
+  );
+
+  const communitySpicyMin = Math.max(0, communityTake - communityTame.length);
+  const communitySpicyMax = Math.min(communityTake, communitySpicy.length);
+  const organiserSpicyMin = Math.max(0, organiserTake - organiserTame.length);
+  const organiserSpicyMax = Math.min(organiserTake, organiserSpicy.length);
+  const targetSpicy = Math.round(count * spicyRatio);
+  const feasibleSpicy = Math.min(
+    communitySpicyMax + organiserSpicyMax,
+    Math.max(communitySpicyMin + organiserSpicyMin, targetSpicy),
+  );
+  const communitySpicyLower = Math.max(communitySpicyMin, feasibleSpicy - organiserSpicyMax);
+  const communitySpicyUpper = Math.min(communitySpicyMax, feasibleSpicy - organiserSpicyMin);
+  const desiredCommunitySpicy = Math.round(communityTake * spicyRatio);
+  const communitySpicyTaken = Math.min(
+    communitySpicyUpper,
+    Math.max(communitySpicyLower, desiredCommunitySpicy),
+  );
+  const organiserSpicyTaken = feasibleSpicy - communitySpicyTaken;
+
+  const spicy = shuffle(
+    [
+      ...communitySpicy.slice(0, communitySpicyTaken),
+      ...organiserSpicy.slice(0, organiserSpicyTaken),
+    ],
+    rnd,
+  );
+  const tame = shuffle(
+    [
+      ...communityTame.slice(0, communityTake - communitySpicyTaken),
+      ...organiserTame.slice(0, organiserTake - organiserSpicyTaken),
+    ],
+    rnd,
+  );
+  return {
+    spicy,
+    tame,
+    // Same-classification selection already prefers organiser content after the
+    // reservation. Keep that priority in cross-pool backfill too: spare organiser
+    // content precedes unselected Community content inside each spicy/tame stratum.
+    leftoverSpicy: [
+      ...organiserSpicy.slice(organiserSpicyTaken),
+      ...communitySpicy.slice(communitySpicyTaken),
+    ],
+    leftoverTame: [
+      ...organiserTame.slice(organiserTake - organiserSpicyTaken),
+      ...communityTame.slice(communityTake - communitySpicyTaken),
+    ],
+  };
+}
+
+function communityStratifiedPicks(
+  pool: DealItem[],
+  count: number,
+  reserveCount: number,
+  spicyRatio: number,
+  rnd: () => number,
+): DealItem[] {
+  const selected = selectCommunityStratified(pool, count, reserveCount, spicyRatio, rnd);
+  return interleavePicks(selected.spicy, selected.tame);
+}
+
+interface CommunityUnstratifiedSelection {
+  picks: DealItem[];
+  leftovers: DealItem[];
+}
+
+/** Easy-pool twin of `selectCommunityStratified`: reserve Community content,
+ * prefer organisers for the remainder, then use unselected Community content
+ * only to prevent same-classification starvation. */
+function selectCommunityUnstratified(
+  pool: DealItem[],
+  count: number,
+  reserveCount: number,
+  rnd: () => number,
+): CommunityUnstratifiedSelection {
+  const community = shuffle(
+    pool.filter((item) => isUsableDealTarget(item.targetDayIndex)),
+    rnd,
+  );
+  const organisers = shuffle(
+    pool.filter((item) => !isUsableDealTarget(item.targetDayIndex)),
+    rnd,
+  );
+  const communityTake = Math.min(community.length, Math.max(reserveCount, count - organisers.length));
+  const organiserTake = Math.min(organisers.length, count - communityTake);
+  return {
+    picks: shuffle(
+      [...community.slice(0, communityTake), ...organisers.slice(0, organiserTake)],
+      rnd,
+    ),
+    leftovers: [...organisers.slice(organiserTake), ...community.slice(communityTake)],
+  };
+}
+
+/**
  * The easy-mix composition (specs/easy-mix.md): `easyCount` squares drawn from the
  * embark pool + `24 - easyCount` from the stratified main deal, interleaved across the
  * grid so the easy squares don't cluster. The MAIN half is selected FIRST so its
@@ -204,6 +337,68 @@ function mixedPicks(
   if (mainPicks.length < mainCount) {
     const spareEasy = easyShuffled.slice(easyUsed);
     mainPicks.push(...spareEasy.slice(0, mainCount - mainPicks.length));
+  }
+  return interleavePicks(easyPicks, mainPicks);
+}
+
+/**
+ * Community-aware easy/main composition (#558). The reservation is apportioned
+ * across the two EXISTING category capacities; it never creates extra easy/main
+ * slots. Each category then prefers organiser content after its reservation and
+ * exposes leftovers to the unchanged bidirectional thin-pool fallback.
+ */
+function communityMixedPicks(
+  mainPool: DealItem[],
+  easyPool: DealItem[],
+  easyCount: number,
+  spicyRatio: number,
+  rnd: () => number,
+): DealItem[] {
+  const mainCount = 24 - easyCount;
+  const mainCommunityCount = mainPool.filter((item) =>
+    isUsableDealTarget(item.targetDayIndex),
+  ).length;
+  const easyCommunityCount = easyPool.filter((item) =>
+    isUsableDealTarget(item.targetDayIndex),
+  ).length;
+  const targetReservation = Math.min(4, mainCommunityCount + easyCommunityCount);
+  const mainPlaceable = Math.min(mainCount, mainCommunityCount);
+  const easyPlaceable = Math.min(easyCount, easyCommunityCount);
+  const actualReservation = Math.min(targetReservation, mainPlaceable + easyPlaceable);
+
+  // A Community Prompt in a zero-capacity classification cannot participate. If
+  // none is placeable, retain the exact pre-#558 mixed path and its PRNG sequence.
+  if (actualReservation === 0) {
+    return mixedPicks(mainPool, easyPool, easyCount, spicyRatio, rnd);
+  }
+
+  const desiredEasyReservation = Math.round((actualReservation * easyCount) / 24);
+  const easyReservationLower = Math.max(0, actualReservation - mainPlaceable);
+  const easyReservationUpper = Math.min(actualReservation, easyPlaceable);
+  const easyReservation = Math.min(
+    easyReservationUpper,
+    Math.max(easyReservationLower, desiredEasyReservation),
+  );
+  const mainReservation = actualReservation - easyReservation;
+
+  // Keep the established main-first random-draw order from `mixedPicks`.
+  const mainSelection = selectCommunityStratified(
+    mainPool,
+    mainCount,
+    mainReservation,
+    spicyRatio,
+    rnd,
+  );
+  const mainPicks = interleavePicks(mainSelection.spicy, mainSelection.tame);
+  const leftoverMain = [...mainSelection.leftoverTame, ...mainSelection.leftoverSpicy];
+  const easySelection = selectCommunityUnstratified(easyPool, easyCount, easyReservation, rnd);
+  const easyPicks = easySelection.picks;
+
+  if (easyPicks.length < easyCount) {
+    easyPicks.push(...leftoverMain.slice(0, easyCount - easyPicks.length));
+  }
+  if (mainPicks.length < mainCount) {
+    mainPicks.push(...easySelection.leftovers.slice(0, mainCount - mainPicks.length));
   }
   return interleavePicks(easyPicks, mainPicks);
 }
@@ -313,10 +508,33 @@ export function dealBoard(
     if (drawable < MIN_POOL) {
       throw new Error(`dealBoard needs at least ${MIN_POOL} prompts, received ${drawable}.`);
     }
-    picks =
-      easyCount > 0
-        ? mixedPicks(mainUsable, easyItems, easyCount, ratio, rnd)
-        : stratifiedPicks(mainUsable, ratio, rnd);
+    if (easyCount > 0) {
+      const communityCount = [...mainUsable, ...easyItems].filter((item) =>
+        isUsableDealTarget(item.targetDayIndex),
+      ).length;
+      // Zero Community Prompts MUST enter the exact pre-#558 path before any new
+      // random draw, preserving every legacy mixed-board seed byte-for-byte.
+      picks =
+        communityCount > 0
+          ? communityMixedPicks(mainUsable, easyItems, easyCount, ratio, rnd)
+          : mixedPicks(mainUsable, easyItems, easyCount, ratio, rnd);
+    } else {
+      const communityCount = mainUsable.filter((item) =>
+        isUsableDealTarget(item.targetDayIndex),
+      ).length;
+      // Zero Community Prompts MUST enter the exact pre-#558 path before any new
+      // random draw, preserving every legacy seed byte-for-byte.
+      picks =
+        communityCount > 0
+          ? communityStratifiedPicks(
+              mainUsable,
+              mainCount,
+              Math.min(4, communityCount),
+              ratio,
+              rnd,
+            )
+          : stratifiedPicks(mainUsable, ratio, rnd);
+    }
   }
   const cells: Cell[] = [];
   let p = 0;

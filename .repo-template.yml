@@ -107,6 +107,14 @@ spec_test_map:
   easy-mix:
     - src/game/easy-mix.test.ts
     - tests/functions/easy-mix-snapshot.test.ts
+  # community-squares-quota spans the pure dealer, approval transaction,
+  # approval UI, and real reshuffle path, so map each differently-named seam.
+  community-squares-quota:
+    - src/game/community-squares-quota.test.ts
+    - src/data/community-prompt-targeting.test.ts
+    - src/components/Admin.test.tsx
+    - src/data/reshuffle.test.ts
+    - tests/rules/community-squares-quota.test.ts
   # admin-messages (Notices, #439) spans a rules block, the mergeFeed unit,
   # two player surfaces, and the admin door — none named for the spec
   # basename, so map each layer's test explicitly (the spec's own Tests list).

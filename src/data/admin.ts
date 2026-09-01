@@ -9,6 +9,7 @@ import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
+import { normalizePool } from '../game/pool';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = () => doc(db, 'events', EVENT_ID);
@@ -40,9 +41,9 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 // consumer of. `rejectItem` moves the row to `rejected` and otherwise LEAVES it in
 // place (never deletes): rejected rows are "kept for audit, hidden from all
 // non-admins" (daily-cards-spec), so the Admin console remains the only surface
-// that can still see WHY a Prompt was turned down. Both writes are unconstrained
-// by `firestore.rules` under the `isAdmin(eventId)` arm — no client-side field
-// allowlist needed beyond what the rule already checks.
+// that can still see WHY a Prompt was turned down. Both writes are admin-only;
+// approval additionally satisfies the rules' resulting pool/spicy invariant,
+// while rejection changes neither field and retains the existing admin update arm.
 /**
  * Where one approval landed (#557), in two independent parts: `dayIndex` /
  * `retained` say where the Prompt now STANDS, and `outcome` says what this call
@@ -75,13 +76,52 @@ export interface ApprovalPlacement {
 
 /**
  * The queue row an approval is asked about. Shaped like the Approvals-queue row
- * so a caller can pass what it already holds, but only `id` is TRUSTED:
+ * so a caller can pass what it already holds. `id` is the only routing input:
  * `targetDayIndex` here is a hint, and routing deliberately ignores it in favour
- * of the value read inside the transaction. A client row can be stale — that is
- * exactly the double-approval hazard the stale guard below exists for — so the
- * authoritative document is the only thing worth routing on.
+ * of the value read inside the transaction. `pool` and `spicy` are different:
+ * they carry the Admin's explicit #558 classification decision made at approval
+ * time. They are validated and written only after the authoritative document
+ * proves the row is still pending, so a stale client can neither reroute nor
+ * reclassify an already-approved Prompt.
  */
-export type ApprovableItem = Pick<ItemDoc, 'id'> & Partial<Pick<ItemDoc, 'targetDayIndex'>>;
+export type ApprovableItem = Pick<ItemDoc, 'id'> &
+  Partial<Pick<ItemDoc, 'targetDayIndex' | 'pool' | 'spicy'>>;
+
+function approvalDifficulty(callerPool: unknown, storedPool: unknown): 'main' | 'easy' {
+  // A caller-provided value is an explicit Admin decision, so fail closed on an
+  // unknown/closing value rather than letting normalizePool's legacy-main fallback
+  // silently turn a bad control value into Exploratory. A missing caller choice is
+  // the backwards-compatible seam and inherits the authoritative row's normalized
+  // pool (old submissions and malformed/missing legacy values normalize to main).
+  if (
+    callerPool !== undefined &&
+    callerPool !== 'main' &&
+    callerPool !== 'easy' &&
+    callerPool !== 'embark'
+  ) {
+    throw new Error('Community Prompt approval requires an easy or exploratory classification.');
+  }
+  const normalized = normalizePool(callerPool ?? storedPool);
+  if (normalized === 'closing') {
+    throw new Error('Community Prompt approval requires an easy or exploratory classification.');
+  }
+  return normalized;
+}
+
+function approvalSpicy(
+  callerSpicy: unknown,
+  storedSpicy: unknown,
+  difficulty: 'main' | 'easy',
+): boolean {
+  if (difficulty === 'easy') return false;
+  if (callerSpicy !== undefined && typeof callerSpicy !== 'boolean') {
+    throw new Error('Community Prompt approval requires a boolean spicy classification.');
+  }
+  // Old callers that predate #558 preserve the authoritative pending row. The
+  // Review queue always supplies its exact current choice so a toggle followed
+  // immediately by approval cannot lose a race to the approval transaction.
+  return callerSpicy === undefined ? storedSpicy === true : callerSpicy;
+}
 
 /**
  * Approve one or more pending Prompts, routing each to its intended Day (#557,
@@ -184,7 +224,23 @@ export async function approveItems(
       // The STORED target is the one routing acts on. The caller's row is a hint
       // that may be stale; this is the value the rules and the snapshot will see.
       const targetDayIndex = row.targetDayIndex;
-      const base = { status: 'active' as const, approvedBy: adminUid, approvedAt };
+      const difficulty = approvalDifficulty(it.pool, row.pool);
+      const spicy = approvalSpicy(it.spicy, row.spicy, difficulty);
+      const base = {
+        status: 'active' as const,
+        approvedBy: adminUid,
+        approvedAt,
+        // Persist through the same transition seam used by curated admin writes:
+        // app-facing `easy` remains `embark` until the post-Event vocabulary cutover.
+        pool: persistedPool(difficulty),
+        // Adult-content derivation and gating are main-pool only. An Easy
+        // classification must therefore clear a submitted/ticked spicy flag in
+        // this SAME guarded write (the same invariant adminAddItem enforces).
+        // Exploratory writes its exact Admin-selected value too: otherwise a
+        // concurrent queue toggle that loses to approval would retry, see an
+        // active row, and correctly no-op while silently losing the choice.
+        spicy,
+      };
       // A placement CLEARS any `retainedAt` already on the row, rather than
       // merely not writing one. Since `tx.update` is a merge, a marker left
       // behind would describe an active Prompt that is being DEALT as one that
@@ -257,11 +313,11 @@ export async function approveItems(
 
 /**
  * Approve one Prompt. Takes the queue ROW because that is what the Approvals
- * queue holds, but only its `id` is load-bearing: since the stale guard reads
+ * queue holds. Its `id` is the only routing input: since the stale guard reads
  * the item inside the transaction, the intended Day comes from the stored
- * document rather than from whatever the client was last shown. That is the
- * stronger version of the original reason for this signature — an id is enough
- * precisely BECAUSE approval no longer trusts the caller's copy of the target.
+ * document rather than from whatever the client was last shown. Its optional
+ * `pool`/`spicy` are the explicit #558 approval-time classification decision,
+ * validated and persisted only if that authoritative row is still pending.
  */
 export const approveItem = (row: ApprovableItem, adminUid: string) =>
   approveItems([row], adminUid).then((placements) => placements[0]);
@@ -269,10 +325,21 @@ export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
 // Lets an admin correct a submitter's 🔞 tagging from the Approvals queue BEFORE
-// approving it into the live pool — once approved, `dealBoard`'s spicy-ratio
-// sampling treats `spicy` as authoritative, so getting it right pre-approve
-// matters more than it would post-approve.
-export const setItemSpicy = (id: string, spicy: boolean) => updateDoc(item(id), { spicy });
+// approving it into the live pool. This must contend with approval, not race it:
+// the former bare update could land after an Easy approval and recreate the
+// invalid `embark + spicy:true` state that adult-content gating does not inspect.
+// Firestore retries this transaction when approval wins; the authoritative row
+// then reads active/easy and the stale toggle becomes a no-op.
+export async function setItemSpicy(id: string, spicy: boolean): Promise<void> {
+  await runTransaction(db, async (tx) => {
+    const ref = item(id);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return;
+    const row = snap.data() as Partial<ItemDoc>;
+    if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return;
+    tx.update(ref, { spicy });
+  });
+}
 
 /**
  * Bulk-approve every row in `items` (the Approvals queue's full pending list) —
