@@ -217,6 +217,47 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     expect(H.approveItem).toHaveBeenCalledWith(row, 'admin-uid');
   });
 
+  it('lets the Admin classify a Prompt as Easy before approving it', () => {
+    const row = pendingItem('p1', {
+      text: 'Choose my difficulty',
+      spicy: true,
+    });
+    H.pendingItems = [row];
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.change(
+      screen.getByRole('combobox', {
+        name: /difficulty for choose my difficulty/i,
+      }),
+      {
+        target: { value: 'easy' },
+      },
+    );
+    expect(screen.queryByRole('checkbox', { name: /spicy/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(H.approveItem).toHaveBeenCalledWith(
+      { ...row, pool: 'easy', spicy: false },
+      'admin-uid',
+    );
+  });
+
+  it('carries an immediate Exploratory spicy tick into the same approval write', () => {
+    const row = pendingItem('p1', { text: 'Race the tick', spicy: false });
+    H.pendingItems = [row];
+    renderAdmin('/more/admin/queue');
+
+    const rendered = screen.getByText('Race the tick').closest('.row') as HTMLElement;
+    fireEvent.click(within(rendered).getByRole('checkbox'));
+    fireEvent.click(within(rendered).getByRole('button', { name: 'Approve' }));
+
+    expect(H.setItemSpicy).toHaveBeenCalledWith('p1', true);
+    expect(H.approveItem).toHaveBeenCalledWith(
+      { ...row, pool: 'main', spicy: true },
+      'admin-uid',
+    );
+  });
+
   it('Reject invokes rejectItem(id, adminUid)', () => {
     H.pendingItems = [pendingItem('p1', { text: 'Reject me' })];
     renderAdmin('/more/admin/queue');
@@ -231,6 +272,52 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve all' }));
     expect(H.bulkApproveItems).toHaveBeenCalledWith(H.pendingItems, 'admin-uid');
+  });
+
+  it('bulk approval carries each row’s independently selected difficulty', () => {
+    const first = pendingItem('p1', { text: 'Easy choice', spicy: true });
+    const second = pendingItem('p2', { text: 'Exploratory choice' });
+    H.pendingItems = [first, second];
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.change(
+      screen.getByRole('combobox', { name: /difficulty for easy choice/i }),
+      {
+        target: { value: 'easy' },
+      },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Approve all' }));
+
+    expect(H.bulkApproveItems).toHaveBeenCalledWith(
+      [
+        { ...first, pool: 'easy', spicy: false },
+        { ...second, pool: 'main' },
+      ],
+      'admin-uid',
+    );
+  });
+
+  it('bulk approval carries immediate Exploratory tick and un-tick choices', () => {
+    const unticked = pendingItem('p1', { text: 'Turn tame', spicy: true });
+    const ticked = pendingItem('p2', { text: 'Turn spicy', spicy: false });
+    H.pendingItems = [unticked, ticked];
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.click(
+      within(screen.getByText('Turn tame').closest('.row') as HTMLElement).getByRole('checkbox'),
+    );
+    fireEvent.click(
+      within(screen.getByText('Turn spicy').closest('.row') as HTMLElement).getByRole('checkbox'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Approve all' }));
+
+    expect(H.bulkApproveItems).toHaveBeenCalledWith(
+      [
+        { ...unticked, pool: 'main', spicy: false },
+        { ...ticked, pool: 'main', spicy: true },
+      ],
+      'admin-uid',
+    );
   });
 
   it('an empty Approvals group shows "Nothing pending review." and no Approve all control', () => {

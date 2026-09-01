@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
 import {
   confirmClaim,
@@ -22,6 +22,7 @@ import { deleteProof } from '../../data/proofs';
 import { track } from '../../analytics';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
+import { normalizePool } from '../../game/pool';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
 import { editionBrand } from '../../editions';
 import { useAdultContentFlipConfirm } from './AdultContentConfirm';
@@ -215,32 +216,48 @@ function ItemQueueRow({
 }
 
 /**
- * One row in the Approvals group (#210, daily-cards-spec § "Item pools and the
- * approval flow"): a pending main-pool Prompt with submitter attribution, a
- * spicy toggle, and Approve/Reject. `spicy` is client-editable here (via a
- * plain `updateDoc` through `data/admin`'s isAdmin-unconstrained write arm) so
- * an admin can correct a submitter's 🔞 tagging BEFORE approving it into the
- * live pool — after approval the spicy ratio sampling (`dealBoard`) already
- * treats it as authoritative, so getting it right pre-approve matters.
+ * One row in the Approvals group (#210/#558): a pending Community Prompt with
+ * submitter attribution, explicit Easy/Exploratory classification, a main-only
+ * spicy toggle, and Approve/Reject. The spicy correction runs as a pending-main
+ * transaction so it contends with approval; the rules also reject any write that
+ * changes pool/spicy into a non-main + spicy state. Easy approval clears spicy in
+ * the same guarded write, before the Prompt can reach an ungated card.
  */
 function ApprovalQueueRow({
   item: it,
   spicy,
+  difficulty,
   adminUid,
   onToggleSpicy,
+  onDifficultyChange,
   onApprove,
 }: {
   item: ItemDoc;
   /** The queue's optimistic view of `it.spicy` — the admin's own tick, before
    *  the Firestore snapshot carrying it has come back. */
   spicy: boolean;
+  /** The Admin's approval-time classification (#558). This stays local until
+   * approval so status, routing, and pool land in one transaction. */
+  difficulty: 'main' | 'easy';
   adminUid: string;
-  onToggleSpicy: (id: string, spicy: boolean) => void;
+  onToggleSpicy: (id: string, spicy: boolean) => Promise<void>;
+  onDifficultyChange: (id: string, difficulty: 'main' | 'easy') => void;
   /** Routed through the queue's flip confirm (#610) rather than calling
    *  `approveItem` directly: approving the FIRST explicit Prompt is what turns
    *  the whole Event 18+ (#608), and the row cannot know it is the first. */
   onApprove: (item: ItemDoc) => Promise<unknown>;
 }) {
+  const [spicyWriteState, setSpicyWriteState] = useState<'idle' | 'busy' | 'error'>('idle');
+  const changeSpicy = async (nextSpicy: boolean) => {
+    if (spicyWriteState === 'busy') return;
+    setSpicyWriteState('busy');
+    try {
+      await onToggleSpicy(it.id, nextSpicy);
+      setSpicyWriteState('idle');
+    } catch {
+      setSpicyWriteState('error');
+    }
+  };
   return (
     <div className="row">
       <div className="grow">
@@ -250,14 +267,53 @@ function ApprovalQueueRow({
         <div className="sub">submitted by {it.createdBy}</div>
       </div>
       <label style={{ fontSize: 12 }}>
-        <input
-          type="checkbox"
-          checked={spicy}
-          onChange={(e) => onToggleSpicy(it.id, e.target.checked)}
-        />{' '}
-        🔞 Spicy
+        Difficulty{' '}
+        <select
+          aria-label={`Difficulty for ${it.text}`}
+          value={difficulty}
+          onChange={(e) => {
+            const nextDifficulty = e.target.value as 'main' | 'easy';
+            // A spicy-write failure belongs to the classification that exposed
+            // the toggle. Changing classification is a fresh decision, so do
+            // not leave its now-hidden retry error attached to the row. Preserve
+            // `busy`, though: the in-flight write still owns the single-flight
+            // fence until it settles.
+            if (nextDifficulty !== difficulty && spicyWriteState === 'error') {
+              setSpicyWriteState('idle');
+            }
+            onDifficultyChange(it.id, nextDifficulty);
+          }}
+        >
+          <option value="main">Exploratory</option>
+          <option value="easy">Easy</option>
+        </select>
       </label>
-      <AsyncButton className="btn primary" onAction={() => onApprove(it)}>
+      {difficulty === 'main' && (
+        <label style={{ fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={spicy}
+            disabled={spicyWriteState === 'busy'}
+            onChange={(e) => void changeSpicy(e.target.checked)}
+          />{' '}
+          🔞 Spicy
+        </label>
+      )}
+      {difficulty === 'main' && spicyWriteState === 'error' && (
+        <span className="pill pill-error" role="alert">
+          Failed—try again.
+        </span>
+      )}
+      <AsyncButton
+        className="btn primary"
+        onAction={() =>
+          onApprove({
+            ...it,
+            pool: difficulty,
+            spicy: difficulty === 'easy' ? false : spicy,
+          })
+        }
+      >
         Approve
       </AsyncButton>
       <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectItem(it.id, adminUid)}>
@@ -303,19 +359,116 @@ export default function ReviewQueue({
   // Event anyway and leave the admin unsure which half landed.
   const { guard, dialog } = useAdultContentFlipConfirm();
   // The 🔞 toggle writes to Firestore and the row re-renders from the NEXT
-  // snapshot, so an admin who ticks the box and immediately taps Approve can
-  // hand the guard a `spicy` that is already out of date — and the confirm for
-  // the write that actually flips the Event would be skipped (Codex P2 on
-  // #615). This optimistic overlay records the admin's own intent the instant
-  // they express it and outranks the snapshot until it catches up. Deliberately
-  // ONE-WAY toward `true`: an un-tick that has not landed yet must not be
-  // trusted to suppress a confirm, which is the same fail-closed direction the
-  // whole posture takes.
-  const [optimisticSpicy, setOptimisticSpicy] = useState<Record<string, boolean>>({});
-  const isSpicy = (it: ItemDoc) => it.spicy || optimisticSpicy[it.id] === true;
-  const toggleSpicy = (id: string, spicy: boolean) => {
-    setOptimisticSpicy((prev) => ({ ...prev, [id]: spicy }));
-    setItemSpicy(id, spicy);
+  // snapshot, so an admin who changes it and immediately taps Approve can hand
+  // the approval a stale value. This overlay records the exact latest choice.
+  // Approval writes that value in its own transaction, so both tick and un-tick
+  // are safe to trust here even when the separate correction loses the race.
+  const [optimisticSpicy, setOptimisticSpicy] = useState<
+    Record<string, { value: boolean; requestId: number; committedRevision?: number }>
+  >({});
+  const spicyRequestSequence = useRef(0);
+  const pendingItemsRef = useRef(pendingItems);
+  const [approvalDifficulties, setApprovalDifficulties] = useState<
+    Record<string, 'main' | 'easy'>
+  >({});
+  useEffect(() => {
+    // Publish only committed props to the async settlement callback. Writing a
+    // ref during render can leak an interrupted/discarded concurrent render;
+    // effect ordering also updates this ref before the reconciliation effect
+    // below evaluates the same committed pendingItems snapshot.
+    pendingItemsRef.current = pendingItems;
+  }, [pendingItems]);
+  useEffect(() => {
+    // The overlay bridges the write→snapshot gap; it must not become a second
+    // source of truth. Retire it once the listener reaches THIS transaction's
+    // committed revision (or anything newer), regardless of value. That handles
+    // both delivery orders: our echo after Promise settlement, and our echo
+    // before settlement followed by another Admin's later correction.
+    const authoritativeItems = new Map(pendingItems.map((it) => [it.id, it] as const));
+    setOptimisticSpicy((prev) => {
+      let next = prev;
+      for (const [id, overlay] of Object.entries(prev)) {
+        const authoritative = authoritativeItems.get(id);
+        const authoritativeRevision =
+          authoritative &&
+          typeof authoritative.spicyRevision === 'number' &&
+          Number.isSafeInteger(authoritative.spicyRevision) &&
+          authoritative.spicyRevision >= 0
+            ? authoritative.spicyRevision
+            : 0;
+        if (
+          !authoritative ||
+          (overlay.committedRevision !== undefined &&
+            authoritativeRevision >= overlay.committedRevision)
+        ) {
+          if (next === prev) next = { ...prev };
+          delete next[id];
+        }
+      }
+      return next;
+    });
+  }, [pendingItems]);
+  const difficultyFor = (it: ItemDoc): 'main' | 'easy' =>
+    approvalDifficulties[it.id] ?? (normalizePool(it.pool) === 'easy' ? 'easy' : 'main');
+  const selectedSpicyFor = (it: ItemDoc): boolean =>
+    Object.hasOwn(optimisticSpicy, it.id) ? optimisticSpicy[it.id].value : it.spicy === true;
+  const isSpicy = (it: ItemDoc) => difficultyFor(it) === 'main' && selectedSpicyFor(it);
+  const toggleSpicy = async (id: string, spicy: boolean) => {
+    const requestId = ++spicyRequestSequence.current;
+    setOptimisticSpicy((prev) => ({
+      ...prev,
+      [id]: { value: spicy, requestId },
+    }));
+    try {
+      const committedRevision = await setItemSpicy(id, spicy);
+      setOptimisticSpicy((prev) => {
+        const current = prev[id];
+        if (current?.requestId !== requestId) return prev;
+        const authoritative = pendingItemsRef.current.find((it) => it.id === id);
+        const authoritativeRevision =
+          authoritative &&
+          typeof authoritative.spicyRevision === 'number' &&
+          Number.isSafeInteger(authoritative.spicyRevision) &&
+          authoritative.spicyRevision >= 0
+            ? authoritative.spicyRevision
+            : 0;
+        if (
+          !authoritative ||
+          typeof committedRevision !== 'number' ||
+          authoritativeRevision >= committedRevision
+        ) {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        }
+        return { ...prev, [id]: { ...current, committedRevision } };
+      });
+    } catch (error) {
+      // The moderation write did not commit. Reconcile the optimistic overlay
+      // immediately so the checkbox cannot continue claiming the correction was
+      // saved. Reveal the authoritative row rather than pinning a copy of its
+      // old value, which could mask another Admin's correction after this error.
+      setOptimisticSpicy((prev) => {
+        if (prev[id]?.requestId !== requestId) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      throw error;
+    }
+  };
+  const changeDifficulty = (id: string, difficulty: 'main' | 'easy') => {
+    setApprovalDifficulties((prev) => ({ ...prev, [id]: difficulty }));
+    if (difficulty === 'easy') {
+      // A prior optimistic tick must not survive a switch to Easy. Drop the
+      // overlay rather than storing false so switching back to Exploratory
+      // restores the authoritative row posture.
+      setOptimisticSpicy((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
   };
   const explicitPending = pendingItems.filter(isSpicy);
   // `prompt_suggestion_approved` (#559): one event per row that actually got
@@ -345,8 +498,8 @@ export default function ReviewQueue({
   // ApprovalPlacement[].
   const trackApprovals = (placements: ApprovalPlacement[]): ApprovalPlacement[] =>
     Array.isArray(placements) ? placements.map(trackApproval) : placements;
-  // Pass the ROW, not the id (#557): approval routes the Prompt to the Day it
-  // was submitted for, which `approveItem` reads off `targetDayIndex`.
+  // Pass the ROW, not the id (#557/#558): approval routes from the authoritative
+  // stored target while atomically carrying the Admin's difficulty/spicy choice.
   // `Promise.resolve(...)` wraps each call rather than chaining `.then`
   // directly on its result — a bare `vi.fn()` test double (no async, no
   // explicit resolved value) returns `undefined`, not a thenable, and a raw
@@ -358,7 +511,20 @@ export default function ReviewQueue({
     guard(
       explicitPending.length > 0,
       'bulk-approve',
-      () => Promise.resolve(bulkApproveItems(pendingItems, adminUid)).then(trackApprovals),
+      () =>
+        Promise.resolve(
+          bulkApproveItems(
+            pendingItems.map((it) => {
+              const difficulty = difficultyFor(it);
+              return {
+                ...it,
+                pool: difficulty,
+                spicy: difficulty === 'easy' ? false : selectedSpicyFor(it),
+              };
+            }),
+            adminUid,
+          ),
+        ).then(trackApprovals),
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
     );
 
@@ -438,8 +604,10 @@ export default function ReviewQueue({
               key={it.id}
               item={it}
               spicy={isSpicy(it)}
+              difficulty={difficultyFor(it)}
               adminUid={adminUid}
               onToggleSpicy={toggleSpicy}
+              onDifficultyChange={changeDifficulty}
               onApprove={approveOne}
             />
           ))}

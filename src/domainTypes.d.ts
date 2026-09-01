@@ -517,6 +517,12 @@ export interface ItemDoc {
   // Whether this Prompt is in the 🔞-tagged "spicy" category (vs. "tame") for
   // stratified Board composition (`dealBoard`'s spicyRatio sampling).
   spicy: boolean;
+  // Monotonic revision for Admin corrections to `spicy`. Absent on legacy
+  // Prompts means 0. The Approvals queue uses it only as an acknowledgement
+  // boundary: once its subscription reaches the revision returned by its own
+  // transaction, the optimistic checkbox can retire without masking a newer
+  // correction from another Admin.
+  spicyRevision?: number;
   // Which of the three Phase 1.5 pools this Prompt belongs to (main game vs
   // the easy/closing curated cards), separated by field within the one `items`
   // collection. Absent on legacy docs → `'main'`, and the pre-#565 persisted
