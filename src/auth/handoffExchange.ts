@@ -45,7 +45,8 @@ import {
 export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 
 function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig']>): string {
-  return `${protocol}://${host}${port === null ? '' : `:${port}`}`;
+  const authority = port === null ? host : `${host}:${port}`;
+  return `${protocol}://${authority}`;
 }
 
 /**
