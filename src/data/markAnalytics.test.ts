@@ -27,6 +27,7 @@ describe('direct-mark analytics requests', () => {
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
     });
 
     directMarkAnalyticsRequest({
@@ -41,5 +42,23 @@ describe('direct-mark analytics requests', () => {
     expect(isLocalDirectMarkRequest('request-a', 'event-b')).toBe(false);
     expect(values.has('five-across:local-direct-mark-requests:event-a')).toBe(true);
     expect(values.has('five-across:local-direct-mark-requests:event-b')).toBe(false);
+  });
+
+  it('migrates pending pre-Event request ids into the active Event exactly once', () => {
+    const values = new Map<string, string>([
+      ['five-across:local-direct-mark-requests', JSON.stringify(['legacy-request'])],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+
+    expect(isLocalDirectMarkRequest('legacy-request', 'event-a')).toBe(true);
+    expect(JSON.parse(values.get('five-across:local-direct-mark-requests:event-a') ?? '[]')).toEqual([
+      'legacy-request',
+    ]);
+    expect(values.has('five-across:local-direct-mark-requests')).toBe(false);
+    expect(isLocalDirectMarkRequest('legacy-request', 'event-b')).toBe(false);
   });
 });

@@ -24,6 +24,7 @@ function createStorageStub(): Storage {
   return {
     getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
     setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
   } as unknown as Storage;
 }
 
@@ -76,6 +77,20 @@ describe('NoticeBanner (specs/admin-messages.md)', () => {
     unmount();
     render(<NoticeBannerView notices={[notice('n2', true)]} />);
     expect(screen.getByText('n2 title')).toBeInTheDocument(); // per-id isolation
+  });
+
+  it('migrates a pre-Event dismissal into the active Event exactly once', () => {
+    storage.setItem('gcb.notice.n1.dismissedAt', '123');
+    const eventA = render(<NoticeBannerView notices={[notice('n1', true)]} />);
+
+    expect(screen.queryByText('n1 title')).not.toBeInTheDocument();
+    expect(storage.getItem('gcb.notice.event-a.n1.dismissedAt')).toBe('123');
+    expect(storage.getItem('gcb.notice.n1.dismissedAt')).toBeNull();
+
+    eventA.unmount();
+    H.eventId = 'event-b';
+    render(<NoticeBannerView notices={[notice('n1', true)]} />);
+    expect(screen.getByText('n1 title')).toBeInTheDocument();
   });
 
   it('dismissing the newest pinned Notice reveals the next still-undismissed pinned one', () => {

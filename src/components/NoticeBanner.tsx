@@ -15,6 +15,7 @@ import type { NoticeDoc } from '../types';
 
 const dismissKey = (eventId: string, noticeId: string): string =>
   `gcb.notice.${eventId}.${noticeId}.dismissedAt`;
+const legacyDismissKey = (noticeId: string): string => `gcb.notice.${noticeId}.dismissedAt`;
 const dismissedWithoutStorage = new Set<string>();
 
 /**
@@ -26,9 +27,28 @@ export function isNoticeBannerDismissed(noticeId: string, eventId = EVENT_ID): b
   const key = dismissKey(eventId, noticeId);
   if (dismissedWithoutStorage.has(key)) return true;
   try {
-    const dismissed = localStorage.getItem(key) !== null;
-    if (dismissed) dismissedWithoutStorage.add(key);
-    return dismissed;
+    const scopedDismissal = localStorage.getItem(key);
+    if (scopedDismissal !== null) {
+      dismissedWithoutStorage.add(key);
+      return true;
+    }
+
+    // Before dismissals were Event-scoped, a notice id was global. Consume
+    // that value into the Event active during the upgrade so it is preserved
+    // without leaking the same dismissal into every other Event.
+    const legacyKey = legacyDismissKey(noticeId);
+    const legacyDismissal = localStorage.getItem(legacyKey);
+    if (legacyDismissal === null) return false;
+
+    dismissedWithoutStorage.add(key);
+    try {
+      localStorage.setItem(key, legacyDismissal);
+      localStorage.removeItem(legacyKey);
+    } catch {
+      // The in-memory key still preserves the dismissal for this Event during
+      // the current session when storage becomes unavailable mid-migration.
+    }
+    return true;
   } catch {
     return false;
   }

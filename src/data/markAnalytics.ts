@@ -18,13 +18,37 @@ export interface DirectMarkAnalyticsRequest {
 
 const localRequestStorageKey = (eventId: string) =>
   `five-across:local-direct-mark-requests:${eventId}`;
+const LEGACY_LOCAL_REQUEST_STORAGE_KEY = 'five-across:local-direct-mark-requests';
 const MAX_LOCAL_REQUEST_IDS = 100;
+
+function parseLocalRequestIds(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  return Array.isArray(parsed)
+    ? parsed.filter((id): id is string => typeof id === 'string').slice(-MAX_LOCAL_REQUEST_IDS)
+    : [];
+}
 
 function localRequestIds(eventId: string): string[] {
   try {
-    const raw = localStorage.getItem(localRequestStorageKey(eventId));
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+    const scopedKey = localRequestStorageKey(eventId);
+    const scoped = localStorage.getItem(scopedKey);
+    if (scoped !== null) return parseLocalRequestIds(scoped);
+
+    // Pre-Event clients kept one global acknowledgement list. Move it into
+    // the Event active during the upgrade, then remove the global capability
+    // so another Event cannot inherit the same first-mark side effects.
+    const legacy = localStorage.getItem(LEGACY_LOCAL_REQUEST_STORAGE_KEY);
+    if (legacy === null) return [];
+
+    const ids = parseLocalRequestIds(legacy);
+    try {
+      localStorage.setItem(scopedKey, JSON.stringify(ids));
+      localStorage.removeItem(LEGACY_LOCAL_REQUEST_STORAGE_KEY);
+    } catch {
+      // The caller can still use the successfully read acknowledgements for
+      // this invocation if storage becomes unavailable during migration.
+    }
+    return ids;
   } catch {
     return [];
   }
