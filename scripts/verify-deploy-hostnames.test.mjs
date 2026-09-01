@@ -1,13 +1,11 @@
 // @vitest-environment node
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { GoogleAuth, Impersonated } from 'google-auth-library';
 import { describe, expect, it, vi } from 'vitest';
 import { BODEGA_EVENT_ID, BODEGA_PREVIEW_HOSTS } from './provision-bodega-preview.mjs';
-import {
-  getApplicationDefaultAccessToken,
-  verifyBodegaHostnameDocuments,
-} from './verify-deploy-hostnames.mjs';
+import { getApplicationDefaultAccessToken, verifyBodegaHostnameDocuments } from './verify-deploy-hostnames.mjs';
 
 const routingDocument = (host) => ({
   name: `projects/fiveacross/databases/(default)/documents/hostnames/${host}`,
@@ -22,17 +20,108 @@ describe('Five Across deploy hostname verification', () => {
     const getAccessToken = vi.fn(async () => 'impersonated-access-token');
     const createAuth = vi.fn(() => ({ getAccessToken }));
 
-    await expect(getApplicationDefaultAccessToken(createAuth)).resolves.toBe(
-      'impersonated-access-token',
-    );
+    await expect(getApplicationDefaultAccessToken(createAuth)).resolves.toBe('impersonated-access-token');
     expect(createAuth).toHaveBeenCalledWith({
       scopes: ['https://www.googleapis.com/auth/datastore'],
     });
     expect(getAccessToken).toHaveBeenCalledOnce();
   });
 
+  it('fails closed when deploy token acquisition never settles', async () => {
+    vi.useFakeTimers();
+    const createAuth = vi.fn(() => ({
+      getAccessToken: vi.fn(() => new Promise(() => {})),
+    }));
+
+    try {
+      const result = getApplicationDefaultAccessToken(createAuth, 10);
+      const rejection = expect(result).rejects.toThrow(
+        'Application Default Credentials access token acquisition timed out after 10 ms.',
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the deploy token timeout when credential acquisition settles normally', async () => {
+    vi.useFakeTimers();
+    const createAuth = vi.fn(() => ({
+      getAccessToken: vi.fn(async () => 'impersonated-access-token'),
+    }));
+
+    try {
+      await expect(getApplicationDefaultAccessToken(createAuth, 10)).resolves.toBe('impersonated-access-token');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('handles a credential rejection that arrives after the deploy token timeout', async () => {
+    vi.useFakeTimers();
+    let rejectAccessToken;
+    const accessToken = new Promise((_, reject) => {
+      rejectAccessToken = reject;
+    });
+    const createAuth = vi.fn(() => ({
+      getAccessToken: vi.fn(() => accessToken),
+    }));
+
+    try {
+      const result = getApplicationDefaultAccessToken(createAuth, 10);
+      const rejection = expect(result).rejects.toThrow(
+        'Application Default Credentials access token acquisition timed out after 10 ms.',
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      await rejection;
+      rejectAccessToken(new Error('late credential failure'));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hard-stops the command after a token timeout even when transport handles remain active', () => {
+    const moduleUrl = pathToFileURL(resolve('scripts/verify-deploy-hostnames.mjs')).href;
+    const childSource = `
+      import net from 'node:net';
+      import {
+        getApplicationDefaultAccessToken,
+        runBodegaHostnameVerificationCommand,
+      } from ${JSON.stringify(moduleUrl)};
+
+      const server = net.createServer(() => {});
+      await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+      const socket = net.connect(server.address().port, '127.0.0.1');
+      await new Promise((resolveConnect) => socket.once('connect', resolveConnect));
+
+      await runBodegaHostnameVerificationCommand({
+        projectId: 'fiveacross',
+        acquireAccessToken: () => getApplicationDefaultAccessToken(
+          () => ({ getAccessToken: () => new Promise(() => {}) }),
+          20,
+        ),
+      });
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', childSource], {
+      encoding: 'utf8',
+      timeout: 1_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Application Default Credentials access token acquisition timed out after 20 ms.');
+  });
+
   it('uses a Google Auth version that recognizes the wrapper impersonation credential shape', () => {
-    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/datastore'] });
+    const auth = new GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/datastore'],
+    });
     const client = auth.fromJSON({
       type: 'impersonated_service_account',
       service_account_impersonation_url:
@@ -47,7 +136,6 @@ describe('Five Across deploy hostname verification', () => {
 
     expect(client).toBeInstanceOf(Impersonated);
   });
-
 
   it('fails closed when the command is not running under the explicit Five Across project', () => {
     const result = spawnSync(process.execPath, [resolve('scripts/verify-deploy-hostnames.mjs')], {
@@ -77,7 +165,9 @@ describe('Five Across deploy hostname verification', () => {
     const fetchImpl = vi.fn(async (url, options) => {
       const host = BODEGA_PREVIEW_HOSTS[fetchImpl.mock.calls.length - 1];
       expect(url).toContain('/v1/projects/fiveacross/databases/(default)/documents/hostnames/');
-      expect(options.headers).toEqual({ Authorization: 'Bearer test-access-token' });
+      expect(options.headers).toEqual({
+        Authorization: 'Bearer test-access-token',
+      });
       expect(options.signal).toBeInstanceOf(AbortSignal);
       return new Response(JSON.stringify(routingDocument(host)), {
         status: 200,
@@ -103,10 +193,11 @@ describe('Five Across deploy hostname verification', () => {
 
   it('fails closed when a serving hostname document is missing', async () => {
     const host = BODEGA_PREVIEW_HOSTS[0];
-    const fetchImpl = vi.fn(async () =>
-      new Response('secret response body', {
-        status: 404,
-      }),
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('secret response body', {
+          status: 404,
+        }),
     );
 
     await expect(
