@@ -1,5 +1,10 @@
 import type { ThemeId } from '../types';
 import { activeEdition, DEFAULT_EDITION } from '../editions';
+import {
+  EDITION_IDS,
+  isRegisteredEdition,
+  type EditionId,
+} from '../edition-registry.ts';
 
 // Edition IDENTITY lives in src/editions.ts, and only there (#580). This module
 // used to keep its own `currentEdition` twin, seeded from the same env var but
@@ -226,9 +231,9 @@ export const THEMES: ThemeMeta[] = [
   },
 ];
 
-const GCB: readonly string[] = [DEFAULT_EDITION];
-const VACAY: readonly string[] = ['vacay'];
-const FIVEACROSS: readonly string[] = ['fiveacross'];
+const GCB: readonly EditionId[] = [EDITION_IDS.GAY_CRUISE_BINGO];
+const VACAY: readonly EditionId[] = [EDITION_IDS.VACAY_BINGO];
+const FIVEACROSS: readonly EditionId[] = [EDITION_IDS.FIVE_ACROSS];
 
 /**
  * Which Editions each Theme may be PICKED on.
@@ -304,25 +309,19 @@ const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
  * Across's is Marquee — the doors-open Theme, so the gate reads as "an event
  * is about to happen" whatever the occasion is (#617).
  */
-const EDITION_DEFAULT_THEME: Record<string, ThemeId> = {
-  gcb: 'neon-playground',
-  vacay: 'the-birds',
-  fiveacross: 'marquee',
+const EDITION_DEFAULT_THEME: Record<EditionId, ThemeId> = {
+  [EDITION_IDS.GAY_CRUISE_BINGO]: 'neon-playground',
+  [EDITION_IDS.VACAY_BINGO]: 'the-birds',
+  [EDITION_IDS.FIVE_ACROSS]: 'marquee',
 };
 
 export function defaultThemeForEdition(edition: string = activeEdition()): ThemeId {
-  // OWN property, not an inherited one — the exact twin of the `BRANDS` bug
-  // (#597, fixed in `src/editions.ts` alongside this). This table is an object
-  // literal too, so a plain `EDITION_DEFAULT_THEME[edition]` answers TRUTHY for
-  // `constructor`, `toString` and friends, and the `??` fallback never fires:
-  // the pre-auth shell would then set `[data-theme]` to a stringified function
-  // and render unstyled. The Edition id comes from operator-authored routing
-  // data, so this is reachable without a code change.
-  //
-  // `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: ES2021 target.
-  return Object.prototype.hasOwnProperty.call(EDITION_DEFAULT_THEME, edition)
-    ? EDITION_DEFAULT_THEME[edition]!
-    : EDITION_DEFAULT_THEME[DEFAULT_EDITION]!;
+  // Validate through the same registry that defines the total map. Besides
+  // narrowing the lookup to EditionId, this rejects inherited object names
+  // such as `constructor` (#597) before they can become an unstyled Theme.
+  return isRegisteredEdition(edition)
+    ? EDITION_DEFAULT_THEME[edition]
+    : EDITION_DEFAULT_THEME[DEFAULT_EDITION];
 }
 
 /**
