@@ -124,6 +124,22 @@ function membershipMarkPreviewRules(source: string): string {
           allow delete: if admitted(eventId)
             && (isOwner(markerUid) || isAdmin(eventId));`,
   );
+  preview = replaceExactlyOnce(
+    preview,
+    'unauthenticated wrapper probes',
+    `    // Collection-group READ for the Feed's Tally Cards (#216/#294):`,
+    `    // TEST-ONLY #1079 probes. The negation makes an unauthenticated
+    // request succeed only when each wrapper's leading signedIn() prevents
+    // its Event argument from being evaluated.
+    match /__membershipBudgetUnauthIsAdmin/{eventId} {
+      allow create: if !isAdmin(eventId);
+    }
+    match /__membershipBudgetUnauthAdmitted/{eventId} {
+      allow create: if !admitted(eventId);
+    }
+
+    // Collection-group READ for the Feed's Tally Cards (#216/#294):`,
+  );
   return preview;
 }
 
@@ -343,6 +359,24 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
         marker(ALICE, 'Prompt'),
       ),
     );
+  });
+
+  it('leaves wrapper Event arguments unevaluated after an unauthenticated short-circuit', async () => {
+    const database = testEnv.unauthenticatedContext().firestore();
+
+    for (const collection of [
+      '__membershipBudgetUnauthIsAdmin',
+      '__membershipBudgetUnauthAdmitted',
+    ]) {
+      const batch = writeBatch(database);
+      for (let index = 0; index < 21; index += 1) {
+        // None of these Event documents exists. If eventData(eventId) were
+        // evaluated before the callee's signedIn() short-circuit, the request
+        // would error or exceed the twenty-access aggregate ceiling.
+        batch.set(doc(database, collection, `missing-event-${index}`), { probe: true });
+      }
+      await assertSucceeds(batch.commit());
+    }
   });
 
   it('admits an active member and denies missing or revoked Memberships', async () => {
