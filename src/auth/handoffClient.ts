@@ -38,6 +38,7 @@ import {
   rememberHandoffTransaction,
   transactionIdFor,
 } from './handoffTransaction';
+import { clearUrlFragmentAndConfirm } from '../urlFragment';
 
 /**
  * The fragment key the code rides back on: `https://host/path#fa_handoff=<code>`.
@@ -139,17 +140,7 @@ export function readHandoffCode(hash: string): string | null {
  * act on: it decides whether telemetry may safely read the URL at all.
  */
 export function clearHandoffFragment(): boolean {
-  try {
-    const { pathname, search } = window.location;
-    window.history.replaceState(window.history.state, '', `${pathname}${search}`);
-    // Confirm rather than assume. A `replaceState` that is refused, ignored, or
-    // silently no-ops still leaves a LIVE handoff code in `window.location` —
-    // and the caller's whole reason for clearing early is that anything reading
-    // the URL afterwards would capture it (Phase 4b P1).
-    return readHandoffCode(window.location.hash) === null;
-  } catch {
-    return false;
-  }
+  return clearUrlFragmentAndConfirm((hash) => readHandoffCode(hash) !== null);
 }
 
 /** The URL the Event origin sends the player to. Built here, navigated to verbatim. */

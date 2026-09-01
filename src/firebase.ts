@@ -116,16 +116,16 @@ export let analytics: Analytics | null = null;
  */
 export const analyticsReady: Promise<Analytics | null> = isSupported()
   .then((ok) => {
-    // …and never while a handoff code is still sitting in the URL (#549, Phase
-    // 4b P1). Suppressing the explicit page view and the dimension registration
-    // is not sufficient: `initializeAnalytics` starts GA4, which reads
+    // …and never while a bearer credential is still sitting in the URL (#549,
+    // #803). Suppressing the explicit page view and dimension registration is
+    // not sufficient: `initializeAnalytics` starts GA4, which reads
     // `window.location` on its own, so INITIALISATION itself is the thing that
     // has to be conditional. This is the last analytics entry point in the
     // graph, which is why the check lives here rather than at each call site.
     //
     // `isUrlSafeForTelemetry` is false only in the narrow case where the
-    // fragment could not actually be removed; `handoffBoot` is deliberately
-    // free of Firebase imports, so there is no cycle.
+    // credential fragment could not actually be removed; `handoffBoot` is
+    // deliberately free of Firebase imports, so there is no cycle.
     if (ok && firebaseConfig.measurementId && !isSyntheticProbe() && isUrlSafeForTelemetry()) {
       analytics = initializeAnalytics(app, { config: { send_page_view: false } });
     }

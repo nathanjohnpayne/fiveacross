@@ -12,15 +12,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   readHandoffCode: vi.fn(),
-  clearHandoffFragment: vi.fn(),
+  readEventInvitationCode: vi.fn(),
+  capturePendingEventInvitation: vi.fn(),
+  clearUrlFragmentAndConfirm: vi.fn(),
 }));
 
 vi.mock('./auth/handoffClient', () => ({
   readHandoffCode: mocks.readHandoffCode,
-  clearHandoffFragment: mocks.clearHandoffFragment,
+}));
+
+vi.mock('./pendingEventInvitation', () => ({
+  readEventInvitationCode: mocks.readEventInvitationCode,
+  capturePendingEventInvitation: mocks.capturePendingEventInvitation,
+}));
+
+vi.mock('./urlFragment', () => ({
+  clearUrlFragmentAndConfirm: mocks.clearUrlFragmentAndConfirm,
 }));
 
 const CODE = 'C'.repeat(43);
+const INVITATION = 'I'.repeat(43);
 
 /** Read a repo file as text. Vitest runs from the repo root. */
 function readSource(relative: string): string {
@@ -36,7 +47,9 @@ async function freshBoot() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.readHandoffCode.mockReturnValue(null);
-  mocks.clearHandoffFragment.mockReturnValue(true);
+  mocks.readEventInvitationCode.mockReturnValue(null);
+  mocks.capturePendingEventInvitation.mockReturnValue(null);
+  mocks.clearUrlFragmentAndConfirm.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -47,26 +60,53 @@ describe('handoffBoot', () => {
   it('captures the code and clears it', async () => {
     mocks.readHandoffCode.mockReturnValue(CODE);
     const boot = await freshBoot();
-    boot.captureHandoffFromUrl();
+    boot.captureUrlCredentialsFromUrl();
     expect(boot.pendingHandoffCode()).toBe(CODE);
-    expect(mocks.clearHandoffFragment).toHaveBeenCalledTimes(1);
+    expect(mocks.clearUrlFragmentAndConfirm).toHaveBeenCalledTimes(1);
+    expect(boot.isUrlSafeForTelemetry()).toBe(true);
+  });
+
+  it('stores an invitation before clearing the fragment', async () => {
+    mocks.readEventInvitationCode.mockReturnValue(INVITATION);
+    const order: string[] = [];
+    mocks.capturePendingEventInvitation.mockImplementation(() => {
+      order.push('capture');
+      return {
+        record: { code: INVITATION, origin: window.location.origin, capturedAt: 1 },
+        durable: true,
+      };
+    });
+    mocks.clearUrlFragmentAndConfirm.mockImplementation(() => {
+      order.push('clear');
+      return true;
+    });
+    const boot = await freshBoot();
+
+    boot.captureUrlCredentialsFromUrl();
+
+    expect(order).toEqual(['capture', 'clear']);
+    expect(mocks.capturePendingEventInvitation).toHaveBeenCalledWith({
+      hash: window.location.hash,
+      origin: window.location.origin,
+      now: expect.any(Number),
+    });
     expect(boot.isUrlSafeForTelemetry()).toBe(true);
   });
 
   it('does not touch the fragment on an ordinary load', async () => {
     const boot = await freshBoot();
-    boot.captureHandoffFromUrl();
+    boot.captureUrlCredentialsFromUrl();
     expect(boot.pendingHandoffCode()).toBeNull();
-    expect(mocks.clearHandoffFragment).not.toHaveBeenCalled();
+    expect(mocks.clearUrlFragmentAndConfirm).not.toHaveBeenCalled();
     // An ordinary load has no code to leak, so telemetry is unaffected.
     expect(boot.isUrlSafeForTelemetry()).toBe(true);
   });
 
   it('marks the URL unsafe when the clear could not be confirmed', async () => {
     mocks.readHandoffCode.mockReturnValue(CODE);
-    mocks.clearHandoffFragment.mockReturnValue(false);
+    mocks.clearUrlFragmentAndConfirm.mockReturnValue(false);
     const boot = await freshBoot();
-    boot.captureHandoffFromUrl();
+    boot.captureUrlCredentialsFromUrl();
     // The code is still returned — sign-in must still complete…
     expect(boot.pendingHandoffCode()).toBe(CODE);
     // …but nothing may read the URL.
@@ -78,11 +118,12 @@ describe('handoffBoot', () => {
   it('is idempotent', async () => {
     mocks.readHandoffCode.mockReturnValueOnce(CODE).mockReturnValue(null);
     const boot = await freshBoot();
-    boot.captureHandoffFromUrl();
-    boot.captureHandoffFromUrl();
+    boot.captureUrlCredentialsFromUrl();
+    boot.captureUrlCredentialsFromUrl();
     expect(boot.pendingHandoffCode()).toBe(CODE);
     expect(mocks.readHandoffCode).toHaveBeenCalledTimes(1);
-    expect(mocks.clearHandoffFragment).toHaveBeenCalledTimes(1);
+    expect(mocks.readEventInvitationCode).toHaveBeenCalledTimes(1);
+    expect(mocks.clearUrlFragmentAndConfirm).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -103,20 +144,36 @@ describe('the entry seam stays free of anything that can read a URL', () => {
     );
   });
 
-  it('handoffBoot statically imports only the firebase-free handoff client', async () => {
+  it('handoffBoot statically imports only dependency-free credential seams', async () => {
     const src = readSource('src/handoffBoot.ts');
-    const staticImports = [...src.matchAll(/^\s*import\s+[^(].*?from\s+'([^']+)'/gm)].map((m) => m[1]);
-    expect(staticImports).toEqual(['./auth/handoffClient']);
+    const staticImports = [
+      ...src.matchAll(/^\s*import\s+(?!\()(?:(?!;)[\s\S])*?\sfrom\s+'([^']+)';/gm),
+    ].map((m) => m[1]);
+    expect(staticImports).toEqual([
+      './auth/handoffClient',
+      './pendingEventInvitation',
+      './urlFragment',
+    ]);
   });
 
-  it('the handoff client itself pulls in no firebase, analytics or react', () => {
-    for (const file of ['src/auth/handoffClient.ts', 'src/auth/handoffTransaction.ts']) {
+  it('the credential seams pull in no firebase, analytics or react', () => {
+    for (const file of [
+      'src/auth/handoffClient.ts',
+      'src/auth/handoffTransaction.ts',
+      'src/pendingEventInvitation.ts',
+      'src/urlFragment.ts',
+    ]) {
       const src = readSource(file);
       const staticImports = [...src.matchAll(/^\s*import\s+[^(].*?from\s+'([^']+)'/gm)].map((m) => m[1]);
       for (const dep of staticImports) {
         expect(dep).not.toMatch(/firebase|posthog|analytics|^react/);
       }
     }
+  });
+
+  it('captures credentials before the first dynamic import can evaluate', () => {
+    const src = readSource('src/entry.tsx');
+    expect(src.indexOf('captureUrlCredentialsFromUrl();')).toBeLessThan(src.indexOf('import('));
   });
 });
 
