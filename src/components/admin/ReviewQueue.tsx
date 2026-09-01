@@ -368,10 +368,16 @@ export default function ReviewQueue({
   >({});
   const spicyRequestSequence = useRef(0);
   const pendingItemsRef = useRef(pendingItems);
-  pendingItemsRef.current = pendingItems;
   const [approvalDifficulties, setApprovalDifficulties] = useState<
     Record<string, 'main' | 'easy'>
   >({});
+  useEffect(() => {
+    // Publish only committed props to the async settlement callback. Writing a
+    // ref during render can leak an interrupted/discarded concurrent render;
+    // effect ordering also updates this ref before the reconciliation effect
+    // below evaluates the same committed pendingItems snapshot.
+    pendingItemsRef.current = pendingItems;
+  }, [pendingItems]);
   useEffect(() => {
     // The overlay bridges the write→snapshot gap; it must not become a second
     // source of truth. Retire it once the listener reaches THIS transaction's
