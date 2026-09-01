@@ -11,11 +11,10 @@ describe('pre-auth Firebase boundary', () => {
     expect(source).toMatch(/initializeAppCheck/);
   });
 
-  it('initializes page Auth explicitly from IndexedDB in its own module', () => {
+  it('keeps page Auth in its own module with Firebase browser fallbacks intact', () => {
     const source = readFileSync('src/firebaseAuth.ts', 'utf8');
 
-    expect(source).toMatch(/initializeAuth\(app/);
-    expect(source).toMatch(/persistence:\s*indexedDBLocalPersistence/);
-    expect(source).toMatch(/popupRedirectResolver:\s*browserPopupRedirectResolver/);
+    expect(source).toMatch(/export const auth = getAuth\(app\)/);
+    expect(source).not.toMatch(/initializeAuth\(app|persistence:\s*indexedDBLocalPersistence/);
   });
 });

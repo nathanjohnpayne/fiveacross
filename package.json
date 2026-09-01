@@ -13,7 +13,7 @@
     "build:gaycruisebingo": "node scripts/build-target.mjs gaycruisebingo",
     "build:fiveacross": "node scripts/build-target.mjs fiveacross",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.sw.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p worker/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.sw.json && tsc --noEmit -p tsconfig.handoff-worker.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p worker/tsconfig.json",
     "typecheck:router-publisher": "npm --prefix router-publisher run build",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -62,3 +62,87 @@ export function pendingHandoffCode(): string | null {
 export function isUrlSafeForTelemetry(): boolean {
   return urlSafeForTelemetry;
 }
+
+export interface ApplicationBootstrapDependencies {
+  code: string | null;
+  completeHandoff(code: string): Promise<{ kind: 'continue' } | { kind: 'recover' }>;
+  loadMain(): Promise<unknown>;
+  renderFailure(kind: BootstrapFailureKind): void;
+}
+
+/**
+ * Compose the pre-app return with the application import.
+ *
+ * This lives in the dependency-free boot seam so the fail-closed ordering can
+ * be executed in a unit test, rather than inferred from two separately tested
+ * modules. A recovery result or unexpected return-module failure is terminal
+ * for this document and can never reach `loadMain`.
+ */
+export async function runApplicationBootstrap(
+  dependencies: ApplicationBootstrapDependencies,
+): Promise<void> {
+  if (dependencies.code !== null) {
+    try {
+      const result = await dependencies.completeHandoff(dependencies.code);
+      if (result.kind === 'recover') {
+        dependencies.renderFailure('handoff-recovery');
+        return;
+      }
+    } catch {
+      dependencies.renderFailure('handoff-recovery');
+      return;
+    }
+  }
+
+  try {
+    await dependencies.loadMain();
+  } catch {
+    dependencies.renderFailure('app-load');
+  }
+}
+
+export type BootstrapFailureKind = 'app-load' | 'handoff-recovery';
+
+/**
+ * Dependency-free last-resort UI for failures that happen before React exists.
+ *
+ * The recovery branch deliberately offers one action only. Reloading creates a
+ * fresh primary Auth queue that can read whichever durable session won; mounting
+ * this document would let an ambiguous Worker commit race the application.
+ */
+export function renderBootstrapFailure(kind: BootstrapFailureKind): void {
+  const root = document.getElementById('root');
+  if (!root) return;
+  root.textContent = '';
+  const wrap = document.createElement('main');
+  wrap.setAttribute('role', 'alert');
+  wrap.style.cssText =
+    'min-height:100dvh;display:grid;place-items:center;padding:2rem 1.5rem;background:#0b0f14;color:#eef2f6;font-family:system-ui,-apple-system,sans-serif;text-align:center';
+  const inner = document.createElement('div');
+  inner.style.maxWidth = '32rem';
+  const h = document.createElement('h1');
+  h.style.cssText = 'font-size:1.5rem;line-height:1.25;margin:0 0 0.75rem';
+  const p = document.createElement('p');
+  p.style.cssText = 'margin:0;line-height:1.55;color:#a9b7c4';
+
+  if (kind === 'handoff-recovery') {
+    h.textContent = 'Finish signing in';
+    p.textContent =
+      'The sign-in may have completed, but this page cannot confirm it safely. Reload once to check the saved session.';
+    const reload = document.createElement('button');
+    reload.type = 'button';
+    reload.textContent = 'Reload';
+    reload.style.cssText =
+      'margin-top:1.25rem;border:0;border-radius:999px;padding:0.75rem 1.25rem;background:#eef2f6;color:#0b0f14;font:600 1rem system-ui,-apple-system,sans-serif;cursor:pointer';
+    reload.addEventListener('click', () => window.location.reload());
+    inner.append(h, p, reload);
+  } else {
+    h.textContent = "This didn't load";
+    p.textContent =
+      'Something went wrong loading the app. Check your connection and reload the page, then tap Sign in again.';
+    inner.append(h, p);
+  }
+
+  wrap.append(inner);
+  root.append(wrap);
+}

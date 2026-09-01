@@ -22,6 +22,18 @@ spec_test_map:
     - src/auth/handoffTransaction.test.ts
     - src/auth/handoffClient.test.ts
     - src/auth/handoffExchange.test.ts
+    - src/auth/handoffCommitProtocol.test.ts
+    - src/auth/handoffCommitClient.test.ts
+    - src/auth/handoffCommitWorker.test.ts
+    - src/auth/firebaseHandoffCommitWorkerAdapter.test.ts
+    - src/auth/handoffIndexedDbProbe.test.ts
+    - src/auth/handoffAttemptFence.test.ts
+    - src/auth/handoffBrowserPrimitives.test.ts
+    - src/auth/handoffSessionFingerprint.test.ts
+    - src/auth/handoffPageAuthObserver.test.ts
+    - src/auth/handoffReturnCoordinator.test.ts
+    - src/auth/handoffReturn.test.ts
+    - src/firebaseCore.test.ts
     - src/auth/handoffAttestation.test.ts
     - src/auth/AuthContext.test.tsx
     - src/auth/handoff-parity.test.ts
@@ -29,6 +41,7 @@ spec_test_map:
     - src/components/event-not-found-auth-reasons.test.tsx
     - src/components/signin-handoff-route.test.tsx
     - src/handoffBoot.test.ts
+    - tests/e2e/auth-handoff-worker.spec.ts
     - src/auth-domain.test.ts
     - scripts/fiveacross-origin.integration.test.mjs
     - scripts/deploy-target.test.mjs

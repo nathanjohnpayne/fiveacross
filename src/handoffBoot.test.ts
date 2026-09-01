@@ -92,9 +92,15 @@ describe('the entry seam stays free of anything that can read a URL', () => {
   // capture stops happening first and the leak returns silently.
   it('entry.tsx statically imports only the boot seam, and reaches the app dynamically', async () => {
     const src = readSource('src/entry.tsx');
-    const staticImports = [...src.matchAll(/^\s*import\s+[^(].*?from\s+'([^']+)'/gm)].map((m) => m[1]);
+    const staticImports = [
+      ...src.matchAll(/^\s*import\s+(?!\()(?:(?!;)[\s\S])*?\sfrom\s+'([^']+)';/gm),
+    ].map((m) => m[1]);
     expect(staticImports).toEqual(['./handoffBoot']);
+    expect(src).toMatch(/import\('\.\/auth\/handoffReturn'\)/);
     expect(src).toMatch(/import\('\.\/main'\)/);
+    expect(src.indexOf("import('./auth/handoffReturn')")).toBeLessThan(
+      src.indexOf("import('./main')"),
+    );
   });
 
   it('handoffBoot statically imports only the firebase-free handoff client', async () => {
@@ -111,5 +117,64 @@ describe('the entry seam stays free of anything that can read a URL', () => {
         expect(dep).not.toMatch(/firebase|posthog|analytics|^react/);
       }
     }
+  });
+});
+
+describe('dependency-free bootstrap failures', () => {
+  it('never imports the app after a recovery result', async () => {
+    const boot = await freshBoot();
+    const loadMain = vi.fn().mockResolvedValue(undefined);
+    const renderFailure = vi.fn();
+
+    await boot.runApplicationBootstrap({
+      code: CODE,
+      completeHandoff: vi.fn().mockResolvedValue({ kind: 'recover' }),
+      loadMain,
+      renderFailure,
+    });
+
+    expect(loadMain).not.toHaveBeenCalled();
+    expect(renderFailure).toHaveBeenCalledOnce();
+    expect(renderFailure).toHaveBeenCalledWith('handoff-recovery');
+  });
+
+  it('never imports the app after an unexpected handoff failure', async () => {
+    const boot = await freshBoot();
+    const loadMain = vi.fn().mockResolvedValue(undefined);
+    const renderFailure = vi.fn();
+
+    await boot.runApplicationBootstrap({
+      code: CODE,
+      completeHandoff: vi.fn().mockRejectedValue(new Error('return module failed')),
+      loadMain,
+      renderFailure,
+    });
+
+    expect(loadMain).not.toHaveBeenCalled();
+    expect(renderFailure).toHaveBeenCalledWith('handoff-recovery');
+  });
+
+  it('renders recovery with exactly one reload action', async () => {
+    document.body.innerHTML = '<div id="root">Loading</div>';
+    const boot = await freshBoot();
+
+    boot.renderBootstrapFailure('handoff-recovery');
+
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert).toHaveTextContent('Finish signing in');
+    expect(alert).toHaveTextContent('cannot confirm it safely');
+    expect(alert?.querySelectorAll('button')).toHaveLength(1);
+    expect(alert?.querySelector('button')).toHaveTextContent('Reload');
+  });
+
+  it('keeps ordinary chunk failure free of a misleading handoff action', async () => {
+    document.body.innerHTML = '<div id="root">Loading</div>';
+    const boot = await freshBoot();
+
+    boot.renderBootstrapFailure('app-load');
+
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert).toHaveTextContent("This didn't load");
+    expect(alert?.querySelector('button')).toBeNull();
   });
 });

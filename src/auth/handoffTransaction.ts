@@ -282,9 +282,10 @@ export function forgetHandoffTransaction(): void {
  *
  * The localStorage half is shared by same-origin tabs. A return that kept an
  * older record in memory must not erase a replacement transaction another tab
- * has written since then. The Web Lock used by the return coordinator makes
- * each compare/delete indivisible relative to other participating returns;
- * this semantic comparison supplies the ownership check inside that boundary.
+ * has written since then. Storage writes on the start leg do not participate in
+ * the return coordinator's Web Lock, so this is intentionally a semantic,
+ * best-effort compare-delete under the documented latest-fallback-only model;
+ * it does not claim a cross-tab transaction with a concurrent start-leg write.
  */
 export function forgetHandoffTransactionIf(expected: HandoffTransactionRecord): boolean {
   let removed = false;

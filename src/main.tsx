@@ -23,8 +23,7 @@ import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
 import { HANDOFF_AUTH_PATH } from './auth/handoffClient';
-import { isUrlSafeForTelemetry, pendingHandoffCode } from './handoffBoot';
-import { completeAuthHandoff } from './auth/handoffExchange';
+import { isUrlSafeForTelemetry } from './handoffBoot';
 import AuthHandoffOrigin from './auth/AuthHandoffOrigin';
 import './theme/themes.css';
 import './index.css';
@@ -206,23 +205,9 @@ const appTree = (
   </React.StrictMode>
 );
 
-/**
- * The handoff code, captured by `entry.tsx` BEFORE this module graph loaded
- * (#549, Phase 4b P1).
- *
- * It is READ here rather than captured here, because capturing here is provably
- * too late: this module's static imports — `firebase.ts` among them, which
- * initialises GA4 — are fully evaluated before any statement below runs, so an
- * analytics SDK would already be live on a URL still carrying
- * `#fa_handoff=<code>`. Line order inside this file could never have fixed
- * that. `src/entry.tsx` closes the window by capturing with nothing else
- * loaded and reaching this file through a dynamic import.
- *
- * `urlSafeForTelemetry` is `false` only when the fragment could not actually be
- * removed, in which case analytics are suppressed for this one page load rather
- * than allowed to read a live credential out of the address bar.
- */
-const handoffCode = pendingHandoffCode();
+// `entry.tsx` captured and completed any return before this graph was imported.
+// This remaining bit only carries forward whether an uncleared fragment makes
+// the URL unsafe for telemetry on this one load.
 const urlSafeForTelemetry = isUrlSafeForTelemetry();
 
 /**
@@ -350,19 +335,6 @@ if (atCentralAuthOrigin) {
         return;
       }
 
-      // The handoff RETURN leg (#549). The player is back on the origin they
-      // started from, carrying an opaque code in the fragment. This runs before
-      // the app mounts so the session exists by the time `onAuthStateChanged`
-      // first settles — completing it inside the tree instead would render the
-      // signed-out SignIn screen and then flip it out from under the player.
-      //
-      // The code was read and the fragment cleared at module scope above, before
-      // analytics could observe either (#898). Failure is recorded, never
-      // retried: the code is single-use and is spent by the time anything here
-      // can fail, so a retry could only fail again.
-      if (resolution.kind === 'event' && handoffCode !== null) {
-        await completeAuthHandoff({ code: handoffCode, origin: window.location.origin });
-      }
       if (resolution.kind === 'not-found') phSetAuthState(null);
       root.render(
         resolution.kind === 'not-found' ? (
