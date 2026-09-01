@@ -58,6 +58,11 @@ if (!isSyntheticProbe()) installFirestorePoisonRecovery();
 export const storage = getStorage(app);
 export const functions = getFunctions(app, 'us-central1');
 
+/** The one production/e2e boundary shared by every Firebase service instance. */
+export function firebaseEmulatorsEnabled(): boolean {
+  return import.meta.env.MODE === 'e2e' && import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-');
+}
+
 // Local Emulator Suite wiring for the Playwright e2e layer
 // (specs/x-e2e-happy-path.md). The suite serves a `vite build --mode e2e` +
 // `vite preview` of the app rather than `vite dev`, because the ADR 0006
@@ -73,7 +78,7 @@ export const functions = getFunctions(app, 'us-central1');
 // project-id check is belt-and-suspenders (the same emulator-only convention
 // tests/offline and tests/rules use). Ports mirror firebase.json's `emulators`
 // block (auth 9099, firestore 8080, storage 9199) and tests/e2e/support/env.ts.
-if (import.meta.env.MODE === 'e2e' && import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-')) {
+if (firebaseEmulatorsEnabled()) {
   connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
   connectStorageEmulator(storage, '127.0.0.1', 9199);

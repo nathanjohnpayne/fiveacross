@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   signInWithCustomToken: vi.fn(),
   updateCurrentUser: vi.fn(),
   attestAdult: vi.fn(),
+  firebaseEmulatorsEnabled: vi.fn(),
   primaryApp: { options: { apiKey: 'test-api-key', projectId: 'test-project' } },
   primaryAuth: {
     authStateReady: vi.fn(),
@@ -39,7 +40,12 @@ vi.mock('firebase/auth', () => ({
   signInWithCustomToken: mocks.signInWithCustomToken,
   updateCurrentUser: mocks.updateCurrentUser,
 }));
-vi.mock('../firebase', () => ({ app: mocks.primaryApp, auth: mocks.primaryAuth, functions: {} }));
+vi.mock('../firebase', () => ({
+  app: mocks.primaryApp,
+  auth: mocks.primaryAuth,
+  functions: {},
+  firebaseEmulatorsEnabled: mocks.firebaseEmulatorsEnabled,
+}));
 vi.mock('../data/api', () => ({ attestAdult: mocks.attestAdult }));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
@@ -119,6 +125,7 @@ beforeEach(() => {
     if (targetAuth === mocks.primaryAuth) mocks.persistedSession.user = user;
   });
   mocks.attestAdult.mockReset().mockResolvedValue(undefined);
+  mocks.firebaseEmulatorsEnabled.mockReset().mockReturnValue(false);
   mocks.primaryAuth.authStateReady.mockReset().mockResolvedValue(undefined);
   mocks.primaryAuth.currentUser = null;
   mocks.primaryAuth.emulatorConfig = null;
@@ -128,6 +135,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -214,8 +223,7 @@ describe('completeAuthHandoff', () => {
       port: 9099,
       options: { disableWarnings: true },
     };
-    vi.stubEnv('MODE', 'e2e');
-    vi.stubEnv('VITE_FIREBASE_PROJECT_ID', 'demo-test');
+    mocks.firebaseEmulatorsEnabled.mockReturnValue(true);
     mocks.primaryAuth.tenantId = 'tenant-1';
     mocks.primaryAuth.emulatorConfig = emulator;
     armTransaction();
@@ -295,13 +303,17 @@ describe('completeAuthHandoff', () => {
   });
 
   it('keeps the successful session when the attestation write rejects', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
     armTransaction({ acknowledgedAdultContent: true });
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
     mocks.attestAdult.mockRejectedValue(new Error('offline'));
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
     expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
     expect(consumeHandoffFailure()).toBeNull();
+    expect(debug).toHaveBeenCalledWith('[auth-handoff] adult attestation did not settle');
   });
 
   // "Delete it the moment the exchange completes or fails" — success included.
@@ -359,6 +371,44 @@ describe('completeAuthHandoff', () => {
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
     expect(mocks.persistedSession.user).toBeNull();
     expect(mocks.deleteApp).toHaveBeenCalledOnce();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
+  it('reports success when primary persistence rejects after installing this exact session in memory', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const returnedUser = { uid: 'u1', refreshToken: 'handoff-refresh-token' };
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockResolvedValue({ user: returnedUser });
+    mocks.updateCurrentUser.mockImplementation(async (targetAuth: unknown, user: unknown) => {
+      // Firebase Auth assigns currentUser before awaiting persistence. A failed
+      // IndexedDB write therefore rejects after the in-memory session exists.
+      (targetAuth as { currentUser: unknown }).currentUser = { ...(user as object) };
+      throw new Error('primary persistence failed');
+    });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.primaryAuth.currentUser).toEqual(returnedUser);
+    expect(mocks.persistedSession.user).toBeNull();
+    expect(consumeHandoffFailure()).toBeNull();
+    expect(debug).toHaveBeenCalledWith(
+      '[auth-handoff] primary persistence rejected after the session entered memory',
+    );
+  });
+
+  it('does not mistake a different same-uid session for this handoff after commit rejection', async () => {
+    const returnedUser = { uid: 'same-user', refreshToken: 'handoff-refresh-token' };
+    const newerUser = { uid: 'same-user', refreshToken: 'newer-refresh-token' };
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockResolvedValue({ user: returnedUser });
+    mocks.updateCurrentUser.mockImplementation(async (targetAuth: unknown) => {
+      (targetAuth as { currentUser: unknown }).currentUser = newerUser;
+      throw new Error('primary persistence failed');
+    });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
+    expect(mocks.primaryAuth.currentUser).toBe(newerUser);
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
   });
 
@@ -423,19 +473,119 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
   });
 
+  it('shares one pre-commit deadline across Auth readiness, exchange, and isolated sign-in', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    armTransaction();
+    mocks.primaryAuth.authStateReady.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 4)),
+    );
+    callables({
+      exchangeAuthHandoff: () =>
+        new Promise((resolve) => setTimeout(() => resolve({ data: { customToken: 'ct-1' } }), 4)),
+    });
+    mocks.signInWithCustomToken.mockImplementation(
+      (targetAuth: unknown) =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve(firebaseSignInResult(targetAuth, { uid: 'u1' })), 4),
+        ),
+    );
+
+    const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 });
+    await vi.advanceTimersByTimeAsync(12);
+
+    expect(await completion).toBe(false);
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
+  it('does not start the exchange after Auth readiness consumes the whole deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    armTransaction();
+    mocks.primaryAuth.authStateReady.mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 10)),
+    );
+    const exchange = vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } });
+    callables({ exchangeAuthHandoff: exchange });
+
+    const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(await completion).toBe(false);
+    expect(exchange).not.toHaveBeenCalled();
+    expect(mocks.signInWithCustomToken).not.toHaveBeenCalled();
+  });
+
   it(
     'does not strand the authenticated app when the attestation write never settles',
     async () => {
+      let finishAttestation: () => void = () => {
+        throw new Error('attestation has not started');
+      };
       armTransaction(true);
       callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
-      mocks.attestAdult.mockImplementation(() => new Promise(() => {}));
+      mocks.attestAdult.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishAttestation = resolve;
+          }),
+      );
 
-      expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(true);
+      const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 100 });
+      const result = await Promise.race([
+        completion.then((value) => ({ kind: 'result' as const, value })),
+        new Promise<{ kind: 'late' }>((resolve) => setTimeout(() => resolve({ kind: 'late' }), 30)),
+      ]);
+
+      expect(result).toEqual({ kind: 'result', value: true });
       expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
       expect(consumeHandoffFailure()).toBeNull();
+      finishAttestation();
+      await Promise.resolve();
     },
     150,
   );
+
+  it('does not let isolated-app cleanup hold the app mount forever', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.deleteApp.mockImplementation(() => new Promise(() => {}));
+
+    const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 100 });
+    const result = await Promise.race([
+      completion.then((value) => ({ kind: 'result' as const, value })),
+      new Promise<{ kind: 'late' }>((resolve) => setTimeout(() => resolve({ kind: 'late' }), 30)),
+    ]);
+
+    expect(result).toEqual({ kind: 'result', value: true });
+  });
+
+  it('logs isolated-app cleanup failure with fixed text without changing success', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.deleteApp.mockRejectedValue(new Error('secret cleanup detail'));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    await Promise.resolve();
+
+    expect(debug).toHaveBeenCalledWith('[auth-handoff] isolated Auth cleanup failed');
+    expect(debug.mock.calls.flat().join(' ')).not.toContain('secret cleanup detail');
+  });
+
+  it('keeps authentication successful when fixed-text diagnostics throw', async () => {
+    vi.spyOn(console, 'debug').mockImplementation(() => {
+      throw new Error('broken console');
+    });
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.deleteApp.mockRejectedValue(new Error('cleanup failed'));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    await Promise.resolve();
+    expect(consumeHandoffFailure()).toBeNull();
+  });
 
   it('leaves room for a slow phone on bad wifi rather than a snappy default', () => {
     expect(HANDOFF_EXCHANGE_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
