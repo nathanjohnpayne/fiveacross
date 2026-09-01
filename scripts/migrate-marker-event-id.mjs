@@ -295,13 +295,16 @@ export function assertReviewedMainCheckout({
     "bash",
     [
       "-c",
-      'source "$1"; cd "$2"; guard_deploy_main_checkout "$3" false',
+      'source "$1"; guard_deploy_main_checkout "$2" false',
       "bash",
       guardPath,
-      cwd,
       commandName,
     ],
-    { encoding: "utf8", env: { ...environment, DEPLOY_ALLOW_DIRTY: "0" } },
+    {
+      cwd,
+      encoding: "utf8",
+      env: { ...environment, DEPLOY_ALLOW_DIRTY: "0" },
+    },
   );
   if (result.status === 0) return;
   const detail =

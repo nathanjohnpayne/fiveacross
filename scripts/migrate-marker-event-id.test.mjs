@@ -362,9 +362,17 @@ describe("marker Event-id migration guards", () => {
   it("uses the exact-main deploy guard and reports its refusal", () => {
     const runGuard = vi.fn(() => ({ status: 1, stderr: "wrong branch\n" }));
     expect(() =>
-      assertReviewedMainCheckout({ runGuard, target: "fiveacross" }),
+      assertReviewedMainCheckout({
+        cwd: "/tmp/reviewed checkout",
+        runGuard,
+        target: "fiveacross",
+      }),
     ).toThrow(/clean main checkout at exact origin\/main/);
     expect(runGuard).toHaveBeenCalledOnce();
+    expect(runGuard.mock.calls[0][1]).not.toContain("/tmp/reviewed checkout");
+    expect(runGuard.mock.calls[0][2]).toMatchObject({
+      cwd: "/tmp/reviewed checkout",
+    });
   });
 });
 
