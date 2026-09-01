@@ -33,7 +33,7 @@ So the whole of #681 is: change `shareMark`, re-render Vacay. The whole of #688'
 
 `src/recon-share-og.test.ts` enforces this — it strips comments from the renderer and fails if any brand-table-owned string was retyped into the code.
 
-**The domain line is the one deliberate exception.** It defaults to the `ogUrl` hostname, which for `gcb` and `fiveacross` *is* the brand's apex. Vacay's `ogUrl` is Event-scoped (`bodega-bay.vacaybingo.com`) until the #546 Worker rewrites it per hostname, and an unfurl is a brand impression, so that row overrides the domain to `vacaybingo.com` in the renderer with a comment saying why.
+**The domain line is the one deliberate exception.** It defaults to the `ogUrl` hostname, which for `gcb` and `fiveacross` *is* the brand's apex. Vacay's `ogUrl` is Event-scoped (`bodega-bay.fiveacross.app`) until the #546 Worker rewrites it per hostname, and an unfurl is a brand impression, so that row overrides the domain to `vacaybingo.com` in the renderer with a comment saying why.
 
 Art direction shared by the generated cards and the annotated wireframes — eyebrow treatment, board pattern, prompt-rule variation, cell radius, free-square ink, board shadow, and marked-cell glow — lives in `scripts/og/og-edition-art.mjs`. Render-only composition such as full palettes, lockup geometry, and the Vacay passport frame stays in the `ART` table in `scripts/og/render-og-editions.mjs`. Neither belongs in the brand table because the app has no runtime consumer for it.
 

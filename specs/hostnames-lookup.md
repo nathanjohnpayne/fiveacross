@@ -72,6 +72,20 @@ GOOGLE_CLOUD_PROJECT=fiveacross npm run provision:bodega-preview -- --apply
 
 The command refuses any project other than `fiveacross`; no default Firebase target is trusted. It is idempotent when all three documents already carry the exact preview. `src/test/bodega-preview-provision.test.ts` proves its all-host plan and fail-closed validation.
 
+## Bodega canonical-host migration
+
+The reviewed #960 migration retires the domain migration's temporary dual-canonical state when its explicit apply step and readback succeed. The required steady state has `bodega-bay.fiveacross.app` as the one Bodega document with `isCanonical: true`; both `bodega-bay.vacaybingo.com` and `fiveacross.app` name it in `canonicalHost` and carry `isCanonical: false`. This matters beyond redirects: clients install `canonicalHost` as their analytics origin, and server-side email origin selection prefers the row marked canonical.
+
+`scripts/migrate-bodega-canonical-host.mjs` is the audited production correction. It is hard-pinned to project `fiveacross`, Event `bodega-bay-2026`, and the fixed three-host inventory. Dry-run is the default. Before an explicit `--apply`, it validates that every document exists, is active, still targets Bodega, and that the canonical/apex metadata has not drifted. It accepts only the exact historical or converged pair on the legacy document, then transactionally changes only `canonicalHost` and `isCanonical`; partial or unfamiliar state fails closed. A post-commit readback must reproduce the converged plan. Apply also requires the credential file selected by the Five Across deploy preflight: it must be the same path in `GOOGLE_APPLICATION_CREDENTIALS` and the preflight marker, and it must parse as the `fiveacross` service account `firebase-deployer@fiveacross.iam.gserviceaccount.com`. Validation happens before Firestore initialisation, and the shared initializer is told to ignore any repo-root `serviceAccountKey.json`, so neither a local key nor ambient ADC can replace the reviewed apply credential.
+
+```bash
+eval "$(OP_PREFLIGHT_FIREBASE_PROJECT_ID=fiveacross scripts/op-preflight.sh --agent codex --mode deploy)"
+npm run migrate:bodega-canonical-host
+npm run migrate:bodega-canonical-host -- --apply
+```
+
+Merge the reviewed migration code before applying it. Keep the script afterward as the audit trail and idempotent verifier; do not replace it with an unrecorded console edit.
+
 **An unknown host is a missing document, not a denial.** `get` succeeds against a non-existent path and returns `exists() == false`, so a client renders an Event-not-found state instead of a permission error it would otherwise have to distinguish from a network failure.
 
 ## Acceptance criteria

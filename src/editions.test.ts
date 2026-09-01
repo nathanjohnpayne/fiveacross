@@ -219,9 +219,9 @@ describe('editions — the share block (#587, artwork #609)', () => {
   it('keeps every og:url on HTTPS with no other Edition’s hostname', () => {
     // og:url is the canonical identity a crawler files the link under. The
     // vacay row carries its Event canonical host (bodega-bay) rather than the
-    // dead vacaybingo.com apex — per-Event truth carried per-Edition until the
-    // #546 Worker rewrites it per hostname (see the EditionBrand.ogUrl note).
-    expect(editionBrand('vacay').ogUrl).toBe('https://bodega-bay.vacaybingo.com/');
+    // legacy serving alias or dead vacaybingo.com apex — per-Event truth stays
+    // here until the #546 Worker rewrites it per hostname.
+    expect(editionBrand('vacay').ogUrl).toBe('https://bodega-bay.fiveacross.app/');
     expect(editionBrand('fiveacross').ogUrl).toBe('https://fiveacross.app/');
     for (const edition of ['vacay', 'fiveacross']) {
       const brand = editionBrand(edition);
