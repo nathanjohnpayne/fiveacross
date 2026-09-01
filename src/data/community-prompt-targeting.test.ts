@@ -671,9 +671,10 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       targetDayIndex: 2,
     });
 
-    await setItemSpicy('p1', true);
+    const revision = await setItemSpicy('p1', true);
 
     expect(updateMock).not.toHaveBeenCalled();
+    expect(revision).toBeNull();
   });
 
   it('still lets the queue correct a pending exploratory Prompt', async () => {
@@ -684,10 +685,29 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       targetDayIndex: 2,
     });
 
-    await setItemSpicy('p1', true);
+    const revision = await setItemSpicy('p1', true);
 
     expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
       spicy: true,
+      spicyRevision: 1,
     });
+    expect(revision).toBe(1);
+  });
+
+  it('increments the authoritative correction revision in the same transaction', async () => {
+    putItem('p1', {
+      status: 'pending',
+      pool: 'main',
+      spicy: true,
+      spicyRevision: 7,
+    });
+
+    const revision = await setItemSpicy('p1', false);
+
+    expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+      spicy: false,
+      spicyRevision: 8,
+    });
+    expect(revision).toBe(8);
   });
 });

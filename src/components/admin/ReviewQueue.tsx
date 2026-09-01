@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
 import {
   confirmClaim,
@@ -240,7 +240,7 @@ function ApprovalQueueRow({
    * approval so status, routing, and pool land in one transaction. */
   difficulty: 'main' | 'easy';
   adminUid: string;
-  onToggleSpicy: (id: string, spicy: boolean, previousSpicy: boolean) => Promise<void>;
+  onToggleSpicy: (id: string, spicy: boolean) => Promise<void>;
   onDifficultyChange: (id: string, difficulty: 'main' | 'easy') => void;
   /** Routed through the queue's flip confirm (#610) rather than calling
    *  `approveItem` directly: approving the FIRST explicit Prompt is what turns
@@ -252,7 +252,7 @@ function ApprovalQueueRow({
     if (spicyWriteState === 'busy') return;
     setSpicyWriteState('busy');
     try {
-      await onToggleSpicy(it.id, nextSpicy, spicy);
+      await onToggleSpicy(it.id, nextSpicy);
       setSpicyWriteState('idle');
     } catch {
       setSpicyWriteState('error');
@@ -363,24 +363,91 @@ export default function ReviewQueue({
   // the approval a stale value. This overlay records the exact latest choice.
   // Approval writes that value in its own transaction, so both tick and un-tick
   // are safe to trust here even when the separate correction loses the race.
-  const [optimisticSpicy, setOptimisticSpicy] = useState<Record<string, boolean>>({});
+  const [optimisticSpicy, setOptimisticSpicy] = useState<
+    Record<string, { value: boolean; requestId: number; committedRevision?: number }>
+  >({});
+  const spicyRequestSequence = useRef(0);
+  const pendingItemsRef = useRef(pendingItems);
+  pendingItemsRef.current = pendingItems;
   const [approvalDifficulties, setApprovalDifficulties] = useState<
     Record<string, 'main' | 'easy'>
   >({});
+  useEffect(() => {
+    // The overlay bridges the write→snapshot gap; it must not become a second
+    // source of truth. Retire it once the listener reaches THIS transaction's
+    // committed revision (or anything newer), regardless of value. That handles
+    // both delivery orders: our echo after Promise settlement, and our echo
+    // before settlement followed by another Admin's later correction.
+    const authoritativeItems = new Map(pendingItems.map((it) => [it.id, it] as const));
+    setOptimisticSpicy((prev) => {
+      let next = prev;
+      for (const [id, overlay] of Object.entries(prev)) {
+        const authoritative = authoritativeItems.get(id);
+        const authoritativeRevision =
+          authoritative &&
+          typeof authoritative.spicyRevision === 'number' &&
+          Number.isSafeInteger(authoritative.spicyRevision) &&
+          authoritative.spicyRevision >= 0
+            ? authoritative.spicyRevision
+            : 0;
+        if (
+          !authoritative ||
+          (overlay.committedRevision !== undefined &&
+            authoritativeRevision >= overlay.committedRevision)
+        ) {
+          if (next === prev) next = { ...prev };
+          delete next[id];
+        }
+      }
+      return next;
+    });
+  }, [pendingItems]);
   const difficultyFor = (it: ItemDoc): 'main' | 'easy' =>
     approvalDifficulties[it.id] ?? (normalizePool(it.pool) === 'easy' ? 'easy' : 'main');
   const selectedSpicyFor = (it: ItemDoc): boolean =>
-    Object.hasOwn(optimisticSpicy, it.id) ? optimisticSpicy[it.id] : it.spicy === true;
+    Object.hasOwn(optimisticSpicy, it.id) ? optimisticSpicy[it.id].value : it.spicy === true;
   const isSpicy = (it: ItemDoc) => difficultyFor(it) === 'main' && selectedSpicyFor(it);
-  const toggleSpicy = async (id: string, spicy: boolean, previousSpicy: boolean) => {
-    setOptimisticSpicy((prev) => ({ ...prev, [id]: spicy }));
+  const toggleSpicy = async (id: string, spicy: boolean) => {
+    const requestId = ++spicyRequestSequence.current;
+    setOptimisticSpicy((prev) => ({
+      ...prev,
+      [id]: { value: spicy, requestId },
+    }));
     try {
-      await setItemSpicy(id, spicy);
+      const committedRevision = await setItemSpicy(id, spicy);
+      setOptimisticSpicy((prev) => {
+        const current = prev[id];
+        if (current?.requestId !== requestId) return prev;
+        const authoritative = pendingItemsRef.current.find((it) => it.id === id);
+        const authoritativeRevision =
+          authoritative &&
+          typeof authoritative.spicyRevision === 'number' &&
+          Number.isSafeInteger(authoritative.spicyRevision) &&
+          authoritative.spicyRevision >= 0
+            ? authoritative.spicyRevision
+            : 0;
+        if (
+          !authoritative ||
+          typeof committedRevision !== 'number' ||
+          authoritativeRevision >= committedRevision
+        ) {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        }
+        return { ...prev, [id]: { ...current, committedRevision } };
+      });
     } catch (error) {
       // The moderation write did not commit. Reconcile the optimistic overlay
       // immediately so the checkbox cannot continue claiming the correction was
-      // saved, then rethrow for the row's inline retry affordance to catch.
-      setOptimisticSpicy((prev) => ({ ...prev, [id]: previousSpicy }));
+      // saved. Reveal the authoritative row rather than pinning a copy of its
+      // old value, which could mask another Admin's correction after this error.
+      setOptimisticSpicy((prev) => {
+        if (prev[id]?.requestId !== requestId) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       throw error;
     }
   };

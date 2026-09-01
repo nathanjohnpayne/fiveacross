@@ -100,6 +100,40 @@ describe("Community Prompt pool/spicy resulting-state invariant (#558)", () => {
     );
   });
 
+  it("allows the Admin correction transaction to advance its spicy revision atomically", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), itemPath("pending-revision")), {
+        ...activePayload("main", false),
+        status: "pending",
+      });
+    });
+
+    await assertSucceeds(
+      updateDoc(doc(db(), itemPath("pending-revision")), {
+        spicy: true,
+        spicyRevision: 1,
+      }),
+    );
+  });
+
+  it("denies a submitter-provided spicy revision on pending create", async () => {
+    const pending = {
+      ...activePayload("main", false),
+      createdBy: PLAYER,
+      status: "pending",
+    };
+
+    await assertSucceeds(
+      setDoc(doc(db(PLAYER), itemPath("pending-normal")), pending),
+    );
+    await assertFails(
+      setDoc(doc(db(PLAYER), itemPath("pending-poisoned")), {
+        ...pending,
+        spicyRevision: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+  });
+
   it("treats an absent legacy pool as main when correcting a pending spicy flag", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const { pool: _pool, ...legacy } = {

@@ -113,6 +113,7 @@ spec_test_map:
     - src/game/community-squares-quota.test.ts
     - src/data/community-prompt-targeting.test.ts
     - src/components/Admin.test.tsx
+    - src/components/admin-async-feedback.test.tsx
     - src/data/reshuffle.test.ts
     - tests/rules/community-squares-quota.test.ts
   # admin-messages (Notices, #439) spans a rules block, the mergeFeed unit,

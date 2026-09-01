@@ -81,10 +81,16 @@ service cloud.firestore {
     // was retained and dealt nowhere (Phase 4b P1, PR #812). `approveItems` also
     // clears the field whenever it places a Prompt, so the two ends agree: only a
     // retention stamps it, and anything else unstamps it.
+    //
+    // `spicyRevision` is likewise Admin-authored. The Approvals queue treats it
+    // as a monotonic acknowledgement fence for transactional spicy corrections;
+    // letting a submitter pre-seed an arbitrary or exhausted value could make the
+    // first legitimate correction acknowledge against attacker-chosen ordering.
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'
         && request.resource.data.pool == 'main'
-        && !('retainedAt' in request.resource.data);
+        && !('retainedAt' in request.resource.data)
+        && !('spicyRevision' in request.resource.data);
     }
     function adminActiveItemCreate(eventId) {
       return isAdmin(eventId)

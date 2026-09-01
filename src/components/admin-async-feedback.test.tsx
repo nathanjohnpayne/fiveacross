@@ -188,7 +188,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
       .mockImplementationOnce(
         () => new Promise<void>((_resolve, reject) => (rejectWrite = reject)),
       )
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce(1);
     renderAdmin('/more/admin/queue');
 
     const row = screen.getByText('Fragile classification').closest('.row') as HTMLElement;
@@ -212,9 +212,203 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     expect(H.setItemSpicy).toHaveBeenNthCalledWith(2, 'i1', true);
   });
 
+  it('retires a successful spicy overlay after its snapshot echo so a later Admin correction wins', async () => {
+    H.pendingItems = [item('i1', { text: 'Shared classification', status: 'pending' })];
+    H.setItemSpicy.mockResolvedValueOnce(1);
+    const view = renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Shared classification').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    await waitFor(() => expect(H.setItemSpicy).toHaveBeenCalledWith('i1', true));
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    H.pendingItems = [
+      item('i1', {
+        text: 'Shared classification',
+        status: 'pending',
+        spicy: true,
+        spicyRevision: 1,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(within(row).getByRole('checkbox')).toBeChecked());
+
+    H.pendingItems = [
+      item('i1', {
+        text: 'Shared classification',
+        status: 'pending',
+        spicy: false,
+        spicyRevision: 2,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(within(row).getByRole('checkbox')).not.toBeChecked());
+  });
+
+  it('does not mistake another Admin matching the pending choice for this write’s snapshot echo', async () => {
+    H.pendingItems = [item('i1', { text: 'Contended classification', status: 'pending' })];
+    let settleWrite!: () => void;
+    H.setItemSpicy.mockImplementationOnce(
+      () => new Promise<number>((resolve) => (settleWrite = () => resolve(3))),
+    );
+    const view = renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Contended classification').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    // Another Admin briefly writes the same value, then changes it back while
+    // this tab's transaction is still pending. Neither snapshot acknowledges
+    // this tab's write, so its exact approval choice must remain overlaid.
+    H.pendingItems = [
+      item('i1', {
+        text: 'Contended classification',
+        status: 'pending',
+        spicy: true,
+        spicyRevision: 1,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    H.pendingItems = [
+      item('i1', {
+        text: 'Contended classification',
+        status: 'pending',
+        spicy: false,
+        spicyRevision: 2,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    await act(async () => {
+      settleWrite();
+      await Promise.resolve();
+    });
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    // Now this write's authoritative echo can retire the overlay; a correction
+    // that follows it must be visible rather than masked by stale local state.
+    H.pendingItems = [
+      item('i1', {
+        text: 'Contended classification',
+        status: 'pending',
+        spicy: true,
+        spicyRevision: 3,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    H.pendingItems = [
+      item('i1', {
+        text: 'Contended classification',
+        status: 'pending',
+        spicy: false,
+        spicyRevision: 4,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(within(row).getByRole('checkbox')).not.toBeChecked());
+  });
+
+  it('retires against a newer revision when the local echo preceded write settlement', async () => {
+    H.pendingItems = [item('i1', { text: 'Overtaken classification', status: 'pending' })];
+    let settleWrite!: () => void;
+    H.setItemSpicy.mockImplementationOnce(
+      () => new Promise<number>((resolve) => (settleWrite = () => resolve(1))),
+    );
+    const view = renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Overtaken classification').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    // This request's true echo arrives first. Before its transaction Promise
+    // settles, an Admin on the previous bundle writes false without advancing
+    // the revision. No further snapshot is required: equality is at-or-after
+    // this write, so settlement at revision 1 must reveal the newer false row.
+    H.pendingItems = [
+      item('i1', {
+        text: 'Overtaken classification',
+        status: 'pending',
+        spicy: true,
+        spicyRevision: 1,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    H.pendingItems = [
+      item('i1', {
+        text: 'Overtaken classification',
+        status: 'pending',
+        spicy: false,
+        spicyRevision: 1,
+      }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    expect(within(row).getByRole('checkbox')).toBeChecked();
+
+    await act(async () => {
+      settleWrite();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(within(row).getByRole('checkbox')).not.toBeChecked());
+  });
+
+  it('drops a rejected spicy overlay so the next authoritative snapshot is visible', async () => {
+    H.pendingItems = [item('i1', { text: 'Remote correction', status: 'pending' })];
+    H.setItemSpicy.mockRejectedValueOnce(new Error('offline'));
+    const view = renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Remote correction').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+    expect(within(row).getByRole('checkbox')).not.toBeChecked();
+
+    H.pendingItems = [
+      item('i1', { text: 'Remote correction', status: 'pending', spicy: true }),
+    ];
+    view.rerender(
+      <MemoryRouter initialEntries={['/more/admin/queue']}>
+        <Admin />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(within(row).getByRole('checkbox')).toBeChecked());
+  });
+
   it('clears a failed spicy correction when the row changes to Easy, then allows a fresh retry', async () => {
     H.pendingItems = [item('i1', { text: 'Reclassified prompt', status: 'pending' })];
-    H.setItemSpicy.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+    H.setItemSpicy.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(1);
     renderAdmin('/more/admin/queue');
 
     const row = screen.getByText('Reclassified prompt').closest('.row') as HTMLElement;

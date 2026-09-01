@@ -330,14 +330,34 @@ export const rejectItem = (id: string, adminUid: string) =>
 // invalid `embark + spicy:true` state that adult-content gating does not inspect.
 // Firestore retries this transaction when approval wins; the authoritative row
 // then reads active/easy and the stale toggle becomes a no-op.
-export async function setItemSpicy(id: string, spicy: boolean): Promise<void> {
-  await runTransaction(db, async (tx) => {
+//
+// The returned revision is the committed transaction's acknowledgement fence.
+// A query listener can echo this write before runTransaction's Promise settles,
+// and another Admin can then correct it again before settlement. Comparing the
+// listener's monotonic revision with this return value distinguishes that newer
+// correction from a stale pre-commit snapshot without treating value equality
+// as authorship. Legacy rows have no revision and therefore start at 0. `null`
+// means the authoritative row was missing or no longer eligible, so no write
+// occurred and the caller must drop any optimistic overlay.
+export async function setItemSpicy(id: string, spicy: boolean): Promise<number | null> {
+  return runTransaction(db, async (tx) => {
     const ref = item(id);
     const snap = await tx.get(ref);
-    if (!snap.exists()) return;
+    if (!snap.exists()) return null;
     const row = snap.data() as Partial<ItemDoc>;
-    if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return;
-    tx.update(ref, { spicy });
+    if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
+    const previousRevision =
+      typeof row.spicyRevision === 'number' &&
+      Number.isSafeInteger(row.spicyRevision) &&
+      row.spicyRevision >= 0
+        ? row.spicyRevision
+        : 0;
+    if (previousRevision === Number.MAX_SAFE_INTEGER) {
+      throw new Error('Prompt spicy revision exhausted');
+    }
+    const revision = previousRevision + 1;
+    tx.update(ref, { spicy, spicyRevision: revision });
+    return revision;
   });
 }
 
