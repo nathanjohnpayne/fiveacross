@@ -2584,13 +2584,23 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await assertSucceeds(createProof(PROOF));
   });
 
-  it('pins the Proof create arm’s access budget: 6 distinct-Event creates pass and 7 deny', async () => {
+  it('pins the Proof create arm’s access budget: 10 distinct-Event creates pass and 11 deny', async () => {
     // The measurement the added `exists()` has to answer for. Firestore allows
-    // 20 document access calls per multi-document request, and the create arm
-    // now spends THREE per Event: `eventOpenForPlay` is `exists()` + `get()` on
-    // the Event document, and the revocation check is one more `exists()`. Six
-    // distinct Events therefore cost 18 and pass; seven cost 21 and deny — which
-    // is what fixes the per-arm cost at three rather than leaving it inferred.
+    // 20 document access calls per multi-document request. The arm spent THREE
+    // per Event when its leading predicate was a bare `signedIn()`:
+    // `eventOpenForPlay` was `exists()` + `get()` on the Event document, and the
+    // revocation check one more `exists()` — six distinct Events cost 18 and
+    // passed, seven cost 21 and denied.
+    //
+    // #804 made the leading predicate `admitted(eventId)`, which reads the SAME
+    // Event document with a `get()` — and that reordering made the arm CHEAPER,
+    // not dearer. A `get()` populates the per-request cache that the following
+    // `exists()` on the same path is then served from, while an `exists()` does
+    // not populate the one a following `get()` needs. So the Event document now
+    // costs ONE access instead of two and the arm spends TWO per Event: ten
+    // distinct Events cost 20 and pass, eleven cost 22 and deny. The number
+    // moved because the admission read absorbed an access the freeze check was
+    // already paying for — no arm gained one.
     //
     // Distinct EVENTS, because the rules engine caches an access per document:
     // repeating the same Event would measure the cache, not the arm. A real
@@ -2598,8 +2608,8 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     // real neighbour is the `attachProof` transaction pinned below.
     const events = (n: number, prefix: string) =>
       Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
-    const pass = events(6, 'budget-pass');
-    const deny = events(7, 'budget-deny');
+    const pass = events(10, 'budget-pass');
+    const deny = events(11, 'budget-deny');
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const fs = ctx.firestore();
       for (const eventId of [...pass, ...deny]) {
