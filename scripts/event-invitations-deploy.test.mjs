@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { dirname, resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filters.mjs";
 
@@ -13,22 +15,63 @@ async function classify(args) {
 }
 
 describe("event-invitation deploy scope", () => {
+  it("does not claim services that the real Functions index does not export", async () => {
+    const source = await readFile(
+      resolve(repoRoot, "functions", "src", "index.ts"),
+      "utf8",
+    );
+
+    expect(source).not.toMatch(
+      /export\s+const\s+(?:mintEventInvitation|redeemEventInvitation|revokeEventInvitation)\b/,
+    );
+  });
+
   it.each([
     { args: [] },
     { args: ["--only", "functions"] },
     { args: ["--only", "functions:default"] },
   ])(
-    "keeps all three services strict for a full Functions release ($args)",
+    "skips unexported services for a full Functions release ($args)",
     async ({ args }) => {
       const result = await classify(args);
 
+      expect(result).toMatchObject({
+        eventInvitationsInvokerSelected: false,
+        eventInvitationsInvokerConservative: false,
+        eventInvitationsStrictServices: "",
+      });
+    },
+  );
+
+  it("keeps every actually exported service strict for a full Functions release", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "event-invitation-exports-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions" } }),
+      );
+      await writeFile(
+        resolve(fixture, "functions", "src", "index.ts"),
+        [
+          "export const mintEventInvitation = 1;",
+          "export const redeemEventInvitation = 2;",
+          "export const revokeEventInvitation = 3;",
+        ].join("\n"),
+      );
+
+      const result = await classifyFirebaseDeployRequest(["fiveacross"], {
+        defaultConfigPath: resolve(fixture, "firebase.json"),
+      });
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
         eventInvitationsInvokerConservative: false,
         eventInvitationsStrictServices: "mint,redeem,revoke",
       });
-    },
-  );
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
 
   it.each([
     ["functions:mintEventInvitation", "mint"],
@@ -96,9 +139,9 @@ describe("event-invitation deploy scope", () => {
       "functions:mintEventInvitation",
     ]);
     expect(endpointQualifiedNoop).toMatchObject({
-      eventInvitationsInvokerSelected: true,
+      eventInvitationsInvokerSelected: false,
       eventInvitationsInvokerConservative: false,
-      eventInvitationsStrictServices: "mint,redeem,revoke",
+      eventInvitationsStrictServices: "",
     });
   });
 });

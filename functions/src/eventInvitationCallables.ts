@@ -11,6 +11,12 @@ import {
   type FunctionsErrorCode,
 } from "firebase-functions/v2/https";
 import {
+  EVENT_INVITATION_EVENT_ID_PATTERN,
+  EVENT_INVITATION_FRAGMENT_KEY,
+  EVENT_INVITATION_ID_PATTERN,
+  EVENT_INVITATION_MAX_EVENT_ID_LENGTH,
+  EVENT_INVITATION_TOKEN_PATTERN,
+  invitationIdForCode,
   mintEventInvitation,
   redeemEventInvitation,
   revokeEventInvitation,
@@ -166,9 +172,7 @@ const DEFAULT_OPERATIONS: EventInvitationCallableOperations = {
   revoke: revokeEventInvitation,
 };
 
-const EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
-const INVITATION_FRAGMENT_PATTERN = /^#fa_invite=[A-Za-z0-9_-]{43}$/;
+const INVITATION_FRAGMENT_PREFIX = `#${EVENT_INVITATION_FRAGMENT_KEY}=`;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
@@ -178,30 +182,32 @@ function isEventId(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
-    value.length <= 128 &&
-    EVENT_ID_PATTERN.test(value)
+    value.length <= EVENT_INVITATION_MAX_EVENT_ID_LENGTH &&
+    EVENT_INVITATION_EVENT_ID_PATTERN.test(value)
   );
 }
 
 function isInvitationId(value: unknown): value is string {
-  return typeof value === "string" && INVITATION_ID_PATTERN.test(value);
+  return typeof value === "string" && EVENT_INVITATION_ID_PATTERN.test(value);
 }
 
-function isInvitationUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
+function invitationCodeFromUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    return (
+    const safeEnvelope =
       url.protocol === "https:" &&
       url.username === "" &&
       url.password === "" &&
       url.port === "" &&
       url.pathname === "/" &&
       url.search === "" &&
-      INVITATION_FRAGMENT_PATTERN.test(url.hash)
-    );
+      url.hash.startsWith(INVITATION_FRAGMENT_PREFIX);
+    if (!safeEnvelope) return null;
+    const code = url.hash.slice(INVITATION_FRAGMENT_PREFIX.length);
+    return EVENT_INVITATION_TOKEN_PATTERN.test(code) ? code : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -319,8 +325,13 @@ export function createEventInvitationCallableHandlers(
         }
         if (
           !isEventId(result.eventId) ||
+          result.eventId !== payload.eventId ||
           !isInvitationId(result.invitationId) ||
-          !isInvitationUrl(result.invitationUrl) ||
+          typeof result.code !== "string" ||
+          !EVENT_INVITATION_TOKEN_PATTERN.test(result.code) ||
+          typeof result.invitationUrl !== "string" ||
+          invitationCodeFromUrl(result.invitationUrl) !== result.code ||
+          invitationIdForCode(result.code) !== result.invitationId ||
           !isPositiveEpoch(result.expiresAt)
         ) {
           throw new Error("Malformed mint success.");
@@ -358,6 +369,7 @@ export function createEventInvitationCallableHandlers(
         }
         if (
           !isEventId(result.eventId) ||
+          result.eventId !== payload.expectedEventId ||
           (result.outcome !== "membership-created" &&
             result.outcome !== "already-member")
         ) {
@@ -389,7 +401,9 @@ export function createEventInvitationCallableHandlers(
         }
         if (
           !isEventId(result.eventId) ||
+          result.eventId !== payload.eventId ||
           !isInvitationId(result.invitationId) ||
+          result.invitationId !== payload.invitationId ||
           (result.outcome !== "revoked" &&
             result.outcome !== "already-revoked") ||
           !isMembershipAccess(result.membershipAccess)

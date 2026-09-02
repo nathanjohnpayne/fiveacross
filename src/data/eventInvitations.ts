@@ -6,8 +6,9 @@ import {
   readEventInvitationCode,
 } from '../pendingEventInvitation';
 
-const EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
+export const EVENT_INVITATION_EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const EVENT_INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
+export const EVENT_INVITATION_MAX_EVENT_ID_LENGTH = 128;
 
 export interface MintEventInvitationInput {
   eventId: string;
@@ -96,7 +97,11 @@ interface RevokeEventInvitationResponse {
 }
 
 function isEventId(value: string): boolean {
-  return value.length > 0 && value.length <= 128 && EVENT_ID_PATTERN.test(value);
+  return (
+    value.length > 0 &&
+    value.length <= EVENT_INVITATION_MAX_EVENT_ID_LENGTH &&
+    EVENT_INVITATION_EVENT_ID_PATTERN.test(value)
+  );
 }
 
 function safeErrorCode(error: unknown): string {
@@ -198,7 +203,7 @@ function isSafeMintResponse(
     return (
       eventId === expectedEventId &&
       typeof invitationId === 'string' &&
-      INVITATION_ID_PATTERN.test(invitationId) &&
+      EVENT_INVITATION_ID_PATTERN.test(invitationId) &&
       isSafeInvitationUrl(invitationUrl) &&
       typeof expiresAt === 'number' &&
       Number.isSafeInteger(expiresAt) &&
@@ -293,7 +298,7 @@ export async function redeemEventInvitation(
 export async function revokeEventInvitation(
   input: RevokeEventInvitationInput,
 ): Promise<RevokeEventInvitationResult> {
-  if (!isEventId(input.eventId) || !INVITATION_ID_PATTERN.test(input.invitationId)) {
+  if (!isEventId(input.eventId) || !EVENT_INVITATION_ID_PATTERN.test(input.invitationId)) {
     return { ok: false, reason: 'invalid-request' };
   }
 

@@ -785,10 +785,10 @@ fi
 # licence to swallow a later failure. GCLOUD_FAIL_AFTER lets the read-only
 # Step 1.6 describes through and fails everything after, which is what an
 # expired credential (or describe-without-update permission) looks like from
-# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — seven after
-# #803 added the three event-invitation callables (submitbugreport,
-# emailunsubscribe, mintauthhandoff, exchangeauthhandoff, and the three
-# invitation services). Bump it when that set grows, or this
+# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — four while
+# #803's invitation callables remain deliberately unexported (submitbugreport,
+# emailunsubscribe, mintauthhandoff, exchangeauthhandoff). Bump it when the
+# invitation exports land, or this
 # case silently stops testing the post-publish path and starts testing the
 # pre-publish abort instead.
 # ---------------------------------------------------------------------------
@@ -805,7 +805,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-11b.log" \
 NPM_LOG="$WORKDIR/npm-calls-11b.log" \
 GCLOUD_CALL_COUNTER="$WORKDIR/gcloud-counter-11b" \
-GCLOUD_FAIL_AFTER=7 \
+GCLOUD_FAIL_AFTER=4 \
   bash -c "cd '$REPO11B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
   >"$OUT11B" 2>"$ERR11B"
 RC11B=$?
@@ -2542,10 +2542,11 @@ fi
 
 # ---------------------------------------------------------------------------
 # Cases 25a-25c (#803): event-invitation callables share one reconciliation
-# wrapper, but exact Firebase scopes keep only the services they named strict.
-# The read-only precheck always tolerates first-deploy absence; after publish,
-# an absent unselected peer is valid while an absent selected service is the
-# published-but-403 failure this guard must surface.
+# wrapper, but full deploys must derive their strict inventory from the actual
+# Functions exports. Exact Firebase scopes keep only the services they named
+# strict. The read-only precheck always tolerates first-deploy absence; after
+# publish, an absent unselected peer is valid while an absent selected service
+# is the published-but-403 failure this guard must surface.
 # ---------------------------------------------------------------------------
 REPO25A="$WORKDIR/case25a-event-invitation-full"
 init_fixture_repo "$REPO25A"
@@ -2555,6 +2556,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-25a.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-25a.log" \
+GCLOUD_MISSING_SERVICE=minteventinvitation,redeemeventinvitation,revokeeventinvitation \
   bash -c "cd '$REPO25A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
   >"$WORKDIR/case25a.out" 2>"$WORKDIR/case25a.err"
 RC25A=$?
@@ -2562,13 +2564,11 @@ set -e
 if [[ $RC25A -ne 0 ]]; then
   fail "event-invitation-full: full Functions deploy returned $RC25A. stderr was:"
   cat "$WORKDIR/case25a.err" >&2
-elif [[ "$(grep -c 'minteventinvitation' "$WORKDIR/gcloud-calls-25a.log")" -lt 2 ]] ||
-     [[ "$(grep -c 'redeemeventinvitation' "$WORKDIR/gcloud-calls-25a.log")" -lt 2 ]] ||
-     [[ "$(grep -c 'revokeeventinvitation' "$WORKDIR/gcloud-calls-25a.log")" -lt 2 ]]; then
-  fail "event-invitation-full: one or more invitation services did not run in both precheck and postdeploy reconciliation. gcloud log was:"
+elif grep -Eq 'minteventinvitation|redeemeventinvitation|revokeeventinvitation' "$WORKDIR/gcloud-calls-25a.log"; then
+  fail "event-invitation-full: full deploy probed invitation services absent from the fixture's Functions source. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-25a.log" >&2
 else
-  pass "event-invitation-full: full Functions deploy checks and reconciles all three invitation services (rc=$RC25A)."
+  pass "event-invitation-full: full Functions deploy skips invitation services absent from its source inventory (rc=$RC25A)."
 fi
 
 REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"

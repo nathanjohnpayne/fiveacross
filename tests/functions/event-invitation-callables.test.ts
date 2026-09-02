@@ -4,21 +4,22 @@ import {
   type EventInvitationCallableLogger,
   type EventInvitationCallableOperations,
 } from "../../functions/src/eventInvitationCallables";
-import type {
-  EventInvitationDeps,
-  EventInvitationPolicy,
-  InvitationFirestore,
-  MintInvitationReason,
-  RedeemInvitationReason,
-  RevokeInvitationReason,
-  RevokeInvitationResult,
+import {
+  invitationIdForCode,
+  type EventInvitationDeps,
+  type EventInvitationPolicy,
+  type InvitationFirestore,
+  type MintInvitationReason,
+  type RedeemInvitationReason,
+  type RevokeInvitationReason,
+  type RevokeInvitationResult,
 } from "../../functions/src/eventInvitations";
 
 const CODE = "I".repeat(43);
 const EVENT_ID = "summer-camp-2026";
 const UID = "verified-auth-user";
 const PAYLOAD_UID = "payload-selected-user";
-const INVITATION_ID = "a".repeat(64);
+const INVITATION_ID = invitationIdForCode(CODE);
 const INVITATION_URL = `https://summer-camp.fiveacross.app/#fa_invite=${CODE}`;
 
 const TEST_POLICY = {
@@ -258,6 +259,67 @@ describe("Event Invitation callable success responses", () => {
       await handlers.mint(request({ eventId: EVENT_ID })),
     ).not.toHaveProperty("code");
   });
+
+  it.each([
+    ["request Event", { eventId: "different-event" }],
+    ["URL bearer", { invitationUrl: `${INVITATION_URL.slice(0, -1)}J` }],
+    ["management id", { invitationId: "f".repeat(64) }],
+    ["raw bearer", { code: "J".repeat(43) }],
+  ] as const)(
+    "fails closed when mint returns a mismatched %s",
+    async (_label, mismatch) => {
+      const handlers = createEventInvitationCallableHandlers(DEPS, {
+        operations: operations({
+          mint: async () => ({ ...MINT_SUCCESS, ...mismatch }),
+        }),
+      });
+
+      const error = await rejectionOf(
+        handlers.mint(request({ eventId: EVENT_ID })),
+      );
+
+      expect({ code: error.code, message: error.message }).toEqual({
+        code: "internal",
+        message: "The invitation service is unavailable. Try again.",
+      });
+    },
+  );
+
+  it("fails closed when redemption echoes a different Event", async () => {
+    const handlers = createEventInvitationCallableHandlers(DEPS, {
+      operations: operations({
+        redeem: async () => ({ ...REDEEM_SUCCESS, eventId: "different-event" }),
+      }),
+    });
+
+    const error = await rejectionOf(
+      handlers.redeem(request({ code: CODE, expectedEventId: EVENT_ID })),
+    );
+
+    expect(error.code).toBe("internal");
+  });
+
+  it.each([
+    ["Event", { eventId: "different-event" }],
+    ["invitation id", { invitationId: "f".repeat(64) }],
+  ] as const)(
+    "fails closed when revoke echoes a different %s",
+    async (_label, mismatch) => {
+      const handlers = createEventInvitationCallableHandlers(DEPS, {
+        operations: operations({
+          revoke: async () => ({ ...REVOKE_SUCCESS, ...mismatch }),
+        }),
+      });
+
+      const error = await rejectionOf(
+        handlers.revoke(
+          request({ eventId: EVENT_ID, invitationId: INVITATION_ID }),
+        ),
+      );
+
+      expect(error.code).toBe("internal");
+    },
+  );
 
   it.each(["invitation-only", "pending-enforcement", "revoked"] as const)(
     "copies the closed revoke membershipAccess value %s",

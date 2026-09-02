@@ -424,7 +424,7 @@ describe('mintEventInvitation', () => {
     expect(db.data(invitationPath(invitationIdForCode(collisionCode)))).toEqual({ occupied: true });
   });
 
-  it('bounds repeated digest collisions without charging a phantom mint', async () => {
+  it('bounds repeated digest collisions and charges the terminal mint attempt once', async () => {
     const seed = baseSeed();
     seed[invitationPath(invitationIdForCode(CODE))] = { occupied: true };
     const db = new RetryFirestore(seed);
@@ -435,7 +435,11 @@ describe('mintEventInvitation', () => {
       deps(db, { mintCode }),
     )).toEqual({ ok: false, reason: 'code-collision' });
     expect(mintCode).toHaveBeenCalledTimes(3);
-    expect(db.data(invitationRatePath('mint', ADMIN))).toBeUndefined();
+    expect(db.data(invitationRatePath('mint', ADMIN))).toEqual({
+      schemaVersion: 1,
+      operation: 'mint',
+      attemptMs: [NOW],
+    });
   });
 
   it('rate-limits repeated mint abuse per authenticated caller', async () => {

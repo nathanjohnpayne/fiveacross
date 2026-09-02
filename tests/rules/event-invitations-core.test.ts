@@ -34,7 +34,7 @@ const POLICY: EventInvitationPolicy = {
   revokeGrantedMemberships: false,
   rate: {
     mint: { windowMs: 60_000, maxAttempts: 1 },
-    redeem: { windowMs: 60_000, maxAttempts: 1 },
+    redeem: { windowMs: 60_000, maxAttempts: 2 },
     revoke: { windowMs: 60_000, maxAttempts: 1 },
   },
 };
@@ -127,7 +127,7 @@ describe('Event Invitation core against real Firestore transactions', () => {
     expect(contention.attempts()).toBeGreaterThanOrEqual(3);
   });
 
-  it('lets two same-caller attempts converge idempotently with one grant and one rate charge', async () => {
+  it('lets two same-caller attempts converge idempotently with one grant and two rate charges', async () => {
     const contention = contentionAdapter();
     const outcomes = await Promise.all([
       redeemEventInvitation({ uid: ALICE, code: CODE, expectedEventId: EVENT_ID }, deps(contention.db)),
@@ -145,6 +145,7 @@ describe('Event Invitation core against real Firestore transactions', () => {
       grantedUids: [ALICE],
     });
     expect((await adminDb.doc(invitationRatePath('redeem', ALICE)).get()).data()?.attemptMs).toEqual([
+      T0 + 1_000,
       T0 + 1_000,
     ]);
     expect(contention.attempts()).toBeGreaterThanOrEqual(3);

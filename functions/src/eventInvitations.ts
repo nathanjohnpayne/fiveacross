@@ -20,12 +20,13 @@ export const EVENT_INVITATION_COLLECTION = 'eventInvitations';
 export const EVENT_INVITATION_RATE_COLLECTION = 'eventInvitationRateLimits';
 export const EVENT_INVITATION_FRAGMENT_KEY = 'fa_invite';
 export const EVENT_INVITATION_SCHEMA_VERSION = 1 as const;
+export const EVENT_INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+export const EVENT_INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
+export const EVENT_INVITATION_EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const EVENT_INVITATION_MAX_EVENT_ID_LENGTH = 128;
 
 const TOKEN_BYTES = 32;
-const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
 const HOST_PATTERN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-const MAX_EVENT_ID = 128;
 const MAX_UID = 256;
 /** Keeps cascade reads and writes comfortably below Firestore's 500-write cap. */
 export const MAX_INVITATION_USES = 100;
@@ -194,7 +195,7 @@ function isSafePathPart(value: unknown, maxLength: number): value is string {
 }
 
 function isEventId(value: unknown): value is string {
-  return isSafePathPart(value, MAX_EVENT_ID) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+  return isSafePathPart(value, EVENT_INVITATION_MAX_EVENT_ID_LENGTH) && EVENT_INVITATION_EVENT_ID_PATTERN.test(value);
 }
 
 function isUid(value: unknown): value is string {
@@ -433,7 +434,7 @@ export async function mintEventInvitation(
 
   for (let collisionAttempt = 0; collisionAttempt < CODE_MINT_ATTEMPTS; collisionAttempt += 1) {
     const code = (deps.mintCode ?? defaultMintCode)();
-    if (!TOKEN_PATTERN.test(code)) return { ok: false, reason: 'invalid-generated-code' };
+    if (!EVENT_INVITATION_TOKEN_PATTERN.test(code)) return { ok: false, reason: 'invalid-generated-code' };
     const invitationId = invitationIdForCode(code);
     const result = await deps.db.runTransaction(async (tx): Promise<MintInvitationResult | { collision: true }> => {
       const now = deps.now();
@@ -446,7 +447,16 @@ export async function mintEventInvitation(
       const eventSnapshot = await tx.get(eventRef);
       const issuerSnapshot = await tx.get(issuerRef);
       const invitationSnapshot = await tx.get(invitationRef);
-      if (invitationSnapshot.exists) return { collision: true };
+      if (invitationSnapshot.exists) {
+        // A collision is an implementation detail, not a free way around the
+        // caller's request budget. Intermediate retries stay invisible because
+        // they are still one public mint call; terminal exhaustion records that
+        // call exactly once before returning its closed failure.
+        if (collisionAttempt === CODE_MINT_ATTEMPTS - 1) {
+          writeRate(tx, rateRef, rateDocument);
+        }
+        return { collision: true };
+      }
       const event = eventSnapshot.exists ? activeEvent(eventSnapshot.data()) : null;
       if (!event) {
         writeRate(tx, rateRef, rateDocument);
@@ -502,7 +512,7 @@ export async function redeemEventInvitation(
   deps: EventInvitationDeps,
 ): Promise<RedeemInvitationResult> {
   if (!isUid(input.uid)) return { ok: false, reason: 'unauthenticated' };
-  if (typeof input.code !== 'string' || !TOKEN_PATTERN.test(input.code)) return { ok: false, reason: 'invalid-code' };
+  if (typeof input.code !== 'string' || !EVENT_INVITATION_TOKEN_PATTERN.test(input.code)) return { ok: false, reason: 'invalid-code' };
   if (!isEventId(input.expectedEventId)) return { ok: false, reason: 'invalid-event-id' };
   if (!policyIsValid(deps.policy)) return { ok: false, reason: 'invalid-policy' };
   const uid = input.uid;
@@ -603,7 +613,7 @@ export async function revokeEventInvitation(
 ): Promise<RevokeInvitationResult> {
   if (!isUid(input.uid)) return { ok: false, reason: 'unauthenticated' };
   if (!isEventId(input.eventId)) return { ok: false, reason: 'invalid-event-id' };
-  if (typeof input.invitationId !== 'string' || !INVITATION_ID_PATTERN.test(input.invitationId)) {
+  if (typeof input.invitationId !== 'string' || !EVENT_INVITATION_ID_PATTERN.test(input.invitationId)) {
     return { ok: false, reason: 'invalid-invitation-id' };
   }
   if (!policyIsValid(deps.policy)) return { ok: false, reason: 'invalid-policy' };

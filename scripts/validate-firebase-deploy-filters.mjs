@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const commander = require("commander");
+const ts = require("typescript");
 const {
   command: firebaseDeployCommand,
 } = require("firebase-tools/lib/commands/deploy");
@@ -108,19 +109,87 @@ function normalizedFilter(value) {
   return value || undefined;
 }
 
-function classifyInvokerScope(only, exceptTargets) {
+const EVENT_INVITATION_EXPORTS = Object.freeze([
+  ["mintEventInvitation", "mint"],
+  ["redeemEventInvitation", "redeem"],
+  ["revokeEventInvitation", "revoke"],
+]);
+
+function eventInvitationServicesFromSource(source) {
+  const exportedNames = new Set();
+  const sourceFile = ts.createSourceFile(
+    "index.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const exported = statement.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+    );
+    if (!exported) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name)) exportedNames.add(declaration.name.text);
+    }
+  }
+  return EVENT_INVITATION_EXPORTS.filter(([exportName]) =>
+    exportedNames.has(exportName),
+  ).map(([, service]) => service);
+}
+
+async function eventInvitationServiceInventory(configSource, configPath) {
+  const functionsConfigs = Array.isArray(configSource.functions)
+    ? configSource.functions
+    : [configSource.functions];
+  const services = new Set();
+  for (const functionsConfig of functionsConfigs) {
+    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    const sourcePath = resolve(
+      dirname(configPath),
+      functionsConfig.source,
+      "src",
+      "index.ts",
+    );
+    let source;
+    try {
+      source = await readFile(sourcePath, "utf8");
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const service of eventInvitationServicesFromSource(source))
+      services.add(service);
+  }
+  return EVENT_INVITATION_EXPORTS.map(([, service]) => service).filter(
+    (service) => services.has(service),
+  );
+}
+
+function classifyInvokerScope(
+  only,
+  exceptTargets,
+  exportedEventInvitationServices,
+) {
+  const exportedInvitationServices = new Set(exportedEventInvitationServices);
+  const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
+    ([, service]) => service,
+  )
+    .filter((service) => exportedInvitationServices.has(service))
+    .join(",");
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = true;
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
-  let eventInvitationsInvokerSelected = true;
+  let eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
   let eventInvitationsInvokerConservative = false;
   let authHandoffStrictHalf = "";
-  let eventInvitationsStrictServices = "mint,redeem,revoke";
+  let eventInvitationsStrictServices = exportedInvitationCsv;
 
   if (only) {
     functionsAttempted = false;
@@ -131,7 +200,7 @@ function classifyInvokerScope(only, exceptTargets) {
     eventInvitationsInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
-    let allEventInvitationsNamed = false;
+    let fullEventInvitationScopeNamed = false;
     let unknownFunctionsSelectorNamed = false;
     const namedEventInvitationServices = new Set();
 
@@ -143,10 +212,10 @@ function classifyInvokerScope(only, exceptTargets) {
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
-        eventInvitationsInvokerSelected = true;
+        eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
         mintNamed = true;
         exchangeNamed = true;
-        allEventInvitationsNamed = true;
+        fullEventInvitationScopeNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
@@ -212,9 +281,9 @@ function classifyInvokerScope(only, exceptTargets) {
     }
 
     if (eventInvitationsInvokerSelected) {
-      if (allEventInvitationsNamed) {
+      if (fullEventInvitationScopeNamed) {
         eventInvitationsInvokerConservative = false;
-        eventInvitationsStrictServices = "mint,redeem,revoke";
+        eventInvitationsStrictServices = exportedInvitationCsv;
       } else if (namedEventInvitationServices.size > 0) {
         // An explicit endpoint name is a fact even when another unfamiliar
         // selector appears in the same request. Keep every explicitly named
@@ -297,6 +366,8 @@ export async function classifyFirebaseDeployRequest(
   const only = normalizedFilter(options.only);
   const exceptTargets = normalizedFilter(options.except);
   const configSource = JSON.parse(await readFile(configPath, "utf8"));
+  const exportedEventInvitationServices =
+    await eventInvitationServiceInventory(configSource, configPath);
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
   // option-looking required value such as `--only --dry-run`: Commander owns
@@ -325,7 +396,11 @@ export async function classifyFirebaseDeployRequest(
     only: only ?? "",
     except: exceptTargets ?? "",
     firebaseDryRun: options.dryRun === true,
-    ...classifyInvokerScope(only, exceptTargets),
+    ...classifyInvokerScope(
+      only,
+      exceptTargets,
+      exportedEventInvitationServices,
+    ),
     hostingAttempted: hostingConfigs.length > 0,
   };
 }
