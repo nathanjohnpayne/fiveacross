@@ -117,6 +117,7 @@ const EVENT_INVITATION_EXPORTS = Object.freeze([
 
 function eventInvitationServicesFromSource(source) {
   const exportedNames = new Set();
+  let hasRuntimeExportStar = false;
   const sourceFile = ts.createSourceFile(
     "index.ts",
     source,
@@ -125,14 +126,39 @@ function eventInvitationServicesFromSource(source) {
     ts.ScriptKind.TS,
   );
   for (const statement of sourceFile.statements) {
-    if (!ts.isVariableStatement(statement)) continue;
     const exported = statement.modifiers?.some(
       (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
     );
-    if (!exported) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name)) exportedNames.add(declaration.name.text);
+    if (ts.isVariableStatement(statement) && exported) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) exportedNames.add(declaration.name.text);
+      }
+      continue;
     }
+    if (
+      exported &&
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+      statement.name
+    ) {
+      exportedNames.add(statement.name.text);
+      continue;
+    }
+    if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
+    if (!statement.exportClause) {
+      // Resolving an export-star requires traversing the module graph. Treat it
+      // as possibly exporting every protected callable instead of silently
+      // skipping invoker repair for a service Firebase may discover.
+      hasRuntimeExportStar = true;
+      continue;
+    }
+    if (ts.isNamedExports(statement.exportClause)) {
+      for (const specifier of statement.exportClause.elements) {
+        if (!specifier.isTypeOnly) exportedNames.add(specifier.name.text);
+      }
+    }
+  }
+  if (hasRuntimeExportStar) {
+    for (const [exportName] of EVENT_INVITATION_EXPORTS) exportedNames.add(exportName);
   }
   return EVENT_INVITATION_EXPORTS.filter(([exportName]) =>
     exportedNames.has(exportName),

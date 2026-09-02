@@ -55,9 +55,66 @@ describe("event-invitation deploy scope", () => {
         resolve(fixture, "functions", "src", "index.ts"),
         [
           "export const mintEventInvitation = 1;",
-          "export const redeemEventInvitation = 2;",
-          "export const revokeEventInvitation = 3;",
+          "const redeemHandler = 2;",
+          "export { redeemHandler as redeemEventInvitation };",
+          "export { revokeEventInvitation } from './revoke.js';",
         ].join("\n"),
+      );
+
+      const result = await classifyFirebaseDeployRequest(["fiveacross"], {
+        defaultConfigPath: resolve(fixture, "firebase.json"),
+      });
+      expect(result).toMatchObject({
+        eventInvitationsInvokerSelected: true,
+        eventInvitationsInvokerConservative: false,
+        eventInvitationsStrictServices: "mint,redeem,revoke",
+      });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores type-only export declarations that Firebase cannot deploy", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "event-invitation-type-exports-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions" } }),
+      );
+      await writeFile(
+        resolve(fixture, "functions", "src", "index.ts"),
+        [
+          "type mintEventInvitation = string;",
+          "export type { mintEventInvitation };",
+          "export type { redeemEventInvitation, revokeEventInvitation } from './types.js';",
+        ].join("\n"),
+      );
+
+      const result = await classifyFirebaseDeployRequest(["fiveacross"], {
+        defaultConfigPath: resolve(fixture, "firebase.json"),
+      });
+      expect(result).toMatchObject({
+        eventInvitationsInvokerSelected: false,
+        eventInvitationsInvokerConservative: false,
+        eventInvitationsStrictServices: "",
+      });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for a runtime export-star whose names cannot be known locally", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "event-invitation-star-export-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions" } }),
+      );
+      await writeFile(
+        resolve(fixture, "functions", "src", "index.ts"),
+        "export * from './runtime.js';\n",
       );
 
       const result = await classifyFirebaseDeployRequest(["fiveacross"], {
