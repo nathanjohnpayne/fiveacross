@@ -21,11 +21,10 @@ import {
 } from 'firebase/firestore';
 import { MAX_DAYS } from '../../src/data/eventLimits';
 
-// #1079 previews the exact D-A membership predicate at the Mark/Echo write
-// arms, while #1072 also previews #804's Event admission on both direct and
-// collection-group marker reads. The source is the REAL firestore.rules file;
-// every replacement is exact-counted so a rules refactor fails closed instead
-// of silently dropping one admission gate.
+// #1079 proved the D-A membership predicate against the real Mark/Echo batch
+// maxima before production enforcement. #804 now consumes the deployed rules
+// directly; the only source rewrite left is a test-only wrapper probe whose
+// insertion is exact-counted so a refactor still fails closed.
 
 const RULES_PATH = fileURLToPath(
   new URL('../../firestore.rules', import.meta.url),
@@ -47,7 +46,7 @@ function replaceExactlyOnce(
   const occurrences = source.split(from).length - 1;
   if (occurrences !== 1) {
     throw new Error(
-      `#1079 preview expected exactly one ${label} anchor; found ${occurrences}`,
+      `#1079 budget test expected exactly one ${label} anchor; found ${occurrences}`,
     );
   }
   return source.replace(from, to);
@@ -62,12 +61,12 @@ function requireOccurrences(
   const actual = source.split(needle).length - 1;
   if (actual !== expected) {
     throw new Error(
-      `#1079 preview expected ${expected} ${label} occurrence(s); found ${actual}`,
+      `#1079 budget test expected ${expected} ${label} occurrence(s); found ${actual}`,
     );
   }
 }
 
-function membershipMarkPreviewRules(source: string): string {
+function membershipMarkRules(source: string): string {
   const helperAnchor = 'function admitted(eventId) {';
   requireOccurrences(source, `canonical ${helperAnchor}`, helperAnchor, 1);
   const threadedAnchor = 'function admittedWithEvent(eventId, event) {';
@@ -87,7 +86,7 @@ function membershipMarkPreviewRules(source: string): string {
     const next = threadedBody.indexOf(clause, clauseCursor + 1);
     if (next < 0)
       throw new Error(
-        `#1079 preview lost or reordered canonical clause: ${clause}`,
+        `#1079 budget test lost or reordered canonical clause: ${clause}`,
       );
     clauseCursor = next;
   }
@@ -104,7 +103,7 @@ function membershipMarkPreviewRules(source: string): string {
       memberBody.indexOf('return exists(membershipDoc(eventId, uid))')
   ) {
     throw new Error(
-      '#1079 preview requires one exists()-then-get() membership predicate',
+      '#1079 budget test requires one exists()-then-get() membership predicate',
     );
   }
   requireOccurrences(
@@ -129,80 +128,10 @@ function membershipMarkPreviewRules(source: string): string {
     1,
   );
 
-  let preview = source;
-  preview = replaceExactlyOnce(
-    preview,
-    'players create/update',
-    `      match /players/{uid} {
-        allow read: if signedIn();
-        allow create, update: if (isOwner(uid) || isAdmin(eventId))
-          && reshuffleCounterMonotonic();`,
-    `      match /players/{uid} {
-        allow read: if signedIn();
-        allow create, update: if admitted(eventId)
-          && (isOwner(uid) || isAdmin(eventId))
-          && reshuffleCounterMonotonic();`,
-  );
-  preview = replaceExactlyOnce(
-    preview,
-    'day boards create/update',
-    `        match /boards/{uid} {
-          allow read: if isOwner(uid) || isAdmin(eventId);
-          allow create, update: if (isOwner(uid) || isAdmin(eventId))
-            && isCanonicalDay(dayIndex)`,
-    `        match /boards/{uid} {
-          allow read: if isOwner(uid) || isAdmin(eventId);
-          allow create, update: if admitted(eventId)
-            && (isOwner(uid) || isAdmin(eventId))
-            && isCanonicalDay(dayIndex)`,
-  );
-  preview = replaceExactlyOnce(
-    preview,
-    'nested tally marker read/write arms',
-    `        match /markers/{markerUid} {
-          // Direct Square/Tally collection scans remain public to signed-in
-          // Players, including legacy rows during rollback. A point get is
-          // stricter: a missing document is observable, field absence is the
-          // explicit legacy shape, an exact field is the canonical shape, and a
-          // present path mismatch is never readable.
-          allow list: if signedIn();
-          allow get: if signedIn() && markerReadHasCompatibleEventId(eventId);
-          allow create, update: if isOwner(markerUid)`,
-    `        match /markers/{markerUid} {
-          // Direct Square/Tally collection scans remain public to admitted
-          // Event members, including legacy rows during rollback. A point get
-          // additionally validates any present Event identity.
-          allow list: if admitted(eventId);
-          allow get: if admitted(eventId)
-            && markerReadHasCompatibleEventId(eventId);
-          allow create, update: if admitted(eventId)
-            && isOwner(markerUid)`,
-  );
-  preview = replaceExactlyOnce(
-    preview,
-    'nested tally markers delete',
-    `          // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if isOwner(markerUid) || isAdmin(eventId);`,
-    `          // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if admitted(eventId)
-            && (isOwner(markerUid) || isAdmin(eventId));`,
-  );
-  preview = replaceExactlyOnce(
-    preview,
-    'collection-group tally marker list arm',
-    `    match /{path=**}/markers/{markerUid} {
-      allow list: if signedIn()
-        && (resource.data.eventId is string
-            || markerDeliveryCompatibilityOpen());
-    }`,
-    `    match /{path=**}/markers/{markerUid} {
-      allow list: if admitted(resource.data.eventId);
-    }`,
-  );
-  preview = replaceExactlyOnce(
-    preview,
+  return replaceExactlyOnce(
+    source,
     'unauthenticated wrapper probes',
-    `    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).`,
+    `    // Event-filtered collection-group LIST for the Feed's Tally Cards`,
     `    // TEST-ONLY #1079 probes. The negation makes an unauthenticated
     // request succeed only when each wrapper's leading signedIn() prevents
     // its Event argument from being evaluated.
@@ -213,9 +142,8 @@ function membershipMarkPreviewRules(source: string): string {
       allow create: if !admitted(eventId);
     }
 
-    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).`,
+    // Event-filtered collection-group LIST for the Feed's Tally Cards`,
   );
-  return preview;
 }
 
 let testEnv: RulesTestEnvironment;
@@ -414,7 +342,7 @@ beforeAll(async () => {
     firestore: {
       host: hostname,
       port: Number(port),
-      rules: membershipMarkPreviewRules(readFileSync(RULES_PATH, 'utf8')),
+      rules: membershipMarkRules(readFileSync(RULES_PATH, 'utf8')),
     },
   });
 });
@@ -433,7 +361,7 @@ beforeEach(async () => {
   });
 });
 
-describe('#1079 membership preview — Mark/Echo rule budget', () => {
+describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
   it('keeps explicit-off and absent-switch Events open to a signed-in Player without a Membership', async () => {
     const offEvent = 'unenforced-explicit';
     const absentEvent = 'unenforced-absent';
@@ -529,7 +457,7 @@ describe('#1079 membership preview — Mark/Echo rule budget', () => {
     );
   });
 
-  it('previews #804 admission on both direct and Event-scoped collection-group marker reads', async () => {
+  it('enforces #804 admission on both direct and Event-scoped collection-group marker reads', async () => {
     const otherEvent = 'membership-other-read';
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const database = ctx.firestore();

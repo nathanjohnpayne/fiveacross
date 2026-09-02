@@ -85,6 +85,16 @@ beforeAll(async () => {
 beforeEach(async () => {
   await testEnv.clearStorage();
   await testEnv.clearFirestore();
+  // The Firestore half of the lockstep Proof tests writes beneath a real Event.
+  // Membership enforcement is deliberately off here, preserving the legacy
+  // signed-in posture without treating an orphaned/deleted Event subtree as a
+  // valid place to inject Proof content (#804).
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+      admins: [ADMIN],
+      membershipEnforcement: 'off',
+    });
+  });
 });
 
 afterAll(async () => {
