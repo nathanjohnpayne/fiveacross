@@ -185,10 +185,15 @@ function sameRecord(
 export function capturePendingEventInvitation(
   input: CapturePendingEventInvitationInput,
 ): PendingEventInvitationState | null {
+  if (!isOrigin(input.origin)) return null;
   const code = readEventInvitationCode(input.hash);
-  if (code === null || !isOrigin(input.origin)) return null;
   const capturedAt = input.now ?? Date.now();
-  if (!Number.isSafeInteger(capturedAt) || capturedAt < 0) return null;
+  if (code === null || !Number.isSafeInteger(capturedAt) || capturedAt < 0) {
+    if (hasEventInvitationFragment(input.hash)) {
+      forgetPendingEventInvitationsForOrigin(input.origin);
+    }
+    return null;
+  }
 
   const record: PendingEventInvitationRecord = {
     code,
@@ -202,6 +207,22 @@ export function capturePendingEventInvitation(
   writeStore('localStorage', serialized);
 
   return readPendingEventInvitation({ origin: input.origin, now: record.capturedAt });
+}
+
+/**
+ * Supersede every copy from this origin after an explicitly tagged replacement
+ * fails validation. Each copy is compare-deleted from a snapshot so a newer
+ * value written by another tab between the read and delete survives.
+ */
+function forgetPendingEventInvitationsForOrigin(origin: string): void {
+  const records = [
+    memoryRecord,
+    parseRecordShape(readStore('sessionStorage')),
+    parseRecordShape(readStore('localStorage')),
+  ];
+  for (const record of records) {
+    if (record?.origin === origin) forgetPendingEventInvitationIf(record);
+  }
 }
 
 /**

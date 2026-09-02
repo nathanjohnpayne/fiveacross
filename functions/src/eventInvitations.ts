@@ -555,20 +555,12 @@ export async function redeemEventInvitation(
         return refuse('membership-unreadable');
       }
       if (membership.status === 'active') {
-        const sameGrant =
-          invitation.grantedUids.includes(uid) && membership.invitationId === invitationId;
-        // A retry by the person this invitation already granted is a read-only
-        // idempotency check for the Invitation use. It still spends request
-        // budget so the public endpoint cannot amplify reads without a bound.
-        if (sameGrant) {
-          writeRate(tx, rateRef, rateDocument);
-          return { ok: true, eventId: invitation.eventId, outcome: 'already-member' };
-        }
-        const currentlyRedeemable = invitation.status === 'active' && now < invitation.expiresAtMs;
+        // Every active Membership is already admitted to the Event, regardless
+        // of which grant created it or what later happened to this Invitation.
+        // The idempotent check consumes no Invitation use but still spends
+        // request budget so the public endpoint cannot amplify reads unbounded.
         writeRate(tx, rateRef, rateDocument);
-        return currentlyRedeemable
-          ? { ok: true, eventId: invitation.eventId, outcome: 'already-member' }
-          : { ok: false, reason: 'invitation-unavailable' };
+        return { ok: true, eventId: invitation.eventId, outcome: 'already-member' };
       }
       return refuse('membership-revoked');
     }

@@ -536,6 +536,60 @@ describe('redeemEventInvitation', () => {
     expect(db.data(invitationRatePath('redeem', MEMBER))?.attemptMs).toEqual([NOW, NOW]);
   });
 
+  it.each([
+    ['expired', (record: Record<string, unknown>) => record, NOW + 60_000],
+    [
+      'revoked',
+      (record: Record<string, unknown>) => ({
+        ...record,
+        status: 'revoked',
+        revokedAt: timestamp(NOW),
+        revokedBy: ADMIN,
+      }),
+      NOW,
+    ],
+    [
+      'consumed',
+      (record: Record<string, unknown>) => ({
+        ...record,
+        status: 'consumed',
+        remainingUses: 0,
+        grantedUids: [OTHER_MEMBER],
+      }),
+      NOW,
+    ],
+  ] as const)(
+    'treats an existing active member as idempotent when the Invitation is %s',
+    async (_label, mutate, redemptionTime) => {
+      const seed = baseSeed();
+      seed[membershipPath(EVENT_ID, MEMBER)] = {
+        schemaVersion: 1,
+        eventId: EVENT_ID,
+        uid: MEMBER,
+        role: 'member',
+        status: 'active',
+        grantedAt: 1,
+        grantedBy: 'system:backfill',
+        invitationId: null,
+      };
+      const db = new RetryFirestore(seed);
+      const invitation = await minted(db);
+      db.writeOutsideTransaction(
+        invitationPath(invitation.invitationId),
+        mutate(db.data(invitationPath(invitation.invitationId))!),
+      );
+
+      expect(await redeemEventInvitation(
+        { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
+        deps(db, { now: () => redemptionTime }),
+      )).toEqual({ ok: true, eventId: EVENT_ID, outcome: 'already-member' });
+      expect(db.data(invitationPath(invitation.invitationId))?.grantedUids).not.toContain(MEMBER);
+      expect(db.data(invitationRatePath('redeem', MEMBER))?.attemptMs).toEqual([
+        redemptionTime,
+      ]);
+    },
+  );
+
   it('never overwrites a revoked membership', async () => {
     const seed = baseSeed();
     seed[membershipPath(EVENT_ID, MEMBER)] = {

@@ -15,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   hasHandoffFragment: vi.fn(),
   readHandoffCode: vi.fn(),
   hasEventInvitationFragment: vi.fn(),
-  readEventInvitationCode: vi.fn(),
   capturePendingEventInvitation: vi.fn(),
   clearUrlFragmentAndConfirm: vi.fn(),
 }));
@@ -27,7 +26,6 @@ vi.mock('./auth/handoffClient', () => ({
 
 vi.mock('./pendingEventInvitation', () => ({
   hasEventInvitationFragment: mocks.hasEventInvitationFragment,
-  readEventInvitationCode: mocks.readEventInvitationCode,
   capturePendingEventInvitation: mocks.capturePendingEventInvitation,
 }));
 
@@ -215,7 +213,6 @@ beforeEach(() => {
   mocks.hasHandoffFragment.mockReturnValue(false);
   mocks.readHandoffCode.mockReturnValue(null);
   mocks.hasEventInvitationFragment.mockReturnValue(false);
-  mocks.readEventInvitationCode.mockReturnValue(null);
   mocks.capturePendingEventInvitation.mockReturnValue(null);
   mocks.clearUrlFragmentAndConfirm.mockReturnValue(true);
 });
@@ -237,7 +234,6 @@ describe('handoffBoot', () => {
 
   it('stores an invitation before clearing the fragment', async () => {
     mocks.hasEventInvitationFragment.mockReturnValue(true);
-    mocks.readEventInvitationCode.mockReturnValue(INVITATION);
     const order: string[] = [];
     mocks.capturePendingEventInvitation.mockImplementation(() => {
       order.push('capture');
@@ -291,7 +287,11 @@ describe('handoffBoot', () => {
 
     boot.captureUrlCredentialsFromUrl();
 
-    expect(mocks.capturePendingEventInvitation).not.toHaveBeenCalled();
+    expect(mocks.capturePendingEventInvitation).toHaveBeenCalledWith({
+      hash: window.location.hash,
+      origin: window.location.origin,
+      now: expect.any(Number),
+    });
     expect(mocks.clearUrlFragmentAndConfirm).toHaveBeenCalledTimes(1);
     expect(boot.isUrlSafeForTelemetry()).toBe(false);
   });
@@ -306,7 +306,7 @@ describe('handoffBoot', () => {
     boot.captureUrlCredentialsFromUrl();
     expect(boot.pendingHandoffCode()).toBe(CODE);
     expect(mocks.readHandoffCode).toHaveBeenCalledTimes(1);
-    expect(mocks.readEventInvitationCode).toHaveBeenCalledTimes(1);
+    expect(mocks.hasEventInvitationFragment).toHaveBeenCalledTimes(1);
     expect(mocks.clearUrlFragmentAndConfirm).toHaveBeenCalledTimes(1);
   });
 });

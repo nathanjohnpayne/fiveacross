@@ -198,6 +198,26 @@ describe('capture and recovery', () => {
     expect(sessionStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
     expect(localStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
   });
+
+  it.each([
+    [`#${EVENT_INVITATION_FRAGMENT_KEY}=short`, 'a malformed replacement'],
+    [
+      `#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}&${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`,
+      'an ambiguous replacement',
+    ],
+  ])('supersedes a stale same-origin invitation with %s (%s)', (hash) => {
+    const stale = capturePendingEventInvitation({
+      hash: `#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`,
+      origin: ORIGIN,
+      now: NOW,
+    })!.record;
+
+    expect(capturePendingEventInvitation({ hash, origin: ORIGIN, now: NOW + 1 })).toBeNull();
+    expect(readPendingEventInvitation({ origin: ORIGIN, now: NOW + 1 })).toBeNull();
+    expect(sessionStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(localStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(forgetPendingEventInvitationIf(stale)).toBe(false);
+  });
 });
 
 describe('origin and TTL binding', () => {

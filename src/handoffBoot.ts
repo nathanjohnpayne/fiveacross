@@ -22,7 +22,6 @@ import { hasHandoffFragment, readHandoffCode } from './auth/handoffClient';
 import {
   capturePendingEventInvitation,
   hasEventInvitationFragment,
-  readEventInvitationCode,
 } from './pendingEventInvitation';
 import { clearUrlFragmentAndConfirm } from './urlFragment';
 
@@ -43,13 +42,12 @@ export function captureUrlCredentialsFromUrl(): void {
   captured = true;
   const hash = window.location.hash;
   capturedCode = readHandoffCode(hash);
-  const invitationCode = readEventInvitationCode(hash);
   const hasHandoffCredential = hasHandoffFragment(hash);
   const hasInvitationCredential = hasEventInvitationFragment(hash);
 
   // Persist before clearing. The fragment is the only recoverable copy on
   // arrival, while storage is what carries the invitation through sign-in.
-  if (invitationCode !== null) {
+  if (hasInvitationCredential) {
     capturePendingEventInvitation({
       hash,
       origin: window.location.origin,
