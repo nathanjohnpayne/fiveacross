@@ -25,7 +25,7 @@ set -euo pipefail
 #     closed if any step errors, rather than masking earlier failures
 #     behind the exit code of the final segment.
 #   - Verifies the Cloud Run invoker credential BEFORE publishing, with a
-#     read-only dry run of both reconciliation scripts, so a missing or
+#     read-only dry run of every selected reconciliation script, so a missing or
 #     expired deploy credential fails the script while nothing is live.
 #     Skipped entirely when this deploy does not release Functions. A
 #     NOT_FOUND here is not fatal — a brand-new target's first deploy has no
@@ -37,7 +37,8 @@ set -euo pipefail
 #     org-policy rejection of the `allUsers` invoker binding as a partial
 #     FAILURE — the exact case the reconciliation below exists to repair.
 #   - Reconciles the Cloud Run invoker config for submitBugReport,
-#     emailUnsubscribe, and the two auth-handoff callables (#768, #548;
+#     emailUnsubscribe, the two auth-handoff callables, and the three
+#     event-invitation callables (#768, #548, #803;
 #     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
@@ -172,10 +173,13 @@ FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
 AUTH_HANDOFF_INVOKER_SELECTED=true
+EVENT_INVITATIONS_INVOKER_SELECTED=true
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=""
+EVENT_INVITATIONS_INVOKER_CONSERVATIVE=false
+EVENT_INVITATIONS_STRICT_SERVICES="mint,redeem,revoke"
 DEPLOY_PROJECT=""
 
 # Source integrity is independent of Firebase argv classification and remains
@@ -210,10 +214,13 @@ while IFS='=' read -r classification_key classification_value; do
     BUG_REPORT_INVOKER_SELECTED) BUG_REPORT_INVOKER_SELECTED="$classification_value" ;;
     EMAIL_UNSUBSCRIBE_INVOKER_SELECTED) EMAIL_UNSUBSCRIBE_INVOKER_SELECTED="$classification_value" ;;
     AUTH_HANDOFF_INVOKER_SELECTED) AUTH_HANDOFF_INVOKER_SELECTED="$classification_value" ;;
+    EVENT_INVITATIONS_INVOKER_SELECTED) EVENT_INVITATIONS_INVOKER_SELECTED="$classification_value" ;;
     BUG_REPORT_INVOKER_CONSERVATIVE) BUG_REPORT_INVOKER_CONSERVATIVE="$classification_value" ;;
     EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE) EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE="$classification_value" ;;
     AUTH_HANDOFF_INVOKER_CONSERVATIVE) AUTH_HANDOFF_INVOKER_CONSERVATIVE="$classification_value" ;;
     AUTH_HANDOFF_STRICT_HALF) AUTH_HANDOFF_STRICT_HALF="$classification_value" ;;
+    EVENT_INVITATIONS_INVOKER_CONSERVATIVE) EVENT_INVITATIONS_INVOKER_CONSERVATIVE="$classification_value" ;;
+    EVENT_INVITATIONS_STRICT_SERVICES) EVENT_INVITATIONS_STRICT_SERVICES="$classification_value" ;;
     *)
       echo "✗ Firebase deploy classification returned an unrecognized field. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
       exit 1
@@ -223,7 +230,7 @@ while IFS='=' read -r classification_key classification_value; do
 done <<EOF
 $FIREBASE_REQUEST_CLASSIFICATION
 EOF
-if [[ "$CLASSIFICATION_FIELDS" -ne 11 ]]; then
+if [[ "$CLASSIFICATION_FIELDS" -ne 14 ]]; then
   echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
@@ -238,7 +245,7 @@ fi
 # whatever the last manual repair named: a stale `EMAIL_UNSUBSCRIBE_PROJECT=
 # fiveacross` during a `gaycruisebingo` deploy makes both prechecks pass
 # against Five Across and leaves the just-reset gaycruisebingo services 403ing,
-# with every log line claiming success. So the automatic path clears all six
+# with every log line claiming success. So the automatic path clears every
 # and re-pins the project from DEPLOY_TARGET_PROJECT (set by
 # scripts/deploy-target.mjs). Invoked bare, with no target selected, everything
 # is cleared and each script falls back to its own documented default.
@@ -250,6 +257,9 @@ INVOKER_ENV=(env
   -u EMAIL_UNSUBSCRIBE_PROJECT -u EMAIL_UNSUBSCRIBE_REGION -u EMAIL_UNSUBSCRIBE_SERVICE
   -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
   -u AUTH_HANDOFF_MINT_SERVICE -u AUTH_HANDOFF_EXCHANGE_SERVICE
+  -u EVENT_INVITATIONS_PROJECT -u EVENT_INVITATIONS_REGION
+  -u EVENT_INVITATIONS_MINT_SERVICE -u EVENT_INVITATIONS_REDEEM_SERVICE
+  -u EVENT_INVITATIONS_REVOKE_SERVICE
 )
 # DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
 # `scripts/deploy.sh -- <project> ...` entry point is invoked directly, so it
@@ -272,6 +282,7 @@ if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
     BUG_REPORT_PROJECT="$INVOKER_PIN_PROJECT"
     EMAIL_UNSUBSCRIBE_PROJECT="$INVOKER_PIN_PROJECT"
     AUTH_HANDOFF_PROJECT="$INVOKER_PIN_PROJECT"
+    EVENT_INVITATIONS_PROJECT="$INVOKER_PIN_PROJECT"
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
@@ -316,6 +327,46 @@ run_postdeploy_handoff_invoker() {
   fi
 }
 
+# Exact event-invitation scopes have up to seven meaningful combinations. The
+# classifier emits a stable ordered CSV of the services Firebase explicitly
+# selected; only their complement may be absent after publish. An unfamiliar
+# Functions selector with no exact endpoint keeps the whole probe lenient.
+run_postdeploy_event_invitations_invoker() {
+  local script="$SCRIPT_DIR/set-event-invitations-invoker.sh"
+  if [[ "$EVENT_INVITATIONS_INVOKER_CONSERVATIVE" == "true" ]]; then
+    run_invoker "$script" --allow-missing
+    return
+  fi
+
+  case "$EVENT_INVITATIONS_STRICT_SERVICES" in
+    mint)
+      run_invoker "$script" --allow-missing-service redeem --allow-missing-service revoke
+      ;;
+    redeem)
+      run_invoker "$script" --allow-missing-service mint --allow-missing-service revoke
+      ;;
+    revoke)
+      run_invoker "$script" --allow-missing-service mint --allow-missing-service redeem
+      ;;
+    mint,redeem)
+      run_invoker "$script" --allow-missing-service revoke
+      ;;
+    mint,revoke)
+      run_invoker "$script" --allow-missing-service redeem
+      ;;
+    redeem,revoke)
+      run_invoker "$script" --allow-missing-service mint
+      ;;
+    mint,redeem,revoke)
+      run_invoker "$script"
+      ;;
+    *)
+      echo "✗ Invalid event-invitation strict-service classification: $EVENT_INVITATIONS_STRICT_SERVICES" >&2
+      return 2
+      ;;
+  esac
+}
+
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
@@ -325,6 +376,9 @@ if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
 fi
 if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-auth-handoff-invoker.sh")
+fi
+if [[ "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-event-invitations-invoker.sh")
 fi
 
 resolve_invoker_deploy_credential() {
@@ -527,7 +581,7 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker credential check skipped (this deploy does not release Functions)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
-  echo ">> Invoker credential check skipped (the selected Function scope does not include submitBugReport or emailUnsubscribe)"
+  echo ">> Invoker credential check skipped (the selected Function scope includes no reconciled callable)"
 else
   echo ">> Checking the Cloud Run invoker credential before publishing (read-only)"
   resolve_invoker_deploy_credential
@@ -540,11 +594,12 @@ else
 
 ✗ Could not read the Cloud Run invoker config. NOTHING HAS BEEN PUBLISHED.
 
-  Step 2.5 of this deploy reconciles the invoker IAM check on submitBugReport
-  and emailUnsubscribe (#768). It runs \`gcloud\`, which resolves its own
+  Step 2.5 of this deploy reconciles the invoker IAM check on submitBugReport,
+  emailUnsubscribe, auth handoff, and event invitations (#768, #548, #803). It
+  runs \`gcloud\`, which resolves its own
   credential chain — NOT the temporary one op-firebase-deploy materializes and
   deletes on exit. If that chain is empty or expired, the reconciliation would
-  fail AFTER Firebase had published, leaving both endpoints 403ing.
+  fail AFTER Firebase had published, leaving selected endpoints 403ing.
 
   Read the gcloud error printed above, then match it here:
 
@@ -630,8 +685,8 @@ set -e
 # docs/app/bug-reports.md § Repeat-deploy hardening and
 # docs/app/phase-1-deploy.md § 1a-i. A `firebase deploy --only functions` can
 # reset that annotation and re-try the rejected `allUsers` binding, silently
-# 403ing submitBugReport / emailUnsubscribe until someone notices and re-runs
-# the fix by hand.
+# 403ing submitBugReport, emailUnsubscribe, auth handoff, or event invitations
+# until someone notices and re-runs the fix by hand.
 #
 # This used to be a manual post-deploy step an operator had to remember for
 # BOTH endpoints — and at different times, each one was forgotten: #158 for
@@ -727,10 +782,24 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
     (#549) and the central origin (#547) are both still outstanding.
 EOF
   fi
+  if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
+    cat >&2 <<EOF
+
+⚠️  The event-invitation callables were RELEASED but NOT reconciled (--skip-invoker).
+
+    Domain Restricted Sharing rejects Firebase's \`allUsers\` invoker binding,
+    so mintEventInvitation, redeemEventInvitation, and revokeEventInvitation
+    may be returning 403 before their application-level auth checks can run.
+
+    Repair the selected project after every Functions deploy:
+
+      EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh
+EOF
+  fi
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
-  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport, emailUnsubscribe, or the auth-handoff callables)"
+  echo ">> Invoker reconciliation skipped (the selected Function scope includes no reconciled callable)"
 elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (Firebase --dry-run: no app or Function was released — mutating the invoker config here would be the exact footgun this wrapper gate rules out)"
 else
@@ -768,13 +837,16 @@ EOF
   if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
     run_postdeploy_handoff_invoker || RECONCILE_STATUS=$?
   fi
+  if [[ "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_event_invitations_invoker || RECONCILE_STATUS=$?
+  fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
 ✗ The Cloud Run invoker reconciliation FAILED and the deploy is already live.
-  submitBugReport, emailUnsubscribe, and/or the auth-handoff callables may be
-  returning 403 right now — and a 403 on the handoff pair means sign-in is down
-  on every Event origin, not just one feature.
+  One or more protected callables may be returning 403 right now — and a 403
+  on the handoff pair means sign-in is down on every Event origin, not just one
+  feature.
 
   The read-only check before publishing passed, so this is not a plain
   "no credential" case. Most likely, in order:
@@ -795,6 +867,7 @@ EOF
     BUG_REPORT_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-bug-report-invoker.sh
     EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
     AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
+    EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh
 EOF
   fi
 fi

@@ -1,9 +1,9 @@
 name: app-ci
 
 # Runs the app test harness on every PR and on pushes to main: typecheck, the
-# jsdom unit/component suite, the production build, the Cloud Functions notifier
-# suite (tests/functions/), the isolated registry publisher build, the
-# Firestore/Storage security-rules suite against
+# jsdom unit/component suite, the production build, the deployment safety
+# harness, the Cloud Functions notifier suite (tests/functions/), the isolated
+# registry publisher build, the Firestore/Storage security-rules suite against
 # the emulators, and the offline-durability suite (tests/offline/) against the
 # auth + firestore emulators. The Playwright e2e layer is a local smoke runner
 # (`npm run test:e2e`) and is intentionally not run here.
@@ -66,6 +66,13 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Pure fixture repositories exercise the deploy wrapper's fail-closed
+      # selection, readiness, and post-publish reconciliation paths. This stays
+      # in app-ci (rather than the propagated repo-lint workflow) because both
+      # the wrapper and its fixtures are Five Across application code.
+      - name: Deployment safety harness
+        run: npm run test:deploy
 
       # The Cloud Functions notifier suite (tests/functions/) imports
       # functions/src, whose resend / firebase-admin deps live only in

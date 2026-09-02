@@ -114,10 +114,13 @@ function classifyInvokerScope(only, exceptTargets) {
   let bugReportInvokerSelected = true;
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
+  let eventInvitationsInvokerSelected = true;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
+  let eventInvitationsInvokerConservative = false;
   let authHandoffStrictHalf = "";
+  let eventInvitationsStrictServices = "mint,redeem,revoke";
 
   if (only) {
     functionsAttempted = false;
@@ -125,8 +128,12 @@ function classifyInvokerScope(only, exceptTargets) {
     bugReportInvokerSelected = false;
     emailUnsubscribeInvokerSelected = false;
     authHandoffInvokerSelected = false;
+    eventInvitationsInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
+    let allEventInvitationsNamed = false;
+    let unknownFunctionsSelectorNamed = false;
+    const namedEventInvitationServices = new Set();
 
     for (const selector of only.split(",")) {
       if (selector === "hosting" || selector.startsWith("hosting:")) {
@@ -136,11 +143,14 @@ function classifyInvokerScope(only, exceptTargets) {
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
+        eventInvitationsInvokerSelected = true;
         mintNamed = true;
         exchangeNamed = true;
+        allEventInvitationsNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
+        eventInvitationsInvokerConservative = false;
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
         functionsAttempted = true;
         bugReportInvokerSelected = true;
@@ -157,15 +167,35 @@ function classifyInvokerScope(only, exceptTargets) {
         functionsAttempted = true;
         authHandoffInvokerSelected = true;
         exchangeNamed = true;
+      } else if (/^functions:(?:[^:]+:)?mintEventInvitation$/.test(selector)) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("mint");
+      } else if (
+        /^functions:(?:[^:]+:)?redeemEventInvitation$/.test(selector)
+      ) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("redeem");
+      } else if (
+        /^functions:(?:[^:]+:)?revokeEventInvitation$/.test(selector)
+      ) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("revoke");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
+        unknownFunctionsSelectorNamed = true;
         if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
         if (!emailUnsubscribeInvokerSelected)
           emailUnsubscribeInvokerConservative = true;
         if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
+        if (!eventInvitationsInvokerSelected)
+          eventInvitationsInvokerConservative = true;
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
+        eventInvitationsInvokerSelected = true;
       }
     }
 
@@ -180,6 +210,26 @@ function classifyInvokerScope(only, exceptTargets) {
         authHandoffStrictHalf = "exchange";
       }
     }
+
+    if (eventInvitationsInvokerSelected) {
+      if (allEventInvitationsNamed) {
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = "mint,redeem,revoke";
+      } else if (namedEventInvitationServices.size > 0) {
+        // An explicit endpoint name is a fact even when another unfamiliar
+        // selector appears in the same request. Keep every explicitly named
+        // service strict and tolerate absence only for its unselected peers.
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = ["mint", "redeem", "revoke"]
+          .filter((service) => namedEventInvitationServices.has(service))
+          .join(",");
+      } else {
+        eventInvitationsInvokerConservative = unknownFunctionsSelectorNamed;
+        eventInvitationsStrictServices = "";
+      }
+    } else {
+      eventInvitationsStrictServices = "";
+    }
   } else if (exceptTargets) {
     for (const selector of exceptTargets.split(",")) {
       if (selector === "hosting") hostingAttempted = false;
@@ -188,9 +238,12 @@ function classifyInvokerScope(only, exceptTargets) {
         bugReportInvokerSelected = false;
         emailUnsubscribeInvokerSelected = false;
         authHandoffInvokerSelected = false;
+        eventInvitationsInvokerSelected = false;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = "";
       }
       // firebase-tools subtracts --except selectors from exact top-level
       // target names. Every colon-qualified Functions exclusion is a no-op.
@@ -203,10 +256,13 @@ function classifyInvokerScope(only, exceptTargets) {
     bugReportInvokerSelected,
     emailUnsubscribeInvokerSelected,
     authHandoffInvokerSelected,
+    eventInvitationsInvokerSelected,
     bugReportInvokerConservative,
     emailUnsubscribeInvokerConservative,
     authHandoffInvokerConservative,
+    eventInvitationsInvokerConservative,
     authHandoffStrictHalf,
+    eventInvitationsStrictServices,
   };
 }
 
@@ -283,11 +339,15 @@ function printShellClassification(result) {
     BUG_REPORT_INVOKER_SELECTED: result.bugReportInvokerSelected,
     EMAIL_UNSUBSCRIBE_INVOKER_SELECTED: result.emailUnsubscribeInvokerSelected,
     AUTH_HANDOFF_INVOKER_SELECTED: result.authHandoffInvokerSelected,
+    EVENT_INVITATIONS_INVOKER_SELECTED: result.eventInvitationsInvokerSelected,
     BUG_REPORT_INVOKER_CONSERVATIVE: result.bugReportInvokerConservative,
     EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE:
       result.emailUnsubscribeInvokerConservative,
     AUTH_HANDOFF_INVOKER_CONSERVATIVE: result.authHandoffInvokerConservative,
     AUTH_HANDOFF_STRICT_HALF: result.authHandoffStrictHalf,
+    EVENT_INVITATIONS_INVOKER_CONSERVATIVE:
+      result.eventInvitationsInvokerConservative,
+    EVENT_INVITATIONS_STRICT_SERVICES: result.eventInvitationsStrictServices,
   };
   for (const [key, value] of Object.entries(fields))
     console.log(`${key}=${value}`);
