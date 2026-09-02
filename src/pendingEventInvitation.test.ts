@@ -5,6 +5,7 @@ import {
   PENDING_EVENT_INVITATION_TTL_MS,
   capturePendingEventInvitation,
   forgetPendingEventInvitationIf,
+  hasEventInvitationFragment,
   readPendingEventInvitation,
   readEventInvitationCode,
 } from './pendingEventInvitation';
@@ -78,6 +79,17 @@ afterEach(() => {
 });
 
 describe('readEventInvitationCode', () => {
+  it('recognizes the credential slot even when its value is malformed or duplicated', () => {
+    expect(hasEventInvitationFragment(`#${EVENT_INVITATION_FRAGMENT_KEY}=short`)).toBe(true);
+    expect(
+      hasEventInvitationFragment(
+        `#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}&${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`,
+      ),
+    ).toBe(true);
+    expect(hasEventInvitationFragment('#unrelated=value')).toBe(false);
+    expect(hasEventInvitationFragment(`?${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`)).toBe(false);
+  });
+
   it('accepts exactly one 256-bit base64url token from the invitation fragment', () => {
     expect(readEventInvitationCode(`#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`)).toBe(CODE);
   });
@@ -209,17 +221,25 @@ describe('origin and TTL binding', () => {
     ).not.toBeNull();
   });
 
-  it('rejects the record after the TTL', () => {
+  it('physically erases the bearer after the TTL', () => {
+    const expected = { code: CODE, origin: ORIGIN, capturedAt: NOW };
     expect(
       readPendingEventInvitation({
         origin: ORIGIN,
         now: NOW + PENDING_EVENT_INVITATION_TTL_MS + 1,
       }),
     ).toBeNull();
+    expect(sessionStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(localStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(forgetPendingEventInvitationIf(expected)).toBe(false);
   });
 
-  it('rejects a record captured in the future', () => {
+  it('physically erases a record captured in the future', () => {
+    const expected = { code: CODE, origin: ORIGIN, capturedAt: NOW };
     expect(readPendingEventInvitation({ origin: ORIGIN, now: NOW - 1 })).toBeNull();
+    expect(sessionStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(localStorage.getItem(PENDING_EVENT_INVITATION_KEY)).toBeNull();
+    expect(forgetPendingEventInvitationIf(expected)).toBe(false);
   });
 });
 

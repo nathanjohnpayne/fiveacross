@@ -1,6 +1,10 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
-import { isEventInvitationCode, readEventInvitationCode } from '../pendingEventInvitation';
+import {
+  EVENT_INVITATION_FRAGMENT_KEY,
+  isEventInvitationCode,
+  readEventInvitationCode,
+} from '../pendingEventInvitation';
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const INVITATION_ID_PATTERN = /^[a-f0-9]{64}$/;
@@ -43,6 +47,7 @@ export type RevokeEventInvitationResult =
       eventId: string;
       invitationId: string;
       outcome: 'revoked' | 'already-revoked';
+      membershipAccess: 'invitation-only' | 'pending-enforcement' | 'revoked';
     }
   | EventInvitationAdminFailure;
 
@@ -87,6 +92,7 @@ interface RevokeEventInvitationResponse {
   eventId: string;
   invitationId: string;
   outcome: 'revoked' | 'already-revoked';
+  membershipAccess: 'invitation-only' | 'pending-enforcement' | 'revoked';
 }
 
 function isEventId(value: string): boolean {
@@ -157,11 +163,25 @@ function isSafeInvitationUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   try {
     const url = new URL(value);
+    const code = readEventInvitationCode(url.hash);
+    if (code === null) return false;
+
+    const strictFragment = `#${EVENT_INVITATION_FRAGMENT_KEY}=${code}`;
+    const strictUrl = `https://${url.hostname}/${strictFragment}`;
+    const outsideFragment = value.slice(0, value.length - url.hash.length);
     return (
       url.protocol === 'https:' &&
       url.username === '' &&
       url.password === '' &&
-      readEventInvitationCode(url.hash) !== null
+      url.port === '' &&
+      url.pathname === '/' &&
+      url.search === '' &&
+      url.hash === strictFragment &&
+      !outsideFragment.includes(code) &&
+      // Exact reconstruction is intentionally stricter than URL's parsed
+      // fields. WHATWG parsing erases an explicit :443 and normalises dot
+      // paths, either of which would otherwise sneak past the checks above.
+      value === strictUrl
     );
   } catch {
     return false;
@@ -195,11 +215,14 @@ function isSafeRevokeResponse(
 ): value is RevokeEventInvitationResponse {
   if (typeof value !== 'object' || value === null) return false;
   try {
-    const { eventId, invitationId, outcome } = value as Record<string, unknown>;
+    const { eventId, invitationId, outcome, membershipAccess } = value as Record<string, unknown>;
     return (
       eventId === input.eventId &&
       invitationId === input.invitationId &&
-      (outcome === 'revoked' || outcome === 'already-revoked')
+      (outcome === 'revoked' || outcome === 'already-revoked') &&
+      (membershipAccess === 'invitation-only' ||
+        membershipAccess === 'pending-enforcement' ||
+        membershipAccess === 'revoked')
     );
   } catch {
     return false;
@@ -291,6 +314,7 @@ export async function revokeEventInvitation(
       eventId: response.data.eventId,
       invitationId: response.data.invitationId,
       outcome: response.data.outcome,
+      membershipAccess: response.data.membershipAccess,
     };
   } catch (error: unknown) {
     return safeAdminFailure(error);

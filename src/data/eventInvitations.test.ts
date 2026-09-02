@@ -143,13 +143,30 @@ describe('mintEventInvitation', () => {
     expect(JSON.stringify(result)).not.toContain(CODE);
   });
 
-  it('fails closed on a URL that does not carry a strict invitation fragment', async () => {
+  it.each([
+    ['query credential', `https://summer-camp.fiveacross.app/?fa_invite=${CODE}#fa_invite=${CODE}`],
+    ['unrelated query', `https://summer-camp.fiveacross.app/?source=admin#fa_invite=${CODE}`],
+    ['non-root path', `https://summer-camp.fiveacross.app/join#fa_invite=${CODE}`],
+    ['normalised dot path', `https://summer-camp.fiveacross.app/./#fa_invite=${CODE}`],
+    ['username', `https://admin@summer-camp.fiveacross.app/#fa_invite=${CODE}`],
+    ['password', `https://admin:secret@summer-camp.fiveacross.app/#fa_invite=${CODE}`],
+    ['non-default port', `https://summer-camp.fiveacross.app:8443/#fa_invite=${CODE}`],
+    // `URL.port` is empty after WHATWG normalises the default port. This case
+    // proves validation is anchored to the raw response too, not parsed fields.
+    ['explicit default port', `https://summer-camp.fiveacross.app:443/#fa_invite=${CODE}`],
+    ['duplicate invitation key', `${INVITATION_URL}&fa_invite=${CODE}`],
+    ['second fragment field', `${INVITATION_URL}&source=admin`],
+    ['bearer copied into another fragment field', `${INVITATION_URL}&copy=${CODE}`],
+    ['bearer copied into hostname', `https://${CODE}.example/#fa_invite=${CODE}`],
+    ['non-canonical fragment encoding', `https://summer-camp.fiveacross.app/#fa_invite=${CODE}%20`],
+    ['not a fragment', `https://summer-camp.fiveacross.app/?fa_invite=${CODE}`],
+  ])('fails closed when the minted URL has %s', async (_description, invitationUrl) => {
     mocks.httpsCallable.mockReturnValue(
       vi.fn().mockResolvedValue({
         data: {
           eventId: EVENT_ID,
           invitationId: INVITATION_ID,
-          invitationUrl: 'https://summer-camp.fiveacross.app/?fa_invite=not-a-fragment',
+          invitationUrl,
           expiresAt: 1_700_000_060_000,
         },
       }),
@@ -163,18 +180,84 @@ describe('mintEventInvitation', () => {
 });
 
 describe('revokeEventInvitation', () => {
-  it.each(['revoked', 'already-revoked'] as const)('returns the closed %s outcome', async (outcome) => {
-    const revoke = vi.fn().mockResolvedValue({
-      data: { eventId: EVENT_ID, invitationId: INVITATION_ID, outcome },
-    });
-    mocks.httpsCallable.mockReturnValue(revoke);
+  it.each(['revoked', 'already-revoked'] as const)(
+    'returns the closed %s outcome',
+    async (outcome) => {
+      const revoke = vi.fn().mockResolvedValue({
+        data: {
+          eventId: EVENT_ID,
+          invitationId: INVITATION_ID,
+          outcome,
+          membershipAccess: 'revoked',
+        },
+      });
+      mocks.httpsCallable.mockReturnValue(revoke);
 
-    await expect(
-      revokeEventInvitation({ eventId: EVENT_ID, invitationId: INVITATION_ID }),
-    ).resolves.toEqual({ ok: true, eventId: EVENT_ID, invitationId: INVITATION_ID, outcome });
-    expect(mocks.httpsCallable).toHaveBeenCalledWith({}, 'revokeEventInvitation');
-    expect(revoke).toHaveBeenCalledWith({ eventId: EVENT_ID, invitationId: INVITATION_ID });
-  });
+      await expect(
+        revokeEventInvitation({
+          eventId: EVENT_ID,
+          invitationId: INVITATION_ID,
+        }),
+      ).resolves.toEqual({
+        ok: true,
+        eventId: EVENT_ID,
+        invitationId: INVITATION_ID,
+        outcome,
+        membershipAccess: 'revoked',
+      });
+      expect(mocks.httpsCallable).toHaveBeenCalledWith({}, 'revokeEventInvitation');
+      expect(revoke).toHaveBeenCalledWith({
+        eventId: EVENT_ID,
+        invitationId: INVITATION_ID,
+      });
+    },
+  );
+
+  it.each(['invitation-only', 'pending-enforcement', 'revoked'] as const)(
+    'preserves the closed membership access state %s',
+    async (membershipAccess) => {
+      mocks.httpsCallable.mockReturnValue(
+        vi.fn().mockResolvedValue({
+          data: {
+            eventId: EVENT_ID,
+            invitationId: INVITATION_ID,
+            outcome: 'revoked',
+            membershipAccess,
+          },
+        }),
+      );
+
+      await expect(
+        revokeEventInvitation({
+          eventId: EVENT_ID,
+          invitationId: INVITATION_ID,
+        }),
+      ).resolves.toMatchObject({ ok: true, membershipAccess });
+    },
+  );
+
+  it.each([undefined, null, 'membership-still-active', true])(
+    'fails closed on membership access value %j',
+    async (membershipAccess) => {
+      mocks.httpsCallable.mockReturnValue(
+        vi.fn().mockResolvedValue({
+          data: {
+            eventId: EVENT_ID,
+            invitationId: INVITATION_ID,
+            outcome: 'revoked',
+            membershipAccess,
+          },
+        }),
+      );
+
+      await expect(
+        revokeEventInvitation({
+          eventId: EVENT_ID,
+          invitationId: INVITATION_ID,
+        }),
+      ).resolves.toEqual({ ok: false, reason: 'unavailable' });
+    },
+  );
 
   it('collapses authorization and invitation-existence failures into one public result', async () => {
     mocks.httpsCallable.mockReturnValue(

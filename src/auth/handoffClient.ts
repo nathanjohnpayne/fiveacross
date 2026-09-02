@@ -129,6 +129,18 @@ export function readHandoffCode(hash: string): string | null {
 }
 
 /**
+ * Whether the fragment names the handoff credential slot at all.
+ *
+ * This is intentionally broader than {@link readHandoffCode}: a malformed
+ * tagged value is unusable, but it must still be cleared before telemetry can
+ * observe the URL because it may contain a real code alongside junk.
+ */
+export function hasHandoffFragment(hash: string): boolean {
+  if (!hash.startsWith('#')) return false;
+  return new URLSearchParams(hash.slice(1)).has(HANDOFF_FRAGMENT_KEY);
+}
+
+/**
  * Strip the code from the address bar without touching anything else.
  *
  * `history.replaceState`, so there is no navigation and no new history entry —
@@ -140,7 +152,7 @@ export function readHandoffCode(hash: string): string | null {
  * act on: it decides whether telemetry may safely read the URL at all.
  */
 export function clearHandoffFragment(): boolean {
-  return clearUrlFragmentAndConfirm((hash) => readHandoffCode(hash) !== null);
+  return clearUrlFragmentAndConfirm(hasHandoffFragment);
 }
 
 /** The URL the Event origin sends the player to. Built here, navigated to verbatim. */

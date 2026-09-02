@@ -60,6 +60,18 @@ export function isEventInvitationCode(value: string): boolean {
   return EVENT_INVITATION_TOKEN_PATTERN.test(value);
 }
 
+/**
+ * Whether the fragment names the invitation credential slot at all.
+ *
+ * Deliberately broader than {@link readEventInvitationCode}: malformed and
+ * duplicate values are not redeemable, but may still contain a real bearer and
+ * therefore must be removed before telemetry can observe the URL.
+ */
+export function hasEventInvitationFragment(hash: string): boolean {
+  if (!hash.startsWith('#')) return false;
+  return new URLSearchParams(hash.slice(1)).has(EVENT_INVITATION_FRAGMENT_KEY);
+}
+
 /** Read an Event invitation only from a URL fragment, never from a query. */
 export function readEventInvitationCode(hash: string): string | null {
   if (!hash.startsWith('#')) return null;
@@ -140,6 +152,18 @@ function usableRecord(
   return record;
 }
 
+function outsideResumptionWindow(
+  record: PendingEventInvitationRecord | null,
+  origin: string,
+  now: number,
+): record is PendingEventInvitationRecord {
+  return (
+    record !== null &&
+    record.origin === origin &&
+    (now < record.capturedAt || now - record.capturedAt > PENDING_EVENT_INVITATION_TTL_MS)
+  );
+}
+
 function sameRecord(
   left: PendingEventInvitationRecord | null,
   right: PendingEventInvitationRecord,
@@ -193,12 +217,18 @@ export function readPendingEventInvitation(
   const now = input.now ?? Date.now();
   if (!isOrigin(input.origin) || !Number.isSafeInteger(now) || now < 0) return null;
 
-  const sessionRecord = usableRecord(
-    parseRecordShape(readStore('sessionStorage')),
-    input.origin,
-    now,
-  );
-  const localRecord = usableRecord(parseRecordShape(readStore('localStorage')), input.origin, now);
+  const storedSessionRecord = parseRecordShape(readStore('sessionStorage'));
+  const storedLocalRecord = parseRecordShape(readStore('localStorage'));
+  for (const record of [memoryRecord, storedSessionRecord, storedLocalRecord]) {
+    if (outsideResumptionWindow(record, input.origin, now)) {
+      // Compare-delete across all copies. A newer invitation captured by
+      // another tab between this read and the removal is never erased.
+      forgetPendingEventInvitationIf(record);
+    }
+  }
+
+  const sessionRecord = usableRecord(storedSessionRecord, input.origin, now);
+  const localRecord = usableRecord(storedLocalRecord, input.origin, now);
   const currentRecord =
     usableRecord(memoryRecord, input.origin, now) ?? sessionRecord ?? localRecord;
   if (currentRecord === null) return null;

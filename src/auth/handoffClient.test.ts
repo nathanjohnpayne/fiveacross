@@ -14,6 +14,7 @@ import {
   buildAuthOriginUrl,
   clearHandoffFragment,
   consumeHandoffFailure,
+  hasHandoffFragment,
   parseHandoffRequest,
   readHandoffCode,
   recordHandoffFailure,
@@ -82,6 +83,11 @@ describe('readHandoffCode', () => {
 });
 
 describe('clearHandoffFragment', () => {
+  it('treats a malformed tagged value as sensitive even though it cannot be used', () => {
+    expect(hasHandoffFragment(`#${HANDOFF_FRAGMENT_KEY}=short`)).toBe(true);
+    expect(hasHandoffFragment('#unrelated=short')).toBe(false);
+  });
+
   it('drops the fragment while preserving path and query, without navigating', () => {
     const loc = { pathname: '/board', search: '?day=3', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` };
     const replaceState = vi.fn(() => {
@@ -111,6 +117,14 @@ describe('clearHandoffFragment', () => {
   it('reports failure when replaceState no-ops and the code survives', () => {
     vi.stubGlobal('window', {
       location: { pathname: '/', search: '', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` },
+      history: { state: null, replaceState: vi.fn() },
+    });
+    expect(clearHandoffFragment()).toBe(false);
+  });
+
+  it('reports failure when a malformed tagged value survives', () => {
+    vi.stubGlobal('window', {
+      location: { pathname: '/', search: '', hash: `#${HANDOFF_FRAGMENT_KEY}=short` },
       history: { state: null, replaceState: vi.fn() },
     });
     expect(clearHandoffFragment()).toBe(false);

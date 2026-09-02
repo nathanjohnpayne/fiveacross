@@ -18,9 +18,10 @@
  * Keeping this seam dependency-free is what lets `entry.tsx` capture and clear
  * the credentials while nothing capable of exporting the URL is awake.
  */
-import { readHandoffCode } from './auth/handoffClient';
+import { hasHandoffFragment, readHandoffCode } from './auth/handoffClient';
 import {
   capturePendingEventInvitation,
+  hasEventInvitationFragment,
   readEventInvitationCode,
 } from './pendingEventInvitation';
 import { clearUrlFragmentAndConfirm } from './urlFragment';
@@ -43,6 +44,8 @@ export function captureUrlCredentialsFromUrl(): void {
   const hash = window.location.hash;
   capturedCode = readHandoffCode(hash);
   const invitationCode = readEventInvitationCode(hash);
+  const hasHandoffCredential = hasHandoffFragment(hash);
+  const hasInvitationCredential = hasEventInvitationFragment(hash);
 
   // Persist before clearing. The fragment is the only recoverable copy on
   // arrival, while storage is what carries the invitation through sign-in.
@@ -57,12 +60,12 @@ export function captureUrlCredentialsFromUrl(): void {
   // A clear that throws, is refused, or is accepted and silently no-ops leaves
   // a LIVE bearer in `window.location`. Whether every supported credential
   // actually went is what decides if telemetry may read the URL at all.
-  const hasCredential = capturedCode !== null || invitationCode !== null;
+  const hasCredential = hasHandoffCredential || hasInvitationCredential;
   urlSafeForTelemetry =
     !hasCredential ||
     clearUrlFragmentAndConfirm(
       (liveHash) =>
-        readHandoffCode(liveHash) !== null || readEventInvitationCode(liveHash) !== null,
+        hasHandoffFragment(liveHash) || hasEventInvitationFragment(liveHash),
     );
 }
 
