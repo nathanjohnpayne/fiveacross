@@ -21,12 +21,10 @@ service cloud.firestore {
       return exists(membershipDoc(eventId, uid))
         && get(membershipDoc(eventId, uid)).data.status == 'active';
     }
-    // Canonical transitional Decision D-A predicate (#801/#802/#1079).
-    // This scaffold is deliberately unused by production allow arms until
-    // #804 enables the complete Event inventory. Keeping the Event data
-    // threaded makes the enforcement switch and Admin bypass one access;
-    // the membership path remains exists()-then-get() so absence is a clean
-    // false instead of an evaluation error.
+    // Canonical transitional Decision D-A predicate (#801/#802/#804/#1079).
+    // Keeping the Event data threaded makes the enforcement switch and Admin
+    // bypass one access; the membership path remains exists()-then-get() so
+    // absence is a clean false instead of an evaluation error.
     function admittedWithEvent(eventId, event) {
       return signedIn()
         && (event.get('membershipEnforcement', 'off') != 'enforced'
@@ -37,6 +35,35 @@ service cloud.firestore {
     }
     function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
+    }
+    function isAdmittedAdmin(eventId) {
+      let event = eventData(eventId);
+      return admittedWithEvent(eventId, event) && isAdminWithEvent(event);
+    }
+    function isAdmittedOwnerOrAdmin(eventId, uid) {
+      let event = eventData(eventId);
+      return admittedWithEvent(eventId, event)
+        && (isOwner(uid) || isAdminWithEvent(event));
+    }
+    // The enforcement switch is server-owned. Presence and value are both
+    // frozen so a client cannot add, remove, enable, or downgrade it.
+    function membershipEnforcementUnchanged() {
+      return ('membershipEnforcement' in request.resource.data)
+               == ('membershipEnforcement' in resource.data)
+        && (!('membershipEnforcement' in resource.data)
+            || request.resource.data.membershipEnforcement
+                 == resource.data.membershipEnforcement);
+    }
+    // Root Event CREATE remains the pre-existing, unsatisfiable client path:
+    // the Admin roster it consults does not exist yet, so only the provisioner
+    // can create Events through the Admin SDK (#793). Admission applies to an
+    // EXISTING Event's update, and the server-owned switch is frozen there.
+    function eventConfigWriteAuthorized(eventId) {
+      let event = eventData(eventId);
+      return isAdminWithEvent(event)
+        && (resource == null
+            || (admittedWithEvent(eventId, event)
+                && membershipEnforcementUnchanged()));
     }
     function markerDeliveryCompatibilityDoc() {
       return /databases/$(database)/documents/markerDeliveryCompatibility/current;
@@ -182,6 +209,17 @@ service cloud.firestore {
       return dayIndex == string(int(dayIndex));
     }
 
+    // Boards are the hottest Event-scoped rule. Thread one Event read through
+    // admission, Admin privilege, and the Day unlock lookup so a reshuffle does
+    // not pay for the same document three times against the ten-call ceiling.
+    function boardWriterAdmittedAndDayOpen(eventId, uid, dayIndex) {
+      let event = eventData(eventId);
+      return admittedWithEvent(eventId, event)
+        && (isOwner(uid) || isAdminWithEvent(event))
+        && isCanonicalDay(dayIndex)
+        && request.time.toMillis() >= event.days[int(dayIndex)].unlockAt;
+    }
+
     // ---- Reshuffle (#378, specs/reshuffle.md) ----
     //
     // A Player may trade a PRISTINE Day Card for a fresh deal at most 3 times per
@@ -295,10 +333,9 @@ service cloud.firestore {
     // write or transaction: a LONE board replace makes `getAfter()` an evaluation
     // error, which DENIES (the safe default), so an unpaired reshuffle cannot land.
     // An absent player row likewise errors the `get()` and denies.
-    function reshuffleCounterPaired(eventId, uid) {
-      return getAfter(playerDoc(eventId, uid)).data.reshufflesUsed
-               == usedCount(get(playerDoc(eventId, uid)).data) + 1
-        && getAfter(playerDoc(eventId, uid)).data.reshufflesUsed <= reshuffleAllowance();
+    function reshuffleCounterPaired(eventId, uid, postCount) {
+      return postCount == usedCount(get(playerDoc(eventId, uid)).data) + 1
+        && postCount <= reshuffleAllowance();
     }
 
     // The per-spend MARKER (#463 finding 1). The counter pairing above is
@@ -318,12 +355,12 @@ service cloud.firestore {
     // fails the equality. `!exists()` requires the marker to be NEW in this
     // batch, so a marker pre-created in an earlier request can't vouch either;
     // `getAfter()` errors (denies) when the batch does not create it.
-    function reshuffleSpendMarkerDoc(eventId, uid) {
-      return /databases/$(database)/documents/events/$(eventId)/reshuffles/$(uid + '-' + string(getAfter(playerDoc(eventId, uid)).data.reshufflesUsed));
+    function reshuffleSpendMarkerDoc(eventId, uid, postCount) {
+      return /databases/$(database)/documents/events/$(eventId)/reshuffles/$(uid + '-' + string(postCount));
     }
-    function reshuffleSpendMarked(eventId, uid, dayIndex) {
-      return !exists(reshuffleSpendMarkerDoc(eventId, uid))
-        && getAfter(reshuffleSpendMarkerDoc(eventId, uid)).data.dayIndex == int(dayIndex);
+    function reshuffleSpendMarked(eventId, uid, dayIndex, postCount) {
+      return !exists(reshuffleSpendMarkerDoc(eventId, uid, postCount))
+        && getAfter(reshuffleSpendMarkerDoc(eventId, uid, postCount)).data.dayIndex == int(dayIndex);
     }
 
     // The EXISTING (pre-write) Board must be pristine — the card being traded away
@@ -331,9 +368,10 @@ service cloud.firestore {
     // incoming payload, which a hand-built client controls) is what makes that
     // check trustworthy, the same discipline `dayLocked` uses for the schedule lock.
     function reshuffleOk(eventId, uid, dayIndex) {
+      let postCount = getAfter(playerDoc(eventId, uid)).data.reshufflesUsed;
       return boardPristine(resource.data.cells)
-        && reshuffleCounterPaired(eventId, uid)
-        && reshuffleSpendMarked(eventId, uid, dayIndex);
+        && reshuffleCounterPaired(eventId, uid, postCount)
+        && reshuffleSpendMarked(eventId, uid, dayIndex, postCount);
     }
 
     // Normal Mark writes are offline-queueable and merge a full replacement
@@ -949,7 +987,11 @@ service cloud.firestore {
     }
 
     match /events/{eventId} {
-      allow read: if signedIn();
+      // In this Event subtree, historical comments that call a surface
+      // "public" mean visible to the Event audience. #804 makes that audience
+      // `admitted(eventId)` when enforcement is on; every narrower owner/Admin
+      // predicate remains an additional conjunct.
+      allow read: if admitted(eventId);
       // Only admins can change event config (theme default, claimMode, admins,
       // settings, bannedUids). `settings.reportHideThreshold` is load-bearing
       // (ADR 0004): when the write carries `settings`, its `reportHideThreshold`
@@ -1017,7 +1059,7 @@ service cloud.firestore {
       // beyond any real Event and finite by construction.
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
-      allow create, update: if isAdmin(eventId)
+      allow create, update: if eventConfigWriteAuthorized(eventId)
         && (!('standingsFreezeAt' in request.resource.data)
             || (request.resource.data.standingsFreezeAt is number
                 && request.resource.data.standingsFreezeAt > 0
@@ -1136,7 +1178,16 @@ service cloud.firestore {
                 && ('days' in request.resource.data) == ('days' in resource.data)
                 && (!('days' in request.resource.data)
                     || request.resource.data.days == resource.data.days)));
-      allow delete: if isAdmin(eventId);
+      allow delete: if isAdmittedAdmin(eventId);
+
+      // Membership is server-authored admission, never a client assertion.
+      // Owners can inspect their own record even after revocation; an admitted
+      // Admin can inspect the roster. Neither grant permits a client write.
+      match /memberships/{uid} {
+        allow get: if isOwner(uid) || isAdmittedAdmin(eventId);
+        allow list: if isAdmittedAdmin(eventId);
+        allow create, update, delete: if false;
+      }
 
       // Community-editable prompt pool.
       match /items/{itemId} {
@@ -1159,7 +1210,7 @@ service cloud.firestore {
         // non-admins" — including its ORIGINAL submitter once rejected — so it
         // falls through to the admin-only arm (no submitter carve-out). This is
         // why the carve-out is `status == 'pending'` ONLY, not `pending || rejected`.
-        allow read: if signedIn() && (
+        allow read: if admitted(eventId) && (
           isAdmin(eventId)
           || resource.data.status == 'active'
           || (resource.data.status == 'pending' && resource.data.createdBy == request.auth.uid)
@@ -1177,7 +1228,7 @@ service cloud.firestore {
         // embark, or farewell Prompts. 'rejected' is deliberately NOT in this set:
         // only an admin's `update` (the isAdmin(eventId) arm below) may transition
         // a row to 'rejected' — a non-admin can never CREATE one pre-rejected.
-        allow create: if signedIn()
+        allow create: if admitted(eventId)
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 80
@@ -1201,13 +1252,13 @@ service cloud.firestore {
         // manual hide/restore via the `isAdmin(eventId)` branch. This is the
         // authoritative promotion of the Phase-0 presentational `isReportHidden`
         // filter — pinned by tests/rules/w4-server-authoritative-hide.test.ts.
-        allow update: if (isAdmin(eventId)
-            && targetDayIndexUnchangedOrValid()
-            && itemPoolSpicyUnchangedOrValid())
-          || (signedIn()
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
-              && request.resource.data.reportCount == resource.data.reportCount + 1);
-        allow delete: if isAdmin(eventId);
+        allow update: if admitted(eventId)
+          && ((isAdmin(eventId)
+                && targetDayIndexUnchangedOrValid()
+                && itemPoolSpicyUnchangedOrValid())
+              || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
+                  && request.resource.data.reportCount == resource.data.reportCount + 1));
+        allow delete: if isAdmittedAdmin(eventId);
       }
 
       // Membership + denormalized stats. Self-writable BY DESIGN (ADR 0001):
@@ -1228,17 +1279,17 @@ service cloud.firestore {
       // moderates here needs to rewind a Player's spent reshuffles, and exempting
       // them would reopen the reset path for any admin-flagged account.
       match /players/{uid} {
-        allow read: if signedIn();
-        allow create, update: if (isOwner(uid) || isAdmin(eventId))
+        allow read: if admitted(eventId);
+        allow create, update: if isAdmittedOwnerOrAdmin(eventId, uid)
           && reshuffleCounterMonotonic();
-        allow delete: if isAdmin(eventId);
+        allow delete: if isAdmittedAdmin(eventId);
 
         // Immutable, server-authored direct Board transition records. The
         // owner consumes them to deliver durable analytics after an offline
         // queue drain or reload; no client may create, modify, or erase a
         // record (the Cloud Functions Admin SDK bypasses these rules).
         match /analyticsTransitions/{transitionId} {
-          allow read: if isOwner(uid) || isAdmin(eventId);
+          allow read: if isAdmittedOwnerOrAdmin(eventId, uid);
           allow write: if false;
         }
       }
@@ -1265,8 +1316,8 @@ service cloud.firestore {
       // already signed-in-readable); delete is admin-only moderation, matching
       // boards — an owner delete would let a spent marker be re-minted.
       match /reshuffles/{markerId} {
-        allow read: if signedIn();
-        allow create: if signedIn()
+        allow read: if admitted(eventId);
+        allow create: if admitted(eventId)
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.n is int
           && request.resource.data.n >= 1
@@ -1276,7 +1327,7 @@ service cloud.firestore {
           && request.resource.data.dayIndex >= 0
           && getAfter(playerDoc(eventId, request.auth.uid)).data.reshufflesUsed
                == request.resource.data.n;
-        allow delete: if isAdmin(eventId);
+        allow delete: if isAdmittedAdmin(eventId);
       }
 
       // Phase 1.5 day-scoped model (daily-cards-spec § "Data model" / "Security
@@ -1327,10 +1378,8 @@ service cloud.firestore {
         // This narrows self-write by exactly one operation that had no legitimate
         // caller — it is not a retreat from ADR 0001's model for marks and stats.
         match /boards/{uid} {
-          allow read: if isOwner(uid) || isAdmin(eventId);
-          allow create, update: if (isOwner(uid) || isAdmin(eventId))
-            && isCanonicalDay(dayIndex)
-            && request.time.toMillis() >= get(/databases/$(database)/documents/events/$(eventId)).data.days[int(dayIndex)].unlockAt
+          allow read: if isAdmittedOwnerOrAdmin(eventId, uid);
+          allow create, update: if boardWriterAdmittedAndDayOpen(eventId, uid, dayIndex)
             // The #457 cells-map contract: any write that CREATES a board or
             // CHANGES its cells must leave a canonical MAP (25 decimal keys).
             // A Mark is a per-cell field-masked patch into the map — which is
@@ -1371,7 +1420,7 @@ service cloud.firestore {
                 || boardPromptsCarried(request.resource.data.cells, resource.data.cells)
                 || !boardCellsChanged())
             && (!isReshuffleWrite() || reshuffleOk(eventId, uid, dayIndex));
-          allow delete: if isAdmin(eventId);
+          allow delete: if isAdmittedAdmin(eventId);
         }
 
         // Per-day First-to-BINGO honor doc: { firstBingo: { uid, displayName, at } }
@@ -1402,8 +1451,8 @@ service cloud.firestore {
         // same coercion as the Board gate) closes the squat: the honor can only be
         // claimed once its Day is live.
         match /meta/{metaId} {
-          allow read: if signedIn();
-          allow create: if signedIn()
+          allow read: if admitted(eventId);
+          allow create: if admitted(eventId)
             && metaId == dayIndex
             && isCanonicalDay(dayIndex)
             && request.time.toMillis() >= get(/databases/$(database)/documents/events/$(eventId)).data.days[int(dayIndex)].unlockAt
@@ -1412,7 +1461,7 @@ service cloud.firestore {
             && request.resource.data.firstBingo.displayName.size() > 0
             && request.resource.data.firstBingo.displayName.size() <= 100
             && request.resource.data.firstBingo.at is number;
-          allow delete: if isAdmin(eventId);
+          allow delete: if isAdmittedAdmin(eventId);
         }
       }
 
@@ -1420,11 +1469,12 @@ service cloud.firestore {
       match /proofs/{proofId} {
         // Non-admins can read only visible ('active') proofs; hidden/flagged
         // proofs are moderation-only and readable by admins.
-        allow read: if signedIn() && (isAdmin(eventId) || resource.data.status == 'active');
+        allow read: if admitted(eventId)
+          && (isAdmin(eventId) || resource.data.status == 'active');
         // Constrain the payload like /items: the uploader owns the doc, only the
         // known fields are allowed, the proof starts visible + unreported, and
         // moderation fields (visionFlag, thumbURL) must be server-set, not client.
-        allow create: if signedIn()
+        allow create: if admitted(eventId)
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.keys().hasOnly([
                'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
@@ -1516,19 +1566,20 @@ service cloud.firestore {
         // crosses `settings.reportHideThreshold`; admins keep manual hide/restore
         // and confirm-claim (`status: 'active'`) via the `isAdmin(eventId)` branch.
         // Pinned by tests/rules/w4-server-authoritative-hide.test.ts.
-        allow update: if isAdmin(eventId)
-          || (signedIn()
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
-              && request.resource.data.reportCount == resource.data.reportCount + 1);
-        allow delete: if isOwner(resource.data.uid) || isAdmin(eventId);
+        allow update: if admitted(eventId)
+          && (isAdmin(eventId)
+              || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
+                  && request.resource.data.reportCount == resource.data.reportCount + 1));
+        allow delete: if isAdmittedOwnerOrAdmin(eventId, resource.data.uid);
       }
 
       // admin_confirmed-mode claims: a player creates a claim for their own square;
       // admins read the queue and resolve (confirm/reject) them.
       match /claims/{claimId} {
-        allow read: if isAdmin(eventId) || isOwner(resource.data.uid);
-        allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isAdmin(eventId);
+        allow read: if isAdmittedOwnerOrAdmin(eventId, resource.data.uid);
+        allow create: if admitted(eventId)
+          && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if isAdmittedAdmin(eventId);
       }
 
       // Per-Prompt Tally (ADR 0002). A Mark is PRIVATE on the Board but PUBLIC as an
@@ -1546,21 +1597,23 @@ service cloud.firestore {
         // Square badge is public-read; in Phase 0 the badge count is derived from
         // the `markers` subcollection below, and the aggregate doc is maintained
         // admin/Cloud-Function-side (Phase 1), never client-forged.
-        allow read: if signedIn();
-        allow write: if isAdmin(eventId);
+        allow read: if admitted(eventId);
+        allow write: if isAdmittedAdmin(eventId);
 
         // Attribution lives here: the entry doc id IS the marker's uid, so a Player
         // may add/update/remove ONLY their own entry and a forged-attribution write
         // is denied. Reads are public (ADR 0002).
         match /markers/{markerUid} {
-          // Direct Square/Tally collection scans remain public to signed-in
-          // Players, including legacy rows during rollback. A point get is
+          // Direct Square/Tally collection scans remain visible to admitted
+          // Event Players, including legacy rows during rollback. A point get is
           // stricter: a missing document is observable, field absence is the
           // explicit legacy shape, an exact field is the canonical shape, and a
           // present path mismatch is never readable.
-          allow list: if signedIn();
-          allow get: if signedIn() && markerReadHasCompatibleEventId(eventId);
-          allow create, update: if isOwner(markerUid)
+          allow list: if admitted(eventId);
+          allow get: if admitted(eventId)
+            && markerReadHasCompatibleEventId(eventId);
+          allow create, update: if admitted(eventId)
+            && isOwner(markerUid)
             && request.resource.data.uid == request.auth.uid
             && request.resource.data.displayName is string
             && request.resource.data.displayName.size() > 0
@@ -1568,7 +1621,7 @@ service cloud.firestore {
             && request.resource.data.markedAt is number
             && markerWriteHasCompatibleEventId(eventId);
           // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if isOwner(markerUid) || isAdmin(eventId);
+          allow delete: if isAdmittedOwnerOrAdmin(eventId, markerUid);
         }
       }
 
@@ -1577,10 +1630,10 @@ service cloud.firestore {
       // never blocks, unmarks, or discounts the Mark; attaching a Proof merely
       // satisfies it. Public read.
       match /doubts/{doubtId} {
-        allow read: if signedIn();
+        allow read: if admitted(eventId);
         // Raised BY the caller, ON someone else's Mark (no self-doubt); a forged
         // `fromUid` is denied.
-        allow create: if signedIn()
+        allow create: if admitted(eventId)
           && request.resource.data.fromUid == request.auth.uid
           && request.resource.data.targetUid is string
           && request.resource.data.targetUid != request.auth.uid
@@ -1628,11 +1681,12 @@ service cloud.firestore {
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
         // The doubted Player (or an admin) marks it satisfied by attaching a Proof —
         // a social resolution recorded in `satisfied*`, not a gate on play (ADR 0001).
-        allow update: if isAdmin(eventId)
-          || (isOwner(resource.data.targetUid)
-              && request.resource.data.diff(resource.data).affectedKeys()
-                   .hasOnly(['satisfiedAt', 'satisfiedProofId']));
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.fromUid);
+        allow update: if admitted(eventId)
+          && (isAdmin(eventId)
+              || (isOwner(resource.data.targetUid)
+                  && request.resource.data.diff(resource.data).affectedKeys()
+                       .hasOnly(['satisfiedAt', 'satisfiedProofId'])));
+        allow delete: if isAdmittedOwnerOrAdmin(eventId, resource.data.fromUid);
       }
 
       // Hearts (specs/feed-hearts.md): one Player's like on a Feed post — a
@@ -1647,8 +1701,8 @@ service cloud.firestore {
       // #425 — Moment ids are deterministic and a deleted Moment can come
       // back at the same id). Toggle-off is the owner's delete.
       match /hearts/{heartId} {
-        allow read: if signedIn();
-        allow create, update: if signedIn()
+        allow read: if admitted(eventId);
+        allow create, update: if admitted(eventId)
           // Own heart only — a forged uid is denied, and the id binding below
           // makes a cross-Player update structurally impossible too (the slot
           // id embeds the OWNER's uid; the writer's payload uid must equal
@@ -1686,7 +1740,7 @@ service cloud.firestore {
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
+        allow delete: if isAdmittedOwnerOrAdmin(eventId, resource.data.uid);
       }
 
       // Moments (ADR 0002): a broadcast of a big social beat (BINGO / Blackout /
@@ -1694,8 +1748,9 @@ service cloud.firestore {
       // Own-beat create only (a forged uid is denied); public read; fully immutable
       // (no update path); deletable by owner or admin.
       match /moments/{momentId} {
-        allow read: if signedIn();
-        allow create: if isOwner(request.resource.data.uid)
+        allow read: if admitted(eventId);
+        allow create: if admitted(eventId)
+          && isOwner(request.resource.data.uid)
           && request.resource.data.kind in ['bingo', 'blackout', 'first_bingo']
           // Bind the doc id to the payload kind so a caller cannot squat an id with a
           // MISMATCHED kind (issue #103). Mirrors the writer's deterministic scheme
@@ -1828,14 +1883,15 @@ service cloud.firestore {
         // over-blocks a STALE bundle's later legacy-id post for a DIFFERENT Day —
         // accepted residual in the silence direction (the current bundle's
         // day-scoped post for that other Day is untouched); see the spec.
-        allow delete: if isAdmin(eventId)
-          || (isOwner(resource.data.uid)
-              && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid
-              && (momentId == resource.data.uid + '-' + resource.data.kind
-                    ? (!resource.data.keys().hasAny(['dayIndex'])
-                        || !(resource.data.dayIndex is int)
-                        || getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind + '-d' + string(resource.data.dayIndex))).data.uid == resource.data.uid)
-                    : getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind)).data.uid == resource.data.uid));
+        allow delete: if admitted(eventId)
+          && (isAdmin(eventId)
+              || (isOwner(resource.data.uid)
+                  && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid
+                  && (momentId == resource.data.uid + '-' + resource.data.kind
+                        ? (!resource.data.keys().hasAny(['dayIndex'])
+                            || !(resource.data.dayIndex is int)
+                            || getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind + '-d' + string(resource.data.dayIndex))).data.uid == resource.data.uid)
+                        : getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind)).data.uid == resource.data.uid)));
       }
 
       // Retraction tombstones (#377, specs/w2-feed-moments.md § Retracting a
@@ -1881,8 +1937,9 @@ service cloud.firestore {
       // exactly that), and it carries no information a Moment did not already
       // publish.
       match /momentRetractions/{momentId} {
-        allow read: if signedIn();
-        allow create: if isOwner(request.resource.data.uid)
+        allow read: if admitted(eventId);
+        allow create: if admitted(eventId)
+          && isOwner(request.resource.data.uid)
           // Exactly the contract's fields, no extras riding along. Deliberately
           // STRICTER than the moments create rule (which has no hasOnly and so
           // accepts stray fields — the honesty pin in the spec): a tombstone is
@@ -1910,7 +1967,7 @@ service cloud.firestore {
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
-        allow delete: if isAdmin(eventId);
+        allow delete: if isAdmittedAdmin(eventId);
       }
 
       // Notices (specs/admin-messages.md): admin-authored broadcasts — title +
@@ -1922,8 +1979,8 @@ service cloud.firestore {
       // report counter (Notices are admin-authored, not player-reportable) and no
       // owner-write path (a Notice belongs to the admin role, not one uid).
       match /notices/{noticeId} {
-        allow read: if signedIn();
-        allow create: if isAdmin(eventId)
+        allow read: if admitted(eventId);
+        allow create: if isAdmittedAdmin(eventId)
           // Bind attribution to the authenticated admin (Codex P2, PR #440) so a
           // Notice's public "📌 Nathan" byline cannot be forged as another admin —
           // the same isOwner-of-uid discipline markers/moments/proofs use.
@@ -1955,7 +2012,7 @@ service cloud.firestore {
         // An edit stamps `editedAt`, which the Feed card and admin history surface
         // as "edited" — a delivered broadcast may be corrected, never silently
         // rewritten.
-        allow update: if isAdmin(eventId)
+        allow update: if isAdmittedAdmin(eventId)
           && request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['title', 'body', 'pinned', 'editedAt'])
           && request.resource.data.title is string
@@ -1984,22 +2041,32 @@ service cloud.firestore {
               || (request.resource.data.editedAt is number
                   && request.resource.data.editedAt <= request.time.toMillis() + 60000
                   && request.resource.data.editedAt >= request.time.toMillis() - 86400000));
-        allow delete: if isAdmin(eventId);
+        allow delete: if isAdmittedAdmin(eventId);
       }
     }
 
-    // Collection-group LIST for the Feed's Tally Cards (#216/#294/#1072).
-    // During the bounded compatibility window, old clients may keep their
-    // project-wide unfiltered query while the server normalizes fieldless rows.
-    // After cutoff, `eventId is string` is deliberately query-shaped: Rules are
-    // not filters, so only a query that proves a string Event equality can pass;
-    // the new client uses `where('eventId', '==', capturedEventId)`. This is LIST
-    // only: point reads stay under the exact nested path rule above, and writes
-    // stay owner/path-bound there too.
+    // Event-filtered collection-group LIST for the Feed's Tally Cards
+    // (#216/#294/#1072/#1089). Every delivered marker now carries `eventId`, and
+    // the client proves one Event with `where('eventId', '==', capturedEventId)`.
+    // Rules are not filters, so `admitted(resource.data.eventId)` authorizes that
+    // shaped query and denies a project-wide or foreign-Event listen after the
+    // bounded #1072 compatibility window. While that explicit window remains
+    // open, installed legacy clients retain their old unfiltered signed-in
+    // query; #805 must not flip an Event to enforced until the window expires.
+    // This is LIST only: point reads stay under the exact nested path rule above,
+    // and writes stay owner/path-bound there too.
     match /{path=**}/markers/{markerUid} {
+      // #1072 made the collection-group query prove one Event identity. Rules
+      // are not filters: the query's eventId equality is what lets the first
+      // document-shaped admission predicate authorize the whole result set.
+      // The compatibility arm comes first so its true result short-circuits
+      // access to the field that legacy rows do not have. After cutoff it is
+      // false and the canonical query must prove a string Event identity before
+      // the membership predicate is evaluated.
       allow list: if signedIn()
-        && (resource.data.eventId is string
-            || markerDeliveryCompatibilityOpen());
+        && (markerDeliveryCompatibilityOpen()
+            || (resource.data.eventId is string
+                && admitted(resource.data.eventId)));
     }
   }
 }
