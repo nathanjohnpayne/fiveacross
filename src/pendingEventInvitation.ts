@@ -7,8 +7,13 @@
 
 export const EVENT_INVITATION_FRAGMENT_KEY = 'fa_invite';
 
-/** The same-origin browser slot used while authentication leaves and returns. */
+/** Namespace for immutable same-origin records held across authentication. */
 export const PENDING_EVENT_INVITATION_KEY = 'fa:event-invitation';
+
+const PENDING_EVENT_INVITATION_STORAGE_ID_BYTES = 16;
+const PENDING_EVENT_INVITATION_STORAGE_ID_PATTERN = /^[a-f0-9]{32}$/;
+const PENDING_EVENT_INVITATION_STORAGE_KEY_ATTEMPTS = 3;
+const PENDING_EVENT_INVITATION_STORAGE_PREFIX = `${PENDING_EVENT_INVITATION_KEY}:v1:`;
 
 /**
  * The client-side resumption window.
@@ -23,6 +28,10 @@ export const PENDING_EVENT_INVITATION_TTL_MS = 30 * 60 * 1000;
 export const EVENT_INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export interface PendingEventInvitationRecord {
+  /** Opaque per-capture identity. It is not an authority or a bearer value. */
+  captureId: string;
+  /** Orders same-millisecond captures observed by this operation. */
+  captureOrdinal: number;
   /** The bearer value. It belongs only in memory, browser storage, and the callable body. */
   code: string;
   /** The exact origin that received the invitation. */
@@ -55,6 +64,7 @@ export interface ReadPendingEventInvitationInput {
 }
 
 let memoryRecord: PendingEventInvitationRecord | null = null;
+let memoryCaptureSequence = 0;
 
 export function isEventInvitationCode(value: string): boolean {
   return EVENT_INVITATION_TOKEN_PATTERN.test(value);
@@ -91,19 +101,106 @@ function storeNamed(name: 'sessionStorage' | 'localStorage'): Storage | undefine
   }
 }
 
-function readStore(name: 'sessionStorage' | 'localStorage'): string | null {
+interface StoredPendingEventInvitation {
+  key: string;
+  record: PendingEventInvitationRecord | null;
+}
+
+function storageIdFromKey(key: string): string | null {
+  if (!key.startsWith(PENDING_EVENT_INVITATION_STORAGE_PREFIX)) return null;
+  const id = key.slice(PENDING_EVENT_INVITATION_STORAGE_PREFIX.length);
+  return PENDING_EVENT_INVITATION_STORAGE_ID_PATTERN.test(id) ? id : null;
+}
+
+function readStore(name: 'sessionStorage' | 'localStorage'): StoredPendingEventInvitation[] {
   try {
-    return storeNamed(name)?.getItem(PENDING_EVENT_INVITATION_KEY) ?? null;
+    const storage = storeNamed(name);
+    if (!storage) return [];
+    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+      .filter((key): key is string => key !== null && storageIdFromKey(key) !== null);
+    return keys.flatMap((key) => {
+      const captureId = storageIdFromKey(key)!;
+      const record = parseRecordShape(storage.getItem(key), captureId);
+      return [{ key, record }];
+    });
   } catch {
-    return null;
+    return [];
   }
 }
 
-function writeStore(name: 'sessionStorage' | 'localStorage', serialized: string): void {
+function storeHasKey(name: 'sessionStorage' | 'localStorage', key: string): boolean {
   try {
-    storeNamed(name)?.setItem(PENDING_EVENT_INVITATION_KEY, serialized);
+    return storeNamed(name)?.getItem(key) != null;
+  } catch {
+    return false;
+  }
+}
+
+function storeHasRecord(
+  name: 'sessionStorage' | 'localStorage',
+  key: string,
+  expected: PendingEventInvitationRecord,
+): boolean {
+  try {
+    const storage = storeNamed(name);
+    const captureId = storageIdFromKey(key);
+    if (!storage || captureId === null) return false;
+    return sameRecord(parseRecordShape(storage.getItem(key), captureId), expected);
+  } catch {
+    return false;
+  }
+}
+
+interface CaptureIdentity {
+  captureId: string;
+  storageKey: string | null;
+}
+
+function newCaptureIdentity(): CaptureIdentity {
+  for (let attempt = 0; attempt < PENDING_EVENT_INVITATION_STORAGE_KEY_ATTEMPTS; attempt += 1) {
+    try {
+      const bytes = new Uint8Array(PENDING_EVENT_INVITATION_STORAGE_ID_BYTES);
+      globalThis.crypto.getRandomValues(bytes);
+      const id = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const key = `${PENDING_EVENT_INVITATION_STORAGE_PREFIX}${id}`;
+      if (!storeHasKey('sessionStorage', key) && !storeHasKey('localStorage', key)) {
+        return { captureId: id, storageKey: key };
+      }
+    } catch {
+      break;
+    }
+  }
+  memoryCaptureSequence += 1;
+  return { captureId: `memory:${memoryCaptureSequence}`, storageKey: null };
+}
+
+function writeStore(
+  name: 'sessionStorage' | 'localStorage',
+  key: string,
+  serialized: string,
+): boolean {
+  try {
+    const storage = storeNamed(name);
+    if (!storage) return false;
+    storage.setItem(key, serialized);
+    return true;
   } catch {
     /* The other store or the current document's memory may still be usable. */
+    return false;
+  }
+}
+
+function removeStored(
+  name: 'sessionStorage' | 'localStorage',
+  stored: StoredPendingEventInvitation,
+): boolean {
+  try {
+    const storage = storeNamed(name);
+    if (!storage) return false;
+    storage.removeItem(stored.key);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -116,7 +213,10 @@ function isOrigin(value: string): boolean {
   }
 }
 
-function parseRecordShape(raw: string | null): PendingEventInvitationRecord | null {
+function parseRecordShape(
+  raw: string | null,
+  expectedCaptureId: string,
+): PendingEventInvitationRecord | null {
   if (raw === null) return null;
 
   let parsed: unknown;
@@ -127,7 +227,15 @@ function parseRecordShape(raw: string | null): PendingEventInvitationRecord | nu
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
 
-  const { code, origin, capturedAt } = parsed as Record<string, unknown>;
+  const { captureId, captureOrdinal, code, origin, capturedAt } = parsed as Record<string, unknown>;
+  if (captureId !== expectedCaptureId) return null;
+  if (
+    typeof captureOrdinal !== 'number' ||
+    !Number.isSafeInteger(captureOrdinal) ||
+    captureOrdinal < 0
+  ) {
+    return null;
+  }
   if (typeof code !== 'string' || !isEventInvitationCode(code)) return null;
   if (typeof origin !== 'string' || !isOrigin(origin)) return null;
   if (
@@ -137,7 +245,7 @@ function parseRecordShape(raw: string | null): PendingEventInvitationRecord | nu
   ) {
     return null;
   }
-  return { code, origin, capturedAt };
+  return { captureId, captureOrdinal, code, origin, capturedAt };
 }
 
 function usableRecord(
@@ -152,7 +260,7 @@ function usableRecord(
   return record;
 }
 
-function outsideResumptionWindow(
+function expiredRecord(
   record: PendingEventInvitationRecord | null,
   origin: string,
   now: number,
@@ -160,7 +268,8 @@ function outsideResumptionWindow(
   return (
     record !== null &&
     record.origin === origin &&
-    (now < record.capturedAt || now - record.capturedAt > PENDING_EVENT_INVITATION_TTL_MS)
+    now >= record.capturedAt &&
+    now - record.capturedAt > PENDING_EVENT_INVITATION_TTL_MS
   );
 }
 
@@ -170,9 +279,77 @@ function sameRecord(
 ): boolean {
   return (
     left?.code === right.code &&
+    left.captureId === right.captureId &&
+    left.captureOrdinal === right.captureOrdinal &&
     left.origin === right.origin &&
     left.capturedAt === right.capturedAt
   );
+}
+
+interface PendingCaptureOrder {
+  captureId: string;
+  captureOrdinal: number;
+  capturedAt: number;
+}
+
+function compareCaptureOrder(left: PendingCaptureOrder, right: PendingCaptureOrder): number {
+  if (left.capturedAt !== right.capturedAt) return left.capturedAt < right.capturedAt ? -1 : 1;
+  if (left.captureOrdinal !== right.captureOrdinal) {
+    return left.captureOrdinal < right.captureOrdinal ? -1 : 1;
+  }
+  if (left.captureId === right.captureId) return 0;
+  return left.captureId < right.captureId ? -1 : 1;
+}
+
+interface NextCaptureOrdinal {
+  captureOrdinal: number;
+  resetObservedSameTime: boolean;
+}
+
+function nextCaptureOrdinal(
+  origin: string,
+  capturedAt: number,
+  stored: readonly StoredPendingEventInvitation[],
+): NextCaptureOrdinal {
+  let maximum =
+    memoryRecord?.origin === origin &&
+    memoryRecord.capturedAt === capturedAt
+      ? memoryRecord.captureOrdinal
+      : -1;
+  for (const entry of stored) {
+    const record = entry.record;
+    if (record?.origin !== origin || record.capturedAt !== capturedAt) continue;
+    if (record.captureOrdinal > maximum) maximum = record.captureOrdinal;
+  }
+  if (maximum === Number.MAX_SAFE_INTEGER) {
+    return { captureOrdinal: 0, resetObservedSameTime: true };
+  }
+  return { captureOrdinal: maximum + 1, resetObservedSameTime: false };
+}
+
+function observedAtOrBeforeReplacement(
+  record: PendingEventInvitationRecord,
+  origin: string,
+  replacement: PendingCaptureOrder,
+  resetObservedSameTime: boolean,
+): boolean {
+  if (record.origin !== origin) return false;
+  if (resetObservedSameTime && record.capturedAt === replacement.capturedAt) return true;
+  return compareCaptureOrder(record, replacement) <= 0;
+}
+
+function newestUsableRecord(
+  stored: readonly StoredPendingEventInvitation[],
+  origin: string,
+  now: number,
+): PendingEventInvitationRecord | null {
+  const newest = stored.reduce<StoredPendingEventInvitation | null>((current, entry) => {
+    const record = usableRecord(entry.record, origin, now);
+    if (record === null) return current;
+    if (current === null || compareCaptureOrder(record, current.record!) > 0) return entry;
+    return current;
+  }, null);
+  return newest?.record ?? null;
 }
 
 /**
@@ -189,39 +366,126 @@ export function capturePendingEventInvitation(
   const code = readEventInvitationCode(input.hash);
   const capturedAt = input.now ?? Date.now();
   if (code === null || !Number.isSafeInteger(capturedAt) || capturedAt < 0) {
-    if (hasEventInvitationFragment(input.hash)) {
-      forgetPendingEventInvitationsForOrigin(input.origin);
+    if (
+      hasEventInvitationFragment(input.hash) &&
+      Number.isSafeInteger(capturedAt) &&
+      capturedAt >= 0
+    ) {
+      forgetPendingEventInvitationsForOrigin(input.origin, capturedAt);
     }
     return null;
   }
 
+  // Snapshot the records this arrival supersedes before publishing its unique
+  // key. Cleanup then names only those immutable keys: a concurrent capture
+  // ordered after this one can never be mistaken for an old record.
+  // localStorage is the only cross-tab store, so snapshot it before touching
+  // tab-local state. A different tab that publishes after this read can never
+  // enter the cleanup set below.
+  const localRecords = readStore('localStorage');
+  const sessionRecords = readStore('sessionStorage');
+  const nextOrdinal = nextCaptureOrdinal(input.origin, capturedAt, [
+    ...localRecords,
+    ...sessionRecords,
+  ]);
+  const identity = newCaptureIdentity();
   const record: PendingEventInvitationRecord = {
+    captureId: identity.captureId,
+    captureOrdinal: nextOrdinal.captureOrdinal,
     code,
     origin: input.origin,
     capturedAt,
   };
+  const priorLocalRecords = localRecords.filter(
+    (stored) =>
+      stored.record === null ||
+      stored.record.origin !== input.origin ||
+      observedAtOrBeforeReplacement(
+        stored.record,
+        input.origin,
+        record,
+        nextOrdinal.resetObservedSameTime,
+      ),
+  );
+  const priorSessionRecords = sessionRecords.filter(
+    (stored) =>
+      stored.record === null ||
+      stored.record.origin !== input.origin ||
+      observedAtOrBeforeReplacement(
+        stored.record,
+        input.origin,
+        record,
+        nextOrdinal.resetObservedSameTime,
+      ),
+  );
   memoryRecord = record;
 
-  const serialized = JSON.stringify(record);
-  writeStore('sessionStorage', serialized);
-  writeStore('localStorage', serialized);
+  if (identity.storageKey !== null) {
+    const serialized = JSON.stringify(record);
+    writeStore('sessionStorage', identity.storageKey, serialized);
+    writeStore('localStorage', identity.storageKey, serialized);
+  }
+  for (const stored of priorSessionRecords) removeStored('sessionStorage', stored);
+  for (const stored of priorLocalRecords) removeStored('localStorage', stored);
 
-  return readPendingEventInvitation({ origin: input.origin, now: record.capturedAt });
+  return {
+    record,
+    durable:
+      identity.storageKey !== null &&
+      (storeHasRecord('sessionStorage', identity.storageKey, record) ||
+        storeHasRecord('localStorage', identity.storageKey, record)),
+  };
 }
 
 /**
  * Supersede every copy from this origin after an explicitly tagged replacement
- * fails validation. Each copy is compare-deleted from a snapshot so a newer
- * value written by another tab between the read and delete survives.
+ * fails validation. Each immutable key is deleted from a snapshot so a newer
+ * key written by another tab between the snapshot and delete survives.
  */
-function forgetPendingEventInvitationsForOrigin(origin: string): void {
-  const records = [
-    memoryRecord,
-    parseRecordShape(readStore('sessionStorage')),
-    parseRecordShape(readStore('localStorage')),
-  ];
-  for (const record of records) {
-    if (record?.origin === origin) forgetPendingEventInvitationIf(record);
+function forgetPendingEventInvitationsForOrigin(
+  origin: string,
+  capturedAt: number,
+): void {
+  const localRecords = readStore('localStorage');
+  const sessionRecords = readStore('sessionStorage');
+  const nextOrdinal = nextCaptureOrdinal(origin, capturedAt, [
+    ...localRecords,
+    ...sessionRecords,
+  ]);
+  const replacement: PendingCaptureOrder = {
+    captureId: newCaptureIdentity().captureId,
+    captureOrdinal: nextOrdinal.captureOrdinal,
+    capturedAt,
+  };
+  if (
+    memoryRecord?.origin === origin &&
+    observedAtOrBeforeReplacement(
+      memoryRecord,
+      origin,
+      replacement,
+      nextOrdinal.resetObservedSameTime,
+    )
+  ) {
+    memoryRecord = null;
+  }
+  for (const [name, records] of [
+    ['localStorage', localRecords],
+    ['sessionStorage', sessionRecords],
+  ] as const) {
+    for (const stored of records) {
+      if (
+        stored.record === null ||
+        stored.record.origin !== origin ||
+        observedAtOrBeforeReplacement(
+          stored.record,
+          origin,
+          replacement,
+          nextOrdinal.resetObservedSameTime,
+        )
+      ) {
+        removeStored(name, stored);
+      }
+    }
   }
 }
 
@@ -238,18 +502,26 @@ export function readPendingEventInvitation(
   const now = input.now ?? Date.now();
   if (!isOrigin(input.origin) || !Number.isSafeInteger(now) || now < 0) return null;
 
-  const storedSessionRecord = parseRecordShape(readStore('sessionStorage'));
-  const storedLocalRecord = parseRecordShape(readStore('localStorage'));
-  for (const record of [memoryRecord, storedSessionRecord, storedLocalRecord]) {
-    if (outsideResumptionWindow(record, input.origin, now)) {
-      // Compare-delete across all copies. A newer invitation captured by
-      // another tab between this read and the removal is never erased.
-      forgetPendingEventInvitationIf(record);
+  const storedLocalRecords = readStore('localStorage');
+  const storedSessionRecords = readStore('sessionStorage');
+  if (expiredRecord(memoryRecord, input.origin, now)) memoryRecord = null;
+  for (const [name, storedRecords] of [
+    ['sessionStorage', storedSessionRecords],
+    ['localStorage', storedLocalRecords],
+  ] as const) {
+    for (const stored of storedRecords) {
+      if (
+        stored.record === null ||
+        stored.record.origin !== input.origin ||
+        expiredRecord(stored.record, input.origin, now)
+      ) {
+        removeStored(name, stored);
+      }
     }
   }
 
-  const sessionRecord = usableRecord(storedSessionRecord, input.origin, now);
-  const localRecord = usableRecord(storedLocalRecord, input.origin, now);
+  const sessionRecord = newestUsableRecord(storedSessionRecords, input.origin, now);
+  const localRecord = newestUsableRecord(storedLocalRecords, input.origin, now);
   const currentRecord =
     usableRecord(memoryRecord, input.origin, now) ?? sessionRecord ?? localRecord;
   if (currentRecord === null) return null;
@@ -261,29 +533,26 @@ export function readPendingEventInvitation(
 }
 
 /**
- * Delete only copies that still equal the invitation the caller consumed.
+ * Delete only immutable entries that equal the invitation the caller consumed.
  *
- * localStorage is shared across tabs. An older redemption must never erase a
- * newer invitation another tab captured while it was in flight.
+ * localStorage is shared across tabs. An older redemption has no mutable slot
+ * with which it could erase a newer invitation captured while it was in flight.
  */
 export function forgetPendingEventInvitationIf(expected: PendingEventInvitationRecord): boolean {
   let removed = false;
+  const storedLocalRecords = readStore('localStorage');
+  const storedSessionRecords = readStore('sessionStorage');
   if (sameRecord(memoryRecord, expected)) {
     memoryRecord = null;
     removed = true;
   }
 
-  for (const name of ['sessionStorage', 'localStorage'] as const) {
-    try {
-      const storage = storeNamed(name);
-      if (!storage) continue;
-      if (!sameRecord(parseRecordShape(storage.getItem(PENDING_EVENT_INVITATION_KEY)), expected)) {
-        continue;
-      }
-      storage.removeItem(PENDING_EVENT_INVITATION_KEY);
-      removed = true;
-    } catch {
-      /* An unavailable store must not widen this into an unconditional clear. */
+  for (const [name, records] of [
+    ['localStorage', storedLocalRecords],
+    ['sessionStorage', storedSessionRecords],
+  ] as const) {
+    for (const stored of records) {
+      if (sameRecord(stored.record, expected) && removeStored(name, stored)) removed = true;
     }
   }
   return removed;

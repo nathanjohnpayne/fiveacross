@@ -11,6 +11,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { MembershipRole } from '../../src/domainTypes';
 import {
   MEMBERSHIP_SCHEMA_VERSION,
+  isActiveMembershipData,
   mayAdministerMembership,
   membershipPath,
   readMembership,
@@ -550,17 +551,17 @@ export async function redeemEventInvitation(
     if (!event) return refuse('event-unavailable');
 
     if (membershipSnapshot.exists) {
-      const membership = readMembership(membershipSnapshot.data());
-      if (!membership || membership.eventId !== invitation.eventId || membership.uid !== uid) {
-        return refuse('membership-unreadable');
-      }
-      if (membership.status === 'active') {
-        // Every active Membership is already admitted to the Event, regardless
-        // of which grant created it or what later happened to this Invitation.
-        // The idempotent check consumes no Invitation use but still spends
-        // request budget so the public endpoint cannot amplify reads unbounded.
+      const membershipData = membershipSnapshot.data();
+      if (isActiveMembershipData(membershipData)) {
+        // The Membership path plus exact active status is the contract's
+        // frozen, version-blind admission core. Everything else may migrate
+        // without turning an already-admitted player into an Invitation error.
         writeRate(tx, rateRef, rateDocument);
         return { ok: true, eventId: invitation.eventId, outcome: 'already-member' };
+      }
+      const membership = readMembership(membershipData);
+      if (!membership || membership.eventId !== invitation.eventId || membership.uid !== uid) {
+        return refuse('membership-unreadable');
       }
       return refuse('membership-revoked');
     }

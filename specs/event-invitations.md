@@ -84,7 +84,7 @@ The server resolves an active canonical hostname for `eventId` and returns the c
 }
 ```
 
-`expectedEventId` is a fail-closed client-context check, not authority. The stored Invitation remains authoritative; a mismatch consumes nothing. The recipient must already be signed in. An existing active Membership is an idempotent success and consumes no additional use. An existing revoked or malformed Membership is a terminal refusal and is never rewritten.
+`expectedEventId` is a fail-closed client-context check, not authority. The stored Invitation remains authoritative; a mismatch consumes nothing. The recipient must already be signed in. A Membership document at the exact Event/UID path whose frozen `status` field is `active` is an idempotent success and consumes no additional use, even when its versioned fields come from a newer schema. An existing revoked or non-active malformed Membership is a terminal refusal and is never rewritten.
 
 ### `revokeEventInvitation`
 
@@ -184,8 +184,10 @@ The invitation is a stronger URL capability than the auth-handoff code because p
 - `entry.tsx` captures and clears it before the Firebase, analytics, or React module graph is imported;
 - failure to confirm removal suppresses telemetry for that page load;
 - a guarded, origin-bound, TTL-bounded pending record survives the central-auth round trip;
-- compare-and-delete prevents an old attempt from clearing a newer Invitation;
+- immutable per-capture storage keys let an old attempt delete only its own record, never a newer Invitation written concurrently;
 - the code never enters query strings, route telemetry, logs, rendered DOM, error text, analytics properties, or Firestore.
+
+Browser cleanup orders captures by `(capturedAt, captureOrdinal, captureId)`. The ordinal advances beyond every same-millisecond capture the operation observed; if a forged record has already exhausted JavaScript's safe integer range, cleanup removes the observed same-time set and restarts at zero rather than persisting an invalid ordinal. The independently random `captureId` remains the immutable key identity and never contains the bearer or origin. A replacement deletes only observed records at or before its order and leaves any capture published after its shared-storage snapshot untouched. A record observed just before its capture time is ignored until that time instead of being erased as invalid. A recognized current-format record naming an origin other than its origin-scoped browser store is unusable and is scrubbed; unknown future record versions remain untouched.
 
 Ticket #804's admission coordinator must order:
 

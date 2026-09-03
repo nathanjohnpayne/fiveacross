@@ -613,7 +613,7 @@ describe('redeemEventInvitation', () => {
     expect(db.data(membershipPath(EVENT_ID, MEMBER))?.status).toBe('revoked');
   });
 
-  it('terminally refuses a malformed active membership instead of treating it as idempotent', async () => {
+  it('uses the frozen active status even when versioned Membership fields are malformed', async () => {
     const db = new RetryFirestore(baseSeed());
     const invitation = await minted(db);
     db.writeOutsideTransaction(membershipPath(EVENT_ID, MEMBER), { status: 'active' });
@@ -621,8 +621,69 @@ describe('redeemEventInvitation', () => {
     expect(await redeemEventInvitation(
       { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
       deps(db),
+    )).toEqual({ ok: true, eventId: EVENT_ID, outcome: 'already-member' });
+    expect(db.data(invitationPath(invitation.invitationId))?.remainingUses).toBe(1);
+  });
+
+  it('terminally refuses a malformed non-active Membership', async () => {
+    const db = new RetryFirestore(baseSeed());
+    const invitation = await minted(db);
+    db.writeOutsideTransaction(membershipPath(EVENT_ID, MEMBER), { status: 'pending' });
+
+    expect(await redeemEventInvitation(
+      { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
+      deps(db),
     )).toEqual({ ok: false, reason: 'membership-unreadable' });
     expect(db.data(invitationPath(invitation.invitationId))?.remainingUses).toBe(1);
+  });
+
+  it('keeps active Membership admission version-blind during schema rollout', async () => {
+    const seed = baseSeed();
+    seed[membershipPath(EVENT_ID, MEMBER)] = {
+      schemaVersion: 2,
+      eventId: EVENT_ID,
+      uid: MEMBER,
+      role: 'member',
+      status: 'active',
+      grantedAt: 1,
+      grantedBy: 'system:migration',
+      invitationId: null,
+    };
+    const db = new RetryFirestore(seed);
+    const invitation = await minted(db);
+
+    expect(await redeemEventInvitation(
+      { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
+      deps(db),
+    )).toEqual({ ok: true, eventId: EVENT_ID, outcome: 'already-member' });
+    expect(db.data(invitationPath(invitation.invitationId))?.remainingUses).toBe(1);
+    expect(db.data(invitationRatePath('redeem', MEMBER))?.attemptMs).toEqual([NOW]);
+  });
+
+  it('re-evaluates a newer active Membership after a transaction conflict', async () => {
+    const db = new RetryFirestore(baseSeed());
+    const invitation = await minted(db);
+    db.beforeCommit = (attempt) => {
+      if (attempt !== 1) return;
+      db.writeOutsideTransaction(membershipPath(EVENT_ID, MEMBER), {
+        schemaVersion: 2,
+        status: 'active',
+        migrationField: 'newer-schema',
+      });
+    };
+
+    expect(await redeemEventInvitation(
+      { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
+      deps(db),
+    )).toEqual({ ok: true, eventId: EVENT_ID, outcome: 'already-member' });
+    expect(db.conflicts).toBe(1);
+    expect(db.data(invitationPath(invitation.invitationId))?.remainingUses).toBe(1);
+    expect(db.data(membershipPath(EVENT_ID, MEMBER))).toEqual({
+      schemaVersion: 2,
+      status: 'active',
+      migrationField: 'newer-schema',
+    });
+    expect(db.data(invitationRatePath('redeem', MEMBER))?.attemptMs).toEqual([NOW]);
   });
 
   it.each([
