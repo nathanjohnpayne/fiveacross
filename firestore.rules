@@ -719,6 +719,28 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Event invitation bearer capabilities and their abuse-control state
+    // (#803, specs/event-invitations.md). The Admin SDK callables are the only
+    // readers and writers: a client that could read an invitation could redeem
+    // somebody else's grant, while one that could write could mint a grant,
+    // restore uses, extend expiry, or clear revocation. Rate-limit documents are
+    // equally server-owned; a caller who could reset its own bucket would make
+    // the callable's brute-force and mint-abuse controls advisory.
+    //
+    // Both schemas are deliberately leaf-only. `markers` is a globally
+    // reserved collection-group id for Event Tally delivery; adding any
+    // subcollection (especially one named `markers`) below either root requires
+    // a new rules/security review because Firestore combines matching grants
+    // with OR semantics. The Admin writer inventory is pinned in the Functions
+    // tests so today's implementation can address only these root documents.
+    match /eventInvitations/{invitationId} {
+      allow read, write: if false;
+    }
+
+    match /eventInvitationRateLimits/{bucketId} {
+      allow read, write: if false;
+    }
+
     // Durable abuse-lookup retry work (#859). A pending row temporarily holds
     // the reporter's raw Firebase uid and an Event address; clients must never
     // read it, and even an Event admin must not be able to forge delivery work.

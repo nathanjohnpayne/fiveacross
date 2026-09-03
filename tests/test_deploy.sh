@@ -785,9 +785,10 @@ fi
 # licence to swallow a later failure. GCLOUD_FAIL_AFTER lets the read-only
 # Step 1.6 describes through and fails everything after, which is what an
 # expired credential (or describe-without-update permission) looks like from
-# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — four since
-# #548 added the two auth-handoff callables (submitbugreport, emailunsubscribe,
-# mintauthhandoff, exchangeauthhandoff). Bump it when that set grows, or this
+# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — four while
+# #803's invitation callables remain deliberately unexported (submitbugreport,
+# emailunsubscribe, mintauthhandoff, exchangeauthhandoff). Bump it when the
+# invitation exports land, or this
 # case silently stops testing the post-publish path and starts testing the
 # pre-publish abort instead.
 # ---------------------------------------------------------------------------
@@ -1750,8 +1751,8 @@ set -e
 if [[ $RC21 -ne 0 ]]; then
   fail "scoped-email-first-deploy: a targeted emailUnsubscribe deployment returned $RC21 because submitbugreport is absent. stderr was:"
   cat "$ERR21" >&2
-elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-21.log"; then
-  fail "scoped-email-first-deploy: deploy.sh inspected unrelated submitbugreport despite --only functions:emailUnsubscribe. gcloud log was:"
+elif grep -Eq 'submitbugreport|eventinvitation' "$WORKDIR/gcloud-calls-21.log"; then
+  fail "scoped-email-first-deploy: deploy.sh inspected an unrelated reconciled service despite --only functions:emailUnsubscribe. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-21.log" >&2
 elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-21.log"; then
   fail "scoped-email-first-deploy: deploy.sh did not inspect the selected emailunsubscribe service. gcloud log was:"
@@ -2537,6 +2538,84 @@ elif [[ -s "$WORKDIR/gcloud-calls-23t.log" || -e "$WORKDIR/build-ran-23t" || -s 
   fail "readiness-after-param-guard: readiness, build, or Firebase ran after Guard 4 failed."
 else
   pass "readiness-after-param-guard: missing Functions params block readiness, BUILD_CMD, and Firebase (rc=$RC23T)."
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 25a-25c (#803): event-invitation callables share one reconciliation
+# wrapper, but full deploys must derive their strict inventory from the actual
+# Functions exports. Exact Firebase scopes keep only the services they named
+# strict. The read-only precheck always tolerates first-deploy absence; after
+# publish, an absent unselected peer is valid while an absent selected service
+# is the published-but-403 failure this guard must surface.
+# ---------------------------------------------------------------------------
+REPO25A="$WORKDIR/case25a-event-invitation-full"
+init_fixture_repo "$REPO25A"
+: >"$WORKDIR/ofd-calls-25a.log"
+: >"$WORKDIR/gcloud-calls-25a.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-25a.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-25a.log" \
+GCLOUD_MISSING_SERVICE=minteventinvitation,redeemeventinvitation,revokeeventinvitation \
+  bash -c "cd '$REPO25A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$WORKDIR/case25a.out" 2>"$WORKDIR/case25a.err"
+RC25A=$?
+set -e
+if [[ $RC25A -ne 0 ]]; then
+  fail "event-invitation-full: full Functions deploy returned $RC25A. stderr was:"
+  cat "$WORKDIR/case25a.err" >&2
+elif grep -Eq 'minteventinvitation|redeemeventinvitation|revokeeventinvitation' "$WORKDIR/gcloud-calls-25a.log"; then
+  fail "event-invitation-full: full deploy probed invitation services absent from the fixture's Functions source. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-25a.log" >&2
+else
+  pass "event-invitation-full: full Functions deploy skips invitation services absent from its source inventory (rc=$RC25A)."
+fi
+
+REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"
+init_fixture_repo "$REPO25B"
+: >"$WORKDIR/ofd-calls-25b.log"
+: >"$WORKDIR/gcloud-calls-25b.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-25b.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-25b.log" \
+GCLOUD_MISSING_SERVICE=redeemeventinvitation \
+  bash -c "cd '$REPO25B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintEventInvitation" \
+  >"$WORKDIR/case25b.out" 2>"$WORKDIR/case25b.err"
+RC25B=$?
+set -e
+if [[ $RC25B -ne 0 ]]; then
+  fail "event-invitation-unselected-missing: exact mint deploy failed because its unselected redeem peer is absent. stderr was:"
+  cat "$WORKDIR/case25b.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-25b.log" ]]; then
+  fail "event-invitation-unselected-missing: exact mint deploy never published."
+elif grep -Eq 'submitbugreport|emailunsubscribe|authhandoff' "$WORKDIR/gcloud-calls-25b.log"; then
+  fail "event-invitation-unselected-missing: exact mint scope inspected unrelated callable families. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-25b.log" >&2
+else
+  pass "event-invitation-unselected-missing: exact mint deploy tolerates an absent unselected peer after publish (rc=$RC25B)."
+fi
+
+REPO25C="$WORKDIR/case25c-event-invitation-selected-missing"
+init_fixture_repo "$REPO25C"
+: >"$WORKDIR/ofd-calls-25c.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-25c.log" \
+GCLOUD_MISSING_SERVICE=minteventinvitation \
+  bash -c "cd '$REPO25C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default:mintEventInvitation" \
+  >"$WORKDIR/case25c.out" 2>"$WORKDIR/case25c.err"
+RC25C=$?
+set -e
+if [[ $RC25C -eq 0 ]]; then
+  fail "event-invitation-selected-missing: exact mint deploy returned 0 though its released service is absent."
+elif [[ ! -s "$WORKDIR/ofd-calls-25c.log" ]]; then
+  fail "event-invitation-selected-missing: failure occurred before publish, so strict postdeploy handling was not exercised."
+elif ! grep -q 'reconciliation FAILED and the deploy is already live' "$WORKDIR/case25c.err"; then
+  fail "event-invitation-selected-missing: missing selected service did not emit the already-live reconciliation banner. stderr was:"
+  cat "$WORKDIR/case25c.err" >&2
+else
+  pass "event-invitation-selected-missing: exact selected service remains strict after publish (rc=$RC25C)."
 fi
 
 # ---------------------------------------------------------------------------

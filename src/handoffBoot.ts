@@ -1,6 +1,5 @@
 /**
- * The handoff code captured before ANY of the app's module graph was loaded
- * (#549, Phase 4b P1).
+ * URL credentials captured before ANY of the app's module graph was loaded.
  *
  * WHY THIS MODULE EXISTS AT ALL. Clearing the fragment at the top of
  * `main.tsx`'s module BODY is not early enough, and the reason is ES module
@@ -8,41 +7,64 @@
  * fully evaluated before its own body runs. `main.tsx` transitively imports
  * `firebase.ts`, which initialises GA4 at import time — so by the time any
  * statement in `main.tsx` executed, an analytics SDK was already live on a page
- * whose URL still read `#fa_handoff=<code>`. Line order inside the module could
- * never have fixed that.
+ * whose URL still held a bearer value. Line order inside the module could never
+ * have fixed that.
  *
- * So the capture happens in `entry.tsx`, which imports only this module and
- * `handoffClient` — both deliberately free of any Firebase, analytics or React
- * import — and only then dynamically imports the application. That import
- * boundary is the guarantee: nothing that could observe a URL is loaded until
- * the code is out of it.
+ * So the capture happens in `entry.tsx`, through modules deliberately free of
+ * Firebase, analytics and React, and only then dynamically imports the
+ * application. That import boundary is the guarantee: nothing that could
+ * observe a URL is loaded until the credentials are out of it.
  *
- * This module holds no logic on purpose. It is the seam the two halves share,
- * and keeping it inert is what lets `entry.tsx` stay provably free of side
- * effects that could reach `window.location`.
+ * Keeping this seam dependency-free is what lets `entry.tsx` capture and clear
+ * the credentials while nothing capable of exporting the URL is awake.
  */
-import { clearHandoffFragment, readHandoffCode } from './auth/handoffClient';
+import { hasHandoffFragment, readHandoffCode } from './auth/handoffClient';
+import {
+  capturePendingEventInvitation,
+  hasEventInvitationFragment,
+} from './pendingEventInvitation';
+import { clearUrlFragmentAndConfirm } from './urlFragment';
 
 let capturedCode: string | null = null;
 let urlSafeForTelemetry = true;
 let captured = false;
 
 /**
- * Read the handoff code out of the fragment and clear it. Call EXACTLY once,
- * from `entry.tsx`, before the application is imported.
+ * Capture every supported URL credential and clear the shared fragment. Call
+ * EXACTLY once, from `entry.tsx`, before the application is imported.
  *
  * Idempotent because a double call would read an already-cleared URL and
  * overwrite a real capture with `null` — turning a working sign-in into
  * `transaction-missing` for no reason.
  */
-export function captureHandoffFromUrl(): void {
+export function captureUrlCredentialsFromUrl(): void {
   if (captured) return;
   captured = true;
-  capturedCode = readHandoffCode(window.location.hash);
+  const hash = window.location.hash;
+  capturedCode = readHandoffCode(hash);
+  const hasHandoffCredential = hasHandoffFragment(hash);
+  const hasInvitationCredential = hasEventInvitationFragment(hash);
+
+  // Persist before clearing. The fragment is the only recoverable copy on
+  // arrival, while storage is what carries the invitation through sign-in.
+  if (hasInvitationCredential) {
+    capturePendingEventInvitation({
+      hash,
+      origin: window.location.origin,
+      now: Date.now(),
+    });
+  }
+
   // A clear that throws, is refused, or is accepted and silently no-ops leaves
-  // a LIVE code in `window.location`. Whether it actually went is what decides
-  // if telemetry may read the URL at all, so it is confirmed, not assumed.
-  urlSafeForTelemetry = capturedCode === null || clearHandoffFragment();
+  // a LIVE bearer in `window.location`. Whether every supported credential
+  // actually went is what decides if telemetry may read the URL at all.
+  const hasCredential = hasHandoffCredential || hasInvitationCredential;
+  urlSafeForTelemetry =
+    !hasCredential ||
+    clearUrlFragmentAndConfirm(
+      (liveHash) =>
+        hasHandoffFragment(liveHash) || hasEventInvitationFragment(liveHash),
+    );
 }
 
 /** The code this page load arrived with, or `null`. */
@@ -54,10 +76,9 @@ export function pendingHandoffCode(): string | null {
  * Whether the URL is safe for analytics to observe.
  *
  * `false` only in the narrow case where the fragment could not be removed. The
- * app still boots and sign-in still completes; analytics are suppressed for
- * that one page load, because one lost page view on a handoff return is not
- * comparable to exporting a single-use bearer credential to a telemetry
- * pipeline.
+ * app still boots and the captured credential remains usable; analytics are
+ * suppressed for that page load, because one lost page view is not comparable
+ * to exporting a bearer credential to a telemetry pipeline.
  */
 export function isUrlSafeForTelemetry(): boolean {
   return urlSafeForTelemetry;

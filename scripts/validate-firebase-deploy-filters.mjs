@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const commander = require("commander");
+const ts = require("typescript");
 const {
   command: firebaseDeployCommand,
 } = require("firebase-tools/lib/commands/deploy");
@@ -108,16 +109,113 @@ function normalizedFilter(value) {
   return value || undefined;
 }
 
-function classifyInvokerScope(only, exceptTargets) {
+const EVENT_INVITATION_EXPORTS = Object.freeze([
+  ["mintEventInvitation", "mint"],
+  ["redeemEventInvitation", "redeem"],
+  ["revokeEventInvitation", "revoke"],
+]);
+
+function eventInvitationServicesFromSource(source) {
+  const exportedNames = new Set();
+  let hasRuntimeExportStar = false;
+  const sourceFile = ts.createSourceFile(
+    "index.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  for (const statement of sourceFile.statements) {
+    const exported = statement.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+    );
+    if (ts.isVariableStatement(statement) && exported) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) exportedNames.add(declaration.name.text);
+      }
+      continue;
+    }
+    if (
+      exported &&
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+      statement.name
+    ) {
+      exportedNames.add(statement.name.text);
+      continue;
+    }
+    if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
+    if (!statement.exportClause) {
+      // Resolving an export-star requires traversing the module graph. Treat it
+      // as possibly exporting every protected callable instead of silently
+      // skipping invoker repair for a service Firebase may discover.
+      hasRuntimeExportStar = true;
+      continue;
+    }
+    if (ts.isNamedExports(statement.exportClause)) {
+      for (const specifier of statement.exportClause.elements) {
+        if (!specifier.isTypeOnly) exportedNames.add(specifier.name.text);
+      }
+    }
+  }
+  if (hasRuntimeExportStar) {
+    for (const [exportName] of EVENT_INVITATION_EXPORTS) exportedNames.add(exportName);
+  }
+  return EVENT_INVITATION_EXPORTS.filter(([exportName]) =>
+    exportedNames.has(exportName),
+  ).map(([, service]) => service);
+}
+
+async function eventInvitationServiceInventory(configSource, configPath) {
+  const functionsConfigs = Array.isArray(configSource.functions)
+    ? configSource.functions
+    : [configSource.functions];
+  const services = new Set();
+  for (const functionsConfig of functionsConfigs) {
+    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    const sourcePath = resolve(
+      dirname(configPath),
+      functionsConfig.source,
+      "src",
+      "index.ts",
+    );
+    let source;
+    try {
+      source = await readFile(sourcePath, "utf8");
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const service of eventInvitationServicesFromSource(source))
+      services.add(service);
+  }
+  return EVENT_INVITATION_EXPORTS.map(([, service]) => service).filter(
+    (service) => services.has(service),
+  );
+}
+
+function classifyInvokerScope(
+  only,
+  exceptTargets,
+  exportedEventInvitationServices,
+) {
+  const exportedInvitationServices = new Set(exportedEventInvitationServices);
+  const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
+    ([, service]) => service,
+  )
+    .filter((service) => exportedInvitationServices.has(service))
+    .join(",");
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = true;
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
+  let eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
+  let eventInvitationsInvokerConservative = false;
   let authHandoffStrictHalf = "";
+  let eventInvitationsStrictServices = exportedInvitationCsv;
 
   if (only) {
     functionsAttempted = false;
@@ -125,8 +223,12 @@ function classifyInvokerScope(only, exceptTargets) {
     bugReportInvokerSelected = false;
     emailUnsubscribeInvokerSelected = false;
     authHandoffInvokerSelected = false;
+    eventInvitationsInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
+    let fullEventInvitationScopeNamed = false;
+    let unknownFunctionsSelectorNamed = false;
+    const namedEventInvitationServices = new Set();
 
     for (const selector of only.split(",")) {
       if (selector === "hosting" || selector.startsWith("hosting:")) {
@@ -136,11 +238,14 @@ function classifyInvokerScope(only, exceptTargets) {
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
+        eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
         mintNamed = true;
         exchangeNamed = true;
+        fullEventInvitationScopeNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
+        eventInvitationsInvokerConservative = false;
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
         functionsAttempted = true;
         bugReportInvokerSelected = true;
@@ -157,15 +262,35 @@ function classifyInvokerScope(only, exceptTargets) {
         functionsAttempted = true;
         authHandoffInvokerSelected = true;
         exchangeNamed = true;
+      } else if (/^functions:(?:[^:]+:)?mintEventInvitation$/.test(selector)) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("mint");
+      } else if (
+        /^functions:(?:[^:]+:)?redeemEventInvitation$/.test(selector)
+      ) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("redeem");
+      } else if (
+        /^functions:(?:[^:]+:)?revokeEventInvitation$/.test(selector)
+      ) {
+        functionsAttempted = true;
+        eventInvitationsInvokerSelected = true;
+        namedEventInvitationServices.add("revoke");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
+        unknownFunctionsSelectorNamed = true;
         if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
         if (!emailUnsubscribeInvokerSelected)
           emailUnsubscribeInvokerConservative = true;
         if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
+        if (!eventInvitationsInvokerSelected)
+          eventInvitationsInvokerConservative = true;
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
+        eventInvitationsInvokerSelected = true;
       }
     }
 
@@ -180,6 +305,26 @@ function classifyInvokerScope(only, exceptTargets) {
         authHandoffStrictHalf = "exchange";
       }
     }
+
+    if (eventInvitationsInvokerSelected) {
+      if (fullEventInvitationScopeNamed) {
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = exportedInvitationCsv;
+      } else if (namedEventInvitationServices.size > 0) {
+        // An explicit endpoint name is a fact even when another unfamiliar
+        // selector appears in the same request. Keep every explicitly named
+        // service strict and tolerate absence only for its unselected peers.
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = ["mint", "redeem", "revoke"]
+          .filter((service) => namedEventInvitationServices.has(service))
+          .join(",");
+      } else {
+        eventInvitationsInvokerConservative = unknownFunctionsSelectorNamed;
+        eventInvitationsStrictServices = "";
+      }
+    } else {
+      eventInvitationsStrictServices = "";
+    }
   } else if (exceptTargets) {
     for (const selector of exceptTargets.split(",")) {
       if (selector === "hosting") hostingAttempted = false;
@@ -188,9 +333,12 @@ function classifyInvokerScope(only, exceptTargets) {
         bugReportInvokerSelected = false;
         emailUnsubscribeInvokerSelected = false;
         authHandoffInvokerSelected = false;
+        eventInvitationsInvokerSelected = false;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
+        eventInvitationsInvokerConservative = false;
+        eventInvitationsStrictServices = "";
       }
       // firebase-tools subtracts --except selectors from exact top-level
       // target names. Every colon-qualified Functions exclusion is a no-op.
@@ -203,10 +351,13 @@ function classifyInvokerScope(only, exceptTargets) {
     bugReportInvokerSelected,
     emailUnsubscribeInvokerSelected,
     authHandoffInvokerSelected,
+    eventInvitationsInvokerSelected,
     bugReportInvokerConservative,
     emailUnsubscribeInvokerConservative,
     authHandoffInvokerConservative,
+    eventInvitationsInvokerConservative,
     authHandoffStrictHalf,
+    eventInvitationsStrictServices,
   };
 }
 
@@ -241,6 +392,8 @@ export async function classifyFirebaseDeployRequest(
   const only = normalizedFilter(options.only);
   const exceptTargets = normalizedFilter(options.except);
   const configSource = JSON.parse(await readFile(configPath, "utf8"));
+  const exportedEventInvitationServices =
+    await eventInvitationServiceInventory(configSource, configPath);
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
   // option-looking required value such as `--only --dry-run`: Commander owns
@@ -269,7 +422,11 @@ export async function classifyFirebaseDeployRequest(
     only: only ?? "",
     except: exceptTargets ?? "",
     firebaseDryRun: options.dryRun === true,
-    ...classifyInvokerScope(only, exceptTargets),
+    ...classifyInvokerScope(
+      only,
+      exceptTargets,
+      exportedEventInvitationServices,
+    ),
     hostingAttempted: hostingConfigs.length > 0,
   };
 }
@@ -283,11 +440,15 @@ function printShellClassification(result) {
     BUG_REPORT_INVOKER_SELECTED: result.bugReportInvokerSelected,
     EMAIL_UNSUBSCRIBE_INVOKER_SELECTED: result.emailUnsubscribeInvokerSelected,
     AUTH_HANDOFF_INVOKER_SELECTED: result.authHandoffInvokerSelected,
+    EVENT_INVITATIONS_INVOKER_SELECTED: result.eventInvitationsInvokerSelected,
     BUG_REPORT_INVOKER_CONSERVATIVE: result.bugReportInvokerConservative,
     EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE:
       result.emailUnsubscribeInvokerConservative,
     AUTH_HANDOFF_INVOKER_CONSERVATIVE: result.authHandoffInvokerConservative,
     AUTH_HANDOFF_STRICT_HALF: result.authHandoffStrictHalf,
+    EVENT_INVITATIONS_INVOKER_CONSERVATIVE:
+      result.eventInvitationsInvokerConservative,
+    EVENT_INVITATIONS_STRICT_SERVICES: result.eventInvitationsStrictServices,
   };
   for (const [key, value] of Object.entries(fields))
     console.log(`${key}=${value}`);

@@ -85,6 +85,23 @@ spec_test_map:
   event-membership:
     - src/data/eventMembership.test.ts
     - tests/rules/membership-mark-batch-budget.test.ts
+  # event-invitations spans the generated server authorization mirror, pure and
+  # real-emulator transaction proofs, the pre-analytics browser capture, closed
+  # client callables, recursive rules denial, and deployment IAM reconciliation.
+  # Most tests are named for those seams rather than the spec basename.
+  event-invitations:
+    - tests/functions/event-invitations.test.ts
+    - tests/rules/event-invitations.test.ts
+    - tests/rules/event-invitations-core.test.ts
+    - src/data/eventInvitations.test.ts
+    - src/pendingEventInvitation.test.ts
+    - src/urlFragment.test.ts
+    - src/handoffBoot.test.ts
+    - src/auth/handoffReturn.test.ts
+    - scripts/materialize-event-membership-functions.test.mjs
+    - scripts/event-invitations-invoker.test.mjs
+    - scripts/event-invitations-deploy.test.mjs
+    - tests/test_deploy.sh
   # event-setup-wizard's coverage is module-named (the draft store seam, the
   # occasion matrix, and the shared validation predicates), so none of the
   # three share the spec basename — map them explicitly.

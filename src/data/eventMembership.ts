@@ -24,15 +24,14 @@
  * `import type` from a declaration-only `.d.ts`, which emits nothing; they are
  * not a precedent for runtime code.
  *
- * The repo's established answer for runtime logic the Functions also need is a
- * LOCAL MIRROR plus a parity test (`functions/src/scoringVocab.ts` mirrors
- * `src/game/scoring.ts`, pinned by `tests/functions/finale-parity.test.ts`).
- * That precedent is deliberately NOT adopted here: drift in a scoring mirror
- * mis-ranks a podium, drift in this one is an authorization bug, and fixtures
- * only cover the cases someone enumerated. #803 must arrive at ONE
- * implementation — a shared build arrangement, or a mirror GENERATED from this
- * file — rather than a second hand-maintained copy. See
- * specs/event-membership.md § One document. Until then there is no second copy.
+ * The repo's established hand-maintained-mirror precedent is deliberately NOT
+ * used here: drift in a scoring mirror mis-ranks a podium, while drift in this
+ * one is an authorization bug and fixtures cover only enumerated cases. Instead
+ * `scripts/materialize-event-membership-functions.mjs` extracts the explicitly
+ * marked blocks below into `functions/src/eventMembership.generated.ts`; its
+ * `--check` mode is pinned by the Functions suite. The generated file is
+ * therefore a build artefact of THIS implementation, never a second authority.
+ * See specs/event-membership.md § One document.
  *
  * THE INVARIANT THIS FILE PROTECTS. A membership record is one a client cannot
  * write. Today's Event "membership" fails that test: `events/{eventId}/players/{uid}`
@@ -54,6 +53,7 @@ import type {
   MembershipStatus,
 } from '../types';
 
+// <event-membership-functions>
 /** The collection under an Event that holds its admission records. */
 export const MEMBERSHIP_COLLECTION = 'memberships';
 
@@ -91,6 +91,7 @@ export const MEMBERSHIP_SCHEMA_VERSION: MembershipBase['schemaVersion'] = 1;
 export function membershipPath(eventId: string, uid: string): string {
   return `events/${eventId}/${MEMBERSHIP_COLLECTION}/${uid}`;
 }
+// </event-membership-functions>
 
 /** The Firestore-rules absolute form of {@link membershipPath}, which is what
  *  `storage.rules` must pass to `firestore.get()`. Exported so the spec's
@@ -100,6 +101,7 @@ export function membershipRulesPath(eventId: string, uid: string): string {
   return `/databases/(default)/documents/${membershipPath(eventId, uid)}`;
 }
 
+// <event-membership-functions>
 const ROLES: readonly MembershipRole[] = ['member', 'admin'];
 
 /** Role precedence, lowest first. `admin` satisfies a `member` requirement;
@@ -206,6 +208,7 @@ export function readMembership(raw: unknown): MembershipDoc | null {
     ? { ...base, status: 'revoked', revokedAt: d.revokedAt as number, revokedBy: d.revokedBy as string }
     : { ...base, status: 'active' };
 }
+// </event-membership-functions>
 
 /**
  * Does a held role satisfy a required one? Total over the role lattice.
@@ -474,6 +477,7 @@ export function adminsMissingMembership(input: {
  * until they are granted a membership server-side — a deferred action with a
  * known remedy, not an outage.
  */
+// <event-membership-functions>
 export function mayAdministerMembership(input: {
   /** The authenticated caller's uid. */
   uid: string | null | undefined;
@@ -486,5 +490,6 @@ export function mayAdministerMembership(input: {
   if (input.isAdmin !== true) return false;
   return isActiveMembershipData(input.membership);
 }
+// </event-membership-functions>
 
 export type { AdmissionDecision, AdmissionOutcome };

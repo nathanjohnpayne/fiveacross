@@ -77,6 +77,8 @@ describe('production handoff return boundary', () => {
       'src/auth/handoffTransaction.ts',
       'src/entry.tsx',
       'src/handoffBoot.ts',
+      'src/pendingEventInvitation.ts',
+      'src/urlFragment.ts',
     ]);
     expect([...closure.packages]).toEqual([]);
   });

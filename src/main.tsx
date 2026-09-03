@@ -205,9 +205,9 @@ const appTree = (
   </React.StrictMode>
 );
 
-// `entry.tsx` captured and completed any return before this graph was imported.
-// This remaining bit only carries forward whether an uncleared fragment makes
-// the URL unsafe for telemetry on this one load.
+// `entry.tsx` captured URL credentials and completed any auth handoff return
+// before this graph was imported. This remaining bit only carries forward
+// whether an uncleared credential makes the URL unsafe for telemetry on this load.
 const urlSafeForTelemetry = isUrlSafeForTelemetry();
 
 /**
