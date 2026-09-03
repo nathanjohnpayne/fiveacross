@@ -32,15 +32,17 @@ The `VITE_FIREBASE_*` values are **non-secret client identifiers** — they're b
 
 ## Local checks before you push
 
-Run the same gates CI runs. [`app-ci`](.github/workflows/app-ci.yml) executes these on every PR and on pushes to `main`, in this order:
+Run the main application test/build gates CI runs. This part of [`app-ci`](.github/workflows/app-ci.yml) executes on every PR and on pushes to `main`, in this order:
 
 | Command | What it covers |
 |---|---|
 | `npm run typecheck` | `tsc --noEmit` — strict TypeScript is the primary static gate |
 | `npm test` | Game-logic unit + component tests (Vitest, jsdom) |
 | `npm run build` | Production Vite build; must succeed |
+| `npm run test:deploy` | Fixture-only deployment safety harness; never touches a live project |
 | `npm run test:functions` | Cloud Functions notifier suite (installs `functions/` deps first; no emulator) |
 | `npm run test:rules` | Firestore/Storage security-rules suite against the emulators (needs Java) |
+| `npm run test:offline` | Offline-durability suite against its own Auth/Firestore emulator run (needs Java) |
 
 `npm run test:e2e` is a **local** Playwright smoke runner — it is intentionally *not* run in CI. Run it locally when you touch a user-facing flow end-to-end.
 

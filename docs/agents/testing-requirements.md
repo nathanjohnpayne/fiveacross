@@ -9,6 +9,7 @@
 - **Unit + component** (`npm test`—Vitest, jsdom): the pure game logic (`src/game/logic.ts`—deal, BINGO/blackout, leaderboard sort) and React components. This is the load-bearing suite.
 - **Security rules** (`npm run test:rules`): Firestore/Storage rules exercised against the Firebase emulators (`@firebase/rules-unit-testing`). Run whenever `firestore.rules` / `storage.rules` change.
 - **Cloud Functions** (`npm run test:functions`): the Phase-1 notifier suite under `tests/functions/`; installs `functions/` deps first, no emulator.
+- **Deployment safety** (`npm run test:deploy`): pure fixture repositories exercise fail-closed target selection, readiness, and post-publish reconciliation without touching a live project.
 - **Offline durability** (`npm run test:offline`): the ADR 0006 layer under `tests/offline/`—a real Firestore client under jsdom + `fake-indexeddb` driving the auth + firestore emulators, covering the offline mutation queue, Echo Marks offline, the cells-map merge, and the `#387` / `#409` regressions. Each file runs against its own per-run demo project id (`tests/offline/runScope.ts`), and files run serially (`fileParallelism: false`) because they share one emulator.
 - **End-to-end** (`npm run test:e2e`): Playwright smoke, **local only**—intentionally not run in CI.
 - **Static gates**: `npm run typecheck` (`tsc --noEmit`, strict) and `npm run build` must pass.
