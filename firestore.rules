@@ -38,6 +38,18 @@ service cloud.firestore {
     function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
     }
+    // #804 deploy 1: freeze the per-Event rollout switch before any production
+    // allow arm consults admission. Presence is part of the invariant because
+    // absent means off; adding, removing, or changing the field is therefore a
+    // switch mutation. Root Event create has no prior resource and remains on
+    // its existing isAdmin(eventId) denial path below.
+    function membershipEnforcementUnchanged() {
+      return ('membershipEnforcement' in request.resource.data)
+               == ('membershipEnforcement' in resource.data)
+        && (!('membershipEnforcement' in resource.data)
+            || request.resource.data.membershipEnforcement
+                 == resource.data.membershipEnforcement);
+    }
     function markerDeliveryCompatibilityDoc() {
       return /databases/$(database)/documents/markerDeliveryCompatibility/current;
     }
@@ -1040,6 +1052,10 @@ service cloud.firestore {
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
       allow create, update: if isAdmin(eventId)
+        // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
+        // a client create still fails at isAdmin(eventId), while the null guard
+        // prevents this update-only comparison from reading prior data.
+        && (resource == null || membershipEnforcementUnchanged())
         && (!('standingsFreezeAt' in request.resource.data)
             || (request.resource.data.standingsFreezeAt is number
                 && request.resource.data.standingsFreezeAt > 0
