@@ -46,7 +46,7 @@ npm test                       # game-logic unit tests
 npm run typecheck              # tsc --noEmit, app + service worker
 ```
 
-`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions`—scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, adult-posture derivation/reconciliation, and legacy-marker normalization), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
+`app-ci` gates every merge: typecheck, unit and component tests, build, the deployment safety harness (`test:deploy`), the functions suite (`test:functions`—scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, adult-posture derivation/reconciliation, and legacy-marker normalization), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
 Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (the 1Password-backed project deploy credential; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
 
