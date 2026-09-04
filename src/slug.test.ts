@@ -13,12 +13,33 @@ describe('reserved infrastructure labels', () => {
   // (#529, #545, and the wizard's address step #790); a silent addition or
   // removal here changes what an organizer may claim AND what the edge router
   // will serve, so it should never move without a test moving with it.
-  it('is exactly the seven infrastructure labels, sorted', () => {
-    expect([...RESERVED_LABELS]).toEqual(['admin', 'api', 'auth', 'd', 'play', 'status', 'www']);
+  it('is exactly the eight infrastructure labels, sorted', () => {
+    expect([...RESERVED_LABELS]).toEqual([
+      'admin',
+      'api',
+      'auth',
+      'd',
+      'play',
+      'send',
+      'status',
+      'www',
+    ]);
   });
 
   it('includes the PostHog ingest proxy label the PRD omitted', () => {
     expect(isReservedLabel('d')).toBe(true);
+  });
+
+  it('includes the Resend return-path label, which carries MX and outranks the wildcard', () => {
+    // `send` is the one reserved label an organizer could plausibly have typed:
+    // three characters, LDH-clean, and an ordinary English word, so nothing
+    // else in `validateSlug` would have refused it. It carries the Resend
+    // return-path MX and SPF for `fiveacross.app` (#1102), which makes it
+    // doubly unclaimable — an Event dealt there would name a host whose DNS is
+    // an SES bounce address, and because a wildcard does not apply to a name
+    // that already exists with ANY record type (RFC 4592), the explicit records
+    // occlude `*.fiveacross.app` for that label entirely once #529 attaches it.
+    expect(isReservedLabel('send')).toBe(true);
   });
 
   it.each([...RESERVED_LABELS])('refuses %s as a Slug', (label) => {

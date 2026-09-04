@@ -10,12 +10,18 @@ import { defineBoolean, defineSecret, defineString } from 'firebase-functions/pa
 export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
 /**
  * Default `from` address for every transactional send. MUST sit on a
- * Resend-verified sending domain — as of 2026-08-05 the account's only
- * verified sending domain is `mail.nathanpayne.com` (see #633; the prior
- * apex-domain default was never verified, so Resend rejected every send and
- * `sendEmail` swallowed it into a logged `false`, per ADR 0001's never-throw
- * contract). Override per project in `functions/.env.<projectId>` — the Five
- * Across deployment already does (`Vacay Bingo <fiveacross@mail.nathanpayne.com>`).
+ * Resend-verified sending domain — the account verifies two, `fiveacross.app`
+ * (#1102) and `mail.nathanpayne.com` (#633; the prior apex-domain default was
+ * never verified, so Resend rejected every send and `sendEmail` swallowed it
+ * into a logged `false`, per ADR 0001's never-throw contract). Override per
+ * project in `functions/.env.<projectId>`.
+ *
+ * UNREACHABLE IN PRACTICE once #1102 lands, and deliberately kept anyway. With
+ * all three `EMAIL_FROM_*` overrides set, every Edition resolves its own
+ * sender and an unknown Edition degrades to `gcb`, which now has one too — so
+ * nothing falls through to this value. It stays as the safety net for the day
+ * one of those params is unset, which is exactly when a silent send failure
+ * would be hardest to notice.
  *
  * DEMOTED TO THE FALLBACK (#671). ADR 0008 splits Firebase projects by
  * cohort, not by brand, so one project can serve several brands (a Vacay Bay
@@ -40,17 +46,25 @@ export const EMAIL_FROM = defineString('EMAIL_FROM', {
  * the send falls back to `EMAIL_FROM` instead of handing Resend a `From:` it
  * will reject (swallowed into a logged `false`, never a thrown error, per
  * ADR 0001). Set the matching param, per project, only once that brand's
- * domain is verified in Resend. Recommended values, from
- * `plans/daily-cards-wireframes.html` § `#fx-email-registers-tri`:
+ * domain is verified in Resend.
  *
- *   EMAIL_FROM_GCB=Gay Cruise Bingo <bingo@gaycruisebingo.com>
- *   EMAIL_FROM_VACAY=Vacay Bingo <hello@vacaybingo.com>
+ * ONE DOMAIN SERVES EVERY EDITION (#1102, owner decision 2026-09-03).
+ * `fiveacross.app` is the account's verified sending domain for all three;
+ * `gaycruisebingo.com` and `vacaybingo.com` are deliberately NOT verified and
+ * are not planned to be. Every Edition of the platform already carries the
+ * `· by Five Across` endorsement in its email footer (#616, #698), so a
+ * `fiveacross.app` sender agrees with what the message says about itself. The
+ * DISPLAY NAME carries the Edition; the DOMAIN carries the platform:
+ *
+ *   EMAIL_FROM_GCB=Gay Cruise Bingo <hello@fiveacross.app>
+ *   EMAIL_FROM_VACAY=Vacay Bingo <hello@fiveacross.app>
  *   EMAIL_FROM_FIVEACROSS=Five Across <hello@fiveacross.app>
  *
- * As of this writing NONE of `gaycruisebingo.com`, `vacaybingo.com` or
- * `fiveacross.app` are verified sending domains — verification is tracked
- * separately (see the PR that introduced these params) and is a prerequisite
- * for setting any of them, not something this code can detect on its own.
+ * This supersedes the per-brand addresses previously recommended here (from
+ * `plans/daily-cards-wireframes.html` § `#fx-email-registers-tri`), which
+ * assumed three verified domains. Three would have meant three DKIM keys,
+ * three sender reputations to warm and three inboxes to answer, in exchange
+ * for a domain name most recipients never look at.
  */
 export const EMAIL_FROM_GCB = defineString('EMAIL_FROM_GCB', { default: '' });
 export const EMAIL_FROM_VACAY = defineString('EMAIL_FROM_VACAY', { default: '' });
@@ -62,10 +76,18 @@ export const EMAIL_FROM_FIVEACROSS = defineString('EMAIL_FROM_FIVEACROSS', { def
  * behaviour, so a project that sets nothing is byte-identical to before. It is
  * a separate param from `EMAIL_FROM` because the two answer different
  * questions: `EMAIL_FROM` must be an address on a Resend-VERIFIED sending
- * domain, while replies want a mailbox a human actually reads. On the Five
- * Across deployment those are deliberately different hosts — mail is sent from
- * the Resend-verified subdomain and replies go to the Google-hosted apex,
- * because the Resend receiving side is switched off.
+ * domain, while replies want a mailbox a human actually reads.
+ *
+ * SHOULD NOW BE EMPTY ON EVERY PROJECT (#1102). Once `hello@fiveacross.app` is
+ * both the `From:` for every Edition and an address that actually receives, a
+ * `Reply-To` has no work left to do — a reply goes to the `From:` by default.
+ * Leaving a value here is worse than redundant: this param is PROJECT-wide
+ * while ADR 0008 splits projects by COHORT, not by brand, so one value is
+ * necessarily wrong for some Edition the project serves. The `fiveacross`
+ * project hosts the Bodega Bay Event, which is `vacay`-Edition, so the former
+ * `nathanpayne.com` value was inviting replies to a personal domain from
+ * Vacay-branded mail. One shared `From:` that receives dissolves the problem
+ * instead of managing it.
  */
 export const EMAIL_REPLY_TO = defineString('EMAIL_REPLY_TO', { default: '' });
 /** Optional shared-inbox override, comma-separated. Empty = roster only. */
