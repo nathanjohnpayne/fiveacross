@@ -36,7 +36,7 @@
  * not quietly open the ingest proxy's label to an organizer.
  *
  * `send` is the one entry an organizer could plausibly have typed on purpose —
- * three characters, LDH-clean, an ordinary word — so nothing else in
+ * four characters, LDH-clean, an ordinary word — so nothing else in
  * `validateSlug` would have refused it. It carries the Resend return-path MX
  * and SPF for `fiveacross.app` (#1102). That makes it unclaimable twice over:
  * an Event dealt there would name a host whose DNS is an SES bounce address,
