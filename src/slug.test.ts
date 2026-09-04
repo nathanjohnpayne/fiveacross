@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   isReservedLabel,
@@ -66,6 +68,56 @@ describe('reserved infrastructure labels', () => {
       expect(validateSlug(label)).toEqual({ ok: false, reason: 'reserved-label' });
     },
   );
+});
+
+/**
+ * Two separately deployed programs keep their OWN copy of the reserved set
+ * because neither can import this module. `router-publisher` pins
+ * `rootDir: "src"` in its tsconfig, so reaching outside it would change the
+ * emitted artifact shape of a deployed Cloud Function; the registry recovery
+ * controller is plain `.mjs` with no build step. Both are MIRRORS, not
+ * independent policies.
+ *
+ * A mirror without a parity test is how mirrors drift — the same reasoning
+ * `dailyEmailTheme.ts` records for its Theme-token table — and this one drifted
+ * exactly that way: `send` was added here (#1102) and both copies silently kept
+ * the former seven, which the root suite could not catch because its `include`
+ * covers `src/`, `scripts/` and `worker/` but NOT `router-publisher/`. The
+ * publisher would then have accepted and signed a `send` replica row that the
+ * registry rejects downstream, and `deployment.json` enables retries, so one
+ * malformed row becomes repeated failed publications rather than a clean
+ * rejection at the boundary.
+ *
+ * This parses the literal out of each file rather than importing it, which is
+ * the only option for a CommonJS-targeted service and an unbuilt `.mjs` — and
+ * is the point: it fails on the SOURCE a deploy actually ships.
+ */
+describe('reserved-label mirrors in separately deployed programs', () => {
+  const parseSet = (path: string, constName: string): string[] => {
+    // Resolved from the Vitest root (the repo root) rather than from
+    // `import.meta.url`, which the jsdom transform does not reliably provide.
+    const src = readFileSync(resolve(process.cwd(), path), 'utf-8');
+    const start = src.indexOf(constName);
+    if (start === -1) throw new Error(`${constName} not found in ${path}`);
+    const open = src.indexOf('[', start);
+    const close = src.indexOf(']', open);
+    if (open === -1 || close === -1) throw new Error(`${constName} literal unparsable in ${path}`);
+    return [...src.slice(open, close).matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]);
+  };
+
+  const expected = [...RESERVED_LABELS].sort();
+
+  it('router-publisher/src/runtime.ts mirrors RESERVED_LABELS exactly', () => {
+    expect(parseSet('router-publisher/src/runtime.ts', 'RESERVED_EVENT_SLUGS').sort()).toEqual(
+      expected,
+    );
+  });
+
+  it('scripts/event-router-registry/recovery-controller.mjs mirrors RESERVED_LABELS exactly', () => {
+    expect(
+      parseSet('scripts/event-router-registry/recovery-controller.mjs', 'RESERVED_SLUGS').sort(),
+    ).toEqual(expected);
+  });
 });
 
 describe('validateSlug', () => {
