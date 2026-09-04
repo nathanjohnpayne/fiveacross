@@ -8,6 +8,23 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * The conventional Firebase TypeScript layout the inventory requires before it
+ * will trust a parsed `src/index.ts`: `main` is the compiled `outDir/index.js`
+ * and `rootDir` is `src`. Fixtures must supply it, because the CLI loads the
+ * BUILT artifact and only this layout lets the source stand in for it.
+ */
+async function writeConventionalManifests(dir) {
+  await writeFile(
+    resolve(dir, "package.json"),
+    JSON.stringify({ name: "fixture", main: "lib/index.js" }),
+  );
+  await writeFile(
+    resolve(dir, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { outDir: "lib", rootDir: "src" } }),
+  );
+}
+
 function classify(args, configPath = resolve(repoRoot, "firebase.json")) {
   return classifyFirebaseDeployRequest(["fiveacross", ...args], {
     defaultConfigPath: configPath,
@@ -23,6 +40,7 @@ async function withFunctionsSource(source, run) {
       resolve(fixture, "firebase.json"),
       JSON.stringify({ functions: { source: "functions" } }),
     );
+    await writeConventionalManifests(resolve(fixture, "functions"));
     await writeFile(
       resolve(fixture, "functions", "src", "index.ts"),
       source,
@@ -243,6 +261,7 @@ async function withCodebases(sources, run) {
     for (const [codebase, source] of Object.entries(sources)) {
       const dir = `functions-${codebase}`;
       await mkdir(resolve(fixture, dir, "src"), { recursive: true });
+      await writeConventionalManifests(resolve(fixture, dir));
       await writeFile(resolve(fixture, dir, "src", "index.ts"), source, "utf8");
       functions.push(
         codebase === "default" ? { source: dir } : { source: dir, codebase },
@@ -355,6 +374,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
     const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-remote-"));
     try {
       await mkdir(resolve(fixture, "functions-default", "src"), { recursive: true });
+      await writeConventionalManifests(resolve(fixture, "functions-default"));
       await writeFile(
         resolve(fixture, "functions-default", "src", "index.ts"),
         [BUILDER_IMPORT, "export const api = onSchedule('every day 00:00', () => {});"].join("\n"),
@@ -399,6 +419,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
     const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-authority-"));
     try {
       await mkdir(resolve(fixture, "functions-alpha", "src"), { recursive: true });
+      await writeConventionalManifests(resolve(fixture, "functions-alpha"));
       await writeFile(
         resolve(fixture, "functions-alpha", "src", "index.ts"),
         endpoint("alphaOnly"),
@@ -436,5 +457,114 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
       );
       expect(prefixed).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
     });
+  });
+});
+
+describe("the config must be simple enough to analyse before any proof counts", () => {
+  /** A fixture with explicit control over package.json / tsconfig / firebase config. */
+  async function withManifests({ pkg, tsconfig, functionsConfig }, run) {
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-manifest-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(resolve(fixture, "functions", "package.json"), JSON.stringify(pkg));
+      if (tsconfig)
+        await writeFile(resolve(fixture, "functions", "tsconfig.json"), JSON.stringify(tsconfig));
+      await writeFile(
+        resolve(fixture, "functions", "src", "index.ts"),
+        endpoint("daily"),
+      );
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions", ...functionsConfig } }),
+      );
+      await run(resolve(fixture, "firebase.json"));
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }
+
+  const CONVENTIONAL = {
+    pkg: { main: "lib/index.js" },
+    tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" } },
+  };
+
+  it("refuses when package.json main is not the compiled src/index.ts", async () => {
+    // The CLI loads `package.json.main || "index.js"` — the BUILT artifact. If
+    // main points elsewhere, a safe-looking src/index.ts says nothing about
+    // what Firebase actually deploys.
+    await withManifests(
+      { ...CONVENTIONAL, pkg: { main: "dist/server.js" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses when tsconfig does not map src to the built output", async () => {
+    await withManifests(
+      { ...CONVENTIONAL, tsconfig: { compilerOptions: { outDir: "lib", rootDir: "." } } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses when the manifests are missing entirely", async () => {
+    await withManifests({ pkg: {}, tsconfig: null }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("refuses a codebase configured with a prefix", async () => {
+    // A `prefix` rewrites deployed ids to `<prefix>-<name>`, so an inventory of
+    // raw export names no longer describes what a selector matches.
+    await withManifests(
+      { ...CONVENTIONAL, functionsConfig: { prefix: "daily" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("accepts the conventional layout, so these preconditions are not vacuous", async () => {
+    await withManifests(CONVENTIONAL, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+    });
+  });
+
+  it("refuses a builder imported from a package that merely starts with firebase-functions", async () => {
+    // `firebase-functions-wrapper` is a different package; its factory may
+    // return an object the runtime loader discovers as a group.
+    await withFunctionsSource(
+      [
+        "import { onSchedule } from 'firebase-functions-wrapper';",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses when a CommonJS assignment can overwrite a proven export", async () => {
+    // TypeScript preserves the reassignment in its emit, and the runtime loader
+    // recursively deploys the final object as a group.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        "exports.daily = require('./group');",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
   });
 });

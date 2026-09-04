@@ -217,13 +217,27 @@ function singleEndpointExportsFromSource(source) {
     if (statement.importClause?.isTypeOnly) continue;
     const specifier = statement.moduleSpecifier;
     if (!ts.isStringLiteral(specifier)) continue;
-    if (!specifier.text.startsWith("firebase-functions")) continue;
+    // EXACT package boundary. A prefix test would trust
+    // `firebase-functions-wrapper`, whose factory may return an object the
+    // runtime loader then discovers as a group of separate endpoints.
+    const from = specifier.text;
+    if (from !== "firebase-functions" && !from.startsWith("firebase-functions/"))
+      continue;
     const bindings = statement.importClause?.namedBindings;
     if (bindings && ts.isNamedImports(bindings)) {
       for (const element of bindings.elements) {
         if (!element.isTypeOnly) builders.add(element.name.text);
       }
     }
+  }
+
+  // TypeScript preserves a CommonJS assignment in its emit, and the runtime
+  // loader recursively discovers an object's members as separate endpoints — so
+  // `export const daily = onSchedule(...)` followed by
+  // `exports.daily = require('./group')` deploys a GROUP under a name this
+  // parser proved was an endpoint. Any such mutation forfeits authority.
+  if (/(^|[^.\w])(?:module\s*\.\s*)?exports\s*(?:\.|\[)/.test(source)) {
+    authoritative = false;
   }
 
   for (const statement of sourceFile.statements) {
@@ -313,6 +327,27 @@ async function singleEndpointInventory(configSource, configPath) {
       continue;
     }
 
+    // A configured `prefix` rewrites deployed ids to `<prefix>-<name>`, so an
+    // inventory of RAW export names no longer describes what a selector
+    // matches. Refuse rather than model the rewrite.
+    if (functionsConfig.prefix) {
+      entry.authoritative = false;
+      continue;
+    }
+
+    // The CLI loads `package.json.main || "index.js"` — the BUILT artifact, not
+    // the TypeScript this parser reads. Only the conventional Firebase TS
+    // layout lets one stand in for the other, so anything else forfeits
+    // authority instead of assuming the mapping holds.
+    if (
+      !(await entrypointIsConventionalTypeScript(
+        resolve(dirname(configPath), functionsConfig.source),
+      ))
+    ) {
+      entry.authoritative = false;
+      continue;
+    }
+
     const sourcePath = resolve(
       dirname(configPath),
       functionsConfig.source,
@@ -336,6 +371,35 @@ async function singleEndpointInventory(configSource, configPath) {
     for (const name of parsed.exports) entry.exports.add(name);
   }
   return { byCodebase, codebaseNames };
+}
+
+/**
+ * Whether `<source>/src/index.ts` is provably the TypeScript that compiles to
+ * the entry point Firebase will load. Requires the conventional layout:
+ * `package.json.main` = `<outDir>/index.js`, tsconfig `rootDir` = `src`.
+ * Everything else — a custom main, a non-Node runtime, an unreadable or
+ * unparsable manifest — returns false and costs only the exemption.
+ */
+async function entrypointIsConventionalTypeScript(sourceDir) {
+  let pkg;
+  try {
+    pkg = JSON.parse(await readFile(resolve(sourceDir, "package.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  const main = typeof pkg.main === "string" ? pkg.main : "index.js";
+  let tsconfig;
+  try {
+    const raw = await readFile(resolve(sourceDir, "tsconfig.json"), "utf8");
+    tsconfig = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ""));
+  } catch {
+    return false;
+  }
+  const options = tsconfig.compilerOptions ?? {};
+  if (options.rootDir !== "src") return false;
+  if (typeof options.outDir !== "string" || !options.outDir) return false;
+  const normalize = (value) => value.replace(/^\.\//, "").replace(/\/+/g, "/");
+  return normalize(main) === normalize(`${options.outDir}/index.js`);
 }
 
 /**
