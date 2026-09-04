@@ -165,6 +165,119 @@ function eventInvitationServicesFromSource(source) {
   ).map(([, service]) => service);
 }
 
+/**
+ * The exported names in a Functions source that are provably a SINGLE endpoint
+ * rather than a group, plus whether that answer is authoritative.
+ *
+ * This exists because `--only functions:X` is ambiguous at the string level.
+ * Firebase's own grammar gives a group the same bare shape as an endpoint —
+ * `exports.metrics = require('./metrics')` deploys as `--only functions:metrics`
+ * (https://firebase.google.com/docs/functions/organize-functions) — so a
+ * selector alone cannot say whether it releases one endpoint or a module's
+ * whole surface, which may include a protected callable.
+ *
+ * The discriminator is therefore the INITIALIZER, not the name. A single
+ * endpoint is `export const NAME = <builder>(...)` where `<builder>` was
+ * imported from `firebase-functions`. That deliberately excludes the two group
+ * shapes: `require('./x')` is also a CallExpression but its callee is not a
+ * firebase-functions import, and an object literal is not a call at all.
+ *
+ * FAILS CLOSED on every uncertainty. An unparsable file, a runtime
+ * `export *` (whose module graph is not traversed here, matching
+ * `eventInvitationServicesFromSource`), a re-export, or a builder reached
+ * through a namespace import all leave the name out of the set, which returns
+ * the caller to the conservative branch it would have taken anyway. The set
+ * only ever REMOVES false conservatism; it can never mark a protected callable
+ * as unrelated, because those match their own explicit selector branches long
+ * before the fallback consults this.
+ */
+function singleEndpointExportsFromSource(source) {
+  const builders = new Set();
+  const endpoints = new Set();
+  let authoritative = true;
+  let sourceFile;
+  try {
+    sourceFile = ts.createSourceFile(
+      "index.ts",
+      source,
+      ts.ScriptTarget.Latest,
+      false,
+      ts.ScriptKind.TS,
+    );
+  } catch {
+    return { endpoints, authoritative: false };
+  }
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    if (statement.importClause?.isTypeOnly) continue;
+    const specifier = statement.moduleSpecifier;
+    if (!ts.isStringLiteral(specifier)) continue;
+    if (!specifier.text.startsWith("firebase-functions")) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        if (!element.isTypeOnly) builders.add(element.name.text);
+      }
+    }
+  }
+
+  for (const statement of sourceFile.statements) {
+    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
+      if (!statement.exportClause) authoritative = false;
+      continue;
+    }
+    if (!ts.isVariableStatement(statement)) continue;
+    const exported = statement.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+    );
+    if (!exported) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      const initializer = declaration.initializer;
+      if (!initializer || !ts.isCallExpression(initializer)) continue;
+      if (!ts.isIdentifier(initializer.expression)) continue;
+      if (!builders.has(initializer.expression.text)) continue;
+      endpoints.add(declaration.name.text);
+    }
+  }
+
+  return { endpoints, authoritative };
+}
+
+async function singleEndpointInventory(configSource, configPath) {
+  const functionsConfigs = Array.isArray(configSource.functions)
+    ? configSource.functions
+    : [configSource.functions];
+  const endpoints = new Set();
+  let authoritative = true;
+  for (const functionsConfig of functionsConfigs) {
+    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    const sourcePath = resolve(
+      dirname(configPath),
+      functionsConfig.source,
+      "src",
+      "index.ts",
+    );
+    let source;
+    try {
+      source = await readFile(sourcePath, "utf8");
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") {
+        // A configured codebase whose entrypoint cannot be read is exactly the
+        // case that must not be treated as "exports nothing dangerous".
+        authoritative = false;
+        continue;
+      }
+      throw error;
+    }
+    const parsed = singleEndpointExportsFromSource(source);
+    if (!parsed.authoritative) authoritative = false;
+    for (const name of parsed.endpoints) endpoints.add(name);
+  }
+  return { endpoints, authoritative };
+}
+
 async function eventInvitationServiceInventory(configSource, configPath) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -197,6 +310,7 @@ function classifyInvokerScope(
   only,
   exceptTargets,
   exportedEventInvitationServices,
+  singleEndpointExports = { endpoints: new Set(), authoritative: false },
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
@@ -280,6 +394,22 @@ function classifyInvokerScope(
         namedEventInvitationServices.add("revoke");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
+        // `functions:[codebase:]name` — a DOTTED tail is a group path
+        // (`--only functions:group1.subgroup1`), never a single endpoint, so it
+        // is left to the conservative branch below along with everything the
+        // inventory cannot vouch for.
+        const selectorName = selector.replace(/^functions:(?:[^:]+:)?/, "");
+        const isProvableSingleEndpoint =
+          singleEndpointExports.authoritative &&
+          !selectorName.includes(".") &&
+          singleEndpointExports.endpoints.has(selectorName);
+        if (isProvableSingleEndpoint) {
+          // A named endpoint that the source proves is a builder call, not a
+          // group. It cannot release a protected callable, so it selects no
+          // invoker and forces no conservatism. Protected callables never reach
+          // here — each has its own branch above.
+          continue;
+        }
         unknownFunctionsSelectorNamed = true;
         if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
         if (!emailUnsubscribeInvokerSelected)
@@ -394,6 +524,10 @@ export async function classifyFirebaseDeployRequest(
   const configSource = JSON.parse(await readFile(configPath, "utf8"));
   const exportedEventInvitationServices =
     await eventInvitationServiceInventory(configSource, configPath);
+  const singleEndpointExports = await singleEndpointInventory(
+    configSource,
+    configPath,
+  );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
   // option-looking required value such as `--only --dry-run`: Commander owns
@@ -426,6 +560,7 @@ export async function classifyFirebaseDeployRequest(
       only,
       exceptTargets,
       exportedEventInvitationServices,
+      singleEndpointExports,
     ),
     hostingAttempted: hostingConfigs.length > 0,
   };
