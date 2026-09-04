@@ -88,9 +88,17 @@ export const EMAIL_FROM_FIVEACROSS = defineString('EMAIL_FROM_FIVEACROSS', { def
  * questions: `EMAIL_FROM` must be an address on a Resend-VERIFIED sending
  * domain, while replies want a mailbox a human actually reads.
  *
- * SHOULD NOW BE EMPTY ON EVERY PROJECT (#1102). Once `hello@fiveacross.app` is
- * both the `From:` for every Edition and an address that actually receives, a
- * `Reply-To` has no work left to do — a reply goes to the `From:` by default.
+ * SHOULD NOW BE EMPTY ON EVERY PROJECT (#1102) — BUT ONLY ONCE INBOUND ROUTING
+ * IS LIVE. The ordering is load-bearing (Codex P1 on PR #1103): Resend's
+ * RECEIVING side is disabled, so `hello@fiveacross.app` accepts mail only
+ * through Cloudflare Email Routing. Emptying this param before that routing
+ * exists points every reply at an address that bounces. Routing was enabled and
+ * verified on 2026-09-03, so it is satisfied today; a project provisioned later
+ * must confirm inbound works first.
+ *
+ * With that satisfied, `hello@fiveacross.app` is both the `From:` for every
+ * Edition and an address that actually receives, so a `Reply-To` has no work
+ * left to do — a reply goes to the `From:` by default.
  * Leaving a value here is worse than redundant: this param is PROJECT-wide
  * while ADR 0008 splits projects by COHORT, not by brand, so one value is
  * necessarily wrong for some Edition the project serves. The `fiveacross`
