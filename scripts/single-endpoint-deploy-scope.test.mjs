@@ -345,3 +345,96 @@ describe("codebase precedence and per-codebase keying", () => {
     });
   });
 });
+
+describe("selector resolution mirrors the pinned firebase-tools parser", () => {
+  it("does not let a remoteSource codebase be read as a same-named local endpoint", async () => {
+    // projectConfig accepts `remoteSource` as an alternative to `source`, and
+    // such a config still carries a codebase. Dropping its NAME would let
+    // codebase precedence be missed and release its whole surface — protected
+    // callables included — with every invoker flag false (Codex P2, round 2).
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-remote-"));
+    try {
+      await mkdir(resolve(fixture, "functions-default", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "functions-default", "src", "index.ts"),
+        [BUILDER_IMPORT, "export const api = onSchedule('every day 00:00', () => {});"].join("\n"),
+      );
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({
+          functions: [
+            { source: "functions-default" },
+            { codebase: "api", remoteSource: { repository: "r", ref: "main" } },
+          ],
+        }),
+      );
+      const result = await classify(
+        ["--only", "functions:api"],
+        resolve(fixture, "firebase.json"),
+      );
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let another codebase veto an unqualified default-codebase proof", async () => {
+    // `fragments.length < 2` resolves to DEFAULT_CODEBASE, so a non-endpoint of
+    // the same name in `beta` is unreachable and must not force conservatism.
+    await withCodebases(
+      {
+        default: endpoint("shared"),
+        beta: [BUILDER_IMPORT, "export const shared = require('./shared');"].join("\n"),
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:shared"], configPath);
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
+  });
+
+  it("does not let one codebase's unreadable source poison a qualified proof in another", async () => {
+    // endpointMatchesFilter rejects a codebase mismatch before comparing ids,
+    // so uncertainty in `beta` cannot widen an explicitly qualified `alpha`.
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-authority-"));
+    try {
+      await mkdir(resolve(fixture, "functions-alpha", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "functions-alpha", "src", "index.ts"),
+        endpoint("alphaOnly"),
+      );
+      await mkdir(resolve(fixture, "functions-beta"), { recursive: true }); // no src/index.ts
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({
+          functions: [
+            { source: "functions-alpha", codebase: "alpha" },
+            { source: "functions-beta", codebase: "beta" },
+          ],
+        }),
+      );
+      const result = await classify(
+        ["--only", "functions:alpha:alphaOnly"],
+        resolve(fixture, "firebase.json"),
+      );
+      expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a hyphenated CODEBASE while still refusing a hyphenated endpoint id", async () => {
+    // validateCodebase permits [a-z0-9_-]+, and the parser splits the codebase
+    // off before applying idChunks, so the hyphen rule belongs to the id alone.
+    await withCodebases({ "my-codebase": endpoint("daily") }, async (configPath) => {
+      const ok = await classify(["--only", "functions:my-codebase:daily"], configPath);
+      expect(ok).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+
+      const prefixed = await classify(
+        ["--only", "functions:my-codebase:daily-extra"],
+        configPath,
+      );
+      expect(prefixed).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+});
