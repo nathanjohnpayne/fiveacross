@@ -236,13 +236,40 @@ function singleEndpointExportsFromSource(source) {
   // `export const daily = onSchedule(...)` followed by
   // `exports.daily = require('./group')` deploys a GROUP under a name this
   // parser proved was an endpoint. Any such mutation forfeits authority.
-  if (/(^|[^.\w])(?:module\s*\.\s*)?exports\s*(?:\.|\[)/.test(source)) {
+  // `.` / `[` catch member mutation; `=` catches whole-object replacement
+  // (`module.exports = { daily: { submitBugReport } }`), which replaces the
+  // module wholesale and is otherwise invisible here.
+  if (/(^|[^.\w])(?:module\s*\.\s*)?exports\s*(?:\.|\[|=[^=])/.test(source)) {
     authoritative = false;
   }
 
   for (const statement of sourceFile.statements) {
     if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
-      if (!statement.exportClause) authoritative = false;
+      if (!statement.exportClause) {
+        authoritative = false;
+        continue;
+      }
+      if (!ts.isNamedExports(statement.exportClause)) {
+        authoritative = false; // namespace re-export
+        continue;
+      }
+      for (const specifier of statement.exportClause.elements) {
+        if (specifier.isTypeOnly) continue;
+        const exportedName = specifier.name;
+        if (!ts.isIdentifier(exportedName)) {
+          // A string-named export (`export { report as "daily-submitBugReport" }`)
+          // becomes a runtime property whose deployed id can share another
+          // endpoint's `name-` prefix, and the CLI matches
+          // `id === prefix || id.startsWith(prefix + "-")`.
+          authoritative = false;
+          continue;
+        }
+        if (exportedName.text.includes("-") || exportedName.text.includes(".")) {
+          authoritative = false;
+        }
+        // Exported but unproven: vetoes rather than abstains.
+        exports.add(exportedName.text);
+      }
       continue;
     }
     if (!ts.isVariableStatement(statement)) continue;
@@ -266,6 +293,12 @@ function singleEndpointExportsFromSource(source) {
     }
     for (const declaration of statement.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name)) continue;
+      if (
+        declaration.name.text.includes("-") ||
+        declaration.name.text.includes(".")
+      ) {
+        authoritative = false;
+      }
       exports.add(declaration.name.text);
       const initializer = declaration.initializer;
       if (!initializer || !ts.isCallExpression(initializer)) continue;

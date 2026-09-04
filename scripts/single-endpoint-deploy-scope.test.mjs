@@ -661,3 +661,91 @@ describe("narrowing that removes whole classes rather than modelling them", () =
     );
   });
 });
+
+describe("module-level replacement and prefix-colliding export ids", () => {
+  it("refuses whole-object module.exports replacement", async () => {
+    // Member mutation was already caught; wholesale replacement was not.
+    // `module.exports = { daily: { submitBugReport } }` replaces the module and
+    // the loader discovers `daily-submitBugReport`.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        "module.exports = { daily: { submitBugReport: 1 } };",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses a string-named export whose id shares a proven endpoint's prefix", async () => {
+    // The CLI matches `id === prefix || id.startsWith(prefix + "-")`, so
+    // `daily-submitBugReport` is inside `--only functions:daily`.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "const report = 1;",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        'export { report as "daily-submitBugReport" };',
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses a namespace re-export, whose members this parser cannot enumerate", async () => {
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        "export * as group from './group.js';",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("records a plain named re-export as exported-but-unproven, so it vetoes", async () => {
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "const other = 1;",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        "export { other as somethingElse };",
+      ].join("\n"),
+      async (configPath) => {
+        // `daily` is still provable — the re-export neither proves nor
+        // collides with it, so this must NOT become conservative.
+        const ok = await classify(["--only", "functions:daily"], configPath);
+        expect(ok).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+        // ...but the re-exported name itself is unproven and must veto.
+        const vetoed = await classify(["--only", "functions:somethingElse"], configPath);
+        expect(vetoed).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses a string-named export even without a hyphen, since its id is unpinnable", async () => {
+    // Discriminates the string-literal guard from the hyphen guard: with no
+    // hyphen the prefix rule is not what saves us, so removing the
+    // `isIdentifier` check must break this and only this.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "const report = 1;",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        'export { report as "weird name" };',
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+});
