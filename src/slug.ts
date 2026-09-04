@@ -34,6 +34,16 @@
  * refused as `too-short` anyway, and a guarantee that holds only by accident of
  * an unrelated constant is not a guarantee. Shortening `SLUG_MIN_LENGTH` must
  * not quietly open the ingest proxy's label to an organizer.
+ *
+ * `send` is the one entry an organizer could plausibly have typed on purpose —
+ * three characters, LDH-clean, an ordinary word — so nothing else in
+ * `validateSlug` would have refused it. It carries the Resend return-path MX
+ * and SPF for `fiveacross.app` (#1102). That makes it unclaimable twice over:
+ * an Event dealt there would name a host whose DNS is an SES bounce address,
+ * and because a wildcard does not apply to a name that already exists with ANY
+ * record type (RFC 4592), those explicit records occlude `*.fiveacross.app` for
+ * that label entirely once #529 attaches the wildcard — so the Event would
+ * resolve to nothing rather than to the wrong thing.
  */
 export const RESERVED_LABELS: readonly string[] = [
   'admin',
@@ -41,6 +51,7 @@ export const RESERVED_LABELS: readonly string[] = [
   'auth',
   'd',
   'play',
+  'send',
   'status',
   'www',
 ];

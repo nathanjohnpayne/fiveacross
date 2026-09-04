@@ -15,7 +15,19 @@ const ALGORITHM = 'RSA_SIGN_PKCS1_2048_SHA256';
 const EDITIONS = new Set(['gcb', 'vacay', 'fiveacross']);
 const STATUSES = new Set(['active', 'disabled', 'archived']);
 const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
-const RESERVED_SLUGS = new Set(['admin', 'api', 'auth', 'd', 'play', 'status', 'www']);
+// MIRROR of `RESERVED_LABELS` in `src/slug.ts` (see the note in
+// `router-publisher/src/runtime.ts`); pinned by the parity test in
+// `src/slug.test.ts`. `send` carries the Resend return-path MX (#1102).
+const RESERVED_SLUGS = new Set([
+  'admin',
+  'api',
+  'auth',
+  'd',
+  'play',
+  'send',
+  'status',
+  'www',
+]);
 const ROOT_HOSTS = new Map([
   ['fiveacross.app', { edition: 'fiveacross', pathNamespace: 'fiveacross.app' }],
   ['vacaybingo.com', { edition: 'vacay', pathNamespace: 'vacaybingo.com' }],
