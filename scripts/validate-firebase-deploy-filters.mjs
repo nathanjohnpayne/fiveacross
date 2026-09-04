@@ -194,6 +194,10 @@ function eventInvitationServicesFromSource(source) {
 function singleEndpointExportsFromSource(source) {
   const builders = new Set();
   const endpoints = new Set();
+  // Every exported binding, endpoint or not. A name that is exported but NOT
+  // proven to be a builder call (a group, a re-export) must veto the
+  // unqualified exemption rather than merely fail to support it.
+  const exports = new Set();
   let authoritative = true;
   let sourceFile;
   try {
@@ -205,7 +209,7 @@ function singleEndpointExportsFromSource(source) {
       ts.ScriptKind.TS,
     );
   } catch {
-    return { endpoints, authoritative: false };
+    return { endpoints, exports, authoritative: false };
   }
 
   for (const statement of sourceFile.statements) {
@@ -234,6 +238,7 @@ function singleEndpointExportsFromSource(source) {
     if (!exported) continue;
     for (const declaration of statement.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name)) continue;
+      exports.add(declaration.name.text);
       const initializer = declaration.initializer;
       if (!initializer || !ts.isCallExpression(initializer)) continue;
       if (!ts.isIdentifier(initializer.expression)) continue;
@@ -242,17 +247,47 @@ function singleEndpointExportsFromSource(source) {
     }
   }
 
-  return { endpoints, authoritative };
+  return { endpoints, exports, authoritative };
 }
 
+/**
+ * Per-codebase single-endpoint inventory, plus the configured codebase names.
+ *
+ * Keyed by codebase and not unioned, because Firebase resolves a selector
+ * against ONE codebase: `endpointMatchesFilter` rejects an endpoint whose
+ * codebase differs from the filter's. A union would let an endpoint exported by
+ * codebase B vouch for `functions:A:name`.
+ *
+ * The codebase names matter more than they look. `parseFunctionSelector` gives
+ * a configured codebase name PRECEDENCE over any endpoint id: when the first
+ * fragment names a codebase it becomes a codebase filter, and with no second
+ * fragment the filter carries no `idChunks`, so `endpointMatchesFilter` returns
+ * true for every endpoint in it. A codebase that also exports an endpoint of
+ * the same name would otherwise be read as that single endpoint and released
+ * with no invoker reconciliation (Codex P2 on PR #1107).
+ */
 async function singleEndpointInventory(configSource, configPath) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
-  const endpoints = new Set();
+  /** @type {Map<string, { endpoints: Set<string>, exports: Set<string> }>} */
+  const byCodebase = new Map();
+  const codebaseNames = new Set();
   let authoritative = true;
+
   for (const functionsConfig of functionsConfigs) {
     if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    if ("kit" in functionsConfig) {
+      // A kit config contributes its instance keys as codebases and its
+      // endpoints from somewhere this parser does not read.
+      authoritative = false;
+      continue;
+    }
+    const codebase =
+      typeof functionsConfig.codebase === "string" && functionsConfig.codebase
+        ? functionsConfig.codebase
+        : "default";
+    codebaseNames.add(codebase);
     const sourcePath = resolve(
       dirname(configPath),
       functionsConfig.source,
@@ -273,9 +308,52 @@ async function singleEndpointInventory(configSource, configPath) {
     }
     const parsed = singleEndpointExportsFromSource(source);
     if (!parsed.authoritative) authoritative = false;
-    for (const name of parsed.endpoints) endpoints.add(name);
+    const entry = byCodebase.get(codebase) ?? {
+      endpoints: new Set(),
+      exports: new Set(),
+    };
+    for (const name of parsed.endpoints) entry.endpoints.add(name);
+    for (const name of parsed.exports) entry.exports.add(name);
+    byCodebase.set(codebase, entry);
   }
-  return { endpoints, authoritative };
+  return { byCodebase, codebaseNames, authoritative };
+}
+
+/**
+ * Whether `selector` provably releases exactly one endpoint that is not a
+ * protected callable. Fails closed on every uncertainty.
+ */
+function selectorIsProvableSingleEndpoint(selector, inventory) {
+  if (!inventory.authoritative) return false;
+  const tail = selector.slice("functions:".length);
+  if (!tail) return false;
+  const fragments = tail.split(":");
+  if (fragments.length > 2) return false;
+
+  // Codebase precedence, mirroring parseFunctionSelector.
+  if (inventory.codebaseNames.has(fragments[0])) {
+    if (fragments.length === 1) return false; // whole codebase
+    return endpointProvenIn(inventory, fragments[0], fragments[1]);
+  }
+  if (fragments.length === 2) return false; // qualified by an unknown codebase
+
+  // Unqualified: Firebase matches across codebases, so every codebase must
+  // agree the name is a single endpoint, and at least one must prove it.
+  const name = fragments[0];
+  let provenSomewhere = false;
+  for (const [codebase] of inventory.byCodebase) {
+    const entry = inventory.byCodebase.get(codebase);
+    if (entry.endpoints.has(name)) provenSomewhere = true;
+    else if (entry.exports.has(name)) return false; // exported, but not proven
+  }
+  return provenSomewhere;
+}
+
+function endpointProvenIn(inventory, codebase, name) {
+  const entry = inventory.byCodebase.get(codebase);
+  if (!entry) return false;
+  if (entry.exports.has(name) && !entry.endpoints.has(name)) return false;
+  return entry.endpoints.has(name);
 }
 
 async function eventInvitationServiceInventory(configSource, configPath) {
@@ -310,7 +388,11 @@ function classifyInvokerScope(
   only,
   exceptTargets,
   exportedEventInvitationServices,
-  singleEndpointExports = { endpoints: new Set(), authoritative: false },
+  singleEndpointExports = {
+    byCodebase: new Map(),
+    codebaseNames: new Set(),
+    authoritative: false,
+  },
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
@@ -398,11 +480,14 @@ function classifyInvokerScope(
         // (`--only functions:group1.subgroup1`), never a single endpoint, so it
         // is left to the conservative branch below along with everything the
         // inventory cannot vouch for.
-        const selectorName = selector.replace(/^functions:(?:[^:]+:)?/, "");
+        // A dotted tail is a group path (`--only functions:group1.subgroup1`),
+        // and Firebase additionally splits idChunks on `-`, so a prefix form
+        // can match `name-*`. Both are refused before the inventory is asked.
+        const selectorTail = selector.slice("functions:".length);
         const isProvableSingleEndpoint =
-          singleEndpointExports.authoritative &&
-          !selectorName.includes(".") &&
-          singleEndpointExports.endpoints.has(selectorName);
+          !selectorTail.includes(".") &&
+          !selectorTail.includes("-") &&
+          selectorIsProvableSingleEndpoint(selector, singleEndpointExports);
         if (isProvableSingleEndpoint) {
           // A named endpoint that the source proves is a builder call, not a
           // group. It cannot release a protected callable, so it selects no

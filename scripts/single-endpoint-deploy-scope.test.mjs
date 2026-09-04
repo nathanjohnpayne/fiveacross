@@ -230,3 +230,118 @@ describe("fail-closed: shapes that must NOT be read as a single endpoint", () =>
     );
   });
 });
+
+/**
+ * A temp project with several configured codebases. `sources` maps a codebase
+ * name to its `src/index.ts`; the key "default" writes a config with no
+ * explicit `codebase` key, which is how Firebase spells the default.
+ */
+async function withCodebases(sources, run) {
+  const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-codebases-"));
+  try {
+    const functions = [];
+    for (const [codebase, source] of Object.entries(sources)) {
+      const dir = `functions-${codebase}`;
+      await mkdir(resolve(fixture, dir, "src"), { recursive: true });
+      await writeFile(resolve(fixture, dir, "src", "index.ts"), source, "utf8");
+      functions.push(
+        codebase === "default" ? { source: dir } : { source: dir, codebase },
+      );
+    }
+    await writeFile(
+      resolve(fixture, "firebase.json"),
+      JSON.stringify({ functions }),
+    );
+    await run(resolve(fixture, "firebase.json"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+const endpoint = (name) =>
+  [BUILDER_IMPORT, `export const ${name} = onSchedule('every day 00:00', () => {});`].join("\n");
+
+describe("codebase precedence and per-codebase keying", () => {
+  it("refuses a selector naming a configured codebase, even when an endpoint shares the name", async () => {
+    // firebase-tools' parseFunctionSelector gives a configured codebase name
+    // precedence over any endpoint id, and a filter with no second fragment
+    // carries no idChunks — so endpointMatchesFilter admits EVERY endpoint in
+    // that codebase, including protected callables. Reading it as the
+    // same-named single endpoint would release them with no reconciliation.
+    await withCodebases(
+      {
+        api: [
+          BUILDER_IMPORT,
+          "export const api = onSchedule('every day 00:00', () => {});",
+          "export const alsoHere = onSchedule('every day 00:00', () => {});",
+        ].join("\n"),
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:api"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("does not let one codebase's export vouch for another codebase's selector", async () => {
+    // `endpointMatchesFilter` rejects an endpoint whose codebase differs from
+    // the filter's, so a union across codebases would be unsound.
+    await withCodebases(
+      { alpha: endpoint("alphaOnly"), beta: endpoint("betaOnly") },
+      async (configPath) => {
+        const result = await classify(
+          ["--only", "functions:alpha:betaOnly"],
+          configPath,
+        );
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("exempts a codebase-qualified endpoint proven in that same codebase", async () => {
+    await withCodebases(
+      { alpha: endpoint("alphaOnly"), beta: endpoint("betaOnly") },
+      async (configPath) => {
+        const result = await classify(
+          ["--only", "functions:alpha:alphaOnly"],
+          configPath,
+        );
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
+  });
+
+  it("refuses an unqualified name that another codebase exports as a non-endpoint", async () => {
+    // Unqualified selectors match across codebases, so one codebase proving the
+    // name is an endpoint is not enough while another exports it as a group.
+    await withCodebases(
+      {
+        alpha: endpoint("shared"),
+        beta: [BUILDER_IMPORT, "export const shared = require('./shared');"].join("\n"),
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:shared"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("refuses a qualified selector whose codebase is not configured", async () => {
+    await withCodebases({ alpha: endpoint("alphaOnly") }, async (configPath) => {
+      const result = await classify(
+        ["--only", "functions:ghost:alphaOnly"],
+        configPath,
+      );
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("refuses a hyphenated selector, which Firebase treats as an id prefix", async () => {
+    // idChunks split on `-` and match `id === prefix || id.startsWith(prefix + '-')`,
+    // so a hyphenated selector is a prefix filter rather than one endpoint.
+    await withCodebases({ default: endpoint("daily") }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily-extra"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+});
