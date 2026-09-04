@@ -34,7 +34,7 @@ describe('reserved infrastructure labels', () => {
 
   it('includes the Resend return-path label, which carries MX and outranks the wildcard', () => {
     // `send` is the one reserved label an organizer could plausibly have typed:
-    // three characters, LDH-clean, and an ordinary English word, so nothing
+    // four characters, LDH-clean, and an ordinary English word, so nothing
     // else in `validateSlug` would have refused it. It carries the Resend
     // return-path MX and SPF for `fiveacross.app` (#1102), which makes it
     // doubly unclaimable — an Event dealt there would name a host whose DNS is
