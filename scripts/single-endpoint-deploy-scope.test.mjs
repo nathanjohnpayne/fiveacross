@@ -17,7 +17,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 async function writeConventionalManifests(dir) {
   await writeFile(
     resolve(dir, "package.json"),
-    JSON.stringify({ name: "fixture", main: "lib/index.js" }),
+    JSON.stringify({ name: "fixture", main: "lib/index.js", engines: { node: "22" } }),
   );
   await writeFile(
     resolve(dir, "tsconfig.json"),
@@ -484,7 +484,7 @@ describe("the config must be simple enough to analyse before any proof counts", 
   }
 
   const CONVENTIONAL = {
-    pkg: { main: "lib/index.js" },
+    pkg: { main: "lib/index.js", engines: { node: "22" } },
     tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" } },
   };
 
@@ -493,7 +493,7 @@ describe("the config must be simple enough to analyse before any proof counts", 
     // main points elsewhere, a safe-looking src/index.ts says nothing about
     // what Firebase actually deploys.
     await withManifests(
-      { ...CONVENTIONAL, pkg: { main: "dist/server.js" } },
+      { ...CONVENTIONAL, pkg: { main: "dist/server.js", engines: { node: "22" } } },
       async (configPath) => {
         const result = await classify(["--only", "functions:daily"], configPath);
         expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
@@ -561,6 +561,99 @@ describe("the config must be simple enough to analyse before any proof counts", 
         "export const daily = onSchedule('every day 00:00', () => {});",
         "exports.daily = require('./group');",
       ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+});
+
+describe("narrowing that removes whole classes rather than modelling them", () => {
+  async function withRuntimeConfig(extraConfig, source, run) {
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-runtime-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeConventionalManifests(resolve(fixture, "functions"));
+      await writeFile(resolve(fixture, "functions", "src", "index.ts"), source, "utf8");
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions", ...extraConfig } }),
+      );
+      await run(resolve(fixture, "firebase.json"));
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }
+
+  it("refuses a non-Node runtime even when decoy TypeScript is present", async () => {
+    // The CLI picks its runtime delegate from the configured runtime, so a
+    // python codebase's endpoints come from source this parser never reads.
+    await withRuntimeConfig({ runtime: "python311" }, endpoint("daily"), async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("accepts an explicitly declared Node runtime", async () => {
+    await withRuntimeConfig({ runtime: "nodejs22" }, endpoint("daily"), async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+    });
+  });
+
+  it("refuses a package.json with no declared node engine", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-engine-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "functions", "package.json"),
+        JSON.stringify({ main: "lib/index.js" }), // no engines
+      );
+      await writeFile(
+        resolve(fixture, "functions", "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { outDir: "lib", rootDir: "src" } }),
+      );
+      await writeFile(
+        resolve(fixture, "functions", "src", "index.ts"),
+        endpoint("daily"),
+      );
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: { source: "functions" } }),
+      );
+      const result = await classify(
+        ["--only", "functions:daily"],
+        resolve(fixture, "firebase.json"),
+      );
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a reassignable `export let` binding", async () => {
+    // `export let daily = onSchedule(...); daily = { submitBugReport };`
+    // rebinds the export with no `exports.` text for the mutation guard to see.
+    // Requiring `const` removes the class instead of hunting for assignments.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "export let daily = onSchedule('every day 00:00', () => {});",
+        "daily = { submitBugReport: 1 };",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
+  it("treats a non-const exported name as exported-but-unproven, so it vetoes", async () => {
+    // It must not merely fail to support the proof — an unqualified selector
+    // has to see it as a name this parser cannot vouch for.
+    await withFunctionsSource(
+      [BUILDER_IMPORT, "export let daily = onSchedule('every day 00:00', () => {});"].join("\n"),
       async (configPath) => {
         const result = await classify(["--only", "functions:daily"], configPath);
         expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);

@@ -250,6 +250,20 @@ function singleEndpointExportsFromSource(source) {
       (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
     );
     if (!exported) continue;
+    // CONST ONLY. `export let daily = onSchedule(...)` followed by
+    // `daily = { submitBugReport }` rebinds the export with no `exports.` text
+    // for the mutation guard to see; TypeScript updates the binding in its emit
+    // and the loader then discovers the object's members. A `const` cannot be
+    // reassigned, so requiring it removes the whole class rather than hunting
+    // for assignments.
+    const isConst =
+      (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
+    if (!isConst) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) exports.add(declaration.name.text);
+      }
+      continue;
+    }
     for (const declaration of statement.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name)) continue;
       exports.add(declaration.name.text);
@@ -327,6 +341,15 @@ async function singleEndpointInventory(configSource, configPath) {
       continue;
     }
 
+    // The CLI picks its runtime delegate from the configured runtime, so a
+    // `python311` codebase with decoy TypeScript would otherwise be "proven"
+    // from source Firebase never reads.
+    const runtime = functionsConfig.runtime;
+    if (typeof runtime === "string" && !runtime.startsWith("nodejs")) {
+      entry.authoritative = false;
+      continue;
+    }
+
     // A configured `prefix` rewrites deployed ids to `<prefix>-<name>`, so an
     // inventory of RAW export names no longer describes what a selector
     // matches. Refuse rather than model the rewrite.
@@ -387,6 +410,9 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
   } catch {
     return false;
   }
+  // With no configured runtime the CLI detects one; only a declared Node
+  // engine makes "this TypeScript is the entry point" a safe reading.
+  if (!pkg.engines || typeof pkg.engines.node === "undefined") return false;
   const main = typeof pkg.main === "string" ? pkg.main : "index.js";
   let tsconfig;
   try {
