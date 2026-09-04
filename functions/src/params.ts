@@ -16,12 +16,22 @@ export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
  * into a logged `false`, per ADR 0001's never-throw contract). Override per
  * project in `functions/.env.<projectId>`.
  *
- * UNREACHABLE IN PRACTICE once #1102 lands, and deliberately kept anyway. With
- * all three `EMAIL_FROM_*` overrides set, every Edition resolves its own
- * sender and an unknown Edition degrades to `gcb`, which now has one too — so
- * nothing falls through to this value. It stays as the safety net for the day
- * one of those params is unset, which is exactly when a silent send failure
- * would be hardest to notice.
+ * STILL REACHED EVEN WITH ALL THREE OVERRIDES SET, which is why its default
+ * moved to the platform sender (#1102, Codex P2 on PR #1103). The reachable
+ * path is an EDITIONLESS Event, not an unknown one: `resolveEventOrigin`
+ * returns `edition: null` for an Event with no active `hostnames` mapping,
+ * `fromAddressFor` returns `undefined` for a null Edition (it cannot look up a
+ * register that does not exist), and `resolveEmailFrom` therefore lands here.
+ * Do not confuse this with the CONTENT register, which does degrade an unknown
+ * Edition to `gcb` (`registerFor`, `dailyEmailContent.ts`) — that is a
+ * different function answering a different question, and the two are easy to
+ * conflate into a false claim that this param is dead code.
+ *
+ * So the default has to be right for an Event whose brand is UNKNOWN, and
+ * `Five Across` is exactly that: the occasion-neutral platform identity
+ * (`BRAND.md`), on the verified domain, at an address that receives. The prior
+ * default branded such an Event `Gay Cruise Bingo`, which is a specific
+ * Edition's identity asserted over an Event that has not claimed one.
  *
  * DEMOTED TO THE FALLBACK (#671). ADR 0008 splits Firebase projects by
  * cohort, not by brand, so one project can serve several brands (a Vacay Bay
@@ -32,7 +42,7 @@ export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
  * — and reach this param only when no per-Edition override is configured.
  */
 export const EMAIL_FROM = defineString('EMAIL_FROM', {
-  default: 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+  default: 'Five Across <hello@fiveacross.app>',
 });
 /**
  * Per-Edition overrides of `EMAIL_FROM` (#671), one per brand in the #608
