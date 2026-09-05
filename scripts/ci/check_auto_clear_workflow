@@ -467,6 +467,365 @@ else
 fi
 rm -rf "$reporter_tmp"
 
+# ── #1188: the failure diagnostic must have a way back to green.
+#
+# Before CONTINUATION_CLEAR_V1 the reporter had no success arm anywhere, so a
+# head that hit one transient infra error kept a red check-run permanently and
+# the PR sat at UNSTABLE for the life of that head. These tests pin both halves
+# of the fix: the workflow runs a clearing arm on a clean evaluation, and the
+# reporter clears ONLY a failure it can actually see.
+# Whole-line anchor, not a substring: `grep -F 'name: Clear …'` still matches a
+# step renamed to "… DISABLED", which is precisely how this assertion was first
+# written and precisely the mutation it failed to catch.
+continuation_clear_count=$(grep -cE '^[[:space:]]+- name: Clear superseded approval-continuation diagnostics$' "$WORKFLOW" || true)
+if [ "$continuation_clear_count" -eq 2 ] \
+   && [ "$(grep -cE "^[[:space:]]+if: always\(\) && env\.CONTINUATION_EVALUATED_PRS != ''\$" "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF "env.CONTINUATION_INFRA_ERROR == '0'" "$WORKFLOW")" -eq 0 ] \
+   && [ "$(grep -cF 'CONTINUATION_EVALUATED_PRS' "$WORKFLOW")" -ge 4 ] \
+   && [ "$(grep -cF "report-approval-continuation-failures.sh --clear" "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF "grep -Fq 'CONTINUATION_CLEAR_V1'" "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF 'eval_started_at=$(date -u +%s)' "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF '$PR:$eval_head:$eval_started_at:$continuation_stage' "$WORKFLOW")" -eq 4 ] \
+   && [ "$(grep -cF 'continuation_stage=protective' "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF 'continuation_stage=full' "$WORKFLOW")" -eq 2 ] \
+   && [ "$(grep -cF '$PR:$continuation_stage:$eval_started_at' "$WORKFLOW")" -eq 2 ] \
+   && grep -Fq 'CONTINUATION_CLEAR_V1' "$CONTINUATION_REPORTER"; then
+  pass=$((pass + 1))
+  echo "  PASS: both continuation loops clear per-PR after a clean evaluation, without the batch sentinel (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: each continuation loop must run a marker-guarded --clear arm gated on the per-PR evaluated list, never on the batch-wide infra sentinel (#1188)" >&2
+fi
+
+# rc=0 means two different things in these loops. The AUTHOR_MERGE_TOKEN-unset
+# branch sets rc=0 after protective retraction alone and deliberately SKIPS the
+# author-token continuation. A boolean "did it evaluate" cannot express that
+# without breaking one side or the other: treat the disabled path as evaluated
+# and it clears failures from a stage it never ran; treat it as unevaluated and
+# a repo with no AUTHOR_MERGE_TOKEN can never clear its own protective-stage
+# failures, keeping a permanently red head — the #1188 bug for a different
+# population. The stage is recorded on both sides instead, so `full` must be
+# reachable ONLY through the branch that runs the author-token helper.
+if [ "$(grep -cF 'continuation_stage=full' "$WORKFLOW")" -eq 2 ] \
+   && [ "$(awk '/AUTHOR_MERGE_TOKEN is not configured/{f=1} f&&/continuation_stage=full/{print "leaked"; exit} f&&/elif \[ "\$protective_rc" -eq 0 \]/{f=0}' "$WORKFLOW" | grep -c leaked)" -eq 0 ]; then
+  pass=$((pass + 1))
+  echo "  PASS: the full stage is reachable only via the author-token continuation, never the disabled path (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: the AUTHOR_MERGE_TOKEN-unset path must not claim the full continuation stage (#1188)" >&2
+fi
+
+clear_tmp=$(mktemp -d "${TMPDIR:-/tmp}/continuation-clear.XXXXXX")
+mkdir -p "$clear_tmp/bin"
+cat > "$clear_tmp/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s' abc123
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  # Scan every argument for the endpoint rather than assuming a position:
+  # `gh api --paginate <endpoint>` puts the flag where a positional match would
+  # look, and a stub that quietly stops matching returns an empty result that
+  # reads exactly like "no diagnostic on this head".
+  endpoint=""
+  for a in "$@"; do
+    case "$a" in
+      */commits/*/check-runs*) endpoint="$a" ;;
+    esac
+  done
+  case "$endpoint" in
+    *"/commits/"*"/check-runs"*)
+      # Emulates gh: --jq is applied per page, and page 2 exists only when the
+      # caller actually passed --paginate. A caller that drops the flag sees
+      # page 1 alone, exactly as the real endpoint behaves.
+      filter='.'
+      prev=""
+      paginate=no
+      for a in "$@"; do
+        [ "$prev" = "--jq" ] && filter="$a"
+        [ "$a" = "--paginate" ] && paginate=yes
+        prev="$a"
+      done
+      printf '%s' "$GH_STUB_CHECKRUNS" | jq -r "$filter"
+      if [ "$paginate" = yes ] && [ -n "${GH_STUB_CHECKRUNS_P2:-}" ]; then
+        printf '%s' "$GH_STUB_CHECKRUNS_P2" | jq -r "$filter"
+      fi
+      exit 0
+      ;;
+    */check-runs/*)
+      exit 0
+      ;;
+  esac
+  exit 0
+fi
+exit 90
+STUB
+chmod +x "$clear_tmp/bin/gh"
+
+# Each case asserts on a fresh log. `want_post` is whether a clearing check-run
+# should reach the API for that fixture.
+# The stub's PR head is always abc123. VERDICT_AFTER is later than every fixture
+# run (so recency never masks the case under test); VERDICT_BEFORE is earlier
+# than all of them, which is how a failure published after the verdict is
+# expressed. `entry` is the PR:SHA:EPOCH token the workflow now passes.
+VERDICT_AFTER=1788609600
+VERDICT_BEFORE=1788480000
+run_clear_case() {
+  local label="$1" want_post="$2" fixture="$3" fixture_p2="${4:-}" entry="${5:-7:abc123:$VERDICT_AFTER:full}" expect_run_id="${6:-[0-9]+}" expect_evidence="${7:-}"
+  : > "$clear_tmp/gh.log"
+  if ! PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" GH_STUB_CHECKRUNS="$fixture" \
+       GH_STUB_CHECKRUNS_P2="$fixture_p2" \
+       GH_RETRY_ATTEMPTS=1 \
+       bash "$CONTINUATION_REPORTER" --clear owner/repo https://example.test/run/1 "$entry" >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    echo "  FAIL: --clear ($label) exited non-zero" >&2
+    return
+  fi
+  local posted=no
+  if grep -Fq 'conclusion=success' "$clear_tmp/gh.log"; then
+    posted=yes
+  fi
+  # A clear must never CREATE a check-run. Creating one re-enters the
+  # latest-run-wins race: a failure published between the read and the write
+  # would be newer evidence, and a fresh success would bury it.
+  if grep -Eq '(^| )api repos/[^ ]*/check-runs( |$)' "$clear_tmp/gh.log"; then
+    fail=$((fail + 1))
+    echo "  FAIL: --clear ($label) created a new check-run instead of updating the selected one" >&2
+  fi
+  if [ "$posted" = "$want_post" ]; then
+    pass=$((pass + 1))
+    echo "  PASS: --clear ($label) posts=$posted as required (#1188)"
+  else
+    fail=$((fail + 1))
+    echo "  FAIL: --clear ($label) expected posts=$want_post, got posts=$posted" >&2
+  fi
+  # The superseded failure's summary must survive into the replacement. This is
+  # the only check-run record of that failure, so overwriting it outright erases
+  # the reason and run URL an operator needs to chase a recurring flake.
+  if [ "$posted" = yes ] && [ -n "${expect_evidence:-}" ]; then
+    if grep -Fq "$expect_evidence" "$clear_tmp/gh.log"; then
+      pass=$((pass + 1))
+      echo "  PASS: --clear ($label) preserved the superseded failure evidence"
+    else
+      fail=$((fail + 1))
+      echo "  FAIL: --clear ($label) discarded the superseded failure evidence" >&2
+    fi
+  fi
+  # A clearing pass must never publish a fresh failure.
+  if grep -Fq 'conclusion=failure' "$clear_tmp/gh.log"; then
+    fail=$((fail + 1))
+    echo "  FAIL: --clear ($label) published a failure conclusion" >&2
+  fi
+  # The write must target the run selected from the EVALUATED head. The head
+  # pinning now shows up as which run id was chosen, since the read is scoped to
+  # that head and the write addresses the run by id.
+  if [ "$posted" = yes ]; then
+    local pinned="${entry#*:}"
+    pinned="${pinned%%:*}"
+    if grep -Fq "commits/$pinned/check-runs" "$clear_tmp/gh.log" \
+       && grep -Eq "api repos/[^ ]*/check-runs/${expect_run_id:-[0-9]+} " "$clear_tmp/gh.log"; then
+      pass=$((pass + 1))
+      echo "  PASS: --clear ($label) updated the run selected from the evaluated head"
+    else
+      fail=$((fail + 1))
+      echo "  FAIL: --clear ($label) did not update the run selected from the evaluated head" >&2
+    fi
+  fi
+}
+
+# Latest-run-wins, proven in BOTH directions. Reading an arbitrary element here
+# reproduces the superseded-red misread the clearing arm exists to undo, so the
+# decisive run sits in the MIDDLE of each fixture: an unsorted `first` and an
+# unsorted `last` then both land on a run that disagrees with the required
+# outcome. A fixture that lists the decisive run at either end is satisfied by
+# array position alone and proves nothing about the sort — the first draft of
+# this test did exactly that and survived the mutation.
+run_clear_case "failure is latest, listed in the middle" yes \
+  '{"check_runs":[{"conclusion":"success","started_at":"2026-09-05T02:00:00Z","id":7},{"conclusion":"failure","started_at":"2026-09-05T05:00:00Z","id":11},{"conclusion":"success","started_at":"2026-09-04T10:00:00Z","id":1}]}' \
+  "" "7:abc123:$VERDICT_AFTER:full" 11
+run_clear_case "success is latest, listed in the middle" no \
+  '{"check_runs":[{"conclusion":"failure","started_at":"2026-09-04T16:45:23Z","id":2},{"conclusion":"success","started_at":"2026-09-05T05:00:00Z","id":9},{"conclusion":"failure","started_at":"2026-09-04T10:00:00Z","id":1}]}'
+run_clear_case "no diagnostic on this head" no \
+  '{"check_runs":[]}'
+# Page 1 says failure, page 2 carries the newer success. An unpaginated read
+# returns page 1 cleanly with no signal that page 2 exists, so it would clear a
+# head whose latest run is already green — the same silent truncation
+# docs/agents/shared-operating-rules.md documents for this endpoint (194
+# check-runs on one head, #687).
+run_clear_case "latest run is on page 2" no \
+  '{"check_runs":[{"conclusion":"failure","started_at":"2026-09-04T16:45:23Z","id":2}]}' \
+  '{"check_runs":[{"conclusion":"success","started_at":"2026-09-05T06:00:00Z","id":40}]}'
+run_clear_case "page 2 carries the newer failure" yes \
+  '{"check_runs":[{"conclusion":"success","started_at":"2026-09-04T09:00:00Z","id":3}]}' \
+  '{"check_runs":[{"conclusion":"failure","started_at":"2026-09-05T06:00:00Z","id":41}]}' \
+  "7:abc123:$VERDICT_AFTER:full" 41
+
+# The head moved between the verdict and this call. The verdict describes a head
+# that is no longer current, so it must not publish anything: re-resolving the
+# head here is what would let a clean result for head A clear a real failure on
+# head B that was never evaluated.
+run_clear_case "head moved since the verdict" no \
+  '{"check_runs":[{"conclusion":"failure","started_at":"2026-09-04T16:45:23Z","id":2}]}' \
+  "" "7:deadbeefcafe:$VERDICT_AFTER:full"
+
+# Same head, but the failure was published AFTER this verdict was taken — it is
+# newer evidence than the verdict and must survive it.
+run_clear_case "failure is newer than the verdict" no \
+  '{"check_runs":[{"conclusion":"failure","started_at":"2026-09-04T16:45:23Z","id":2}]}' \
+  "" "7:abc123:$VERDICT_BEFORE:full"
+
+# Stage coverage. A verdict clears only a diagnostic from a stage it actually
+# REACHED. Both directions matter and they fail differently: without the guard a
+# protective-only pass clears an author-token-stage failure it never re-ran;
+# with too strict a guard a repo that can only ever reach the protective stage
+# can never clear its own protective failures and keeps a permanently red head.
+PROTECTIVE_DIAG='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-05T05:00:00Z","id":21,"output":{"summary":"boom [continuation-stage: protective] see run"}}]}'
+FULL_DIAG='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-05T05:00:00Z","id":22,"output":{"summary":"boom [continuation-stage: full] see run"}}]}'
+LEGACY_DIAG='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-05T05:00:00Z","id":23,"output":{"summary":"boom, posted before stage markers existed"}}]}'
+
+run_clear_case "protective verdict clears a protective diagnostic" yes \
+  "$PROTECTIVE_DIAG" "" "7:abc123:$VERDICT_AFTER:protective" 21 "boom [continuation-stage: protective] see run"
+run_clear_case "protective verdict leaves a full-stage diagnostic" no \
+  "$FULL_DIAG" "" "7:abc123:$VERDICT_AFTER:protective"
+run_clear_case "full verdict clears a protective diagnostic" yes \
+  "$PROTECTIVE_DIAG" "" "7:abc123:$VERDICT_AFTER:full" 21
+# An unmarked diagnostic predates the marker; reading it as "full" is the
+# conservative default, so only a full verdict may clear it.
+run_clear_case "protective verdict leaves an unmarked legacy diagnostic" no \
+  "$LEGACY_DIAG" "" "7:abc123:$VERDICT_AFTER:protective"
+run_clear_case "full verdict clears an unmarked legacy diagnostic" yes \
+  "$LEGACY_DIAG" "" "7:abc123:$VERDICT_AFTER:full" 23
+# An unknown stage is refused rather than defaulted: a wrong clear is the
+# dangerous direction.
+run_clear_case "unknown verdict stage is refused" no \
+  "$PROTECTIVE_DIAG" "" "7:abc123:$VERDICT_AFTER:partial"
+
+# Concurrent triggers make publication time and evaluation time diverge: an
+# older evaluation can fail and reach the reporter AFTER a newer clean
+# evaluation already ran its clearing step. Judged on `started_at` that stale
+# failure outranks the clean verdict and the head stays red — and on a consumer
+# with `scheduled_sweep_enabled: false` no later event is guaranteed to arrive,
+# which is the #1188 bug again. `started_at` here is deliberately LATER than the
+# verdict while the embedded evaluation epoch is EARLIER, so the two readings
+# disagree and only the correct one clears.
+LATE_PUBLISHED_STALE='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-06T00:00:00Z","id":51,"output":{"summary":"boom [continuation-stage: full] [continuation-evaluated-at: 1788480000] see run"}}]}'
+run_clear_case "stale failure published after the verdict" yes \
+  "$LATE_PUBLISHED_STALE" "" "7:abc123:$VERDICT_AFTER:full" 51
+
+# The mirror: a failure genuinely evaluated AFTER the verdict is newer evidence
+# and must survive, even though both markers are present.
+GENUINELY_NEWER='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-06T00:00:00Z","id":52,"output":{"summary":"boom [continuation-stage: full] [continuation-evaluated-at: 1788696000] see run"}}]}'
+run_clear_case "failure evaluated after the verdict survives" no \
+  "$GENUINELY_NEWER" "" "7:abc123:$VERDICT_AFTER:full"
+
+# Without the marker, recency falls back to publication time — the prior
+# behaviour, kept for diagnostics posted before the marker existed.
+UNMARKED_LATE='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-06T00:00:00Z","id":53,"output":{"summary":"boom [continuation-stage: full] see run"}}]}'
+run_clear_case "unmarked late failure falls back to publication time" no \
+  "$UNMARKED_LATE" "" "7:abc123:$VERDICT_AFTER:full"
+
+# Round-trip: the marker the FAILURE arm writes must be the one the CLEAR arm
+# reads. These are two independent string expressions in the same file, so a
+# drift between them would silently downgrade every protective diagnostic to
+# "full" and re-create the permanently-red case. Assert on the writer's actual
+# output rather than on the constant.
+: > "$clear_tmp/gh.log"
+PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" GH_RETRY_ATTEMPTS=1 \
+  bash "$CONTINUATION_REPORTER" owner/repo https://example.test/run/9 "7:protective:1788480000" >/dev/null 2>&1 || true
+written_epoch_marker=$(grep -o -m1 '\[continuation-evaluated-at: 1788480000\]' "$clear_tmp/gh.log" || true)
+if [ -n "$written_epoch_marker" ]; then
+  pass=$((pass + 1))
+  echo "  PASS: the failure arm writes the evaluation-epoch marker the clear arm reads (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: the failure arm did not write a readable evaluation-epoch marker (#1188)" >&2
+fi
+# `grep -m1 ... || true`, not `grep | head`: this grep is EXPECTED to find
+# nothing when the marker drifts, and under `set -euo pipefail` both the empty
+# match and head(1) closing the pipe early abort the whole harness — which is
+# how the first draft of this test silently killed the suite instead of failing
+# the assertion it exists to make.
+written_marker=$(grep -o -m1 '\[continuation-stage: protective\]' "$clear_tmp/gh.log" || true)
+: > "$clear_tmp/gh.log"
+PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" GH_RETRY_ATTEMPTS=1 \
+  GH_STUB_CHECKRUNS="{\"check_runs\":[{\"conclusion\":\"failure\",\"started_at\":\"2026-09-05T05:00:00Z\",\"id\":31,\"output\":{\"summary\":\"x ${written_marker} y\"}}]}" \
+  bash "$CONTINUATION_REPORTER" --clear owner/repo https://example.test/run/9 "7:abc123:$VERDICT_AFTER:protective" >/dev/null 2>&1 || true
+if [ -n "$written_marker" ] && grep -Fq 'conclusion=success' "$clear_tmp/gh.log"; then
+  pass=$((pass + 1))
+  echo "  PASS: the stage marker the failure arm writes is the one the clear arm reads (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: stage marker drift between the failure and clear arms (written='${written_marker}') (#1188)" >&2
+fi
+
+# Interleaving regression (CodeRabbit P1). The clear must address the run it
+# SELECTED, by id. Creating a new success instead would make the clear the
+# newest run on the head, so a failure published between the read and the write
+# would be silently buried under it — the exact latest-run-wins race this whole
+# script arbitrates. Updating run 11 cannot bury a run that does not exist yet:
+# a newer failure stays newer, stays current, and keeps blocking.
+: > "$clear_tmp/gh.log"
+PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" \
+  GH_STUB_CHECKRUNS='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-05T05:00:00Z","id":11}]}' \
+  GH_RETRY_ATTEMPTS=1 \
+  bash "$CONTINUATION_REPORTER" --clear owner/repo https://example.test/run/1 "7:abc123:$VERDICT_AFTER:full" >/dev/null 2>&1 || true
+if grep -Eq 'api repos/owner/repo/check-runs/11( |$)' "$clear_tmp/gh.log" \
+   && grep -Fq 'PATCH' "$clear_tmp/gh.log" \
+   && ! grep -Eq '(^| )api repos/owner/repo/check-runs( |$)' "$clear_tmp/gh.log"; then
+  pass=$((pass + 1))
+  echo "  PASS: --clear updates the selected run by id and never creates a competing one (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: --clear must PATCH the selected run id, not create a success that can bury a newer failure (#1188)" >&2
+fi
+
+# A caller that passes a bare PR number has lost the head pinning entirely.
+# Asserting only "posts nothing" would pass for the WRONG reason: with the shape
+# guard removed, `7` still falls out at the head-mismatch check further down
+# (EVAL_HEAD parses as "7", which never equals a real SHA). So assert the shape
+# guard's own diagnostic, which is the only thing that distinguishes "the caller
+# is malformed" from "the head moved" — two very different operational stories.
+: > "$clear_tmp/gh.log"
+bare_out=$(PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" \
+  GH_STUB_CHECKRUNS='{"check_runs":[{"conclusion":"failure","started_at":"2026-09-04T16:45:23Z","id":2}]}' \
+  GH_RETRY_ATTEMPTS=1 \
+  bash "$CONTINUATION_REPORTER" --clear owner/repo https://example.test/run/1 "7" 2>&1 || true)
+if grep -Fq 'refusing to guess' <<<"$bare_out" \
+   && ! grep -Fq 'conclusion=success' "$clear_tmp/gh.log"; then
+  pass=$((pass + 1))
+  echo "  PASS: --clear rejects a bare PR number as malformed, not as a moved head (#1188)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: --clear must reject an unpinned entry with its own shape diagnostic (#1188)" >&2
+fi
+
+# Arg contract: the clearing arm still takes exactly three positionals, so a
+# consumer calling it wrongly fails loudly rather than posting to a guessed repo.
+set +e
+PATH="$clear_tmp/bin:$PATH" GH_STUB_LOG="$clear_tmp/gh.log" GH_RETRY_ATTEMPTS=1 \
+  bash "$CONTINUATION_REPORTER" --clear owner/repo https://example.test/run/1 >/dev/null 2>&1
+clear_argrc=$?
+set -e
+if [ "$clear_argrc" -eq 2 ]; then
+  pass=$((pass + 1))
+  echo "  PASS: --clear rejects a short argument list with rc=2"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: --clear should exit 2 on a short argument list (got rc=$clear_argrc)" >&2
+fi
+# Stock macOS ships bash 3.2, where `${VAR^}` aborts with "bad substitution"
+# before either arm can post. The hosted Ubuntu runner masks it, so pin it here.
+if grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\^' "$CONTINUATION_REPORTER"; then
+  fail=$((fail + 1))
+  echo "  FAIL: reporter uses a bash 4-only case-modification expansion; stock macOS bash 3.2 aborts on it" >&2
+else
+  pass=$((pass + 1))
+  echo "  PASS: reporter avoids bash 4-only case-modification expansions"
+fi
+rm -rf "$clear_tmp"
+
 # #730: the pull_request_target trigger must include `edited` so a body-edit
 # nudge (the reliable re-fire for a claude-authored Phase-4 PR after a late
 # Codex clearance) re-evaluates auto-clear on the PR head. Anchor to the
