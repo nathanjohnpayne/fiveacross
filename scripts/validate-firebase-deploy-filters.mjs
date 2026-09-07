@@ -1,9 +1,22 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const commander = require("commander");
@@ -22,6 +35,7 @@ const {
   filterExcept,
   filterOnly,
 } = require("firebase-tools/lib/hosting/config");
+const functionsEnv = require("firebase-tools/lib/functions/env");
 
 // Deploy-command options come directly from the pinned firebase-tools module.
 // This small global subset covers options that change destination or whose
@@ -166,39 +180,26 @@ function eventInvitationServicesFromSource(source) {
 }
 
 /**
- * The exported names in a Functions source that are provably a SINGLE endpoint
- * rather than a group, plus whether that answer is authoritative.
+ * The exported names a Functions source DECLARES as builder calls — a fast
+ * pre-check, not a proof.
  *
- * This exists because `--only functions:X` is ambiguous at the string level.
- * Firebase's own grammar gives a group the same bare shape as an endpoint —
- * `exports.metrics = require('./metrics')` deploys as `--only functions:metrics`
- * (https://firebase.google.com/docs/functions/organize-functions) — so a
- * selector alone cannot say whether it releases one endpoint or a module's
- * whole surface, which may include a protected callable.
+ * `--only functions:X` is ambiguous at the string level: Firebase's grammar
+ * gives a group the same bare shape as an endpoint
+ * (`exports.metrics = require('./metrics')` deploys as `--only
+ * functions:metrics`, https://firebase.google.com/docs/functions/organize-functions),
+ * so the selector alone cannot say whether it releases one endpoint or a
+ * module's whole surface. The ANSWER comes from the built artifact
+ * (`artifactEndpointInventory`), because the artifact is what Firebase loads.
  *
- * The discriminator is therefore the INITIALIZER, not the name. A single
- * endpoint is `export const NAME = <builder>(...)` where `<builder>` was
- * imported from `firebase-functions`. That deliberately excludes the two group
- * shapes: `require('./x')` is also a CallExpression but its callee is not a
- * firebase-functions import, and an object literal is not a call at all.
- *
- * FAILS CLOSED on every uncertainty. An unparsable file, a runtime
- * `export *` (whose module graph is not traversed here, matching
- * `eventInvitationServicesFromSource`), a re-export, or a builder reached
- * through a namespace import all leave the name out of the set, which returns
- * the caller to the conservative branch it would have taken anyway. The set
- * only ever REMOVES false conservatism; it can never mark a protected callable
- * as unrelated, because those match their own explicit selector branches long
- * before the fallback consults this.
+ * This parse exists only to decide whether that build is worth running. A name
+ * it does not list is refused without building; a name it lists is then put to
+ * the artifact, which may still refuse it. So the set is deliberately
+ * PERMISSIVE: it does not try to model CommonJS mutation, `export *`, or
+ * reassignment — the artifact walk sees the consequences of all of them
+ * directly. It can only ever cost an exemption, never grant one.
  */
-function singleEndpointExportsFromSource(source) {
-  const builders = new Set();
-  const endpoints = new Set();
-  // Every exported binding, endpoint or not. A name that is exported but NOT
-  // proven to be a builder call (a group, a re-export) must veto the
-  // unqualified exemption rather than merely fail to support it.
-  const exports = new Set();
-  let authoritative = true;
+function sourceEndpointCandidates(source) {
+  const candidates = new Set();
   let sourceFile;
   try {
     sourceFile = ts.createSourceFile(
@@ -209,179 +210,424 @@ function singleEndpointExportsFromSource(source) {
       ts.ScriptKind.TS,
     );
   } catch {
-    return { endpoints, exports, authoritative: false };
+    return candidates;
   }
 
+  const builders = new Set();
   for (const statement of sourceFile.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     if (statement.importClause?.isTypeOnly) continue;
     const specifier = statement.moduleSpecifier;
     if (!ts.isStringLiteral(specifier)) continue;
-    // EXACT package boundary. A prefix test would trust
-    // `firebase-functions-wrapper`, whose factory may return an object the
-    // runtime loader then discovers as a group of separate endpoints.
-    // …and only the SDK's endpoint-builder modules: `firebase-functions`,
-    // `/v1`, `/v2` and their provider subpaths. `firebase-functions/params`,
-    // `/logger` and `/options` export helpers such as `select`, whose return
-    // value can nest a callable the runtime loader then discovers as an
-    // endpoint of its own.
-    const from = specifier.text;
-    if (!/^firebase-functions(?:\/v[12](?:\/[a-z]+)?)?$/.test(from)) continue;
+    // EXACT package boundary, and only the SDK's endpoint-builder modules:
+    // `firebase-functions`, `/v1`, `/v2` and their provider subpaths. A prefix
+    // test would trust `firebase-functions-wrapper`; `firebase-functions/params`
+    // and `/logger` export helpers that are not endpoint constructors.
+    if (!/^firebase-functions(?:\/v[12](?:\/[a-z]+)*)?$/.test(specifier.text)) continue;
     const bindings = statement.importClause?.namedBindings;
-    if (bindings && ts.isNamedImports(bindings)) {
-      for (const element of bindings.elements) {
-        if (element.isTypeOnly) continue;
-        // Builders are the `onX` factories; `HttpsError`, `setGlobalOptions`
-        // and friends from the same modules are not endpoint constructors.
-        const imported = (element.propertyName ?? element.name).text;
-        if (/^on[A-Z]/.test(imported)) builders.add(element.name.text);
-      }
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      if (element.isTypeOnly) continue;
+      const imported = (element.propertyName ?? element.name).text;
+      if (/^on[A-Z]/.test(imported)) builders.add(element.name.text);
     }
-  }
-
-  // TypeScript preserves a CommonJS mutation in its emit, and the runtime
-  // loader recursively discovers the FINAL object's members as separate
-  // endpoints — so `export const daily = onSchedule(...)` followed by any
-  // runtime touch of the exports object deploys a GROUP under a name this
-  // parser proved was an endpoint. The mutation syntaxes are open-ended
-  // (`exports.daily =`, `module.exports =`, `Object.assign(exports, …)`,
-  // `Object.defineProperty(exports, …)`, an alias `const e = exports`), so
-  // rather than enumerate them, ANY reference to the `exports` or `module`
-  // identifier anywhere in the AST forfeits authority. A Functions entrypoint
-  // written as an ES module never needs either name.
-  // Only VALUE references count. `{ module: "engagement" }` and
-  // `metadata.module` name a property, not Node's module object, and must not
-  // cost an unrelated codebase its authority.
-  const isPropertyNamePosition = (node, parent) => {
-    if (!parent) return false;
-    if (ts.isPropertyAccessExpression(parent)) return parent.name === node;
-    if (
-      ts.isPropertyAssignment(parent) ||
-      ts.isPropertySignature(parent) ||
-      ts.isPropertyDeclaration(parent) ||
-      ts.isMethodDeclaration(parent) ||
-      ts.isMethodSignature(parent) ||
-      ts.isEnumMember(parent) ||
-      ts.isGetAccessorDeclaration(parent) ||
-      ts.isSetAccessorDeclaration(parent)
-    ) {
-      return parent.name === node;
-    }
-    if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
-      return parent.propertyName === node;
-    }
-    if (ts.isQualifiedName(parent)) return parent.right === node;
-    return false;
-  };
-  const referencesCommonJsModuleObject = (node, parent) =>
-    (ts.isIdentifier(node) &&
-      (node.text === "exports" || node.text === "module") &&
-      !isPropertyNamePosition(node, parent)) ||
-    ts.forEachChild(node, (child) =>
-      referencesCommonJsModuleObject(child, node),
-    ) === true;
-  if (referencesCommonJsModuleObject(sourceFile, undefined)) {
-    authoritative = false;
   }
 
   for (const statement of sourceFile.statements) {
-    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
-      if (!statement.exportClause) {
-        authoritative = false;
-        continue;
-      }
-      if (!ts.isNamedExports(statement.exportClause)) {
-        authoritative = false; // namespace re-export
-        continue;
-      }
-      for (const specifier of statement.exportClause.elements) {
-        if (specifier.isTypeOnly) continue;
-        const exportedName = specifier.name;
-        if (!ts.isIdentifier(exportedName)) {
-          // A string-named export (`export { report as "daily-submitBugReport" }`)
-          // becomes a runtime property whose deployed id can share another
-          // endpoint's `name-` prefix, and the CLI matches
-          // `id === prefix || id.startsWith(prefix + "-")`.
-          authoritative = false;
-          continue;
-        }
-        if (exportedName.text.includes("-") || exportedName.text.includes(".")) {
-          authoritative = false;
-        }
-        // Exported but unproven: vetoes rather than abstains.
-        exports.add(exportedName.text);
-      }
-      continue;
-    }
     if (!ts.isVariableStatement(statement)) continue;
     const exported = statement.modifiers?.some(
       (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
     );
     if (!exported) continue;
-    // CONST ONLY. `export let daily = onSchedule(...)` followed by
-    // `daily = { submitBugReport }` rebinds the export with no `exports.` text
-    // for the mutation guard to see; TypeScript updates the binding in its emit
-    // and the loader then discovers the object's members. A `const` cannot be
-    // reassigned, so requiring it removes the whole class rather than hunting
-    // for assignments.
-    const isConst =
-      (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
-    if (!isConst) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) exports.add(declaration.name.text);
-      }
-      continue;
-    }
     for (const declaration of statement.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name)) continue;
-      if (
-        declaration.name.text.includes("-") ||
-        declaration.name.text.includes(".")
-      ) {
-        authoritative = false;
-      }
-      exports.add(declaration.name.text);
       const initializer = declaration.initializer;
       if (!initializer || !ts.isCallExpression(initializer)) continue;
       if (!ts.isIdentifier(initializer.expression)) continue;
       if (!builders.has(initializer.expression.text)) continue;
-      endpoints.add(declaration.name.text);
+      candidates.add(declaration.name.text);
     }
   }
-
-  return { endpoints, exports, authoritative };
+  return candidates;
 }
 
 /**
- * Per-codebase single-endpoint inventory, plus the codebase names Firebase
- * treats as selector targets. Mirrors the pinned CLI rather than paraphrasing
- * it; each rule below cites the behaviour it matches.
+ * The configured `source` as a project-relative directory this classifier can
+ * reproduce in a scratch tree, or `null`.
+ *
+ * `./functions`, `functions/` and `functions` all name one directory, and the
+ * scratch copy must land at the same project-relative path so that a hook
+ * spelled `npm --prefix functions run build` finds it. An absolute path or one
+ * that climbs out of the project directory cannot be mirrored, so it is refused
+ * rather than approximated (Codex P2, round 9).
+ */
+function normalizedSourcePath(source) {
+  if (typeof source !== "string" || !source) return null;
+  if (isAbsolute(source)) return null;
+  const normalized = source.replace(/\/+/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!normalized || normalized === "." || normalized === "..") return null;
+  if (normalized.split("/").includes("..")) return null;
+  return normalized;
+}
+
+/** Hooks are given a generous ceiling; a real `tsc` build is seconds, not minutes. */
+const PREDEPLOY_HOOK_TIMEOUT_MS = 300_000;
+/** Loading the artifact is a require and a walk; anything slower is a hang. */
+const ARTIFACT_WALK_TIMEOUT_MS = 20_000;
+
+const ARTIFACT_WALKER = fileURLToPath(
+  new URL("./firebase-artifact-endpoints.cjs", import.meta.url),
+);
+
+/**
+ * `cross-env-shell`, resolved the way `firebase-tools` resolves it, so hooks run
+ * through the same wrapper the deploy uses (`lifecycleHooks.js` `runCommand`).
+ */
+function crossEnvShellPath() {
+  const crossEnv = require.resolve("cross-env", {
+    paths: [dirname(require.resolve("firebase-tools/package.json")), process.cwd()],
+  });
+  return resolve(dirname(crossEnv), "bin", "cross-env-shell.js");
+}
+
+function runCapturedProcess(command, args, options) {
+  return new Promise((settle) => {
+    let child;
+    try {
+      child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      settle({ ok: false, output: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    // Captured, never inherited: this classifier's own stdout is the
+    // machine-readable classification `deploy.sh` parses.
+    let output = "";
+    const collect = (chunk) => {
+      if (output.length < 8192) output += chunk.toString("utf8");
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+    child.on("error", (error) => settle({ ok: false, output: `${output}${error.message}` }));
+    child.on("close", (code, signal) => {
+      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}` });
+      else settle({ ok: code === 0, output, code });
+    });
+  });
+}
+
+/**
+ * Run one `predeploy` entry exactly as `firebase-tools` does
+ * (`lib/deploy/lifecycleHooks.js`): the whole value is handed to
+ * `cross-env-shell` under a shell, with the PROJECT directory as cwd and the
+ * codebase source directory exposed only through `$RESOURCE_DIR`.
+ */
+function runPredeployHook(command, { projectDir, resourceDir, project }) {
+  const translated = `"${process.execPath}" "${crossEnvShellPath()}" "${command.replace(/"/g, '\\"')}"`;
+  return runCapturedProcess(translated, [], {
+    cwd: projectDir,
+    shell: true,
+    timeout: PREDEPLOY_HOOK_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    env: {
+      ...process.env,
+      GCLOUD_PROJECT: project || "",
+      PROJECT_DIR: projectDir,
+      RESOURCE_DIR: resourceDir,
+    },
+  });
+}
+
+/**
+ * A project directory whose Functions codebase is a WRITABLE COPY and whose
+ * every other entry is a symlink to the original.
+ *
+ * A Functions build is not self-contained — this repository's own
+ * `functions/src` imports `../../src/domainTypes`, and a hook may be spelled
+ * with a project-relative `--prefix` — so the copy has to sit at the same
+ * project-relative path inside a directory that otherwise looks like the whole
+ * project. Symlinks give that view for the cost of one `readdir` per path
+ * segment, where copying the project would mean copying whatever build output,
+ * test artifacts, or nested worktrees happen to live in it.
+ *
+ * `.git` is deliberately NOT exposed: no Functions build needs it, and a hook
+ * that reached through it would be reaching into the real repository.
+ *
+ * The boundary this draws is therefore exact rather than absolute: everything a
+ * Functions build WRITES — the source dir and its artifact — is a copy, while
+ * everything it READS outside that dir is the original. A hook that deliberately
+ * wrote through one of the symlinks would touch the real tree, but that hook
+ * writes to the same place a few steps later when `firebase deploy` runs it for
+ * real, and `deploy.sh` builds the app after this point, so nothing it could
+ * leave behind survives the deploy it precedes.
+ */
+async function stageProjectOverlay({ projectDir, scratchProject, sourceRel, links }) {
+  const linkTo = async (from, to) => {
+    const type = (await lstat(from)).isDirectory() ? "junction" : "file";
+    await symlink(from, to, type);
+    links.push(to);
+  };
+
+  let realDir = projectDir;
+  let scratchDir = scratchProject;
+  for (const segment of sourceRel.split("/")) {
+    await mkdir(scratchDir, { recursive: true });
+    for (const entry of await readdir(realDir)) {
+      if (entry === segment || entry === ".git") continue;
+      await linkTo(join(realDir, entry), join(scratchDir, entry));
+    }
+    realDir = join(realDir, segment);
+    scratchDir = join(scratchDir, segment);
+  }
+
+  await cp(realDir, scratchDir, {
+    recursive: true,
+    dereference: false,
+    // `node_modules` is symlinked instead: copying it would cost minutes, and
+    // the deploy's own build reads the very same tree.
+    filter: (entry) => basename(entry) !== "node_modules",
+  });
+  const modules = join(realDir, "node_modules");
+  if (existsSync(modules)) await linkTo(modules, join(scratchDir, "node_modules"));
+}
+
+/**
+ * The environment the CLI's own discovery process runs under.
+ *
+ * This matters because a `.env` value can decide whether an export is an
+ * endpoint at all (`export const x = FLAG ? onObjectFinalized(…) : undefined`),
+ * so a walk under the ambient shell environment could miss an endpoint the
+ * deploy will create. `prepare.js` builds `{…userEnvs, …firebaseEnvs,
+ * GOOGLE_CLOUD_QUOTA_PROJECT}` from the codebase's own dotenv files and hands
+ * it to the delegate, whose `spawnFunctionsProcess` then passes through only
+ * `HOME`, `PATH`, `NODE_ENV` and `FUNCTIONS_CONTROL_API` — deliberately NOT the
+ * whole ambient environment. Both halves are mirrored, the dotenv half through
+ * firebase-tools' own loader reading the staged copy.
+ */
+function discoveryEnvironment({ scratchProject, scratchSource, project }) {
+  const userEnvs = functionsEnv.loadUserEnvs({
+    functionsSource: scratchSource,
+    projectId: project,
+    projectDir: scratchProject,
+  });
+  const environment = {
+    ...userEnvs,
+    ...functionsEnv.loadFirebaseEnvs({ projectId: project }, project),
+    GOOGLE_CLOUD_QUOTA_PROJECT: project,
+    FUNCTIONS_CONTROL_API: "true",
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    NODE_ENV: process.env.NODE_ENV,
+  };
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) delete environment[key];
+  }
+  return environment;
+}
+
+/**
+ * Refusing is the safe answer, but a silent refusal is an unexplained deploy
+ * slowdown. `FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1` prints the reason on STDERR —
+ * never stdout, which carries the classification `deploy.sh` parses.
+ */
+function refused(reason) {
+  if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
+    console.error(`  classifier: artifact inventory refused — ${reason}`);
+  }
+  return { authoritative: false, reason, endpoints: [], groups: [] };
+}
+
+/**
+ * Build a codebase the way the deploy will, then inventory the endpoint ids the
+ * runtime loader would discover in the result.
+ *
+ * WHY BUILD. `--only functions:<name>` matches DEPLOYED ids, and those come
+ * from `package.json.main` — the artifact — never from `src/index.ts`. Between
+ * the two sit the `predeploy` hooks, the npm build script, npm's implicit
+ * `pre`/`post` lifecycle scripts, and tsconfig; each is an arbitrary shell
+ * program, and eight rounds of review found a new way for one of them to make
+ * the artifact disagree with the source (`true || tsc`,
+ * `tsc && cp group.js lib/index.js`, a `postbuild` swap, an earlier hook that
+ * rewrites `src/index.ts`). Modelling shell semantics statically is unbounded;
+ * running the program is exact.
+ *
+ * WHY THIS IS NOT NEW TRUST. These are the same hooks, from the same config,
+ * that `firebase deploy` executes minutes later in the same working tree. The
+ * only new thing is WHEN.
+ *
+ * WHY A SCRATCH PROJECT. Building in place would leave the classifier's own
+ * artifact in the developer's tree. Instead `stageProjectOverlay` builds a
+ * temporary project directory in which the CODEBASE SOURCE DIR is a real copy
+ * (minus `node_modules`, symlinked so `tsc` and the SDK resolve) and every
+ * other project entry is a symlink to the original. The copy is where a build
+ * writes, so the working tree's Functions source and artifact are untouched;
+ * the symlinks are what let a cross-directory import such as
+ * `../../src/domainTypes` and a hook spelled `npm --prefix functions run build`
+ * resolve exactly as they do in the real project.
+ *
+ * FAILS CLOSED on every uncertainty: an unmirrorable source path, a staging
+ * failure, a non-zero or timed-out hook, a discovery manifest, an artifact that
+ * will not load, or a walk that throws.
+ */
+async function buildAndInventoryArtifact({ projectDir, sourceRel, predeploy, project }) {
+  const steps =
+    typeof predeploy === "string"
+      ? [predeploy]
+      : Array.isArray(predeploy)
+        ? predeploy
+        : predeploy === undefined || predeploy === null
+          ? []
+          : null;
+  if (steps === null || steps.some((step) => typeof step !== "string")) {
+    return refused("predeploy is not a string or list of strings");
+  }
+
+  const realSource = resolve(projectDir, sourceRel);
+  if (!existsSync(realSource)) return refused(`no Functions source at ${sourceRel}`);
+
+  const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
+  const scratchProject = join(scratch, "project");
+  const scratchSource = resolve(scratchProject, sourceRel);
+  /** Every symlink this staging created, so cleanup can unlink them by name. */
+  const links = [];
+  try {
+    try {
+      await stageProjectOverlay({ projectDir, scratchProject, sourceRel, links });
+    } catch (error) {
+      return refused(
+        `could not stage the Functions source — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    for (const command of steps) {
+      const hook = await runPredeployHook(command, {
+        projectDir: scratchProject,
+        resourceDir: scratchSource,
+        project,
+      });
+      if (!hook.ok) {
+        return refused(`predeploy hook failed: ${command} — ${hook.output.trim().slice(-400)}`);
+      }
+    }
+
+    // The Node delegate tries `functions.yaml` BEFORE running the SDK's
+    // discovery, so a manifest — committed, or written by a hook — decides the
+    // deployed surface and the artifact no longer does
+    // (`runtimes/node/index.js` `discoverBuild`). Refuse rather than parse it.
+    const manifests = (await readdir(scratchSource)).filter((name) =>
+      /^functions\.ya?ml$/i.test(name),
+    );
+    if (manifests.length > 0) {
+      return refused(`${manifests[0]} supplies discovery instead of the artifact`);
+    }
+
+    let walkEnv;
+    try {
+      walkEnv = discoveryEnvironment({ scratchProject, scratchSource, project });
+    } catch (error) {
+      return refused(
+        `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const outFile = join(scratch, "endpoints.json");
+    const walk = await runCapturedProcess(
+      process.execPath,
+      [ARTIFACT_WALKER, scratchSource, outFile],
+      {
+        // cwd and environment both mirror the SDK process the CLI spawns.
+        cwd: scratchSource,
+        timeout: ARTIFACT_WALK_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        env: walkEnv,
+      },
+    );
+    let reported;
+    try {
+      reported = JSON.parse(await readFile(outFile, "utf8"));
+    } catch {
+      return refused(
+        `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
+      );
+    }
+    if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
+      return refused(reported?.reason ?? "the artifact walk was inconclusive");
+    }
+    const groups = Array.isArray(reported.groups) ? reported.groups : [];
+    if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
+      console.error(`  classifier: ${sourceRel} deploys ${reported.endpoints.join(", ")}`);
+      // Groups are the ids a `--only functions:<group>` scope expands to. They
+      // never grant the exemption — the prefix rule below already refuses a
+      // selector any of their endpoints falls inside — but they are what makes
+      // such a refusal legible.
+      if (groups.length > 0) console.error(`  classifier: ${sourceRel} groups ${groups.join(", ")}`);
+    }
+    return { authoritative: true, endpoints: reported.endpoints, groups };
+  } finally {
+    // Unlink the borrowed `node_modules` explicitly before the recursive
+    // remove. `fs.rm` already unlinks symlinks rather than descending them,
+    // but nothing about deleting a link INTO the repository should rest on
+    // that alone.
+    for (const link of links) await unlink(link).catch(() => {});
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The artifact inventory for one codebase, built at most once per process.
+ *
+ * Lazy on purpose: a `--only hosting` run, a whole-codebase `--only functions`,
+ * and every selector the source pre-check already refuses all classify without
+ * building anything.
+ *
+ * Once per process is also the right lifetime. `deploy.sh` classifies once per
+ * deploy, so the inventory describes the tree as it stood a few steps before
+ * the release — the same window in which the app build and the deploy's own
+ * predeploy run. Editing the codebase inside that window invalidates the
+ * classification exactly as it invalidates everything else the deploy computed.
+ */
+function artifactEndpointInventory(entry) {
+  if (!entry.artifactInventory) {
+    entry.artifactInventory = buildAndInventoryArtifact(entry.build);
+  }
+  return entry.artifactInventory;
+}
+
+/**
+ * Per-codebase inventory, plus the codebase names Firebase treats as selector
+ * targets. Mirrors the pinned CLI rather than paraphrasing it.
  *
  * `codebaseNames` mirrors `getCodebasesFromConfig`: the EXPLICIT `codebase`
  * values (and a kit config's instance keys). An implicit default contributes
  * nothing, exactly as `[c.codebase]` contributes `undefined` there. This set is
  * what gives a codebase name precedence over an endpoint id, so it must include
- * codebases this parser cannot read — a `remoteSource` codebase is still a
+ * codebases this classifier cannot build — a `remoteSource` codebase is still a
  * configured codebase (`projectConfig.js` accepts `source` OR `remoteSource`),
  * and omitting its name would let `functions:<name>` be read as a same-named
  * local endpoint while Firebase deploys that codebase's whole surface.
  *
- * Authority is tracked PER CODEBASE. `endpointMatchesFilter` rejects an
- * endpoint whose codebase differs from the filter's, so uncertainty in `beta`
- * cannot widen an explicitly qualified `alpha` deployment.
+ * `blocked` is tracked PER CODEBASE. `endpointMatchesFilter` rejects an endpoint
+ * whose codebase differs from the filter's, so uncertainty in `beta` cannot
+ * widen an explicitly qualified `alpha` deployment.
  */
-async function singleEndpointInventory(configSource, configPath) {
+async function singleEndpointInventory(configSource, configPath, project) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
-  /** @type {Map<string, { endpoints: Set<string>, exports: Set<string>, authoritative: boolean }>} */
+  /**
+   * @type {Map<string, {
+   *   candidates: Set<string>,
+   *   blocked: string | null,
+   *   build: { projectDir: string, sourceRel: string, predeploy: unknown, project: string } | null,
+   *   artifactInventory?: Promise<{ authoritative: boolean, endpoints: string[] }>,
+   * }>}
+   */
   const byCodebase = new Map();
   const codebaseNames = new Set();
+  const projectDir = dirname(configPath);
 
   const entryFor = (codebase) => {
     let entry = byCodebase.get(codebase);
     if (!entry) {
-      entry = { endpoints: new Set(), exports: new Set(), authoritative: true };
+      entry = { candidates: new Set(), blocked: null, build: null };
       byCodebase.set(codebase, entry);
     }
     return entry;
@@ -392,10 +638,10 @@ async function singleEndpointInventory(configSource, configPath) {
 
     if ("kit" in functionsConfig) {
       // Kit instance keys are codebase names; their endpoints come from
-      // somewhere this parser does not read.
+      // somewhere this classifier does not build.
       for (const instance of Object.keys(functionsConfig.instances ?? {})) {
         codebaseNames.add(instance);
-        entryFor(instance).authoritative = false;
+        entryFor(instance).blocked = "kit codebase";
       }
       continue;
     }
@@ -408,192 +654,64 @@ async function singleEndpointInventory(configSource, configPath) {
     const codebase = explicitCodebase || "default";
     const entry = entryFor(codebase);
 
-    if (typeof functionsConfig.source !== "string" || !functionsConfig.source) {
-      // A remoteSource codebase (or any shape without a readable local source)
-      // exists and can be deployed; it simply cannot be proven from here.
-      entry.authoritative = false;
+    const sourceRel = normalizedSourcePath(functionsConfig.source);
+    if (!sourceRel) {
+      // A remoteSource codebase (or any shape without a mirrorable local
+      // source) exists and can be deployed; it simply cannot be built here.
+      entry.blocked = "no mirrorable local source";
       continue;
     }
 
     // The CLI picks its runtime delegate from the configured runtime, so a
-    // `python311` codebase with decoy TypeScript would otherwise be "proven"
-    // from source Firebase never reads.
+    // `python311` codebase's endpoints never come from the Node artifact this
+    // classifier builds and walks.
     const runtime = functionsConfig.runtime;
     if (typeof runtime === "string" && !runtime.startsWith("nodejs")) {
-      entry.authoritative = false;
+      entry.blocked = `non-Node runtime ${runtime}`;
       continue;
     }
 
     // A configured `prefix` rewrites deployed ids to `<prefix>-<name>`, so an
-    // inventory of RAW export names no longer describes what a selector
-    // matches. Refuse rather than model the rewrite.
+    // inventory of the artifact's own export ids no longer describes what a
+    // selector matches. Refuse rather than model the rewrite.
     if (functionsConfig.prefix) {
-      entry.authoritative = false;
+      entry.blocked = "configured id prefix";
       continue;
     }
 
-    // The CLI loads `package.json.main || "index.js"` — the BUILT artifact, not
-    // the TypeScript this parser reads — and the pinned Node delegate's own
-    // `build()` is empty, so only the config's `predeploy` hook refreshes that
-    // artifact from `src/index.ts`. Without a build step there, a stale
-    // `lib/index.js` can export a group the source never mentions.
-    if (!predeployBuildsSource(functionsConfig.predeploy, functionsConfig.source)) {
-      entry.authoritative = false;
+    // Two configs sharing one codebase name would each need their own build;
+    // the exemption is not worth the ambiguity.
+    if (entry.build) {
+      entry.blocked = "several configs share this codebase";
       continue;
     }
+    entry.build = {
+      projectDir,
+      sourceRel,
+      predeploy: functionsConfig.predeploy,
+      project: project || "",
+    };
 
-    // Only the conventional Firebase TS layout lets the source stand in for
-    // the artifact, so anything else forfeits authority instead of assuming
-    // the mapping holds.
-    if (
-      !(await entrypointIsConventionalTypeScript(
-        resolve(dirname(configPath), functionsConfig.source),
-      ))
-    ) {
-      entry.authoritative = false;
-      continue;
-    }
-
-    const sourcePath = resolve(
-      dirname(configPath),
-      functionsConfig.source,
-      "src",
-      "index.ts",
-    );
+    // The pre-check reads the conventional TypeScript entrypoint. A codebase
+    // written some other way simply offers no candidates and is refused
+    // without a build — false conservatism, never a false exemption.
     let source;
     try {
-      source = await readFile(sourcePath, "utf8");
+      source = await readFile(resolve(projectDir, sourceRel, "src", "index.ts"), "utf8");
     } catch (error) {
-      if (error && typeof error === "object" && error.code === "ENOENT") {
-        // "Unreadable" must not degrade to "exports nothing dangerous".
-        entry.authoritative = false;
-        continue;
-      }
+      if (error && typeof error === "object" && error.code === "ENOENT") continue;
       throw error;
     }
-    const parsed = singleEndpointExportsFromSource(source);
-    if (!parsed.authoritative) entry.authoritative = false;
-    for (const name of parsed.endpoints) entry.endpoints.add(name);
-    for (const name of parsed.exports) entry.exports.add(name);
+    for (const name of sourceEndpointCandidates(source)) entry.candidates.add(name);
   }
   return { byCodebase, codebaseNames };
-}
-
-/**
- * Whether `<source>/src/index.ts` is provably the TypeScript that compiles to
- * the entry point Firebase will load. Requires the conventional layout:
- * `package.json.main` = `<outDir>/index.js`, tsconfig `rootDir` = `src`.
- * Everything else — a custom main, a non-Node runtime, an unreadable or
- * unparsable manifest — returns false and costs only the exemption.
- */
-/**
- * Whether a functions config's `predeploy` hook rebuilds the artifact the CLI
- * loads. Firebase runs each entry with `$RESOURCE_DIR` set to the source dir;
- * the conventional hook is `npm --prefix "$RESOURCE_DIR" run build`, and a
- * direct `tsc` invocation is the only other shape accepted. Anything else
- * (absent, lint-only, an unfamiliar tool) cannot prove the artifact is fresh.
- */
-function predeployBuildsSource(predeploy, source) {
-  const steps =
-    typeof predeploy === "string"
-      ? [predeploy]
-      : Array.isArray(predeploy)
-        ? predeploy.filter((step) => typeof step === "string")
-        : [];
-  // The CLI runs hooks with the PROJECT directory as cwd and exposes the
-  // Functions directory only through `$RESOURCE_DIR`
-  // (lifecycleHooks.js:74-76). A bare `npm run build` or bare `tsc` therefore
-  // builds the root project, not the Functions package, so only a hook that
-  // targets `$RESOURCE_DIR` (or the configured source path itself) counts.
-  const escaped = String(source).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-  const target = `(?:"?\\$RESOURCE_DIR"?|'?\\$RESOURCE_DIR'?|"?\\.?\\/?${escaped}\\/?"?)`;
-  // Anchored to the start of the (sub)command: `echo npm --prefix … run build`
-  // mentions the build without running it, and the CLI executes the whole
-  // value as one shell command.
-  const prefixed = new RegExp(
-    `(?:^|&&|;)\\s*npm\\s+--prefix\\s+${target}\\s+run\\s+build\\s*$`,
-  );
-  const entered = new RegExp(
-    `(?:^|&&|;)\\s*cd\\s+${target}\\s*&&\\s*(?:npm\\s+run\\s+build|tsc)\\s*$`,
-  );
-  // The CLI runs every element in order (lifecycleHooks.js:67-82), so a
-  // later step could overwrite what the build just emitted. The trusted
-  // build must therefore be the LAST effective step, and must not itself be
-  // chained onto further commands after the build.
-  if (steps.length === 0) return false;
-  const last = steps[steps.length - 1];
-  const builds = prefixed.test(last) || entered.test(last);
-  if (!builds) return false;
-  // Both anchored forms already require the build to be the final command of
-  // the last step, so nothing can run after it.
-  return true;
-}
-
-async function entrypointIsConventionalTypeScript(sourceDir) {
-  let pkg;
-  try {
-    pkg = JSON.parse(await readFile(resolve(sourceDir, "package.json"), "utf8"));
-  } catch {
-    return false;
-  }
-  // With no configured runtime the CLI detects one; only a declared Node
-  // engine makes "this TypeScript is the entry point" a safe reading.
-  if (!pkg.engines || typeof pkg.engines.node === "undefined") return false;
-  // The predeploy hook runs `npm run build`; that script must be the TS
-  // compiler, and it must EMIT: `tsc --noEmit` (or `noEmit: true` below)
-  // exits 0 while leaving a stale `lib/index.js` exactly as it was.
-  const build = pkg.scripts && typeof pkg.scripts.build === "string" ? pkg.scripts.build : "";
-  // The tsc invocation must be a bare `tsc`: any flag redirects, suppresses or
-  // re-scopes the emit, and any positional input file makes tsc IGNORE
-  // tsconfig.json and compile just that file with default options, so the
-  // tsconfig below would no longer describe what lands at `main`. Other
-  // commands may follow (`tsc && cp …`); the tsc segment itself is exact.
-  const segments = build.split(/\s*(?:&&|\|\||;)\s*/);
-  const tscSegments = segments.filter((segment) => /\btsc\b/.test(segment));
-  if (tscSegments.length === 0) return false;
-  if (!tscSegments.every((segment) => /^(?:npx\s+)?tsc$/.test(segment.trim()))) {
-    return false;
-  }
-  const main = typeof pkg.main === "string" ? pkg.main : "index.js";
-  let tsconfig;
-  try {
-    const raw = await readFile(resolve(sourceDir, "tsconfig.json"), "utf8");
-    tsconfig = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ""));
-  } catch {
-    return false;
-  }
-  // The program must be exactly "everything under src": a `files` list,
-  // an `exclude`, an inherited `extends`, or project `references` can leave
-  // `src/index.ts` out of the emit while `tsc` still exits 0.
-  if ("extends" in tsconfig || "files" in tsconfig || "exclude" in tsconfig || "references" in tsconfig) {
-    return false;
-  }
-  if ("include" in tsconfig) {
-    const include = tsconfig.include;
-    const wholeSrc = /^\.?\/?src\/?(?:\*\*\/\*(?:\.ts)?)?$/;
-    if (!Array.isArray(include) || include.length !== 1 || !wholeSrc.test(String(include[0]))) {
-      return false;
-    }
-  }
-  const options = tsconfig.compilerOptions ?? {};
-  if (options.noEmit === true || options.emitDeclarationOnly === true) return false;
-  // Incremental and composite builds consult .tsbuildinfo and can skip the
-  // emit entirely when the source is judged current, leaving an altered
-  // artifact untouched while tsc exits 0.
-  if (options.incremental === true || options.composite === true) return false;
-  if (typeof options.tsBuildInfoFile === "string") return false;
-  if (typeof options.outFile === "string") return false;
-  if (options.rootDir !== "src") return false;
-  if (typeof options.outDir !== "string" || !options.outDir) return false;
-  const normalize = (value) => value.replace(/^\.\//, "").replace(/\/+/g, "/");
-  return normalize(main) === normalize(`${options.outDir}/index.js`);
 }
 
 /**
  * Whether `selector` provably releases exactly one endpoint that is not a
  * protected callable. Fails closed on every uncertainty.
  */
-function selectorIsProvableSingleEndpoint(selector, inventory) {
+async function selectorIsProvableSingleEndpoint(selector, inventory) {
   const tail = selector.slice("functions:".length);
   if (!tail) return false;
   const fragments = tail.split(":");
@@ -626,10 +744,20 @@ function selectorIsProvableSingleEndpoint(selector, inventory) {
   if (name.includes(".") || name.includes("-")) return false;
 
   const entry = inventory.byCodebase.get(codebase);
-  if (!entry || !entry.authoritative) return false;
-  // Exported but unproven (a group, a re-export) vetoes rather than abstains.
-  if (entry.exports.has(name) && !entry.endpoints.has(name)) return false;
-  return entry.endpoints.has(name);
+  if (!entry || entry.blocked || !entry.build) return false;
+  // Fast pre-check: no build for a name the source never declares as a builder
+  // call. This can only withhold an exemption, never grant one.
+  if (!entry.candidates.has(name)) return false;
+
+  const artifact = await artifactEndpointInventory(entry);
+  if (!artifact.authoritative) return false;
+  // `endpointMatchesFilter`, applied to the ids the runtime loader would
+  // actually discover: the selector is one endpoint only when exactly one
+  // deployed id falls inside it, and that id is the name itself.
+  const matched = artifact.endpoints.filter(
+    (id) => id === name || id.startsWith(`${name}-`),
+  );
+  return matched.length === 1 && matched[0] === name;
 }
 
 /**
@@ -673,7 +801,7 @@ async function eventInvitationServiceInventory(configSource, configPath) {
   );
 }
 
-function classifyInvokerScope(
+async function classifyInvokerScope(
   only,
   exceptTargets,
   exportedEventInvitationServices,
@@ -788,7 +916,7 @@ function classifyInvokerScope(
         // (`--only functions:group1.subgroup1`), never a single endpoint, so it
         // is left to the conservative branch below along with everything the
         // inventory cannot vouch for.
-        if (selectorIsProvableSingleEndpoint(selector, singleEndpointExports)) {
+        if (await selectorIsProvableSingleEndpoint(selector, singleEndpointExports)) {
           // A named endpoint that the source proves is a builder call, not a
           // group. It cannot release a protected callable, so it selects no
           // invoker and forces no conservatism. Protected callables never reach
@@ -902,6 +1030,7 @@ export async function classifyFirebaseDeployRequest(
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
+    project,
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
@@ -925,18 +1054,24 @@ export async function classifyFirebaseDeployRequest(
   hostingConfigs = filterOnly(hostingConfigs, only);
   hostingConfigs = filterExcept(hostingConfigs, exceptTargets);
 
+  // The invoker scope is resolved LAST, because proving an exact
+  // single-endpoint selector runs the codebase's own predeploy hooks in a
+  // scratch copy. Everything cheap and everything that can reject the request
+  // outright has already happened.
+  const invokerScope = await classifyInvokerScope(
+    only,
+    exceptTargets,
+    exportedEventInvitationServices,
+    singleEndpointExports,
+  );
+
   return {
     project,
     configPath,
     only: only ?? "",
     except: exceptTargets ?? "",
     firebaseDryRun: options.dryRun === true,
-    ...classifyInvokerScope(
-      only,
-      exceptTargets,
-      exportedEventInvitationServices,
-      singleEndpointExports,
-    ),
+    ...invokerScope,
     hostingAttempted: hostingConfigs.length > 0,
   };
 }
