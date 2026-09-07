@@ -6,7 +6,7 @@ import {
   type ArchiveEventResult,
 } from '../../data/admin';
 import { claimsAwaitingAdmin } from '../../data/moderation';
-import { buildEventArchive, isEventArchived, isEventArchiving } from '../../data/eventArchive';
+import { draftEventArchive, isEventArchived, isEventArchiving } from '../../data/eventArchive';
 import { useDayMetasStatus, useLeaderboard } from '../../hooks/useData';
 import { editionLexicon } from '../../editions';
 import AsyncButton from './AsyncButton';
@@ -17,11 +17,20 @@ function archivedOn(at: number | undefined): string {
   return new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+/** Stated identically wherever the oversized record is refused — before the
+ *  quiesce (the disabled control) and after it (the second write's report) — so
+ *  an Admin who meets it twice is told the same thing about the same cause. */
+const TOO_LARGE_COPY =
+  'These standings are too large to freeze onto the Event—a Player row is carrying far more text than a name. Banning that Player drops their row from the record.';
+
 const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
   archived: 'Archived. The final standings are frozen.',
   'already-archived': 'Already archived—the record is unchanged.',
   'no-event': 'No Event document to archive.',
   'not-closing': 'Play reopened before the record was taken—nothing was frozen.',
+  'claims-pending':
+    'A claim arrived as play was closing, so nothing was frozen. Resolve the Review queue, then archive again.',
+  'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
   reopened: 'Play is open again. Nothing was frozen.',
 };
 
@@ -81,7 +90,18 @@ const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
  *     threaded from `Admin.tsx`'s existing subscription rather than re-opened
  *     here, so the gate and the queue it points at can never disagree. It gates
  *     the freeze in the closing state too, where the only way to drain is to
- *     reopen play first.
+ *     reopen play first. THE GATE IS TAKEN AGAIN AFTER THE CLOSING WRITE, from
+ *     the server, inside `archiveEvent`: a subscription can only report what has
+ *     already been delivered, so a Claim committing between this render and the
+ *     quiesce would sail straight through a check made here alone. When that
+ *     server re-read refuses, `runArchive` reopens play — this handler shut the
+ *     Event, so this handler puts it back.
+ *  3. **The record fits.** `players/{uid}` validates none of its fields, so a
+ *     Player can leave a row the archive cannot serialize or cannot fit inside
+ *     the Event document's 1 MiB budget. `draftEventArchive` coerces and skips
+ *     what it can and REFUSES what it cannot, and that refusal has to be read
+ *     BEFORE the first write — otherwise every attempt shuts the Event and then
+ *     fails on the second one (Codex P2, PR #1139).
  */
 export default function ArchiveEvent({
   event,
@@ -111,7 +131,28 @@ export default function ArchiveEvent({
   // pending across the freeze can never be resolved again.
   const drained = pendingClaimsLoaded && blockingClaims.length === 0;
   const previewConfirmed = !!event && rosterConfirmed && dayMetasConfirmed;
-  const ready = previewConfirmed && drained;
+
+  // What WOULD be frozen, so the confirm row can state the record's size before
+  // the Admin commits to it — and, since #1139, whether it can be frozen at all.
+  // Derived from the same builder the write uses, so the preview cannot drift
+  // from the record.
+  const draft = draftEventArchive({
+    players,
+    event,
+    dayMetas,
+    dayMetasLoaded,
+    archivedAt: 0,
+  });
+  const preview = draft.archive;
+  // THE THIRD PRECONDITION, and it has to be checked HERE rather than around the
+  // write (Codex P2, PR #1139). `players/{uid}` validates neither the presence
+  // nor the length of its fields, so a Player can leave a row the record cannot
+  // carry; the builder coerces and skips what it can, but a record that still
+  // does not fit the Event document is unwritable — and the first write has
+  // already shut the Event by the time the second one would discover that. Every
+  // attempt would close play and then fail.
+  const fits = draft.refusal === null;
+  const ready = previewConfirmed && drained && fits;
   // Why the door is shut, in the order the Admin can act on it: nothing to do
   // about a loading roster but wait, whereas a pending claim names its own fix.
   const blockedReason =
@@ -119,18 +160,10 @@ export default function ArchiveEvent({
       ? 'Loading the final standings—the archive stays closed until every one of them is confirmed by the server.'
       : blockingClaims.length > 0
         ? `Resolve the ${blockingClaims.length} pending claim${blockingClaims.length === 1 ? '' : 's'} in the Review queue first. Confirming or rejecting a claim writes to a Board, which the freeze denies—so a claim left pending here stays pending forever.${closing ? ' Reopen play to drain the queue, then archive again.' : ''}`
-        : null;
+        : !fits
+          ? `${TOO_LARGE_COPY}${closing ? ' Play is already closed—reopen it, ban that Player, then archive again.' : ' Nothing has been closed.'}`
+          : null;
 
-  // What WOULD be frozen, so the confirm row can state the record's size before
-  // the Admin commits to it. Derived from the same builder the write uses, so
-  // the preview cannot drift from the record.
-  const preview = buildEventArchive({
-    players,
-    event,
-    dayMetas,
-    dayMetasLoaded,
-    archivedAt: 0,
-  });
   const frozen = event?.archive;
 
   const runArchive = async () => {
@@ -139,7 +172,18 @@ export default function ArchiveEvent({
       setResult(opened);
       return;
     }
-    setResult(await archiveEvent());
+    const frozen = await archiveEvent();
+    // THIS handler is what shut the Event, so this handler is what puts it back
+    // when the second write refuses (Codex P2, PR #1139). Both refusals here
+    // wrote nothing and both leave a LIVE Event shut to gameplay with no record
+    // to show for it — the state the quiesce's reversibility exists for. Leaving
+    // it closed would strand the Event on a condition the Admin cannot even
+    // clear from there: draining the claim queue writes Boards, which the freeze
+    // denies. (The closing-state surface below reaches `archiveEvent` too, and
+    // deliberately does NOT reopen: that Event was already shut when the Admin
+    // arrived, and `Reopen play` sits beside the button they pressed.)
+    if (frozen === 'claims-pending' || frozen === 'too-large') await abandonArchive();
+    setResult(frozen);
   };
 
   return (
@@ -175,7 +219,7 @@ export default function ArchiveEvent({
           <AsyncButton
             ariaLabel="Freeze the record now"
             failureLabel="Freeze failed—try again."
-            disabled={!drained}
+            disabled={!drained || !fits}
             onAction={async () => setResult(await archiveEvent())}
           >
             Freeze the record
@@ -211,6 +255,12 @@ export default function ArchiveEvent({
                   {preview.dailyHonors.length} daily honor
                   {preview.dailyHonors.length === 1 ? '' : 's'}. Play closes first, then the record
                   is taken. No one can Mark, claim, post a Proof or heart afterwards.
+                  {/* Stated rather than silently absorbed: a row with no id
+                      cannot be ban-filtered, matched to an honour or rendered,
+                      so the record leaves it out — and an Admin who is told the
+                      count up front is not left comparing rosters afterwards. */}
+                  {draft.skippedRows > 0 &&
+                    ` ${draft.skippedRows} unreadable row${draft.skippedRows === 1 ? '' : 's'} will not be included.`}
                 </div>
               </div>
               <button type="button" className="btn" onClick={() => setArming(false)}>

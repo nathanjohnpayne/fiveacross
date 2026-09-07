@@ -316,6 +316,15 @@ export interface ArchivedFirstBingo {
   at: number;
 }
 
+/** The headline holder's OWN standings row, kept whole beside the honour so the
+ *  Share Card's pinned eleventh row can be built even when they rank outside the
+ *  bounded `standings` prefix (#134, Codex P2 on PR #1139). `rank` is their place
+ *  in the COMPLETE ban-filtered standings at the freeze, which the retained
+ *  prefix no longer has the rows to recompute. */
+export interface ArchivedFirstBingoRow extends ArchivedStandingRow {
+  rank: number;
+}
+
 /** One Day's frozen First to BINGO honour — the same `{dayIndex, uid,
  *  displayName, firstBingoAt}` shape `DayHonor` carries live, resolved
  *  pinned-day-meta-first exactly as the Leaderboard's honours strip resolves it. */
@@ -346,6 +355,19 @@ export interface EventArchive {
   playerCount: number;
   /** Event-wide First to BINGO; `null` when nobody held a qualifying bingo. */
   firstBingo: ArchivedFirstBingo | null;
+  /**
+   * The headline holder's own standings row and true rank, carried OUTSIDE the
+   * bounded `standings` prefix so the Share Card can always print the pinned
+   * eleventh row (#134, Codex P2 on PR #1139). `null` exactly when `firstBingo`
+   * is — they are selected together and neither survives the other.
+   *
+   * Necessary because the two bounds are independent: `standings` keeps 200
+   * rows in RANK order while the headline honour is decided by who bingoed
+   * EARLIEST, so on a large roster the holder can sit outside the prefix
+   * entirely. Searching only `standings` for them then finds nothing and the
+   * Share Card silently drops the row it names in its own headline.
+   */
+  firstBingoRow: ArchivedFirstBingoRow | null;
   /** Each Day's own First to BINGO, ordered by Day index; `[]` on a pre-Day-Cards roster. */
   dailyHonors: ArchivedDayHonor[];
   /** The Standings Freeze the snapshot was taken as of (`resolvedStandingsFreezeAt`), or `null`. */

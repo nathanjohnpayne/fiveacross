@@ -134,11 +134,24 @@ export default function ArchivedLeaderboard({
 
   // The Share Card prints the VISIBLE rows, so a banned Player never appears on
   // a shared card (#108's rule, same as the live Leaderboard's).
+  //
+  // THE PINNED ELEVENTH ROW FALLS BACK TO `firstBingoRow` (Codex P2, PR #1139).
+  // `standings` is a bounded prefix cut by RANK while the headline honour is
+  // decided by who bingoed EARLIEST, so past `MAX_ARCHIVED_STANDING_ROWS` the
+  // holder this card names in its own headline can be absent from the rows
+  // searched here — and the appended row would silently vanish on exactly the
+  // Event large enough to have truncated. The serializer keeps their row and
+  // their true rank beside the honour for this; the rank is the one the
+  // COMPLETE standings held at the freeze, which the retained prefix cannot
+  // recompute (and which a later ban above them therefore cannot shift).
   const shareRows = ((): LeaderboardShareRow[] => {
     const ranked = standings.map((row, i) => toShareRow(row, i + 1, firstBingoUid));
     const rows = ranked.slice(0, MAX_SHARE_ROWS);
     if (firstBingoUid && !rows.some((r) => r.uid === firstBingoUid)) {
-      const pinned = ranked.find((r) => r.uid === firstBingoUid);
+      const kept = archive.firstBingoRow;
+      const pinned =
+        ranked.find((r) => r.uid === firstBingoUid) ??
+        (kept && kept.uid === firstBingoUid ? toShareRow(kept, kept.rank, firstBingoUid) : null);
       if (pinned) rows.push(pinned);
     }
     return rows;

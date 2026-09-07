@@ -128,7 +128,7 @@ export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: bo
  * at would name a fix the Admin cannot perform.
  */
 export function claimsQueueOpen(
-  event: Pick<EventDoc, 'claimMode'> | null | undefined,
+  event: Partial<Pick<EventDoc, 'claimMode'>> | null | undefined,
 ): boolean {
   return event?.claimMode === 'admin_confirmed';
 }
@@ -146,9 +146,15 @@ export function claimsQueueOpen(
  * non-admin-confirmed Event has NO Confirm/Reject affordance to drain it
  * (#269's mode gate, unchanged by this ticket), so blocking archival on one
  * would be a dead end rather than a gate — recorded as a residual in the spec.
+ *
+ * Read by BOTH halves of the gate, on purpose: the console applies it to its
+ * live subscription so the control is disabled before the first tap, and
+ * `archiveEvent` applies it to a SERVER read taken after the closing write, so
+ * a claim that commits in the window between the two is still caught (Codex P2
+ * on PR #1139). Same predicate, so the two can never disagree about what counts.
  */
 export function claimsAwaitingAdmin(
-  event: Pick<EventDoc, 'claimMode'> | null | undefined,
+  event: Partial<Pick<EventDoc, 'claimMode'>> | null | undefined,
   claims: readonly ClaimDoc[],
 ): ClaimDoc[] {
   if (!claimsQueueOpen(event)) return [];

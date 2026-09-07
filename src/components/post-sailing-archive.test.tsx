@@ -142,6 +142,15 @@ const FROZEN: EventArchive = {
   ],
   playerCount: 2,
   firstBingo: { uid: 'early-bird', displayName: 'Early Bird', at: 1_000 },
+  firstBingoRow: {
+    uid: 'early-bird',
+    displayName: 'Early Bird',
+    bingoCount: 3,
+    squaresMarked: 18,
+    blackout: true,
+    firstBingoAt: 1_000,
+    rank: 1,
+  },
   dailyHonors: [
     { dayIndex: 0, uid: 'early-bird', displayName: 'Early Bird', firstBingoAt: 1_000 },
     { dayIndex: 1, uid: 'steady', displayName: 'Steady Eddie', firstBingoAt: 4_000 },
@@ -635,5 +644,116 @@ describe('the archive control drains the claim queue first', () => {
     expect(commit).toBeDisabled();
     await user.click(commit);
     expect(H.archiveEvent).not.toHaveBeenCalled();
+  });
+
+  // Codex P2, PR #1139. A subscription reports what has already been DELIVERED,
+  // never what is about to commit — so a Claim landing between the last render
+  // and the closing write clears both taps of the gate above and is then
+  // stranded forever, because the freeze never reads the Claim collection at
+  // all. The remedy is a server re-read taken AFTER the close, inside
+  // `archiveEvent`; what the control owes is putting play back when it refuses.
+  it('reopens play when a claim commits between the tap and the close', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    // The queue this render can see is EMPTY — both taps of the client gate pass.
+    H.pendingClaims = [];
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'claims-pending';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    // The Event was shut, the record was refused, and the shut was undone — in
+    // that order. An Event left closing here could not be drained at all: the
+    // claim resolution writes a Board, which the freeze denies.
+    expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'A claim arrived as play was closing, so nothing was frozen. Resolve the Review queue, then archive again.',
+    );
+  });
+
+  it('leaves an already-closing Event closed, where the way back is one tap away', async () => {
+    // The closing-state surface reaches the same refusal, and deliberately does
+    // NOT reopen: that Event was already shut when the Admin arrived, and
+    // `Reopen play` is the button beside the one they pressed.
+    const user = userEvent.setup();
+    H.event = closingEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    H.pendingClaims = [];
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'claims-pending';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    expect(H.writes).toEqual(['archive']);
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+  });
+});
+
+// Codex P2, PR #1139. `players/{uid}` is self-written under the honour system
+// and its rules arm validates none of its fields, so a Player can leave a row
+// the record cannot carry. The builder coerces and skips what it can; what it
+// cannot absorb has to be refused BEFORE the closing write, or every attempt
+// shuts the Event and then fails on the second one.
+describe('the archive control refuses a record it could not store', () => {
+  /** A Player whose own row would blow the Event document's budget. `dayStats`
+   *  is a Player-written map with no rules validation and one derived daily
+   *  honour per key, so thousands of buckets become thousands of honour rows. */
+  const whale = (): PlayerDoc => {
+    const dayStats: PlayerDoc['dayStats'] = {};
+    for (let i = 0; i < 6_000; i++) {
+      dayStats[i] = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1_000 + i };
+    }
+    return mkPlayer({
+      uid: 'whale',
+      displayName: 'Whale',
+      bingoCount: 1,
+      squaresMarked: 1,
+      firstBingoAt: 1_000,
+      dayStats,
+    });
+  };
+
+  it('will not arm, and says so before anything is closed', () => {
+    H.event = liveEvent();
+    H.players = [whale()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/too large to freeze onto the Event/);
+    expect(screen.getByRole('status')).toHaveTextContent(/Nothing has been closed\./);
+    expect(H.beginArchive).not.toHaveBeenCalled();
+  });
+
+  it('holds the closing-state freeze shut too, and names the way out', () => {
+    H.event = closingEvent();
+    H.players = [whale()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/reopen it, ban that Player/);
+  });
+
+  it('reopens play when the SERVER re-read is the one that does not fit', async () => {
+    // The console checks the record it previewed from its live subscriptions;
+    // `archiveEvent` checks the one built from the server re-read taken after
+    // the close. Different rosters, so both checks are real.
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'too-large';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+    expect(await screen.findByRole('status')).toHaveTextContent(/Nothing was frozen\./);
   });
 });

@@ -88,6 +88,15 @@ const FROZEN_RECORD = {
   ],
   playerCount: 1,
   firstBingo: { uid: ALICE, displayName: 'Alice', at: 1000 },
+  firstBingoRow: {
+    uid: ALICE,
+    displayName: 'Alice',
+    bingoCount: 2,
+    squaresMarked: 14,
+    blackout: false,
+    firstBingoAt: 1000,
+    rank: 1,
+  },
   dailyHonors: [{ dayIndex: 0, uid: ALICE, displayName: 'Alice', firstBingoAt: 1000 }],
   freezeAt: null,
   archivedAt: 1_700_000_000_000,
@@ -487,6 +496,10 @@ describe('post-sailing-archive — the archive write must carry the whole record
       'standings',
       'playerCount',
       'firstBingo',
+      // The headline holder's kept row is part of the whole record: a card that
+      // names a First to BINGO it cannot print a row for is the half-built map
+      // this arm exists to refuse.
+      'firstBingoRow',
       'dailyHonors',
       'freezeAt',
       'archivedAt',
@@ -502,6 +515,7 @@ describe('post-sailing-archive — the archive write must carry the whole record
       { standings: 'none' },
       { playerCount: '1' },
       { firstBingo: 'Alice' },
+      { firstBingoRow: 'Alice' },
       { dailyHonors: {} },
       { freezeAt: 'never' },
       { archivedAt: 'then' },
@@ -516,12 +530,19 @@ describe('post-sailing-archive — the archive write must carry the whole record
     await assertFails(archiveWith({ ...FROZEN_RECORD, archivedAt: FROZEN_RECORD.archivedAt + 1 }));
   });
 
-  it('ALLOWS the complete record, including the legitimately null pair', async () => {
-    // `firstBingo: null` means nobody got there and `freezeAt: null` means the
-    // Event had no Standings Freeze — both are real records, so the check is
-    // presence-then-type-or-null rather than a bare `is map`/`is number`.
+  it('ALLOWS the complete record, including the legitimately null trio', async () => {
+    // `firstBingo`/`firstBingoRow: null` means nobody got there and
+    // `freezeAt: null` means the Event had no Standings Freeze — both are real
+    // records, so the check is presence-then-type-or-null rather than a bare
+    // `is map`/`is number`.
     await assertSucceeds(
-      archiveWith({ ...FROZEN_RECORD, firstBingo: null, freezeAt: null, dailyHonors: [] }),
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingo: null,
+        firstBingoRow: null,
+        freezeAt: null,
+        dailyHonors: [],
+      }),
     );
   });
 });

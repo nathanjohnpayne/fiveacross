@@ -118,6 +118,12 @@ service cloud.firestore {
         && archive.playerCount is number
         && archive.dailyHonors is list
         && (archive.firstBingo == null || archive.firstBingo is map)
+        // The headline holder's own standings row, kept outside the bounded
+        // prefix so the Share Card can print the pinned row for a holder who
+        // ranks past it. Required-and-nullable exactly like `firstBingo`: the
+        // two are selected together, so a record carrying one without the other
+        // is a half-built map the archived Share Card would read a hole from.
+        && (archive.firstBingoRow == null || archive.firstBingoRow is map)
         && (archive.freezeAt == null || archive.freezeAt is number)
         && archive.archivedAt == stamp;
     }

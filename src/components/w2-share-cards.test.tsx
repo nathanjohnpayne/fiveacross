@@ -104,6 +104,10 @@ import {
 // Real module, never mocked here: the #607 entry-origin tests below install a
 // resolved analytics-canonical host and prove the share `url` ignores it.
 import { applyResolvedCanonicalHost } from '../canonicalHost';
+// Real module too (#134): the truncated-archive case below builds its fixture
+// with the SERIALIZER the archive write uses, so the retained prefix and the
+// kept headline row are the ones that would actually be stored.
+import { buildEventArchive, MAX_ARCHIVED_STANDING_ROWS } from '../data/eventArchive';
 
 // Same shape/rationale as w2-feed-moments.test.tsx's dealtWith: a dealt board
 // with the free center (index 12) always on, plus whichever indices are
@@ -2487,6 +2491,15 @@ describe('ArchivedLeaderboard — share affordance', () => {
     ],
     playerCount: 2,
     firstBingo: { uid: 'early-bird', displayName: 'Early Bird', at: 1000 },
+    firstBingoRow: {
+      uid: 'early-bird',
+      displayName: 'Early Bird',
+      bingoCount: 4,
+      squaresMarked: 18,
+      blackout: false,
+      firstBingoAt: 1000,
+      rank: 1,
+    },
     dailyHonors: [],
     freezeAt: null,
     archivedAt: 1_700_000_000_000,
@@ -2569,6 +2582,57 @@ describe('ArchivedLeaderboard — share affordance', () => {
     await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
     expect(latestToBlobNode().textContent).not.toContain('Early Bird');
     expect(latestToBlobNode().textContent).toContain('Top Dog');
+  });
+
+  // Codex P2, PR #1139. The record's two bounds are independent: `standings`
+  // keeps 200 rows in RANK order, while the headline honour goes to whoever
+  // bingoed EARLIEST — so on a roster past the cap the holder this card names
+  // in its own headline can sit outside the retained rows entirely. Searching
+  // only `standings` for the pinned row then found nothing and the eleventh row
+  // vanished from exactly the Event large enough to have truncated.
+  it('still prints the pinned First-BINGO row when its holder ranks past the retained 200', async () => {
+    // 260 Players: rank falls with the index, and the EARLIEST bingo belongs to
+    // the LAST-ranked one, which is the shape the bug needs.
+    const roster = Array.from({ length: 260 }, (_, i) =>
+      mkPlayer({
+        uid: `p${String(i).padStart(3, '0')}`,
+        displayName: `Player ${i}`,
+        bingoCount: 300 - i,
+        squaresMarked: 300 - i,
+        firstBingoAt: 1_000_000 - i,
+      }),
+    );
+    const archive = buildEventArchive({
+      players: roster,
+      event: { days: [], bannedUids: [], frozenAt: undefined, standingsFreezeAt: undefined },
+      archivedAt: 1_700_000_000_000,
+    });
+    // The fixture is only interesting if the holder really is outside the prefix.
+    expect(archive.standings).toHaveLength(MAX_ARCHIVED_STANDING_ROWS);
+    expect(archive.playerCount).toBe(260);
+    expect(archive.firstBingo?.uid).toBe('p259');
+    expect(archive.standings.some((r) => r.uid === 'p259')).toBe(false);
+    expect(archive.firstBingoRow).toMatchObject({ uid: 'p259', rank: 260 });
+
+    H.event = {
+      ...(H.event as EventDoc),
+      archive,
+      archivedAt: archive.archivedAt,
+    } as unknown as EventDoc;
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+
+    const node = latestToBlobNode();
+    // Three podium columns plus eight compact rows: the top ten and the pin.
+    expect(node.querySelectorAll('.share-card-col')).toHaveLength(3);
+    expect(node.querySelectorAll('.share-card-row')).toHaveLength(8);
+    const pinned = node.querySelectorAll('.share-card-row.pinned');
+    expect(pinned).toHaveLength(1);
+    expect(pinned[0].textContent).toContain('Player 259');
+    // The rank printed is the one the COMPLETE standings held at the freeze,
+    // not a position invented inside the truncated prefix.
+    expect(pinned[0].querySelector('.share-card-rank')?.textContent).toBe('260');
   });
 });
 

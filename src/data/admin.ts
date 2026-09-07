@@ -7,11 +7,11 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor } from './moderation';
+import { claimsAwaitingAdmin, isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import { buildEventArchive } from './eventArchive';
-import { dayMetaRef, playersCol } from './paths';
+import { draftEventArchive } from './eventArchive';
+import { claimsCol, dayMetaRef, playersCol } from './paths';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
@@ -651,8 +651,18 @@ export type AbandonArchiveResult = 'reopened' | 'already-archived' | 'no-event';
 /** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
  *  the Admin surface can say what happened instead of inferring it from a
  *  resolved promise. `not-closing` means the quiesce was never taken (or was
- *  abandoned under this call), which the rules refuse to archive from. */
-export type ArchiveEventResult = 'archived' | 'already-archived' | 'no-event' | 'not-closing';
+ *  abandoned under this call), which the rules refuse to archive from;
+ *  `claims-pending` means a Claim was still awaiting an Admin when the Event
+ *  shut, which the freeze would make unresolvable; `too-large` means the record
+ *  built from the server re-read would not fit on the Event document. Both of
+ *  the last two write NOTHING (#134, Codex P2 on PR #1139). */
+export type ArchiveEventResult =
+  | 'archived'
+  | 'already-archived'
+  | 'no-event'
+  | 'not-closing'
+  | 'claims-pending'
+  | 'too-large';
 
 /**
  * THE QUIESCE (#134, specs/post-sailing-archive.md § "The quiesce protocol") —
@@ -748,6 +758,18 @@ export async function abandonArchive(): Promise<AbandonArchiveResult> {
  * inside the transaction — the `setDayTheme`/`confirmClaim` discipline — so the
  * ban roster and schedule the record freezes against are the stored ones.
  *
+ * TWO THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and both
+ * report instead of throwing so the console can say what happened and put play
+ * back (Codex P2, PR #1139):
+ *
+ *  - `claims-pending` — a Claim was still awaiting an Admin when the Event shut.
+ *    The freeze never reads that collection, so a claim resolved after it is not
+ *    resolvable at all; the same server-read discipline the roster gets is
+ *    applied to the queue.
+ *  - `too-large` — the record built from the server re-read would not fit on the
+ *    Event document. `draftEventArchive` decides that on coerced, bounded inputs,
+ *    so it is the residue no clamp can absorb rather than a malformed row.
+ *
  * Archiving is ONE-WAY from the client. The transaction re-reads the Event
  * inside itself and reports `already-archived` rather than re-freezing, so a
  * double tap (or a second Admin's tap) can never overwrite the record with a
@@ -764,6 +786,24 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
   const preData = pre.data() as Partial<EventDoc>;
   if (preData.status === 'archived') return 'already-archived';
   if (preData.archiving !== true) return 'not-closing';
+
+  // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
+  // #1139). The console's own gate reads a passive listener, and a Claim can
+  // commit between that listener's last render and the closing write — the exact
+  // window the quiesce exists to have. Nothing downstream would notice: the
+  // freeze never reads the Claim collection, so an `admin_confirmed` claim left
+  // pending here is pending FOREVER, behind a Confirm/Reject pair whose Board
+  // and Player writes the freeze now denies.
+  //
+  // Re-read the same way the roster is, and for the same reason: this read is
+  // issued after the closing write is acknowledged, so its result is the state
+  // of a collection that can no longer change. Refused rather than fixed —
+  // resolving a claim from here would be the gameplay write the freeze just
+  // denied — and `ArchiveEvent` reopens play when it was this call that shut it.
+  const claimsSnap = await getDocsFromServer(claimsCol());
+  if (claimsAwaitingAdmin(preData, claimsSnap.docs.map((d) => d.data())).length > 0) {
+    return 'claims-pending';
+  }
 
   // Everything the record freezes, read after the close. `playersCol()` /
   // `dayMetaRef()` are the same converter-attached references the live
@@ -792,24 +832,32 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
     // again. Refuse rather than freeze what may already be stale.
     if (data.archiving !== true) return 'not-closing';
     const archivedAt = params.now ?? Date.now();
+    const draft = draftEventArchive({
+      players,
+      event: {
+        days: Array.isArray(data.days) ? data.days : [],
+        bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
+        frozenAt: data.frozenAt,
+        standingsFreezeAt: data.standingsFreezeAt,
+      },
+      dayMetas,
+      // Every Day's pin was read from the server above, so an absent pin is
+      // the server's answer rather than an unfilled cache — which is the one
+      // thing `dayMetasLoaded` exists to tell apart.
+      dayMetasLoaded: true,
+      archivedAt,
+    });
+    // The last line of the same defence the Admin console applies BEFORE the
+    // quiesce (Codex P2, PR #1139). The console checks the record it previewed
+    // from the live subscriptions; this checks the one actually built from the
+    // server re-read, which is a different roster and can be a different size.
+    // Refused rather than attempted, because the alternative is a write that
+    // throws on an Event whose gameplay is already shut.
+    if (draft.refusal === 'too-large') return 'too-large';
     tx.update(eventRef, {
       status: 'archived',
       archivedAt,
-      archive: buildEventArchive({
-        players,
-        event: {
-          days: Array.isArray(data.days) ? data.days : [],
-          bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
-          frozenAt: data.frozenAt,
-          standingsFreezeAt: data.standingsFreezeAt,
-        },
-        dayMetas,
-        // Every Day's pin was read from the server above, so an absent pin is
-        // the server's answer rather than an unfilled cache — which is the one
-        // thing `dayMetasLoaded` exists to tell apart.
-        dayMetasLoaded: true,
-        archivedAt,
-      }),
+      archive: draft.archive,
       // The quiesce is over. `status` carries the freeze from here, and unlike
       // this flag it cannot be cleared.
       archiving: false,
