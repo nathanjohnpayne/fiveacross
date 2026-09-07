@@ -411,6 +411,7 @@ const ZONE_ID = '1'.repeat(32);
 const RULESET_ID = '2'.repeat(32);
 const RULE_ID = '3'.repeat(32);
 const RULE_REF = 'registry-recovery';
+const LOCK_ID = 'lock-1';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -557,24 +558,32 @@ function canonicalObservation(
   };
 }
 
+/** What a held recovery lock lets a `canonical-after-unblock` challenge name. */
+type HeldRecoveryLock = { digest: string; lockId: string; recoverySequence: string };
+
 /**
- * Contain, acquire, unblock, prove, clear — the whole § Audit and recovery
- * state machine against one host, with the canonical evidence taken from the
- * router's own answer.
+ * Step 1 of § Audit and recovery — contain and acquire — on three blocked
+ * attestations and the provider records that match them.
+ *
+ * Extracted so it can be reached without the clear that follows it, because a
+ * `canonical-after-unblock` challenge is only issuable WHILE THE LOCK IS HELD:
+ * the registry checks the lock id, the recovery sequence and the unblock time
+ * before it will mint one. Every test that needs a real canonical challenge
+ * therefore comes through here rather than borrowing a `blocked-before-worker`
+ * challenge — a mismatched phase is rejected before any of the fields the test
+ * meant to exercise are compared, which makes the test pass for a reason that
+ * has nothing to do with what it claims to check.
  *
  * The WAF and its provider logs are the one part that cannot be observed here:
  * a `blocked-before-worker` request never reaches the Worker by definition, so
  * that phase is synthesised. Everything after the unblock is real.
  */
-async function recoverAndClear(
+async function acquireRecoveryLock(
   instance: Miniflare,
   payload: RouterReplicaDesired,
-): Promise<{
-  observed: RouterObservation[];
-  audit: { recoveryLock: unknown; committed: { revision: string } | null };
-}> {
+  base: number,
+): Promise<HeldRecoveryLock> {
   const host = payload.host;
-  const base = Date.now();
   const digest = await projectionDigest(payload);
   const blockNonce = `block-${host}`;
   const blockDigest = sha256(JSON.stringify({ recoveryBlock: blockNonce }));
@@ -651,9 +660,27 @@ async function recoverAndClear(
       op: 'recover',
       host,
       request: acquire,
-      context: recoveryContext(base + 3_000, 'lock-1'),
+      context: recoveryContext(base + 3_000, LOCK_ID),
     }),
   ).resolves.toEqual({ ok: true, sequence: '1', action: 'acquire-lock' });
+  return { digest, lockId: LOCK_ID, recoverySequence: '1' };
+}
+
+/**
+ * Contain, acquire, unblock, prove, clear — the whole § Audit and recovery
+ * state machine against one host, with the canonical evidence taken from the
+ * router's own answer.
+ */
+async function recoverAndClear(
+  instance: Miniflare,
+  payload: RouterReplicaDesired,
+): Promise<{
+  observed: RouterObservation[];
+  audit: { recoveryLock: unknown; committed: { revision: string } | null };
+}> {
+  const host = payload.host;
+  const base = Date.now();
+  const { digest, lockId, recoverySequence } = await acquireRecoveryLock(instance, payload, base);
 
   // 2. Remove the block, then prove the canonical answer — from the ROUTER.
   const wafRemovedAt = new Date(base + 4_000).toISOString();
@@ -670,8 +697,8 @@ async function recoverAndClear(
           host,
           phase: 'canonical-after-unblock',
           expectedStateDigest: digest,
-          recoveryLockId: 'lock-1',
-          recoverySequence: '1',
+          recoveryLockId: lockId,
+          recoverySequence,
           wafRemovedAt,
         },
         principal,
@@ -705,7 +732,7 @@ async function recoverAndClear(
     sourceAudit: await sourceAuditFor(payload, base + 8_000),
     action: {
       kind: 'clear-lock',
-      lockId: 'lock-1',
+      lockId,
       wafRemovedAt,
       probeAttestationIds: clearIds,
       providerRequests: clearProviders as WafEvidence['providerRequests'],
@@ -786,52 +813,104 @@ describe('recovery evidence taken from the router’s own answer', () => {
     );
   }, 30_000);
 
-  it('refuses a canonical attestation whose observed revision is missing', async () => {
+  it('accepts a canonical attestation, and refuses the same one with only its observed revision removed', async () => {
     // The negative control for the pair above, and the exact failure a router
     // that dropped the revision on a refusal produces: the runner holds an
     // expectation derived from committed state and observes a revision-less
     // response, so the attestation is refused and no `clear-lock` evidence can
     // ever be assembled for that host.
+    //
+    // Both halves are here because only the pair isolates the revision. A
+    // refusal on its own proves nothing about `observedRevision`: an
+    // attestation whose phase, lock, nonce or freshness does not line up is
+    // refused just as loudly, and refused EARLIER — which is precisely how the
+    // previous version of this test passed. It issued a `blocked-before-worker`
+    // challenge and submitted a `canonical-after-unblock` observation, so
+    // `acceptProbeAttestation` rejected the phase mismatch before it ever
+    // reached the revision comparison, and deleting that comparison outright
+    // left the test green.
+    //
+    // So the challenge below MATCHES the observation's phase, the recovery lock
+    // is really held, and the intact evidence is accepted first. The second
+    // attestation differs from the accepted one in exactly one field.
     const instance = miniflare();
+    // Reached the way a real tombstone is: revision 1 active, then its exact
+    // successor carrying the withdrawal.
+    await publish(instance, routePayload(TOMBSTONE_HOST, 'active', '1'));
     const payload: RouterReplicaDesired = {
       schemaVersion: 1,
-      revision: '1',
+      revision: '2',
       host: TOMBSTONE_HOST,
       desired: { kind: 'tombstone' },
       updatedAt: new Date().toISOString(),
     };
-    await publish(instance, payload);
-    const digest = await projectionDigest(payload);
-    const now = Date.now();
-    const [principal] = principals('missing-revision');
-    const nonce = 'missing-revision-nonce';
+    await expect(publish(instance, payload)).resolves.toEqual({ status: 200, result: 'applied' });
+
+    const base = Date.now();
+    const { digest, lockId, recoverySequence } = await acquireRecoveryLock(instance, payload, base);
+    const wafRemovedAt = new Date(base + 4_000).toISOString();
+    const [intactRunner, mutatedRunner] = principals('revision-control');
+
+    // One real `canonical-after-unblock` challenge, then THE public request
+    // through the real router over the real binding, exactly as the clearing
+    // path above assembles its evidence.
+    const observeUnderChallenge = async (
+      principal: ProbePrincipal,
+      nonce: string,
+    ): Promise<RouterObservation> => {
+      await expect(
+        control<ChallengeResult>(instance, {
+          op: 'challenge',
+          host: TOMBSTONE_HOST,
+          request: {
+            host: TOMBSTONE_HOST,
+            phase: 'canonical-after-unblock',
+            expectedStateDigest: digest,
+            recoveryLockId: lockId,
+            recoverySequence,
+            wafRemovedAt,
+          },
+          principal,
+          now: base + 5_000,
+          nonce,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      return observeRouter(instance, TOMBSTONE_HOST, nonce);
+    };
+
+    const intactNonce = `revision-control-intact-${TOMBSTONE_HOST}`;
+    const intact = await observeUnderChallenge(intactRunner, intactNonce);
+    expect(intact.status).toBe(404);
+    expect(intact.reason).toBe('unknown-host');
+    expect(intact.revision).toBe('2');
     await expect(
-      control<ChallengeResult>(instance, {
-        op: 'challenge',
+      control<AttestResult>(instance, {
+        op: 'attest',
         host: TOMBSTONE_HOST,
-        request: { host: TOMBSTONE_HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
-        principal,
-        now,
-        nonce,
+        observation: canonicalObservation(TOMBSTONE_HOST, intactNonce, base + 6_000, intact),
+        principal: intactRunner,
+        now: base + 7_000,
+        id: `revision-control-intact-${TOMBSTONE_HOST}`,
       }),
     ).resolves.toMatchObject({ ok: true });
 
-    const answer = await observeRouter(instance, TOMBSTONE_HOST, nonce);
-    expect(answer.revision).toBe('1');
-
+    const mutatedNonce = `revision-control-missing-${TOMBSTONE_HOST}`;
+    const mutated = await observeUnderChallenge(mutatedRunner, mutatedNonce);
+    expect(mutated).toEqual(intact);
     await expect(
       control<AttestResult>(instance, {
         op: 'attest',
         host: TOMBSTONE_HOST,
         observation: {
-          ...canonicalObservation(TOMBSTONE_HOST, nonce, now, answer),
-          // What the runner would have recorded had the router published no
-          // revision header on this refusal.
+          ...canonicalObservation(TOMBSTONE_HOST, mutatedNonce, base + 6_000, mutated),
+          // The ONLY difference from the accepted attestation: what the runner
+          // would have recorded had the router published no revision header on
+          // this refusal.
           observedRevision: '',
         },
-        principal,
-        now: now + 1_000,
-        id: 'missing-revision-attestation',
+        principal: mutatedRunner,
+        now: base + 7_000,
+        id: `revision-control-missing-${TOMBSTONE_HOST}`,
       }),
     ).resolves.toEqual({ ok: false, error: 'probe-refused' });
   }, 30_000);
