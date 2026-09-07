@@ -47,6 +47,16 @@ export interface DayLike {
 /** The subset of an `EventDoc` the scheduler reads. */
 export interface EventLike {
   days?: DayLike[];
+  /** The post-Event archive state (#134, specs/post-sailing-archive.md).
+   *  `'archived'` means this Event is frozen; every other value (including an
+   *  absent field, which is every doc written before the field was consumed)
+   *  means open. Loosely typed because this package reads RAW Firestore maps. */
+  status?: string;
+  /** The archive's QUIESCING phase (#134): gameplay is shut but the record has
+   *  not been taken yet. Server-side gameplay writes must stop here too, not
+   *  only at `status`, or the very window the quiesce exists to create is the
+   *  window a scheduler run writes into. */
+  archiving?: boolean;
   /** The CONFIGURED Standings Freeze (ADR 0011) — the moment scoring stops.
    *  Distinct from `frozenAt`, the stamp recording that it happened. Absent on
    *  every doc written before the field existed, in which case `finaleTimes`
@@ -470,6 +480,32 @@ export function isEventAdmin(event: EventLike | undefined, uid: string | undefin
   return !!uid && Array.isArray(event?.admins) && event.admins.includes(uid);
 }
 
+/**
+ * Whether this Event is closed to GAMEPLAY writes (#134,
+ * specs/post-sailing-archive.md) — archived, or in the archive's quiescing
+ * phase. The Admin-SDK mirror of `eventClosedToPlay` in `firestore.rules`,
+ * defaults and all: an absent `status` reads as open, exactly as it does there.
+ *
+ * IT HAS TO EXIST SEPARATELY, because the Admin SDK bypasses `firestore.rules`
+ * entirely. Every write below runs with full data-plane authority, so the freeze
+ * that stops a Player from marking a square stops none of them. Without this
+ * guard a scheduler sweep SELECTED just before the archive can still stamp a
+ * Day, freeze finale fields, or post a system Moment into a record the rules
+ * have already made permanent — and an Admin can call `unlockDayNow` on an
+ * archived Event and have it succeed (Codex P2, PR #1139).
+ *
+ * The `archiving` half matters most: the quiesce is precisely the window in
+ * which the client is reading the roster it is about to freeze, so a server
+ * write landing there is the one this whole protocol exists to prevent.
+ *
+ * Every core below checks it against its FIRST read AND re-checks it inside the
+ * transaction that writes, because the archive can commit between the two — the
+ * same re-check discipline the snapshot's own `already-stamped` guard uses.
+ */
+export function eventClosedToPlay(event: EventLike | undefined): boolean {
+  return event?.status === 'archived' || event?.archiving === true;
+}
+
 /** Thrown by `manualUnlockNow` for a non-admin caller; mapped to an HttpsError at the trigger seam. */
 export class UnlockPermissionError extends Error {}
 
@@ -505,7 +541,16 @@ export interface AdminFirestore {
   runTransaction<T>(updateFunction: (tx: Transaction) => Promise<T>): Promise<T>;
 }
 
-export type SnapshotResult = 'stamped' | 'already-stamped' | 'not-due' | 'no-event' | 'no-day';
+export type SnapshotResult =
+  | 'stamped'
+  | 'already-stamped'
+  | 'not-due'
+  | 'no-event'
+  | 'no-day'
+  /** The Event is archived or closing (#134): gameplay is over, so nothing is
+   *  stamped. Reported rather than thrown — a scheduled sweep that finds an
+   *  archived Event has done its job correctly. */
+  | 'archived';
 
 export interface UnlockDeps {
   /** Current time; defaults to `Date.now`. */
@@ -558,6 +603,16 @@ async function postFinaleMoment(
   // posts the minimal beat (content is best-effort; the beat itself is not).
   extra?: Record<string, unknown>,
 ): Promise<void> {
+  // #134: re-read the Event immediately before the write, not only at the top
+  // of `runFinaleBeats`. This beat is best-effort and RETRIED until the Moment
+  // lands, and the content build above it reads a roster and every Day's
+  // honours — so minutes can pass between the guard and the write. A system
+  // Moment posted after the freeze appends to a Feed the archive has already
+  // preserved, which is the one thing an archived Feed promises it will not do.
+  // A Moment write is a plain `set` at a deterministic id, not a transaction,
+  // so the tightest available guard is the freshest possible read.
+  const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
+  if (eventClosedToPlay(event)) return;
   // Write at the DETERMINISTIC `kind` id, not an auto-id: the public Feed read
   // (`hasCanonicalMomentId`, src/hooks/useData.ts) only renders these singleton
   // finale beats when `moment.id === moment.kind`, so an auto-id moment would exist
@@ -669,6 +724,10 @@ export async function stampDaySnapshot(
   const eventRef = db.doc(`events/${eventId}`);
   const pre = (await eventRef.get()).data() as EventLike | undefined;
   if (!pre) return 'no-event';
+  // #134: an archived or closing Event unlocks nothing. Stamping a snapshot
+  // deals a Day Card that no one may then mark, on an Event whose frozen record
+  // has already been taken.
+  if (eventClosedToPlay(pre)) return 'archived';
   const days = Array.isArray(pre.days) ? pre.days : [];
   const day = days.find((d) => d.index === dayIndex);
   if (!day) return 'no-day';
@@ -679,6 +738,11 @@ export async function stampDaySnapshot(
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
     if (!ev) return 'no-event';
+    // Re-confirmed INSIDE the transaction, exactly like the unstamped/due
+    // guards below: the archive can commit between the pre-read above and this
+    // write, and a scheduler run selected moments before the freeze must not
+    // land on the far side of it (Codex P2, PR #1139).
+    if (eventClosedToPlay(ev)) return 'archived';
     const arr = Array.isArray(ev.days) ? [...ev.days] : [];
     const i = arr.findIndex((d) => d.index === dayIndex);
     if (i < 0) return 'no-day';
@@ -726,6 +790,11 @@ async function freezeStandings(db: AdminFirestore, eventId: string, frozenAt: nu
   return db.runTransaction(async (tx) => {
     const ev = (await tx.get(eventRef)).data() as EventLike | undefined;
     if (!ev || ev.frozenAt != null) return false;
+    // #134: re-checked inside the transaction that writes. `frozenAt` is
+    // finale state on an Event whose whole record has been frozen; stamping it
+    // afterwards changes what the podium and the Scoring Policy resolve to,
+    // underneath an archive that already said otherwise.
+    if (eventClosedToPlay(ev)) return false;
     tx.update(eventRef, { frozenAt });
     return true;
   });
@@ -836,6 +905,11 @@ async function freezeStandingsAndPersistMostLovedAward(
     const eventSnap = await tx.get(eventRef);
     const event = eventSnap.data() as EventLike | undefined;
     if (!event || event.frozenAt != null || event.mostLovedPhoto != null) return false;
+    // #134, re-checked inside the writing transaction beside the idempotence
+    // guards it sits with: an archived Event's award and freeze stamp are
+    // already part of a frozen record, and this transaction would rebuild them
+    // from moderation state the archive has moved past.
+    if (eventClosedToPlay(event)) return false;
 
     // Firestore requires all transaction reads before its write. Reading every
     // award input through `tx` gives the Event update a single, retry-safe view.
@@ -866,6 +940,11 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   const now = (deps.now ?? Date.now)();
   const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
   if (!event) return;
+  // #134: an archived or closing Event has no finale left to run. Every beat
+  // below writes gameplay state — the freeze stamp, the Most-Loved award, a
+  // system Moment — and each is guarded again at its own write, because this
+  // read can be minutes older than they are.
+  if (eventClosedToPlay(event)) return;
   const times = finaleTimes(Array.isArray(event.days) ? event.days : [], event.standingsFreezeAt);
   if (!times) return;
 
@@ -991,6 +1070,14 @@ export async function runScheduledUnlock(
   const now = (deps.now ?? Date.now)();
   const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
   if (!event) return { stamped: 0 };
+  // #134: the sweep's own early out. `runScheduledUnlockForActiveEvents`
+  // (functions/src/index.ts) selects `status == 'active'`, which excludes an
+  // archived Event — but the SELECTION happens once per run and the Events it
+  // returns are then processed one at a time, so a run selected moments before
+  // an archive (or a Cloud Functions retry of one) still arrives here on a
+  // frozen Event. It also does not exclude the CLOSING state, which is
+  // deliberately still `status: 'active'`.
+  if (eventClosedToPlay(event)) return { stamped: 0 };
   const days = Array.isArray(event.days) ? event.days : [];
   let stamped = 0;
   for (const day of daysDueForSnapshot(days, now)) {
@@ -1009,6 +1096,14 @@ export async function runScheduledUnlock(
  * one Day on demand (function lag / failure). Denies a non-admin caller by
  * throwing `UnlockPermissionError`; on success runs the identical
  * `stampDaySnapshot` the scheduled path uses, so the two can never diverge.
+ *
+ * #134: being an Admin is not an exemption from the freeze. `firestore.rules`
+ * denies the admin branch of every gameplay arm on an archived Event for the
+ * stated reason — an "archive" whose own organiser can still open a Day is not
+ * a frozen record — and this callable runs on the Admin SDK, which those rules
+ * never see. The guard is stated here as well as inside `stampDaySnapshot` so
+ * the refusal is legible at the callable's own boundary rather than only as a
+ * consequence two layers down.
  */
 export async function manualUnlockNow(
   db: AdminFirestore,
@@ -1021,6 +1116,7 @@ export async function manualUnlockNow(
   if (!isEventAdmin(event, callerUid)) {
     throw new UnlockPermissionError('Only an event admin can unlock a Day.');
   }
+  if (eventClosedToPlay(event)) return 'archived';
   return stampDaySnapshot(db, eventId, dayIndex, deps);
 }
 
@@ -1032,7 +1128,10 @@ export type ResnapshotResult =
   | 'not-recoverable'
   | 'not-due'
   | 'no-event'
-  | 'no-day';
+  | 'no-day'
+  /** The Event is archived or closing (#134): the deal pool is closed, so the
+   *  one overwrite this repo permits is refused along with everything else. */
+  | 'archived';
 
 /**
  * The easy-mix deploy-race fallback (specs/easy-mix.md § "Deploy race"): OVERWRITE one
@@ -1069,6 +1168,10 @@ export async function resnapshotDayIfNoBoards(
   if (!isEventAdmin(pre, callerUid)) {
     throw new UnlockPermissionError('Only an event admin can re-snapshot a Day.');
   }
+  // #134: the freeze binds the Admin for gameplay too. This is the ONE path
+  // that overwrites an existing snapshot, so it is the last one that should
+  // survive an archive.
+  if (eventClosedToPlay(pre)) return 'archived';
   const days = Array.isArray(pre?.days) ? pre!.days : [];
   const day = days.find((d) => d.index === dayIndex);
   if (!day) return 'no-day';
@@ -1089,6 +1192,10 @@ export async function resnapshotDayIfNoBoards(
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
     if (!ev) return 'no-event';
+    // Re-checked inside the writing transaction, beside the zero-boards guard:
+    // the pool query above is a full collection read, so an archive can easily
+    // commit between it and this write (#134).
+    if (eventClosedToPlay(ev)) return 'archived';
     const arr = Array.isArray(ev.days) ? [...ev.days] : [];
     const i = arr.findIndex((d) => d.index === dayIndex);
     if (i < 0) return 'no-day';
