@@ -475,13 +475,23 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
    * shorter than the list of cases it replaces.
    */
   const singleCharacterEdits = (text: string): string[] => {
+    // The substituted and inserted characters have to include the ones ALREADY
+    // in `text`. A mirror that widens a component by repeating one of its own
+    // characters — `fiveacrosss?\.app`, admitting `fiveacrosss.app` — is only
+    // caught by an edit that doubles that character, and a generator that only
+    // ever inserts a foreign `x` can never produce it.
+    const alphabet = [...new Set([...text, 'x', '-', '0'])];
     const edits: string[] = [];
     for (let index = 0; index < text.length; index += 1) {
       edits.push(text.slice(0, index) + text.slice(index + 1));
-      edits.push(`${text.slice(0, index)}x${text.slice(index + 1)}`);
+      for (const character of alphabet) {
+        edits.push(`${text.slice(0, index)}${character}${text.slice(index + 1)}`);
+      }
     }
     for (let index = 0; index <= text.length; index += 1) {
-      edits.push(`${text.slice(0, index)}x${text.slice(index)}`);
+      for (const character of alphabet) {
+        edits.push(`${text.slice(0, index)}${character}${text.slice(index)}`);
+      }
     }
     return [...new Set(edits)].filter((edit) => edit !== text);
   };
@@ -620,6 +630,79 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     }
     const positives = HOSTS.filter((host) => canonical('either', host));
     expect(HOSTS.length - positives.length).toBeGreaterThan(positives.length);
+  });
+
+  /**
+   * What the two classes ARE, restated independently of the regexes in
+   * `src/slug.ts` that implement them: the marker, the exact suffix length, and
+   * the RFC 4648 lowercase base32 alphabet.
+   *
+   * Deliberately a second statement of the same rule, for the reason
+   * `describe('reserved infrastructure labels')` above pins `RESERVED_LABELS`
+   * verbatim and exhaustively. Every other assertion in this block asks whether
+   * the mirrors AGREE with the canonical predicates, which is silent about the
+   * canonical predicates themselves: widen `REHEARSAL_EVENT_LABEL` to
+   * `^r2-(?:x-)?[a-z2-7]{26}$` and `r2-x-…` becomes canonical while all seven
+   * mirrors keep rejecting it — a real parity break that leaves every
+   * expectation here unchanged, because no fixture ever probes a shape I did
+   * not already think of.
+   *
+   * So the shape is pinned. Widening a class is then a two-file edit, and this
+   * fixture has to be told about the new shape before the mirrors can be
+   * measured against it.
+   */
+  const BASE32 = /^[a-z2-7]*$/;
+  const EVENT_MARKER = 'r2-';
+  const ROOT_MARKER = 'r2-root-';
+  const EVENT_SUFFIX_LENGTH = 26;
+  const ROOT_SUFFIX_LENGTH = 20;
+
+  const isEventShaped = (label: string): boolean =>
+    label.startsWith(EVENT_MARKER) &&
+    label.length === EVENT_MARKER.length + EVENT_SUFFIX_LENGTH &&
+    BASE32.test(label.slice(EVENT_MARKER.length));
+
+  const isRootShaped = (label: string): boolean =>
+    label.startsWith(ROOT_MARKER) &&
+    label.length === ROOT_MARKER.length + ROOT_SUFFIX_LENGTH &&
+    BASE32.test(label.slice(ROOT_MARKER.length));
+
+  /** A base32 suffix of exactly `length` characters. */
+  const suffix = (length: number): string =>
+    'abcdefghijklmnopqrstuvwxyz234567'.slice(0, length);
+
+  /**
+   * Shapes a widened canonical class would plausibly start accepting, none of
+   * which any mirror accepts. An inserted segment after either marker, a
+   * borrowed marker, and every suffix length within three of each exact one.
+   */
+  const CANONICAL_PROBES = [
+    ...LABELS,
+    ...MARKER_NEAR_MISSES,
+    ...['x', 'r2', 'root', 'test', 'v2'].flatMap((segment) => [
+      `${EVENT_MARKER}${segment}-${suffix(EVENT_SUFFIX_LENGTH)}`,
+      `${ROOT_MARKER}${segment}-${suffix(ROOT_SUFFIX_LENGTH)}`,
+      `${EVENT_MARKER}${segment}-${suffix(ROOT_SUFFIX_LENGTH)}`,
+    ]),
+    ...[-3, -2, -1, 0, 1, 2, 3].flatMap((delta) => [
+      `${EVENT_MARKER}${suffix(EVENT_SUFFIX_LENGTH + delta)}`,
+      `${ROOT_MARKER}${suffix(ROOT_SUFFIX_LENGTH + delta)}`,
+      `${EVENT_MARKER}${suffix(ROOT_SUFFIX_LENGTH + delta)}`,
+      `${ROOT_MARKER}${suffix(EVENT_SUFFIX_LENGTH + delta)}`,
+    ]),
+  ];
+
+  it('pins the canonical classes to their documented shape', () => {
+    for (const label of CANONICAL_PROBES) {
+      expect(isRehearsalEventLabel(label), `event: ${label}`).toBe(isEventShaped(label));
+      expect(isRehearsalRootLabel(label), `root: ${label}`).toBe(isRootShaped(label));
+      expect(isRehearsalLabel(label), `either: ${label}`).toBe(
+        isEventShaped(label) || isRootShaped(label),
+      );
+    }
+    // The probe set has to contain both accepted shapes, or the pin is vacuous.
+    expect(CANONICAL_PROBES.filter(isEventShaped).length).toBeGreaterThan(0);
+    expect(CANONICAL_PROBES.filter(isRootShaped).length).toBeGreaterThan(0);
   });
 
   it('keeps the two classes disjoint, so no host is both', () => {
