@@ -397,6 +397,12 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     'r2-root-abcdefghijklmnopqrs0',
     'r2-root-abcdefghijklmnopqrs1',
     'r2-root-abcdefghijklmnopqrst-',
+    // The boundary BETWEEN the two classes, which every other label sits on one
+    // side of. Making `root-` optional admits the first as a root host; letting
+    // the root suffix take an Event's length admits the second. Both are
+    // rejected by the canonical predicates, and neither has any other fixture.
+    'r2-abcdefghijklmnopqrst',
+    'r2-root-abcdefghijklmnopqrstuvwxyz',
     'r2',
     'r2-',
     'r2-root-',
@@ -458,6 +464,48 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   );
 
   /**
+   * Every one-character edit of `text`: each deletion, each substitution, and
+   * an insertion at each position.
+   *
+   * Hand-picked near-misses kept missing by one. A first pass at the Namespace
+   * cases covered a character short at either end, one substituted at the end
+   * and one appended — and `fiveacrossx?\.app` still passed, because an
+   * insertion in the MIDDLE was not among them. Enumerating the whole
+   * single-edit neighbourhood closes the class instead of the instance, and is
+   * shorter than the list of cases it replaces.
+   */
+  const singleCharacterEdits = (text: string): string[] => {
+    const edits: string[] = [];
+    for (let index = 0; index < text.length; index += 1) {
+      edits.push(text.slice(0, index) + text.slice(index + 1));
+      edits.push(`${text.slice(0, index)}x${text.slice(index + 1)}`);
+    }
+    for (let index = 0; index <= text.length; index += 1) {
+      edits.push(`${text.slice(0, index)}x${text.slice(index)}`);
+    }
+    return [...new Set(edits)].filter((edit) => edit !== text);
+  };
+
+  /**
+   * The Namespace half, which decides WHICH Namespace a rehearsal host was
+   * dealt under. The table otherwise holds each Namespace exactly, plus one
+   * unrelated domain, and that cannot tell an exact match from a loosened one.
+   */
+  const NAMESPACE_NEAR_MISSES = NAMESPACES.flatMap(singleCharacterEdits).filter(
+    (candidate) => !NAMESPACES.includes(candidate),
+  );
+
+  /**
+   * The two fixed markers, `r2-` and `r2-root-`, edited the same way. They are
+   * literal text in every mirror exactly as the Namespaces are, and a loosened
+   * marker is how one class starts answering for the other.
+   */
+  const MARKER_NEAR_MISSES = [
+    ...singleCharacterEdits('r2-').map((marker) => `${marker}${EVENT_POSITIVE.slice(3)}`),
+    ...singleCharacterEdits('r2-root-').map((marker) => `${marker}${ROOT_POSITIVE.slice(8)}`),
+  ];
+
+  /**
    * The same two anchors again, defeated a different way. `m` rebinds `^` and
    * `$` to LINE boundaries, so a mirror that acquired it would admit a host
    * with a well-formed line buried in it while every single-line fixture above
@@ -511,6 +559,12 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     ...MULTILINE_NEAR_MISSES,
     ...SEPARATOR_NEAR_MISSES,
     ...TRAILING_ROOT_DOT_NEAR_MISSES,
+    ...[EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) =>
+      NAMESPACE_NEAR_MISSES.map((namespace) => `${label}.${namespace}`),
+    ),
+    ...MARKER_NEAR_MISSES.flatMap((label) =>
+      NAMESPACES.map((namespace) => `${label}.${namespace}`),
+    ),
   ];
 
   /** What the canonical predicates say about a host, for a given class. */
