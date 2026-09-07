@@ -2239,12 +2239,13 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ends a successful hook's lingering descendants before accepting the tree", async () => {
-    // Codex P1, round 14: a hook that backgrounds a process and exits keeps
-    // that descendant alive with the LIVE directory as its cwd, past the final
-    // fingerprint and into the build. The rehearsal now ends the hook's whole
-    // process group when the immediate shell settles, so the write below never
-    // lands — not during the run, and not after it either.
+  it("refuses a hook that leaves descendants running, and still ends them", async () => {
+    // Codex P1, rounds 14 and 17: a hook that backgrounds a process and exits
+    // has an outcome Firebase decides on the descendant's own clock (it never
+    // kills what a hook left running), which this rehearsal cannot reproduce
+    // either way — so the request is refused into the conservative arm. The
+    // group is still ended, so the write below never lands in the live tree:
+    // not during the run, and not after it either.
     await withFunctionsProject(
       {
         functionsConfig: {
@@ -2253,11 +2254,59 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
         files: { "shared/toggle": "" },
       },
       async (configPath) => {
-        await classify(["--only", "functions:daily"], configPath);
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
         await new Promise((settle) => setTimeout(settle, 4500));
         const { readFile: read } = await import("node:fs/promises");
         const { dirname: dir, join: under } = await import("node:path");
         await expect(read(under(dir(configPath), "shared", "toggle"), "utf8")).resolves.toBe("");
+      },
+    );
+  });
+
+  it("refuses a backgrounded artifact rewrite that a later hook would let finish", async () => {
+    // Codex P1, round 17, verbatim: Firebase would let the copy finish before
+    // discovery and deploy the group; awaiting or killing it here are both
+    // guesses, so the exemption is refused instead.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, '("sleep" 0.2; cp "$RESOURCE_DIR/group.js" "$RESOURCE_DIR/lib/index.js") &', "sleep 1"],
+        },
+        files: { "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };") },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
+  it("rehearses an mtime-based incremental hook against the live timestamps", async () => {
+    // Codex P1, round 17: the staging copy used to refresh every source mtime,
+    // so a hook that builds the protected group only when `src/index.ts` is
+    // older than a linked stamp emitted the plain endpoint here and the group
+    // for real. Timestamps now travel with the copy.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [
+            ...PREDEPLOY,
+            'if [ "$RESOURCE_DIR/src/index.ts" -ot "$PROJECT_DIR/shared/stamp" ]; then cp "$RESOURCE_DIR/group.js" "$RESOURCE_DIR/lib/index.js"; fi',
+          ],
+        },
+        files: {
+          "shared/stamp": "",
+          "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+        },
+      },
+      async (configPath) => {
+        const { utimes } = await import("node:fs/promises");
+        const { dirname: dir, join: under } = await import("node:path");
+        const past = new Date(Date.now() - 3_600_000);
+        await utimes(under(dir(configPath), "functions", "src", "index.ts"), past, past);
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, bugReportInvokerSelected: true });
       },
     );
   });

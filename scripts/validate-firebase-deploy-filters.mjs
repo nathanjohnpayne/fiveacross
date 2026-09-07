@@ -483,22 +483,34 @@ function runCapturedProcess(
         child.stdout?.destroy();
         child.stderr?.destroy();
       }
-      // And the descendant itself goes with them (Codex P1, round 14 on
-      // #1107). Firebase moves on when the immediate shell exits, but a hook
-      // that backgrounded `(cd shared; sleep 20; write) &` would otherwise keep
-      // running — holding the LIVE directory it entered through the overlay
-      // link as its cwd, past the final drift fingerprint and into the build
-      // and publish that follow. The child is its own process group precisely
-      // so the whole tree can be ended at once; an empty group is a no-op.
+      // Whether the hook left descendants behind, and then their end (Codex
+      // P1, rounds 14 and 17 on #1107). Firebase moves on when the immediate
+      // shell exits and never kills what it backgrounded, so a descendant
+      // such as `(sleep 0.2; cp group.js lib/index.js) &` finishes on its own
+      // clock during the real deploy — before or after discovery, nobody can
+      // say. This rehearsal cannot reproduce that race, so the CALLER refuses
+      // the exemption when descendants remain (`descendantsLeft`), and the
+      // group is still ended here so nothing outlives the rehearsal into the
+      // live tree, the final fingerprint or the build. The child is its own
+      // process group precisely so both are one signal; libuv has reaped the
+      // child itself by the time `exit` fires, so a group that still answers
+      // holds only descendants.
+      let descendantsLeft = false;
       if (POSIX && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 0);
+          descendantsLeft = true;
+        } catch {
+          // Empty group: nothing was left running.
+        }
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
           // Already gone.
         }
       }
-      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}`, channel });
-      else settle({ ok: code === 0, output, code, channel });
+      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}`, channel, descendantsLeft });
+      else settle({ ok: code === 0, output, code, channel, descendantsLeft });
     });
 
     deadline = setTimeout(() => {
@@ -660,6 +672,11 @@ async function stageProjectOverlay({
       // Links are copied as they are written, not rewritten to absolute paths
       // into the live tree. See `refuseEscapingLinks`.
       verbatimSymlinks: true,
+      // Timestamps travel with the copy (Codex P1, round 17 on #1107): an
+      // incremental hook that compares `src/index.ts -ot shared/stamp` must
+      // see the same answer here as in the live tree, and a copy that
+      // refreshed every mtime would rehearse a build Firebase never runs.
+      preserveTimestamps: true,
       // `node_modules` is symlinked instead: copying it would cost minutes,
       // and the deploy's own build reads the very same tree. EVERY one is
       // relinked, not just the source root's — a nested package resolves its
@@ -1487,6 +1504,20 @@ async function buildAndInventoryProject({
         }
         return refuseAll(
           `predeploy hook failed: ${hook.command} — ${result.output.trim().slice(-400)}`,
+        );
+      }
+      if (result.descendantsLeft) {
+        // A hook that returned with work still running in the background has
+        // an outcome this rehearsal cannot reproduce: Firebase lets that work
+        // finish on its own clock, so the artifact it discovers may differ
+        // from the one here whether the descendant is ended or awaited
+        // (Codex P1, round 17). The live tree is still checked — the
+        // descendant may already have written into it — and then the request
+        // falls to the conservative arm rather than to a guess.
+        const wroteInBackground = await liveDrift();
+        if (wroteInBackground) throw new LiveCheckoutDriftError(wroteInBackground, "predeploy hook");
+        return refuseAll(
+          `predeploy hook left work running in the background, whose effect on the artifact cannot be rehearsed: ${hook.command}`,
         );
       }
     }
