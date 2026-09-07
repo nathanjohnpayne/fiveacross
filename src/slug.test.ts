@@ -249,11 +249,29 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     readFileSync(resolve(process.cwd(), path), 'utf-8');
 
   /**
+   * Comments are not code, and this scans source TEXT. Left in, a mirror could
+   * be replaced by a widened `new RegExp('…')` with the old literal parked in a
+   * commented-out line above it, and the comment would satisfy both the count
+   * and the behavioural comparison while the executable consumer had drifted.
+   * Stripped first, so only real code is ever scanned.
+   *
+   * A `//` inside a string would take the rest of its line with it. That is
+   * survivable in a way the reverse is not: losing a literal fails the count,
+   * which is loud, while keeping a commented one passes, which is silent.
+   */
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ' ');
+
+  /**
    * Matches a regex literal that starts anchored and mentions `r2-`, capturing
    * its pattern and its FLAGS separately. The `[^\n/]` classes are what make it
    * safe to do this with a regex at all: none of these literals contains a
    * slash or spans a line, so the scan cannot run past its own closing
    * delimiter into the rest of the file.
+   *
+   * Only in an EXECUTABLE position: bound to a name, or invoked directly. A
+   * literal sitting in neither is not a mirror this program consults, and
+   * counting it would let a real consumer drift behind a decorative twin.
    *
    * Deliberately does NOT require the trailing `$`. Requiring it would make a
    * copy whose end anchor was dropped invisible to the scan, which then binds
@@ -265,7 +283,8 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
    * flags-discarding reconstruction stayed case-sensitive here, so the suite
    * would pass through exactly the drift it exists to catch.
    */
-  const HOST_REGEX_LITERAL = /\/(\^[^\n/]*r2-[^\n/]*)\/([dgimsuvy]*)/;
+  const LITERAL = String.raw`/(\^[^\n/]*r2-[^\n/]*)/([dgimsuvy]*)`;
+  const HOST_REGEX_LITERAL = new RegExp(`=\\s*${LITERAL}|${LITERAL}\\s*\\.test\\(`);
 
   /**
    * `g` and `y` advance `lastIndex` between `test` calls. On a module-level
@@ -284,14 +303,17 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   const ANCHOR_WINDOW = 512;
 
   const countHostRegexes = (source: string): number =>
-    [...source.matchAll(new RegExp(HOST_REGEX_LITERAL, 'g'))].length;
+    [...stripComments(source).matchAll(new RegExp(HOST_REGEX_LITERAL, 'g'))].length;
 
   const hostRegexAfter = (source: string, anchor: string): RegExp => {
-    const from = source.indexOf(anchor);
+    const code = stripComments(source);
+    const from = code.indexOf(anchor);
     if (from === -1) throw new Error(`anchor not found: ${anchor}`);
-    const found = HOST_REGEX_LITERAL.exec(source.slice(from, from + ANCHOR_WINDOW));
+    const found = HOST_REGEX_LITERAL.exec(code.slice(from, from + ANCHOR_WINDOW));
     if (found === null) throw new Error(`no rehearsal host regex after: ${anchor}`);
-    const [, pattern, flags] = found;
+    // Two alternatives, one pair of groups each: bound to a name, or invoked.
+    const pattern = found[1] ?? found[3];
+    const flags = found[2] ?? found[4];
     if (STATEFUL_FLAGS.test(flags)) {
       throw new Error(`mirror regex after ${anchor} carries a stateful flag: /${flags}`);
     }
@@ -400,6 +422,42 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   ];
 
   /**
+   * One character outside lowercase RFC 4648 base32, substituted at the END of
+   * the suffix and again in the MIDDLE of it, for both classes.
+   *
+   * Position is the reason for two of each: a widened character class can be
+   * written anywhere in the pattern, and a fixture that only ever spoils the
+   * last character cannot tell a class widened in place from one widened at
+   * the edge. The set is deliberately not just digits and case — `_` is the
+   * one that showed this was thin, since `[a-z2-7_]` is a plausible slip and
+   * nothing here would have caught it.
+   */
+  const OUTSIDE_BASE32 = ['A', '0', '1', '8', '9', '_', '-', '+', '~', '%'];
+
+  const ALPHABET_NEAR_MISSES = OUTSIDE_BASE32.flatMap((character) =>
+    [EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) => [
+      `${label.slice(0, -1)}${character}`,
+      `${label.slice(0, -4)}${character}${label.slice(-3)}`,
+    ]),
+  );
+
+  /**
+   * The fully-qualified form of each canonical positive. A trailing root dot
+   * names the SAME host in DNS, which is exactly why a mirror might grow a
+   * `\.?$` to be accommodating — and why it must not: `canonical()` rejects it,
+   * the router rejects it explicitly (`hasTrailingRootDot` in
+   * `worker/src/host.ts`), and a mirror that accepted it would key a registry
+   * row under a host string nothing else in the system produces.
+   *
+   * The existing suffix near-misses could not see this. `.example.com` is a
+   * longer suffix; a bare `.` is a shorter one, and only the second survives
+   * an end anchor that was made optional rather than dropped.
+   */
+  const TRAILING_ROOT_DOT_NEAR_MISSES = [EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) =>
+    NAMESPACES.map((namespace) => `${label}.${namespace}.`),
+  );
+
+  /**
    * The same two anchors again, defeated a different way. `m` rebinds `^` and
    * `$` to LINE boundaries, so a mirror that acquired it would admit a host
    * with a well-formed line buried in it while every single-line fixture above
@@ -446,9 +504,13 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     // carries a dot. These are also the only inputs that reach the dotless
     // guard in `canonical()`.
     ...LABELS,
+    ...ALPHABET_NEAR_MISSES.flatMap((label) =>
+      NAMESPACES.map((namespace) => `${label}.${namespace}`),
+    ),
     ...UNANCHORED_NEAR_MISSES,
     ...MULTILINE_NEAR_MISSES,
     ...SEPARATOR_NEAR_MISSES,
+    ...TRAILING_ROOT_DOT_NEAR_MISSES,
   ];
 
   /** What the canonical predicates say about a host, for a given class. */
