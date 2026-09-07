@@ -172,7 +172,7 @@ export default function ArchiveEvent({
       setResult(opened);
       return;
     }
-    const frozen = await archiveEvent();
+    const outcome = await archiveEvent();
     // THIS handler is what shut the Event, so this handler is what puts it back
     // when the second write refuses (Codex P2, PR #1139). Both refusals here
     // wrote nothing and both leave a LIVE Event shut to gameplay with no record
@@ -182,8 +182,8 @@ export default function ArchiveEvent({
     // denies. (The closing-state surface below reaches `archiveEvent` too, and
     // deliberately does NOT reopen: that Event was already shut when the Admin
     // arrived, and `Reopen play` sits beside the button they pressed.)
-    if (frozen === 'claims-pending' || frozen === 'too-large') await abandonArchive();
-    setResult(frozen);
+    if (outcome === 'claims-pending' || outcome === 'too-large') await abandonArchive();
+    setResult(outcome);
   };
 
   return (

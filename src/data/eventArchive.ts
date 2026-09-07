@@ -316,13 +316,19 @@ export function draftEventArchive(params: {
     firstBingoRow,
     // Coerced on the way out for the same reason the rows are: a derived honour
     // carries the Player's own `displayName`, and a pinned one carries whatever
-    // the day-meta document holds.
-    dailyHonors: pinnedOrDerivedDailyHonors(ranked, days, dayMetas, dayMetasLoaded).map((h) => ({
-      dayIndex: h.dayIndex,
-      uid: h.uid,
-      displayName: archiveName(h.displayName),
-      firstBingoAt: archiveCount(h.firstBingoAt),
-    })),
+    // the day-meta document holds. A non-integer `dayIndex` is dropped rather
+    // than coerced — a derived honour reads it off a `dayStats` KEY, which is a
+    // Player-written map, and a Day the schedule does not have is a chip nothing
+    // could ever label. The live strip already drops it by matching against the
+    // schedule; the record has to, because the record is permanent.
+    dailyHonors: pinnedOrDerivedDailyHonors(ranked, days, dayMetas, dayMetasLoaded)
+      .filter((h) => Number.isInteger(h.dayIndex))
+      .map((h) => ({
+        dayIndex: h.dayIndex,
+        uid: h.uid,
+        displayName: archiveName(h.displayName),
+        firstBingoAt: archiveCount(h.firstBingoAt),
+      })),
     freezeAt,
     archivedAt,
   };

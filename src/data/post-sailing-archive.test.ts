@@ -466,6 +466,31 @@ describe('draftEventArchive — the inputs are validated before the Event is shu
     expect(draft.skippedRows).toBe(0);
   });
 
+  it('drops a daily honour whose Day index is not one', () => {
+    // A derived honour reads its `dayIndex` off a `dayStats` KEY, and `dayStats`
+    // is a Player-written map with no rules validation — so a junk key becomes
+    // `Number('abc')`, a chip nothing could label. The live honours strip drops
+    // it by matching against the schedule; the record has to drop it itself,
+    // because the record is permanent and an Event with no schedule at all
+    // renders the derived list straight through.
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'odd', displayName: 'Odd', bingoCount: 1, squaresMarked: 1 }),
+          dayStats: {
+            1: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 500 },
+            abc: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 600 },
+          },
+        } as unknown as PlayerDoc,
+      ],
+      // An Event with no schedule: `pinnedOrDerivedDailyHonors` returns the
+      // derived list straight through rather than matching it against Days.
+      event: { days: [], bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([1]);
+  });
+
   it('bounds a name at the cap the rest of the estate already enforces', () => {
     const draft = draftEventArchive({
       players: [mkPlayer({ uid: 'shouty', displayName: 'A'.repeat(50_000), squaresMarked: 1 })],
