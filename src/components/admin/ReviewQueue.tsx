@@ -18,6 +18,7 @@ import {
   unbanUser,
   type ApprovalPlacement,
 } from '../../data/admin';
+import { claimsQueueOpen } from '../../data/moderation';
 import { deleteProof } from '../../data/proofs';
 import { track } from '../../analytics';
 import { EVENT_ID } from '../../firebase';
@@ -351,7 +352,7 @@ export default function ReviewQueue({
   const threshold = event?.settings?.reportHideThreshold;
   const bannedUids = event?.bannedUids ?? [];
   const admins = event?.admins ?? [];
-  const claimsVisible = event?.claimMode === 'admin_confirmed';
+  const claimsVisible = claimsQueueOpen(event);
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
   // paths go through it, and the bulk one is the easy miss: a batch containing

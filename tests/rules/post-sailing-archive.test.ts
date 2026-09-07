@@ -428,6 +428,57 @@ describe('post-sailing-archive — gameplay writes stop at the freeze', () => {
     await assertFails(deleteDoc(doc(db(ALICE), `${eventPath()}/proofs/${PROOF}`)));
   });
 
+  it('leaves a pending Claim resolvable ON PAPER ONLY — the reason the archive drains the queue first', async () => {
+    // The claims arm keeps `allow update: if isAdmin(eventId)` open on an
+    // archived Event, so the CLAIM DOCUMENT still moves. What does not move is
+    // everything the resolution actually consists of: `resolve()`
+    // (src/data/admin.ts) writes the claimant's Board and Player row in the
+    // same transaction, and both are gameplay writes the freeze denies — so a
+    // Confirm or Reject offered after the archive can only ever fail, and the
+    // claim is pending forever.
+    //
+    // The remedy is client-side and cannot be expressed here: rules cannot
+    // query a collection, so "no pending claims" is not a condition the archive
+    // write can carry. `ArchiveEvent` refuses to arm while the Review queue
+    // holds one (specs/post-sailing-archive.md § "The admin action"), which is
+    // what keeps this state unreachable in the first place.
+    const claimPath = `${eventPath()}/claims/claim-open`;
+    const resolveBoard = (marked: number[]) =>
+      setDoc(
+        doc(db(ADMIN), `${eventPath()}/days/0/boards/${ALICE}`),
+        { cells: cells(marked), markSeed: 7 },
+        { merge: true },
+      );
+    const resolveStats = (squares: number) =>
+      setDoc(
+        doc(db(ADMIN), `${eventPath()}/players/${ALICE}`),
+        { squaresMarked: squares },
+        { merge: true },
+      );
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), claimPath), {
+        uid: ALICE,
+        displayName: 'Alice',
+        cellIndex: 3,
+        itemText: 'Something happens',
+        status: 'pending',
+        createdAt: NOW(),
+        dayIndex: 0,
+      });
+    });
+    // Live, the whole resolution lands.
+    await assertSucceeds(resolveBoard([3]));
+    await assertSucceeds(resolveStats(1));
+    await freeze();
+    // Frozen: the claim's own status still moves…
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), claimPath), { status: 'confirmed', resolvedBy: ADMIN }),
+    );
+    // …and every write that would make it mean anything is denied.
+    await assertFails(resolveBoard([3, 4]));
+    await assertFails(resolveStats(2));
+  });
+
   it('DENIES a Claim create', async () => {
     const makeClaim = (id: string) =>
       setDoc(doc(db(ALICE), `${eventPath()}/claims/${id}`), {

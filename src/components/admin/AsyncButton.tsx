@@ -18,6 +18,7 @@ export default function AsyncButton({
   title,
   ariaLabel,
   failureLabel = 'Failed—try again.',
+  disabled = false,
 }: {
   onAction: () => Promise<unknown> | unknown;
   children: ReactNode;
@@ -25,10 +26,16 @@ export default function AsyncButton({
   title?: string;
   ariaLabel?: string;
   failureLabel?: string;
+  /** A caller-owned precondition, ORed with the in-flight disable (#134): the
+   *  archive action stays unavailable until its inputs are server-confirmed and
+   *  the claim queue is drained. Held separately from `state` so neither can
+   *  re-enable the button on the other's behalf — a failed write still offers a
+   *  retry, but only while the precondition itself holds. */
+  disabled?: boolean;
 }) {
   const [state, setState] = useState<'idle' | 'busy' | 'error'>('idle');
   const run = async () => {
-    if (state === 'busy') return;
+    if (state === 'busy' || disabled) return;
     setState('busy');
     try {
       await onAction();
@@ -44,7 +51,7 @@ export default function AsyncButton({
         className={className}
         title={title}
         aria-label={ariaLabel}
-        disabled={state === 'busy'}
+        disabled={state === 'busy' || disabled}
         onClick={() => void run()}
       >
         {children}

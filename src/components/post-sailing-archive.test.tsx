@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
-import type { EventArchive, EventDoc, PlayerDoc } from '../types';
+import type { ClaimDoc, EventArchive, EventDoc, PlayerDoc } from '../types';
 
 // specs/post-sailing-archive.md, RTL layer (#134). Two surfaces:
 //
@@ -13,23 +13,37 @@ import type { EventArchive, EventDoc, PlayerDoc } from '../types';
 //      numbers and fail here. The live hooks are `vi.fn()`s so the archived
 //      render can assert it never CALLED them, not merely that it ignored what
 //      they returned: "it subscribes to nothing" is a claim about listeners.
-//   2. The Admin archive control is two taps, reports what happened, and
-//      retires itself once the Event is frozen.
+//   2. The Admin archive control is two taps, reports what happened, retires
+//      itself once the Event is frozen, and refuses to fire at all until its
+//      inputs are server-confirmed and the claim queue is drained.
 //
 // The read hooks are stubbed (the `w2-leaderboard.test.tsx` precedent for
 // isolating a presentational surface), and `../analytics` / `../firebase` are
 // stubbed because both surfaces import them for Event-scoped share tracking.
-// `../data/moderation` is deliberately NOT stubbed: `isBanned` is the ban
-// contract under test here, and a stubbed predicate would prove nothing.
+// `../data/moderation` is deliberately NOT stubbed: it owns both predicates
+// under test here — `isBanned` (the ban contract) and `claimsAwaitingAdmin`
+// (the drain gate) — and a stubbed gate would prove nothing about the gate.
 
 const H = vi.hoisted(() => {
   const state = {
     players: [] as PlayerDoc[],
     loading: false,
+    rosterConfirmed: true,
+    dayMetasServerLoaded: true,
+    pendingClaims: [] as ClaimDoc[],
+    pendingClaimsLoaded: true,
     event: null as EventDoc | null,
     archiveEvent: vi.fn(async (_params: { players: readonly PlayerDoc[] }) => 'archived' as const),
-    useLeaderboard: vi.fn(() => ({ players: state.players, loading: state.loading })),
-    useDayMetasStatus: vi.fn(() => ({ metas: new Map(), loaded: true })),
+    useLeaderboard: vi.fn(() => ({
+      players: state.players,
+      loading: state.loading,
+      hasServerData: state.rosterConfirmed,
+    })),
+    useDayMetasStatus: vi.fn(() => ({
+      metas: new Map(),
+      loaded: true,
+      serverLoaded: state.dayMetasServerLoaded,
+    })),
     useProofKindsByUid: vi.fn(() => ({ kindsByUid: {}, loading: false })),
   };
   return state;
@@ -51,6 +65,19 @@ vi.mock('../data/admin', () => ({ archiveEvent: H.archiveEvent }));
 
 import Leaderboard from './Leaderboard';
 import ArchiveEvent from './admin/ArchiveEvent';
+
+function mkClaim(over: Partial<ClaimDoc> = {}): ClaimDoc {
+  return {
+    id: 'claim-1',
+    uid: 'late-riser',
+    displayName: 'Late Riser',
+    cellIndex: 3,
+    itemText: 'Something happened',
+    status: 'pending',
+    createdAt: 1_000,
+    ...over,
+  };
+}
 
 function mkPlayer(
   over: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid' | 'displayName'>,
@@ -133,9 +160,26 @@ const renderLeaderboard = () =>
     </MemoryRouter>,
   );
 
+const renderArchiveControl = () =>
+  render(
+    <ArchiveEvent
+      event={H.event}
+      pendingClaims={H.pendingClaims}
+      pendingClaimsLoaded={H.pendingClaimsLoaded}
+    />,
+  );
+
+/** An Event still open for play, with the archive control's preconditions met. */
+const liveEvent = (over: Partial<EventDoc> = {}) =>
+  archivedEvent({ status: 'active', archivedAt: undefined, archive: undefined, ...over });
+
 beforeEach(() => {
   H.players = liveRoster;
   H.loading = false;
+  H.rosterConfirmed = true;
+  H.dayMetasServerLoaded = true;
+  H.pendingClaims = [];
+  H.pendingClaimsLoaded = true;
   H.event = archivedEvent();
   H.archiveEvent.mockClear();
   H.useLeaderboard.mockClear();
@@ -294,8 +338,8 @@ describe('a ban still hides a Player after the freeze', () => {
 describe('the Admin archive control', () => {
   it('needs a second, explicit confirmation before it freezes anything', async () => {
     const user = userEvent.setup();
-    H.event = archivedEvent({ status: 'active', archivedAt: undefined, archive: undefined });
-    render(<ArchiveEvent event={H.event} />);
+    H.event = liveEvent();
+    renderArchiveControl();
 
     await user.click(screen.getByRole('button', { name: 'Archive…' }));
     expect(H.archiveEvent).not.toHaveBeenCalled();
@@ -314,8 +358,8 @@ describe('the Admin archive control', () => {
 
   it('backs out cleanly when the Admin cancels', async () => {
     const user = userEvent.setup();
-    H.event = archivedEvent({ status: 'active', archivedAt: undefined, archive: undefined });
-    render(<ArchiveEvent event={H.event} />);
+    H.event = liveEvent();
+    renderArchiveControl();
 
     await user.click(screen.getByRole('button', { name: 'Archive…' }));
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -325,9 +369,124 @@ describe('the Admin archive control', () => {
   });
 
   it('retires the control once the Event is archived and reports the frozen record', () => {
-    render(<ArchiveEvent event={archivedEvent()} />);
+    renderArchiveControl();
     expect(screen.queryByRole('button', { name: 'Archive…' })).not.toBeInTheDocument();
     expect(screen.getByText(/^Archived /)).toBeInTheDocument();
     expect(screen.getByText(/2 players · first to BINGO Early Bird/)).toBeInTheDocument();
+  });
+});
+
+describe('the archive control waits for its inputs to be server-confirmed', () => {
+  // Codex P1: the write is permanent behind write-once rules. Until the server
+  // has spoken, an empty roster and an unpinned Day are indistinguishable from
+  // a cold ADR 0006 cache, and archiving on one would freeze empty standings
+  // and missing honours forever.
+  it('disables the control while the roster is still cache-only', () => {
+    H.event = liveEvent();
+    H.rosterConfirmed = false;
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
+  });
+
+  it('disables the control while a Day-meta subscription is unconfirmed', () => {
+    H.event = liveEvent();
+    H.dayMetasServerLoaded = false;
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+  });
+
+  it('disables the control while the Event document itself has not arrived', () => {
+    // `useDayMetasStatus(0)` reports `serverLoaded` vacuously, so the Event doc
+    // is part of the same precondition rather than an implied one.
+    H.event = null;
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+  });
+
+  it('enables it once the roster and every Day-meta subscription are confirmed', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    renderArchiveControl();
+    const arm = screen.getByRole('button', { name: 'Archive…' });
+    expect(arm).toBeEnabled();
+    expect(screen.queryByText(/Loading the final standings/)).not.toBeInTheDocument();
+    await user.click(arm);
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    expect(H.archiveEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the archive control drains the claim queue first', () => {
+  // Codex P2: `confirmClaim`/`rejectClaim` write the claimant's Board and
+  // Player row, both of which the freeze denies — so a claim still pending at
+  // the archive is pending forever, behind a Confirm/Reject pair that can now
+  // only fail.
+  it('refuses to arm while a pending claim is in the Review queue', () => {
+    H.event = liveEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    H.pendingClaims = [mkClaim()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /Resolve the 1 pending claim in the Review queue first/,
+    );
+  });
+
+  it('says so in the plural, and stays shut until the queue is empty', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    H.pendingClaims = [mkClaim(), mkClaim({ id: 'claim-2' })];
+    const { rerender } = renderArchiveControl();
+    expect(screen.getByRole('status')).toHaveTextContent(/Resolve the 2 pending claims/);
+
+    H.pendingClaims = [];
+    rerender(
+      <ArchiveEvent event={H.event} pendingClaims={[]} pendingClaimsLoaded={true} />,
+    );
+    const arm = screen.getByRole('button', { name: 'Archive…' });
+    expect(arm).toBeEnabled();
+    await user.click(arm);
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    expect(H.archiveEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a not-yet-loaded claim queue as drained', () => {
+    // The gate's own vacuous-pass hazard: an unarrived subscription reads as
+    // zero pending claims.
+    H.event = liveEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    H.pendingClaims = [];
+    H.pendingClaimsLoaded = false;
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
+  });
+
+  it('ignores a stale claim outside admin-confirmed mode, which has no drain path', () => {
+    // #269's mode gate is unchanged by this ticket: outside admin_confirmed the
+    // Review queue offers no Confirm/Reject, so gating on such a claim would be
+    // a dead end rather than a gate (spec § Residuals).
+    H.event = liveEvent({ claimMode: 'honor' } as Partial<EventDoc>);
+    H.pendingClaims = [mkClaim()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
+  });
+
+  it('re-checks the gate at the second tap, not only the first', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent({ claimMode: 'admin_confirmed' } as Partial<EventDoc>);
+    const { rerender } = renderArchiveControl();
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    // A claim lands while the confirm row is armed.
+    rerender(
+      <ArchiveEvent
+        event={H.event}
+        pendingClaims={[mkClaim()]}
+        pendingClaimsLoaded={true}
+      />,
+    );
+    const commit = screen.getByRole('button', { name: 'Archive the Event now' });
+    expect(commit).toBeDisabled();
+    await user.click(commit);
+    expect(H.archiveEvent).not.toHaveBeenCalled();
   });
 });

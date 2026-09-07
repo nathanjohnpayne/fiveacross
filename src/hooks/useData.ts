@@ -345,9 +345,34 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
   return useDayMetasStatus(dayCount).metas;
 }
 
+/**
+ * `loaded` vs `serverLoaded`. `loaded` means every Day's subscription has
+ * DELIVERED something — a cache snapshot counts, which is what the honours
+ * strip wants (it paints the pins it has and repaints when better ones land).
+ * `serverLoaded` is the stricter latch: every Day has been answered by the
+ * SERVER at least once (or by an error, which is terminal for that
+ * subscription — see below). A surface that PERSISTS what it read needs the
+ * strict one, because a cache-only "no pin here" is indistinguishable from
+ * "the server says there is no pin" and freezing the wrong one is permanent
+ * (#134, Codex P1: `ArchiveEvent` writes `dayMetas` into `EventDoc.archive`).
+ *
+ * The fan subscribes with `{ includeMetadataChanges: true }` for the same
+ * reason `useDocSub`/`useColSub` do: without metadata events Firestore never
+ * re-notifies when the server confirms data the cache already held
+ * byte-for-byte, so a `!fromCache` latch would deadlock on exactly the docs
+ * that were cached. These are write-once per-Day honour docs, so the extra
+ * notifications are a handful per session, not a stream.
+ *
+ * An ERRORED subscription (permission-denied, signed out mid-flight) resolves
+ * the Day for BOTH flags. It can never deliver a server snapshot, so counting
+ * it as unresolved would disable the archive control forever; and a Day whose
+ * meta cannot be read has no pin on the live Leaderboard either, so the record
+ * still freezes what the Admin was looking at.
+ */
 export function useDayMetasStatus(dayCount: number): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
+  serverLoaded: boolean;
 } {
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'day-metas', dayCount);
@@ -355,8 +380,9 @@ export function useDayMetasStatus(dayCount: number): {
     key: string;
     metas: ReadonlyMap<number, DayMetaDoc>;
     seen: ReadonlySet<number>;
+    serverSeen: ReadonlySet<number>;
   };
-  const empty = (): State => ({ key, metas: new Map(), seen: new Set() });
+  const empty = (): State => ({ key, metas: new Map(), seen: new Set(), serverSeen: new Set() });
   const [state, setState] = useState<State>(empty);
   useEffect(() => {
     let active = true;
@@ -369,6 +395,7 @@ export function useDayMetasStatus(dayCount: number): {
     const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
       onSnapshot(
         dayMetaRef(dayIndex, eventId),
+        { includeMetadataChanges: true },
         (snap) => {
           if (!active) return;
           setState((previous) => {
@@ -378,7 +405,12 @@ export function useDayMetasStatus(dayCount: number): {
             else metas.delete(dayIndex);
             const seen = new Set(current.seen);
             seen.add(dayIndex);
-            return { key, metas, seen };
+            // A LATCH, like `hasServerData`: once the server has spoken for
+            // this Day it has spoken, whatever a later cache-sourced snapshot
+            // says.
+            const serverSeen = new Set(current.serverSeen);
+            if (!snap.metadata.fromCache) serverSeen.add(dayIndex);
+            return { key, metas, seen, serverSeen };
           });
         },
         () => {
@@ -388,7 +420,9 @@ export function useDayMetasStatus(dayCount: number): {
             const current = previous.key === key ? previous : empty();
             const seen = new Set(current.seen);
             seen.add(dayIndex);
-            return { ...current, seen };
+            const serverSeen = new Set(current.serverSeen);
+            serverSeen.add(dayIndex);
+            return { ...current, seen, serverSeen };
           });
         },
       ),
@@ -401,7 +435,11 @@ export function useDayMetasStatus(dayCount: number): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const current = state.key === key ? state : empty();
-  return { metas: current.metas, loaded: dayCount <= 0 || current.seen.size >= dayCount };
+  return {
+    metas: current.metas,
+    loaded: dayCount <= 0 || current.seen.size >= dayCount,
+    serverLoaded: dayCount <= 0 || current.serverSeen.size >= dayCount,
+  };
 }
 
 /**
@@ -973,10 +1011,19 @@ export function useFeed(max = 60) {
   };
 }
 
+/**
+ * The admin-confirmed claim queue, oldest first. `hasServerData` rides along
+ * (#134, Codex P2) because the archive control gates on this queue being EMPTY:
+ * a cache-only (or not-yet-arrived) snapshot reads as zero pending claims, and
+ * a gate that passes vacuously is no gate at all.
+ */
 export function usePendingClaims() {
-  const { data, loading } = useColSub<ClaimDoc>(claimsCol(), eventSubscriptionKey('claims'));
+  const { data, loading, hasServerData } = useColSub<ClaimDoc>(
+    claimsCol(),
+    eventSubscriptionKey('claims'),
+  );
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
-  return { claims, loading };
+  return { claims, loading, hasServerData };
 }
 
 /**
