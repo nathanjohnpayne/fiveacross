@@ -850,6 +850,104 @@ describe('a held ⭐ is never gated on the score (#1052)', () => {
   });
 });
 
+describe('the personal line and the ⭐ tie-break read their own inputs (#1052)', () => {
+  const days: EmailDay[] = [
+    { index: 0, date: '2026-08-01', unlockAt: Date.parse('2026-08-01T06:00:00Z'), pool: 'main', theme: 'glamiators' },
+    { index: 1, date: '2026-08-02', unlockAt: Date.parse('2026-08-02T06:00:00Z'), pool: 'main', tutorial: false, scoring: 'ceremonial', theme: 'sporty-splash' },
+    { index: 2, date: '2026-08-03', unlockAt: Date.parse('2026-08-03T06:00:00Z'), pool: 'main', theme: 'duty-free' },
+  ];
+  const event: EmailEvent = {
+    name: 'Personal Line',
+    timezone: 'UTC',
+    days,
+    standingsFreezeAt: Date.parse('2026-08-09T06:00:00Z'),
+    settings: { dailyEmailEnabled: true },
+  };
+  const modelFor = (players: EmailPlayer[], recipient: string) =>
+    buildDailyEmailModel({
+      event,
+      day: days[2],
+      players,
+      recipient: { uid: recipient, displayName: recipient },
+      edition: 'fiveacross',
+      feedUrl: 'https://fiveacross.app/feed',
+      unsubscribeUrl: 'https://example.com/u',
+      preferencesUrl: 'https://example.com/u?a=preferences',
+    });
+
+  it('never tells a Player who bingoed on a ceremonial Day that their first BINGO is open', () => {
+    // Someone ELSE holds the ⭐, so "am I the holder" is the wrong question —
+    // the reader's own buckets are. Their ceremonial bingo left the standings,
+    // not the card.
+    const players: EmailPlayer[] = [
+      {
+        uid: 'holder',
+        displayName: 'Holder',
+        bingoCount: 1,
+        squaresMarked: 12,
+        firstBingoAt: 100,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 } },
+      },
+      {
+        uid: 'ceremonial-only',
+        displayName: 'Cera',
+        bingoCount: 0,
+        squaresMarked: 5,
+        firstBingoAt: null,
+        dayStats: {
+          0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null },
+          1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 900 },
+        },
+      },
+    ];
+    // The honour is the earlier competitive bingo, not the ceremonial one.
+    expect(modelFor(players, 'holder').standings.rows.find((r) => r.starred)?.uid).toBe('holder');
+    // …and Cera is told what is true: her squares, with no false claim appended.
+    expect(modelFor(players, 'ceremonial-only').standings.youLine).toBe(
+      "You're #2—5 squares marked so far.",
+    );
+    // A Player with no bingo anywhere still gets the nudge.
+    const none: EmailPlayer[] = [
+      players[0],
+      { ...players[1], dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } } },
+    ];
+    expect(modelFor(none, 'ceremonial-only').standings.youLine).toBe(
+      "You're #2—5 squares marked—your first BINGO is still out there.",
+    );
+  });
+
+  it('breaks an exact ⭐ tie by standings order, the way the Leaderboard pin does', () => {
+    // Two eligible bingos on the same millisecond. Whoever the standings put
+    // first takes the honour, so the email cannot disagree with the app because
+    // Firestore happened to return a page in another order.
+    const TIE = 500;
+    const strong: EmailPlayer = {
+      uid: 'strong',
+      displayName: 'Strong',
+      bingoCount: 2,
+      squaresMarked: 20,
+      firstBingoAt: TIE,
+      dayStats: { 0: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE } },
+    };
+    const weak: EmailPlayer = {
+      uid: 'weak',
+      displayName: 'Weak',
+      bingoCount: 1,
+      squaresMarked: 5,
+      firstBingoAt: TIE,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE } },
+    };
+    // Either query order resolves to the standings leader.
+    expect(modelFor([weak, strong], 'strong').standings.rows.find((r) => r.starred)?.uid).toBe('strong');
+    expect(modelFor([strong, weak], 'strong').standings.rows.find((r) => r.starred)?.uid).toBe('strong');
+    // Stated directly on the selector: roster order decides the tie, so the
+    // caller must hand it the ranked roster rather than a raw query page.
+    const tutorial = tutorialDayIndexes(days);
+    expect(eventFirstBingoUid([weak, strong], 3, tutorial)).toBe('weak');
+    expect(eventFirstBingoUid(standingsThrough([weak, strong], 3, tutorial, ceremonialDayIndexes(days)), 3, tutorial)).toBe('strong');
+  });
+});
+
 // --- ③ Edition registers --------------------------------------------------------
 
 describe('Edition registers (#608 lexicon)', () => {

@@ -401,6 +401,37 @@ function headlineFirstBingoAt(
 }
 
 /**
+ * Whether this Player has ANY bingo of their own recorded before
+ * `throughDayIndexExclusive` — the honest answer to "is your first BINGO still
+ * out there", which is a question about the reader's own play and NOT about the
+ * standings or the honour.
+ *
+ * Every Day counts here, Tutorial and ceremonial alike: a bingo happened. The
+ * ceremonial policy removes its SCORE, and the Tutorial framing removes its
+ * claim on the headline, but neither un-marks the card. Reading the answer off
+ * the ceremonial-excluded `bingoCount` — or off whether the reader owns the ⭐ —
+ * tells a Player who bingoed on a ceremonial Day that their first BINGO is
+ * still out there while their own `dayStats` records one (Codex P2, round 2).
+ *
+ * A legacy row with no `dayStats` falls back to its root `bingoCount`, the only
+ * evidence such a row has, matching every other legacy path in this module.
+ */
+function hasBingoThrough(player: EmailPlayer, throughDayIndexExclusive: number): boolean {
+  const dayStats = player.dayStats;
+  if (!dayStats || typeof dayStats !== 'object' || Object.keys(dayStats).length === 0) {
+    return typeof player.bingoCount === 'number' && player.bingoCount > 0;
+  }
+  for (const [key, stat] of Object.entries(dayStats)) {
+    const dayIndex = Number(key);
+    if (!Number.isInteger(dayIndex) || dayIndex >= throughDayIndexExclusive) continue;
+    if (!stat || typeof stat !== 'object') continue;
+    const bingos = stat.bingoCount;
+    if (typeof bingos === 'number' && Number.isFinite(bingos) && bingos > 0) return true;
+  }
+  return false;
+}
+
+/**
  * The uid holding the Event-wide First to BINGO pin (⭐), or `null` when nobody
  * qualifies.
  *
@@ -424,9 +455,14 @@ function headlineFirstBingoAt(
  * of the standings and its timestamp is out of the ranking tie-break, but it is
  * still real play that someone was first to, so the headline can be its.
  *
- * Ties go to the first Player in roster order, unchanged. The caller passes the
- * roster BEFORE the presentational ban filter, so a ban hides the holder's row
- * without promoting the next-earliest Player (specs/w2-ban-console.md).
+ * Ties go to the first Player in the roster AS PASSED, so the caller decides
+ * what an exact-millisecond tie means. Pass the STANDINGS-ORDERED roster: the
+ * in-app Leaderboard resolves its pin over its own ranked roster, and handing
+ * this one raw Firestore query order instead would let the two name different
+ * holders on a tie, by uid or by whatever order the page came back in (Codex P2,
+ * round 2). Pass it BEFORE the presentational ban filter, so a ban hides the
+ * holder's row without promoting the next-earliest Player
+ * (specs/w2-ban-console.md).
  */
 export function eventFirstBingoUid(
   players: readonly EmailPlayer[],
@@ -663,7 +699,10 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const holderUid =
     args.starUid === undefined
       ? eventFirstBingoUid(
-          players,
+          // The RANKED rows, not the caller's roster order: an exact-millisecond
+          // tie must break the same way the in-app Leaderboard's pin breaks it,
+          // and that one resolves over its own ranked roster (Codex P2, round 2).
+          ranked,
           day.index,
           tutorialDays,
           // The ALREADY-GUARDED `days`, not `event`: a raw Event doc whose
@@ -705,13 +744,14 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const you = youIndex >= 0 ? ranked[youIndex] : null;
   let youLine: string | null = null;
   if (you && played) {
-    // "Your first BINGO is still out there" is FALSE for the ⭐ holder: they
-    // hold the Event-wide honour for one, it simply landed on a Day whose Marks
-    // do not score. Telling them otherwise beside their own ⭐ contradicts the
-    // same email. With no scoring squares either there is nothing true left to
-    // say about their standings, so the line is omitted — the choice this
-    // module already makes for an address that is not on the roster.
-    const bingoStillOpen = you.uid !== starUid;
+    // "Your first BINGO is still out there" is a claim about the READER'S OWN
+    // play, so it is answered from their own buckets rather than from the
+    // ceremonial-excluded `bingoCount` or from whether they hold the ⭐ (Codex P2,
+    // round 2). A Player who bingoed on a ceremonial Day has bingoed; the policy
+    // removed its score, not the Mark. With no scoring squares either there is
+    // nothing true left to say about their standings, so the line is omitted —
+    // the choice this module already makes for an off-roster address.
+    const bingoStillOpen = !hasBingoThrough(you, day.index);
     const squares = `${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'}`;
     const tail =
       you.bingoCount > 0

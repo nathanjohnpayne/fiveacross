@@ -591,12 +591,12 @@ export async function sendDailyEmailForEvent(
   const tutorialDays = tutorialDayIndexes(schedule);
   const ceremonialDays = ceremonialDayIndexes(schedule);
   const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays, ceremonialDays);
-  const starUid = eventFirstBingoUid(
-    rosterPage.allPlayers,
-    day.index,
-    tutorialDays,
-    standingsFreezeAtFor(event),
-  );
+  // The RANKED pre-ban roster, not the raw query page: an exact-millisecond tie
+  // is broken by roster order, and the in-app Leaderboard breaks it over its own
+  // ranked roster — handing this one Firestore's page order would let the email
+  // and the app name different holders (Codex P2). Still pre-ban, so a
+  // presentational ban hides the row without promoting anyone.
+  const starUid = eventFirstBingoUid(rawRanked, day.index, tutorialDays, standingsFreezeAtFor(event));
   const banned = new Set(event.bannedUids ?? []);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
