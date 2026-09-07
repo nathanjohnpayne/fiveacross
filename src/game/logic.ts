@@ -1402,14 +1402,16 @@ export type HeadlineBingoRow = Pick<PlayerDoc, 'uid' | 'firstBingoAt' | 'dayStat
  * enqueued — before the server has it, and therefore before any rival's client
  * can see it (Codex P2 on #1128 round 2).
  *
- * The comparison is STRICT, so an exact tie blocks neither side and both attempt
- * the claim. That is the documented honest race (ADR 0001): the create-only
- * singleton resolves it to one Moment, whereas a non-strict test would resurrect
- * the mutual-suppression case above at the tie.
+ * An earlier instant blocks; an exact-millisecond tie is broken by uid,
+ * ascending — the same key `eventFirstBingoWinner` applies (Codex P2 on #1128
+ * round 4). Letting a tie race to the create-only singleton would let the
+ * larger uid win the Feed Moment while the Leaderboard and podium named the
+ * smaller one, forever. A tie therefore blocks exactly the Player the selector
+ * does not name, and never both (the mutual-suppression case above).
  *
  * Blocking therefore coincides with the shared headline selector: this returns
  * true exactly when `eventFirstBingoWinner` over the same roster and cutoff names
- * a Player who is not the candidate (ties aside).
+ * a Player who is not the candidate.
  */
 export function earlierEligibleHeadlineBingoExists(params: {
   roster: readonly HeadlineBingoRow[];
@@ -1429,7 +1431,12 @@ export function earlierEligibleHeadlineBingoExists(params: {
     if (p.uid === candidateUid) return false;
     const at = eligibleAt(p);
     if (at == null) return false;
-    return candidateAt == null || at < candidateAt;
+    if (candidateAt == null || at < candidateAt) return true;
+    // An exact-millisecond tie is broken by uid, ascending — the same key
+    // `eventFirstBingoWinner` applies for the Leaderboard and podium, so the
+    // one Player that selector names is the one Player left eligible to claim
+    // the singleton, and the Feed can never disagree with the standings on a tie.
+    return at === candidateAt && p.uid < candidateUid;
   });
 }
 

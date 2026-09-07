@@ -471,6 +471,38 @@ describe('earlierEligibleHeadlineBingoExists — the shared First-to-BINGO gate 
     expect([blocked, notBlocked]).toEqual([true, false]);
   });
 
+  it('breaks an exact-millisecond tie by uid, ascending, exactly as the shared selector does', () => {
+    // Codex P2 on #1128: a strict `<` let both tied Players claim the singleton,
+    // so whichever write landed first won — and if that was the larger uid, the
+    // immutable Feed Moment disagreed forever with `eventFirstBingoWinner`.
+    const tiedAt = 1_000;
+    const rowFor = (uid: string): PlayerDoc =>
+      mkPlayer(
+        uid,
+        { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: tiedAt } },
+        { firstBingoAt: null },
+      );
+    const roster = [rowFor('zed'), rowFor('ace')];
+    const gate = (candidateUid: string) =>
+      earlierEligibleHeadlineBingoExists({ roster, candidateUid, isTutorialDay: isTutorial });
+    // The selector names `ace`; `ace` stays eligible to claim, `zed` is blocked.
+    expect(eventFirstBingoWinner(roster, isTutorial)?.uid).toBe('ace');
+    expect(gate('ace')).toBe(false);
+    expect(gate('zed')).toBe(true);
+    // Roster order is not the key: reversing it changes nothing.
+    const reversed = [...roster].reverse();
+    expect(
+      earlierEligibleHeadlineBingoExists({ roster: reversed, candidateUid: 'ace', isTutorialDay: isTutorial }),
+    ).toBe(false);
+    expect(
+      earlierEligibleHeadlineBingoExists({ roster: reversed, candidateUid: 'zed', isTutorialDay: isTutorial }),
+    ).toBe(true);
+    // One millisecond of daylight and the earlier instant wins regardless of uid.
+    const earlierZed = [rowFor('ace'), mkPlayer('zed', { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: tiedAt - 1 } }, { firstBingoAt: null })];
+    expect(earlierEligibleHeadlineBingoExists({ roster: earlierZed, candidateUid: 'ace', isTutorialDay: isTutorial })).toBe(true);
+    expect(earlierEligibleHeadlineBingoExists({ roster: earlierZed, candidateUid: 'zed', isTutorialDay: isTutorial })).toBe(false);
+  });
+
   it('the freeze boundary is inclusive: at-or-after is ineligible, strictly before is not', () => {
     const freezeAt = 5_000;
     const call = (at: number) =>
@@ -603,7 +635,7 @@ describe('earlierEligibleHeadlineBingoExists — the shared First-to-BINGO gate 
     ).toBe(true);
   });
 
-  it('an exact TIE blocks neither side — the create-only singleton resolves it', () => {
+  it('an exact TIE blocks only the Player the shared selector does not name', () => {
     const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 } });
     const tied = rivalOn(8, 200);
     const gate = (candidateUid: string) =>
@@ -612,16 +644,18 @@ describe('earlierEligibleHeadlineBingoExists — the shared First-to-BINGO gate 
         candidateUid,
         isTutorialDay: isTutorial,
       });
-    // A non-strict comparison here would re-create the mutual-suppression case:
-    // both defer, nobody writes, the Feed carries no ceremony at all.
-    expect([gate('me'), gate('rival')]).toEqual([false, false]);
+    // 'me' < 'rival', so the selector names 'me': 'me' may claim, 'rival' may not.
+    // Neither the old strict race (both attempt) nor mutual suppression (neither
+    // attempts) is acceptable — the Feed must name the selector's Player.
+    expect(eventFirstBingoWinner([me, tied], isTutorial)?.uid).toBe('me');
+    expect([gate('me'), gate('rival')]).toEqual([false, true]);
   });
 
   it('blocks exactly when the shared headline selector names someone else', () => {
     // The Moment gate and the Leaderboard/podium pin answer ONE question: this
     // client may claim the singleton iff the shared selector over the same roster
     // and cutoff does not name a different Player. Distinct instants throughout —
-    // the tie case above is the documented honest race.
+    // the tie case above is broken by uid, exactly as the selector breaks it.
     const roster: PlayerDoc[] = [
       rivalOn(8, 1_000), // ceremonial, non-tutorial — eligible
       { ...rivalOn(0, 1), uid: 'warmup' }, // tutorial only — never eligible
