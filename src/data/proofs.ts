@@ -263,14 +263,21 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // clear it when no bingo stands (mirrors setMark/deleteProof). In daily mode
     // the stamp being preserved is the VIEWED Day's bucket, never the Event-wide
     // root (#1049) — `boardFirstBingoAt` owns that choice for every write path.
+    const livePlayer = playerSnap.data() as
+      | { firstBingoAt?: number | null; dayStats?: DayStats }
+      | undefined;
+    // The caller's sheet prop is a fallback for an UNREADABLE Player row ONLY —
+    // never for a live row whose Board stamp is explicitly absent (Codex P2,
+    // round 2). A `??` chain over the live value cannot tell those apart, so it
+    // revived a stamp the transaction had just been told is gone: another tab
+    // removing this Day's last line clears the bucket, and the proof that
+    // re-completes the line must stamp `now`. That misread is worst on a
+    // Tutorial or ceremonial Day, whose Event root legitimately stays `null`
+    // while the sheet still holds the Day's old instant.
     const existingFirst =
-      boardFirstBingoAt(
-        playerSnap.data() as { firstBingoAt?: number | null; dayStats?: DayStats } | undefined,
-        daily === true,
-        dayIndex ?? 0,
-      ) ??
-      currentFirstBingoAt ??
-      null;
+      livePlayer === undefined
+        ? (currentFirstBingoAt ?? null)
+        : boardFirstBingoAt(livePlayer, daily === true, dayIndex ?? 0);
     const firstBingoAt = bingoCount > 0 ? (existingFirst ?? now) : null;
 
     tx.set(pRef, {
@@ -492,6 +499,9 @@ export async function deleteProof(
         // own bucket keeps its instant — reading the Event-wide root here would
         // write some other Day's First-to-BINGO into it. Legacy events have one
         // bucket, so the root is that Board's stamp and is read unchanged.
+        // Deletion takes no caller-supplied stamp at all, so there is no stale
+        // prop to fall back to and none of `attachProof`'s revival hazard: the
+        // live row IS the only source, and an unreadable one reads as no stamp.
         const existingFirst = boardFirstBingoAt(
           playerSnap.data() as { firstBingoAt?: number | null; dayStats?: DayStats } | undefined,
           daily,

@@ -577,6 +577,64 @@ describe('attachProof — the preserved first-bingo stamp is the DAY’s, not th
     // …and the farewell honour records its own instant, not the frozen root's.
     expect(write.dayStats[9].firstBingoAt).toBe(1000);
   });
+
+  // Codex P2, round 2: the caller's sheet prop must be a fallback for an
+  // UNREADABLE Player row only. A `??` chain over the live value could not tell
+  // "this Day has no stamp" from "no row to read", so it revived a stamp the
+  // transaction had just been told was gone.
+  it('does NOT revive the stale sheet prop when the live Day bucket explicitly has no stamp', async () => {
+    // The sheet opened while Day 9 held a line at t=300; another tab has since
+    // unmarked that Day's last Square, so the live bucket is an explicit null.
+    // Day 9 is ceremonial, so the Event root legitimately stays null too —
+    // exactly the shape where the old chain had a stale value and nothing else
+    // to contradict it.
+    playerState = {
+      firstBingoAt: null,
+      dayStats: { 9: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+    };
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 9,
+      currentFirstBingoAt: 300, // the stale prop the sheet still carries
+      proof: { type: 'text', text: 'relit the line' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    // The new win is stamped NOW, not resurrected at the sheet's old instant.
+    expect(write.dayStats[9].firstBingoAt).toBe(1000);
+    expect(write.dayStats[9].firstBingoAt).not.toBe(300);
+  });
+
+  it('falls back to the caller prop only when the Player row itself is unreadable', async () => {
+    // No Player document at all in the transaction read — the one case the prop
+    // is the best knowledge available, so it must still be honoured.
+    playerState = undefined;
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 2,
+      currentFirstBingoAt: 300,
+      proof: { type: 'text', text: 'no row to read' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    expect(write.dayStats[2].firstBingoAt).toBe(300);
+  });
 });
 
 describe('deleteProof — the surviving first-bingo stamp is the DAY’s, not the Event root (#1049)', () => {
