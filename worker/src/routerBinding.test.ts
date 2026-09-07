@@ -8,6 +8,7 @@
 // public edge Worker, and a surviving Firebase binding falsifies the App Check
 // posture the whole change exists to establish.
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import ts from 'typescript';
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
@@ -83,6 +84,33 @@ describe('the Event router’s registry service binding', () => {
     // router the registry's default export — the signed sync/audit/recovery
     // control plane — instead of `lookup(host)`.
     expect(() => validateRouterServiceBinding(config)).toThrow('RegistryLookupEntrypoint');
+  });
+
+  it('declares exactly one public method on the lookup entrypoint, read from the source', async () => {
+    // The compile-time guard above proves assignability, and structural
+    // assignability tolerates EXTRA methods — a later `attestProbe()` on the
+    // entrypoint would still satisfy the one-method seam. So the complete
+    // method set is read off the class declaration and compared to exactly
+    // `['lookup']`, which is the lookup-only capability the binding certifies.
+    const source = await readFile(resolve(HERE, 'registry/registryWorker.ts'), 'utf8');
+    const file = ts.createSourceFile('registryWorker.ts', source, ts.ScriptTarget.Latest, true);
+    const methods: string[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isClassDeclaration(node) && node.name?.text === 'RegistryLookupEntrypoint') {
+        for (const member of node.members) {
+          if (ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member)) {
+            const isPrivate = member.modifiers?.some(
+              (m) => m.kind === ts.SyntaxKind.PrivateKeyword || m.kind === ts.SyntaxKind.ProtectedKeyword,
+            );
+            const name = member.name.getText(file);
+            if (!isPrivate && !name.startsWith('#')) methods.push(name);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    expect(methods).toEqual(['lookup']);
   });
 
   it('exposes only `lookup` in Wrangler’s generated binding type', async () => {

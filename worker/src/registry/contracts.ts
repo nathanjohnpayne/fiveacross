@@ -162,6 +162,8 @@ const DESIRED_KEYS: Record<string, readonly string[]> = {
 };
 
 export function hasExactDesiredKeys(desired: ReplicaDesired): boolean {
+  // An array is never a projection record, whatever property names it carries.
+  if (Array.isArray(desired)) return false;
   const expected = DESIRED_KEYS[(desired as { kind?: unknown }).kind as string];
   return expected !== undefined && hasExactKeys(desired as unknown as Record<string, unknown>, expected);
 }

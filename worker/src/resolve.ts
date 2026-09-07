@@ -365,7 +365,13 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
   const revision = lookup.revision;
   const desired = lookup.desired;
-  if (typeof desired !== 'object' || desired === null) return notFound('replica-malformed');
+  // A record, not an array: `typeof [] === 'object'`, and an array carrying
+  // the route's property names would satisfy the exact-key check below, so the
+  // ingestion parser's `!Array.isArray` requirement is repeated at this
+  // boundary rather than assumed of the other deployment (Codex P2 on #1120).
+  if (typeof desired !== 'object' || desired === null || Array.isArray(desired)) {
+    return notFound('replica-malformed');
+  }
 
   // The exact KEY SET, before any arm reads a value out of it, and from the
   // same table `parseDesired` uses at ingestion.

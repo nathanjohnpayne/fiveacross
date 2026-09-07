@@ -157,6 +157,24 @@ describe('the fail-closed decision table', () => {
     await expect(reasonFor({ kind: 'unknown-host' })).resolves.toBe('unknown-host');
   });
 
+  it('refuses an array-shaped projection even when it carries the route property names', async () => {
+    // `typeof [] === 'object'`, and an array with `kind`, `eventId`, `status`,
+    // `slug`, `edition` and `pathNamespace` set as properties has exactly the
+    // route key set — so only an explicit array check keeps it out.
+    const desired = Object.assign([] as unknown as Record<string, unknown>, {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: SLUG,
+      edition: 'fiveacross',
+      pathNamespace: null,
+    }) as unknown as ReplicaDesired;
+    await expect(refusalFor(committed(desired))).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
   it('answers a tombstone as unknown rather than advertising that the address existed', async () => {
     await expect(reasonFor(committed({ kind: 'tombstone' }))).resolves.toBe('unknown-host');
   });
