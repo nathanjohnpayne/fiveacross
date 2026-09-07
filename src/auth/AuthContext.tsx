@@ -663,6 +663,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
+  // The token of the redirect attempt this tab most recently STARTED and has
+  // not yet seen fail — the handle the bfcache recovery below needs to retire
+  // that attempt's records without touching any other tab's (#1123).
+  const redirectAttemptTokenRef = useRef<string | null>(null);
   const redirectResultHandledRef = useRef(false);
   // Whether onAuthStateChanged has ever fired for this mount — see its own
   // check-and-clear site (Phase 4b P1 on #836) for why signal (b) is scoped
@@ -2145,6 +2149,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }, [completeRedirectReturn, consumeAppOwnedRedirectTokenOnce]);
 
+  // Back from Google restores this page from the bfcache with the redirect
+  // still "in flight" (#1123): `signInWithRedirect`'s promise deliberately
+  // never settles once navigation starts, so neither the caller's catch nor the
+  // `finally` below ever releases the single-flight guard, and the button stays
+  // on "Signing in…" until a reload — where cancelling the retired popup used to
+  // allow a retry. A persisted `pageshow` IS that abandonment: nothing signed
+  // in (a completed return is a fresh navigation, never a bfcache restore), so
+  // release the guard and retire exactly this attempt's records, the same
+  // terminal cleanup a failed start performs. Token-addressed removal keeps a
+  // different tab's live attempt untouched.
+  useEffect(() => {
+    const onPageShow = (event: Event) => {
+      if ((event as PageTransitionEvent).persisted !== true) return;
+      const token = redirectAttemptTokenRef.current;
+      if (token === null) return;
+      redirectAttemptTokenRef.current = null;
+      signInAttemptRef.current = null;
+      clearPendingRedirectAttestationIfToken(token);
+      clearCollectedAcknowledgementIfToken(token);
+      clearRedirectPendingIfToken(token);
+      clearRedirectLoginLoggedIfToken(token);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
+
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
 
@@ -2190,6 +2220,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // one (#907).
         pruneExpiredRedirectAttemptRecords();
         const attemptToken = generateAttemptToken();
+        redirectAttemptTokenRef.current = attemptToken;
         markPendingRedirectAttestation(attemptToken);
         // The durable #346 signal (b) companion to the marker above — written
         // alongside it, in the same store as the acknowledgement record, for
@@ -2214,6 +2245,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearCollectedAcknowledgementIfToken(attemptToken);
           clearRedirectPendingIfToken(attemptToken);
           clearRedirectLoginLoggedIfToken(attemptToken);
+          if (redirectAttemptTokenRef.current === attemptToken) {
+            redirectAttemptTokenRef.current = null;
+          }
           trackSignInFailure(err);
           throw err;
         }
