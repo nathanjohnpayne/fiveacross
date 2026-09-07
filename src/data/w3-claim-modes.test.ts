@@ -452,12 +452,27 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
 });
 
 describe('planConfirmBroadcasts — TRANSITION-gated, the same as the live edge (issue #41, Codex #116 finding 1)', () => {
+  // The ten-Day sailing's tutorial Days: the embark card (0) and the farewell
+  // card (9). Day 8 is CEREMONIAL but NOT tutorial — the ADR 0011 shape #1050 is
+  // about, where the headline honour still counts a Day the standings do not.
+  const TUTORIAL_DAYS = new Set([0, 9]);
+  const isTutorialDay = (i: number) => TUTORIAL_DAYS.has(i);
   const base = {
     uid: 'u1',
     roster: [{ uid: 'u1', firstBingoAt: null as number | null }],
     rosterConfirmed: true,
     hasPriorBingo: false,
+    isTutorialDay,
   };
+  /** A rival roster row whose only bingo is on `dayIndex` at `at`. Its ROOT
+   *  `firstBingoAt` is the standings value — `null` for a ceremonial or tutorial
+   *  Day, because `rankingExcludedDay` drops both from the ranked fold — which is
+   *  exactly why the headline gate must not read it (#1050). */
+  const rivalOn = (dayIndex: number, at: number, rankable: boolean) => ({
+    uid: 'rival',
+    firstBingoAt: rankable ? at : null,
+    dayStats: { [dayIndex]: { bingoCount: 1, squaresMarked: 5, firstBingoAt: at } },
+  });
 
   it('a confirm that COMPLETES the line (no bingo before → bingo after) emits bingo + the ceremonial first_bingo', () => {
     // Row 0 confirmed; cell 4 is the just-confirmed flip. Treating cell 4 as still
@@ -531,5 +546,75 @@ describe('planConfirmBroadcasts — TRANSITION-gated, the same as the live edge 
   it('a confirmed square that completes NO line emits nothing', () => {
     const plan = planConfirmBroadcasts({ ...base, cells: boardWith([0, 1, 2]), confirmedIndexes: [2] });
     expect(plan).toEqual({ bingo: false, blackout: false, firstBingo: false, firstBingoHeld: false });
+  });
+
+  // --- #1050: the headline gate is tutorial-only, never the standings root ----
+  //
+  // The rival rows below all carry a ROOT `firstBingoAt` of null on the excluded
+  // Days, because the ranked fold drops ceremonial AND tutorial buckets. The
+  // pre-#1050 planner read that root, so every one of these cases decided on a
+  // field that cannot answer the headline question.
+
+  it('an earlier rival bingo on a CEREMONIAL, non-tutorial Day BLOCKS the singleton', () => {
+    const plan = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      // Day 8: `scoring: ceremonial`, `tutorial: false`. Its root contribution is
+      // null (the standings ignore it) but the headline honour counts it.
+      roster: [rivalOn(8, 1_000, false)],
+    });
+    expect(plan.bingo).toBe(true); // the winner's own BINGO still posts
+    expect(plan.firstBingo).toBe(false); // the singleton is NOT minted
+    expect(plan.firstBingoHeld).toBe(false); // decided-and-lost, not held
+  });
+
+  it('an earlier rival bingo on a TUTORIAL Day does NOT block the singleton', () => {
+    const plan = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      roster: [rivalOn(0, 1, false)], // embark card, numerically earliest
+    });
+    expect(plan.firstBingo).toBe(true);
+  });
+
+  it('a rival bingo AT the freeze is ineligible; strictly before it blocks', () => {
+    const atFreeze = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      roster: [rivalOn(8, 5_000, false)],
+      freezeAt: 5_000,
+    });
+    expect(atFreeze.firstBingo).toBe(true); // the cutoff is inclusive
+    const beforeFreeze = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      roster: [rivalOn(8, 4_999, false)],
+      freezeAt: 5_000,
+    });
+    expect(beforeFreeze.firstBingo).toBe(false);
+  });
+
+  it('a rival row with NO dayStats keeps the legacy root behaviour', () => {
+    const plan = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      roster: [{ uid: 'legacy', firstBingoAt: 42 }],
+    });
+    expect(plan.firstBingo).toBe(false);
+  });
+
+  it("the candidate's OWN earlier bingo never blocks their own claim", () => {
+    const plan = planConfirmBroadcasts({
+      ...base,
+      cells: boardWith(ROW0),
+      confirmedIndexes: [4],
+      roster: [{ ...rivalOn(3, 10, true), uid: 'u1' }],
+    });
+    expect(plan.firstBingo).toBe(true);
   });
 });

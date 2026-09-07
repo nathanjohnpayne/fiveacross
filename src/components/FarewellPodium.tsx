@@ -9,7 +9,7 @@ import type {
   ProofDoc,
 } from '../types';
 import { buildPodium, type Podium } from '../data/finale';
-import { standingsFreezeAtFor } from '../game/logic';
+import { resolvedStandingsFreezeAt } from '../game/logic';
 import { mostLovedDisplayWinners, mostLovedFrozenEventPayload } from '../data/mostLoved';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
@@ -461,7 +461,7 @@ function FarewellPodiumInner({
   // recording Marks afterwards, and without this cutoff a post-freeze bingo
   // could mint a First to BINGO the scheduler's immutable podium Moment does
   // not have — the card and the Feed naming different winners.
-  const freezeAt = event?.frozenAt ?? standingsFreezeAtFor(event ?? null);
+  const freezeAt = resolvedStandingsFreezeAt(event ?? null);
   const podium = buildPodium(players, days, dayMetas, dayMetasLoaded, freezeAt);
   const dayLabel = makeDayLabel(days);
 
