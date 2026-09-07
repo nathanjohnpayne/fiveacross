@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { applyPublisherSync, initialRegistryState, registryLookup } from './state';
-import type { RegistryState, RouterReplicaDesired } from './contracts';
+import type { RegistryState, ReplicaDesired, RouterReplicaDesired } from './contracts';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
+const ROOT_TEST_HOST = `r2-root-${'e'.repeat(20)}.fiveacross.app`;
 
 function desired(revision: string, eventId = 'synthetic-event'): RouterReplicaDesired {
   return {
@@ -109,16 +110,101 @@ describe('per-host contiguous publisher state', () => {
     const first = await applyPublisherSync(initialRegistryState(), desired('1'), '1');
     expect(registryLookup(first.state)).toEqual({
       kind: 'committed',
+      schemaVersion: 1,
       revision: '1',
       desired: desired('1').desired,
     });
     expect(registryLookup(locked(first.state))).toEqual({
       kind: 'committed',
+      schemaVersion: 1,
       revision: '1',
       desired: desired('1').desired,
     });
     expect(registryLookup(initialRegistryState())).toEqual({
       kind: 'unknown-host',
     });
+  });
+
+  it('reports a tombstone as unknown but keeps the revision recovery has to observe', async () => {
+    // The projection is withheld — a deleted address must not advertise that
+    // it ever named an Event — but the revision is not. The spec's own threat
+    // model calls individual replica revisions public metadata, and
+    // `clear-lock` consumes three public attestations "whose host/result/
+    // revision equal committed state", which a tombstoned host could never
+    // produce if its public answer carried no revision.
+    const tombstone = {
+      ...desired('1'),
+      revision: '4',
+      desired: { kind: 'tombstone' } as const,
+    };
+    const applied = await applyPublisherSync(initialRegistryState(), { ...desired('1') }, '1');
+    const deleted = await applyPublisherSync(applied.state, { ...tombstone, revision: '2' }, '1');
+    expect(deleted.response).toEqual({ status: 200, result: 'applied' });
+    expect(registryLookup(deleted.state)).toEqual({
+      kind: 'unknown-host',
+      revision: '2',
+      schemaVersion: 1,
+    });
+  });
+
+  it('carries the committed schema version on every shape the router interprets', async () => {
+    // The registry is a separately deployed Worker, so the version a record was
+    // COMMITTED under is the only thing that tells a router on the far side of
+    // the service binding whether it may read the record at all. An additive v2
+    // that kept today's discriminants would otherwise arrive looking exactly
+    // like a v1 route. The version therefore travels with every arm derived
+    // from a committed record — the active and inactive route, the root marker,
+    // and the tombstone whose revision the router publishes — which is what
+    // lets `worker/src/resolve.ts` refuse an unsupported one BEFORE reading
+    // `desired` (`specs/event-router-registry.md` § Failure semantics,
+    // "malformed/unsupported committed state").
+    const route = (status: 'active' | 'disabled'): ReplicaDesired => ({
+      kind: 'route',
+      eventId: 'synthetic-event',
+      status,
+      slug: 'r2-abcdefghijklmnopqrstuvwxyz',
+      edition: 'fiveacross',
+      pathNamespace: null,
+    });
+    const root: ReplicaDesired = {
+      kind: 'root',
+      root: 'doorway',
+      edition: 'fiveacross',
+      pathNamespace: null,
+    };
+
+    for (const [label, host, shape] of [
+      ['active route', HOST, route('active')],
+      ['inactive route', HOST, route('disabled')],
+      ['root marker', ROOT_TEST_HOST, root],
+    ] as const) {
+      const applied = await applyPublisherSync(
+        initialRegistryState(),
+        { ...desired('1'), host, desired: shape },
+        '1',
+      );
+      expect(applied.response, label).toEqual({ status: 200, result: 'applied' });
+      expect(registryLookup(applied.state), label).toEqual({
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '1',
+        desired: shape,
+      });
+    }
+
+    const tombstoned = await applyPublisherSync(
+      initialRegistryState(),
+      { ...desired('1'), desired: { kind: 'tombstone' } },
+      '1',
+    );
+    expect(registryLookup(tombstoned.state)).toEqual({
+      kind: 'unknown-host',
+      revision: '1',
+      schemaVersion: 1,
+    });
+
+    // An uninitialized object has no committed record, so it stamps no version
+    // and the router reads the same plain `unknown-host` it always did.
+    expect(registryLookup(initialRegistryState())).toEqual({ kind: 'unknown-host' });
   });
 });

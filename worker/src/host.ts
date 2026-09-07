@@ -8,7 +8,7 @@
 // namespace guard, NEVER an authorization layer, and the application still
 // verifies membership before reading Event data.
 
-import { isReservedLabel, validateSlug, type SlugRejection } from '../../src/slug';
+import { isRehearsalLabel, isReservedLabel, validateSlug, type SlugRejection } from '../../src/slug';
 import { hostnameKey } from '../../src/hostnameKey';
 
 /**
@@ -42,10 +42,12 @@ export type HostRejection =
 
 export type HostClass =
   /** The Namespace apex itself — `fiveacross.app`. A registered serving host
-   *  with its own `hostnames/{host}` document, but no first label, so there is
-   *  no Slug to validate or cross-check. */
+   *  with its own committed registry projection, but no first label, so there
+   *  is no Slug to validate or cross-check. */
   | { kind: 'apex'; host: string; namespace: string; slug: null }
-  /** A wildcard Event address — `bodega-bay.fiveacross.app`. */
+  /** A labelled address under a Namespace — `bodega-bay.fiveacross.app`, or one
+   *  of the two closed rehearsal classes. Whether it SERVES is `resolve.ts`'s
+   *  question; this only says the address may reach the lookup. */
   | { kind: 'event'; host: string; namespace: string; slug: string }
   | { kind: 'rejected'; host: string; reason: HostRejection; detail?: SlugRejection };
 
@@ -104,6 +106,19 @@ export function classifyHost(rawHost: string, namespaces: readonly string[] = NA
     const label = host.slice(0, host.length - namespace.length - 1);
     if (label.includes('.')) {
       return { kind: 'rejected', host, reason: 'nested-label' };
+    }
+    // The two CLOSED rehearsal classes are addressable even though `r2-*` is
+    // permanently unclaimable (#972; specs/event-router-registry.md § Lookup,
+    // cache, and abuse posture). The exception is narrow in three directions
+    // at once, which is what makes it safe to grant a public guard: only these
+    // two exact shapes qualify — every other `r2-` label falls through to the
+    // reserved refusal below — being addressable is not being SERVABLE, since
+    // a rehearsal host with no committed registry projection still fails
+    // closed as `unknown-host`; and only the guarded controller can create one
+    // of those projections, because every ordinary claim and mutation path
+    // rejects the prefix globally.
+    if (isRehearsalLabel(label)) {
+      return { kind: 'event', host, namespace, slug: label };
     }
     if (isReservedLabel(label)) {
       return { kind: 'rejected', host, reason: 'reserved-label' };

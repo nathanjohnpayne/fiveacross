@@ -14,7 +14,12 @@ const authState = vi.hoisted(() => ({
 }));
 
 vi.mock('./auth/AuthContext', () => ({
-  useAuth: () => ({ user: { uid: 'sailor-1' }, loading: false, ...authState.value }),
+  useAuth: () => ({
+    user: { uid: 'sailor-1' },
+    loading: false,
+    admission: { kind: 'clear' },
+    ...authState.value,
+  }),
   AuthProvider: ({ children }: { children: ReactNode }) => children,
 }));
 

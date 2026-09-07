@@ -85,7 +85,15 @@ tmp/
 # a pre-existing one is user-owned and must never be committed).
 functions/.secret.local
 
-# Cloudflare Worker local dev secrets (worker/README.md § 2 rehearsal). Holds a
-# real Firebase web api key; never committed.
+# Cloudflare Worker local dev secrets. The router itself no longer holds any
+# secret (#972 removed the Firebase api key along with the Firestore reader),
+# but `wrangler dev` still reads this file and a future binding could reach for
+# it, so it stays ignored rather than being re-added after the first accident.
 .dev.vars
 worker/.dev.vars
+
+# `wrangler dev` state: local Durable Object storage, the workerd config cache,
+# and dev-session logs. Created by `npm run worker:dev`, which since #972 starts
+# the registry alongside the router and therefore materialises a local object
+# store on first run.
+worker/.wrangler/

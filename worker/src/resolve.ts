@@ -1,199 +1,318 @@
-// The Event lookup at the edge (#545): "resolves slugs from the same
-// `hostnames/{host}` collection the client uses" (specs/hostnames-lookup.md,
-// ADR 0009). Same collection, same fail-closed rules, same stale-serve
-// behaviour as `src/eventResolution.ts` — deliberately, because two answers to
-// "is this address in service?" that can disagree is worse than either answer
-// alone.
+// The Event lookup at the edge, against the App Check-compatible registry
+// (#972, epic #888; specs/event-router-registry.md, ADR 0014).
 //
-// Every seam is injected (`fetch`, `cache`, `now`), mirroring the convention
-// `specs/event-resolution.md` sets for the client resolver: "a pure function
-// with injected `fetchDoc`, `storage`, `now` and `delay`, so every branch is
-// testable without a network, a browser or an emulator." That is why the whole
-// decision table below is exercised by `resolve.test.ts` with no workerd, no
-// Firestore and no Cloudflare cache.
+// This module used to point-get `hostnames/{host}` over the Firestore REST API
+// with the Firebase web api key, in front of a `caches.default` envelope with a
+// TTL and a stale-serve path. All of it is gone, and the removal is the point
+// rather than a side effect: enforced Cloud Firestore rejects an unattested
+// REST caller regardless of the public `allow get` rule, so a router that reads
+// Firestore at all can only be routed by weakening the control #44 exists to
+// add. What replaces it is one strongly consistent point call into a per-host
+// Durable Object through a named lookup-only service binding.
+//
+// THERE IS NO FALLBACK BEHIND IT — not Firestore, not KV, not the Cache API,
+// not a negative or stale envelope. That is a deliberate trade rather than an
+// omission: the registry object is the single transactional owner of acceptance
+// and lookup, so a second cached answer could only ever disagree with it, and a
+// router that serves a mapping the registry has retracted is worse than one
+// that fails closed for the length of an outage. Every failure below is a
+// rendered not-found with a closed reason header.
+//
+// Every seam is injected (`registry`), so the whole decision table below is
+// exercised by `resolve.test.ts` with no workerd, no Durable Object and no
+// network — the same convention `specs/event-resolution.md` sets for the client
+// resolver, and the reason `worker/src/index.ts` is still the only file here
+// that knows it is running on Cloudflare.
 
-/** The subset of `hostnames/{host}` this router reads. Still a subset on
- *  purpose — the preview slice and the 18+ posture stay with the app, which
- *  resolves them for itself from the same document. */
-export interface HostnameRecord {
-  eventId: string;
-  status: string;
-  /** The first label, denormalised onto the document expressly "for the edge
-   *  router" (specs/hostnames-lookup.md § Data model). This module is that
-   *  router, and cross-checking it is what makes a repointed or half-written
-   *  document fail closed instead of serving. */
-  slug: string | null;
-  /** Which Edition dresses this address (specs/hostnames-lookup.md § Data
-   *  model), read for the per-hostname PWA manifest (#546) and for NOTHING
-   *  else.
-   *
-   *  It is a widening of the EXISTING field mask rather than a second lookup,
-   *  and that is the point: two reads of one document are two answers that can
-   *  disagree, which is the failure mode this module's whole cache posture
-   *  exists to prevent. Whether the address serves at all is decided without
-   *  it — see {@link RoutingFields}, whose narrowed type is what makes routing
-   *  on the Edition a compile error rather than something review has to
-   *  catch. */
-  edition: string | null;
-}
+import {
+  hasExactDesiredKeys,
+  isCanonicalRevision,
+  isRegistryEdition,
+  isRegistryRootHost,
+  isReplicaRootMarker,
+  isReplicaRouteStatus,
+  isSyntheticRootTestHost,
+  registryHostPathNamespace,
+  registryRootHostEdition,
+  type PathNamespace,
+  type RegistryEdition,
+} from './registry/contracts';
+import type { RegistryLookup, RegistryLookupService } from './registry/state';
+import { validateSlug } from '../../src/slug';
 
-/**
- * The fields the fail-closed decision may see — deliberately NOT the whole
- * record.
- *
- * `edition` is data the router CARRIES, never data it routes on. Stating that
- * as a type rather than as a convention means a later edit that tries to make
- * an Edition decide whether an address serves does not compile, which is
- * strictly better than a rule a reviewer has to remember. A `Pick` rather than
- * an `Omit` so a future non-routing field is excluded by DEFAULT: `Omit` would
- * quietly admit it.
- */
-export type RoutingFields = Pick<HostnameRecord, 'eventId' | 'status' | 'slug'>;
+export type { RegistryLookupService };
 
 export type NotFoundReason =
-  /** No `hostnames/{host}` document. The ordinary unknown-address case. */
+  /** No committed projection for this address — an uninitialized object, or a
+   *  tombstone, which is permanent and reads the same way from outside. The
+   *  ordinary unknown-address case. */
   | 'unknown-host'
-  /** Present but `status` is not `active` — disabled, archived, or a value
-   *  this router does not recognise. */
+  /** A committed route whose `status` is not `active` — disabled or archived. */
   | 'inactive'
-  /** Present and active but carries no `eventId`. A half-written document. */
-  | 'malformed'
-  /** Present, but its denormalised `slug` names a different first label than
-   *  the address it was reached at. */
+  /** The registry answered, and its committed projection is malformed or
+   *  carries a shape this router does not support. Distinguished from
+   *  `lookup-unavailable` because it alerts and will not heal on a retry. */
+  | 'replica-malformed'
+  /** A committed route whose denormalised `slug` names a different first label
+   *  than the address it was reached at. */
   | 'slug-mismatch'
-  /** Present, but carries no `slug` to cross-check against. */
+  /** A committed route carrying no `slug` to cross-check against. */
   | 'slug-missing'
-  /** The lookup itself could not be completed and no cached answer existed.
-   *  The only reason that is about US rather than about the address. */
-  | 'lookup-unavailable'
-  /** The lookup completed and Firestore REFUSED it — 401/403. Distinguished
-   *  from `lookup-unavailable` because the two demand opposite responses: an
-   *  unavailable lookup is usually transient and self-heals, whereas a refused
-   *  one is a standing configuration fact that will never self-heal and takes
-   *  every uncached host down the moment the cache drains. App Check
-   *  enforcement on Cloud Firestore (docs/app/phase-1-deploy.md § 2) is the
-   *  expected cause: this Worker reads as an unauthenticated caller carrying
-   *  only the web API key, which enforced Firestore rejects regardless of the
-   *  public `allow get` rule. Seeing this reason on every host means the
-   *  project enforces App Check and the router cannot serve until that is
-   *  resolved — not that Firestore is down. */
-  | 'lookup-forbidden';
-
-/** What {@link decide} answers, from the routing fields alone. */
-type RoutingDecision =
-  | { kind: 'serve'; eventId: string; stale: boolean }
-  | { kind: 'not-found'; reason: NotFoundReason };
-
-export type Resolution =
-  /** `edition` rides along on a SERVING resolution only. A fail-closed answer
-   *  has no Edition by construction — the router does not know which Event, and
-   *  therefore which Edition, the address belongs to, which is the same reason
-   *  the not-found page is brand-neutral. */
-  | { kind: 'serve'; eventId: string; stale: boolean; edition: string | null }
-  | { kind: 'not-found'; reason: NotFoundReason };
-
-/** Firestore answered, and the answer was "no". Its own class so the resolver
- *  can report a refusal distinctly from an unreachable dependency without
- *  string-matching a message. */
-export class LookupRefusedError extends Error {}
-
-/** Bumped whenever `CacheEnvelope`'s shape changes, so an envelope written by
- *  an older Worker version reads as a MISS rather than being coerced —
- *  the same rule the client cache follows (specs/event-resolution.md). */
-export const CACHE_VERSION = 2;
-
-export interface CacheEnvelope {
-  version: number;
-  fetchedAt: number;
-  record: HostnameRecord;
-}
+  /** The lookup itself could not be completed: no registry binding, or the
+   *  service call rejected or exceeded the bound. The only reason that is about
+   *  US rather than about the address. */
+  | 'lookup-unavailable';
 
 /**
- * Whether a value read back from the cache is an envelope this resolver may
- * dereference.
+ * The projection the router serves from — and the whole of it.
  *
- * A version check alone is NOT enough, and the gap is the same
- * crash-instead-of-fail-closed family as an unbound binding: an envelope
- * carrying the current `CACHE_VERSION` but a missing or partial `record` would
- * pass a version test, reach `decide`, and throw on `record.status` — a Worker
- * runtime error in place of the documented fail-closed page. The cache is a
- * deserialisation boundary (JSON out of a shared store, possibly written by a
- * different deployment), so every field the resolver dereferences is checked
- * here. Anything short reads as a MISS, never as coerced data — the same rule
- * `specs/event-resolution.md` gives the client's envelope.
+ * It carries no membership, no Event data, no adult-content posture and no
+ * hostname catalogue, because the router routes: the application resolves all
+ * of that for itself and never accepts the edge's `eventId` as its own
+ * Resolution (ADR 0014 invariant 2). `edition` and the root/path-capability
+ * fields are present only because #546's per-host identity and the accepted
+ * path-addressing contract must render without a second lookup.
  */
-export function isCacheEnvelope(value: unknown): value is CacheEnvelope {
-  if (typeof value !== 'object' || value === null) return false;
-  const envelope = value as Partial<CacheEnvelope>;
-  if (envelope.version !== CACHE_VERSION) return false;
-  if (typeof envelope.fetchedAt !== 'number' || !Number.isFinite(envelope.fetchedAt)) return false;
-  if (typeof envelope.record !== 'object' || envelope.record === null) return false;
-  const record = envelope.record as Partial<HostnameRecord>;
-  return (
-    typeof record.eventId === 'string' &&
-    typeof record.status === 'string' &&
-    (record.slug === null || typeof record.slug === 'string') &&
-    // Checked like every other dereferenced field, and NOT waved through as
-    // "only branding": an envelope missing it would hand `undefined` to the
-    // manifest builder, which resolves that to the default Edition — a wrong
-    // installed name is precisely the defect #546 exists to remove, and it
-    // would arrive silently. Version 2 exists so envelopes written before the
-    // field read as a MISS rather than reaching this check at all.
-    (record.edition === null || typeof record.edition === 'string')
-  );
+export interface ServedRecord {
+  /** `null` for a root marker: a configured origin that is not itself an Event. */
+  eventId: string | null;
+  /** A validated canonical decimal — the only shape that reaches the
+   *  `x-event-router-revision` header. */
+  revision: string;
+  pathNamespace: PathNamespace;
+  edition: RegistryEdition;
+  /** `doorway` or `not-found` for a root marker, `null` for a route. It
+   *  controls the APP's `/` outcome, never whether the edge may serve. */
+  root: 'doorway' | 'not-found' | null;
 }
 
-/** The cache seam. `worker/src/index.ts` adapts Cloudflare's `caches.default`
- *  to it; the tests supply a map. Deliberately narrow — a `Cache` has a large
- *  surface this module has no use for. */
-export interface HostnameCache {
-  read(host: string): Promise<CacheEnvelope | null>;
-  write(host: string, envelope: CacheEnvelope): Promise<void>;
-  /** A revalidated refusal supplies the lookup start time as a fence, so an
-   *  older in-flight positive response cannot repopulate the entry after it. */
-  drop(host: string): Promise<void>;
-}
+export type Resolution =
+  | { kind: 'serve'; record: ServedRecord }
+  | {
+      kind: 'not-found';
+      reason: NotFoundReason;
+      /**
+       * The committed revision this refusal was decided FROM, or `null` when
+       * there was none to decide from.
+       *
+       * A fail-closed answer is not automatically a revision-less one.
+       * `specs/event-router-registry.md` § Failure semantics says a resolved
+       * edge record carries `x-event-router-revision`, and § Audit and recovery
+       * makes that header load-bearing rather than decorative: a
+       * `canonical-after-unblock` probe observation is `{reason, revision}`
+       * together for `null`, `inactive` AND `unknown-host`, and `clear-lock`
+       * consumes three of them "whose host/result/revision equal committed
+       * state". A router that dropped the revision on the two refusals the
+       * recovery machine can be asked to prove would leave those hosts unable
+       * to clear a lock — and therefore unable to accept another publisher
+       * update — for as long as the state persisted.
+       *
+       * So it is non-null for exactly the refusals the router decided FROM a
+       * committed record it could attribute to this address: `inactive`, and
+       * the `unknown-host` a tombstone produces. It is `null` for the refusals
+       * that are about the absence of a usable record rather than its content —
+       * an uninitialized object, an unavailable lookup, a malformed projection,
+       * and a record whose Slug names a different address, none of which the
+       * probe contract models and none of which the router may claim to be
+       * serving a revision for.
+       */
+      revision: string | null;
+    };
 
 export interface ResolveConfig {
-  projectId: string;
-  apiKey: string;
+  /** Hard bound on the whole registry service call. */
   lookupTimeoutMs: number;
-  cacheTtlMs: number;
 }
 
 export interface ResolveDeps {
-  fetch: typeof fetch;
-  cache: HostnameCache;
-  now(): number;
+  /** The named lookup-only registry entrypoint, or `null` when the binding is
+   *  absent. Absent is a configuration fact the router must ANSWER rather than
+   *  crash in — the same reason `config.ts` normalises an unbound string
+   *  binding to `''` instead of leaving it `undefined`. */
+  registry: RegistryLookupService | null;
+  /**
+   * Where the two refusals the registry spec pages on are reported
+   * (§ Failure semantics: `replica-malformed` and `lookup-unavailable` both say
+   * "alert"). A closed, bounded event — the reason and the host, never the
+   * lookup's contents — so a permanently broken projection is distinguishable
+   * from an ordinary unknown host in monitoring (Phase 4b P2, #1120).
+   * Optional: the decision table is unchanged whether or not anyone listens.
+   */
+  diagnostics?: (event: RouterDiagnosticEvent) => void;
 }
 
+/** The closed shape every router-side alert carries. */
+export interface RouterDiagnosticEvent {
+  event: 'event-router.diagnostic';
+  outcome: 'replica-malformed' | 'lookup-unavailable';
+  host: string;
+}
+
+const ALERTED_REASONS: ReadonlySet<NotFoundReason> = new Set(['replica-malformed', 'lookup-unavailable']);
+
 /**
- * Whether the router can perform a lookup at all.
- *
- * Exported because it is checked in TWO places for two different reasons, and
- * collapsing them into one would lose a case: here, so a lookup is never
- * attempted with no credentials, and in `router.ts` BEFORE the `/__/auth/*`
- * exemption, so an unconfigured deployment fails closed uniformly instead of
- * quietly proxying the one path that skips the lookup. A missing api key is not
- * the transient dependency failure that exemption exists to survive — it is a
- * total misconfiguration, and a router that half-serves under one is harder to
- * diagnose than one that serves nothing.
+ * Emit one router-side diagnostic through the seam. Exported so the router can
+ * report the refusal it decides BEFORE `resolveHost` runs — an absent binding
+ * — under the same closed shape (Codex P2 on #1120): the spec's Failure
+ * semantics page on that case, and a deployment-wide misconfiguration is the
+ * one failure this alerting most needs to see.
  */
-export function isLookupConfigured(config: Pick<ResolveConfig, 'projectId' | 'apiKey'>): boolean {
-  return config.apiKey.length > 0 && config.projectId.length > 0;
+export function reportDiagnostic(
+  deps: Pick<ResolveDeps, 'diagnostics'>,
+  host: string,
+  outcome: RouterDiagnosticEvent['outcome'],
+): void {
+  if (!deps.diagnostics) return;
+  try {
+    deps.diagnostics({ event: 'event-router.diagnostic', outcome, host });
+  } catch {
+    // A diagnostic must never turn a closed refusal into an escaping error.
+  }
+}
+
+function reportRefusal(deps: ResolveDeps, host: string, resolution: Resolution): Resolution {
+  if (resolution.kind === 'not-found' && ALERTED_REASONS.has(resolution.reason)) {
+    reportDiagnostic(deps, host, resolution.reason as RouterDiagnosticEvent['outcome']);
+  }
+  return resolution;
+}
+
+/** `revision` defaults to `null`, so a refusal only carries one where the arm
+ *  deciding it says so. */
+function notFound(reason: NotFoundReason, revision: string | null = null): Resolution {
+  return { kind: 'not-found', reason, revision };
 }
 
 /**
- * ONLY positive resolutions are cached, and the asymmetry is deliberate.
+ * The exact key set each LOOKUP ENVELOPE arm may carry.
  *
- * A cached negative would make a newly provisioned Event unreachable for the
- * length of the TTL — an organizer finishes the setup wizard, types their own
- * address, and gets the not-found page for five minutes. That is the exact
- * moment the product is least able to afford it. A negative lookup is also
- * cheap to recompute: one Firestore point read, which Cloudflare absorbs at
- * edge volume. If unresolvable-hostname traffic ever becomes a real cost, the
- * knob is a short negative TTL here, not rate limiting bolted into the router —
- * volumetric abuse belongs to the Cloudflare layer in front of this code.
+ * The same rule the projection gets, one level up, and for the same reason. An
+ * envelope that carries a field its arm does not define is internally
+ * contradictory — `{kind: 'unknown-host', revision, schemaVersion, desired}` is
+ * a registry that has said "nothing here" and handed over a projection in the
+ * same breath — and validating only the fields the arm happens to read would
+ * publish that revision as canonical recovery evidence off a record this Worker
+ * never actually agreed with. `parseDesired` refuses contradictory shapes on
+ * the way in; a separately deployed consumer has to refuse them on the way out.
+ *
+ * `revision` and `schemaVersion` are optional on the `unknown-host` arm, so it
+ * is expressed as the keys ALLOWED rather than the keys required; the pairing
+ * rule below is what makes the optional pair coherent.
+ */
+const ENVELOPE_KEYS: Record<string, readonly string[]> = {
+  'unknown-host': ['kind', 'revision', 'schemaVersion'],
+  unavailable: ['kind'],
+  malformed: ['kind'],
+  committed: ['desired', 'kind', 'revision', 'schemaVersion'],
+};
+
+function hasExactEnvelopeKeys(lookup: RegistryLookup): boolean {
+  // An OWN-property lookup, and a string discriminant, before the table is
+  // indexed at all. `ENVELOPE_KEYS` is an ordinary object literal, so it
+  // inherits every member of `Object.prototype`: `{kind: 'constructor'}`,
+  // `{kind: 'toString'}` and `{kind: '__proto__'}` each select an inherited
+  // member that is not an array, and `allowed.includes` throws on it. That
+  // throw does not stay inside the module — `decide` runs OUTSIDE the
+  // `try/catch` in `resolveHost`, which brackets the bounded service call
+  // only — so a registry answer carrying one of those three strings escapes as
+  // a runtime error and an unversioned Cloudflare error page, instead of the
+  // `replica-malformed` this table promises for every arm it does not
+  // recognise (Codex P2 on #1120). A non-string `kind` is refused for the same
+  // reason it is refused everywhere else here: it is not a discriminant this
+  // envelope defines.
+  const kind: unknown = (lookup as { kind?: unknown }).kind;
+  if (typeof kind !== 'string' || !Object.hasOwn(ENVELOPE_KEYS, kind)) return false;
+  const allowed = ENVELOPE_KEYS[kind];
+  const actual = Object.keys(lookup);
+  return actual.every((key) => allowed.includes(key));
+}
+
+/**
+ * The projection schema versions THIS router build knows how to interpret.
+ *
+ * Declared here rather than imported from the registry's contracts module, and
+ * the distinction is the whole mechanism: the registry stamps a committed
+ * record with the version it was WRITTEN under, and this set is the version or
+ * versions this deployment can READ. They are different facts about two
+ * separately deployed Workers, and a single shared constant would silently make
+ * every registry schema bump look supported to a router that had merely been
+ * rebuilt against it.
+ *
+ * Widening it is therefore a deliberate edit made together with the code that
+ * understands the new shape — never a consequence of the registry moving.
+ */
+const SUPPORTED_PROJECTION_SCHEMA_VERSIONS: ReadonlySet<number> = new Set([1]);
+
+/**
+ * Fail-closed on the version BEFORE anything is read out of the record.
+ *
+ * `specs/event-router-registry.md` § Failure semantics gives unsupported
+ * committed state the same closed answer as malformed state, and this is the
+ * only check that can deliver it: a future schema whose `desired` keeps today's
+ * discriminants — an additive v2 — is byte-indistinguishable from a v1 route
+ * once the version is gone, so a router that reads the projection first has
+ * already served it under the wrong rules. Absent, non-numeric and merely
+ * unrecognised versions are all the same answer, because "I cannot tell what
+ * this record means" is one condition however it arrives.
+ */
+function isSupportedProjectionSchemaVersion(value: unknown): value is number {
+  return typeof value === 'number' && SUPPORTED_PROJECTION_SCHEMA_VERSIONS.has(value);
+}
+
+/**
+ * Whether the projection's `pathNamespace` is the one this host may carry.
+ *
+ * Compared against a single expected VALUE rather than against membership of
+ * the closed set, because membership is not the rule: `fiveacross.app` is a
+ * valid namespace and a valid value for the apex, and simultaneously an invalid
+ * value for `bodega-bay.fiveacross.app`. A set test would accept the second and
+ * publish a path capability claiming an Event subdomain is path-addressed,
+ * which is precisely what the accepted path-addressing contract forbids.
+ */
+function hostPathNamespace(host: string, pathNamespace: PathNamespace): boolean {
+  return pathNamespace === registryHostPathNamespace(host);
+}
+
+/**
+ * Bound the ENTIRE service call, not a request inside it.
+ *
+ * The Firestore reader could hand `AbortSignal.timeout` to `fetch` and be done;
+ * an RPC call over a service binding has no such signal, so the bound has to be
+ * a race the caller owns. Unbounded, a hung registry would put every request on
+ * the wrong side of a stalled dependency — the failure class the 2,000 ms bound
+ * exists to prevent, and the one an edge router can least afford because it
+ * sits in front of the origin rather than beside it.
+ *
+ * The timer is always cleared, so a fast lookup does not leave the isolate
+ * holding a pending timeout for the rest of the bound.
+ */
+async function boundedLookup(
+  registry: RegistryLookupService,
+  host: string,
+  timeoutMs: number,
+): Promise<RegistryLookup> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      registry.lookup(host),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('event-router: registry lookup timed out')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * One point lookup, and nothing else.
+ *
+ * Note what is NOT here any more: no cache read, no TTL comparison, no
+ * stale-serve, no drop-on-refusal, no negative-caching asymmetry. Every one of
+ * those existed to soften a slow or unreachable Firestore, and every one of
+ * them was a second answer to "is this address in service?" that could disagree
+ * with the first. The registry object is strongly consistent with its own
+ * committed state, so the correct behaviour on a failed lookup is to say so.
  */
 export async function resolveHost(
   host: string,
@@ -201,232 +320,275 @@ export async function resolveHost(
   config: ResolveConfig,
   deps: ResolveDeps,
 ): Promise<Resolution> {
-  // The cache is an OPTIMISATION, so every access degrades to "no cache"
-  // rather than propagating. A rejecting Cache API would otherwise escape this
-  // function as a Worker runtime error — no rendered state, no diagnostic
-  // header, no fail-closed page — which is strictly worse than the extra
-  // Firestore read a miss costs. Same rule `specs/event-resolution.md` gives
-  // the client: "storage that throws on access degrades to 'no cache', never
-  // to a failed boot."
-  // Validated at the seam, not merely version-checked: `deps.cache` is an
-  // injected interface over a shared store, so what comes back is untrusted
-  // data rather than a value this module wrote.
-  const raw = await swallow<unknown>(() => deps.cache.read(host), null);
-  const cached = isCacheEnvelope(raw) ? raw : null;
-  // Age must be non-negative as well as under the TTL. An envelope stamped in
-  // the FUTURE — by a clock-skewed writer, or left by another deployment on
-  // the shared cache this module treats as untrusted — yields a negative age,
-  // which would satisfy a bare `< ttl` test and pin an obsolete mapping for
-  // the cache's full retention window without ever revalidating. A stamp we
-  // cannot have written is evidence of nothing, so it revalidates.
-  const age = cached === null ? -1 : deps.now() - cached.fetchedAt;
-  const fresh = cached !== null && age >= 0 && age < config.cacheTtlMs;
-  const eligibleForStaleServe = cached !== null && age >= 0;
+  if (deps.registry === null) return reportRefusal(deps, host, notFound('lookup-unavailable'));
 
-  if (fresh && cached !== null) {
-    // Envelope shape alone only makes the value safe to inspect. It does NOT
-    // make it a positive cache entry: a current-version envelope could have
-    // been left by an older deployment while its record was inactive,
-    // malformed, or for another Slug. Returning that decision would turn the
-    // shared cache into a negative cache and strand a corrected Firestore
-    // record until the TTL elapsed. Fresh cache may serve, never refuse.
-    const decision = decide(cached.record, expectedSlug, false);
-    if (decision.kind === 'serve') return withEdition(decision, cached.record);
-    await swallow(() => deps.cache.drop(host), undefined);
-  }
-
-  let record: HostnameRecord | null;
-  // Stamped when the lookup BEGINS, not when it returns, so an entry ages from
-  // the moment its evidence was requested rather than from whenever a slow
-  // response happened to arrive. That is the conservative direction: it can
-  // only shorten an entry's freshness, never extend it past the TTL.
-  //
-  // It deliberately does NOT order overlapping lookups against each other. A
-  // request start time says nothing about which document state each read
-  // observed, so a later-starting lookup can still have read an older
-  // document. See `worker/src/index.ts` for why the ordering problem is
-  // accepted rather than half-defended.
-  const observedAt = deps.now();
+  let lookup: RegistryLookup;
   try {
-    record = await fetchHostnameRecord(host, config, deps);
-  } catch (error) {
-    // Revalidation failed. A stale-but-servable entry still serves and is NOT
-    // restamped — an expired mapping beats a dead app when the network is
-    // simply gone, but it stops counting as evidence the mapping is still
-    // good (specs/event-resolution.md). With no entry at all there is nothing
-    // to fall back to, so this fails closed like every other unknown.
-    if (eligibleForStaleServe && cached !== null) {
-      return withEdition(decide(cached.record, expectedSlug, true), cached.record);
-    }
-    return {
-      kind: 'not-found',
-      reason: error instanceof LookupRefusedError ? 'lookup-forbidden' : 'lookup-unavailable',
-    };
-  }
-
-  if (record === null) {
-    // Dropped, not expired: a mapping that is gone must stop serving from this
-    // edge immediately rather than at the end of its TTL.
-    await swallow(() => deps.cache.drop(host), undefined);
-    return { kind: 'not-found', reason: 'unknown-host' };
-  }
-
-  const decision = decide(record, expectedSlug, false);
-  if (decision.kind === 'serve') {
-    await swallow(
-      () => deps.cache.write(host, { version: CACHE_VERSION, fetchedAt: observedAt, record }),
-      undefined,
-    );
-  } else {
-    // Only SERVABLE records are cached, and the else-arm is the other half of
-    // that rule rather than a tidy-up. Caching a record that exists but does
-    // not serve — inactive, malformed, slug-mismatched — would manufacture
-    // exactly the stuck negative this module refuses to create for an unknown
-    // host: provisioning that briefly exposes a partial document would pin the
-    // failure for a full TTL after the document was corrected. Dropping also
-    // closes the other direction: an Event that goes inactive must not leave a
-    // servable envelope behind for the stale-serve path to resurrect.
-    await swallow(() => deps.cache.drop(host), undefined);
-  }
-  return withEdition(decision, record);
-}
-
-/**
- * Re-attach the non-routing Edition to a decision made without it.
- *
- * The join happens HERE rather than inside `decide` because `decide` is not
- * allowed to see the field at all ({@link RoutingFields}). A refusal carries no
- * Edition: the router does not know which Event the address belongs to, so it
- * has none to carry.
- */
-function withEdition(decision: RoutingDecision, record: HostnameRecord): Resolution {
-  return decision.kind === 'serve' ? { ...decision, edition: record.edition } : decision;
-}
-
-/** Run a cache operation, treating any failure as absence. */
-async function swallow<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await operation();
+    lookup = await boundedLookup(deps.registry, host, config.lookupTimeoutMs);
   } catch {
-    return fallback;
+    // A rejected or timed-out service call is indistinguishable from an
+    // unavailable object from here, and both demand the same closed answer.
+    // The rejection is swallowed rather than propagated so the response stays
+    // inside the router's contract: an escaping rejection would hand the
+    // response to Cloudflare and lose the version stamp an operator uses to
+    // prove this Worker handled the host.
+    return reportRefusal(deps, host, notFound('lookup-unavailable'));
   }
+
+  return reportRefusal(deps, host, decide(host, lookup, expectedSlug));
 }
 
 /**
  * The fail-closed decision table. Every arm that is not an explicit,
- * well-formed, active, address-matching record is a not-found — never an
+ * well-formed, active, address-matching projection is a not-found — never an
  * inferred active.
- */
-function decide(
-  record: RoutingFields,
-  expectedSlug: string | null,
-  stale: boolean,
-): RoutingDecision {
-  // `status` must be EXPLICIT. Defaulting a missing or unrecognised value to
-  // active would let a half-written routing document publish an Event before
-  // the record opts in (ADR 0009).
-  if (record.status !== 'active') return { kind: 'not-found', reason: 'inactive' };
-  if (record.eventId.length === 0) return { kind: 'not-found', reason: 'malformed' };
-
-  // The apex has no first label, so there is nothing to cross-check; its
-  // document's `slug` names the Event's wildcard address, not this one.
-  if (expectedSlug !== null) {
-    if (record.slug === null) return { kind: 'not-found', reason: 'slug-missing' };
-    if (record.slug !== expectedSlug) return { kind: 'not-found', reason: 'slug-mismatch' };
-  }
-
-  return { kind: 'serve', eventId: record.eventId, stale };
-}
-
-/**
- * One Firestore REST point-get, as an UNAUTHENTICATED caller.
  *
- * The Worker carries the Firebase web API key and no service-account
- * credential, which is a deliberate ceiling rather than an omission: it means
- * the router can read exactly what a browser standing on the same address can
- * read, and `firestore.rules` (`allow get: if true; allow list: if false`) is
- * the thing enforcing that — not a promise this code makes about itself. A
- * router that held admin credentials would be one refactor away from becoming
- * the authorization layer #529 says it must never be. The web API key is not a
- * secret; the identical value already ships in every production bundle.
- *
- * Throws on anything that is not a definite answer, so the caller's stale-serve
- * path can take over. A 404 is a definite answer — Firestore returns it for a
- * document that does not exist — and reads as `null`, matching the client's
- * rule that "an unknown host is a missing document, not a denial"
- * (specs/hostnames-lookup.md).
+ * It re-validates the projection it was handed AGAINST THE HOST it was fetched
+ * for, and that is not belt-and-braces over the Durable Object's own parse. The
+ * service binding is a boundary between two separately deployed Workers: what
+ * arrives is a contract this module did not write, one field of it is reflected
+ * into a response header and another into a public capability projection, and a
+ * Worker built against an older projection shape must fail closed rather than
+ * dereference a field that has since changed meaning. Checking the closed sets
+ * without checking the host class would leave the combinations that matter
+ * most — a root shape on an Event subdomain, a non-null `pathNamespace` on a
+ * host that has none — accepted at exactly the boundary the revalidation exists
+ * to survive. Anything that does not conform is `replica-malformed`, never
+ * coerced data.
  */
-export async function fetchHostnameRecord(
-  host: string,
-  config: ResolveConfig,
-  deps: ResolveDeps,
-): Promise<HostnameRecord | null> {
-  if (!isLookupConfigured(config)) {
-    throw new Error('event-router: FIREBASE_API_KEY / FIREBASE_PROJECT_ID are not configured');
+export function decide(host: string, lookup: RegistryLookup, expectedSlug: string | null): Resolution {
+  // The ENVELOPE is checked before its discriminant is read, and the order is
+  // the point. A registry mid-rollout, or one whose entrypoint returned nothing
+  // at all, hands back `null` or `undefined`; reading `.kind` off that throws
+  // before any arm below can classify it, and the rejection escapes
+  // `resolveHost` — which does not catch it, because `decide` runs outside the
+  // bounded call — into an unversioned Cloudflare error page. That is the same
+  // crash-instead-of-fail-closed failure an unbound binding used to cause, and
+  // it is exactly the response this module exists to never produce.
+  // A record, not an array, for the envelope exactly as for `desired` below:
+  // an array carrying the envelope property names satisfies both `typeof` and
+  // the exact-key check (Codex P2 on #1120).
+  if (typeof lookup !== 'object' || lookup === null || Array.isArray(lookup)) {
+    return notFound('replica-malformed');
+  }
+  // The envelope's own key set, before its discriminant is used to read
+  // anything out of it. An arm carrying a field it does not define is a
+  // registry contradicting itself, and the arms below would otherwise judge
+  // only the fields they happen to look at.
+  if (!hasExactEnvelopeKeys(lookup)) return notFound('replica-malformed');
+
+  switch (lookup.kind) {
+    case 'unknown-host': {
+      // `revision` and `schemaVersion` travel TOGETHER on this arm, and are
+      // therefore judged together. Both are stamped from a committed record —
+      // the tombstone that reads as unknown from outside while keeping the
+      // revision the recovery machine's canonical probe has to observe — and
+      // both are absent when there is no committed record at all. ONLY that
+      // second case is the ordinary unknown address.
+      //
+      // Either half arriving alone is a half-written envelope: something
+      // committed existed to stamp one of them, and the other did not survive
+      // the crossing. Reading "no record here" off it would infer an absence
+      // from a defect, which is the one coercion this module refuses
+      // everywhere else — and it would let an unsupported-version tombstone
+      // that lost its revision pass as an ordinary unknown host instead of
+      // raising the `replica-malformed` alert that the state actually needs,
+      // leaving that host unable to produce the revision-bearing evidence
+      // `clear-lock` consumes.
+      //
+      // Past that pairing, the version gates the revision for the same reason
+      // it gates a projection: publishing a revision read out of a record
+      // written under a schema this build does not understand would attribute
+      // to the address a value this Worker cannot claim to have read
+      // correctly. A revision that is present and NOT canonical is judged the
+      // same way one on a committed projection is — the shape rule is the
+      // projection's, not the arm's.
+      // Absence is judged by OWN-KEY presence, not by value: the contract says
+      // an uninitialized object carries neither field, and the service binding
+      // carries `undefined` values intact where JSON would drop them. An
+      // envelope that names either key with an `undefined` value is a
+      // version-skewed or half-written tombstone, not an ordinary unknown
+      // address, and it falls through to the shape rules below, which refuse
+      // it (Codex P2 on #1120).
+      const { revision, schemaVersion } = lookup;
+      const namesRevision = Object.hasOwn(lookup, 'revision');
+      const namesSchemaVersion = Object.hasOwn(lookup, 'schemaVersion');
+      if (!namesRevision && !namesSchemaVersion) return notFound('unknown-host');
+      if (!isSupportedProjectionSchemaVersion(schemaVersion)) return notFound('replica-malformed');
+      if (!isCanonicalRevision(revision)) return notFound('replica-malformed');
+      return notFound('unknown-host', revision);
+    }
+    case 'unavailable':
+      return notFound('lookup-unavailable');
+    case 'malformed':
+      return notFound('replica-malformed');
+    case 'committed':
+      break;
+    default:
+      // An arm this Worker does not recognise — the shape of a registry that
+      // has moved ahead of this deployment.
+      return notFound('replica-malformed');
   }
 
-  const url = new URL(
-    `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}` +
-      `/databases/(default)/documents/hostnames/${encodeURIComponent(host)}`,
-  );
-  url.searchParams.set('key', config.apiKey);
-  // A field mask, so a document that grows a large `preview` slice does not
-  // grow this request. Four fields, not three, since #546: `edition` is read
-  // for the per-hostname manifest. WIDENING the existing mask rather than
-  // adding a second point-get is the whole design — one document, one read, one
-  // answer, so the Edition served at the edge cannot describe a different
-  // revision of the mapping than the Event routed to.
-  for (const field of ['eventId', 'status', 'slug', 'edition']) {
-    url.searchParams.append('mask.fieldPaths', field);
+  // THE VERSION FIRST, then everything the record says. `desired` is read
+  // under the rules of a particular schema, so a version this build does not
+  // understand has to be refused before any field of it is interpreted — that
+  // ordering is the fail-closed half of the contract, not a stylistic choice.
+  if (!isSupportedProjectionSchemaVersion(lookup.schemaVersion)) return notFound('replica-malformed');
+  if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
+  const revision = lookup.revision;
+  const desired = lookup.desired;
+  // A record, not an array: `typeof [] === 'object'`, and an array carrying
+  // the route's property names would satisfy the exact-key check below, so the
+  // ingestion parser's `!Array.isArray` requirement is repeated at this
+  // boundary rather than assumed of the other deployment (Codex P2 on #1120).
+  if (typeof desired !== 'object' || desired === null || Array.isArray(desired)) {
+    return notFound('replica-malformed');
   }
 
-  const response = await deps.fetch(url.toString(), {
-    method: 'GET',
-    headers: { accept: 'application/json' },
-    // Hard-bounded. An unbounded pre-proxy read would put every request on the
-    // wrong side of a hung dependency, which is the same failure class the
-    // client resolver's `timeoutMs` exists to prevent.
-    signal: AbortSignal.timeout(config.lookupTimeoutMs),
-  });
+  // The exact KEY SET, before any arm reads a value out of it, and from the
+  // same table `parseDesired` uses at ingestion.
+  //
+  // Checking values without checking the key set accepts exactly the shapes
+  // that carry a field their arm does not define — a tombstone with an
+  // `eventId`, a root with a `slug`, a route with a field this schema has never
+  // heard of. Every one of them is refused on the way IN, so a committed
+  // projection carrying one is a registry defect however it got there, and this
+  // boundary exists to answer for defects the registry did not catch. It
+  // matters more than tidiness because these arms publish a revision: § Audit
+  // and recovery makes the public `{reason, revision}` pair the evidence
+  // `clear-lock` compares against committed state, so serving — or
+  // `unknown-host`-ing — a shape the registry itself would have rejected would
+  // offer it to the recovery machine as canonical.
+  if (!hasExactDesiredKeys(desired)) return notFound('replica-malformed');
 
-  if (response.status === 404) return null;
-  if (response.status === 401 || response.status === 403) {
-    throw new LookupRefusedError(`event-router: hostnames lookup refused (${response.status})`);
+  switch (desired.kind) {
+    case 'tombstone':
+      // A deleted address is permanent and reads as `unknown-host` from
+      // outside, which is the point: a tombstone must not advertise that the
+      // address ever existed as a route. It keeps its REVISION, though — that
+      // is public metadata by the spec's own threat model, and the recovery
+      // contract requires it (see the `revision` note on `Resolution`).
+      //
+      // The object already reports this state through its `unknown-host` arm;
+      // the router repeats the classification so a registry that ever handed
+      // back the committed tombstone instead still fails closed here, with the
+      // same reason and the same revision either way.
+      return notFound('unknown-host', revision);
+
+    case 'root': {
+      // A root marker is a valid configured origin. `doorway` or `not-found`
+      // controls what the APP renders at `/`; it is not a statement about
+      // whether the edge may serve the shell or the path capability. There is
+      // no Slug cross-check because a root projection carries no slug — the
+      // apex has no first label, and the guarded `r2-root-*` rehearsal class
+      // deliberately reuses the same shape on a labelled host.
+      //
+      // The root SHAPE is nonetheless bound to a host class: only a Namespace
+      // apex, a brand mirror, or the root-test rehearsal class may carry one.
+      // A root projection returned for an ordinary Event subdomain is a
+      // registry defect, not a doorway.
+      if (!isRegistryRootHost(host)) return notFound('replica-malformed');
+      if (!isReplicaRootMarker(desired.root)) return notFound('replica-malformed');
+      if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
+        return notFound('replica-malformed');
+      }
+      // A configured root origin brands itself: `vacaybingo.com` is the Vacay
+      // doorway and `fiveacross.app` is the Five Across one. A root marker
+      // whose Edition disagrees with its host would render the wrong product's
+      // doorway on a real brand domain, so the pin is checked here as well as
+      // at ingestion. The synthetic root-test class pins none, and
+      // `registryRootHostEdition` returns `null` for it.
+      const pinnedEdition = registryRootHostEdition(host);
+      if (pinnedEdition !== null && desired.edition !== pinnedEdition) {
+        return notFound('replica-malformed');
+      }
+      return {
+        kind: 'serve',
+        record: {
+          eventId: null,
+          revision,
+          pathNamespace: desired.pathNamespace,
+          edition: desired.edition,
+          root: desired.root,
+        },
+      };
+    }
+
+    case 'route': {
+      // The root-test rehearsal class accepts no route, on either side of the
+      // registry. `parseDesired` refuses one at ingestion; this refuses one
+      // that reached the binding anyway, which is the whole reason a
+      // separately deployed consumer revalidates at all — an ingestion-only
+      // rule is not a rule the router can rely on across version skew.
+      if (isSyntheticRootTestHost(host)) return notFound('replica-malformed');
+      if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
+        return notFound('replica-malformed');
+      }
+      // `status` must be EXPLICIT and known. An unrecognised value is a
+      // projection this Worker cannot judge, not an inferred active — the same
+      // rule ADR 0009 gives the source document, moved to the projection.
+      if (!isReplicaRouteStatus(desired.status)) return notFound('replica-malformed');
+
+      // SHAPE AND ADDRESS FIRST, STATE SECOND — and the order is load-bearing
+      // now that `inactive` publishes a revision. A disabled route with no
+      // `slug`, or one naming a different host, is not a record this address
+      // may quote a revision from: it is half-written or it belongs to
+      // somewhere else, and answering `inactive` with its revision would both
+      // contradict the rule that a slug-less or slug-mismatched projection
+      // carries none and offer a cross-host projection to the recovery machine
+      // as this host's canonical evidence. Judging the projection before its
+      // state is the same rule the unrecognised-`status` arm above applies.
+      if (typeof desired.eventId !== 'string' || desired.eventId.length === 0) {
+        return notFound('replica-malformed');
+      }
+
+      // EVERY route projection carries a slug — the schema requires a non-empty
+      // one, and a route that has lost it is half-written whatever host it was
+      // reached at. The apex exemption removes only the COMPARISON to a first
+      // label, because the apex has none; it does not remove the requirement.
+      if (typeof desired.slug !== 'string' || desired.slug.length === 0) {
+        return notFound('slug-missing');
+      }
+      if (expectedSlug === null) {
+        // On the apex there is no first label to compare against, so the Slug
+        // contract itself is the only check left — and it is the one
+        // `parseDesired` applies to this host class. Without it, a projection
+        // naming `admin` or `bad/slash` would serve from the apex on the
+        // strength of being non-empty. It is `replica-malformed` rather than a
+        // slug reason because nothing about the ADDRESS is wrong: the
+        // projection violates its own schema.
+        //
+        // The comparison arm below needs no equivalent. `expectedSlug` came
+        // from `classifyHost`, which produces one only for a label that has
+        // already passed this contract — or for a rehearsal class, which is
+        // deliberately outside it and can only ever match itself.
+        if (!validateSlug(desired.slug).ok) return notFound('replica-malformed');
+      } else if (desired.slug !== expectedSlug) {
+        return notFound('slug-mismatch');
+      }
+
+      // Only now is this a complete route projection for THIS address, and
+      // therefore a record whose revision the router may publish. Disabled and
+      // archived are refusals decided FROM it, so they carry that revision —
+      // the state a `canonical-after-unblock` probe observes as
+      // `{reason: 'inactive', revision}` and `clear-lock` compares against
+      // committed state.
+      if (desired.status !== 'active') return notFound('inactive', revision);
+
+      return {
+        kind: 'serve',
+        record: {
+          eventId: desired.eventId,
+          revision,
+          pathNamespace: desired.pathNamespace,
+          edition: desired.edition,
+          root: null,
+        },
+      };
+    }
+
+    default:
+      return notFound('replica-malformed');
   }
-  if (!response.ok) {
-    throw new Error(`event-router: hostnames lookup returned ${response.status}`);
-  }
-
-  return parseHostnameDocument(await response.json());
-}
-
-/** Firestore REST wraps every value in a type tag; anything that is not a
- *  present `stringValue` reads as absent rather than being coerced. */
-function stringField(fields: Record<string, unknown>, name: string): string | null {
-  const value = fields[name];
-  if (typeof value !== 'object' || value === null) return null;
-  const stringValue = (value as { stringValue?: unknown }).stringValue;
-  return typeof stringValue === 'string' ? stringValue : null;
-}
-
-export function parseHostnameDocument(body: unknown): HostnameRecord {
-  const fields =
-    typeof body === 'object' && body !== null && typeof (body as { fields?: unknown }).fields === 'object'
-      ? ((body as { fields: Record<string, unknown> }).fields ?? {})
-      : {};
-
-  return {
-    eventId: stringField(fields, 'eventId') ?? '',
-    // Absent `status` deliberately becomes a value that is not `'active'`,
-    // rather than a default that is.
-    status: stringField(fields, 'status') ?? '',
-    slug: stringField(fields, 'slug'),
-    // Absent or non-string reads as `null`, which the manifest builder resolves
-    // to the default Edition — the SAME rule the client applies
-    // (`src/data/hostnames.ts` coerces a non-string `edition` to `''`, and
-    // `setActiveEdition('')` resets to the default). Edge and client must not
-    // disagree even about the fallback, or a player's home-screen icon ends up
-    // named differently from the app it opens.
-    edition: stringField(fields, 'edition'),
-  };
 }

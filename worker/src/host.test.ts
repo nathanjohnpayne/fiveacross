@@ -120,3 +120,63 @@ describe('classifyHost — the guard', () => {
     expect(classifyHost('x.evilfiveacross.app')).toMatchObject({ reason: 'out-of-namespace' });
   });
 });
+
+/**
+ * The one deliberate hole in the `r2-` reservation, and its edges.
+ *
+ * The registry contract needs the router to ROUTE the two closed rehearsal
+ * classes — they are the only real-Namespace surface the cutover evidence can
+ * be measured on — while `validateSlug` keeps the whole `r2-` prefix
+ * permanently unclaimable by an organizer. Addressable is not servable: a
+ * rehearsal host with no committed registry projection still fails closed as
+ * `unknown-host` one layer up, and only the guarded controller can create one.
+ */
+describe('classifyHost — the closed rehearsal classes (#972)', () => {
+  const eventLabel = `r2-${'a'.repeat(26)}`;
+  const rootLabel = `r2-root-${'b'.repeat(20)}`;
+
+  it.each(NAMESPACES.flatMap((ns) => [eventLabel, rootLabel].map((label) => [label, ns] as const)))(
+    'classifies %s.%s as an addressable Event-shaped host',
+    (label, namespace) => {
+      expect(classifyHost(`${label}.${namespace}`)).toEqual({
+        kind: 'event',
+        host: `${label}.${namespace}`,
+        namespace,
+        slug: label,
+      });
+    },
+  );
+
+  it.each([
+    // Every one of these begins `r2-` and is outside both closed classes, so
+    // the reservation still applies to it in full.
+    'r2-short.fiveacross.app',
+    `r2-${'a'.repeat(25)}.fiveacross.app`,
+    `r2-${'a'.repeat(27)}.fiveacross.app`,
+    // `1`, `8` and `9` are outside RFC 4648's base32 alphabet.
+    `r2-${'a1'.repeat(13)}.fiveacross.app`,
+    `r2-root-${'b'.repeat(19)}.fiveacross.app`,
+    `r2-root-${'b'.repeat(21)}.fiveacross.app`,
+    'r2-rehearsal.vacaybingo.com',
+  ])('still refuses %s as reserved', (host) => {
+    expect(classifyHost(host)).toEqual({ kind: 'rejected', host, reason: 'reserved-label' });
+  });
+
+  it('does not extend the exception to another zone', () => {
+    expect(classifyHost(`${eventLabel}.example.com`)).toMatchObject({
+      kind: 'rejected',
+      reason: 'out-of-namespace',
+    });
+  });
+
+  it('normalises case before deciding, like every other host', () => {
+    // DNS is case-insensitive and `normalizeHost` runs first, so an uppercase
+    // rehearsal host is the SAME host rather than a near-miss outside the
+    // class. The lowercase-only rule is about the label a controller may
+    // generate, and `src/slug.test.ts` pins it there.
+    expect(classifyHost(`R2-${'A'.repeat(26)}.FIVEACROSS.APP`)).toMatchObject({
+      kind: 'event',
+      slug: eventLabel,
+    });
+  });
+});

@@ -55,6 +55,7 @@ describe('registry R0 provisioning contract', () => {
           distinctHostsGreaterThan: 64,
           windowSeconds: 300,
         },
+        { id: 'malformed-state', outcome: 'malformed', countGreaterThan: 0, windowSeconds: 60 },
       ],
     });
   });

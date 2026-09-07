@@ -74,20 +74,30 @@ p { margin: 0; color: var(--muted); }
  * `detail` refines `invalid-slug` into the specific rule the label broke, as
  * `invalid-slug:too-short`. Qualified rather than replaced, so the class stays
  * greppable as a prefix while the rule is still named.
+ *
+ * `revision` is the committed revision this refusal was decided from, on the
+ * refusals that HAVE one — `inactive`, and the `unknown-host` a tombstone
+ * produces. A fail-closed page is not a revision-less page:
+ * `specs/event-router-registry.md` § Audit and recovery makes the publicly
+ * observed `{reason, revision}` pair the evidence a recovery lock is cleared
+ * with, so dropping it here would strand exactly the two states a recovery is
+ * most likely to end in. It is stamped through the same closed path a served
+ * response uses, from a value `resolve.ts` validated as canonical decimal;
+ * every other refusal passes `null` and emits no header at all.
  */
 export function notFoundResponse(
   reason: FailClosedReason,
   version: string,
   detail?: SlugRejection,
+  revision?: string | null,
 ): Response {
-  return new Response(BODY, {
-    status: 404,
-    headers: {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-robots-tag': 'noindex, nofollow',
-      'x-event-router': version,
-      'x-event-router-reason': detail === undefined ? reason : `${reason}:${detail}`,
-    },
+  const headers = new Headers({
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-robots-tag': 'noindex, nofollow',
+    'x-event-router': version,
+    'x-event-router-reason': detail === undefined ? reason : `${reason}:${detail}`,
   });
+  if (revision !== undefined && revision !== null) headers.set('x-event-router-revision', revision);
+  return new Response(BODY, { status: 404, headers });
 }

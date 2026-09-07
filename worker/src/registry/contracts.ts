@@ -1,5 +1,5 @@
-import { classifyHost, normalizeHost } from '../host';
-import { validateSlug } from '../../../src/slug';
+import { classifyHost, NAMESPACES, normalizeHost } from '../host';
+import { isRehearsalEventLabel, isRehearsalRootLabel, validateSlug } from '../../../src/slug';
 
 export const SYNC_PATH = '/__internal/hostname-replicas/v1';
 export const SYNC_MAX_BYTES = 2_048;
@@ -65,8 +65,33 @@ const EDITIONS = new Set<RegistryEdition>(['gcb', 'vacay', 'fiveacross']);
 const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
 const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
-const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
+/**
+ * A rehearsal host is one of the two closed label classes under one of the two
+ * Namespaces. The label halves come from `src/slug.ts` and the Namespace half
+ * from `host.ts`, so the registry, the router's guard and the private harness
+ * all answer "is this a rehearsal host?" from one definition — a class that
+ * three files agreed on separately is a class that eventually two of them
+ * disagree on.
+ */
+function isSyntheticHost(host: string, isLabel: (label: string) => boolean): boolean {
+  const separator = host.indexOf('.');
+  return (
+    separator !== -1 && isLabel(host.slice(0, separator)) && NAMESPACES.includes(host.slice(separator + 1))
+  );
+}
+
+/**
+ * The root-test rehearsal class, exported because it is the one host class that
+ * accepts NO route projection at all, and both sides of the registry have to
+ * enforce that: `parseDesired` when a payload arrives, and
+ * `worker/src/resolve.ts` when a committed projection comes back across the
+ * service binding. An ingestion-only refusal would leave registry version skew
+ * able to serve an Event from the single host reserved to prove root behaviour.
+ */
+export const isSyntheticRootTestHost = (host: string): boolean =>
+  isSyntheticHost(host, isRehearsalRootLabel);
+
+const isSyntheticEventHostClass = (host: string): boolean => isSyntheticHost(host, isRehearsalEventLabel);
 const ROOT_HOSTS = new Map<string, { edition: RegistryEdition; pathNamespace: PathNamespace }>([
   ['fiveacross.app', { edition: 'fiveacross', pathNamespace: 'fiveacross.app' }],
   ['vacaybingo.com', { edition: 'vacay', pathNamespace: 'vacaybingo.com' }],
@@ -76,12 +101,116 @@ const ROOT_HOSTS = new Map<string, { edition: RegistryEdition; pathNamespace: Pa
   ['gaycruisebingo.vercel.app', { edition: 'gcb', pathNamespace: null }],
 ]);
 
+/**
+ * The value predicates below are exported because the projection has TWO
+ * validating consumers, not one: this module validates a payload on its way IN
+ * from the publisher, and `worker/src/resolve.ts` re-validates the committed
+ * projection on its way OUT across the registry service binding — a boundary
+ * between two separately deployed Workers whose returned shape is a contract
+ * rather than something the router itself wrote. Duplicating the closed sets
+ * would let those two answers drift, which is the one failure a shared registry
+ * projection cannot survive.
+ */
+export function isRegistryEdition(value: unknown): value is RegistryEdition {
+  return typeof value === 'string' && EDITIONS.has(value as RegistryEdition);
+}
+
+export function isPathNamespace(value: unknown): value is PathNamespace {
+  return value === null || (typeof value === 'string' && PATH_NAMESPACES.has(value));
+}
+
+export function isReplicaRouteStatus(value: unknown): value is 'active' | 'disabled' | 'archived' {
+  return value === 'active' || value === 'disabled' || value === 'archived';
+}
+
+export function isReplicaRootMarker(value: unknown): value is 'doorway' | 'not-found' {
+  return value === 'doorway' || value === 'not-found';
+}
+
+/** A canonical positive decimal with no leading zeroes — the only shape a
+ *  revision may take, and therefore the only shape that may reach the
+ *  `x-event-router-revision` response header. */
+export function isCanonicalRevision(value: unknown): value is string {
+  return typeof value === 'string' && POSITIVE_DECIMAL.test(value);
+}
+
 export function isSyntheticRegistryHost(host: string): boolean {
-  return SYNTHETIC_EVENT.test(host) || SYNTHETIC_ROOT.test(host);
+  return isSyntheticEventHostClass(host) || isSyntheticRootTestHost(host);
+}
+
+/**
+ * The exact key set each `desired` arm may carry — the SAME closed-key rule
+ * `parseDesired` applies on the way in, exported so the router can apply it to
+ * a projection arriving across the service binding on the way out.
+ *
+ * Checking values without checking the key set leaves the shapes that carry a
+ * field their arm does not define: a tombstone with an `eventId`, a root with a
+ * `slug`, a route with something neither this schema nor this Worker knows what
+ * to do with. Ingestion refuses every one of them, so a committed projection
+ * that has one is a defect however it got there — and the router publishes a
+ * revision off these arms, which is recovery evidence, so accepting a shape the
+ * registry itself would have rejected would offer it as canonical.
+ *
+ * Declared here rather than restated in `worker/src/resolve.ts` for the reason
+ * the value predicates above are: two answers to "what may this arm carry?" is
+ * one answer too many.
+ */
+const DESIRED_KEYS: Record<string, readonly string[]> = {
+  route: ROUTE_KEYS,
+  root: ROOT_KEYS,
+  tombstone: TOMBSTONE_KEYS,
+};
+
+export function hasExactDesiredKeys(desired: ReplicaDesired): boolean {
+  // An array is never a projection record, whatever property names it carries.
+  if (Array.isArray(desired)) return false;
+  // An OWN-property lookup, and a string discriminant, before the table is
+  // indexed. `DESIRED_KEYS` is an ordinary object literal and therefore
+  // inherits `Object.prototype`, so `kind: 'constructor'`, `'toString'` or
+  // `'__proto__'` selects an inherited member that is not an array of key
+  // names: the `!== undefined` test passes and `hasExactKeys` then compares
+  // against a function's `length` and numeric indices, deciding a projection's
+  // key set from `Object.prototype`. Same table, same rule, same reason as
+  // `hasExactEnvelopeKeys` in `worker/src/resolve.ts` (Codex P2 on #1120).
+  const kind: unknown = (desired as { kind?: unknown }).kind;
+  if (typeof kind !== 'string' || !Object.hasOwn(DESIRED_KEYS, kind)) return false;
+  return hasExactKeys(desired as unknown as Record<string, unknown>, DESIRED_KEYS[kind]);
 }
 
 export function isRegistryRootHost(host: string): boolean {
-  return ROOT_HOSTS.has(host) || SYNTHETIC_ROOT.test(host);
+  return ROOT_HOSTS.has(host) || isSyntheticRootTestHost(host);
+}
+
+/**
+ * The ONE `pathNamespace` a projection for this host may carry.
+ *
+ * `pathNamespace` is non-null only on a mapped Namespace apex or brand mirror,
+ * and explicitly null everywhere else — an Event subdomain, a GCB host, or
+ * either synthetic rehearsal class. Expressed as the expected VALUE rather than
+ * as a predicate so both consumers compare against the same single answer:
+ * `parseDesired` when a payload arrives, and `worker/src/resolve.ts` when a
+ * committed projection comes back across the service binding. A router that
+ * accepted a non-null namespace on an Event subdomain would publish a path
+ * capability that the accepted path-addressing contract forbids.
+ */
+export function registryHostPathNamespace(host: string): PathNamespace {
+  return ROOT_HOSTS.get(host)?.pathNamespace ?? null;
+}
+
+/**
+ * The ONE Edition a ROOT projection for this host may carry, or `null` where
+ * the host class does not pin one.
+ *
+ * A configured root origin brands itself — `vacaybingo.com` is the Vacay
+ * doorway and `fiveacross.app` is the Five Across one — so a root marker whose
+ * Edition disagrees with its host is a projection that would render the wrong
+ * product's doorway. `null` covers the synthetic root-test class, which is
+ * deliberately unpinned because it exists to exercise the shape rather than a
+ * brand. Route projections are not constrained here: an Event's Edition comes
+ * from the Event, not from the host it is reached at.
+ */
+export function registryRootHostEdition(host: string): RegistryEdition | null {
+  return ROOT_HOSTS.get(host)?.edition ?? null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -110,11 +239,11 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
   }
 
   const edition = value.edition;
-  if (typeof edition !== 'string' || !EDITIONS.has(edition as RegistryEdition)) {
+  if (!isRegistryEdition(edition)) {
     throw new Error('invalid edition');
   }
   const pathNamespace = value.pathNamespace;
-  if (pathNamespace !== null && (typeof pathNamespace !== 'string' || !PATH_NAMESPACES.has(pathNamespace))) {
+  if (!isPathNamespace(pathNamespace)) {
     throw new Error('invalid pathNamespace');
   }
 
@@ -122,11 +251,20 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     if (!hasExactKeys(value, ROUTE_KEYS)) throw new Error('invalid route fields');
     const eventId = requireString(value.eventId, 'eventId');
     const slug = requireString(value.slug, 'slug');
-    if (!['active', 'disabled', 'archived'].includes(String(value.status))) {
+    if (!isReplicaRouteStatus(value.status)) {
       throw new Error('invalid route status');
     }
+    // The root-test class is ROOT-shaped and disjoint by construction, so a
+    // route may never be committed on it. Stated explicitly rather than left to
+    // the host classifier: `classifyHost` now ADDRESSES `r2-root-*` (#972), so
+    // without this line the branch below would read it as an ordinary labelled
+    // Event address and admit a route whose slug happened to match — letting
+    // the one host reserved to prove root behaviour serve an Event instead.
+    if (isSyntheticRootTestHost(host)) {
+      throw new Error('the root-test rehearsal class accepts no route projection');
+    }
     const classified = classifyHost(host);
-    const syntheticSlug = SYNTHETIC_EVENT.test(host) ? host.split('.')[0] : null;
+    const syntheticSlug = isSyntheticEventHostClass(host) ? host.split('.')[0] : null;
     const rootClass = ROOT_HOSTS.get(host);
     if (syntheticSlug !== null) {
       if (syntheticSlug !== slug || pathNamespace !== null) {
@@ -142,29 +280,34 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     return {
       kind: 'route',
       eventId,
-      status: value.status as 'active' | 'disabled' | 'archived',
+      status: value.status,
       slug,
-      edition: edition as RegistryEdition,
-      pathNamespace: pathNamespace as PathNamespace,
+      edition,
+      pathNamespace,
     };
   }
 
   if (value.kind === 'root') {
     if (!hasExactKeys(value, ROOT_KEYS)) throw new Error('invalid root fields');
-    if (value.root !== 'doorway' && value.root !== 'not-found') throw new Error('invalid root marker');
-    const syntheticRoot = SYNTHETIC_ROOT.test(host);
-    const rootClass = ROOT_HOSTS.get(host);
-    if (!syntheticRoot && rootClass === undefined) throw new Error('invalid root shape');
+    if (!isReplicaRootMarker(value.root)) throw new Error('invalid root marker');
+    const syntheticRoot = isSyntheticRootTestHost(host);
+    if (!syntheticRoot && !ROOT_HOSTS.has(host)) throw new Error('invalid root shape');
     if (syntheticRoot) {
       if (pathNamespace !== null) throw new Error('synthetic root pathNamespace must be null');
-    } else if (rootClass?.pathNamespace !== pathNamespace || rootClass.edition !== edition) {
+      // Read through the same accessors the router's boundary revalidation
+      // uses, rather than through the map directly, so the two sides cannot
+      // start disagreeing about what a host class pins.
+    } else if (
+      registryHostPathNamespace(host) !== pathNamespace ||
+      registryRootHostEdition(host) !== edition
+    ) {
       throw new Error('root edition/pathNamespace must match its host class');
     }
     return {
       kind: 'root',
       root: value.root,
-      edition: edition as RegistryEdition,
-      pathNamespace: pathNamespace as PathNamespace,
+      edition,
+      pathNamespace,
     };
   }
 
@@ -188,7 +331,7 @@ export function parseSyncRequest(body: string, contentType: string | null): Rout
   }
   if (decoded.schemaVersion !== 1) throw new Error('invalid schemaVersion');
   const revision = requireString(decoded.revision, 'revision');
-  if (!POSITIVE_DECIMAL.test(revision)) throw new Error('invalid revision');
+  if (!isCanonicalRevision(revision)) throw new Error('invalid revision');
   const host = requireString(decoded.host, 'host');
   if (host !== normalizeHost(host) || host.endsWith('.')) throw new Error('host must be canonical');
   const updatedAt = requireString(decoded.updatedAt, 'updatedAt');
