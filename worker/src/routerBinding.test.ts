@@ -180,11 +180,11 @@ describe('what the router sources no longer reach for', () => {
  * `CLOUDFLARE_ENV`, which the wrapper forwards like any other variable.
  *
  * The ACCEPTED cases matter just as much and in the other direction. A
- * `[[services]]` written inside a multi-line string or a comment is text; a
- * `[vars]` entry named `services` is an ordinary Worker var; an environment
- * that declares no binding of its own is an ordinary environment. A validator
- * that refused those would refuse configurations that are in fact correct —
- * which is how a capability gate ends up switched off.
+ * `[[services]]` or `[env.staging]` written inside a multi-line string or a
+ * comment is text, and a `[vars]` entry named `services` or `env` is an
+ * ordinary Worker var. A validator that refused those would refuse
+ * configurations that are in fact correct — which is how a capability gate
+ * ends up switched off.
  */
 describe('the shared binding validator, read as TOML', () => {
   const ONLY_BINDING = [
@@ -202,6 +202,25 @@ describe('the shared binding validator, read as TOML', () => {
   // it wrong and the smuggled `env` lands inside the services entry, where
   // Wrangler would never read it — a fixture that proves nothing.
   const beforeTheBinding = (root: string) => `${root}\n\n${ONLY_BINDING}\n`;
+
+  /**
+   * Why EVERY named environment is refused, not merely the ones that smuggle a
+   * binding.
+   *
+   * Wrangler does not inherit service bindings into a named environment, so an
+   * `[env.<name>]` has only two possible contents and neither is certifiable.
+   * Declare a binding there and it is a second copy of this capability
+   * boundary, selectable through `CLOUDFLARE_ENV`, that no reviewer of the
+   * top-level block would see. Declare none and `CLOUDFLARE_ENV=<name>`
+   * publishes a router with no registry binding at all, which answers
+   * `lookup-unavailable` on every address while reporting a clean deploy.
+   * `specs/event-router-registry.md` authorises no routed environment; wanting
+   * one changes what this gate claims and belongs in the spec first.
+   *
+   * Refusing the KEY rather than its spellings is what makes it total: a table
+   * header, a dotted key, an inline table and a quoted key all parse to the
+   * same root `env`, so there is no fourth spelling to have missed.
+   */
 
   it.each([
     [
@@ -254,11 +273,8 @@ describe('the shared binding validator, read as TOML', () => {
     ],
     [
       // Repeating the IDENTICAL lookup-only binding under an environment is
-      // refused too, and deliberately. The claim this gate makes is that one
-      // binding exists in this file; a second copy is a second thing to keep
-      // correct, selectable through `CLOUDFLARE_ENV`, that no reviewer of the
-      // top-level block would see. Wanting a routed environment changes the
-      // claim, and that belongs in specs/event-router-registry.md first.
+      // refused too, and deliberately — see the environment note above the
+      // `it.each` below.
       'an environment that repeats the same lookup-only binding',
       `${ONLY_BINDING}\n\n[env.staging]\nservices = [{ binding = "REGISTRY", service = "five-across-event-registry", entrypoint = "RegistryLookupEntrypoint" }]\n`,
     ],
@@ -270,17 +286,52 @@ describe('the shared binding validator, read as TOML', () => {
       '[[env.staging.services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
     ],
     [
-      // An `env` this validator cannot enumerate is an unknown number of
-      // unexamined bindings, and unknown must not count as zero.
-      'an env that is not a table',
-      beforeTheBinding('env = "staging"'),
+      // The other half of the environment hazard, and the one a "count the
+      // bindings" rule would wave through: an environment that declares NO
+      // binding. `CLOUDFLARE_ENV=staging` then publishes a router with no
+      // registry binding at all, answering `lookup-unavailable` on every
+      // address while reporting a clean deploy.
+      'an environment that declares no service binding at all',
+      `${ONLY_BINDING}\n\n[env.staging]\n[env.staging.vars]\nROUTER_VERSION = "staging"\n`,
     ],
+    [
+      'an environment declared with a dotted key that adds no service binding',
+      beforeTheBinding('env.staging.vars.ROUTER_VERSION = "staging"'),
+    ],
+    [
+      'an environment declared as an inline table that adds no service binding',
+      beforeTheBinding('env = { staging = { vars = { ROUTER_VERSION = "staging" } } }'),
+    ],
+    [
+      'an environment named by a quoted segment that adds no service binding',
+      `${ONLY_BINDING}\n\n[env."staging".vars]\nROUTER_VERSION = "staging"\n`,
+    ],
+    ['an env that is not a table', beforeTheBinding('env = "staging"')],
     ['an environment that is not a table', `${ONLY_BINDING}\n\n[env]\nstaging = "x"\n`],
     [
-      // Wrangler has no nested environments, so a document that declares one
-      // is expressing something this validator has no reading of.
-      'an environment carrying a nested env',
+      'a nested environment',
       `${ONLY_BINDING}\n\n[env.staging.env.production]\nname = "five-across-event-router"\n`,
+    ],
+    [
+      // `[[unsafe.bindings]]` uploads bindings Wrangler's schema does not
+      // model, and `type = "service"` is a service binding like any other —
+      // a second one, with no environment and no CLI flag involved. A gate
+      // that counted only `services` would certify a file that uploads two.
+      'an unsafe service binding beside the real one',
+      `${ONLY_BINDING}\n\n[[unsafe.bindings]]\nname = "CONTROL"\ntype = "service"\nservice = "five-across-event-registry"\n`,
+    ],
+    [
+      'an unsafe binding written as an inline table',
+      beforeTheBinding(
+        'unsafe = { bindings = [{ name = "CONTROL", type = "service", service = "five-across-event-registry" }] }',
+      ),
+    ],
+    [
+      // `environment` binds a named environment of the TARGET service — a
+      // different deployment of the registry, whose `RegistryLookupEntrypoint`
+      // is whatever that deployment exports.
+      'a binding that names an environment of the registry service',
+      '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\nenvironment = "control"\n',
     ],
     ['a services value that is not an array', 'services = "five-across-event-registry"\n'],
     ['a services array whose entry is not a table', 'services = ["five-across-event-registry"]\n'],
@@ -341,25 +392,26 @@ describe('the shared binding validator, read as TOML', () => {
       'the one real binding written as an inline array',
       'services = [{ binding = "REGISTRY", service = "five-across-event-registry", entrypoint = "RegistryLookupEntrypoint" }]\n',
     ],
-    // The four environment spellings again, each declaring no binding of its
-    // own. These are the positive controls for the refusals above: without
-    // them, a validator that simply refused any document containing `env`
-    // would pass every one of those cases for the wrong reason.
+    // The positive controls for the environment refusals above. The rule is
+    // structural — a root `env` TABLE — not a search for the letters `env`, and
+    // without these a validator that refused any document merely mentioning one
+    // would pass every environment case for the wrong reason.
     [
-      'an environment table that declares no service binding',
-      `${ONLY_BINDING}\n\n[env.staging]\n[env.staging.vars]\nROUTER_VERSION = "staging"\n`,
+      'an env table header written inside a comment',
+      `${ONLY_BINDING}\n\n# [env.staging]\n# services = [{ binding = "CONTROL" }]\n`,
     ],
     [
-      'an environment declared with a dotted key that adds no service binding',
-      beforeTheBinding('env.staging.vars.ROUTER_VERSION = "staging"'),
+      'an env table header written inside a multi-line string',
+      `${ONLY_BINDING}\n\n[vars]\nNOTE = """\n[env.staging]\nservices = []\n"""\n`,
     ],
     [
-      'an environment declared as an inline table that adds no service binding',
-      beforeTheBinding('env = { staging = { vars = { ROUTER_VERSION = "staging" } } }'),
+      // `vars.env` is a Worker variable named `env`, not a named environment.
+      'a [vars] entry that happens to be named env',
+      `${ONLY_BINDING}\n\n[vars]\nenv = "staging"\n`,
     ],
     [
-      'an environment named by a quoted segment that adds no service binding',
-      `${ONLY_BINDING}\n\n[env."staging".vars]\nROUTER_VERSION = "staging"\n`,
+      'a [vars] entry that happens to be named unsafe',
+      `${ONLY_BINDING}\n\n[vars]\nunsafe = "false"\n`,
     ],
   ])('accepts %s', (_label, config) => {
     expect(validateRouterServiceBinding(config)).toEqual({

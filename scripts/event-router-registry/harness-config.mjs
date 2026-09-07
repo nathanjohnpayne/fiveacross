@@ -4,6 +4,9 @@ const REQUIRED_ENTRYPOINT = 'RegistryLookupEntrypoint';
 const REGISTRY_SERVICE = 'five-across-event-registry';
 const SERVICES_KEY = 'services';
 const ENV_KEY = 'env';
+const UNSAFE_KEY = 'unsafe';
+/** The complete key set of the one binding this file may declare. */
+const BINDING_KEYS = ['binding', 'service', 'entrypoint'];
 
 /**
  * Wrangler's configuration, judged as a PARSED TOML DOCUMENT rather than as
@@ -48,32 +51,6 @@ function isTable(value) {
 }
 
 /**
- * Every scope Wrangler would read a `services` array from: the top level, plus
- * one per named environment.
- *
- * `null` for a document whose `env` is a shape this check cannot judge — a
- * scalar, an array, or an environment that is not a table. Wrangler resolves an
- * environment's own bindings for that environment's upload, so an `env` this
- * function cannot enumerate is an unknown number of unexamined bindings, which
- * must fail closed rather than count as zero. A nested `env` inside an
- * environment is refused for the same reason: Wrangler has no nested
- * environments, so the document is expressing something this validator has no
- * reading of.
- */
-function bindingScopes(document) {
-  const scopes = [{ root: true, table: document }];
-  if (!Object.hasOwn(document, ENV_KEY)) return scopes;
-
-  const environments = document[ENV_KEY];
-  if (!isTable(environments)) return null;
-  for (const environment of Object.values(environments)) {
-    if (!isTable(environment) || Object.hasOwn(environment, ENV_KEY)) return null;
-    scopes.push({ root: false, table: environment });
-  }
-  return scopes;
-}
-
-/**
  * The registry's lookup binding, validated from a Wrangler configuration.
  *
  * ONE validator, two consumers — the private synthetic harness and the public
@@ -90,23 +67,15 @@ function bindingScopes(document) {
  *   - The document parses. A TOML error — an undefined escape, a duplicated
  *     key, a redefined table — refuses, because "unreadable" and "absent" must
  *     not be the same answer in a capability check.
- *   - `env`, if present, is a table of tables, none of them nested.
- *   - Every `services` value in every one of those scopes is an array of
- *     tables. A `[vars]` entry that happens to be named `services` is an
- *     ordinary Worker var in a scope Wrangler reads no binding from, and is
- *     deliberately untouched — a false positive there is how a capability gate
- *     gets switched off.
- *   - There is EXACTLY ONE service binding in the whole document, top level and
- *     every environment counted together, and it is declared at the top level.
- *     A named environment does not inherit top-level bindings, so a config that
- *     repeats even the identical lookup-only binding under `[env.<name>]` is
- *     refused too: this gate's claim is "one binding exists in this file", and
- *     a second copy is a second thing to keep correct, selectable by an
- *     environment variable, that no reviewer of the top-level block would see.
- *     If a routed environment is ever wanted, that decision changes the claim
- *     and belongs in `specs/event-router-registry.md` first.
- *   - That one binding names `REGISTRY`, the registry service, and the
- *     lookup-only entrypoint explicitly.
+ *   - The document declares NO named environment and NO `unsafe` table. See
+ *     the notes on each below.
+ *   - The top level declares exactly one `services` entry; it is a table; it
+ *     carries exactly the keys `binding`, `service` and `entrypoint`; and they
+ *     name `REGISTRY`, the registry service, and the lookup-only entrypoint.
+ *     A `[vars]` entry that happens to be named `services`, `env` or `unsafe`
+ *     is an ordinary Worker var in a table Wrangler reads no binding from, and
+ *     is deliberately untouched — a false positive there is how a capability
+ *     gate gets switched off.
  */
 export function validateRegistryLookupBinding(config, subject) {
   const exactlyOnce = new Error(`${subject} must bind exactly once to ${REQUIRED_ENTRYPOINT}`);
@@ -119,24 +88,63 @@ export function validateRegistryLookupBinding(config, subject) {
   }
   if (!isTable(document)) throw exactlyOnce;
 
-  const scopes = bindingScopes(document);
-  if (scopes === null) throw exactlyOnce;
-
-  const bindings = [];
-  let atTopLevel = 0;
-  for (const scope of scopes) {
-    if (!Object.hasOwn(scope.table, SERVICES_KEY)) continue;
-    const declared = scope.table[SERVICES_KEY];
-    if (!Array.isArray(declared) || !declared.every(isTable)) throw exactlyOnce;
-    if (scope.root) atTopLevel += declared.length;
-    bindings.push(...declared);
+  // A named environment is refused OUTRIGHT, whatever it contains, because
+  // neither thing it can contain is certifiable.
+  //
+  // Wrangler does not inherit service bindings into a named environment — its
+  // own schema says they are "not automatically inherited from the top level
+  // environment" and "must be specified in every named environment". So an
+  // `[env.<name>]` either declares its own binding, which is a second copy of
+  // this capability boundary selectable through `CLOUDFLARE_ENV` that no
+  // reviewer of the top-level block would see; or it declares none, and
+  // `CLOUDFLARE_ENV=<name>` then publishes a router carrying no registry
+  // binding at all, which answers `lookup-unavailable` on every address while
+  // reporting a clean deploy. This gate can certify neither, and
+  // `specs/event-router-registry.md` authorises no routed environment. (The
+  // "temporary preview environment" in worker/README.md is `wrangler dev
+  // --remote`'s own; it is not an `[env.<name>]` block in this file.)
+  //
+  // Refusing the KEY rather than its spellings is what makes this total: a
+  // table header, a dotted key, an inline table and a quoted key all parse to
+  // the same root `env`, so there is no fourth spelling to have missed.
+  if (Object.hasOwn(document, ENV_KEY)) {
+    throw new Error(
+      `${subject} must declare no named environment: a Wrangler environment inherits no service ` +
+        `binding, so ${REQUIRED_ENTRYPOINT} cannot be certified for one`,
+    );
   }
-  if (bindings.length !== 1 || atTopLevel !== 1) throw exactlyOnce;
+
+  // `[[unsafe.bindings]]` is Wrangler's escape hatch for bindings its schema
+  // does not model, and an entry with `type = "service"` is a service binding
+  // like any other — a second one, reachable with no environment and no CLI
+  // flag. A gate that counted only `services` would certify a file that
+  // uploads two. Refused as a table rather than entry by entry, for the same
+  // reason `env` is: a rule about a KEY has no spellings left to miss, and this
+  // configuration has no business declaring an unmodelled binding at all.
+  if (Object.hasOwn(document, UNSAFE_KEY)) {
+    throw new Error(
+      `${subject} must declare no unsafe bindings: they bypass the ${REQUIRED_ENTRYPOINT} check`,
+    );
+  }
+
+  if (!Object.hasOwn(document, SERVICES_KEY)) throw exactlyOnce;
+  const declared = document[SERVICES_KEY];
+  if (!Array.isArray(declared) || declared.length !== 1 || !isTable(declared[0])) throw exactlyOnce;
 
   // Read as OWN properties. An inherited value is not something this file
   // declared, and a capability check must not accept one.
   const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : null);
-  const [block] = bindings;
+  const [block] = declared;
+  // EXACTLY these three keys, because the binding's other schema fields change
+  // what it reaches. `environment = "…"` binds a named environment of the
+  // TARGET service — a different deployment of the registry, whose
+  // `RegistryLookupEntrypoint` is whatever that deployment exports. Naming the
+  // permitted keys rather than the forbidden ones is what keeps this true of
+  // fields Wrangler has not added yet.
+  const keys = Object.keys(block);
+  if (keys.length !== BINDING_KEYS.length || !BINDING_KEYS.every((key) => keys.includes(key))) {
+    throw exactlyOnce;
+  }
   const binding = own(block, 'binding');
   const service = own(block, 'service');
   const entrypoint = own(block, 'entrypoint');
