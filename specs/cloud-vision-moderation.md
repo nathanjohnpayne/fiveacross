@@ -127,6 +127,8 @@ A `'hidden'` Proof carrying no marker is deliberately publishable, and that is t
 - **Given** the trigger's write and the client's gate **then** they name the same marker field and agree on the doc the trigger produced, with no verdict list on the client to drift. (Tests: the "the confirm-time gate reads the SERVER marker" block in `tests/functions/cloud-vision-moderation.test.ts`.)
 - **Given** a pending-claim row whose Proof carries a standing safety hide **then** it shows the pill and says the photo stays hidden; **given** any other claim — including one whose Proof is plainly hidden with no marker — **then** it is unannotated and Confirm behaves as before. (Tests: the "Pending claims" cases in `src/components/admin/cloud-vision-moderation.test.tsx`.)
 
+- Restore is steered only by the Proof owner's own pending claim: any signed-in Player can create a pending claim that names another Player's Proof (the claim-create rule binds `uid` to the caller, not `proofId` to the caller's Proof), so `restoreProof` reads the Proof inside its transaction and counts a pending claim only when its `uid` is the Proof's `uid` and its `proofId` is the Proof; the claims-by-`proofId` lookup is bounded (25) so forged references cannot push the transaction past Firestore's read limit. Pinned by `src/data/cloud-vision-moderation.test.ts` (a forged pending claim restores to active; the owner's pending claim beside forged ones restores to pending; a missing Proof restores to active; the lookup carries a limit).
+
 ## What this does not do
 
 - **No posting gate, no pre-moderation queue** (PRD non-goals). The scan runs on the uploaded object, so the hide is always reactive: the Proof exists, the Mark stands, and only the media stops being readable.

@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, getDocs, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocs, limit, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -434,14 +434,38 @@ export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden'
  * a Proof's claim is created in `attachProof`'s own transaction, alongside the
  * Proof itself, so an existing Proof never gains a new one.
  */
+/**
+ * How many claims the restore will consider. A Proof legitimately backs ONE
+ * claim (its owner's, created in `attachProof`'s own transaction), so the bound
+ * exists for the forged case below: any signed-in user can create a pending
+ * claim naming another Player's Proof (the claim-create rule binds `uid` to the
+ * caller, not `proofId` to the caller's Proof), and enough of them would push
+ * the transaction past Firestore's read limit (Codex P2 on #1143).
+ */
+const RESTORE_CLAIM_LOOKUP_LIMIT = 25;
+
 export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
-  const candidates = await getDocs(query(claimsRaw(eventId), where('proofId', '==', id)));
+  const candidates = await getDocs(
+    query(claimsRaw(eventId), where('proofId', '==', id), limit(RESTORE_CLAIM_LOOKUP_LIMIT)),
+  );
   const claimRefs = candidates.docs.map((d) => claim(d.id, eventId));
   await runTransaction(db, async (tx) => {
+    // The Proof first: a claim steers the restore only when it is the Proof
+    // OWNER's claim. Any signed-in user can create a pending claim that names
+    // someone else's Proof, and trusting it would let a stranger send another
+    // Player's photo back to `pending` instead of to the Feed (Codex P2 on
+    // #1143). The owner is read live, inside the transaction, like the claims.
+    const proofSnap = await tx.get(proof(id, eventId));
+    const owner = proofSnap.exists() ? (proofSnap.data() as Partial<ProofDoc>).uid : undefined;
     let claimUndecided = false;
     for (const ref of claimRefs) {
       const snap = await tx.get(ref);
-      if (snap.exists() && (snap.data() as Partial<ClaimDoc>).status === 'pending') claimUndecided = true;
+      if (!snap.exists()) continue;
+      const data = snap.data() as Partial<ClaimDoc>;
+      if (data.status !== 'pending') continue;
+      if (data.proofId !== id) continue;
+      if (owner === undefined || data.uid !== owner) continue;
+      claimUndecided = true;
     }
     tx.update(proof(id, eventId), {
       status: claimUndecided ? 'pending' : 'active',

@@ -337,8 +337,13 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 // deliberately writes nothing to the Proof, so nothing would take it back down.
 
 describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () => {
+  // The Proof's owner is `u1`; only u1's pending claim may steer the restore.
+  beforeEach(() => {
+    liveProof = { uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence' };
+  });
+
   it('restores to PENDING while a claim on the Proof is still undecided', async () => {
-    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
 
     await restoreProof('P');
 
@@ -357,7 +362,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
   it('restores to ACTIVE once the claim is decided — confirmed or rejected', async () => {
     for (const status of ['confirmed', 'rejected'] as const) {
       vi.clearAllMocks();
-      claimsForProof = [{ id: 'claim-1', live: { status, proofId: 'P' } }];
+      claimsForProof = [{ id: 'claim-1', live: { status, proofId: 'P', uid: 'u1' } }];
 
       await restoreProof('P');
 
@@ -371,7 +376,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     // re-read inside it. Here the lookup found it and another admin confirmed it
     // in the gap: the restore publishes rather than sending it back for a
     // decision that has already been made.
-    claimsForProof = [{ id: 'claim-1', live: { status: 'confirmed', proofId: 'P' } }];
+    claimsForProof = [{ id: 'claim-1', live: { status: 'confirmed', proofId: 'P', uid: 'u1' } }];
 
     await restoreProof('P');
 
@@ -380,7 +385,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
   });
 
   it('reads every claim BEFORE it writes, per the reads-before-writes contract', async () => {
-    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
 
     await restoreProof('P');
 
@@ -393,7 +398,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     // The marker is what confirmClaim gates on. Leaving it set would hold the
     // Proof after the admin had explicitly overridden the verdict, and the
     // console would offer no second control that could clear it.
-    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
 
     await restoreProof('P');
 
@@ -404,8 +409,48 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(txUpdate).toHaveBeenCalledTimes(1); // one write, not a publish followed by a clear
   });
 
+  it("ignores a pending claim that is not the Proof owner's — a forged claim cannot steer Restore", async () => {
+    // Codex P2 on #1143: any signed-in user can create a pending claim naming
+    // another Player's Proof (the create rule binds uid to the caller, not
+    // proofId to the caller's Proof). Only the owner's claim counts.
+    claimsForProof = [{ id: 'forged-1', live: { status: 'pending', proofId: 'P', uid: 'attacker' } }];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it("still honours the owner's pending claim beside forged ones", async () => {
+    claimsForProof = [
+      { id: 'forged-1', live: { status: 'pending', proofId: 'P', uid: 'attacker' } },
+      { id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } },
+    ];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+  });
+
+  it('restores to ACTIVE when the Proof itself is missing, whatever claims name it', async () => {
+    liveProof = undefined;
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it('bounds the claim lookup', async () => {
+    claimsForProof = [];
+
+    await restoreProof('P');
+
+    const lookup = getDocsMock.mock.calls[0]?.[0] as { constraints?: unknown[] } | undefined;
+    expect(JSON.stringify(lookup?.constraints ?? [])).toContain('limit');
+  });
+
   it('never touches the claim itself — Restore moves the photo, not the decision', async () => {
-    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
 
     await restoreProof('P');
 
