@@ -35,7 +35,7 @@
 import { classifyHost, NAMESPACES } from './host';
 import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
-import { resolveHost, type ResolveDeps, type ServedRecord } from './resolve';
+import { resolveHost, type ResolveDeps, type ServedRecord, reportDiagnostic } from './resolve';
 
 export interface RouterConfig {
   /** The Firebase Hosting host to proxy to — the site's own `*.web.app`
@@ -119,6 +119,10 @@ export async function handleRequest(
   // documented "fails closed on every address" posture quietly untrue for the
   // one path hardest to notice.
   if (!isRouterConfigured(config, deps)) {
+    // The one refusal decided before `resolveHost`, so it reports itself: the
+    // spec pages on an absent binding, and this early return is the only path
+    // that would otherwise answer `lookup-unavailable` in silence.
+    reportDiagnostic(deps, url.hostname, 'lookup-unavailable');
     return notFoundResponse('lookup-unavailable', config.version);
   }
 

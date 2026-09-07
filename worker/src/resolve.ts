@@ -150,17 +150,29 @@ export interface RouterDiagnosticEvent {
 
 const ALERTED_REASONS: ReadonlySet<NotFoundReason> = new Set(['replica-malformed', 'lookup-unavailable']);
 
+/**
+ * Emit one router-side diagnostic through the seam. Exported so the router can
+ * report the refusal it decides BEFORE `resolveHost` runs — an absent binding
+ * — under the same closed shape (Codex P2 on #1120): the spec's Failure
+ * semantics page on that case, and a deployment-wide misconfiguration is the
+ * one failure this alerting most needs to see.
+ */
+export function reportDiagnostic(
+  deps: Pick<ResolveDeps, 'diagnostics'>,
+  host: string,
+  outcome: RouterDiagnosticEvent['outcome'],
+): void {
+  if (!deps.diagnostics) return;
+  try {
+    deps.diagnostics({ event: 'event-router.diagnostic', outcome, host });
+  } catch {
+    // A diagnostic must never turn a closed refusal into an escaping error.
+  }
+}
+
 function reportRefusal(deps: ResolveDeps, host: string, resolution: Resolution): Resolution {
-  if (deps.diagnostics && resolution.kind === 'not-found' && ALERTED_REASONS.has(resolution.reason)) {
-    try {
-      deps.diagnostics({
-        event: 'event-router.diagnostic',
-        outcome: resolution.reason as RouterDiagnosticEvent['outcome'],
-        host,
-      });
-    } catch {
-      // A diagnostic must never turn a closed refusal into an escaping error.
-    }
+  if (resolution.kind === 'not-found' && ALERTED_REASONS.has(resolution.reason)) {
+    reportDiagnostic(deps, host, resolution.reason as RouterDiagnosticEvent['outcome']);
   }
   return resolution;
 }

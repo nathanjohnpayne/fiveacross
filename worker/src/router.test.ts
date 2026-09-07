@@ -641,6 +641,28 @@ describe('the per-hostname PWA manifest (#546)', () => {
     expect(requests).toHaveLength(0);
   });
 
+  it('reports the absent binding through the diagnostic seam, ahead of the auth exemption', async () => {
+    // Codex P2 on #1120: the unconfigured early return bypasses `resolveHost`,
+    // which was the only path that reported, so production answered
+    // `lookup-unavailable` with no `event-router.diagnostic` line — invisible
+    // to the alerting the spec's Failure semantics require for exactly this case.
+    const events: unknown[] = [];
+    const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': VACAY } });
+    const unconfigured = { ...deps, registry: null, diagnostics: (event: unknown) => events.push(event) };
+    await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, unconfigured);
+    await handleRequest(get('https://bodega-bay.fiveacross.app/__/auth/handler'), CONFIG, unconfigured);
+    expect(events).toEqual([
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: 'bodega-bay.fiveacross.app' },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: 'bodega-bay.fiveacross.app' },
+    ]);
+    // Foreign and malformed hosts are refused before the binding is consulted,
+    // so they never report: the guard ordering keeps invalid traffic silent.
+    events.length = 0;
+    await handleRequest(get('https://bodega-bay.example.com/'), CONFIG, unconfigured);
+    await handleRequest(get('https://x.fiveacross.app/'), CONFIG, unconfigured);
+    expect(events).toEqual([]);
+  });
+
   it('answers HEAD with no body', async () => {
     const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
     const response = await handleRequest(
