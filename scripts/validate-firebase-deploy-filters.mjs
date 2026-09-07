@@ -513,7 +513,19 @@ function predeployBuildsSource(predeploy, source) {
   const entered = new RegExp(
     `\\bcd\\s+${target}\\s*&&\\s*(?:npm\\s+run\\s+build\\b|tsc\\b)`,
   );
-  return steps.some((step) => prefixed.test(step) || entered.test(step));
+  // The CLI runs every element in order (lifecycleHooks.js:67-82), so a
+  // later step could overwrite what the build just emitted. The trusted
+  // build must therefore be the LAST effective step, and must not itself be
+  // chained onto further commands after the build.
+  if (steps.length === 0) return false;
+  const last = steps[steps.length - 1];
+  const builds = prefixed.test(last) || entered.test(last);
+  if (!builds) return false;
+  const afterBuild = last.split(/\s*(?:&&|\|\||;)\s*/);
+  const buildIndex = afterBuild.findIndex(
+    (part) => /\brun\s+build\b/.test(part) || /\btsc\b/.test(part),
+  );
+  return buildIndex === afterBuild.length - 1;
 }
 
 async function entrypointIsConventionalTypeScript(sourceDir) {
@@ -559,6 +571,11 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
   }
   const options = tsconfig.compilerOptions ?? {};
   if (options.noEmit === true || options.emitDeclarationOnly === true) return false;
+  // Incremental and composite builds consult .tsbuildinfo and can skip the
+  // emit entirely when the source is judged current, leaving an altered
+  // artifact untouched while tsc exits 0.
+  if (options.incremental === true || options.composite === true) return false;
+  if (typeof options.tsBuildInfoFile === "string") return false;
   if (typeof options.outFile === "string") return false;
   if (options.rootDir !== "src") return false;
   if (typeof options.outDir !== "string" || !options.outDir) return false;

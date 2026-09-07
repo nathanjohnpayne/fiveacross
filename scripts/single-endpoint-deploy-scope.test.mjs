@@ -590,6 +590,9 @@ describe("the config must be simple enough to analyse before any proof counts", 
     ["noEmit in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", noEmit: true } } }],
     ["emitDeclarationOnly in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", emitDeclarationOnly: true } } }],
     ["outFile in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", outFile: "lib/index.js" } } }],
+    ["incremental in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", incremental: true } } }],
+    ["composite in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", composite: true } } }],
+    ["tsBuildInfoFile in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", tsBuildInfoFile: ".tsbuildinfo" } } }],
   ])("refuses %s, whose successful build leaves main untouched", async (_label, override) => {
     // `tsc --noEmit` exits 0 without writing, so the predeploy hook succeeds
     // while a stale lib/index.js is what Firebase loads.
@@ -610,6 +613,26 @@ describe("the config must be simple enough to analyse before any proof counts", 
       const result = await classify(["--only", "functions:daily"], configPath);
       expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
     });
+  });
+
+  it.each([
+    ["a hook AFTER the build that can overwrite main", { predeploy: ['npm --prefix "$RESOURCE_DIR" run build', "cp group.js functions/lib/index.js"] }],
+    ["a build chained onto a later command", { predeploy: ['npm --prefix "$RESOURCE_DIR" run build && cp group.js functions/lib/index.js'] }],
+  ])("refuses %s, since hooks run in order and the build must be last", async (_label, functionsConfig) => {
+    await withManifests({ ...CONVENTIONAL, functionsConfig }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("accepts a hook BEFORE the build, since the build is still the last word", async () => {
+    await withManifests(
+      { ...CONVENTIONAL, functionsConfig: { predeploy: ["npm run lint", 'npm --prefix "$RESOURCE_DIR" run build'] } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
   });
 
   it.each([
