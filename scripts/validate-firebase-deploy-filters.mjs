@@ -306,7 +306,7 @@ const POSIX = process.platform !== "win32";
  * therefore its own process group and the deadline kills the group, with a
  * grace timer so that even an unkillable descendant cannot hold this open.
  */
-function runCapturedProcess(command, args, { timeout, ...options }) {
+function runCapturedProcess(command, args, { timeout, settleOn = "close", ...options }) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -339,7 +339,14 @@ function runCapturedProcess(command, args, { timeout, ...options }) {
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
     child.on("error", (error) => settle({ ok: false, output: `${output}${error.message}` }));
-    child.on("close", (code, signal) => {
+    child.on(settleOn, (code, signal) => {
+      // On `exit` the pipes may still be open (a background descendant holds
+      // them). Nothing more will be read, so drop them rather than let them
+      // keep this process alive.
+      if (settleOn === "exit") {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }
       if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}` });
       else settle({ ok: code === 0, output, code });
     });
@@ -382,6 +389,11 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
   return runCapturedProcess(translated, [], {
     cwd: projectDir,
     shell: true,
+    // `runCommand` settles on `exit`, so Firebase moves on as soon as the
+    // immediate shell is done and never waits for a background descendant.
+    // Waiting for `close` here would let this classifier observe a LATER tree
+    // than the deploy discovers from (Codex P2, round 12).
+    settleOn: "exit",
     timeout: timeoutMs ?? PREDEPLOY_HOOK_TIMEOUT_MS,
     env: {
       ...process.env,
@@ -469,38 +481,75 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
 }
 
 /**
- * The environment the CLI's own discovery process runs under.
+ * The two project-config shapes a walk is run under.
+ *
+ * `prepare.js` gives discovery the project's `adminSdkConfig` in
+ * `FIREBASE_CONFIG` and its legacy runtime config in `CLOUD_RUNTIME_CONFIG`,
+ * both from authenticated lookups a local preflight must not make. Only the
+ * project id is reproducible.
+ *
+ * Rather than instrument how the artifact reads them — which only ever covered
+ * the access forms someone thought of, and missed `"x" in config`,
+ * `Object.hasOwn`, enumeration and plain string inspection in turn (Codex P2,
+ * rounds 11 and 12) — the walk is run TWICE: once with the unreproducible
+ * fields ABSENT and once with them PRESENT, under obviously synthetic values.
+ * Equal endpoint ids from both runs mean the deployed surface does not depend
+ * on those fields at all, however the artifact chose to look at them; different
+ * ids forfeit. One mechanism, no access-form list, and nothing to keep current.
+ *
+ * The residual is an artifact that branches on a field's EXACT real value,
+ * which takes the same (false) branch under both probes. No offline classifier
+ * can close that one: the real value is precisely what it cannot obtain.
+ */
+const CONFIG_PROBES = Object.freeze([
+  Object.freeze({ label: "minimal", extraFirebaseConfig: {}, extraRuntimeConfig: {} }),
+  Object.freeze({
+    label: "populated",
+    extraFirebaseConfig: {
+      databaseURL: "https://firebase-deploy-scope-probe.firebaseio.com",
+      storageBucket: "firebase-deploy-scope-probe.appspot.com",
+      locationId: "us-central1",
+    },
+    extraRuntimeConfig: { firebaseDeployScopeProbe: { value: "probe" } },
+  }),
+]);
+
+/**
+ * The environment the CLI's own discovery process runs under, for one probe.
  *
  * This matters because a `.env` value can decide whether an export is an
  * endpoint at all (`export const x = FLAG ? onObjectFinalized(…) : undefined`),
  * so a walk under the ambient shell environment could miss an endpoint the
  * deploy will create. `prepare.js` builds `{…userEnvs, …firebaseEnvs,
- * GOOGLE_CLOUD_QUOTA_PROJECT}` from the codebase's own dotenv files and hands
- * it to the delegate, whose `spawnFunctionsProcess` then passes through only
- * `HOME`, `PATH`, `NODE_ENV` and `FUNCTIONS_CONTROL_API` — deliberately NOT the
- * whole ambient environment — plus the serialized runtime config. All of that
- * is mirrored, the dotenv half through firebase-tools' own loader reading the
- * staged copy.
+ * GOOGLE_CLOUD_QUOTA_PROJECT}` and hands it to the delegate, whose
+ * `spawnFunctionsProcess` then passes through only `HOME`, `PATH`, `NODE_ENV`
+ * and `FUNCTIONS_CONTROL_API` — deliberately NOT the whole ambient environment
+ * — plus the serialized runtime config. All of that is mirrored, the dotenv
+ * half through firebase-tools' own loader.
+ *
+ * The dotenv files come from the config's `configDir`, not from its source:
+ * `resolveConfigDir` is `configDir || source`, and a codebase that sets one
+ * keeps its `.env` files there (Codex P2, round 12).
  */
-function discoveryEnvironment({ scratchProject, scratchSource, project }) {
+function discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe }) {
   const userEnvs = functionsEnv.loadUserEnvs({
-    functionsSource: scratchSource,
+    functionsSource: scratchConfigDir,
+    configDir: scratchConfigDir,
     projectId: project,
     projectDir: scratchProject,
   });
-  const firebaseConfig = { projectId: project };
+  const firebaseConfig = { projectId: project, ...probe.extraFirebaseConfig };
   const environment = {
     ...userEnvs,
     ...functionsEnv.loadFirebaseEnvs(firebaseConfig, project),
     // `spawnFunctionsProcess` serializes the codebase's runtime config here
     // whenever it is non-empty, and `prepare.js` makes it at least
-    // `{firebase: firebaseConfig}` — so omitting it entirely is itself a
-    // divergence a `process.env.CLOUD_RUNTIME_CONFIG` branch could see (Codex
-    // P2, round 11). The legacy `functions.config()` namespaces on top of it
-    // come from an authenticated fetch, so the child watches this value the
-    // same way it watches FIREBASE_CONFIG and forfeits if the ARTIFACT's own
-    // code consults something neither can supply.
-    CLOUD_RUNTIME_CONFIG: JSON.stringify({ firebase: firebaseConfig }),
+    // `{firebase: firebaseConfig}` — so omitting it entirely would itself be a
+    // divergence a `process.env.CLOUD_RUNTIME_CONFIG` branch could see.
+    CLOUD_RUNTIME_CONFIG: JSON.stringify({
+      firebase: firebaseConfig,
+      ...probe.extraRuntimeConfig,
+    }),
     GOOGLE_CLOUD_QUOTA_PROJECT: project,
     FUNCTIONS_CONTROL_API: "true",
     HOME: process.env.HOME,
@@ -630,6 +679,20 @@ async function buildAndInventoryProject({
 
   const staged = configs.filter((config) => config.sourceRel);
   if (staged.length === 0) return refuseAll("no Functions codebase has a mirrorable local source");
+  // One source dir inside another would share the outer's `node_modules` in the
+  // staged copy, so the nested codebase would resolve its dependencies from the
+  // wrong package (Codex P2, round 12). Overlapping Functions sources are not a
+  // shape worth modelling; refuse instead of getting them subtly wrong.
+  for (const outer of staged) {
+    for (const inner of staged) {
+      if (inner === outer) continue;
+      if (inner.sourceRel === outer.sourceRel || inner.sourceRel.startsWith(`${outer.sourceRel}/`)) {
+        return refuseAll(
+          `Functions source ${inner.sourceRel} overlaps ${outer.sourceRel}, so their dependencies cannot be staged apart`,
+        );
+      }
+    }
+  }
   for (const config of staged) {
     if (!existsSync(resolve(projectDir, config.sourceRel))) {
       return refuseAll(`no Functions source at ${config.sourceRel}`);
@@ -677,6 +740,7 @@ async function buildAndInventoryProject({
         await inventoryCodebaseArtifact({
           scratchProject,
           scratchSource: resolve(scratchProject, config.sourceRel),
+          scratchConfigDir: resolve(scratchProject, config.configDirRel ?? config.sourceRel),
           sourceRel: config.sourceRel,
           scratch,
           project,
@@ -699,10 +763,18 @@ async function buildAndInventoryProject({
   }
 }
 
-/** Load one built codebase in a sandboxed child and read back its endpoint ids. */
+/**
+ * Load one built codebase in a sandboxed child and read back its endpoint ids,
+ * once per config probe.
+ *
+ * Two runs, not one: the deployed surface must be the same under both
+ * `CONFIG_PROBES` before it can be trusted, because the difference between them
+ * is exactly the project config this classifier could not obtain.
+ */
 async function inventoryCodebaseArtifact({
   scratchProject,
   scratchSource,
+  scratchConfigDir,
   sourceRel,
   scratch,
   project,
@@ -725,46 +797,68 @@ async function inventoryCodebaseArtifact({
     return refused(`${manifests[0]} supplies discovery instead of the artifact`);
   }
 
-  let walkEnv;
-  try {
-    walkEnv = discoveryEnvironment({ scratchProject, scratchSource, project });
-  } catch (error) {
+  const slug = Buffer.from(sourceRel).toString("hex");
+  const results = [];
+  for (const probe of CONFIG_PROBES) {
+    let walkEnv;
+    try {
+      walkEnv = discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe });
+    } catch (error) {
+      return refused(
+        `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const outFile = join(scratch, `endpoints-${slug}-${probe.label}.json`);
+    const walk = await runCapturedProcess(
+      process.execPath,
+      [ARTIFACT_WALKER, scratchSource, outFile],
+      {
+        // cwd and environment both mirror the SDK process the CLI spawns.
+        cwd: scratchSource,
+        timeout: ARTIFACT_WALK_TIMEOUT_MS,
+        env: walkEnv,
+      },
+    );
+    let reported;
+    try {
+      reported = JSON.parse(await readFile(outFile, "utf8"));
+    } catch {
+      return refused(
+        `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
+      );
+    }
+    if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
+      return refused(reported?.reason ?? "the artifact walk was inconclusive");
+    }
+    results.push({
+      probe,
+      endpoints: reported.endpoints,
+      groups: Array.isArray(reported.groups) ? reported.groups : [],
+    });
+  }
+
+  const [first, ...rest] = results;
+  const signature = (result) => JSON.stringify([[...result.endpoints].sort(), [...result.groups].sort()]);
+  const divergent = rest.find((result) => signature(result) !== signature(first));
+  if (divergent) {
     return refused(
-      `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+      `the deployed surface changes with project config this classifier cannot supply ` +
+        `(${first.probe.label}: ${first.endpoints.join(", ") || "none"}; ` +
+        `${divergent.probe.label}: ${divergent.endpoints.join(", ") || "none"})`,
     );
   }
 
-  const outFile = join(scratch, `endpoints-${Buffer.from(sourceRel).toString("hex")}.json`);
-  const walk = await runCapturedProcess(
-    process.execPath,
-    [ARTIFACT_WALKER, scratchSource, outFile],
-    {
-      // cwd and environment both mirror the SDK process the CLI spawns.
-      cwd: scratchSource,
-      timeout: ARTIFACT_WALK_TIMEOUT_MS,
-      env: walkEnv,
-    },
-  );
-  let reported;
-  try {
-    reported = JSON.parse(await readFile(outFile, "utf8"));
-  } catch {
-    return refused(
-      `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
-    );
-  }
-  if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
-    return refused(reported?.reason ?? "the artifact walk was inconclusive");
-  }
-  const groups = Array.isArray(reported.groups) ? reported.groups : [];
   if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
-    console.error(`  classifier: ${sourceRel} deploys ${reported.endpoints.join(", ")}`);
+    console.error(`  classifier: ${sourceRel} deploys ${first.endpoints.join(", ")}`);
     // Groups are the ids a `--only functions:<group>` scope expands to. They
     // never grant the exemption — the prefix rule already refuses a selector
     // any of their endpoints falls inside — but they make a refusal legible.
-    if (groups.length > 0) console.error(`  classifier: ${sourceRel} groups ${groups.join(", ")}`);
+    if (first.groups.length > 0) {
+      console.error(`  classifier: ${sourceRel} groups ${first.groups.join(", ")}`);
+    }
   }
-  return { authoritative: true, endpoints: reported.endpoints, groups };
+  return { authoritative: true, endpoints: first.endpoints, groups: first.groups };
 }
 
 /**
@@ -863,6 +957,9 @@ async function singleEndpointInventory(
       codebase,
       rawCodebase: explicitCodebase,
       sourceRel,
+      // `resolveConfigDir` is `configDir || source`: a codebase that sets one
+      // keeps its dotenv files there, not in its source dir.
+      configDirRel: normalizedSourcePath(functionsConfig.configDir) ?? sourceRel,
       steps: predeploySteps(functionsConfig.predeploy),
     });
 

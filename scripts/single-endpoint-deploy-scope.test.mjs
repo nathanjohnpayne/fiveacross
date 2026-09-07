@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -786,10 +786,13 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("refuses an artifact that branches on a legacy runtime-config namespace", async () => {
-    // `spawnFunctionsProcess` serializes the runtime config into
-    // CLOUD_RUNTIME_CONFIG, and every namespace beyond `firebase` comes from an
-    // authenticated `functions.config()` fetch.
+  it("refuses an artifact that reads the legacy runtime config at all", async () => {
+    // The differential probe cannot cover CLOUD_RUNTIME_CONFIG: its
+    // `functions.config()` namespaces are user-chosen, so a branch on
+    // `runtime.someLegacyNamespace` reads `undefined` under BOTH probes while
+    // the real value could be anything. Reading the variable is therefore
+    // all-or-nothing — which costs nothing in practice, since its only consumer
+    // is the deprecated v1 API.
     await withPrewrittenArtifact(
       [
         'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
@@ -803,15 +806,19 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("exempts an artifact that reads only the firebase half of the runtime config", async () => {
+  it("refuses an artifact that inspects the raw FIREBASE_CONFIG string", async () => {
+    // The differential probe covers every ACCESS FORM at once, string
+    // inspection included, because the two probes' serialized values differ
+    // (Codex P2, round 12). Nothing here parses the value.
     await withPrewrittenArtifact(
       [
-        'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
-        "exports.daily = endpoint();",
-        "exports.daily.__endpoint.project = runtime.firebase.projectId;",
+        'const raw = process.env.FIREBASE_CONFIG || "";',
+        'exports.daily = raw.includes("storageBucket") ? { submitBugReport: endpoint() } : endpoint();',
       ].join("\n"),
       async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
       },
     );
   });
@@ -1287,6 +1294,102 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
         );
         expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
         expect(Date.now() - started).toBeLessThan(3_000);
+      },
+    );
+  });
+
+  it("reads dotenv files from a configured configDir, not from the source dir", async () => {
+    // `resolveConfigDir` is `configDir || source`, so a codebase that sets one
+    // keeps its `.env` files there. Scanning the source dir instead would miss
+    // a flag that decides the deployed surface (Codex P2, round 12).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [], configDir: "env" },
+        files: {
+          "env/.env": "GROUP_THE_ENDPOINT=1\n",
+          "functions/lib/index.js": artifact(
+            "exports.daily = process.env.GROUP_THE_ENDPOINT ? { submitBugReport: endpoint() } : endpoint();",
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts the same codebase when its configDir carries no such flag", async () => {
+    // Discriminates the case above from "a configDir forfeits": the directory
+    // is read either way, it just says nothing that changes the surface.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [], configDir: "env" },
+        files: {
+          "env/.env": "SOMETHING_ELSE=1\n",
+          "functions/lib/index.js": artifact(
+            "exports.daily = process.env.GROUP_THE_ENDPOINT ? { submitBugReport: endpoint() } : endpoint();",
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("refuses overlapping Functions source directories", async () => {
+    // A nested source would share the outer's `node_modules` in the staged
+    // copy and resolve its dependencies from the wrong package. Refuse rather
+    // than get it subtly wrong (Codex P2, round 12).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+          "functions/sub/package.json": JSON.stringify({ name: "nested", main: "index.js" }),
+          "functions/sub/index.js": "exports.other = 1;\n",
+        },
+      },
+      async (configPath) => {
+        // Re-read the config with a second, nested codebase declared.
+        const withNested = JSON.parse(await readFile(configPath, "utf8"));
+        withNested.functions = [
+          withNested.functions,
+          { source: "functions/sub", codebase: "nested", predeploy: [] },
+        ];
+        await writeFile(configPath, JSON.stringify(withNested), "utf8");
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("inventories the artifact the hook left when its shell exited", async () => {
+    // `runCommand` settles on `exit`, so Firebase starts discovery as soon as
+    // the immediate shell is done and never waits for a background descendant.
+    // Waiting for `close` here would let the classifier see the LATER artifact
+    // — a single endpoint — while the deploy discovers the group
+    // (Codex P2, round 12).
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [
+            "cp functions/group.js functions/lib/index.js && (sleep 5; cp functions/single.js functions/lib/index.js) &",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
       },
     );
   });

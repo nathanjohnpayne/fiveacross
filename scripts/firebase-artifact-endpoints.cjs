@@ -36,10 +36,16 @@
  * because `process.stdout` is asynchronous on a pipe, so an exit could truncate
  * the answer. `authoritative: false` (with a `reason`) is the answer to every
  * uncertainty: an ESM artifact, an unexpected top-level export shape, a cyclic
- * or absurdly deep export graph, a read of a config field only the deploy's
- * authenticated lookup could supply, or any thrown error. The caller treats an
+ * or absurdly deep export graph, or any thrown error. The caller treats an
  * absent or malformed file the same way, so a crash, a signal, or a timeout
  * also fails closed.
+ *
+ * The one part of the discovery environment the caller cannot reproduce is the
+ * CONTENT of `FIREBASE_CONFIG` and `CLOUD_RUNTIME_CONFIG`, which come from
+ * authenticated lookups. That is not handled here: the caller runs this script
+ * TWICE under two different values for those variables and forfeits unless both
+ * runs report the same ids, which is what makes the answer independent of the
+ * fields it could not supply — however the artifact chose to inspect them.
  *
  * Discovery is mirrored from the pinned SDK, not paraphrased: `extractStack`
  * treats a value as an endpoint when it is a FUNCTION carrying an `__endpoint`
@@ -59,130 +65,38 @@ const path = require("node:path");
 const MAX_DEPTH = 32;
 
 /**
- * The environment variables whose CONTENT this classifier can only partly
- * reproduce, mapped to the fields it can vouch for.
+ * Whether anything read `CLOUD_RUNTIME_CONFIG`.
  *
- * `prepare.js` hands discovery the project's `adminSdkConfig` in
- * `FIREBASE_CONFIG` and its legacy runtime config in `CLOUD_RUNTIME_CONFIG`,
- * both of which come from authenticated API calls a local preflight must not
- * make. The project id IS known, and reading it is the ordinary case — this
- * repository's own `visionGate.ts` does — so forfeiting on any read would
- * refuse the very codebase this exists to exempt.
+ * The caller's differential probe handles `FIREBASE_CONFIG`, whose schema is
+ * fixed, by running twice with those fields absent and present. It cannot do
+ * the same for the legacy runtime config, whose namespaces are user-chosen and
+ * unbounded: a branch on `config().someNamespace` reads `undefined` under both
+ * probes while the real value could be anything (Codex P2, round 12).
  *
- * So the boundary is watched instead. Each variable's value is parsed by
- * whoever consumes it, so wrapping the RESULT of a `JSON.parse` of that exact
- * string records what was actually asked for. A field this classifier could not
- * supply is a field whose real value might have selected a different endpoint
- * surface, so touching one forfeits — and "touching" covers membership,
- * descriptor and enumeration access, not just reads, because `"x" in config`
- * discriminates just as well as `config.x` (Codex P2, round 11).
+ * So this variable is all-or-nothing. Reading it at all forfeits — and that
+ * costs almost nothing, because the only consumer is `functions.config()`, the
+ * deprecated v1 API, which a codebase using it cannot be classified offline
+ * anyway.
  */
-const SUPPLIED_CONFIG_FIELDS = {
-  FIREBASE_CONFIG: new Set(["projectId"]),
-  // Only the `firebase` key is reproducible; every legacy `functions.config()`
-  // namespace comes from the API. The nested value is itself the
-  // FIREBASE_CONFIG object and is wrapped with those rules.
-  CLOUD_RUNTIME_CONFIG: new Set(["firebase"]),
-};
+let readRuntimeConfig = false;
 
-/** The first unsupplied field any watched config object was asked about. */
-let unsuppliedConfigField = null;
-
-/**
- * Whether the code that just touched a watched config object is the ARTIFACT's
- * own, as opposed to a dependency's.
- *
- * This matters because the SDKs read these objects themselves — `firebase-admin`
- * probes `credential`, `databaseURL` and `storageBucket` while initializing —
- * and those reads are not branches on the endpoint surface. Forfeiting on them
- * would refuse every codebase that calls `initializeApp()`, which is all of
- * them. A branch that could change what gets deployed lives in the codebase's
- * own compiled files, so the caller's frame is the discriminator.
- */
-let artifactRootCache;
-function artifactRoot() {
-  if (artifactRootCache === undefined) {
-    try {
-      artifactRootCache = fs.realpathSync(path.resolve(process.argv[2] ?? ""));
-    } catch {
-      artifactRootCache = null;
-    }
-  }
-  return artifactRootCache;
-}
-
-function calledFromArtifact() {
-  // Realpath, because Node reports module filenames resolved (on macOS the
-  // scratch dir's `/var/...` is `/private/var/...`) and a prefix test against
-  // the unresolved path would silently never match — failing OPEN.
-  const sourceDir = artifactRoot();
-  if (!sourceDir) return false;
-  const stack = new Error().stack ?? "";
-  for (const line of stack.split("\n").slice(1)) {
-    const match = /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line);
-    if (!match) continue;
-    const file = match[1];
-    if (file === __filename) continue;
-    if (!file.startsWith(sourceDir)) return false;
-    return !file.split(path.sep).includes("node_modules");
-  }
-  return false;
-}
-
-function watchedConfigObject(value, variable) {
-  const supplied = SUPPLIED_CONFIG_FIELDS[variable];
-  const flag = (property) => {
-    if (typeof property !== "string" || supplied.has(property)) return;
-    if (!calledFromArtifact()) return;
-    unsuppliedConfigField = unsuppliedConfigField ?? `${variable}.${property}`;
-  };
-  const enumerated = () => {
-    if (!calledFromArtifact()) return;
-    unsuppliedConfigField = unsuppliedConfigField ?? `${variable} (enumerated)`;
-  };
-  return new Proxy(value, {
-    get(target, property) {
-      // A field that IS supplied and is itself a watched shape stays watched.
-      if (variable === "CLOUD_RUNTIME_CONFIG" && property === "firebase") {
-        const nested = target[property];
-        return nested && typeof nested === "object"
-          ? watchedConfigObject(nested, "FIREBASE_CONFIG")
-          : nested;
-      }
-      // Reading an absent field is what a branch does; reading a supplied one
-      // is the ordinary case and must stay free.
-      if (target[property] === undefined) flag(property);
-      return target[property];
-    },
-    has(target, property) {
-      flag(property);
-      return property in target;
-    },
-    getOwnPropertyDescriptor(target, property) {
-      flag(property);
-      return Reflect.getOwnPropertyDescriptor(target, property);
-    },
-    ownKeys(target) {
-      // Enumeration cannot say which key mattered, and the real object has
-      // more of them, so any enumeration is a difference.
-      enumerated();
-      return Reflect.ownKeys(target);
-    },
+function watchRuntimeConfigReads() {
+  const env = process.env;
+  Object.defineProperty(process, "env", {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: new Proxy(env, {
+      get(target, property) {
+        if (property === "CLOUD_RUNTIME_CONFIG") readRuntimeConfig = true;
+        return target[property];
+      },
+      has(target, property) {
+        if (property === "CLOUD_RUNTIME_CONFIG") readRuntimeConfig = true;
+        return property in target;
+      },
+    }),
   });
-}
-
-function watchConfigReads() {
-  const watched = Object.keys(SUPPLIED_CONFIG_FIELDS)
-    .map((variable) => [variable, process.env[variable]])
-    .filter(([, injected]) => typeof injected === "string");
-  if (watched.length === 0) return;
-  const parse = JSON.parse;
-  JSON.parse = function watchedParse(text, reviver) {
-    const value = parse.call(this, text, reviver);
-    if (value === null || typeof value !== "object") return value;
-    const match = watched.find(([, injected]) => text === injected);
-    return match ? watchedConfigObject(value, match[0]) : value;
-  };
 }
 
 const isObject = (value) => typeof value === "object" && value !== null;
@@ -238,7 +152,7 @@ function main() {
     return;
   }
 
-  watchConfigReads();
+  watchRuntimeConfigReads();
 
   // Customer code at module scope may print, and the caller captures this
   // stream for diagnostics. Silence both across the load and restore after.
@@ -278,12 +192,12 @@ function main() {
     emit({ authoritative: false, reason: `export walk failed — ${message}` });
     return;
   }
-  if (unsuppliedConfigField) {
+  if (readRuntimeConfig) {
     emit({
       authoritative: false,
       reason:
-        `the artifact consulted ${unsuppliedConfigField}, which only the deploy's ` +
-        "authenticated project-config lookup can supply",
+        "the artifact consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
+        "namespaces only the deploy's authenticated fetch can supply",
     });
     return;
   }
