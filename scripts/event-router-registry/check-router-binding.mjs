@@ -17,7 +17,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const WORKER = resolve(HERE, '../../worker');
+// The directory under test is the checkout's `worker/` unless the ONE
+// argument this script accepts, `--worker-dir <path>`, names another — the
+// hook the test suite uses to probe a redirect planted in a throwaway fixture
+// tree instead of writing into the live repository root (Codex P2 on #1120).
+// An argument, not an environment variable, on purpose: `scripts/worker-deploy.sh`
+// runs this script with no arguments and refuses forwarded ones, so nothing
+// ambient in an operator's shell can point the deploy's check elsewhere.
+const WORKER = resolveWorkerDirectory(process.argv.slice(2));
 const CONFIG = resolve(WORKER, 'wrangler.toml');
 
 /**
@@ -58,6 +65,13 @@ function isFile(path) {
   } catch {
     return false;
   }
+}
+
+function resolveWorkerDirectory(args) {
+  if (args.length === 0) return resolve(HERE, '../../worker');
+  if (args.length === 2 && args[0] === '--worker-dir' && args[1].length > 0) return resolve(args[1]);
+  process.stderr.write('usage: check-router-binding.mjs [--worker-dir <path>]\n');
+  process.exit(UNAVAILABLE);
 }
 
 /** Every ancestor of `worker/`, nearest first, the way Wrangler walks them. */

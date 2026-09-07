@@ -157,6 +157,23 @@ describe('the fail-closed decision table', () => {
     await expect(reasonFor({ kind: 'unknown-host' })).resolves.toBe('unknown-host');
   });
 
+  it('refuses an array-shaped envelope even when it carries the committed property names', async () => {
+    const lookup = Object.assign([] as unknown as Record<string, unknown>, {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '7',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+    }) as unknown as RegistryLookup;
+    await expect(refusalFor(lookup)).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
+
   it('refuses an array-shaped projection even when it carries the route property names', async () => {
     // `typeof [] === 'object'`, and an array with `kind`, `eventId`, `status`,
     // `slug`, `edition` and `pathNamespace` set as properties has exactly the

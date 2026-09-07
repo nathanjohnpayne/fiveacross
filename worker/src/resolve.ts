@@ -306,7 +306,12 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   // bounded call — into an unversioned Cloudflare error page. That is the same
   // crash-instead-of-fail-closed failure an unbound binding used to cause, and
   // it is exactly the response this module exists to never produce.
-  if (typeof lookup !== 'object' || lookup === null) return notFound('replica-malformed');
+  // A record, not an array, for the envelope exactly as for `desired` below:
+  // an array carrying the envelope property names satisfies both `typeof` and
+  // the exact-key check (Codex P2 on #1120).
+  if (typeof lookup !== 'object' || lookup === null || Array.isArray(lookup)) {
+    return notFound('replica-malformed');
+  }
   // The envelope's own key set, before its discriminant is used to read
   // anything out of it. An arm carrying a field it does not define is a
   // registry contradicting itself, and the arms below would otherwise judge

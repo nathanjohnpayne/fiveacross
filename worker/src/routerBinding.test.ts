@@ -7,11 +7,12 @@
 // — an omitted `entrypoint` line binds the registry's signed control plane to a
 // public edge Worker, and a surviving Firebase binding falsifies the App Check
 // posture the whole change exists to establish.
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import ts from 'typescript';
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -188,30 +189,45 @@ describe('what the router’s configuration no longer declares', () => {
     // other check here, including the clean-tree guard (`.wrangler/` is
     // gitignored).
     const guard = resolve(HERE, '../../scripts/event-router-registry/check-router-binding.mjs');
-    const planted = resolve(HERE, '../../.wrangler/deploy/config.json');
-
-    const before = spawnSync('node', [guard], { encoding: 'utf8' });
-    expect(before.status, before.stderr).toBe(0);
-
-    const created = !existsSync(resolve(HERE, '../../.wrangler'));
-    mkdirSync(dirname(planted), { recursive: true });
-    writeFileSync(planted, '{"configPath":"../../elsewhere/wrangler.toml"}', 'utf8');
+    // A throwaway tree: `<tmp>/repo/worker/wrangler.toml` is the committed
+    // configuration, and the redirect is planted at `<tmp>/repo/.wrangler/…`,
+    // an ancestor of that worker directory. Nothing is written into the live
+    // checkout, so a deploy-guard test running in parallel cannot observe it
+    // (Codex P2 on #1120).
+    const tree = mkdtempSync(join(tmpdir(), 'router-binding-'));
+    const repo = join(tree, 'repo');
+    const worker = join(repo, 'worker');
+    const planted = join(repo, '.wrangler', 'deploy', 'config.json');
     try {
-      const after = spawnSync('node', [guard], { encoding: 'utf8' });
+      mkdirSync(worker, { recursive: true });
+      copyFileSync(ROUTER_CONFIG, join(worker, 'wrangler.toml'));
+
+      const before = spawnSync('node', [guard, '--worker-dir', worker], { encoding: 'utf8' });
+      expect(before.status, before.stderr).toBe(0);
+
+      mkdirSync(dirname(planted), { recursive: true });
+      writeFileSync(planted, '{"configPath":"../../elsewhere/wrangler.toml"}', 'utf8');
+      const after = spawnSync('node', [guard, '--worker-dir', worker], { encoding: 'utf8' });
       expect(after.status).toBe(1);
       expect(after.stderr).toContain(planted);
       expect(after.stderr).toContain('away from worker/wrangler.toml');
-    } finally {
-      rmSync(planted, { force: true });
-      // Leave the checkout as it was found. The directory tree is harmless —
-      // the guard tests for a real FILE — but a test that plants state should
-      // not depend on that to stay tidy.
-      if (created) rmSync(resolve(HERE, '../../.wrangler'), { recursive: true, force: true });
-    }
 
-    // And the refusal is the planted file's, not a latent one: removing it
-    // restores the clean answer.
-    expect(spawnSync('node', [guard], { encoding: 'utf8' }).status).toBe(0);
+      // And the refusal is the planted file's, not a latent one: removing it
+      // restores the clean answer.
+      rmSync(planted, { force: true });
+      expect(spawnSync('node', [guard, '--worker-dir', worker], { encoding: 'utf8' }).status).toBe(0);
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses any argument other than --worker-dir, so a forwarded flag cannot repoint the deploy check', () => {
+    const guard = resolve(HERE, '../../scripts/event-router-registry/check-router-binding.mjs');
+    for (const args of [['--worker-dir'], ['--env', 'staging'], ['worker']]) {
+      const result = spawnSync('node', [guard, ...args], { encoding: 'utf8' });
+      expect(result.status, args.join(' ')).toBe(69);
+      expect(result.stderr).toContain('usage');
+    }
   });
 
   it('keeps BOTH wildcard route blocks commented out', async () => {
