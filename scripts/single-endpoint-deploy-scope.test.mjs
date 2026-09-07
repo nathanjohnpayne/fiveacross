@@ -2298,6 +2298,43 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a hook writes THROUGH a copied root file that is a symlink", async () => {
+    // Codex P1, round 16: a copied root file can itself be a link — a shared
+    // build input outside the repository, say — and fingerprinting only the
+    // link inode would let a hook rewrite its target through INIT_CWD. The
+    // target is recorded under the link exactly as the walk records it.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf y > "$INIT_CWD/build-input.txt"'],
+        },
+        links: { "build-input.txt": "../outside-build-input.txt" },
+      },
+      async (configPath) => {
+        const { dirname: dir, join: under } = await import("node:path");
+        const { rm: remove, writeFile: write } = await import("node:fs/promises");
+        // The target lives OUTSIDE the fixture (and so outside every watched
+        // directory), created before the overlay copies the link through it.
+        const outside = under(dir(configPath), "..", "outside-build-input.txt");
+        await write(outside, "x");
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = dir(configPath);
+        try {
+          const failure = await classify(["--only", "functions:daily"], configPath).then(
+            () => null,
+            (error) => error,
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("build-input.txt");
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+          await remove(outside, { force: true });
+        }
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
@@ -2533,6 +2570,41 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
           emailUnsubscribeInvokerSelected: true,
           authHandoffInvokerSelected: true,
         });
+      },
+    );
+  });
+});
+
+describe("a Functions kit beside an explicit codebase", RUNS_A_BUILD, () => {
+  // Codex P1, round 16: a kit config has no `codebase` key, so
+  // `getReleventConfigs` runs ITS predeploy hooks on every Functions deploy —
+  // `--only functions:alpha:daily` included — and the classifier has no source
+  // directory in which to rehearse them. A kit hook could rewrite alpha's
+  // artifact for real and never here, so no codebase is proved exact while
+  // such hooks exist.
+  const withKit = (kitExtra) => ({
+    functions: [
+      { source: "functions", codebase: "alpha", predeploy: PREDEPLOY },
+      { kit: "@firebase/example-kit", instances: { kitone: {} }, ...kitExtra },
+    ],
+  });
+
+  it("refuses the exemption when the kit carries predeploy hooks", async () => {
+    await withFunctionsProject(
+      { config: withKit({ predeploy: ["echo kit-hook"] }) },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:alpha:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
+  it("still proves the exact endpoint when the kit carries no hooks", async () => {
+    await withFunctionsProject(
+      { config: withKit({}) },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:alpha:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...NO_INVOKER_SELECTED });
       },
     );
   });

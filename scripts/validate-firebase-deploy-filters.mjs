@@ -804,6 +804,35 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   } catch {
     projectRoot = projectDir;
   }
+  /**
+   * What a symlink at `path` reaches, keyed under the link: a file target's
+   * stat, or a directory target walked in full. Shared by the directory walk
+   * and the copied root files, because a root file that is itself a link
+   * (a shared build input, say) is one more path a hook can write THROUGH
+   * (Codex P1, round 16 on #1107).
+   */
+  const recordLinkTarget = async (path) => {
+    let target;
+    try {
+      target = await stat(path, { bigint: true });
+      fingerprint.set(
+        `${path} -> target`,
+        `${target.mode} ${target.ino} ${target.size} ${target.mtimeNs} ${target.ctimeNs}`,
+      );
+    } catch (error) {
+      fingerprint.set(`${path} -> target`, `absent ${error?.code ?? "?"}`);
+    }
+    if (target?.isDirectory()) {
+      const resolved = await realpath(path);
+      const inside = relative(projectRoot, resolved);
+      if (inside.startsWith("..") || isAbsolute(inside)) {
+        throw new Error(
+          `${path} is a symlink to a directory outside the repository (${resolved}); the live checkout cannot be fingerprinted, so this deploy is refused`,
+        );
+      }
+      await walk(resolved);
+    }
+  };
   const walk = async (dir) => {
     let real;
     try {
@@ -855,28 +884,7 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
       // repository is refused outright, because the guard cannot vouch for a
       // deployment input it is not allowed to read and must not be led to walk
       // an arbitrary tree.
-      if (entry.isSymbolicLink()) {
-        let target;
-        try {
-          target = await stat(path, { bigint: true });
-          fingerprint.set(
-            `${path} -> target`,
-            `${target.mode} ${target.ino} ${target.size} ${target.mtimeNs} ${target.ctimeNs}`,
-          );
-        } catch (error) {
-          fingerprint.set(`${path} -> target`, `absent ${error?.code ?? "?"}`);
-        }
-        if (target?.isDirectory()) {
-          const resolved = await realpath(path);
-          const inside = relative(projectRoot, resolved);
-          if (inside.startsWith("..") || isAbsolute(inside)) {
-            throw new Error(
-              `${path} is a symlink to a directory outside the repository (${resolved}); the live checkout cannot be fingerprinted, so this deploy is refused`,
-            );
-          }
-          await walk(resolved);
-        }
-      }
+      if (entry.isSymbolicLink()) await recordLinkTarget(path);
       if (entry.isDirectory()) await walk(path);
     }
   };
@@ -891,8 +899,9 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   // The copied root files, by their live paths: the overlay's copy is what a
   // relative write reaches, but the live original is what the deploy reads.
   for (const file of liveFiles) {
+    let stats;
     try {
-      const stats = await lstat(file, { bigint: true });
+      stats = await lstat(file, { bigint: true });
       fingerprint.set(
         file,
         `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
@@ -900,6 +909,7 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
     } catch (error) {
       fingerprint.set(file, `absent ${error?.code ?? "?"}`);
     }
+    if (stats?.isSymbolicLink()) await recordLinkTarget(file);
   }
   return fingerprint;
 }
@@ -1873,6 +1883,8 @@ async function singleEndpointInventory(
     }
     return entry;
   };
+  /** Whether a kit config carries predeploy hooks this classifier cannot mirror. */
+  let kitHooks = false;
 
   for (const functionsConfig of functionsConfigs) {
     if (!functionsConfig || typeof functionsConfig !== "object") continue;
@@ -1885,6 +1897,16 @@ async function singleEndpointInventory(
         entryFor(instance).blocked = "kit codebase";
         configs.push({ codebase: instance, rawCodebase: instance, sourceRel: null, steps: [] });
       }
+      // A kit config's OWN predeploy hooks run on every Functions deploy
+      // (`getReleventConfigs` takes the unconditional branch for a config with
+      // no `codebase` key), including `--only functions:<other>:<endpoint>`,
+      // and this classifier has nowhere to rehearse them: the kit has no
+      // source directory to stage. A hook that rewrites another codebase's
+      // artifact would therefore run for real and never here, so no codebase
+      // may be proved exact while such hooks exist (Codex P1, round 16 on
+      // #1107). Recorded now and applied to every entry below.
+      const kitSteps = predeploySteps(functionsConfig.predeploy);
+      if (kitSteps === null || kitSteps.length > 0) kitHooks = true;
       continue;
     }
 
@@ -1962,6 +1984,9 @@ async function singleEndpointInventory(
       throw error;
     }
     for (const name of sourceEndpointCandidates(source)) entry.candidates.add(name);
+  }
+  if (kitHooks) {
+    for (const entry of byCodebase.values()) entry.blocked ??= "kit predeploy hooks";
   }
 
   return {
