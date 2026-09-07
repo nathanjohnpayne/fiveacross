@@ -164,8 +164,17 @@ const DESIRED_KEYS: Record<string, readonly string[]> = {
 export function hasExactDesiredKeys(desired: ReplicaDesired): boolean {
   // An array is never a projection record, whatever property names it carries.
   if (Array.isArray(desired)) return false;
-  const expected = DESIRED_KEYS[(desired as { kind?: unknown }).kind as string];
-  return expected !== undefined && hasExactKeys(desired as unknown as Record<string, unknown>, expected);
+  // An OWN-property lookup, and a string discriminant, before the table is
+  // indexed. `DESIRED_KEYS` is an ordinary object literal and therefore
+  // inherits `Object.prototype`, so `kind: 'constructor'`, `'toString'` or
+  // `'__proto__'` selects an inherited member that is not an array of key
+  // names: the `!== undefined` test passes and `hasExactKeys` then compares
+  // against a function's `length` and numeric indices, deciding a projection's
+  // key set from `Object.prototype`. Same table, same rule, same reason as
+  // `hasExactEnvelopeKeys` in `worker/src/resolve.ts` (Codex P2 on #1120).
+  const kind: unknown = (desired as { kind?: unknown }).kind;
+  if (typeof kind !== 'string' || !Object.hasOwn(DESIRED_KEYS, kind)) return false;
+  return hasExactKeys(desired as unknown as Record<string, unknown>, DESIRED_KEYS[kind]);
 }
 
 export function isRegistryRootHost(host: string): boolean {

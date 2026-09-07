@@ -516,6 +516,38 @@ describe('the exact key set the ENVELOPE itself may carry', () => {
     });
   });
 
+  it.each([
+    ['constructor'],
+    ['toString'],
+    ['__proto__'],
+    ['hasOwnProperty'],
+  ])('refuses `kind: %s` rather than reading the key set off Object.prototype', async (kind) => {
+    // The envelope table is an ordinary object literal, so it inherits every
+    // member of `Object.prototype`. Indexed with one of their names, an
+    // `in`-style lookup returns an inherited member that is not an array of
+    // key names, and `allowed.includes` throws on it — and the throw does not
+    // stay inside the module: `decide` runs OUTSIDE `resolveHost`'s catch,
+    // which brackets the bounded service call only, so a registry answering
+    // with one of these strings would hand the request to Cloudflare as an
+    // unversioned error page instead of the fail-closed refusal this table
+    // promises for every arm it does not recognise (Codex P2 on #1120).
+    await expect(refusalFor({ kind } as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('refuses a non-string discriminant for the same reason', async () => {
+    // Not a discriminant this envelope defines, and indexing the table with it
+    // would coerce it to a string that might name an inherited member.
+    for (const kind of [0, null, undefined, { toString: () => 'committed' }]) {
+      await expect(refusalFor({ kind } as unknown as RegistryLookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    }
+  });
+
   it('still accepts every arm written exactly, including the optional pair', async () => {
     // The `unknown-host` arm's two fields are OPTIONAL, so the rule is the keys
     // ALLOWED rather than the keys required — a bare `{kind}` and a full
@@ -596,6 +628,33 @@ describe('the exact key set a `desired` arm may carry', () => {
     // record it cannot use, not FROM one it read for the address.
     expect(resolution).toEqual({ kind: 'not-found', reason: 'replica-malformed', revision: null });
   });
+
+  it.each([['constructor'], ['toString'], ['__proto__'], ['hasOwnProperty']])(
+    'refuses a desired `kind: %s` rather than reading its key set off Object.prototype',
+    async (kind) => {
+      // `DESIRED_KEYS` is the same shape of object literal as the envelope
+      // table one level up, and inherits `Object.prototype` the same way. The
+      // consequence here is quieter than the envelope's — `hasExactKeys`
+      // reads `.length` and numeric indices rather than calling a method, so
+      // an inherited member makes it decide a projection's key set from
+      // `Object.prototype` instead of throwing — and the answer it happens to
+      // reach today is already `replica-malformed`. These cases therefore PIN
+      // that answer rather than reproduce a crash: the own-property lookup is
+      // what makes it the answer by rule instead of by arithmetic accident
+      // (Codex P2 on #1120).
+      const { deps } = harness({
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '7',
+        desired: { kind } as unknown as ReplicaDesired,
+      });
+      await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+        kind: 'not-found',
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    },
+  );
 
   it('still serves the exact shapes, so the rule is a key set and not a refusal of everything', async () => {
     const { deps } = harness(ACTIVE_ROUTE);

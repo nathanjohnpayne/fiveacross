@@ -162,8 +162,22 @@ const ENVELOPE_KEYS: Record<string, readonly string[]> = {
 };
 
 function hasExactEnvelopeKeys(lookup: RegistryLookup): boolean {
-  const allowed = ENVELOPE_KEYS[(lookup as { kind?: unknown }).kind as string];
-  if (allowed === undefined) return false;
+  // An OWN-property lookup, and a string discriminant, before the table is
+  // indexed at all. `ENVELOPE_KEYS` is an ordinary object literal, so it
+  // inherits every member of `Object.prototype`: `{kind: 'constructor'}`,
+  // `{kind: 'toString'}` and `{kind: '__proto__'}` each select an inherited
+  // member that is not an array, and `allowed.includes` throws on it. That
+  // throw does not stay inside the module — `decide` runs OUTSIDE the
+  // `try/catch` in `resolveHost`, which brackets the bounded service call
+  // only — so a registry answer carrying one of those three strings escapes as
+  // a runtime error and an unversioned Cloudflare error page, instead of the
+  // `replica-malformed` this table promises for every arm it does not
+  // recognise (Codex P2 on #1120). A non-string `kind` is refused for the same
+  // reason it is refused everywhere else here: it is not a discriminant this
+  // envelope defines.
+  const kind: unknown = (lookup as { kind?: unknown }).kind;
+  if (typeof kind !== 'string' || !Object.hasOwn(ENVELOPE_KEYS, kind)) return false;
+  const allowed = ENVELOPE_KEYS[kind];
   const actual = Object.keys(lookup);
   return actual.every((key) => allowed.includes(key));
 }
