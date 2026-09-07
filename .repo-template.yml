@@ -214,6 +214,16 @@ spec_test_map:
     - scripts/og/og-stage-commit-concurrency.test.mjs
     - scripts/og/og-commit-lock.test.mjs
     - scripts/og/og-commit-lock-atomicity.test.mjs
+  # cloud-vision-moderation spans four layers — the hide decision (functions),
+  # the rules pin that adding a second server writer needed no client surface,
+  # the queue row's reason/restore treatment, and the queue-membership arm that
+  # keeps a restored Proof reachable. Only the first shares the spec basename's
+  # discovery path, so map them all explicitly.
+  cloud-vision-moderation:
+    - tests/functions/cloud-vision-moderation.test.ts
+    - tests/rules/cloud-vision-moderation.test.ts
+    - src/components/admin/cloud-vision-moderation.test.tsx
+    - src/hooks/cloud-vision-moderation.test.tsx
 # Glob patterns that identify test files. Supplements the default
 # ("tests/**/*.test.*") which doesn't cover shell-based tests or the
 # Vite app's colocated unit tests under src/.
