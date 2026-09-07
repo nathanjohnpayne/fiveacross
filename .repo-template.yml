@@ -104,6 +104,9 @@ spec_test_map:
     - src/urlFragment.test.ts
     - src/handoffBoot.test.ts
     - src/auth/handoffReturn.test.ts
+    - src/auth/admissionCoordinator.test.ts
+    - src/auth/admission-wiring.test.tsx
+    - src/components/signin-invitation-handoff.test.tsx
     - scripts/materialize-event-membership-functions.test.mjs
     - scripts/event-invitations-invoker.test.mjs
     - scripts/event-invitations-deploy.test.mjs

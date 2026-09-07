@@ -4,7 +4,12 @@ import { markerDisplayName } from './attribution';
 import { dropHeldHonorPins } from './dayMeta';
 import { eventScopeKey } from './eventScope';
 import { cellsFromData } from '../game/cells';
-import { hasBingo, isBlackout } from '../game/logic';
+import {
+  earlierEligibleHeadlineBingoExists,
+  hasBingo,
+  isBlackout,
+  type HeadlineBingoRow,
+} from '../game/logic';
 import type { Cell, MomentDoc, MomentKind } from '../types';
 
 // Moments (ADR 0002): a broadcast of a big social beat — a BINGO, a Blackout, or
@@ -1422,8 +1427,9 @@ export async function hasPriorBingoWitness(
   // "prior win" that permanently disqualifies the player's first REAL bingo
   // from the ceremony. A witness whose payload Day is in `excludeDayIndexes`
   // resolves false. A day-LESS witness on a daily Event (pre-#286 data) stays
-  // a witness — conservative: the roster gate (already main-game-aware via
-  // the tutorial-excluded firstBingoAt fold) remains the fallback.
+  // a witness — conservative: the drain-time roster gate
+  // (`earlierEligibleHeadlineBingoExists`, which derives each rival's headline
+  // eligibility from their per-Day `dayStats`) remains the fallback.
   //
   // `dayIndexes` (#372) is the Event's scheduled Day indexes. Per-card bingo
   // means there is no longer ONE `${uid}-bingo` doc to read: the witness lives
@@ -1692,10 +1698,12 @@ export function broadcastFirstBingo(who: MomentActor, dayIndex?: number, eventId
  *     vacuously true, so an empty/non-attributable board emits nothing (the same
  *     round-3-finding-B length gate Board applies);
  *   - `firstBingo` is the ceremonial event singleton — raised only on a bingo
- *     TRANSITION, claimed ONLY against a SERVER-CONFIRMED roster showing no OTHER
- *     Player already has a `firstBingoAt` (PR #99 finding 2), and SUPPRESSED when
- *     the durable prior-win witness exists (`hasPriorBingoWitness`, finding D) so a
- *     regained line never re-mints it;
+ *     TRANSITION, claimed ONLY against a SERVER-CONFIRMED roster in which no OTHER
+ *     Player holds an ELIGIBLE headline bingo (PR #99 finding 2; the eligibility
+ *     is the shared `earlierEligibleHeadlineBingoExists` decision since #1050, so
+ *     this path, the live Mark path and the held release all read one policy), and
+ *     SUPPRESSED when the durable prior-win witness exists (`hasPriorBingoWitness`,
+ *     finding D) so a regained line never re-mints it;
  *   - while the roster is unconfirmed a crossed first-win is HELD, not guessed
  *     (`firstBingoHeld`): the caller keeps the candidate and re-decides once the
  *     roster confirms, exactly as Board holds the candidate.
@@ -1723,11 +1731,29 @@ export function planConfirmBroadcasts(params: {
   // as still pending, the "after" board is `cells` as it stands now.
   confirmedIndexes: number[];
   uid: string;
-  roster: { uid: string; firstBingoAt: number | null }[];
+  // The roster rows the headline gate reads. Full `PlayerDoc`s satisfy
+  // `HeadlineBingoRow`, and the per-Day `dayStats` are load-bearing: the root
+  // `firstBingoAt` alone answers the STANDINGS question, not the headline one
+  // (#1050).
+  roster: readonly HeadlineBingoRow[];
   rosterConfirmed: boolean;
   hasPriorBingo: boolean;
+  // The Event's tutorial Days — the ONLY Days excluded from the headline honour.
+  isTutorialDay: (dayIndex: number) => boolean;
+  // The resolved Standings Freeze (`resolvedStandingsFreezeAt`), or null/absent
+  // before any freeze is scheduled.
+  freezeAt?: number | null;
 }): ConfirmBroadcastPlan {
-  const { cells, confirmedIndexes, uid, roster, rosterConfirmed, hasPriorBingo } = params;
+  const {
+    cells,
+    confirmedIndexes,
+    uid,
+    roster,
+    rosterConfirmed,
+    hasPriorBingo,
+    isTutorialDay,
+    freezeAt,
+  } = params;
   const none = { bingo: false, blackout: false, firstBingo: false, firstBingoHeld: false };
   if (cells.length === 0 || confirmedIndexes.length === 0) return none;
 
@@ -1741,9 +1767,16 @@ export function planConfirmBroadcasts(params: {
 
   // The ceremonial First-to-BINGO is a candidate only when this confirm CROSSED
   // into a bingo the Player has no durable prior-win witness for. Then the roster
-  // decides: unconfirmed → HELD; confirmed → claim iff no other Player bingoed first.
+  // decides: unconfirmed → HELD; confirmed → claim iff no other Player already
+  // holds an ELIGIBLE headline bingo, through the ONE shared decision every claim
+  // path uses (#1050).
   const firstCandidate = bingoTransition && !hasPriorBingo;
-  const othersBingoed = roster.some((p) => p.uid !== uid && p.firstBingoAt != null);
+  const othersBingoed = earlierEligibleHeadlineBingoExists({
+    roster,
+    candidateUid: uid,
+    isTutorialDay,
+    freezeAt,
+  });
   const firstBingo = firstCandidate && rosterConfirmed && !othersBingoed;
   const firstBingoHeld = firstCandidate && !rosterConfirmed;
 

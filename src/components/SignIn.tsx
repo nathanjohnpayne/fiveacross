@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
 import { resolveSignInStrategy } from '../auth/authMode';
 import { consumeHandoffFailure, startAuthHandoff } from '../auth/handoffClient';
+import { persistPendingEventInvitation } from '../pendingEventInvitation';
 import EventPostcard from './EventPostcard';
 
 // The wordmark, the signed-out line and the offline note come from the resolved
@@ -50,10 +51,29 @@ export default function SignIn() {
   // a later re-render cannot resurrect a stale message.
   const [handoffFailed] = useState(() => consumeHandoffFailure() !== null);
   const [startFailed, setStartFailed] = useState(false);
+  // A pending Invitation that only memory holds cannot survive the handoff's
+  // top-level navigation, and the handoff branch below never passes through
+  // `AuthContext.signIn`'s durability check (Codex P1 on #1131). The tap tries
+  // once more to give it a stored copy; if the stores still refuse, the tap
+  // does not leave the document and says why.
+  const [invitationUnkept, setInvitationUnkept] = useState(false);
+
+  // Back from Google restores this screen from the bfcache with `busy` still
+  // true and a redirect that will never settle (#1123). AuthContext releases
+  // its single-flight guard on the same persisted `pageshow`, so the button
+  // re-arms here in step; a fresh tap starts a fresh attempt.
+  useEffect(() => {
+    const onPageShow = (event: Event) => {
+      if ((event as PageTransitionEvent).persisted === true) setBusy(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
 
   const go = async () => {
     setBusy(true);
     setStartFailed(false);
+    setInvitationUnkept(false);
     try {
       if (reprompt) {
         await attest();
@@ -74,6 +94,15 @@ export default function SignIn() {
       });
 
       if (strategy.kind === 'handoff') {
+        const invitation = persistPendingEventInvitation({
+          origin: window.location.origin,
+          now: Date.now(),
+        });
+        if (invitation !== null && !invitation.durable) {
+          setInvitationUnkept(true);
+          setBusy(false);
+          return;
+        }
         // Leaves this origin, so nothing after it runs on success and `busy`
         // stays true through the navigation — which is what we want: the button
         // must not re-arm while the browser is on its way out.
@@ -194,6 +223,12 @@ export default function SignIn() {
       {(handoffFailed || startFailed) && (
         <p className="muted" role="alert" data-testid="signin-handoff-error">
           That sign-in didn't finish. Please tap Continue with Google to try again.
+        </p>
+      )}
+      {invitationUnkept && (
+        <p className="muted" role="alert" data-testid="signin-invitation-unkept">
+          This browser can't keep your invitation through sign-in. Sign in first, then open your
+          invitation link again.
         </p>
       )}
       {/* The invitation copy block under the CTA (#647) — brand-carried, so

@@ -11,7 +11,13 @@ import {
   getConfirmState,
   type MomentActor,
 } from '../data/moments';
-import { hasBingo, standingsFrozen, tutorialDayIndexSet } from '../game/logic';
+import {
+  earlierEligibleHeadlineBingoExists,
+  hasBingo,
+  resolvedStandingsFreezeAt,
+  standingsFrozen,
+  tutorialDayIndexSet,
+} from '../game/logic';
 import type { BoardDoc, Cell, EventDoc, PlayerDoc } from '../types';
 import { EVENT_ID } from '../firebase';
 
@@ -140,6 +146,10 @@ export default function ConfirmWinMoments() {
     dayBoards: ReadonlyMap<number, BoardDoc>;
     event: EventDoc | null;
     tutorialDays: ReadonlySet<number>;
+    // The resolved Standings Freeze — the cutoff the shared headline decision
+    // applies to every rival's bingo (#1050), derived through the SAME resolver
+    // the Leaderboard pin and the frozen podium use.
+    freezeAt: number | null;
   }>({
     eventId,
     uid: undefined,
@@ -153,6 +163,7 @@ export default function ConfirmWinMoments() {
     dayBoards: new Map(),
     event: null,
     tutorialDays: new Set(),
+    freezeAt: null,
   });
   // The cells a Day's confirms adjudicate against (#274): that Day's own board
   // in daily mode (owned by construction — useMyDayBoards subscribes only the
@@ -184,6 +195,7 @@ export default function ConfirmWinMoments() {
       dayBoards,
       event: event ?? null,
       tutorialDays: tutorialDayIndexSet(event?.days),
+      freezeAt: resolvedStandingsFreezeAt(event ?? null),
     };
     cellsForDayRef.current = cellsForDay;
   });
@@ -289,6 +301,12 @@ export default function ConfirmWinMoments() {
               roster: cc.players,
               rosterConfirmed: cc.rosterConfirmed,
               hasPriorBingo: witnessed,
+              // The headline gate's policy inputs (#1050) — tutorial-only
+              // exclusion and the resolved freeze cutoff. Passed rather than
+              // re-derived inside the planner so this path, the live Mark path
+              // and the held release below all decide from one function.
+              isTutorialDay: (i) => cc.tutorialDays.has(i),
+              freezeAt: cc.freezeAt,
             });
             // The Day rides every broadcast (#274): the per-card blackout id
             // (#267), and the bingo/first_bingo payload chips (#262). A legacy
@@ -392,7 +410,17 @@ export default function ConfirmWinMoments() {
     }
     // The win still stands — publish only once the identity + roster gates open.
     if (!c.identityKnown || !c.rosterConfirmed) return; // still held
-    const othersBingoed = c.players.some((p) => p.uid !== c.uid && p.firstBingoAt != null);
+    // The SAME headline decision the planner and the live drain make (#1050):
+    // a release can be arbitrarily later than the detection that parked it, so
+    // the rival roster is re-read here — and it is read through the shared
+    // eligibility, never the rival's root `firstBingoAt`, which excludes
+    // ceremonial Days the headline still counts.
+    const othersBingoed = earlierEligibleHeadlineBingoExists({
+      roster: c.players,
+      candidateUid: c.uid,
+      isTutorialDay: (i) => c.tutorialDays.has(i),
+      freezeAt: c.freezeAt,
+    });
     if (!othersBingoed) broadcastFirstBingo(actor, heldDay ?? undefined, c.eventId);
     st.heldCeremony = null;
     st.heldCeremonyDay = null;

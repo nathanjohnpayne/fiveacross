@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { mayDealUnderAdmission } from './auth/admissionCoordinator';
 import { ThemeProvider } from './theme/ThemeContext';
 import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
@@ -116,9 +117,16 @@ if (!rootEl) throw new Error('root element missing');
  * `playerTheme` doc (Codex P2 on #232).
  */
 function ThemedApp() {
-  const { user, loading } = useAuth();
-  const { data: event } = useEventDoc(!!user);
-  const { data: player } = useMyPlayer(user?.uid);
+  const { user, loading, admission } = useAuth();
+  // The two subscriptions this shell opens for a signed-in User wait for
+  // admission (#804): a visit whose Invitation is held, pending or blocked is
+  // not a member, and the whole-shell gate has to cover the Event and Player
+  // documents opened HERE, above App, not only what App renders below it
+  // (Codex P1 on #1131). A visit with no Invitation classifies `clear` in the
+  // same batch as the identity change, so nothing opens later than it did.
+  const admitted = mayDealUnderAdmission(admission);
+  const { data: event } = useEventDoc(!!user && admitted);
+  const { data: player } = useMyPlayer(admitted ? user?.uid : undefined);
   // Edition default, not a hardcoded cruise Theme (#555). This line runs on the
   // signed-out shell too, where `useEventDoc(false)` means there is no Event doc
   // at all — so a Vacay build opened in Neon Playground and only changed skin

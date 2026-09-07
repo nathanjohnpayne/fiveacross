@@ -522,14 +522,86 @@ export function readPendingEventInvitation(
 
   const sessionRecord = newestUsableRecord(storedSessionRecords, input.origin, now);
   const localRecord = newestUsableRecord(storedLocalRecords, input.origin, now);
-  const currentRecord =
-    usableRecord(memoryRecord, input.origin, now) ?? sessionRecord ?? localRecord;
+  // The NEWEST usable capture wins, wherever it lives. Memory is this tab's
+  // own copy and a fallback for a page whose stores refused the write — it is
+  // not a priority: localStorage is the one cross-tab store, so a newer
+  // Invitation captured in another tab lands there with a later capture order,
+  // and a reader that preferred its own memory would hand a Retry the bearer
+  // that just failed instead of the capture the spec says supersedes it
+  // (specs/event-invitations.md § ordering; Codex P2 on #1131). Ties in
+  // capture order cannot occur across stores for distinct captures because
+  // `captureId` is part of the order.
+  const currentRecord = [usableRecord(memoryRecord, input.origin, now), sessionRecord, localRecord]
+    .filter((candidate): candidate is PendingEventInvitationRecord => candidate !== null)
+    .reduce<PendingEventInvitationRecord | null>(
+      (newest, candidate) =>
+        newest === null || compareCaptureOrder(candidate, newest) > 0 ? candidate : newest,
+      null,
+    );
   if (currentRecord === null) return null;
+
+  // Retire what the winner out-ordered. A superseded capture that stayed
+  // behind in this tab's memory or session store would come back on the next
+  // read once the winner is consumed (`forgetPendingEventInvitationIf` deletes
+  // only the record it was handed), and a Retry, an account change or a reload
+  // would then redeem a bearer the spec already replaced — or show its stale
+  // terminal error (Codex P2 on #1131). Only records this read OBSERVED and
+  // ordered before the winner are removed; a capture published after the
+  // snapshot is untouched, exactly as capture-time cleanup behaves.
+  if (memoryRecord !== null && compareCaptureOrder(memoryRecord, currentRecord) < 0) {
+    memoryRecord = null;
+  }
+  for (const [name, storedRecords] of [
+    ['sessionStorage', storedSessionRecords],
+    ['localStorage', storedLocalRecords],
+  ] as const) {
+    for (const stored of storedRecords) {
+      if (
+        stored.record !== null &&
+        stored.record.origin === input.origin &&
+        compareCaptureOrder(stored.record, currentRecord) < 0
+      ) {
+        removeStored(name, stored);
+      }
+    }
+  }
 
   return {
     record: currentRecord,
     durable: sameRecord(sessionRecord, currentRecord) || sameRecord(localRecord, currentRecord),
   };
+}
+
+/**
+ * Give a memory-only invitation a durable copy before the document is left.
+ *
+ * `capturePendingEventInvitation` keeps the memory copy when both stores
+ * refuse the write (quota, privacy mode). A caller about to navigate away —
+ * the central-auth handoff, a top-level redirect — would destroy that only
+ * copy, so it asks here first: if the current usable record has no stored
+ * copy, the write is attempted again under a fresh immutable key, and the
+ * memory copy is replaced by the stored identity so a later compare-delete
+ * names one record. Returns the state after the attempt, or `null` when the
+ * origin holds no usable invitation at all. `durable: false` on return means
+ * the stores still refuse and the caller must not leave the document.
+ */
+export function persistPendingEventInvitation(
+  input: ReadPendingEventInvitationInput,
+): PendingEventInvitationState | null {
+  const current = readPendingEventInvitation(input);
+  if (current === null || current.durable) return current;
+  const identity = newCaptureIdentity();
+  if (identity.storageKey === null) return current;
+  const record: PendingEventInvitationRecord = { ...current.record, captureId: identity.captureId };
+  const serialized = JSON.stringify(record);
+  const session = writeStore('sessionStorage', identity.storageKey, serialized);
+  const local = writeStore('localStorage', identity.storageKey, serialized);
+  const durable =
+    (session && storeHasRecord('sessionStorage', identity.storageKey, record)) ||
+    (local && storeHasRecord('localStorage', identity.storageKey, record));
+  if (!durable) return current;
+  memoryRecord = record;
+  return { record, durable: true };
 }
 
 /**
