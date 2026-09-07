@@ -223,9 +223,12 @@ export default function Leaderboard() {
     const derived = derivedHonors.find((h) => h.dayIndex === d.index);
     // THE PIN WINS when present (#280 round 4): the write-once, rules-
     // timestamped day-meta doc is the honor's source of truth. Derived
-    // dayStats timestamps are NOT reliable tiebreakers — the mark folds can
-    // seed a later day's bucket from the cruise-wide root firstBingoAt, so an
-    // "earlier" derived stamp may be another day's time entirely. The derived
+    // dayStats timestamps are NOT reliable tiebreakers — a proof-backed Mark
+    // could seed a later day's bucket from the cruise-wide root firstBingoAt,
+    // so an "earlier" derived stamp may be another day's time entirely. The
+    // write paths no longer copy the root (#1049, `boardFirstBingoAt`), but
+    // that ticket ships no backfill, so rows persisted before it can still
+    // carry another Day's instant and this pin-wins rule still stands. The derived
     // roster is the fallback for UNPINNED days only. If the pinned winner is
     // banned, the chip renders blank — hidden, never reassigned. The unknown-
     // identity-winner residual the old earliest-wins rule chased is now covered
