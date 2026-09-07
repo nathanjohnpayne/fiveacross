@@ -2,16 +2,19 @@
 //
 // One versioned service in front of `*.fiveacross.app` and `*.vacaybingo.com`,
 // so a new Event needs no DNS record, no Hosting custom domain, no certificate
-// and no Worker route of its own. It does four things and refuses a fifth:
+// and no Worker route of its own. It does five things and refuses a sixth:
 //
 //   1. guards the Namespace and the reserved infrastructure labels (`host.ts`)
 //   2. resolves the address against `hostnames/{host}` (`resolve.ts`)
 //   3. fails CLOSED on anything that is not an explicit, active, matching
 //      record (`notFound.ts`)
-//   4. proxies what survives to the Firebase Hosting origin with a rewritten
+//   4. answers `/manifest.webmanifest` with the resolved Edition's installed-app
+//      identity (`manifest.ts`, #546) — the one address whose correct answer
+//      depends on which hostname asked
+//   5. proxies what survives to the Firebase Hosting origin with a rewritten
 //      Host header, leaving the public hostname in the browser untouched
 //
-// The fifth — the one it refuses — is REDIRECTING. This Worker is not a
+// The sixth — the one it refuses — is REDIRECTING. This Worker is not a
 // canonicaliser. #599 as amended removed edge canonicalization outright: every
 // registered host serves in place, and a serving domain is never bounced off
 // itself. The canonical hostname still exists, but its job is analytics
@@ -27,6 +30,7 @@
 // is running on Cloudflare.
 
 import { classifyHost, NAMESPACES } from './host';
+import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
 import { isLookupConfigured, resolveHost, type HostnameCache, type ResolveDeps } from './resolve';
 
@@ -120,6 +124,19 @@ export async function handleRequest(
   const resolution = await resolveHost(classified.host, classified.slug, config, deps);
   if (resolution.kind === 'not-found') {
     return notFoundResponse(resolution.reason, config.version);
+  }
+
+  // The per-hostname PWA manifest (#546), and note WHERE it sits: after the
+  // namespace guard AND after resolution. It is not an exemption like
+  // `/__/auth/*` — the opposite. That exemption exists because the sign-in
+  // round-trip must survive a lookup failure; this route STRICTLY DEPENDS on
+  // the resolution it derives from, because the Edition it serves comes out of
+  // the resolved record. So a reserved label, an out-of-namespace host and an
+  // unknown or inactive Event all still fail closed here exactly as they do for
+  // every other path, and an address that does not serve an app does not serve
+  // an app identity either.
+  if (isWebManifestRequest(request.method, url.pathname)) {
+    return webManifestResponse(resolution.edition, config.version, request.method);
   }
 
   return proxyToOrigin(request, url, config, deps);
