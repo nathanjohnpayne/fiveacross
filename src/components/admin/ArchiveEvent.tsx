@@ -80,7 +80,7 @@ const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
  * ever surface it, and an Event silently stuck unplayable is the worst outcome
  * this feature could produce.
  *
- * TWO PRECONDITIONS ahead of the first tap, because the write is permanent
+ * THREE PRECONDITIONS ahead of the first tap, because the write is permanent
  * behind write-once rules and there is no second attempt to correct it:
  *
  *  1. **Every preview input server-confirmed.** `useLeaderboard`'s
@@ -107,12 +107,15 @@ const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
  *     quiesce would sail straight through a check made here alone. When that
  *     server re-read refuses, `runArchive` reopens play — this handler shut the
  *     Event, so this handler puts it back.
- *  3. **The record fits.** `players/{uid}` validates none of its fields, so a
- *     Player can leave a row the archive cannot serialize or cannot fit inside
- *     the Event document's 1 MiB budget. `draftEventArchive` coerces and skips
- *     what it can and REFUSES what it cannot, and that refusal has to be read
- *     BEFORE the first write — otherwise every attempt shuts the Event and then
- *     fails on the second one (Codex P2, PR #1139).
+ *  3. **The record fits the DOCUMENT.** `players/{uid}` validates none of its
+ *     fields, so a Player can leave a row the archive cannot serialize; and the
+ *     record never lands on an empty Event, so an Event whose own `days` /
+ *     `bannedUids` / `mostLovedPhoto` already fill the 1 MiB budget cannot take
+ *     even an ordinary one. `draftEventArchive` coerces and skips what it can
+ *     and REFUSES what it cannot — measured against the PROJECTED document,
+ *     which is why the Event this control is subscribed to is passed to it —
+ *     and that refusal has to be read BEFORE the first write, or every attempt
+ *     shuts the Event and then fails on the second one (Codex P2, PR #1139).
  */
 export default function ArchiveEvent({
   event,

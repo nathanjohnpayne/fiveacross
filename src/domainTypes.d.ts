@@ -484,7 +484,7 @@ export interface EventDoc {
    * against one closing state and then commits against whatever the
    * transaction finds — so an Event reopened and shut AGAIN underneath a
    * slow snapshot (an Admin reopening play, gameplay resuming, a second archive
-   * beginning) presents a `archiving: true` indistinguishable from the first,
+   * beginning) presents an `archiving: true` indistinguishable from the first,
    * and the stale reads commit as a permanent record. Comparing the token the
    * snapshot was read against with the one the transaction sees is what tells
    * the two generations apart.

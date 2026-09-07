@@ -90,50 +90,6 @@ service cloud.firestore {
     function eventOpenForPlay(eventId) {
       return !eventClosedToPlay(eventId);
     }
-    // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed. The
-    // NULLABLE keys are checked as type-or-null, because `null` is a
-    // legitimate stored value for each — the First-BINGO pair is `null` when
-    // nobody got there, `freezeAt: null` means the Event had no Standings
-    // Freeze. An ABSENT key needs no clause of its own: reading a missing key errors the
-    // expression, which denies, and denying is what a record the archived
-    // Leaderboard would throw on deserves. `archivedAt` must equal the
-    // document's own stamp, which both type-checks it and holds the invariant
-    // `EventArchive.archivedAt` states — the two are written from one value in
-    // one update, and a record disagreeing with the stamp beside it would put
-    // two answers on screen.
-    //
-    // The record is passed in ALREADY DEREFERENCED, rather than the whole
-    // document: this rule's arm lives one clause away from Firestore's
-    // 1000-expression cap (#850/#934), and re-walking `request.resource.data
-    // .archive` per clause is the kind of cost that pushed it over.
-    //
-    // Rules cannot iterate a list, so the standings ROWS remain the stated
-    // residual (the same one `bannedUids` carries); what this closes is the
-    // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
-    // at all, or an empty map — which is irreversible and leaves the Leaderboard
-    // on its live fallback while play is frozen (Codex P2, PR #1139).
-    // The headline honour and the holder's own kept row, validated TOGETHER
-    // (#134, Codex P2 on PR #1139 round 4). They are SELECTED together — the
-    // row exists only to carry the honour's holder outside the bounded
-    // `standings` prefix — so the record has exactly two legitimate shapes:
-    // both `null` (nobody got there), or both maps naming the SAME holder.
-    // Type-checking them one at a time accepted the two shapes the pairing
-    // exists to refuse: a map beside a `null`, which is the half-built record
-    // the archived Share Card reads a hole from, and two maps naming DIFFERENT
-    // Players, which puts one name in the hall of fame's headline and another
-    // on the pinned eleventh row of the same card. An ABSENT key still errors
-    // the expression and denies, exactly as it did.
-    //
-    // Its own helper for the reason `completeArchiveRecord` is one: the arm
-    // that calls it sits against Firestore's expression cap (#850/#934), so
-    // the pairing is expressed once here rather than unrolled inline.
-    function firstBingoPairComplete(archive) {
-      return (archive.firstBingo == null && archive.firstBingoRow == null)
-        || (archive.firstBingo is map
-            && archive.firstBingoRow is map
-            && archive.firstBingo.uid is string
-            && archive.firstBingoRow.uid == archive.firstBingo.uid);
-    }
     // The flip is BOUND to the quiesce the record was read against (#134,
     // Codex P1 on PR #1139). `archiving: true` says the Event is shut; it
     // cannot say WHICH shut. Play can be reopened and shut AGAIN while a
@@ -160,6 +116,50 @@ service cloud.firestore {
         && stored.get('archiveToken', '') != ''
         && incoming.get('archiveToken', '') == stored.get('archiveToken', '');
     }
+    // The headline honour and the holder's own kept row, validated TOGETHER
+    // (#134, Codex P2 on PR #1139 round 4). They are SELECTED together — the
+    // row exists only to carry the honour's holder outside the bounded
+    // `standings` prefix — so the record has exactly two legitimate shapes:
+    // both `null` (nobody got there), or both maps naming the SAME holder.
+    // Type-checking them one at a time accepted the two shapes the pairing
+    // exists to refuse: a map beside a `null`, which is the half-built record
+    // the archived Share Card reads a hole from, and two maps naming DIFFERENT
+    // Players, which puts one name in the hall of fame's headline and another
+    // on the pinned eleventh row of the same card. An ABSENT key still errors
+    // the expression and denies, exactly as it did.
+    //
+    // Its own helper for the reason `completeArchiveRecord` is one: the arm
+    // that calls it sits against Firestore's expression cap (#850/#934), so
+    // the pairing is expressed once here rather than unrolled inline.
+    function firstBingoPairComplete(archive) {
+      return (archive.firstBingo == null && archive.firstBingoRow == null)
+        || (archive.firstBingo is map
+            && archive.firstBingoRow is map
+            && archive.firstBingo.uid is string
+            && archive.firstBingoRow.uid == archive.firstBingo.uid);
+    }
+    // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed. The
+    // NULLABLE keys are checked as type-or-null, because `null` is a legitimate
+    // stored value for each — the First-BINGO pair is `null` when nobody got
+    // there, `freezeAt: null` means the Event had no Standings Freeze. An
+    // ABSENT key needs no clause of its own: reading a missing key errors the
+    // expression, which denies, and denying is what a record the archived
+    // Leaderboard would throw on deserves. `archivedAt` must equal the
+    // document's own stamp, which both type-checks it and holds the invariant
+    // `EventArchive.archivedAt` states — the two are written from one value in
+    // one update, and a record disagreeing with the stamp beside it would put
+    // two answers on screen.
+    //
+    // The record is passed in ALREADY DEREFERENCED, rather than the whole
+    // document: this rule's arm lives one clause away from Firestore's
+    // 1000-expression cap (#850/#934), and re-walking `request.resource.data
+    // .archive` per clause is the kind of cost that pushed it over.
+    //
+    // Rules cannot iterate a list, so the standings ROWS remain the stated
+    // residual (the same one `bannedUids` carries); what this closes is the
+    // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
+    // at all, or an empty map — which is irreversible and leaves the Leaderboard
+    // on its live fallback while play is frozen (Codex P2, PR #1139).
     function completeArchiveRecord(archive, stamp) {
       return archive is map
         && archive.standings is list

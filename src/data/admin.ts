@@ -761,6 +761,12 @@ export async function beginArchive(): Promise<BeginArchiveResult> {
  * way back. Once `status` is `'archived'` this reports `already-archived` and
  * writes nothing — the freeze is carried by `status` from there, and that IS
  * write-once (spec § Recovery).
+ *
+ * `archiveToken` is deliberately LEFT in place rather than cleared. It only
+ * ever means anything while `archiving` is true, and the next `beginArchive`
+ * mints a fresh one precisely because the Event is no longer closing when it
+ * runs — so a freeze still in flight under the old generation sees a token that
+ * has moved and aborts, which is the whole point.
  */
 export async function abandonArchive(): Promise<AbandonArchiveResult> {
   const eventRef = evt();
@@ -821,7 +827,6 @@ export async function abandonArchive(): Promise<AbandonArchiveResult> {
  *  - `config-changed` — the Event configuration the snapshot is defined by
  *    (`claimMode`, `days`, the freeze boundary) moved between the pre-read and
  *    the commit, so the reads and the record would describe different Events.
- *
  *  - `claims-pending` — a Claim was still awaiting an Admin when the Event shut.
  *    The freeze never reads that collection, so a claim resolved after it is not
  *    resolvable at all; the same server-read discipline the roster gets is
