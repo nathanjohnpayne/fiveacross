@@ -37,7 +37,7 @@ Every named Five Across deploy therefore performs a read-only predeploy check **
 
 The first hostname-resolved Five Across deployment activates the server-provided `canonicalHost` as the analytics origin. Before that release, run `npm run migrate:bodega-canonical-host` through the exact Five Across deploy credential path. If the dry run reports drift, do not deploy until the reviewed migration code is merged, an explicit `--apply` succeeds, and the post-write readback confirms `bodega-bay.fiveacross.app` as the sole Bodega canonical host. The migration and rollback boundary is operationally separate from application publish.
 
-Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. Until #546 supplies per-host static rewriting, do not attach a non-Vacay Edition hostname to the wildcard.
+Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. #546 moved the PWA manifest to the edge Worker, which serves it per host — but only once its routes are attached, and only for shells built after #546 (`worker/README.md` § 4). The crawler-facing `<head>` is still baked per build, so until #1118 supplies per-host HTML rewriting, do not attach a non-Vacay Edition hostname to the wildcard.
 
 ## Target environment files
 

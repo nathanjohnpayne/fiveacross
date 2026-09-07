@@ -39,9 +39,12 @@
          Edition-scoped at BUILD time like the chrome tags above (#587, artwork
          #609): crawlers do not run JS, so unlike the document title there is no
          runtime repair for these — a hostname-resolved bundle keeps the default
-         Edition's share block until the edge Worker (#546) rewrites it per
-         hostname. og:description stays static: it is the Edition-invariant
-         tagline, shared verbatim by every brand row. -->
+         Edition's share block until the edge Worker rewrites it per hostname.
+         That rewrite is #1118, a FOLLOW-UP to #546: #546 shipped the per-host
+         PWA manifest, which the Worker CONSTRUCTS, and left this block to the
+         change that has to mutate a proxied HTML response instead.
+         og:description stays static: it is the Edition-invariant tagline,
+         shared verbatim by every brand row. -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="%EDITION_SHARE_NAME%" />
     <meta property="og:title" content="%EDITION_SHARE_NAME%" />
