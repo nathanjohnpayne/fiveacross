@@ -2459,6 +2459,120 @@ describe('Leaderboard — share affordance', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ArchivedLeaderboard — share affordance (#134, Codex P2 on PR #1139)
+// ---------------------------------------------------------------------------
+
+describe('ArchivedLeaderboard — share affordance', () => {
+  // Reached through `Leaderboard`'s routing component, which mounts the
+  // archived surface instead of the live one — the same path a returning
+  // Player takes, so the frozen card is rendered by the real component tree.
+  const FROZEN_ARCHIVE = {
+    standings: [
+      {
+        uid: 'early-bird',
+        displayName: 'Early Bird',
+        bingoCount: 4,
+        squaresMarked: 18,
+        blackout: false,
+        firstBingoAt: 1000,
+      },
+      {
+        uid: 'top-dog',
+        displayName: 'Top Dog',
+        bingoCount: 2,
+        squaresMarked: 12,
+        blackout: false,
+        firstBingoAt: 9000,
+      },
+    ],
+    playerCount: 2,
+    firstBingo: { uid: 'early-bird', displayName: 'Early Bird', at: 1000 },
+    dailyHonors: [],
+    freezeAt: null,
+    archivedAt: 1_700_000_000_000,
+  };
+
+  beforeEach(() => {
+    H.players = [];
+    H.event = {
+      name: 'Allure of the Seas',
+      status: 'archived',
+      archivedAt: FROZEN_ARCHIVE.archivedAt,
+      archive: FROZEN_ARCHIVE,
+      days: [],
+      bannedUids: [],
+    } as unknown as EventDoc;
+  });
+
+  // The archive is IMMUTABLE — `EventDoc.archive` is write-once at the rules
+  // boundary — so this takes the FarewellPodium treatment rather than the live
+  // Leaderboard's warm-on-intent-only one: pre-rendering cannot bake in
+  // anything a later snapshot would change, and it is what lets the no-wait tap
+  // below still carry the image on a cold mobile press.
+  it('renders the frozen card eagerly on mount; hover and the tap both reuse it — exactly one rasterization', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1)); // eager, not tap-time
+
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    expect(toBlobMock).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    expect(toBlobMock).toHaveBeenCalledTimes(1); // the tap reused the eager render
+    expect(shareMock.mock.calls[0][0].files).toHaveLength(1);
+    // The frozen rows, not the (empty) live roster the archived view never reads.
+    expect(latestToBlobNode().textContent).toContain('Early Bird');
+  });
+
+  // The bug this closes (Codex P2, PR #1139): the tap AWAITED a full
+  // rasterization, so on a slow phone the render outlived the transient user
+  // activation and `navigator.share` was skipped entirely. The fix is
+  // structural, not a shorter wait — the handler takes the render only if it has
+  // ALREADY settled, so `shareCardBlob` runs in the same turn as the gesture.
+  it('a tap on a stalled render shares in the same turn as the gesture — no wait to outlive the activation', async () => {
+    toBlobMock.mockReturnValue(new Promise(() => {})); // a render that never settles
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+
+    // No await, no timer advance: the share call has ALREADY happened by the
+    // time the click handler returns, which is the whole guarantee.
+    expect(shareMock).toHaveBeenCalledTimes(1);
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.files).toBeUndefined(); // no image — the documented degrade
+    expect(shareArg.title).toBe('Gay Cruise Bingo—Final standings');
+    expect(shareArg.url).toBeTruthy();
+  });
+
+  it('re-renders when a ban changes what the card shows, rather than sharing the stale one', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(latestToBlobNode().textContent).toContain('Early Bird');
+
+    // Moderation is the archive's ONE live input: the stored record is
+    // unchanged, but a banned Player must leave the shared card too. The eager
+    // render is deliberately once-only, so warm-on-intent is what re-renders
+    // the invalidated card.
+    H.event = { ...(H.event as EventDoc), bannedUids: ['early-bird'] } as EventDoc;
+    rerender(<Leaderboard />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+    expect(latestToBlobNode().textContent).not.toContain('Early Bird');
+    expect(latestToBlobNode().textContent).toContain('Top Dog');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FarewellPodium — share affordance (issue #449)
 // ---------------------------------------------------------------------------
 

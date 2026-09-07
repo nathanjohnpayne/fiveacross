@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
@@ -48,6 +49,24 @@ function toShareRow(
     firstToBingo: row.uid === firstBingoUid,
   };
 }
+
+/**
+ * The warmed archive card, with its SETTLED state carried alongside the promise
+ * — the `FarewellPodium` shape, for the `FarewellPodium` reason (Codex P1, PR
+ * #712 round 3). `navigator.share` needs transient user activation, and so does
+ * `clipboard.writeText` on Safari and Firefox, so a tap that WAITS on a
+ * rasterization can outlive the activation and leave every share leg unable to
+ * fire. Only a tap that never waits is structurally safe: the handler reads
+ * `blob` (valid only when `settled`) and calls `shareCardBlob` in the same turn
+ * as the gesture. A `null` blob on a settled render is fine — it already means
+ * "share without the image" downstream.
+ */
+type WarmedCard = {
+  key: string;
+  promise: Promise<Blob | null>;
+  settled: boolean;
+  blob: Blob | null;
+};
 
 /**
  * The archived Leaderboard (#134, specs/post-sailing-archive.md): the frozen
@@ -113,23 +132,85 @@ export default function ArchivedLeaderboard({
     return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
   };
 
-  const shareLeaderboard = async () => {
-    const actedEventId = EVENT_ID;
-    // The Share Card prints the VISIBLE rows, so a banned Player never appears
-    // on a shared card (#108's rule, same as the live Leaderboard's).
+  // The Share Card prints the VISIBLE rows, so a banned Player never appears on
+  // a shared card (#108's rule, same as the live Leaderboard's).
+  const shareRows = ((): LeaderboardShareRow[] => {
     const ranked = standings.map((row, i) => toShareRow(row, i + 1, firstBingoUid));
     const rows = ranked.slice(0, MAX_SHARE_ROWS);
     if (firstBingoUid && !rows.some((r) => r.uid === firstBingoUid)) {
       const pinned = ranked.find((r) => r.uid === firstBingoUid);
       if (pinned) rows.push(pinned);
     }
-    const blob = await renderLeaderboardShareCard({
-      eventName: event?.name ?? shareCardAppName(),
-      rows,
-      contextLine: event?.name ? `${event.name} · Final standings` : undefined,
+    return rows;
+  })();
+  const shareEventName = event?.name ?? shareCardAppName();
+  const shareContextLine = event?.name ? `${event.name} · Final standings` : undefined;
+
+  const warmedCard = useRef<WarmedCard | null>(null);
+  const eagerRenderStarted = useRef(false);
+
+  /**
+   * Start (or reuse) the card rasterization. Keyed on the rendered inputs — the
+   * Event name and the VISIBLE rows — so a ban or an unban that changes what the
+   * card shows re-renders rather than sharing a card with the wrong Player on
+   * it. `.catch(() => null)` lives inside the cached promise (the Leaderboard's
+   * own rationale): a render failure resolves null, `shareCardBlob` degrades to
+   * the text/URL leg, and an unconsummated hover can never surface as an
+   * unhandled rejection.
+   */
+  const warmShareCard = (): Promise<Blob | null> => {
+    const key = JSON.stringify({ shareEventName, shareContextLine, shareRows });
+    if (warmedCard.current?.key === key) return warmedCard.current.promise;
+    const promise = renderLeaderboardShareCard({
+      eventName: shareEventName,
+      rows: shareRows,
+      contextLine: shareContextLine,
       statLine: 'Final standings',
     }).catch(() => null);
-    if (EVENT_ID !== actedEventId) return;
+    const entry: WarmedCard = { key, promise, settled: false, blob: null };
+    warmedCard.current = entry;
+    // Mutating the entry rather than checking identity here is deliberate (the
+    // FarewellPodium note): a superseded entry recording its own result is
+    // harmless, because every READ goes through `warmedCard.current`, whose key
+    // must match the card the tap is about to share.
+    void promise.then((rendered) => {
+      entry.settled = true;
+      entry.blob = rendered;
+    });
+    return promise;
+  };
+
+  // ONE eager render on mount — the `FarewellPodium` treatment, and here it is
+  // the obvious one: the archive is IMMUTABLE. `EventDoc.archive` is write-once
+  // at the rules boundary, so unlike the live Leaderboard (which re-renders on
+  // every roster snapshot, and refused mount-eager rasterization for exactly
+  // that reason) there is no per-snapshot churn to pay for. Pre-rendering it
+  // cannot bake in anything a later snapshot would change, and it is what lets
+  // the no-wait tap below still carry the image on the common cold mobile tap,
+  // where `onPointerDown` gives a render only the length of the press.
+  //
+  // Deliberately ONE, guarded by a ref rather than a dep list: a later ban
+  // changes the key and simply falls back to warm-on-intent.
+  useEffect(() => {
+    if (eagerRenderStarted.current) return;
+    eagerRenderStarted.current = true;
+    void warmShareCard();
+    // Intentionally re-checked on every commit: `warmShareCard` closes over the
+    // current rows, and the ref above — not the dep list — is what makes it run
+    // once.
+  });
+
+  const shareLeaderboard = async () => {
+    const actedEventId = EVENT_ID;
+    // NOTHING is awaited before `shareCardBlob`. Start (or reuse) the render,
+    // then take its blob ONLY if it has already settled: an unsettled render
+    // costs the image, never the share. `shareCardBlob` is therefore invoked in
+    // the same turn as the tap, so `navigator.share` runs while the transient
+    // activation is unambiguously alive. The cached promise keeps rasterizing
+    // either way, so a second tap gets the image.
+    void warmShareCard();
+    const warmed = warmedCard.current;
+    const blob = warmed?.settled === true ? warmed.blob : null;
     try {
       await shareCardBlob({
         blob,
@@ -224,7 +305,17 @@ export default function ArchivedLeaderboard({
         Frozen when the {editionLexicon().occasion} was archived—nothing here changes again.
       </p>
       <div className="lb-actions">
-        <button type="button" className="btn" onClick={shareLeaderboard}>
+        {/* Warm-on-intent as well as mount-eager (the live Leaderboard's three
+            handlers): the eager render covers the cold tap, and these cover a
+            key change — a ban or unban — that invalidated it. */}
+        <button
+          type="button"
+          className="btn"
+          onClick={shareLeaderboard}
+          onPointerEnter={() => void warmShareCard()}
+          onFocus={() => void warmShareCard()}
+          onPointerDown={() => void warmShareCard()}
+        >
           Share final standings
         </button>
       </div>
