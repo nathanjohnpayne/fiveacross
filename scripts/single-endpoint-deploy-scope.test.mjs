@@ -2437,6 +2437,58 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("rehearses an mtime-based hook against a project-root stamp with live timestamps", async () => {
+    // Codex P1, round 19: the copied root files refreshed their mtimes too,
+    // so a hook comparing a source file against `$PROJECT_DIR/stamp` answered
+    // differently here than live. The root-file copy preserves timestamps now.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [
+            ...PREDEPLOY,
+            'if [ "$RESOURCE_DIR/src/index.ts" -ot "$PROJECT_DIR/stamp" ]; then cp "$RESOURCE_DIR/group.js" "$RESOURCE_DIR/lib/index.js"; fi',
+          ],
+        },
+        files: {
+          stamp: "",
+          "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+        },
+      },
+      async (configPath) => {
+        const { utimes } = await import("node:fs/promises");
+        const { dirname: dir, join: under } = await import("node:path");
+        const past = new Date(Date.now() - 3_600_000);
+        await utimes(under(dir(configPath), "functions", "src", "index.ts"), past, past);
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, bugReportInvokerSelected: true });
+      },
+    );
+  });
+
+  it("ABORTS when a hook that leaves descendants running has also moved a remote-tracking ref", async () => {
+    // Codex P1, round 19: the background-hook refusal checked the live tree
+    // but not what git answers, and returned BEFORE the post-hook metadata
+    // check — so a hook that moved origin/main and left a child running was
+    // refused conservatively while the wrapper's checkout guard no longer
+    // held. The refusal now asks git first and aborts on the moved ref.
+    await withFunctionsProject(
+      {
+        branch: "release",
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, "git update-ref refs/remotes/origin/main HEAD; sleep 3 &"],
+        },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
+        expect(failure.message).toContain("refs/remotes/origin/main");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the

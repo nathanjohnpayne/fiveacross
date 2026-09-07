@@ -713,7 +713,7 @@ async function stageProjectOverlay({
       metadataDirs.push(from);
       return;
     }
-    await cp(from, to, { dereference: true });
+    await cp(from, to, { dereference: true, preserveTimestamps: true });
     const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(from, "utf8"));
     if (!pointer) return;
     const gitDir = resolve(dirname(from), pointer[1]);
@@ -743,7 +743,10 @@ async function stageProjectOverlay({
         // mutation guard has to watch.
         liveDirs.push(from);
       } else {
-        await cp(from, to, { dereference: true });
+        // Timestamps travel with the copy for the same reason they do in the
+        // source copy (Codex P1, round 19): an incremental hook comparing a
+        // source file against a root stamp must answer here as it does live.
+        await cp(from, to, { dereference: true, preserveTimestamps: true });
         // Copied, not linked — and STILL watched (Codex P1, round 15 on
         // #1107). The overlay closes the relative route to this file, but a
         // hook launched through npm inherits `INIT_CWD` pointing at the live
@@ -806,6 +809,20 @@ async function stageProjectOverlay({
  * copy: it is relinked deliberately, because the deploy's own build reads and
  * writes that very tree, and walking it would cost more than everything else
  * combined. Nothing else is excluded.
+ *
+ * WHAT NO REHEARSAL CAN CLOSE. A hook that inspects the rehearsal itself — the
+ * scratch path `$PROJECT_DIR` resolves to, the symlinked project directories
+ * (`[ -L shared ]`), the process tree it runs under — can tell this run from
+ * the deploy and behave differently in each (Codex P1, round 19 on #1107).
+ * Parity against a hook that wants to detect the rehearsal is unattainable by
+ * construction: staging real directories would leave the path, and copying
+ * the project to the live path is the deploy. This is the same residual the
+ * design states for a hook that keeps state in `$HOME`, `/tmp`, `.git` or a
+ * lock server — a hook that reads something outside the deployment inputs to
+ * decide what to build — and it is answered the same way: the guard closes
+ * every route by which a hook changes the inputs the deploy reads, and a hook
+ * written to fool the guard is a change to this repository's own hooks, which
+ * review catches where classification cannot.
  */
 async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   /** @type {Map<string, string>} */
@@ -1531,11 +1548,14 @@ async function buildAndInventoryProject({
         // an outcome this rehearsal cannot reproduce: Firebase lets that work
         // finish on its own clock, so the artifact it discovers may differ
         // from the one here whether the descendant is ended or awaited
-        // (Codex P1, round 17). The live tree is still checked — the
-        // descendant may already have written into it — and then the request
-        // falls to the conservative arm rather than to a guess.
+        // (Codex P1, round 17). The live tree AND the repository metadata are
+        // still checked — the descendant may already have written into the
+        // tree or moved a ref (Codex P1, round 19) — and only then does the
+        // request fall to the conservative arm rather than to a guess.
         const wroteInBackground = await liveDrift();
         if (wroteInBackground) throw new LiveCheckoutDriftError(wroteInBackground, "predeploy hook");
+        const movedInBackground = await metadataDrift();
+        if (movedInBackground) throw new RepositoryMetadataDriftError(movedInBackground, "predeploy hook");
         return refuseAll(
           `predeploy hook left work running in the background, whose effect on the artifact cannot be rehearsed: ${hook.command}`,
         );
