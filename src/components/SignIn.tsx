@@ -145,6 +145,12 @@ export default function SignIn() {
       // the click and the auth transaction starting.
       await signIn(adult && ack);
     } catch {
+      // A popup the browser blocked, an account Google rejected, a network
+      // failure (#1134, Phase 4b P2 on #1131): the attempt is over and the
+      // button re-arms, so the player has to be told why they are looking at
+      // it again. The surface below is static copy — a Firebase error never
+      // reaches the DOM.
+      setStartFailed(true);
       setBusy(false);
     }
   };
@@ -215,14 +221,18 @@ export default function SignIn() {
             ? 'Enter the event'
             : 'Continue with Google'}
       </button>
-      {/* The handoff's explicit failure surface (#549, ADR 0010: "failure states
-          are explicit — no silent fallback"). Two causes, one message, because
-          the player's next move is identical and the server deliberately refuses
-          to say which of expired / already-used / unknown a code was. Below the
-          button, so the retry it asks for is the thing directly above it. */}
+      {/* The explicit failure surface (#549, ADR 0010: "failure states are
+          explicit — no silent fallback"). A handoff that did not complete, a
+          handoff that could not start, and a direct sign-in that rejected
+          (#1134) share one message, because the player's next move is identical
+          and the server deliberately refuses to say which of expired /
+          already-used / unknown a code was. Below the button, so the retry it
+          asks for is the thing directly above it. */}
       {(handoffFailed || startFailed) && (
         <p className="muted" role="alert" data-testid="signin-handoff-error">
-          That sign-in didn't finish. Please tap Continue with Google to try again.
+          {reprompt
+            ? "That didn't save. Please tap Enter the event to try again."
+            : "That sign-in didn't finish. Please tap Continue with Google to try again."}
         </p>
       )}
       {invitationUnkept && (
