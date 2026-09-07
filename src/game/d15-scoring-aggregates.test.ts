@@ -247,6 +247,30 @@ describe('cruiseFirstBingoUid / effectiveCruiseFirstBingoAt', () => {
     expect(effectiveCruiseFirstBingoAt(legacy, isTutorialDay)).toBe(1234);
     expect(cruiseFirstBingoUid([legacy], isTutorialDay)).toBe('legacy');
   });
+
+  it('breaks an exact tie by uid, not by the order the roster arrives in', () => {
+    // The mirror of the daily email's ⭐ tie-break (`eventFirstBingoUid` in
+    // `functions/src/dailyEmailContent.ts`). The two selectors never see the
+    // same order — this one is handed a roster sorted by LIVE root totals,
+    // the email one a through-yesterday window — so a Player who marks today's
+    // card before a delayed or retried send could flip a roster-order tie-break
+    // on one side alone (Codex P2, #1052). Uid is the key neither view supplies.
+    const TIE = 777;
+    const zed = mkPlayer('zed', { 4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE } });
+    const ace = mkPlayer('ace', { 4: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE } });
+    expect(cruiseFirstBingoUid([zed, ace], isTutorialDay)).toBe('ace');
+    expect(cruiseFirstBingoUid([ace, zed], isTutorialDay)).toBe('ace');
+    // Including the order the Leaderboard actually hands it: `sortPlayers` puts
+    // `zed` first on totals, and the honour still goes to `ace`.
+    expect(cruiseFirstBingoUid(sortPlayers([ace, zed]), isTutorialDay)).toBe('ace');
+    expect(sortPlayers([ace, zed]).map((p) => p.uid)).toEqual(['zed', 'ace']);
+    // One millisecond of daylight and the timestamp decides again — the uid is a
+    // secondary key, never a way to overtake an earlier bingo.
+    const zedEarlier = mkPlayer('zed', {
+      4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE - 1 },
+    });
+    expect(cruiseFirstBingoUid([ace, zedEarlier], isTutorialDay)).toBe('zed');
+  });
 });
 
 describe('boardFirstBingoAt — the stamp ONE Board preserves (#1049)', () => {

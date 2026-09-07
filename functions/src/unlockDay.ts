@@ -77,6 +77,7 @@ import {
   buildPodiumPayload,
   buildMostLovedPhotoAward,
   freezePhraseForUnlock,
+  standingsFreezeAtFor,
   type FinalePlayer,
   type FinaleDay,
   type FinaleDayStat,
@@ -85,7 +86,6 @@ import {
   type MostLovedHeartLike,
 } from './finaleContent';
 import { normalizePool } from './poolVocab';
-import { isCeremonialDay } from './scoringVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent) —
 // the persisted award shape both compiler roots agree on.
 
@@ -359,23 +359,13 @@ export interface FinaleTimes {
  * of #552 is that this file's arithmetic is timezone-free.
  */
 export function finaleTimes(days: DayLike[], standingsFreezeAt?: number): FinaleTimes | null {
-  // The sentinel guard applies to the DERIVED instant too, not just the stored
-  // one: `unlockAt: 0` means "live from event open" (this file already treats a
-  // non-positive snapshot cutoff as no cutoff, #289), so a ceremonial Day
-  // carrying it schedules no freeze rather than one at the epoch. Mirrors
-  // `standingsFreezeAtFor` in `src/game/logic.ts`.
-  const ceremonial = days.find(
-    (d) => isCeremonialDay(d) && Number.isFinite(d.unlockAt) && d.unlockAt > 0,
-  );
-  // A non-finite or non-positive stored value is ignored rather than honoured:
-  // 0 is the schedule's "always unlocked" sentinel elsewhere in this file, and
-  // reading it as a freeze instant would freeze every Event at the epoch.
-  // Mirrors `standingsFreezeAtFor` in `src/game/logic.ts`.
-  const configured =
-    typeof standingsFreezeAt === 'number' && Number.isFinite(standingsFreezeAt) && standingsFreezeAt > 0
-      ? standingsFreezeAt
-      : null;
-  const freezeAt = configured ?? ceremonial?.unlockAt ?? null;
+  // Configured-wins, else the first ceremonial Day's `unlockAt`, with the
+  // sentinel guard applied to both — `standingsFreezeAtFor` (finaleContent.ts)
+  // is the single Functions-side derivation of this instant, mirroring
+  // `standingsFreezeAtFor` in `src/game/logic.ts`. The finale's freeze and the
+  // daily email's headline cutoff read the same function precisely so they can
+  // never resolve one Event to two different instants.
+  const freezeAt = standingsFreezeAtFor({ standingsFreezeAt, days });
   if (freezeAt == null) return null;
 
   // The Day the podium Moment is filed under: the LAST Day still OPEN at the
