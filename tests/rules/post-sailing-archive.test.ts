@@ -524,6 +524,40 @@ describe('post-sailing-archive — the archive write must carry the whole record
     }
   });
 
+  // Codex P2, PR #1139 round 4. `firstBingo` and `firstBingoRow` were typed
+  // INDEPENDENTLY, which accepted the two shapes the pairing exists to refuse:
+  // one present beside the other null (the half-built record the archived Share
+  // Card reads a hole from), and two maps naming DIFFERENT holders (one name in
+  // the hall of fame's headline, another on the pinned eleventh row of the same
+  // card). They are selected together, so they are validated together.
+  it('DENIES a First-BINGO honour and a kept row that do not agree', async () => {
+    // An honour with no row to print for it…
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingoRow: null }));
+    // …and a row belonging to an honour the record does not name.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingo: null }));
+    // Two maps, two different Players: the headline and the pinned row would
+    // disagree on the same card.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, uid: BOB },
+      }),
+    );
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: BOB } }),
+    );
+    // A holder with no usable id on either half is refused for the same reason
+    // the pairing exists: there is nothing to match the two against.
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: 7 } }),
+    );
+  });
+
+  it('ALLOWS the pair when both halves name the same holder', async () => {
+    // The matching control, so the denials above are not vacuous.
+    await assertSucceeds(archiveWith(FROZEN_RECORD));
+  });
+
   it('DENIES a record whose stamp disagrees with the document stamp', async () => {
     // Two answers to one question is exactly what the archived surfaces would
     // then show; both are written from one value in one update.

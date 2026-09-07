@@ -91,10 +91,10 @@ service cloud.firestore {
       return !eventClosedToPlay(eventId);
     }
     // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed. The
-    // two NULLABLE keys are checked as type-or-null, because `null` is a
-    // legitimate stored value for both — `firstBingo: null` means nobody got
-    // there, `freezeAt: null` means the Event had no Standings Freeze. An
-    // ABSENT key needs no clause of its own: reading a missing key errors the
+    // NULLABLE keys are checked as type-or-null, because `null` is a
+    // legitimate stored value for each — the First-BINGO pair is `null` when
+    // nobody got there, `freezeAt: null` means the Event had no Standings
+    // Freeze. An ABSENT key needs no clause of its own: reading a missing key errors the
     // expression, which denies, and denying is what a record the archived
     // Leaderboard would throw on deserves. `archivedAt` must equal the
     // document's own stamp, which both type-checks it and holds the invariant
@@ -112,18 +112,34 @@ service cloud.firestore {
     // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
     // at all, or an empty map — which is irreversible and leaves the Leaderboard
     // on its live fallback while play is frozen (Codex P2, PR #1139).
+    // The headline honour and the holder's own kept row, validated TOGETHER
+    // (#134, Codex P2 on PR #1139 round 4). They are SELECTED together — the
+    // row exists only to carry the honour's holder outside the bounded
+    // `standings` prefix — so the record has exactly two legitimate shapes:
+    // both `null` (nobody got there), or both maps naming the SAME holder.
+    // Type-checking them one at a time accepted the two shapes the pairing
+    // exists to refuse: a map beside a `null`, which is the half-built record
+    // the archived Share Card reads a hole from, and two maps naming DIFFERENT
+    // Players, which puts one name in the hall of fame's headline and another
+    // on the pinned eleventh row of the same card. An ABSENT key still errors
+    // the expression and denies, exactly as it did.
+    //
+    // Its own helper for the reason `completeArchiveRecord` is one: the arm
+    // that calls it sits against Firestore's expression cap (#850/#934), so
+    // the pairing is expressed once here rather than unrolled inline.
+    function firstBingoPairComplete(archive) {
+      return (archive.firstBingo == null && archive.firstBingoRow == null)
+        || (archive.firstBingo is map
+            && archive.firstBingoRow is map
+            && archive.firstBingo.uid is string
+            && archive.firstBingoRow.uid == archive.firstBingo.uid);
+    }
     function completeArchiveRecord(archive, stamp) {
       return archive is map
         && archive.standings is list
         && archive.playerCount is number
         && archive.dailyHonors is list
-        && (archive.firstBingo == null || archive.firstBingo is map)
-        // The headline holder's own standings row, kept outside the bounded
-        // prefix so the Share Card can print the pinned row for a holder who
-        // ranks past it. Required-and-nullable exactly like `firstBingo`: the
-        // two are selected together, so a record carrying one without the other
-        // is a half-built map the archived Share Card would read a hole from.
-        && (archive.firstBingoRow == null || archive.firstBingoRow is map)
+        && firstBingoPairComplete(archive)
         && (archive.freezeAt == null || archive.freezeAt is number)
         && archive.archivedAt == stamp;
     }
