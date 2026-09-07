@@ -152,6 +152,14 @@ function makeDb(seed: {
         update: (_ref: unknown, data: Record<string, unknown>) => {
           docs[eventPath] = { ...(docs[eventPath] ?? {}), ...data };
         },
+        // #134: the system-Moment write moved INSIDE the transaction that reads
+        // the Event, so this fake needs the transactional `set` the real
+        // Admin-SDK surface already has. It delegates to the reference's own
+        // `set` — which applies synchronously here, exactly as `update` above
+        // does — so the stored Moments are the ones the write actually made.
+        set: (ref: { set(data: Record<string, unknown>): Promise<unknown> }, data: Record<string, unknown>) => {
+          void ref.set(data);
+        },
       };
       return fn(tx);
     },
@@ -393,9 +401,9 @@ describe('runFinaleBeats — no finale state lands on a frozen Event', () => {
 
   it('withholds the Moment when the archive lands during the content build', async () => {
     // This beat is retried until the Moment actually lands, and the content
-    // build between the guard and the write reads a whole roster — so the
-    // freshest possible re-read immediately before the `set` is the tightest
-    // guard a non-transactional write can have.
+    // build between `runFinaleBeats`' own guard and the write reads a whole
+    // roster — so the write needs a guard of its own, not just the one at the
+    // top of the run.
     const db = makeDb({
       eventId: 'e',
       event: { days: mainDays(), timezone: 'Europe/Rome' },
@@ -404,6 +412,28 @@ describe('runFinaleBeats — no finale state lands on a frozen Event', () => {
     const beats = runFinaleBeats(db, 'e', { now: () => LAST_CALL_AT });
     db.archiveNow();
     await beats;
+    expect(db.moments()).toEqual([]);
+  });
+
+  it('writes the Moment inside the transaction that reads the Event, so a mid-flight archive aborts it', async () => {
+    // Codex P2, PR #1139. A fresh read followed by a plain `set` still leaves a
+    // window: the archive can commit between the two, and the Moment then
+    // appends to a Feed the record has already preserved. Reading the Event
+    // INSIDE the transaction that writes the Moment closes it — the archive's
+    // own write touches that document, so a commit landing in the window aborts
+    // this attempt and the retry re-reads the closed state. This hook fires
+    // immediately before the transaction's read, which is what that retry sees.
+    //
+    // It is also the assertion that the write is transactional AT ALL: the hook
+    // only fires on a transactional read, and at the last-call instant this beat
+    // is the only transaction in the run.
+    const db = makeDb({
+      eventId: 'e',
+      event: { days: mainDays(), timezone: 'Europe/Rome' },
+      players: roster(),
+      onTransaction: (d) => d.archiveNow({ archiving: true }),
+    });
+    await runFinaleBeats(db, 'e', { now: () => LAST_CALL_AT });
     expect(db.moments()).toEqual([]);
   });
 

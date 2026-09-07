@@ -533,6 +533,9 @@ interface Transaction {
   get(ref: DocRef): Promise<DocSnapshot>;
   get(ref: QueryRef): Promise<{ docs: DocSnapshot[] }>;
   update(ref: DocRef, data: Record<string, unknown>): void;
+  /** #134: the system-Moment write joins the transaction that reads the Event,
+   *  so an archive landing beside it forces a retry rather than a stale write. */
+  set(ref: DocRef, data: Record<string, unknown>): void;
 }
 /** The minimal admin-SDK Firestore surface the scheduler uses. */
 export interface AdminFirestore {
@@ -603,31 +606,43 @@ async function postFinaleMoment(
   // posts the minimal beat (content is best-effort; the beat itself is not).
   extra?: Record<string, unknown>,
 ): Promise<void> {
-  // #134: re-read the Event immediately before the write, not only at the top
-  // of `runFinaleBeats`. This beat is best-effort and RETRIED until the Moment
-  // lands, and the content build above it reads a roster and every Day's
-  // honours — so minutes can pass between the guard and the write. A system
-  // Moment posted after the freeze appends to a Feed the archive has already
-  // preserved, which is the one thing an archived Feed promises it will not do.
-  // A Moment write is a plain `set` at a deterministic id, not a transaction,
-  // so the tightest available guard is the freshest possible read.
-  const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
-  if (eventClosedToPlay(event)) return;
+  // #134: the Event read and the Moment write are ONE TRANSACTION, not a read
+  // followed by a plain `set` (Codex P2, PR #1139). Re-reading immediately before
+  // the write was already necessary — this beat is best-effort and RETRIED until
+  // the Moment lands, and the content build above it reads a roster and every
+  // Day's honours, so minutes can pass between `runFinaleBeats`' own guard and
+  // this point — but a fresh read is still only a read: the archive can commit in
+  // the gap between it and the `set`, and the Moment then appends to a Feed the
+  // record has already preserved, which is the one thing an archived Feed
+  // promises it will not do.
+  //
+  // A transaction closes that gap because it serializes against the documents it
+  // READS: the archive's own write touches this Event document, so a commit
+  // landing inside the window aborts this attempt, and the retry re-reads and
+  // sees the closed state. That is the same guarantee the snapshot and finale
+  // freeze transactions already get from their in-transaction re-checks; this
+  // write was the one beat still taking it on trust.
+  const eventRef = db.doc(`events/${eventId}`);
   // Write at the DETERMINISTIC `kind` id, not an auto-id: the public Feed read
   // (`hasCanonicalMomentId`, src/hooks/useData.ts) only renders these singleton
   // finale beats when `moment.id === moment.kind`, so an auto-id moment would exist
   // in Firestore but never surface (Codex #228 P1). The deterministic id also makes
-  // a retry overwrite the one doc rather than fan out duplicates. No human
-  // author — a `system` uid keeps the MomentDoc shape intact without
-  // impersonating a Player.
-  await db.collection(`events/${eventId}/moments`).doc(kind).set({
-    kind,
-    uid: 'system',
-    displayName: '',
-    photoURL: null,
-    createdAt: now,
-    dayIndex,
-    ...(extra ?? {}),
+  // a retry overwrite the one doc rather than fan out duplicates.
+  const momentRef = db.collection(`events/${eventId}/moments`).doc(kind);
+  await db.runTransaction(async (tx) => {
+    const event = (await tx.get(eventRef)).data() as EventLike | undefined;
+    if (eventClosedToPlay(event)) return;
+    // No human author — a `system` uid keeps the MomentDoc shape intact without
+    // impersonating a Player.
+    tx.set(momentRef, {
+      kind,
+      uid: 'system',
+      displayName: '',
+      photoURL: null,
+      createdAt: now,
+      dayIndex,
+      ...(extra ?? {}),
+    });
   });
 }
 

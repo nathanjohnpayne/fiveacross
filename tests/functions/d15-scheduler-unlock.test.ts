@@ -130,6 +130,13 @@ function makeDb(seed: {
           docs[`events/${seed.eventId}`] = { ...current, ...data };
           void ref;
         },
+        // #134: the finale system-Moment write now runs inside the transaction
+        // that reads the Event, so the fake needs the transactional `set` the
+        // real Admin-SDK surface already has. It delegates to the reference's
+        // own `set`, which applies synchronously here just as `update` does.
+        set: (ref: { set(d: Record<string, unknown>): Promise<unknown> }, data: Record<string, unknown>) => {
+          void ref.set(data);
+        },
       };
       return fn(tx);
     },
