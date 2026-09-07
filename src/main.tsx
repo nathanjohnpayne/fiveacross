@@ -84,7 +84,7 @@ if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
 // force-activate the fleet on an armed floor with no stale tab anywhere and
 // then navigate the probe out of the very load it is asserting — turning the
 // incident deploy the floor exists for into a false outage alert, the same trap
-// the `/__/*` sign-in-popup filter exists to avoid. The invariant the rescue
+// the `/__/*` sign-in-handler filter exists to avoid. The invariant the rescue
 // rests on is "absent from the registry means this module scope never ran", so
 // nothing that DOES run it may opt out of naming itself.
 postClientBuild(__BUILD_STAMP__);
