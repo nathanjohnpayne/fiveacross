@@ -9,6 +9,7 @@ import {
   setEasyMixRatio,
   setForceAdult,
 } from '../../data/admin';
+import ArchiveEvent from './ArchiveEvent';
 import { themesForEditionIncluding } from '../../theme/themes';
 import { useAdultContent } from '../../hooks/useAdultContent';
 import { useAdultContentFlipConfirm } from './AdultContentConfirm';
@@ -328,6 +329,10 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
           ))}
         </div>
       </div>
+
+      {/* Last, because it is the one control here that ends the Event rather
+          than tuning it (#134, specs/post-sailing-archive.md). */}
+      <ArchiveEvent event={event} />
       {dialog}
     </>
   );

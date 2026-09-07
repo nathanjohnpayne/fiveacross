@@ -15,6 +15,8 @@ import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
+import { isEventArchived } from '../data/eventArchive';
+import ArchivedLeaderboard from './ArchivedLeaderboard';
 import Avatar from './Avatar';
 import { EmojiText } from './EmojiText';
 import type { EventDoc, PlayerDoc } from '../types';
@@ -157,6 +159,23 @@ export default function Leaderboard() {
     bannedKey: string;
     promise: Promise<Blob | null>;
   } | null>(null);
+
+  // #134: once the Event is archived, the FROZEN record supersedes the live
+  // roster entirely — `ArchivedLeaderboard` renders `EventDoc.archive` and
+  // subscribes to nothing, so the standings a returning Player sees are the
+  // ones the archive stamped, not a re-derivation over rows that may since have
+  // been moderated. Placed after every hook call and before the loading/empty
+  // early returns (the #280 hook-order rule): the branch changes what renders,
+  // never how many hooks ran.
+  //
+  // An Event marked archived with NO record is not a state this app produces —
+  // `archiveEvent` writes status, stamp and record in one update — so the live
+  // rendering below is left as the fallback for a hand-edited document. It is
+  // still read-only in the only place that counts: `firestore.rules` deny its
+  // gameplay writes on the `status` field alone.
+  if (isEventArchived(event) && event?.archive) {
+    return <ArchivedLeaderboard event={event} archive={event.archive} />;
+  }
 
   if (loading) return <LoadingState label="Tallying the leaderboard…" />;
   if (!players.length) return <div className="center muted">No players yet. Be the first.</div>;
