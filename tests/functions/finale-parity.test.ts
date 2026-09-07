@@ -3,11 +3,24 @@ import {
   tutorialDayIndexes,
   ceremonialDayIndexes,
   buildPodiumPayload,
+  standingsFreezeAtFor as fnsStandingsFreezeAtFor,
   type FinaleDay,
   type FinalePlayer,
 } from '../../functions/src/finaleContent';
 import { scoringForDay as fnsScoringForDay } from '../../functions/src/scoringVocab';
-import { tutorialDayIndexSet, ceremonialDayIndexSet } from '../../src/game/logic';
+import {
+  eventFirstBingoUid,
+  standingsRows,
+  standingsThrough,
+  type EmailDay,
+  type EmailPlayer,
+} from '../../functions/src/dailyEmailContent';
+import {
+  tutorialDayIndexSet,
+  ceremonialDayIndexSet,
+  cruiseFirstBingoUid,
+  standingsFreezeAtFor as clientStandingsFreezeAtFor,
+} from '../../src/game/logic';
 import { scoringForDay } from '../../src/game/scoring';
 import { buildPodium } from '../../src/data/finale';
 import type { DayDef, PlayerDoc } from '../../src/types';
@@ -429,5 +442,222 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
     expect(buildPodiumPayload(asFinalePlayers(players), undefined).firstBingo).toEqual(
       buildPodium(players, undefined).firstBingo,
     );
+  });
+});
+
+// --- The Standings Freeze, resolved once per package ----------------------------
+//
+// `standingsFreezeAtFor` is the third member of the ADR 0011 mirror family, and
+// the daily email's headline cutoff now reads it — so a drift here would let the
+// finale freeze an Event at one instant while the email quoted another.
+
+/** A Day carrying the freeze derivation's inputs on both sides. */
+type FreezeFixtureDay = Pick<DayDef, 'index' | 'pool'> & { unlockAt: number; scoring?: string };
+
+const FREEZE_CASES: Array<{ name: string; standingsFreezeAt?: number; days?: FreezeFixtureDay[] }> = [
+  { name: 'a configured freeze beats the schedule', standingsFreezeAt: 9_000, days: [
+    { index: 0, pool: 'main', unlockAt: 1_000 },
+    { index: 1, pool: 'main', unlockAt: 2_000, scoring: 'ceremonial' },
+  ] },
+  { name: 'no configured freeze derives the FIRST ceremonial Day', days: [
+    { index: 0, pool: 'main', unlockAt: 1_000 },
+    { index: 1, pool: 'main', unlockAt: 2_000, scoring: 'ceremonial' },
+    { index: 2, pool: 'main', unlockAt: 3_000, scoring: 'ceremonial' },
+  ] },
+  { name: 'a legacy closing-pool Day states the policy by its pool', days: [
+    { index: 0, pool: 'main', unlockAt: 1_000 },
+    { index: 1, pool: 'farewell', unlockAt: 5_000 },
+  ] },
+  { name: 'the open sentinel schedules no freeze rather than one at the epoch', days: [
+    { index: 0, pool: 'closing', unlockAt: 0 },
+  ] },
+  { name: 'a non-positive configured value falls through to the schedule', standingsFreezeAt: 0, days: [
+    { index: 0, pool: 'closing', unlockAt: 2_000 },
+  ] },
+  { name: 'an all-competitive schedule never freezes on its own', days: [
+    { index: 0, pool: 'main', unlockAt: 1_000 },
+    { index: 1, pool: 'closing', unlockAt: 2_000, scoring: 'competitive' },
+  ] },
+  { name: 'an Event with no schedule at all', days: [] },
+  { name: 'an Event with no days key at all' },
+];
+
+describe('client/functions parity — the Standings Freeze (ADR 0011)', () => {
+  it.each(FREEZE_CASES)('agrees on $name', ({ standingsFreezeAt, days }) => {
+    const event = { standingsFreezeAt, days };
+    expect(fnsStandingsFreezeAtFor(event)).toEqual(
+      clientStandingsFreezeAtFor(event as unknown as Parameters<typeof clientStandingsFreezeAtFor>[0]),
+    );
+  });
+
+  it('agrees on a null/undefined Event', () => {
+    expect(fnsStandingsFreezeAtFor(undefined)).toEqual(clientStandingsFreezeAtFor(undefined));
+    expect(fnsStandingsFreezeAtFor(null)).toEqual(clientStandingsFreezeAtFor(null));
+  });
+
+  it('pins the two answers that matter, so a symmetric regression still fails', () => {
+    expect(clientStandingsFreezeAtFor({ standingsFreezeAt: 9_000, days: [] } as never)).toBe(9_000);
+    expect(
+      clientStandingsFreezeAtFor({
+        days: [{ index: 0, pool: 'farewell', unlockAt: 5_000 }],
+      } as never),
+    ).toBe(5_000);
+  });
+});
+
+// --- The daily email is a third reader of the same policy (#1052) ---------------
+//
+// The email prints standings and a First-to-BINGO ⭐ at players every morning,
+// which makes it a scoring surface — and sent mail is irreversible. It builds
+// its snapshot in `dailyEmailContent.ts` rather than through the podium
+// builders, so this pins the ANSWER across all three: the email, the client
+// podium the Card renders, and the Functions podium the Feed's Moment carries.
+
+/** The freeze this Event configures. Stated rather than derived, because the
+ *  ceremonial Day here is an EARLY one — deriving would pull the freeze to Day 1
+ *  and end the Event on its second morning. */
+const EMAIL_FREEZE = 4_000;
+
+/** One schedule carrying every distinction ADR 0011 draws: a Tutorial Day that
+ *  still scores, an EARLY ceremonial Day that is NOT a Tutorial Day, an ordinary
+ *  competitive Day, and a legacy closing-pool Day stating no policy at all. */
+const EMAIL_SHAPE: FreezeFixtureDay[] = [
+  { index: 0, pool: 'easy', unlockAt: 1_000 },
+  { index: 1, pool: 'main', unlockAt: 2_000, scoring: 'ceremonial' },
+  { index: 2, pool: 'main', unlockAt: 3_000 },
+  { index: 3, pool: 'farewell', unlockAt: EMAIL_FREEZE },
+];
+const EMAIL_TUTORIAL = [true, false, false, false];
+
+/** The same schedule in each package's local Day shape. */
+const emailDays = (): EmailDay[] =>
+  EMAIL_SHAPE.map((d, i) => ({ ...d, tutorial: EMAIL_TUTORIAL[i] }));
+const emailClientDays = (): DayDef[] => emailDays() as unknown as DayDef[];
+
+/** Marks chosen so each policy rule flips a visible answer: Ana holds the
+ *  earliest bingo on the Event but on a Tutorial Day; Cera's whole haul is on
+ *  the ceremonial Day, which is inert for score and eligible for the honour;
+ *  Late's only bingo lands after the freeze. */
+function emailRoster(): PlayerDoc[] {
+  const p = (
+    uid: string,
+    displayName: string,
+    bingoCount: number,
+    squaresMarked: number,
+    firstBingoAt: number | null,
+    dayStats: PlayerDoc['dayStats'],
+  ): PlayerDoc => ({
+    uid,
+    displayName,
+    photoURL: null,
+    joinedAt: 0,
+    bingoCount,
+    squaresMarked,
+    firstBingoAt,
+    reshufflesUsed: 0,
+    dayStats,
+  });
+  return [
+    p('ana', 'Ana', 2, 22, 500, {
+      0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+      2: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 500 },
+    }),
+    p('cera', 'Cera', 0, 3, null, {
+      1: { bingoCount: 5, squaresMarked: 50, firstBingoAt: 200 },
+      2: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null },
+    }),
+    p('bo', 'Bo', 1, 10, 300, { 2: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 300 } }),
+    p('dee', 'Dee', 1, 5, 600, { 2: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 600 } }),
+    p('late', 'Late', 0, 0, null, {
+      3: { bingoCount: 1, squaresMarked: 4, firstBingoAt: EMAIL_FREEZE + 500 },
+    }),
+  ];
+}
+
+const asEmailPlayers = (players: readonly PlayerDoc[]): EmailPlayer[] =>
+  players.map((p) => ({
+    uid: p.uid,
+    displayName: p.displayName,
+    bingoCount: p.bingoCount,
+    squaresMarked: p.squaresMarked,
+    firstBingoAt: p.firstBingoAt,
+    dayStats: p.dayStats,
+  }));
+
+describe('client/functions parity — the daily email standings and ⭐ (#1052)', () => {
+  const days = emailDays();
+  const players = emailRoster();
+  const email = asEmailPlayers(players);
+  // Resolved, never hardcoded: the email reads the Event's freeze through the
+  // same function the finale does, and this pins that it lands on the same one.
+  const freezeAt = fnsStandingsFreezeAtFor({ standingsFreezeAt: EMAIL_FREEZE, days });
+  const tutorial = tutorialDayIndexes(days);
+  const ceremonial = ceremonialDayIndexes(days);
+  // The email mails Day 3, so its window is Days 0-2 — "through yesterday".
+  const ranked = standingsThrough(email, 3, tutorial, ceremonial);
+  const starUid = eventFirstBingoUid(email, 3, tutorial, freezeAt);
+
+  it('resolves the same policy sets on both sides of the package boundary', () => {
+    expect(freezeAt).toBe(EMAIL_FREEZE);
+    expect(sorted(tutorial)).toEqual(sorted(tutorialDayIndexSet(emailClientDays())));
+    expect(sorted(ceremonial)).toEqual(sorted(ceremonialDayIndexSet(emailClientDays())));
+    expect(sorted(tutorial)).toEqual([0]);
+    // Day 1 states it; Day 3 inherits it from the legacy closing pool.
+    expect(sorted(ceremonial)).toEqual([1, 3]);
+  });
+
+  it('ranks the email standings exactly as both podiums rank them', () => {
+    const client = buildPodium(players, emailClientDays(), undefined, true, EMAIL_FREEZE);
+    const fns = buildPodiumPayload(
+      asFinalePlayers(players),
+      emailDays() as unknown as FinaleDay[],
+      [],
+      EMAIL_FREEZE,
+    );
+    expect(fns.champion).toEqual(client.champion);
+
+    const podiumTop = [client.champion, ...client.runnersUp].map(
+      (r) => `${r?.uid}:${r?.bingoCount}/${r?.squaresMarked}`,
+    );
+    const emailTop = ranked
+      .slice(0, 3)
+      .map((r) => `${r.uid}:${r.bingoCount}/${r.squaresMarked}`);
+    expect(emailTop).toEqual(podiumTop);
+    // Pin the answer too, so a symmetric regression on all three still fails:
+    // Cera's 5 ceremonial bingos count nowhere, and Ana's Tutorial-Day bingo
+    // and squares count everywhere.
+    expect(emailTop).toEqual(['ana:2/22', 'bo:1/10', 'dee:1/5']);
+  });
+
+  it('gives the email, the podium and the Leaderboard pin ONE First to BINGO', () => {
+    const client = buildPodium(players, emailClientDays(), undefined, true, EMAIL_FREEZE);
+    const fns = buildPodiumPayload(
+      asFinalePlayers(players),
+      emailDays() as unknown as FinaleDay[],
+      [],
+      EMAIL_FREEZE,
+    );
+    const pin = cruiseFirstBingoUid(players, (i) => tutorial.has(i), EMAIL_FREEZE);
+
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(starUid).toBe(client.firstBingo?.uid);
+    expect(starUid).toBe(pin);
+    // The honour belongs to the ceremonial, non-Tutorial Day's bingo — inert for
+    // score, eligible for the headline — while Ana's numerically earlier
+    // Tutorial-Day bingo takes nothing and Late's post-freeze one is cut off.
+    expect(client.firstBingo).toEqual({ uid: 'cera', displayName: 'Cera', at: 200 });
+  });
+
+  it('keeps the ⭐ holder in the email snapshot at her true rank', () => {
+    // Cera ranks 4th precisely BECAUSE her score is ceremonial, so the append is
+    // what stops the email claiming there is no First to BINGO while the Card
+    // shows one (specs/daily-engagement-email.md § Ranking parity).
+    const rows = standingsRows(ranked, starUid);
+    expect(rows.map((r) => `${r.rank}:${r.uid}:${r.starred}`)).toEqual([
+      '1:ana:false',
+      '2:bo:false',
+      '3:dee:false',
+      '4:cera:true',
+    ]);
   });
 });

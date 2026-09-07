@@ -130,6 +130,53 @@ export function ceremonialDayIndexes(days: readonly FinaleDay[] | undefined): Se
   return s;
 }
 
+/** A Day as the Standings Freeze derivation reads it: the Scoring Policy inputs
+ *  `FinaleDay` already carries, plus the `unlockAt` the derived freeze falls
+ *  back to. */
+export type FreezeDay = FinaleDay & { unlockAt: number };
+
+/** The Event fields the Standings Freeze derivation reads. Spelled out rather
+ *  than `Pick`ed from `EventDoc` because this side reads RAW Firestore maps, and
+ *  because a caller assembling a partial Event by hand must read as an Event
+ *  with no CONFIGURED freeze and fall back to the schedule derivation — the
+ *  correct answer for both live Events, whose docs predate the field. */
+export interface FreezeSchedule {
+  standingsFreezeAt?: number;
+  days?: readonly FreezeDay[];
+}
+
+/**
+ * The Event's Standings Freeze instant (ADR 0011): the CONFIGURED
+ * `EventDoc.standingsFreezeAt` when the doc carries a usable one, else the FIRST
+ * ceremonial Day's `unlockAt` — the instant the pre-ADR `pool === 'closing'`
+ * derivation used, so both live Events resolve to exactly the moment they always
+ * did. `null` when the Event has neither, which is an Event with no scheduled
+ * freeze at all rather than one frozen at the epoch.
+ *
+ * A non-finite or non-positive value is ignored on BOTH sides of that fallback:
+ * `0` is the schedule's "live from Event open" sentinel elsewhere in this
+ * contract (#289), and reading it as a freeze instant would put every Mark in
+ * the Event's history at-or-after the boundary.
+ *
+ * MUST stay identical to `standingsFreezeAtFor` in `src/game/logic.ts`; the two
+ * packages are deliberately decoupled, so this is a mirror pinned by
+ * `tests/functions/finale-parity.test.ts`. It is the one derivation of this
+ * instant in the Functions package — `finaleTimes` (`unlockDay.ts`) and the
+ * daily email's headline cutoff both read it here, because a freeze the finale
+ * observes and a freeze the email quotes must never be two different instants.
+ */
+export function standingsFreezeAtFor(event: FreezeSchedule | null | undefined): number | null {
+  if (!event) return null;
+  const configured = event.standingsFreezeAt;
+  if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  for (const d of event.days ?? []) {
+    if (isCeremonialDay(d) && Number.isFinite(d.unlockAt) && d.unlockAt > 0) return d.unlockAt;
+  }
+  return null;
+}
+
 /** A Player's EFFECTIVE Event-wide First to BINGO: the earliest `firstBingoAt`
  *  across non-Tutorial Days when the Player has a `dayStats` breakdown, else the
  *  legacy root `firstBingoAt` (a roster predating Day Cards carries no `dayStats`).

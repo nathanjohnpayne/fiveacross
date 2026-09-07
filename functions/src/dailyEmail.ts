@@ -40,7 +40,7 @@
  */
 import {
   buildDailyEmailModel,
-  firstBingoUid,
+  eventFirstBingoUid,
   fromAddressFor,
   hasScheduledUnlock,
   standingsThrough,
@@ -48,7 +48,12 @@ import {
   type EmailEvent,
   type EmailPlayer,
 } from './dailyEmailContent';
-import { tutorialDayIndexes, type FinaleDayStat } from './finaleContent';
+import {
+  ceremonialDayIndexes,
+  standingsFreezeAtFor,
+  tutorialDayIndexes,
+  type FinaleDayStat,
+} from './finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText } from './dailyEmailTemplate';
 import {
   ensureEmailPrefs,
@@ -573,9 +578,25 @@ export async function sendDailyEmailForEvent(
   // identical for everyone (the rank line is a lookup into it), so recomputing
   // it inside the loop would re-slice and re-sort the roster N times for the
   // same answer — quadratic in roster size.
-  const tutorialDays = tutorialDayIndexes(event.days ?? []);
-  const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays);
-  const starUid = firstBingoUid(rawRanked);
+  //
+  // THREE POLICIES, THREE DERIVATIONS (#1052). ADR 0011 makes a Day's Tutorial
+  // framing and its Scoring Policy independent facts, and the standings totals,
+  // the standings tie-break and the headline ⭐ each read a different one. Both
+  // sets come from the schedule's STATED policy (`scoringForDay`'s legacy
+  // pool fallback covers every Day of both live Events, which carry no
+  // `scoring` key), and the ⭐ is resolved from the RAW roster rather than from
+  // the ranked rows — a presentational ban must hide the holder's row without
+  // promoting the next-earliest Player.
+  const schedule = event.days ?? [];
+  const tutorialDays = tutorialDayIndexes(schedule);
+  const ceremonialDays = ceremonialDayIndexes(schedule);
+  const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays, ceremonialDays);
+  const starUid = eventFirstBingoUid(
+    rosterPage.allPlayers,
+    day.index,
+    tutorialDays,
+    standingsFreezeAtFor(event),
+  );
   const banned = new Set(event.bannedUids ?? []);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
