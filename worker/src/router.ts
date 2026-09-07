@@ -2,7 +2,7 @@
 //
 // One versioned service in front of `*.fiveacross.app` and `*.vacaybingo.com`,
 // so a new Event needs no DNS record, no Hosting custom domain, no certificate
-// and no Worker route of its own. It does five things and refuses a sixth:
+// and no Worker route of its own. It does six things and refuses a seventh:
 //
 //   1. guards the Namespace and the reserved infrastructure labels (`host.ts`)
 //   2. resolves the address through the named lookup-only registry entrypoint
@@ -11,10 +11,13 @@
 //      committed projection (`notFound.ts`)
 //   4. answers the exact `/.well-known/fiveacross-path-capability` projection
 //      from that same lookup, so the service worker needs no second source
-//   5. proxies what survives to the Firebase Hosting origin with a rewritten
+//   5. answers `/manifest.webmanifest` with the resolved Edition's installed-app
+//      identity (`manifest.ts`, #546) — the one address whose correct answer
+//      depends on which hostname asked, taken from that same lookup too
+//   6. proxies what survives to the Firebase Hosting origin with a rewritten
 //      Host header, leaving the public hostname in the browser untouched
 //
-// The sixth — the one it refuses — is REDIRECTING. This Worker is not a
+// The seventh — the one it refuses — is REDIRECTING. This Worker is not a
 // canonicaliser. #599 as amended removed edge canonicalization outright: every
 // registered host serves in place, and a serving domain is never bounced off
 // itself. The canonical hostname still exists, but its job is analytics
@@ -30,6 +33,7 @@
 // that knows it is running on Cloudflare.
 
 import { classifyHost, NAMESPACES } from './host';
+import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
 import { resolveHost, type ResolveDeps, type ServedRecord } from './resolve';
 
@@ -154,6 +158,28 @@ export async function handleRequest(
   // fail-closed state rather than a capability.
   if (isPathCapabilityRequest(request, url)) {
     return pathCapabilityResponse(resolution.record, config.version);
+  }
+
+  // The per-hostname PWA manifest (#546), and note WHERE it sits: after the
+  // namespace guard, after resolution AND after the capability projection. It
+  // is not an exemption like `/__/auth/*` — the opposite. That exemption exists
+  // because the sign-in round-trip must survive a lookup failure; this route
+  // STRICTLY DEPENDS on the resolution it derives from, because the Edition it
+  // serves comes out of the committed projection the registry answered with.
+  // So a reserved label, an out-of-namespace host and an unknown, malformed or
+  // inactive Event all still fail closed here exactly as they do for every
+  // other path, and an address that does not serve an app does not serve an
+  // app identity either. The Edition needs no fallback at this point: the
+  // boundary re-validation in `resolve.ts` already refused any projection
+  // whose `edition` is not one this build knows, as `replica-malformed`.
+  //
+  // It carries the revision stamp like every other served response, because
+  // `specs/event-router-registry.md` § Failure semantics makes the header a
+  // property of a resolved edge record rather than of the proxy path.
+  if (isWebManifestRequest(request.method, url.pathname)) {
+    const response = webManifestResponse(resolution.record.edition, config.version, request.method);
+    response.headers.set('x-event-router-revision', resolution.record.revision);
+    return response;
   }
 
   return proxyToOrigin(request, url, config, deps, resolution.record.revision);

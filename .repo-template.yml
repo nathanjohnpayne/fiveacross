@@ -205,6 +205,9 @@ spec_test_map:
     - worker/src/config.test.ts
     - worker/src/index.test.ts
     - worker/src/routerBinding.test.ts
+    - worker/src/manifest.test.ts
+    - src/web-manifest.test.ts
+    - src/sw-precache-audit.test.ts
     - scripts/worker-deploy.test.mjs
   # event-router-registry spans the control plane, the per-host Durable Object,
   # the signing/verification chain, the recovery and probe surfaces, and the

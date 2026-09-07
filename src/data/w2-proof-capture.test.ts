@@ -457,6 +457,254 @@ describe('attachProof — returns the win-transition verdict (PR #110 round 2 fi
   });
 });
 
+// #1049: in daily-cards mode each Day Card is its OWN Board, so the first-bingo
+// stamp a proofed Mark preserves is that Day's `dayStats` bucket. Reading the
+// Player's Event-level ROOT here copied an earlier Day's instant into the Day
+// being written — a proofed Day-2 win inheriting a Day-1 First to BINGO — which
+// awards the wrong daily honour and, once summed back up, the wrong headline.
+// The bare-Mark path (`setMark` ← Board) already derives per-Day; these pin the
+// proof path onto the same rule, and pin legacy single-board reads unchanged.
+describe('attachProof — the preserved first-bingo stamp is the DAY’s, not the Event root (#1049)', () => {
+  // A Player who bingoed on Day 1 at t=100 and has done nothing on Day 2 yet.
+  const day1Winner = () => ({
+    firstBingoAt: 100,
+    dayStats: { 1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 } },
+  });
+
+  it('stamps a cross-Day proofed win with NOW, never the root carried over from another Day', async () => {
+    playerState = day1Winner();
+    boardState = { cells: withMarked([0, 1, 2, 3]) }; // Day 2's card, one Square shy
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 2,
+      proof: { type: 'text', text: 'day two, line one' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+      firstBingoAt: number | null;
+      bingoCount: number;
+    };
+    // Day 2 records the instant it actually happened (Date.now() is pinned to 1000)…
+    expect(write.dayStats[2].firstBingoAt).toBe(1000);
+    expect(write.dayStats[2].firstBingoAt).not.toBe(100);
+    // …and only Day 2's bucket rides the write, so Day 1's stamp is untouched.
+    expect(Object.keys(write.dayStats)).toEqual(['2']);
+    // The root is still the re-derived Event-wide earliest across both Days.
+    expect(write.firstBingoAt).toBe(100);
+    expect(write.bingoCount).toBe(2);
+    // The Day-scoped board is the one written (never the legacy flat board).
+    expect(setPayload(`events/${EVENT_ID}/days/2/boards/u1`)).toBeDefined();
+  });
+
+  it('does not re-stamp a Day bingo that already stands when proof lands on an already-marked Square', async () => {
+    playerState = {
+      firstBingoAt: 100,
+      dayStats: {
+        1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+        2: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 300 },
+      },
+    };
+    boardState = { cells: withMarked([0, 1, 2, 3, 4]) }; // Day 2's line already stands
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 0,
+      itemId: 'i0',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 2,
+      proof: { type: 'text', text: 'adding proof after the fact' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    // Day 2 keeps its OWN earlier instant — not `now`, and not Day 1's 100.
+    expect(write.dayStats[2].firstBingoAt).toBe(300);
+  });
+
+  it('keeps the LEGACY single-board read on the root, unchanged', async () => {
+    // No `daily`: the pre-1.5 flat write, whose one Board's stamp IS the root.
+    playerState = { firstBingoAt: 100 };
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      proof: { type: 'text', text: 'legacy line' },
+    });
+
+    expect(setPayload('/players/')).toEqual({
+      squaresMarked: 5,
+      bingoCount: 1,
+      firstBingoAt: 100,
+      blackout: false,
+    });
+  });
+
+  it('post-freeze ceremonial bucket-only write still carries the Day’s own stamp (#265 preserved)', async () => {
+    playerState = {
+      firstBingoAt: 100,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 } },
+    };
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 9,
+      ceremonialDayIndexes: [9],
+      statsFrozen: true,
+      proof: { type: 'text', text: 'farewell line' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    // Still bucket-only (the frozen roots never move)…
+    expect(Object.keys(write)).toEqual(['dayStats']);
+    // …and the farewell honour records its own instant, not the frozen root's.
+    expect(write.dayStats[9].firstBingoAt).toBe(1000);
+  });
+
+  // Codex P2, round 2: the caller's sheet prop must be a fallback for an
+  // UNREADABLE Player row only. A `??` chain over the live value could not tell
+  // "this Day has no stamp" from "no row to read", so it revived a stamp the
+  // transaction had just been told was gone.
+  it('does NOT revive the stale sheet prop when the live Day bucket explicitly has no stamp', async () => {
+    // The sheet opened while Day 9 held a line at t=300; another tab has since
+    // unmarked that Day's last Square, so the live bucket is an explicit null.
+    // Day 9 is ceremonial, so the Event root legitimately stays null too —
+    // exactly the shape where the old chain had a stale value and nothing else
+    // to contradict it.
+    playerState = {
+      firstBingoAt: null,
+      dayStats: { 9: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+    };
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 9,
+      currentFirstBingoAt: 300, // the stale prop the sheet still carries
+      proof: { type: 'text', text: 'relit the line' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    // The new win is stamped NOW, not resurrected at the sheet's old instant.
+    expect(write.dayStats[9].firstBingoAt).toBe(1000);
+    expect(write.dayStats[9].firstBingoAt).not.toBe(300);
+  });
+
+  it('falls back to the caller prop only when the Player row itself is unreadable', async () => {
+    // No Player document at all in the transaction read — the one case the prop
+    // is the best knowledge available, so it must still be honoured.
+    playerState = undefined;
+    boardState = { cells: withMarked([0, 1, 2, 3]) };
+
+    await attachProof({
+      ...baseArgs,
+      cellIndex: 4,
+      itemId: 'i4',
+      claimMode: 'proof_required',
+      daily: true,
+      dayIndex: 2,
+      currentFirstBingoAt: 300,
+      proof: { type: 'text', text: 'no row to read' },
+    });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+    };
+    expect(write.dayStats[2].firstBingoAt).toBe(300);
+  });
+});
+
+describe('deleteProof — the surviving first-bingo stamp is the DAY’s, not the Event root (#1049)', () => {
+  // Day 2's card with two standing lines (row 0 and row 1) and a proof backing
+  // cell 5 — deleting it breaks row 1 while row 0 still stands.
+  function twoLineDay2Board(): Cell[] {
+    const board = withMarked([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    board[5] = { ...board[5], proofId: 'P' };
+    return board;
+  }
+
+  beforeEach(() => {
+    proofState = { uid: 'u1', cellIndex: 5, dayIndex: 2, storagePath: null };
+    playerState = {
+      firstBingoAt: 100,
+      dayStats: {
+        1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+        2: { bingoCount: 2, squaresMarked: 11, firstBingoAt: 300 },
+      },
+    };
+  });
+
+  it("preserves THAT Day's stamp when a line still stands after the delete", async () => {
+    boardState = { cells: twoLineDay2Board() };
+
+    await deleteProof('P', undefined, { daily: true, dayIndexes: [1, 2] });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { bingoCount: number; firstBingoAt: number | null }>;
+      firstBingoAt: number | null;
+    };
+    expect(write.dayStats[2].bingoCount).toBe(1); // row 0 survives
+    // Day 2 keeps its own 300 — reading the root would write Day 1's 100 here.
+    expect(write.dayStats[2].firstBingoAt).toBe(300);
+    expect(write.firstBingoAt).toBe(100); // root is still the Event-wide earliest
+  });
+
+  it('clears that Day’s stamp when the delete removes the LAST standing line', async () => {
+    const board = withMarked([0, 1, 2, 3, 4]); // Day 2's only line
+    board[4] = { ...board[4], proofId: 'P' };
+    boardState = { cells: board };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 2, storagePath: null };
+
+    await deleteProof('P', undefined, { daily: true, dayIndexes: [1, 2] });
+
+    const write = setPayload('/players/') as {
+      dayStats: Record<number, { bingoCount: number; firstBingoAt: number | null }>;
+      firstBingoAt: number | null;
+    };
+    expect(write.dayStats[2].bingoCount).toBe(0);
+    expect(write.dayStats[2].firstBingoAt).toBeNull();
+    // Day 1's own win is untouched, so the Event-wide root still reads 100.
+    expect(write.firstBingoAt).toBe(100);
+  });
+
+  it('keeps the LEGACY single-board delete reading the root, unchanged', async () => {
+    playerState = { firstBingoAt: 300 };
+    boardState = { cells: twoLineDay2Board() };
+
+    await deleteProof('P', undefined);
+
+    expect(setPayload('/players/')).toEqual({
+      squaresMarked: 9,
+      bingoCount: 1,
+      firstBingoAt: 300,
+      blackout: false,
+    });
+  });
+});
+
 describe('attachProof — ONLINE-only: it rejects offline rather than queuing (ADR 0006)', () => {
   it('rejects (does not queue) when the media upload has no signal — no proof doc is written', async () => {
     uploadSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded (offline)'));

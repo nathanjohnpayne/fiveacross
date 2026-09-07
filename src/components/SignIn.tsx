@@ -17,7 +17,9 @@ import EventPostcard from './EventPostcard';
 //
 // One 18+ acknowledgement, two entry points (#23):
 //   • signed OUT → the sign-in gate App renders on `!user`: the checkbox gates
-//     Google sign-in, which PERSISTS the attestation after the popup
+//     Google sign-in, which PERSISTS the attestation once the sign-in
+//     transaction completes — on the redirect return for every same-origin
+//     handler, inline after the popup only on a cross-origin handler (#765)
 //     (AuthContext.signIn → attest).
 //   • signed IN but un-attested → the re-prompt gate AuthProvider renders when a
 //     SETTLED profile lacks `attestedAdultAt`: the checkbox records the persisted

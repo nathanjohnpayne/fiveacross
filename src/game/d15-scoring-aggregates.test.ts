@@ -3,6 +3,7 @@ import {
   sumDayStats,
   eventFirstBingoAt,
   aggregatePlayerStats,
+  boardFirstBingoAt,
   foldDayStat,
   tutorialDayIndexSet,
   perDayHonors,
@@ -245,6 +246,131 @@ describe('cruiseFirstBingoUid / effectiveCruiseFirstBingoAt', () => {
     };
     expect(effectiveCruiseFirstBingoAt(legacy, isTutorialDay)).toBe(1234);
     expect(cruiseFirstBingoUid([legacy], isTutorialDay)).toBe('legacy');
+  });
+
+  it('breaks an exact tie by uid, not by the order the roster arrives in', () => {
+    // The mirror of the daily email's ⭐ tie-break (`eventFirstBingoUid` in
+    // `functions/src/dailyEmailContent.ts`). The two selectors never see the
+    // same order — this one is handed a roster sorted by LIVE root totals,
+    // the email one a through-yesterday window — so a Player who marks today's
+    // card before a delayed or retried send could flip a roster-order tie-break
+    // on one side alone (Codex P2, #1052). Uid is the key neither view supplies.
+    const TIE = 777;
+    const zed = mkPlayer('zed', { 4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE } });
+    const ace = mkPlayer('ace', { 4: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE } });
+    expect(cruiseFirstBingoUid([zed, ace], isTutorialDay)).toBe('ace');
+    expect(cruiseFirstBingoUid([ace, zed], isTutorialDay)).toBe('ace');
+    // Including the order the Leaderboard actually hands it: `sortPlayers` puts
+    // `zed` first on totals, and the honour still goes to `ace`.
+    expect(cruiseFirstBingoUid(sortPlayers([ace, zed]), isTutorialDay)).toBe('ace');
+    expect(sortPlayers([ace, zed]).map((p) => p.uid)).toEqual(['zed', 'ace']);
+    // One millisecond of daylight and the timestamp decides again — the uid is a
+    // secondary key, never a way to overtake an earlier bingo.
+    const zedEarlier = mkPlayer('zed', {
+      4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE - 1 },
+    });
+    expect(cruiseFirstBingoUid([ace, zedEarlier], isTutorialDay)).toBe('zed');
+  });
+});
+
+describe('boardFirstBingoAt — the stamp ONE Board preserves (#1049)', () => {
+  const row = {
+    firstBingoAt: 100,
+    dayStats: {
+      1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 },
+      2: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 },
+    } satisfies DayStats,
+  };
+
+  it("reads the VIEWED Day's own bucket in daily mode, never the Event-wide root", () => {
+    expect(boardFirstBingoAt(row, true, 2)).toBe(200);
+    // The root aggregate is Day 1's 100. Day 2's Board must not inherit it.
+    expect(boardFirstBingoAt(row, true, 2)).not.toBe(row.firstBingoAt);
+  });
+
+  it('is null for a Day with no bucket, or a bucket carrying no bingo yet', () => {
+    expect(boardFirstBingoAt(row, true, 5)).toBeNull();
+    expect(
+      boardFirstBingoAt(
+        { firstBingoAt: 100, dayStats: { 3: { bingoCount: 0, squaresMarked: 2, firstBingoAt: null } } },
+        true,
+        3,
+      ),
+    ).toBeNull();
+    expect(boardFirstBingoAt(null, true, 0)).toBeNull();
+    expect(boardFirstBingoAt(undefined, true, 0)).toBeNull();
+  });
+
+  it('returns the root unchanged for a legacy single-Board row (no dayStats)', () => {
+    expect(boardFirstBingoAt({ firstBingoAt: 1234 }, false, 0)).toBe(1234);
+    expect(boardFirstBingoAt(row, false, 2)).toBe(100);
+    expect(boardFirstBingoAt({ firstBingoAt: null }, false, 0)).toBeNull();
+    expect(boardFirstBingoAt(null, false, 0)).toBeNull();
+  });
+});
+
+// The scoring consequence the copy has, stated over the read surfaces that
+// award the honours. This is the regression #1049 exists to close: a Day-2 win
+// stamped with Day 1's instant is indistinguishable, downstream, from a genuine
+// Day-2 win at that time — `perDayHonors` and `eventFirstBingoAt` can only read
+// what the write path stored.
+describe('a copied root timestamp selects the WRONG daily and headline winner (#1049)', () => {
+  // Day 1: `veteran` bingoes at t=100, `rival` at t=150.
+  // Day 2: `rival` bingoes at t=180; `veteran` completes Day 2 through PROOF at
+  // t=200 — genuinely second on that Day.
+  const day2Correct = 200;
+  const day2Copied = 100; // veteran's Event-level root, copied off Day 1
+
+  const withVeteranDay2 = (stamp: number) => [
+    mkPlayer('veteran', {
+      1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+      2: { bingoCount: 1, squaresMarked: 12, firstBingoAt: stamp },
+    }),
+    mkPlayer('rival', {
+      1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 150 },
+      2: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 180 },
+    }),
+  ];
+
+  it("awards Day 2's First to BINGO to the rival who actually won it", () => {
+    const honors = perDayHonors(withVeteranDay2(day2Correct));
+    expect(honors.find((h) => h.dayIndex === 2)).toMatchObject({ uid: 'rival', firstBingoAt: 180 });
+  });
+
+  it("hands Day 2's honour to the wrong Player once the root stamp is copied in", () => {
+    const honors = perDayHonors(withVeteranDay2(day2Copied));
+    // Day 1's 100 now reads as a Day-2 bingo that beats the rival's real 180.
+    expect(honors.find((h) => h.dayIndex === 2)).toMatchObject({ uid: 'veteran', firstBingoAt: 100 });
+  });
+
+  it('leaves no trace of the copy in the Event-wide root the headline reads', () => {
+    const veteran = withVeteranDay2(day2Copied)[0];
+    // The correct Day-2 bucket leaves the headline anchored to the real Day-1 win…
+    expect(eventFirstBingoAt(withVeteranDay2(day2Correct)[0].dayStats, isTutorialDay)).toBe(100);
+    // …and so does the copy, so the corruption is INVISIBLE in the root: the
+    // evidence of which Day produced the instant is gone, which is why a later
+    // UI-only workaround cannot reconstruct it.
+    expect(eventFirstBingoAt(veteran.dayStats, isTutorialDay)).toBe(100);
+    expect(veteran.dayStats![2].firstBingoAt).toBe(100);
+  });
+
+  it('flips the podium when the copy lands on a Day the rival won outright', () => {
+    // Same shape one Day later: `rival` is the only Day-3 winner, and a proofed
+    // `veteran` Day-3 line stamped with the copied root steals both the daily
+    // honour and the tie-break the Leaderboard ranks on.
+    const correct = [
+      mkPlayer('veteran', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 400 } }),
+      mkPlayer('rival', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 300 } }),
+    ];
+    expect(sortPlayers(correct).map((p) => p.uid)).toEqual(['rival', 'veteran']);
+    expect(cruiseFirstBingoUid(correct, isTutorialDay)).toBe('rival');
+
+    const copied = [
+      mkPlayer('veteran', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 } }),
+      mkPlayer('rival', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 300 } }),
+    ];
+    expect(sortPlayers(copied).map((p) => p.uid)).toEqual(['veteran', 'rival']);
+    expect(cruiseFirstBingoUid(copied, isTutorialDay)).toBe('veteran');
   });
 });
 

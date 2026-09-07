@@ -17,7 +17,12 @@
  * WORDS; the Day changes the PALETTE; the order never moves.
  */
 import type { DayDef, EventDoc, PlayerDoc } from '../../src/domainTypes';
-import { compareFinalePlayers, tutorialDayIndexes } from './finaleContent';
+import {
+  ceremonialDayIndexes,
+  compareFinalePlayers,
+  standingsFreezeAtFor,
+  tutorialDayIndexes,
+} from './finaleContent';
 import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
 
 // --- Canonical domain views -----------------------------------------------------
@@ -35,10 +40,32 @@ export type EmailDay = Pick<DayDef, 'index' | 'unlockAt'> &
     port?: string;
     /** Legacy persisted name for `placeEmoji` (pre-#566 Event docs). */
     portEmoji?: string;
+    /** The Day's stated Scoring Policy (ADR 0011) — whether its Marks move the
+     *  standings. Absent on every doc written before the field existed, which
+     *  is every Day of both live Events. Typed as a bare `string` rather than
+     *  `DayDef['scoring']` for the same reason `FinaleDay` is: this boundary
+     *  reads RAW Firestore maps, so a stored value that is neither policy is
+     *  reachable and must resolve, not fail to typecheck. Resolve through
+     *  `scoringForDay`/`isCeremonialDay` (`scoringVocab.ts`) — never by direct
+     *  comparison, and never off `pool` (ADR 0011: a reader who finds a pool
+     *  comparison in a scoring path is looking at a regression). */
+    scoring?: string;
+    /** The Day's Pool identity, carried ONLY so the legacy Scoring Policy
+     *  fallback can read it: a Day with no `scoring` key resolves ceremonial iff
+     *  it deals the closing pool, which is exactly what the pre-ADR-0011 code
+     *  hard-coded. Loosely typed because the pre-#565 spellings (`embark` /
+     *  `farewell`) are what both live Events actually persist; `normalizePool`
+     *  inside the resolver is what folds them. */
+    pool?: string;
   };
 
-/** The canonical `EventDoc` fields the email reads, with legacy-safe presence. */
-export type EmailEvent = Partial<Pick<EventDoc, 'name' | 'timezone' | 'bannedUids'>> & {
+/** The canonical `EventDoc` fields the email reads, with legacy-safe presence.
+ *  `standingsFreezeAt` is the CONFIGURED Standings Freeze (ADR 0011); the
+ *  headline ⭐ resolves it through `standingsFreezeAtFor`, which falls back to
+ *  the first ceremonial Day's `unlockAt` when the doc carries none. */
+export type EmailEvent = Partial<
+  Pick<EventDoc, 'name' | 'timezone' | 'bannedUids' | 'standingsFreezeAt'>
+> & {
   days?: EmailDay[];
   settings?: Partial<Pick<EventDoc['settings'], 'dailyEmailEnabled'>>;
 };
@@ -190,25 +217,50 @@ export function fromAddressFor(
 // --- Standings ------------------------------------------------------------------
 
 /**
- * Every Player's totals THROUGH a Day — i.e. summed over `dayStats` entries
- * strictly BEFORE `throughDayIndexExclusive`. The email reports standings
- * "through yesterday" because today's card has only just unlocked, so today's
- * marks are all zero and a snapshot including them would be identical but
- * mislabelled.
+ * Every Player's STANDINGS totals THROUGH a Day — i.e. folded over `dayStats`
+ * entries strictly BEFORE `throughDayIndexExclusive`. The email reports
+ * standings "through yesterday" because today's card has only just unlocked, so
+ * today's marks are all zero and a snapshot including them would be identical
+ * but mislabelled.
  *
- * TUTORIAL DAYS COUNT FOR SCORE BUT NOT FOR THE ⭐ (ADR 0011, and the parity
- * `finaleContent.ts` already keeps with `src/game/logic.ts`). Bingos and squares
- * from a Tutorial Day are real play and are summed; the Event-wide First to
- * BINGO honor deliberately excludes them, and so does the `firstBingoAt`
- * tie-break that rides on it — otherwise an embark-Day winner would take the
- * ⭐ in the email while the in-app Leaderboard gave it to someone else, which
- * is the exact contradiction ADR 0011 exists to prevent (Codex #623 P2).
+ * THREE POLICIES MEET HERE AND ONLY TWO OF THEM LIVE IN THIS FUNCTION (#1052).
+ * ADR 0011 makes a Day's Pool identity, its Tutorial framing and its Scoring
+ * Policy three independent facts, and the surfaces that read them ask three
+ * different questions:
+ *
+ *   - the standings TOTALS exclude ceremonial Days — a `ceremonial` policy
+ *     promises its Marks never move the standings, so its bingos and squares
+ *     are dropped from the sum (its per-Day bucket is untouched, and its own
+ *     daily honour still stands);
+ *   - the standings TIE-BREAK excludes Tutorial Days OR ceremonial Days.
+ *     `compareFinalePlayers` breaks a bingos+squares tie on the earliest
+ *     first-bingo, so a value that still counted a ceremonial Mark would let
+ *     that Mark decide the ranking while its score was being excluded — the row
+ *     would be internally inconsistent. This mirrors `rankingExcludedDay` in
+ *     `src/game/logic.ts` and `podiumStandingRow` in `finaleContent.ts`;
+ *   - the headline ⭐ excludes Tutorial Days ALONE and honours the Standings
+ *     Freeze, which is a different question with a different answer — see
+ *     `eventFirstBingoUid`. It is DELIBERATELY not read off the row this
+ *     function returns: one mutated `firstBingoAt` cannot carry both meanings,
+ *     and making it try is the defect #1052 fixed.
+ *
+ * Tutorial Days still COUNT FOR SCORE: an embark-Day bingo is real pre-freeze
+ * play and is summed (ADR 0011; `sumDayStats` in `src/game/logic.ts` sums every
+ * Day). Only the ceremonial policy removes score, and only the honour rules
+ * remove a timestamp.
  *
  * A Player with no `dayStats` breakdown (a legacy roster predating Day Cards)
  * keeps their root aggregates — there is nothing to slice — matching
  * `podiumStandingRow`'s handling in `finaleContent.ts`. Ranking is
  * `compareFinalePlayers`, so the email, the podium and the in-app Leaderboard
  * can never disagree about who is ahead.
+ *
+ * A row that HAS buckets is always re-derived from them, where the podium
+ * additionally passes the roots through when the schedule states no ceremonial
+ * Day at all. The two are not in tension: this function reports a WINDOW ("through
+ * Day N-1"), which no root can answer, so it has nothing to pass through — the
+ * podium's extra branch exists to leave a legacy/hybrid row alone when it is
+ * reporting the whole Event and re-summing would rewrite it.
  *
  * Malformed `dayStats` entries are SKIPPED rather than trusted: `players/{uid}`
  * is self-writable by design (ADR 0001), so a row like `{ dayStats: { 0: null } }`
@@ -219,6 +271,7 @@ export function standingsThrough(
   players: readonly EmailPlayer[],
   throughDayIndexExclusive: number,
   tutorialDays: ReadonlySet<number> = new Set(),
+  ceremonialDays: ReadonlySet<number> = new Set(),
 ): EmailPlayer[] {
   return players
     .map((p) => {
@@ -233,13 +286,16 @@ export function standingsThrough(
         const dayIndex = Number(key);
         if (!Number.isInteger(dayIndex) || dayIndex >= throughDayIndexExclusive) continue;
         if (!stat || typeof stat !== 'object') continue;
+        // A ceremonial Day's Marks never move the standings — neither its score
+        // nor the tie-break that separates equal scores.
+        if (ceremonialDays.has(dayIndex)) continue;
         if (typeof stat.bingoCount === 'number' && Number.isFinite(stat.bingoCount)) {
           bingoCount += stat.bingoCount;
         }
         if (typeof stat.squaresMarked === 'number' && Number.isFinite(stat.squaresMarked)) {
           squaresMarked += stat.squaresMarked;
         }
-        if (tutorialDays.has(dayIndex)) continue; // scores yes, ⭐ no
+        if (tutorialDays.has(dayIndex)) continue; // scores yes, ranking tie-break no
         const at = stat.firstBingoAt;
         if (typeof at === 'number' && Number.isFinite(at) && (firstBingoAt == null || at < firstBingoAt)) {
           firstBingoAt = at;
@@ -293,18 +349,141 @@ export function standingsRows(
 
 /** Whether a standings snapshot has anything to report: at least one Player who
  *  has actually marked something. An all-zero board renders the empty state
- *  (Day 1, or a Day nobody has played) rather than a podium of ties. */
+ *  (Day 1, or a Day nobody has played) rather than a podium of ties.
+ *
+ *  Read over the CEREMONIAL-EXCLUDED rows, so an Event whose only play so far
+ *  landed on ceremonial Days reports no standings — which is the literal truth
+ *  about the board, since none of those Marks moved it. The ⭐ is suppressed
+ *  with the rows it would have ridden on; a headline pinned to nothing renders
+ *  nowhere. */
 function hasPlay(ranked: readonly EmailPlayer[]): boolean {
   return ranked.some((p) => p.bingoCount > 0 || p.squaresMarked > 0);
 }
 
-/** The uid holding the Event-wide First to BINGO pin (⭐) across the ranked
- *  slice, or `null` when nobody has one. Earliest `firstBingoAt` wins. */
-export function firstBingoUid(ranked: readonly EmailPlayer[]): string | null {
-  let best: EmailPlayer | null = null;
-  for (const p of ranked) {
-    if (p.firstBingoAt == null) continue;
-    if (!best || p.firstBingoAt < (best.firstBingoAt as number)) best = p;
+/**
+ * One Player's EFFECTIVE Event-wide First to BINGO through a Day: the earliest
+ * `firstBingoAt` across their NON-TUTORIAL buckets before
+ * `throughDayIndexExclusive`, or — for a legacy row carrying no `dayStats` at
+ * all — their root `firstBingoAt`, which is the only evidence such a row has.
+ *
+ * Mirrors `effectiveCruiseFirstBingoAt` in `src/game/logic.ts`, including that
+ * a Player WITH buckets is answered from the buckets alone: a row that has a
+ * breakdown and no qualifying bucket holds no honour, and falling back to its
+ * root would re-admit exactly the Tutorial/ceremonial timestamp the breakdown
+ * exists to filter.
+ *
+ * Ceremonial Days are NOT excluded here, deliberately. Their Marks are inert
+ * for the standings and eligible for the headline; the two exclusions are
+ * different sets and collapsing them is the bug (ADR 0011 § Consequences).
+ */
+function headlineFirstBingoAt(
+  player: EmailPlayer,
+  throughDayIndexExclusive: number,
+  tutorialDays: ReadonlySet<number>,
+): number | null {
+  const dayStats = player.dayStats;
+  if (!dayStats || typeof dayStats !== 'object' || Object.keys(dayStats).length === 0) {
+    const root = player.firstBingoAt;
+    return typeof root === 'number' && Number.isFinite(root) ? root : null;
+  }
+  let earliest: number | null = null;
+  for (const [key, stat] of Object.entries(dayStats)) {
+    const dayIndex = Number(key);
+    if (!Number.isInteger(dayIndex) || dayIndex >= throughDayIndexExclusive) continue;
+    if (tutorialDays.has(dayIndex)) continue;
+    if (!stat || typeof stat !== 'object') continue;
+    const at = stat.firstBingoAt;
+    if (typeof at === 'number' && Number.isFinite(at) && (earliest == null || at < earliest)) {
+      earliest = at;
+    }
+  }
+  return earliest;
+}
+
+/**
+ * Whether this Player has ANY bingo of their own recorded before
+ * `throughDayIndexExclusive` — the honest answer to "is your first BINGO still
+ * out there", which is a question about the reader's own play and NOT about the
+ * standings or the honour.
+ *
+ * Every Day counts here, Tutorial and ceremonial alike: a bingo happened. The
+ * ceremonial policy removes its SCORE, and the Tutorial framing removes its
+ * claim on the headline, but neither un-marks the card. Reading the answer off
+ * the ceremonial-excluded `bingoCount` — or off whether the reader owns the ⭐ —
+ * tells a Player who bingoed on a ceremonial Day that their first BINGO is
+ * still out there while their own `dayStats` records one (Codex P2, round 2).
+ *
+ * A legacy row with no `dayStats` falls back to its root `bingoCount`, the only
+ * evidence such a row has, matching every other legacy path in this module.
+ */
+function hasBingoThrough(player: EmailPlayer, throughDayIndexExclusive: number): boolean {
+  const dayStats = player.dayStats;
+  if (!dayStats || typeof dayStats !== 'object' || Object.keys(dayStats).length === 0) {
+    return typeof player.bingoCount === 'number' && player.bingoCount > 0;
+  }
+  for (const [key, stat] of Object.entries(dayStats)) {
+    const dayIndex = Number(key);
+    if (!Number.isInteger(dayIndex) || dayIndex >= throughDayIndexExclusive) continue;
+    if (!stat || typeof stat !== 'object') continue;
+    const bingos = stat.bingoCount;
+    if (typeof bingos === 'number' && Number.isFinite(bingos) && bingos > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * The uid holding the Event-wide First to BINGO pin (⭐), or `null` when nobody
+ * qualifies.
+ *
+ * DERIVED FROM THE RAW ROSTER, NOT FROM THE RANKED ROWS (#1052). The honour and
+ * the standings answer different questions, so this reads the Players' own
+ * `dayStats` rather than the `firstBingoAt` `standingsThrough` rewrote for the
+ * ranking tie-break. Two exclusions, and they are not the same set — the same
+ * split `eventFirstBingoWinner` keeps in `src/game/logic.ts`:
+ *
+ *   - Tutorial Days, always. An onboarding or send-off card is framed as
+ *     non-competition, so its bingo never takes the headline honour — even when
+ *     its timestamp is the earliest on the Event.
+ *   - Anything at or after `freezeAt`, when a cutoff is supplied. The standings
+ *     are "as of the freeze", and a ceremonial Day deliberately keeps recording
+ *     Marks afterwards so its own daily honour still renders; without the cutoff
+ *     those late Marks would mint a ⭐ the frozen podium does not carry, and the
+ *     email and the Card would name different winners. INCLUSIVE at the instant
+ *     itself, matching `standingsFrozen`'s `now >= freezeAt`.
+ *
+ * A CEREMONIAL, non-Tutorial Day stays ELIGIBLE. Its bingos and squares are out
+ * of the standings and its timestamp is out of the ranking tie-break, but it is
+ * still real play that someone was first to, so the headline can be its.
+ *
+ * AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING, so the caller may hand
+ * this ANY roster order — Firestore's page order included. The app's mirror
+ * (`eventFirstBingoWinner` in `src/game/logic.ts`) resolves the same tie over a
+ * roster sorted by LIVE root totals, today's marks included, while this one only
+ * ever sees the THROUGH-YESTERDAY window. So a rule that read either roster's
+ * order would let a Player who marks today's card before a delayed or retried
+ * send flip which of two tied Players the email stars versus the Leaderboard
+ * (Codex P2, #1052). The uid is standings-independent, so no view's ordering
+ * participates, and the tie-break applies only when the eligible timestamps are
+ * exactly equal. `buildPodiumPayload` in `finaleContent.ts` is the third copy of
+ * the same key, and `tests/functions/finale-parity.test.ts` fails if any of the
+ * three changes alone.
+ *
+ * Pass the roster BEFORE the presentational ban filter, so a ban hides the
+ * holder's row without promoting the next-earliest Player
+ * (specs/w2-ban-console.md).
+ */
+export function eventFirstBingoUid(
+  players: readonly EmailPlayer[],
+  throughDayIndexExclusive: number,
+  tutorialDays: ReadonlySet<number> = new Set(),
+  freezeAt?: number | null,
+): string | null {
+  let best: { uid: string; at: number } | null = null;
+  for (const p of players) {
+    const at = headlineFirstBingoAt(p, throughDayIndexExclusive, tutorialDays);
+    if (at == null) continue;
+    if (freezeAt != null && at >= freezeAt) continue;
+    if (!best || at < best.at || (at === best.at && p.uid < best.uid)) best = { uid: p.uid, at };
   }
   return best ? best.uid : null;
 }
@@ -465,19 +644,21 @@ export interface BuildDailyEmailArgs {
   /** The full roster, already ban-filtered by the caller. */
   players: readonly EmailPlayer[];
   /**
-   * `standingsThrough(players, day.index)`, precomputed. Optional and purely a
-   * cost lever: the snapshot is IDENTICAL for every recipient (the rank line is
-   * a lookup into it, not a per-recipient computation), so a send to a full
-   * roster would otherwise re-slice and re-sort the roster once per recipient —
-   * quadratic in roster size for no different answer. The sender computes it
-   * once and passes it here; a caller that omits it gets the same result, just
-   * recomputed.
+   * `standingsThrough(players, day.index, tutorialDays, ceremonialDays)`,
+   * precomputed. Optional and purely a cost lever: the snapshot is IDENTICAL
+   * for every recipient (the rank line is a lookup into it, not a per-recipient
+   * computation), so a send to a full roster would otherwise re-slice and
+   * re-sort the roster once per recipient — quadratic in roster size for no
+   * different answer. The sender computes it once and passes it here; a caller
+   * that omits it gets the same result, just recomputed.
    */
   ranked?: readonly EmailPlayer[];
-  /** Historical First-to-BINGO holder from the RAW roster. `undefined` lets
-   *  the model derive it from `ranked`; `null` records that nobody holds it.
-   *  The sender passes this explicitly so a presentational ban hides the
-   *  holder's row without promoting a later Player. */
+  /** Historical First-to-BINGO holder, resolved by `eventFirstBingoUid` from
+   *  the RAW roster — never read off `ranked`, whose `firstBingoAt` carries the
+   *  standings tie-break rather than the honour (#1052). `undefined` lets the
+   *  model derive it from `players`; `null` records that nobody holds it. The
+   *  sender passes it explicitly so a presentational ban hides the holder's row
+   *  without promoting a later Player. */
   starUid?: string | null;
   /** The recipient — their row drives the one personalized line. */
   recipient: { uid: string; displayName: string };
@@ -514,9 +695,45 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
     .join(' · ');
 
   // --- ③ Standings snapshot -----------------------------------------------------
-  const ranked = args.ranked ?? standingsThrough(players, day.index, tutorialDayIndexes(days));
-  const played = hasPlay(ranked);
-  const starUid = played ? (args.starUid === undefined ? firstBingoUid(ranked) : args.starUid) : null;
+  // Two independent policy sets, resolved from the schedule (ADR 0011): the
+  // ranked rows drop ceremonial score and a Tutorial-or-ceremonial tie-break,
+  // while the ⭐ is derived separately from the raw roster with the
+  // Tutorial-only exclusion and the Event's resolved Standings Freeze. The
+  // sender precomputes both and passes them in; a caller that omits them gets
+  // the same answers, just recomputed (#1052).
+  const tutorialDays = tutorialDayIndexes(days);
+  const ranked =
+    args.ranked ?? standingsThrough(players, day.index, tutorialDays, ceremonialDayIndexes(days));
+  const holderUid =
+    args.starUid === undefined
+      ? eventFirstBingoUid(
+          // The roster as given, NOT the ranked rows: the honour is read off each
+          // Player's own buckets, and an exact-millisecond tie is broken by uid,
+          // so ranking this first would change nothing (Codex P2, #1052).
+          players,
+          day.index,
+          tutorialDays,
+          // The ALREADY-GUARDED `days`, not `event`: a raw Event doc whose
+          // `days` is not an array would otherwise make the resolver's
+          // `for…of` throw and take the whole send down, and this module's
+          // contract is that everything is a function of its arguments.
+          standingsFreezeAtFor({ standingsFreezeAt: event.standingsFreezeAt, days }),
+        )
+      : args.starUid;
+  // THE HONOUR IS NOT GATED ON THE SCORE (Codex P2 on this PR). An Event whose
+  // only play so far landed on ceremonial Days has an all-zero board AND a real
+  // ⭐ holder — the exact combination the policy above deliberately creates —
+  // and reporting the empty state there would print "every honor is wide open"
+  // while the Card and the Leaderboard show a First to BINGO. That is the
+  // email-versus-app contradiction this whole change exists to remove, so a held
+  // honour is itself reason enough to render the snapshot: every row honestly
+  // reads 0 bingos · 0 sq, because none of those Marks scored, and the ⭐ sits
+  // where it belongs. The holder must be VISIBLE for that to help — a banned
+  // holder is absent from `ranked` by design, and no visible Player is ever
+  // promoted into their honour (specs/w2-ban-console.md).
+  const holderVisible = holderUid != null && ranked.some((p) => p.uid === holderUid);
+  const played = hasPlay(ranked) || holderVisible;
+  const starUid = played ? holderUid : null;
   const rows: StandingsRow[] = played ? standingsRows(ranked, starUid) : [];
   const standingsHeading = played ? `Standings · through Day ${dayNumber - 1}` : `Standings · Day ${dayNumber}`;
   // Two empty states, not one. The OPENING Day has nothing to report because
@@ -535,13 +752,26 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const you = youIndex >= 0 ? ranked[youIndex] : null;
   let youLine: string | null = null;
   if (you && played) {
+    // "Your first BINGO is still out there" is a claim about the READER'S OWN
+    // play, so it is answered from their own buckets rather than from the
+    // ceremonial-excluded `bingoCount` or from whether they hold the ⭐ (Codex P2,
+    // round 2). A Player who bingoed on a ceremonial Day has bingoed; the policy
+    // removed its score, not the Mark. With no scoring squares either there is
+    // nothing true left to say about their standings, so the line is omitted —
+    // the choice this module already makes for an off-roster address.
+    const bingoStillOpen = !hasBingoThrough(you, day.index);
+    const squares = `${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'}`;
     const tail =
       you.bingoCount > 0
-        ? `${you.bingoCount} bingo${you.bingoCount === 1 ? '' : 's'} and ${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'} so far.`
+        ? `${you.bingoCount} bingo${you.bingoCount === 1 ? '' : 's'} and ${squares} so far.`
         : you.squaresMarked > 0
-          ? `${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'} marked—your first BINGO is still out there.`
-          : 'your first BINGO is still out there.';
-    youLine = `You're #${youIndex + 1}—${tail}`;
+          ? bingoStillOpen
+            ? `${squares} marked—your first BINGO is still out there.`
+            : `${squares} marked so far.`
+          : bingoStillOpen
+            ? 'your first BINGO is still out there.'
+            : null;
+    youLine = tail === null ? null : `You're #${youIndex + 1}—${tail}`;
   }
 
   // --- ④ Participation nudge ----------------------------------------------------

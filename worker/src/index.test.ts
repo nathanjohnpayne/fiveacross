@@ -88,6 +88,7 @@ describe('the Cloudflare entrypoint', () => {
       'https://admin.fiveacross.app/',
       'https://bodega-bay.fiveacross.app/__/auth/handler',
       'https://bodega-bay.fiveacross.app/.well-known/fiveacross-path-capability',
+      'https://bodega-bay.fiveacross.app/manifest.webmanifest',
     ]) {
       await worker.fetch(new Request(url), environment());
     }

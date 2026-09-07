@@ -6,8 +6,12 @@ import {
   type RouterConfig,
   type RouterDeps,
 } from './router';
+import { WEB_MANIFEST_PATH } from './manifest';
 import type { RegistryLookup } from './registry/state';
 import { RESERVED_LABELS } from '../../src/slug';
+// `edition-brands`, not `editions`: this program has no DOM lib and no
+// `vite/client`, which is why #546 split the table out in the first place.
+import { brandFor } from '../../src/edition-brands';
 
 const CONFIG: RouterConfig = {
   originHost: 'fiveacross.web.app',
@@ -179,6 +183,8 @@ describe('the no-redirect regression guard (#599 as amended)', () => {
       'https://bodega-bay.example.com/',
       'https://bodega-bay.fiveacross.app/__/auth/handler',
       `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+      `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
+      `https://unknown-event.fiveacross.app${WEB_MANIFEST_PATH}`,
     ];
     const { deps } = harness({ seed: { ...servingSeed, 'fiveacross.app': APEX_ROOT } });
 
@@ -497,6 +503,176 @@ describe('the path-capability projection', () => {
   });
 });
 
+describe('the per-hostname PWA manifest (#546)', () => {
+  const VACAY: RegistryLookup = {
+    kind: 'committed',
+    schemaVersion: 1,
+    revision: '42',
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'vacay',
+      pathNamespace: null,
+    },
+  };
+  const manifestUrl = (host: string) => `https://${host}${WEB_MANIFEST_PATH}`;
+
+  it('answers from the resolved Edition rather than proxying to the origin', async () => {
+    const { deps, requests, lookup } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      name: brandFor('vacay').appName,
+      short_name: brandFor('vacay').appShortName,
+    });
+    // The origin serves ONE bundle to every address, so proxying this would
+    // hand a Vacay guest the bundle Edition's manifest — which is the whole
+    // defect. Nothing left for the origin at all here, and the Edition came
+    // out of the SAME point lookup that decided the request may proceed.
+    expect(requests).toHaveLength(0);
+    expect(lookup).toHaveBeenCalledExactlyOnceWith('bodega-bay.vacaybingo.com');
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+  });
+
+  it('carries the revision stamp like every other served response', async () => {
+    // The header is a property of a resolved edge record, not of the proxy
+    // path: the recovery machine reads it off whatever the edge answered.
+    const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('answers the same committed projection on either Namespace', async () => {
+    const { deps } = harness({
+      seed: { 'bodega-bay.fiveacross.app': VACAY, 'bodega-bay.vacaybingo.com': VACAY },
+    });
+    const canonical = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    const alternate = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
+    // #599 as amended: both hosts SERVE, each with its Event's Edition, and
+    // neither is bounced at the other. Per-origin installed apps are the
+    // accepted consequence — with the same name on both.
+    expect(await canonical.text()).toBe(await alternate.text());
+  });
+
+  it('serves the apex root marker its own Edition', async () => {
+    const { deps } = harness({ seed: { 'fiveacross.app': APEX_ROOT } });
+    const response = await handleRequest(get(manifestUrl('fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ name: brandFor('fiveacross').appName });
+    expect(response.headers.get('x-event-router-revision')).toBe('5');
+  });
+
+  it('fails closed on a projection naming an Edition this build does not know, rather than defaulting', async () => {
+    // There is no "default Edition" arm at the edge. The shared builder keeps
+    // its fallback for the build-side consumer, but a committed projection
+    // whose `edition` the boundary re-validation cannot place is refused as
+    // malformed BEFORE this route sees it — so an installed app is never named
+    // for a product the registry did not actually commit.
+    const unknownEdition: RegistryLookup = {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '42',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: 'bodega-bay',
+        edition: 'bodega' as never,
+        pathNamespace: null,
+      },
+    };
+    const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': unknownEdition } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('replica-malformed');
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(requests).toHaveLength(0);
+  });
+
+  // The route sits AFTER the namespace guard and AFTER resolution, and this is
+  // the block that proves it. It is not an exemption like `/__/auth/*` — the
+  // opposite: it strictly depends on the resolution it derives from, so an
+  // address that does not serve an app does not serve an app identity either.
+  it.each([
+    ['admin.fiveacross.app', 'reserved-label'],
+    ['unknown-event.fiveacross.app', 'unknown-host'],
+    ['bodega-bay.example.com', 'out-of-namespace'],
+    ['ab.fiveacross.app', 'invalid-slug:too-short'],
+  ] as const)('fails closed at %s with reason %s', async (host, reason) => {
+    const { deps, requests } = harness({ seed: { 'admin.fiveacross.app': VACAY } });
+    const response = await handleRequest(get(manifestUrl(host)), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe(reason);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('fails closed for an inactive Event rather than serving its identity', async () => {
+    const disabled: RegistryLookup = {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '42',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'disabled',
+        slug: 'bodega-bay',
+        edition: 'vacay',
+        pathNamespace: null,
+      },
+    };
+    const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': disabled } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('inactive');
+  });
+
+  it('fails closed on an unconfigured router, like every other path', async () => {
+    const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, {
+      ...deps,
+      registry: null,
+    });
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('answers HEAD with no body', async () => {
+    const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(
+      get(manifestUrl('bodega-bay.vacaybingo.com'), { method: 'HEAD' }),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('');
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('leaves a non-GET/HEAD request on that path to the proxy', async () => {
+    // The router does not start refusing methods at an address it used to
+    // relay; that would be a behaviour change hiding inside a branding fix.
+    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(
+      get(manifestUrl('bodega-bay.vacaybingo.com'), { method: 'POST' }),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(requests.at(-1)!.url).toContain('fiveacross.web.app');
+  });
+
+  it('leaves every other path to the proxy', async () => {
+    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    await handleRequest(get(`${manifestUrl('bodega-bay.vacaybingo.com')}.bak`), CONFIG, deps);
+    expect(requests.at(-1)!.url).toContain('fiveacross.web.app');
+  });
+});
+
 describe('/__/auth/* passthrough', () => {
   it.each(['/__/auth/handler', '/__/auth/iframe', '/__/auth'])(
     'proxies %s intact without a lookup, so a registry blip cannot break sign-in mid-transaction',
@@ -564,6 +740,7 @@ describe('an unconfigured router', () => {
     'https://fiveacross.app/',
     'https://bodega-bay.fiveacross.app/__/auth/handler',
     `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+    `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
   ])('fails closed on %s rather than serving when the origin host is unbound', async (url) => {
     const { deps, requests, lookup } = harness({ seed: servingSeed });
     const response = await handleRequest(get(url), { ...CONFIG, originHost: '' }, deps);
@@ -577,6 +754,7 @@ describe('an unconfigured router', () => {
     'https://bodega-bay.fiveacross.app/',
     'https://fiveacross.app/',
     'https://bodega-bay.fiveacross.app/__/auth/handler',
+    `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
   ])('fails closed on %s when the registry binding is absent', async (url) => {
     const { deps, requests } = harness({ seed: servingSeed });
     const response = await handleRequest(get(url), CONFIG, { ...deps, registry: null });
@@ -600,6 +778,7 @@ describe('what the router no longer reaches for', () => {
       'https://admin.fiveacross.app/',
       'https://bodega-bay.fiveacross.app/__/auth/handler',
       `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+      `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
     ]) {
       await handleRequest(get(url), CONFIG, deps);
     }

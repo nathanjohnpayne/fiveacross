@@ -1223,6 +1223,31 @@ export function eventFirstBingoAt(
   return earliest;
 }
 
+/**
+ * The First-to-BINGO stamp that governs ONE Board — the value a Mark, a proof
+ * attach, or a proof deletion PRESERVES rather than re-stamps (#1049).
+ *
+ * In daily-cards mode every Day Card is its own Board, so that stamp is that
+ * Day's OWN `dayStats` bucket. The root `firstBingoAt` is an AGGREGATE over
+ * every Day (`eventFirstBingoAt`), so reading it here would copy an earlier
+ * Day's instant into the Day being written — awarding that Day's honour to the
+ * wrong Player and, once the copy is summed back up, corrupting the Event-wide
+ * headline too. A legacy single-Board Player carries no `dayStats`, so their
+ * root IS that one Board's stamp and is returned unchanged.
+ *
+ * Callers that distinguish "no prior stamp" from "prior state unknown" (the #75
+ * omit) keep doing so around this helper: it answers only WHICH field holds the
+ * Board's stamp, never whether the row itself was knowable.
+ */
+export function boardFirstBingoAt(
+  row: { firstBingoAt?: number | null; dayStats?: DayStats } | null | undefined,
+  daily: boolean,
+  dayIndex: number,
+): number | null {
+  if (!daily) return row?.firstBingoAt ?? null;
+  return row?.dayStats?.[dayIndex]?.firstBingoAt ?? null;
+}
+
 /** Derive a Player's Event-wide root totals from their per-Day `dayStats`:
  *  bingos/squares summed over all Days, First to BINGO restricted to
  *  non-Tutorial Days. This is exactly the `PlayerDoc` root shape the
@@ -1318,7 +1343,21 @@ export function cruiseFirstBingoUid(
  * millisecond is not eligible (Phase 4b P2). Absent/`null` means no cutoff,
  * which is every pre-freeze render.
  *
- * Ties go to the first Player in roster order, unchanged.
+ * AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING — a key that belongs to
+ * no caller's ordering, and the same key the two decoupled mirrors apply
+ * (`eventFirstBingoUid` in `functions/src/dailyEmailContent.ts`, and the podium
+ * payload's own loop in `functions/src/finaleContent.ts`). The three selectors
+ * never see the same roster order: this one is handed a roster sorted by LIVE
+ * root totals (today's marks included, via `useLeaderboard`), the email resolves
+ * the honour over a THROUGH-YESTERDAY window, and the scheduler's podium reads
+ * its own roster query. So any rule that read the caller's order would let a
+ * Player who marks today's card before a delayed or retried send flip which of
+ * two tied Players the email stars versus this pin (Codex P2, #1052). Sorting
+ * the tie by uid removes the one input the three views disagree about, and
+ * `tests/functions/finale-parity.test.ts` fails if any side changes alone.
+ *
+ * The tie-break applies ONLY when the eligible timestamps are exactly equal, so
+ * a Player never overtakes an earlier bingo by owning a smaller uid.
  */
 export function eventFirstBingoWinner(
   players: readonly PlayerDoc[],
@@ -1330,7 +1369,9 @@ export function eventFirstBingoWinner(
     const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
     if (at == null) continue;
     if (freezeAt != null && at >= freezeAt) continue;
-    if (!best || at < best.at) best = { uid: p.uid, displayName: p.displayName, at };
+    if (!best || at < best.at || (at === best.at && p.uid < best.uid)) {
+      best = { uid: p.uid, displayName: p.displayName, at };
+    }
   }
   return best;
 }
