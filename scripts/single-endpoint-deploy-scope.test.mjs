@@ -2189,6 +2189,54 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a hook overwrites a file THROUGH a directory-valued symlink", async () => {
+    // Codex P1, round 13: overwriting an EXISTING file through a link whose
+    // target is a directory moves neither the link nor the directory's mtime,
+    // so the target's metadata alone would let the write through. The target
+    // directory is walked under the link, so the file it reaches is drift.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, "printf y > tools/config-link/app.txt"],
+        },
+        files: { "config/app.txt": "x", "tools/.keep": "" },
+        links: { "tools/config-link": "../config" },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("app.txt");
+        expect(failure.message).toContain("Nothing has been restored");
+      },
+    );
+  });
+
+  it("refuses a directory-valued symlink that leaves the repository", async () => {
+    // The walk through a directory target is bounded to the repository: a
+    // link out of it names a tree the guard may not read and must not be led
+    // to walk. The live checkout therefore cannot be fingerprinted, the
+    // inventory is refused BEFORE any hook runs (the hook below would leave a
+    // trace it never gets to leave), and the request falls to the conservative
+    // arm — every invoker reconciled, exactly as for any other unprovable scope.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
+        files: { "shared/toggle": "", "tools/.keep": "" },
+        links: { "tools/escape-dir": "../.." },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+        const { readFile: read } = await import("node:fs/promises");
+        const { dirname: dir, join: under } = await import("node:path");
+        await expect(read(under(dir(configPath), "shared", "toggle"), "utf8")).resolves.toBe("");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
@@ -2277,5 +2325,71 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
+  });
+});
+
+describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS_A_BUILD, () => {
+  // Codex P1, round 13 on #1107: `addPinnedFunctionsToOnlyString` runs before
+  // any lifecycle hook and appends every `pinTag` rewrite's function to
+  // `--only`, so `--only functions:daily,hosting` deploys the pinned callable
+  // too. The classifier has to see the same selector the CLI will act on.
+  const pinned = (extra = {}) => ({
+    hosting: {
+      public: "public",
+      rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport", pinTag: true, ...extra } }],
+    },
+  });
+
+  it("selects the pinned callable's invoker for an otherwise exact selector", async () => {
+    await withFunctionsProject(
+      { config: pinned(), files: { "public/index.html": "" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily,hosting"], configPath);
+        expect(result).toMatchObject({
+          hostingAttempted: true,
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          authHandoffInvokerSelected: false,
+        });
+      },
+    );
+  });
+
+  it("does not widen when Hosting is not part of the deploy", async () => {
+    await withFunctionsProject(
+      { config: pinned(), files: { "public/index.html": "" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ hostingAttempted: false, ...NO_INVOKER_SELECTED });
+      },
+    );
+  });
+
+  it("does not widen for a rewrite that is not pinned", async () => {
+    const unpinned = { hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport" } }] } };
+    await withFunctionsProject(
+      { config: unpinned, files: { "public/index.html": "" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily,hosting"], configPath);
+        expect(result).toMatchObject({ hostingAttempted: true, ...NO_INVOKER_SELECTED });
+      },
+    );
+  });
+
+  it("re-adds the whole Functions target when only Hosting was asked for", async () => {
+    await withFunctionsProject(
+      { config: pinned(), files: { "public/index.html": "" } },
+      async (configPath) => {
+        const result = await classify(["--except", "functions"], configPath);
+        expect(result).toMatchObject({
+          hostingAttempted: true,
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          emailUnsubscribeInvokerSelected: true,
+          authHandoffInvokerSelected: true,
+        });
+      },
+    );
   });
 });

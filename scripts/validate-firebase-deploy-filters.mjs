@@ -10,6 +10,7 @@ import {
   readFile,
   readdir,
   readlink,
+  realpath,
   rm,
   stat,
   symlink,
@@ -760,10 +761,29 @@ async function stageProjectOverlay({
  * writes that very tree, and walking it would cost more than everything else
  * combined. Nothing else is excluded.
  */
-async function liveTreeFingerprint(liveDirs) {
+async function liveTreeFingerprint(liveDirs, projectDir) {
   /** @type {Map<string, string>} */
   const fingerprint = new Map();
+  /** Real paths already walked, so a link cannot make the guard traverse a tree twice or loop. */
+  const visited = new Set();
+  // The repository as the filesystem names it: a project path handed in
+  // through a symlinked ancestor (macOS's `/var` → `/private/var`, say) would
+  // otherwise make every resolved target look like it left the repository.
+  let projectRoot;
+  try {
+    projectRoot = await realpath(projectDir);
+  } catch {
+    projectRoot = projectDir;
+  }
   const walk = async (dir) => {
+    let real;
+    try {
+      real = await realpath(dir);
+    } catch {
+      real = dir;
+    }
+    if (visited.has(real)) return;
+    visited.add(real);
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -787,27 +807,45 @@ async function liveTreeFingerprint(liveDirs) {
         path,
         `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
       );
-      // Dirents report the entry's OWN type, so a symlink is never descended:
-      // the walk stays inside the directories the overlay actually exposed.
-      // Its TARGET is fingerprinted, though (Phase 4b / Codex P1, round 20): a
-      // link such as `tools/config-link -> ../firebase.json` is a path a hook
-      // can write THROUGH, and recording only the link's own inode would let
-      // the write land on a deployment input outside every watched tree
-      // without a single fingerprint changing. The target's stat — including
-      // its `ctime` — is keyed under the link path, so a replaced or edited
-      // target reads as drift on the link that reached it. Directory targets
-      // are recorded the same way (an entry added or removed moves their
-      // `mtime`); they are not walked, so a link cannot make the guard
-      // traverse the repository twice or escape it.
+      // Dirents report the entry's OWN type, so `isDirectory()` below never
+      // descends a symlink by accident. A link's TARGET is fingerprinted,
+      // though (Phase 4b / Codex P1, round 20): a link such as
+      // `tools/config-link -> ../firebase.json` is a path a hook can write
+      // THROUGH, and recording only the link's own inode would let the write
+      // land on a deployment input outside every watched tree without a single
+      // fingerprint changing. The target's stat — including its `ctime` — is
+      // keyed under the link path, so a replaced or edited target reads as
+      // drift on the link that reached it.
+      //
+      // A DIRECTORY target is walked as well (Codex P1, round 13 on #1107):
+      // overwriting an existing file through `tools/config-link -> ../config`
+      // moves neither the link nor the directory's `mtime`, so its metadata
+      // alone would let the write through. The walk is bounded two ways — the
+      // `visited` set above stops a loop or a second pass over a tree the
+      // overlay already exposed, and a target that resolves OUTSIDE the
+      // repository is refused outright, because the guard cannot vouch for a
+      // deployment input it is not allowed to read and must not be led to walk
+      // an arbitrary tree.
       if (entry.isSymbolicLink()) {
+        let target;
         try {
-          const target = await stat(path, { bigint: true });
+          target = await stat(path, { bigint: true });
           fingerprint.set(
             `${path} -> target`,
             `${target.mode} ${target.ino} ${target.size} ${target.mtimeNs} ${target.ctimeNs}`,
           );
         } catch (error) {
           fingerprint.set(`${path} -> target`, `absent ${error?.code ?? "?"}`);
+        }
+        if (target?.isDirectory()) {
+          const resolved = await realpath(path);
+          const inside = relative(projectRoot, resolved);
+          if (inside.startsWith("..") || isAbsolute(inside)) {
+            throw new Error(
+              `${path} is a symlink to a directory outside the repository (${resolved}); the live checkout cannot be fingerprinted, so this deploy is refused`,
+            );
+          }
+          await walk(resolved);
         }
       }
       if (entry.isDirectory()) await walk(path);
@@ -1337,7 +1375,7 @@ async function buildAndInventoryProject({
     let liveBaseline;
     let metadataBaseline;
     try {
-      liveBaseline = await liveTreeFingerprint(liveDirs);
+      liveBaseline = await liveTreeFingerprint(liveDirs, projectDir);
       metadataBaseline = metadataDirs.length > 0 ? await gitAnswerFingerprint(projectDir) : "";
     } catch (error) {
       return refuseAll(
@@ -1351,7 +1389,7 @@ async function buildAndInventoryProject({
      */
     const liveDrift = async () => {
       try {
-        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs));
+        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs, projectDir));
       } catch (error) {
         return `the live checkout could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -2004,11 +2042,42 @@ async function eventInvitationServiceInventory(configSource, configPath) {
   );
 }
 
+/**
+ * The function ids that Hosting will ADD to this deploy on its own: every
+ * rewrite of a deployed Hosting config whose `function` is an object carrying
+ * `pinTag` (Codex P1, round 13 on #1107). The pinned CLI runs
+ * `addPinnedFunctionsToOnlyString` before any lifecycle hook — see
+ * `deploy/index.js` and `deploy/hosting/prepare.js` — so `--only
+ * functions:daily,hosting` is really `--only functions:daily,hosting,
+ * functions:<pinned>` by the time Functions deploys, and it re-adds the
+ * `functions` target when `hosting` alone was asked for. A selector this
+ * classifier judged exact would otherwise release a pinned protected callable
+ * with its invoker left un-reconciled.
+ *
+ * Only the ids are mirrored, not the codebase the CLI resolves from the live
+ * backend: the selector branches accept the bare `functions:<name>` form, and
+ * an id no branch recognises falls to the conservative arm, which is the
+ * fail-closed direction.
+ */
+function pinnedHostingFunctionIds(hostingConfigs) {
+  const ids = [];
+  for (const config of hostingConfigs ?? []) {
+    for (const rewrite of config?.rewrites ?? []) {
+      const fn = rewrite?.function;
+      if (fn && typeof fn === "object" && fn.pinTag && typeof fn.functionId === "string") {
+        ids.push(fn.functionId);
+      }
+    }
+  }
+  return ids;
+}
+
 async function classifyInvokerScope(
   only,
   exceptTargets,
   exportedEventInvitationServices,
   singleEndpointExports = { byCodebase: new Map(), codebaseNames: new Set() },
+  pinnedFunctionIds = [],
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
@@ -2058,7 +2127,16 @@ async function classifyInvokerScope(
       eventInvitationsInvokerSelected = true;
     };
 
-    for (const selector of only.split(",")) {
+    // Mirror the CLI's own widening: when Hosting is deployed and a rewrite
+    // pins a function, that function joins the selector before hooks run.
+    const requestedSelectors = only.split(",");
+    const hostingDeployed = requestedSelectors.some(
+      (selector) => selector === "hosting" || selector.startsWith("hosting:"),
+    );
+    const effectiveSelectors = hostingDeployed
+      ? [...requestedSelectors, ...pinnedFunctionIds.map((id) => `functions:${id}`)]
+      : requestedSelectors;
+    for (const selector of effectiveSelectors) {
       if (selector === "hosting" || selector.startsWith("hosting:")) {
         hostingAttempted = true;
       } else if (selector === "functions" || selector === "functions:default") {
@@ -2179,6 +2257,18 @@ async function classifyInvokerScope(
       // firebase-tools subtracts --except selectors from exact top-level
       // target names. Every colon-qualified Functions exclusion is a no-op.
     }
+    // With no `--only` there is no selector string to widen, but the CLI still
+    // re-adds the `functions` TARGET when a deployed Hosting config pins a
+    // function — and without a selector that is the whole codebase, every
+    // invoker included. Undo the exclusion above rather than trust it.
+    if (hostingAttempted && pinnedFunctionIds.length > 0 && !functionsAttempted) {
+      functionsAttempted = true;
+      bugReportInvokerSelected = true;
+      emailUnsubscribeInvokerSelected = true;
+      authHandoffInvokerSelected = true;
+      eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
+      eventInvitationsStrictServices = exportedInvitationCsv;
+    }
   }
 
   return {
@@ -2286,6 +2376,7 @@ export async function classifyFirebaseDeployRequest(
     exceptTargets,
     exportedEventInvitationServices,
     singleEndpointExports,
+    pinnedHostingFunctionIds(hostingConfigs),
   );
 
   return {
