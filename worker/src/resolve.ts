@@ -36,6 +36,7 @@ import {
   type RegistryEdition,
 } from './registry/contracts';
 import type { RegistryLookup, RegistryLookupService } from './registry/state';
+import { validateSlug } from '../../src/slug';
 
 export type { RegistryLookupService };
 
@@ -296,7 +297,21 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       if (typeof desired.slug !== 'string' || desired.slug.length === 0) {
         return notFound('slug-missing');
       }
-      if (expectedSlug !== null && desired.slug !== expectedSlug) {
+      if (expectedSlug === null) {
+        // On the apex there is no first label to compare against, so the Slug
+        // contract itself is the only check left — and it is the one
+        // `parseDesired` applies to this host class. Without it, a projection
+        // naming `admin` or `bad/slash` would serve from the apex on the
+        // strength of being non-empty. It is `replica-malformed` rather than a
+        // slug reason because nothing about the ADDRESS is wrong: the
+        // projection violates its own schema.
+        //
+        // The comparison arm below needs no equivalent. `expectedSlug` came
+        // from `classifyHost`, which produces one only for a label that has
+        // already passed this contract — or for a rehearsal class, which is
+        // deliberately outside it and can only ever match itself.
+        if (!validateSlug(desired.slug).ok) return notFound('replica-malformed');
+      } else if (desired.slug !== expectedSlug) {
         return notFound('slug-mismatch');
       }
 

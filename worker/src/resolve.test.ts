@@ -205,6 +205,32 @@ describe('the fail-closed decision table', () => {
       reason: 'slug-missing' satisfies NotFoundReason,
     });
   });
+
+  it.each(['admin', 'bad/slash', 'ab', '-edge', 'xn--80ak6aa92e'])(
+    'refuses an APEX route whose slug (%s) is present but breaks the Slug contract',
+    async (slug) => {
+      // On the apex there is no first label to compare against, so the
+      // contract itself is the only check left. Non-empty is not the same as
+      // valid, and `parseDesired` applies the full contract to this host
+      // class — the boundary revalidation has to as well or version skew
+      // serves an apex from a projection naming a reserved infrastructure
+      // label.
+      const { deps } = harness(
+        committed({
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug,
+          edition: 'fiveacross',
+          pathNamespace: 'fiveacross.app',
+        }),
+      );
+      await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
+        kind: 'not-found',
+        reason: 'replica-malformed' satisfies NotFoundReason,
+      });
+    },
+  );
 });
 
 describe('re-validating the projection at the service boundary', () => {
