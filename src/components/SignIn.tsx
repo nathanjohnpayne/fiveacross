@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
@@ -50,6 +50,18 @@ export default function SignIn() {
   // a later re-render cannot resurrect a stale message.
   const [handoffFailed] = useState(() => consumeHandoffFailure() !== null);
   const [startFailed, setStartFailed] = useState(false);
+
+  // Back from Google restores this screen from the bfcache with `busy` still
+  // true and a redirect that will never settle (#1123). AuthContext releases
+  // its single-flight guard on the same persisted `pageshow`, so the button
+  // re-arms here in step; a fresh tap starts a fresh attempt.
+  useEffect(() => {
+    const onPageShow = (event: Event) => {
+      if ((event as PageTransitionEvent).persisted === true) setBusy(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
 
   const go = async () => {
     setBusy(true);
