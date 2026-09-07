@@ -141,6 +141,10 @@ export function validateRegistryLookupBinding(config, subject) {
   // Refusing the KEY rather than its spellings is what makes this total: a
   // table header, a dotted key, an inline table and a quoted key all parse to
   // the same root `env`, so there is no fourth spelling to have missed.
+  //
+  // The top-level allowlist further down would refuse `env` and `unsafe` too.
+  // These two checks run first for their MESSAGES: "declares env" names a key,
+  // and each of these needs to name a decision instead.
   if (Object.hasOwn(document, ENV_KEY)) {
     throw new Error(
       `${subject} must declare no named environment: a Wrangler environment inherits no service ` +
