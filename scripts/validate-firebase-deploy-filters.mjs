@@ -322,7 +322,15 @@ function runCapturedProcess(command, args, options) {
  * codebase source directory exposed only through `$RESOURCE_DIR`.
  */
 function runPredeployHook(command, { projectDir, resourceDir, project }) {
-  const translated = `"${process.execPath}" "${crossEnvShellPath()}" "${command.replace(/"/g, '\\"')}"`;
+  // firebase-tools escapes only `"` when it wraps the hook. That is incomplete
+  // for a command containing a BACKSLASH, which could close its own quote — so
+  // such a command is REFUSED before it gets here rather than quoted some other
+  // way, because running a different command from the one the deploy will run
+  // is the one thing this classifier must not do. Backslashes are escaped too
+  // so the transformation is total; over the accepted input it is byte-for-byte
+  // what `runCommand` produces.
+  const quoted = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const translated = `"${process.execPath}" "${crossEnvShellPath()}" "${quoted}"`;
   return runCapturedProcess(translated, [], {
     cwd: projectDir,
     shell: true,
@@ -479,6 +487,12 @@ async function buildAndInventoryArtifact({ projectDir, sourceRel, predeploy, pro
           : null;
   if (steps === null || steps.some((step) => typeof step !== "string")) {
     return refused("predeploy is not a string or list of strings");
+  }
+  // See `runPredeployHook`: the CLI's own quoting does not survive a backslash,
+  // so a hook containing one cannot be reproduced exactly and is refused rather
+  // than approximated.
+  if (steps.some((step) => step.includes("\\"))) {
+    return refused("a predeploy hook contains a backslash, whose quoting cannot be mirrored");
   }
 
   const realSource = resolve(projectDir, sourceRel);

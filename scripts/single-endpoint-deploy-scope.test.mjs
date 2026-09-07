@@ -954,6 +954,20 @@ describe("configs whose deployed surface this classifier cannot reproduce", () =
     });
   });
 
+  it("refuses a predeploy hook containing a backslash", async () => {
+    // firebase-tools wraps a hook by escaping only `"`, which a backslash can
+    // defeat. Rather than quote it some other way — and so run a command the
+    // deploy will not — such a hook is refused.
+    await withFunctionsProject(
+      { functionsConfig: { predeploy: ['npm --prefix "$RESOURCE_DIR" run build \\'] } },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it.each([["./functions"], ["functions/"]])(
     "accepts the equivalent source spelling %s",
     async (source) => {
