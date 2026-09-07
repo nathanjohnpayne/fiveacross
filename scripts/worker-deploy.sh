@@ -116,9 +116,11 @@ verify_registry_lookup_binding() {
     echo "❌ Could not run the registry binding check." >&2
     echo "" >&2
     echo "It parses worker/wrangler.toml with a root devDependency, so install the" >&2
-    echo "root lockfile first and re-run:" >&2
+    echo "root lockfile first and re-run. \`--include=dev\` is not optional: a shell" >&2
+    echo "carrying NODE_ENV=production or NPM_CONFIG_OMIT=dev omits smol-toml and" >&2
+    echo "lands you back here." >&2
     echo "" >&2
-    echo "  npm ci" >&2
+    echo "  npm ci --include=dev" >&2
     echo "" >&2
     exit 69
   fi

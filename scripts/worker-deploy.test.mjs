@@ -133,7 +133,12 @@ describe('worker deploy guard — registry lookup binding', () => {
     const result = runWithStubbedNpm({ bindingCheckFails: true, bindingCheckExit: 69 });
     expect(result.status).toBe(69);
     expect(result.stderr).toContain('Could not run the registry binding check');
-    expect(result.stderr).toContain('npm ci');
+    // And the instruction has to be the one that WORKS. `smol-toml` is a root
+    // devDependency, so a shell carrying NODE_ENV=production or
+    // NPM_CONFIG_OMIT=dev omits it — `npm config get omit` reports `dev` under
+    // either — and a bare `npm ci` would land the operator back on this exact
+    // exit with nothing to show for the install.
+    expect(result.stderr).toContain('npm ci --include=dev');
     expect(result.stderr).not.toContain('does not bind REGISTRY explicitly');
     expect(result.npmCalls).toEqual([]);
   });
