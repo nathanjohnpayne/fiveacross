@@ -836,6 +836,27 @@ export class LiveCheckoutDriftError extends Error {
 }
 
 /**
+ * Repository METADATA drift is the same class of failure as tree drift, and it
+ * exits the same way. A hook that moves `HEAD`, the branch or a tag has changed
+ * a deployment input — `vite.config.ts` stamps the bundle with `git rev-parse
+ * HEAD` during `BUILD_CMD` — after the approved-checkout guards ran, so a
+ * conservative classification is not enough: the deploy must stop (Phase 4b
+ * P1, round 19). Subclassed so every `instanceof LiveCheckoutDriftError` exit
+ * path applies unchanged.
+ */
+export class RepositoryMetadataDriftError extends LiveCheckoutDriftError {
+  constructor(drift, when) {
+    super(drift, when);
+    this.name = "RepositoryMetadataDriftError";
+    this.message =
+      `a ${when} changed what the repository answers (${drift}). The build stamps the bundle from ` +
+      "`git` answers, so a deploy from this checkout would publish metadata the approved-checkout " +
+      "guards never saw; it is refused rather than continued. Nothing has been restored: inspect the " +
+      "repository (git status, git log -1) and decide what belongs in it.";
+  }
+}
+
+/**
  * What the repository ANSWERS, for the lookups a build makes of it.
  *
  * The counterpart of `liveTreeFingerprint` for the `.git` view, and deliberately
@@ -1339,6 +1360,17 @@ async function buildAndInventoryProject({
         deployEnv,
       });
       if (!result.ok) {
+        // A hook can write through the overlay and THEN fail. Its failure is a
+        // conservative refusal, but the write is the fatal condition, and the
+        // order here is what keeps it fatal: a refusal returned first would let
+        // `deploy.sh` carry on into BUILD_CMD with a mutated checkout (Phase 4b
+        // P1, round 19).
+        const wroteBeforeFailing = await liveDrift();
+        if (wroteBeforeFailing) throw new LiveCheckoutDriftError(wroteBeforeFailing, "failing predeploy hook");
+        const metadataBeforeFailing = await metadataDrift();
+        if (metadataBeforeFailing) {
+          throw new RepositoryMetadataDriftError(metadataBeforeFailing, "failing predeploy hook");
+        }
         return refuseAll(
           `predeploy hook failed: ${hook.command} — ${result.output.trim().slice(-400)}`,
         );
@@ -1348,12 +1380,7 @@ async function buildAndInventoryProject({
     const afterHooks = await liveDrift();
     if (afterHooks) throw new LiveCheckoutDriftError(afterHooks, "predeploy hook");
     const metadataAfterHooks = await metadataDrift();
-    if (metadataAfterHooks) {
-      return refuseAll(
-        `a predeploy hook changed what the repository answers (${metadataAfterHooks}), so what ` +
-          "`git` told this run is not what it will tell the deploy",
-      );
-    }
+    if (metadataAfterHooks) throw new RepositoryMetadataDriftError(metadataAfterHooks, "predeploy hook");
 
     const targets = targetCodebases(only, configs, codebaseNames);
     const selected = staged.filter((config) => targets.has(config.codebase));
@@ -1440,10 +1467,7 @@ async function buildAndInventoryProject({
     if (afterDiscovery) throw new LiveCheckoutDriftError(afterDiscovery, "loaded codebase");
     const metadataAfterDiscovery = await metadataDrift();
     if (metadataAfterDiscovery) {
-      return refuseAll(
-        `loading a codebase changed what the repository answers (${metadataAfterDiscovery}), so ` +
-          "its discovered surface is a function of state this run changed",
-      );
+      throw new RepositoryMetadataDriftError(metadataAfterDiscovery, "loaded codebase");
     }
     return inventories;
   } finally {

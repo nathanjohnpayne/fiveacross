@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   LiveCheckoutDriftError,
+  RepositoryMetadataDriftError,
   classifyFirebaseDeployRequest,
 } from "./validate-firebase-deploy-filters.mjs";
 
@@ -2133,21 +2134,54 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("forfeits the exemption when a hook changes what the repository answers", async () => {
+  it("ABORTS when a hook changes what the repository answers", async () => {
     // The other half of exposing `.git`: the view is live, so a hook can write
     // through it. The guard is on what `git` ANSWERS rather than on the files
     // under `.git`, because that is the property a build can observe — and
     // because a file-level watch reports drift for a background fetch's
     // FETCH_HEAD, which no build has ever branched on.
+    //
+    // Fatal, not conservative (Phase 4b P1, round 19): `vite.config.ts` stamps
+    // the bundle from `git rev-parse HEAD` during BUILD_CMD, so metadata a hook
+    // moved after the approved-checkout guards is a deployment input that
+    // changed, and the deploy must stop the same way tree drift stops it.
     await withFunctionsProject(
       {
         branch: "release",
         functionsConfig: { predeploy: [...PREDEPLOY, "git checkout -q -b rewritten"] },
       },
       async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
-          ALL_INVOKERS_CONSERVATIVE,
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
         );
+        expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("changed what the repository answers");
+        expect(failure.message).toContain("Nothing has been restored");
+      },
+    );
+  });
+
+  it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
+    // The write is the fatal condition and the failure is merely conservative;
+    // checking them in that order is what keeps the write fatal. Handled the
+    // other way round, the refusal returns first and `deploy.sh` walks into
+    // BUILD_CMD with a checkout the clean-tree guard never approved (Phase 4b
+    // P1, round 19).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle && exit 7"] },
+        files: { "shared/toggle": "" },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("shared/toggle");
+        expect(failure.message).toContain("failing predeploy hook");
       },
     );
   });
