@@ -8,6 +8,26 @@ service firebase.storage {
       return signedIn()
         && request.auth.uid in firestore.get(/databases/(default)/documents/events/$(eventId)).data.admins;
     }
+    // The Storage half of the post-Event freeze (#134,
+    // specs/post-sailing-archive.md). `firestore.rules` denies the Proof
+    // DOCUMENT on an archived Event; this denies its MEDIA, because a denial on
+    // only one of the two leaves an archive that still grows blobs — the #806
+    // lesson, and exactly what `specs/path-addressing-and-root.md` § D8 names
+    // ("Storage uploads under that Event's prefix alike").
+    //
+    // Two Firestore accesses, which is the whole per-evaluation budget Storage
+    // Rules allow — affordable only because the create/update arm below spends
+    // none today. The `exists()` half is not decoration: without it a missing
+    // Event document would error the `get()` and newly deny an upload that
+    // succeeds today, and the `'active'` default keeps an Event document with no
+    // `status` key OPEN. Deletes deliberately keep their single
+    // `isEventAdmin()` access and are NOT gated: an Admin must still be able to
+    // take media down out of a frozen record.
+    function eventArchived(eventId) {
+      return firestore.exists(/databases/(default)/documents/events/$(eventId))
+        && firestore.get(/databases/(default)/documents/events/$(eventId))
+             .data.get('status', 'active') == 'archived';
+    }
     function okImage() {
       return request.resource.contentType.matches('image/.*')
         && request.resource.size < 8 * 1024 * 1024;
@@ -32,7 +52,9 @@ service firebase.storage {
       // request.resource, so okImage()/okAudio() would reject it and leave the
       // blob orphaned when deleteProof() removes the doc. Owners delete their own
       // media; admins delete reported/flagged media during moderation.
-      allow create, update: if isOwner(uid) && (okImage() || okAudio());
+      allow create, update: if isOwner(uid)
+        && !eventArchived(eventId)
+        && (okImage() || okAudio());
       allow delete: if isOwner(uid) || isEventAdmin(eventId);
     }
 
