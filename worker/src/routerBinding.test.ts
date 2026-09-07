@@ -165,6 +165,7 @@ describe('what the router’s configuration no longer declares', () => {
     const before = spawnSync('node', [guard], { encoding: 'utf8' });
     expect(before.status, before.stderr).toBe(0);
 
+    const created = !existsSync(resolve(HERE, '../../.wrangler'));
     mkdirSync(dirname(planted), { recursive: true });
     writeFileSync(planted, '{"configPath":"../../elsewhere/wrangler.toml"}', 'utf8');
     try {
@@ -174,6 +175,10 @@ describe('what the router’s configuration no longer declares', () => {
       expect(after.stderr).toContain('away from worker/wrangler.toml');
     } finally {
       rmSync(planted, { force: true });
+      // Leave the checkout as it was found. The directory tree is harmless —
+      // the guard tests for a real FILE — but a test that plants state should
+      // not depend on that to stay tidy.
+      if (created) rmSync(resolve(HERE, '../../.wrangler'), { recursive: true, force: true });
     }
 
     // And the refusal is the planted file's, not a latent one: removing it
