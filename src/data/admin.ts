@@ -652,17 +652,46 @@ export type AbandonArchiveResult = 'reopened' | 'already-archived' | 'no-event';
  *  the Admin surface can say what happened instead of inferring it from a
  *  resolved promise. `not-closing` means the quiesce was never taken (or was
  *  abandoned under this call), which the rules refuse to archive from;
- *  `claims-pending` means a Claim was still awaiting an Admin when the Event
- *  shut, which the freeze would make unresolvable; `too-large` means the record
- *  built from the server re-read would not fit on the Event document. Both of
- *  the last two write NOTHING (#134, Codex P2 on PR #1139). */
+ *  `quiesce-changed` means play was reopened and shut AGAIN while the record
+ *  was being read, so the closing state the snapshot describes is not the one
+ *  the write would land on (Codex P1, PR #1139); `claims-pending` means a Claim
+ *  was still awaiting an Admin when the Event shut, which the freeze would make
+ *  unresolvable; `too-large` means the record built from the server re-read
+ *  would not fit on the Event document. All three write NOTHING (#134). */
 export type ArchiveEventResult =
   | 'archived'
   | 'already-archived'
   | 'no-event'
   | 'not-closing'
+  | 'quiesce-changed'
   | 'claims-pending'
   | 'too-large';
+
+/**
+ * A usable quiesce generation id — the shape `beginArchive` mints and the shape
+ * `archiveEvent` will bind a snapshot to. A missing, blank or non-string token
+ * is not one this build can bind to, so it is refused rather than treated as a
+ * wildcard: an unidentified closing state is exactly the state the binding
+ * exists to distinguish from another.
+ */
+function usableArchiveToken(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * A fresh quiesce generation id. `crypto.randomUUID` where it exists, called
+ * THROUGH its receiver (the `newDraftId` discipline in `src/data/eventDraft.ts`
+ * — it is a Web IDL method that throws when extracted), with a time+random
+ * fallback for environments without it. Uniqueness only has to hold against
+ * the ONE token this Event currently stores, so the fallback is ample.
+ */
+function newArchiveToken(): string {
+  const c: unknown = globalThis.crypto;
+  if (c && typeof (c as { randomUUID?: unknown }).randomUUID === 'function') {
+    return (c as { randomUUID: () => string }).randomUUID();
+  }
+  return `qz-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
 
 /**
  * THE QUIESCE (#134, specs/post-sailing-archive.md § "The quiesce protocol") —
@@ -683,17 +712,36 @@ export type ArchiveEventResult =
  * latches say the server has spoken, never that it has stopped speaking. Only a
  * server-enforced closed state can (Codex P1, PR #1139).
  *
+ * IT ALSO IDENTIFIES THE QUIESCE (Codex P1, PR #1139). `archiving: true` says
+ * the Event is shut; it cannot say WHICH shut, and the archive's second write
+ * needs to know — it reads its inputs against one closing state and commits
+ * against whatever the transaction finds. An Event reopened and shut AGAIN
+ * underneath a slow snapshot presents an identical flag, so `archiveToken` is
+ * minted here and carried through the protocol as the thing that tells two
+ * generations apart.
+ *
  * IDEMPOTENT and REVERSIBLE. Calling it on an Event that is already closing is
- * a no-op that still reports `'closing'`; `abandonArchive` is the way back out,
- * because a freeze that failed halfway must not shut an Event forever.
+ * a no-op that still reports `'closing'` — and PRESERVES the stored token,
+ * because nothing about that call reopened play or took a new snapshot, so
+ * re-minting would abort an in-flight freeze that is still perfectly valid. A
+ * closing Event carrying no usable token gets one, which is how a state shut by
+ * a pre-token build becomes archivable again. `abandonArchive` is the way back
+ * out, because a freeze that failed halfway must not shut an Event forever; the
+ * next `beginArchive` after it opens a NEW generation, which is exactly what
+ * the reads taken under the old one must not commit against.
  */
 export async function beginArchive(): Promise<BeginArchiveResult> {
   const eventRef = evt();
   return runTransaction(db, async (tx): Promise<BeginArchiveResult> => {
     const snap = await tx.get(eventRef);
     if (!snap.exists()) return 'no-event';
-    if ((snap.data() as Partial<EventDoc>).status === 'archived') return 'already-archived';
-    tx.update(eventRef, { archiving: true });
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') return 'already-archived';
+    const token =
+      data.archiving === true && usableArchiveToken(data.archiveToken)
+        ? data.archiveToken
+        : newArchiveToken();
+    tx.update(eventRef, { archiving: true, archiveToken: token });
     return 'closing';
   });
 }
@@ -789,6 +837,19 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
   const preData = pre.data() as Partial<EventDoc>;
   if (preData.status === 'archived') return 'already-archived';
   if (preData.archiving !== true) return 'not-closing';
+  // THE GENERATION THIS SNAPSHOT IS BOUND TO (Codex P1, PR #1139). Every read
+  // below describes the Event as it stands under THIS closing state; the
+  // transaction re-checks that the same one is still in force before it
+  // commits them. Captured here, before the first of those reads, so the
+  // binding covers all of them.
+  //
+  // A closing state carrying no usable token is one this build cannot bind a
+  // snapshot to — the shape a pre-token build (or a hand edit) leaves behind —
+  // and the rules refuse the flip from it besides, so it is refused HERE rather
+  // than attempted and thrown after the Event is already shut. `beginArchive`
+  // mints one, so reopening and archiving again is the way through.
+  const quiesce = preData.archiveToken;
+  if (!usableArchiveToken(quiesce)) return 'quiesce-changed';
 
   // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
   // #1139). The console's own gate reads a passive listener, and a Claim can
@@ -834,6 +895,20 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
     // gameplay reopened in that window is one whose roster may have moved
     // again. Refuse rather than freeze what may already be stale.
     if (data.archiving !== true) return 'not-closing';
+    // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play
+    // can be REOPENED and SHUT AGAIN inside the window the reads above occupy:
+    // gameplay resumes, Marks land, Claims are created, and a second quiesce
+    // begins — and the document this transaction reads then carries an
+    // `archiving: true` indistinguishable from the one the snapshot was taken
+    // under. Committing here would freeze standings that predate the reopened
+    // play, permanently, and the record is what the rules lock. The token
+    // `beginArchive` mints per quiesce is what tells the two generations apart.
+    //
+    // Refused, never repaired, and deliberately WITHOUT reopening play: the
+    // closing state in force belongs to whoever took it, and clearing it would
+    // reopen an Event underneath their in-flight freeze. The console's
+    // closing-state surface is where that Event is picked back up.
+    if (data.archiveToken !== quiesce) return 'quiesce-changed';
     const archivedAt = params.now ?? Date.now();
     const draft = draftEventArchive({
       players,
@@ -870,6 +945,13 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
       // The quiesce is over. `status` carries the freeze from here, and unlike
       // this flag it cannot be cleared.
       archiving: false,
+      // The generation this record was read against, restated so the RULES can
+      // hold the same binding this transaction just checked: the flip arm
+      // requires the write's token to equal the stored one, which denies a
+      // direct SDK write carrying a superseded generation. Writing the value it
+      // already has leaves the field out of `affectedKeys()`, so the arm's
+      // `hasOnly` guard is unaffected.
+      archiveToken: quiesce,
     });
     return 'archived';
   });

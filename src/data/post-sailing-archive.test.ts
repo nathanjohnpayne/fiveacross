@@ -25,6 +25,9 @@ const A = vi.hoisted(() => ({
   updates: [] as Record<string, unknown>[],
   /** Every server-read path, in order, so "after the close" is provable. */
   serverReads: [] as string[],
+  /** Fired once the server reads are done and before the transaction opens —
+   *  the window a reopen-and-reshut actually lands in. */
+  betweenReadsAndTx: null as (() => void) | null,
 }));
 
 vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'test-event' }));
@@ -59,18 +62,20 @@ vi.mock('firebase/firestore', async (importOriginal) => {
           : [];
       return { docs: rows.map((row) => ({ exists: () => true, data: () => row })) };
     },
-    runTransaction: async (_db: unknown, fn: (tx: unknown) => unknown) =>
-      fn({
+    runTransaction: async (_db: unknown, fn: (tx: unknown) => unknown) => {
+      A.betweenReadsAndTx?.();
+      return fn({
         get: async (r: Ref) => snapOf(r.path),
         update: (_r: Ref, data: Record<string, unknown>) => {
           A.updates.push(data);
         },
-      }),
+      });
+    },
   };
 });
 
 // Imported AFTER the mocks above, which vitest hoists.
-import { archiveEvent } from './admin';
+import { abandonArchive, archiveEvent, beginArchive } from './admin';
 
 // specs/post-sailing-archive.md, unit layer (#134). `buildEventArchive` is the
 // whole freeze: whatever it returns is what the archived Leaderboard renders
@@ -669,6 +674,113 @@ describe('draftEventArchive — the inputs are validated before the Event is shu
   });
 });
 
+// Codex P1, PR #1139 round 4. `archiving: true` says the Event is shut; it
+// cannot say WHICH shut. `archiveEvent` reads the roster, the Day pins and the
+// Claim queue against one closing state and commits against whatever the
+// transaction finds — so play REOPENED and SHUT AGAIN inside that window
+// (gameplay resumes, Marks land, a second archive begins) presents an identical
+// flag, and the stale reads would commit as a permanent record. The generation
+// token `beginArchive` mints per quiesce is what tells the two apart.
+describe('the quiesce is identified, and the snapshot is bound to the one it read', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 'quiesce-1',
+    claimMode: 'honor',
+    days: [],
+    bannedUids: [],
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.updates = [];
+    A.serverReads = [];
+    A.betweenReadsAndTx = null;
+  });
+
+  it('mints a generation id when it shuts the Event', async () => {
+    A.event = { status: 'active', days: [], bannedUids: [] };
+    expect(await beginArchive()).toBe('closing');
+    expect(A.updates).toHaveLength(1);
+    expect(A.updates[0].archiving).toBe(true);
+    expect(typeof A.updates[0].archiveToken).toBe('string');
+    expect(A.updates[0].archiveToken as string).not.toBe('');
+  });
+
+  it('keeps the generation id when the Event is already closing', async () => {
+    // The call is idempotent and takes no new snapshot, so re-minting here
+    // would abort an in-flight freeze that is still perfectly valid.
+    expect(await beginArchive()).toBe('closing');
+    expect(A.updates[0].archiveToken).toBe('quiesce-1');
+  });
+
+  it('mints a fresh id for a closing state that carries none', async () => {
+    // The shape a pre-token build leaves behind: unidentified, so it gets an
+    // identity rather than being bound to by guesswork.
+    A.event = closingEvent({ archiveToken: undefined });
+    expect(await beginArchive()).toBe('closing');
+    expect(typeof A.updates[0].archiveToken).toBe('string');
+    expect(A.updates[0].archiveToken).not.toBe('');
+  });
+
+  it('mints a NEW id for the next quiesce after an abandon', async () => {
+    // The whole point of the ABA case: the generation after a reopen must not
+    // be mistakable for the one before it.
+    A.event = closingEvent();
+    expect(await abandonArchive()).toBe('reopened');
+    A.event = { ...closingEvent(), archiving: false };
+    expect(await beginArchive()).toBe('closing');
+    expect(A.updates[1].archiveToken).not.toBe('quiesce-1');
+  });
+
+  it('freezes, and restates the generation it read, when the quiesce holds', async () => {
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    // Restated so the RULES can hold the same binding at the boundary.
+    expect(A.updates[0].archiveToken).toBe('quiesce-1');
+  });
+
+  it('ABORTS, and writes nothing, when play was reopened and shut again mid-snapshot', async () => {
+    // A: the quiesce the roster was read under. B: play reopened, gameplay
+    // resumed, a second archive begun. A's transaction sees `archiving: true`
+    // either way — only the generation distinguishes them.
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ archiveToken: 'quiesce-2' });
+      A.players = [
+        { uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 },
+        { uid: 'newcomer', displayName: 'Newcomer', bingoCount: 3, squaresMarked: 20 },
+      ];
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('quiesce-changed');
+    // Nothing frozen — the alternative is a permanent record that predates
+    // play the Event had already accepted.
+    expect(A.updates).toEqual([]);
+  });
+
+  it('refuses a closing state it cannot bind a snapshot to, before reading anything else', async () => {
+    // No token at all: not a quiesce this build can distinguish from another,
+    // and the rules refuse the flip from it besides — so it is refused here
+    // rather than attempted and thrown on an Event already shut.
+    A.event = closingEvent({ archiveToken: undefined });
+    expect(await archiveEvent({ now: 5 })).toBe('quiesce-changed');
+    expect(A.updates).toEqual([]);
+    expect(A.serverReads).toEqual(['events/test-event']);
+  });
+
+  it('still reports not-closing when the quiesce was simply lifted', async () => {
+    // The two failures are distinct: nothing in force at all, versus a
+    // different one in force. Only the second must leave the Event shut.
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ archiving: false });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('not-closing');
+    expect(A.updates).toEqual([]);
+  });
+});
+
 // Codex P2, PR #1139. The console's drain gate reads a passive listener, which
 // reports only what has already been DELIVERED — so a Claim committing between
 // the last render and the closing write clears the gate and is then stranded
@@ -680,6 +792,9 @@ describe('archiveEvent — the drain gate is re-taken from the server after the 
   const closingEvent = (over: Record<string, unknown> = {}) => ({
     status: 'active',
     archiving: true,
+    // The quiesce's own generation id: `archiving` alone cannot say WHICH shut
+    // the record was read against (#1139).
+    archiveToken: 'quiesce-1',
     claimMode: 'admin_confirmed',
     days: [],
     bannedUids: [],
@@ -692,6 +807,7 @@ describe('archiveEvent — the drain gate is re-taken from the server after the 
     A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
     A.updates = [];
     A.serverReads = [];
+    A.betweenReadsAndTx = null;
   });
 
   it('freezes when the queue is genuinely empty (the control)', async () => {

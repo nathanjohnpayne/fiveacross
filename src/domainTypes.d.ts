@@ -475,6 +475,28 @@ export interface EventDoc {
    */
   archiving?: boolean;
   /**
+   * WHICH quiesce this is (#134, Codex P1 on PR #1139): an opaque id minted by
+   * `beginArchive` beside `archiving`, and unchanged for as long as that one
+   * closing state holds.
+   *
+   * `archiving: true` says the Event is shut; it cannot say WHICH shut. The
+   * archive's second write reads the roster, the Day pins and the Claim queue
+   * against one closing state and then commits against whatever the
+   * transaction finds — so an Event reopened and shut AGAIN underneath a
+   * slow snapshot (an Admin reopening play, gameplay resuming, a second archive
+   * beginning) presents a `archiving: true` indistinguishable from the first,
+   * and the stale reads commit as a permanent record. Comparing the token the
+   * snapshot was read against with the one the transaction sees is what tells
+   * the two generations apart.
+   *
+   * A fresh id per quiesce, so an ABA sequence never collides; preserved when
+   * `beginArchive` is called on an Event that is already closing, because that
+   * call is idempotent and takes no new snapshot. REVERSIBLE and inert exactly
+   * as `archiving` is — the freeze is carried by `status`, which is write-once
+   * — and absent on every Event that has never been mid-archive.
+   */
+  archiveToken?: string;
+  /**
    * The frozen final record (#134): the Leaderboard standings and the
    * First-to-BINGO hall of fame as they stood at `archivedAt`. Write-once — the
    * rules refuse to change it once present — so the record persists unchanged

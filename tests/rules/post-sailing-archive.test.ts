@@ -229,12 +229,17 @@ async function freeze(): Promise<void> {
   });
 }
 
+/** The generation id `beginArchive` mints per quiesce (#1139): `archiving: true`
+ *  says the Event is shut, never WHICH shut, and the flip is bound to the one
+ *  its record was read against. */
+const QUIESCE = 'quiesce-1';
+
 /** Shut the Event out-of-band into the archive's QUIESCING phase — gameplay
  *  denied, no record taken — so the paired gameplay cases can prove the closing
  *  half of the freeze denies exactly what the archived half does. */
-async function quiesce(): Promise<void> {
+async function quiesce(token: string = QUIESCE): Promise<void> {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
-    await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true });
+    await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: token });
   });
 }
 
@@ -430,6 +435,57 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the record 
         archive: FROZEN_RECORD,
         archiving: false,
         standingsFreezeAt: PAST(),
+      }),
+    );
+  });
+
+  // Codex P1, PR #1139 round 4. Being shut is not the same as being the shut
+  // the record was read against: play can be REOPENED and SHUT AGAIN while a
+  // snapshot is in flight, and the document the freeze then writes against
+  // carries an `archiving: true` indistinguishable from the first. The
+  // generation id makes the two distinguishable, at the boundary rather than
+  // only in the client that checks.
+  it('DENIES an archive write bound to a superseded quiesce', async () => {
+    const archiveBoundTo = (token: string) =>
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: false,
+        archiveToken: token,
+      });
+    await quiesce();
+    // The record was read under an earlier generation; play has been reopened
+    // and shut again since.
+    await assertFails(archiveBoundTo('quiesce-0'));
+    // The generation actually in force is accepted — so the denial above is
+    // about the binding, not about carrying the field at all.
+    await assertSucceeds(archiveBoundTo(QUIESCE));
+  });
+
+  it('DENIES the flip from a closing state that carries no generation at all', async () => {
+    // An unidentified quiesce is exactly the state the binding exists to tell
+    // apart from another, so it fails closed. `beginArchive` mints one, which
+    // is how a state shut by a pre-token build becomes archivable again.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true });
+    });
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: false,
+      }),
+    );
+    // …and with a generation in place the identical write lands.
+    await quiesce();
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: false,
       }),
     );
   });

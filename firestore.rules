@@ -134,6 +134,32 @@ service cloud.firestore {
             && archive.firstBingo.uid is string
             && archive.firstBingoRow.uid == archive.firstBingo.uid);
     }
+    // The flip is BOUND to the quiesce the record was read against (#134,
+    // Codex P1 on PR #1139). `archiving: true` says the Event is shut; it
+    // cannot say WHICH shut. Play can be reopened and shut AGAIN while a
+    // snapshot is being read — gameplay resumes, Marks land, a second archive
+    // begins — and the document the freeze then writes against carries an
+    // `archiving: true` indistinguishable from the first, so stale standings
+    // commit as a permanent record.
+    //
+    // `beginArchive` mints `archiveToken` per quiesce and the writer restates
+    // the one it read; this requires the two to agree, so a write carrying a
+    // SUPERSEDED generation is denied at the boundary rather than only by the
+    // client that happens to check. It also requires the stored closing state
+    // to CARRY one: an unidentified quiesce is exactly the state the binding
+    // exists to tell apart from another, so it fails closed — `beginArchive`
+    // mints one, which is how a closing state shut by a pre-token build becomes
+    // archivable again.
+    //
+    // Its own helper, on this arm only. The general Event arm deliberately does
+    // NOT type-check the field: that arm sits against Firestore's
+    // 1000-expression cap (#850/#934), and a malformed token can only ever fail
+    // the flip closed here, never open a hole.
+    function boundToStoredQuiesce(stored, incoming) {
+      return stored.get('archiveToken', '') is string
+        && stored.get('archiveToken', '') != ''
+        && incoming.get('archiveToken', '') == stored.get('archiveToken', '');
+    }
     function completeArchiveRecord(archive, stamp) {
       return archive is map
         && archive.standings is list
@@ -1197,6 +1223,16 @@ service cloud.firestore {
       //   - it may only be taken from the QUIESCED state, so a direct SDK write
       //     cannot skip the window in which gameplay was already shut and the
       //     roster had stopped moving;
+      //   - and only from the SAME quiesce the record was read against
+      //     (`boundToStoredQuiesce`), because being shut is not the same as
+      //     being the shut the snapshot describes: play reopened and shut again
+      //     underneath a slow read presents an identical flag. The writer
+      //     restates the token it read, so a superseded generation is denied
+      //     here rather than only by the client that checks. Restating an
+      //     UNCHANGED value leaves the field out of `affectedKeys()`, which is
+      //     why the `hasOnly` guard below still names four keys — a write that
+      //     MOVED it is refused by the binding clause first, and by that guard
+      //     after;
       //   - it must carry a numeric, bounded `archivedAt`, which is what makes
       //     "no reader ever sees an archived Event with no stamp" an enforced
       //     invariant rather than a property of one client's writer;
@@ -1218,6 +1254,7 @@ service cloud.firestore {
       allow update: if resource != null
         && resource.data.get('archiving', false) == true
         && resource.data.get('status', 'active') != 'archived'
+        && boundToStoredQuiesce(resource.data, request.resource.data)
         && isAdmin(eventId)
         && request.resource.data.status == 'archived'
         && request.resource.data.archivedAt is number

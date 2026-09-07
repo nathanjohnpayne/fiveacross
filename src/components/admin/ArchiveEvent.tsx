@@ -35,6 +35,8 @@ const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
   'already-archived': 'Already archived—the record is unchanged.',
   'no-event': 'No Event document to archive.',
   'not-closing': 'Play reopened before the record was taken—nothing was frozen.',
+  'quiesce-changed':
+    'Play was reopened and shut again while the record was being taken, so nothing was frozen. Archive again from where the Event stands now.',
   'claims-pending':
     'A claim arrived as play was closing, so nothing was frozen. Resolve the Review queue, then archive again.',
   'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
@@ -195,6 +197,13 @@ export default function ArchiveEvent({
     // denies. (The closing-state surface below reaches `archiveEvent` too, and
     // deliberately does NOT reopen: that Event was already shut when the Admin
     // arrived, and `Reopen play` sits beside the button they pressed.)
+    //
+    // `quiesce-changed` is deliberately NOT in that set (Codex P1, PR #1139).
+    // It means the closing state now in force is a DIFFERENT one — play was
+    // reopened and shut again underneath this call — so the Event standing
+    // there is not the one this handler shut, and reopening it would clear
+    // someone else's quiesce out from under their own in-flight freeze. The
+    // Event is reported and left exactly as found.
     if (outcome === 'claims-pending' || outcome === 'too-large') await abandonArchive();
     setResult(outcome);
   };

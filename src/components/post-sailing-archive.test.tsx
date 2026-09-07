@@ -733,6 +733,29 @@ describe('the archive control drains the claim queue first', () => {
     );
   });
 
+  // Codex P1, PR #1139 round 4. `quiesce-changed` is the one refusal that must
+  // NOT reopen play: the closing state now in force belongs to whoever took it
+  // — play was reopened and shut again underneath this call — so clearing it
+  // would pull an Event out from under someone else's in-flight freeze.
+  it('leaves the Event shut when the quiesce it read was taken over by another', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'quiesce-changed';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    expect(H.writes).toEqual(['begin', 'archive']);
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Play was reopened and shut again while the record was being taken, so nothing was frozen. Archive again from where the Event stands now.',
+    );
+  });
+
   it('leaves an already-closing Event closed, where the way back is one tap away', async () => {
     // The closing-state surface reaches the same refusal, and deliberately does
     // NOT reopen: that Event was already shut when the Admin arrived, and
