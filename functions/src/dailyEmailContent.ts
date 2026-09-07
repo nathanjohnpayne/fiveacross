@@ -455,12 +455,20 @@ function hasBingoThrough(player: EmailPlayer, throughDayIndexExclusive: number):
  * of the standings and its timestamp is out of the ranking tie-break, but it is
  * still real play that someone was first to, so the headline can be its.
  *
- * Ties go to the first Player in the roster AS PASSED, so the caller decides
- * what an exact-millisecond tie means. Pass the STANDINGS-ORDERED roster: the
- * in-app Leaderboard resolves its pin over its own ranked roster, and handing
- * this one raw Firestore query order instead would let the two name different
- * holders on a tie, by uid or by whatever order the page came back in (Codex P2,
- * round 2). Pass it BEFORE the presentational ban filter, so a ban hides the
+ * AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING, so the caller may hand
+ * this ANY roster order — Firestore's page order included. The app's mirror
+ * (`eventFirstBingoWinner` in `src/game/logic.ts`) resolves the same tie over a
+ * roster sorted by LIVE root totals, today's marks included, while this one only
+ * ever sees the THROUGH-YESTERDAY window. So a rule that read either roster's
+ * order would let a Player who marks today's card before a delayed or retried
+ * send flip which of two tied Players the email stars versus the Leaderboard
+ * (Codex P2, #1052). The uid is standings-independent, so no view's ordering
+ * participates, and the tie-break applies only when the eligible timestamps are
+ * exactly equal. `buildPodiumPayload` in `finaleContent.ts` is the third copy of
+ * the same key, and `tests/functions/finale-parity.test.ts` fails if any of the
+ * three changes alone.
+ *
+ * Pass the roster BEFORE the presentational ban filter, so a ban hides the
  * holder's row without promoting the next-earliest Player
  * (specs/w2-ban-console.md).
  */
@@ -475,7 +483,7 @@ export function eventFirstBingoUid(
     const at = headlineFirstBingoAt(p, throughDayIndexExclusive, tutorialDays);
     if (at == null) continue;
     if (freezeAt != null && at >= freezeAt) continue;
-    if (!best || at < best.at) best = { uid: p.uid, at };
+    if (!best || at < best.at || (at === best.at && p.uid < best.uid)) best = { uid: p.uid, at };
   }
   return best ? best.uid : null;
 }
@@ -699,10 +707,10 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const holderUid =
     args.starUid === undefined
       ? eventFirstBingoUid(
-          // The RANKED rows, not the caller's roster order: an exact-millisecond
-          // tie must break the same way the in-app Leaderboard's pin breaks it,
-          // and that one resolves over its own ranked roster (Codex P2, round 2).
-          ranked,
+          // The roster as given, NOT the ranked rows: the honour is read off each
+          // Player's own buckets, and an exact-millisecond tie is broken by uid,
+          // so ranking this first would change nothing (Codex P2, #1052).
+          players,
           day.index,
           tutorialDays,
           // The ALREADY-GUARDED `days`, not `event`: a raw Event doc whose

@@ -466,11 +466,19 @@ export function buildPodiumPayload(
         }
       : null;
 
+  // AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING — the third copy of the
+  // one key `eventFirstBingoWinner` (`src/game/logic.ts`) and `eventFirstBingoUid`
+  // (`dailyEmailContent.ts`) apply. The three selectors are each handed a
+  // different order — this one the scheduler's roster read, the in-app pin a
+  // roster sorted by live root totals, the email a through-yesterday window — so
+  // a roster-order tie-break lets the Feed's immutable podium Moment, the
+  // Leaderboard and the email name three different holders of one honour
+  // (Codex P2, #1052). Only exactly-equal timestamps reach the uid comparison.
   let firstBingo: PodiumFirstBingo | null = null;
   for (const p of players) {
     const at = withinFreeze(effectiveFirstBingoAt(p, isTutorialDay));
     if (at == null) continue;
-    if (!firstBingo || at < firstBingo.at) {
+    if (!firstBingo || at < firstBingo.at || (at === firstBingo.at && p.uid < firstBingo.uid)) {
       firstBingo = { uid: p.uid, displayName: p.displayName, at };
     }
   }

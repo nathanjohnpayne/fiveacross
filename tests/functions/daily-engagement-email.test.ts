@@ -916,35 +916,51 @@ describe('the personal line and the ⭐ tie-break read their own inputs (#1052)'
     );
   });
 
-  it('breaks an exact ⭐ tie by standings order, the way the Leaderboard pin does', () => {
-    // Two eligible bingos on the same millisecond. Whoever the standings put
-    // first takes the honour, so the email cannot disagree with the app because
-    // Firestore happened to return a page in another order.
+  it('breaks an exact ⭐ tie by uid, so no roster order can move it', () => {
+    // Two eligible bingos on the same millisecond, with the uids chosen so the
+    // stable answer disagrees with EVERY ordering in play: `zed` leads the
+    // standings, `ace` sorts first by uid. The email sees a through-yesterday
+    // window and the in-app pin sees live root totals that include today's
+    // marks, so a Player marking today's card before a delayed or retried send
+    // would flip a roster-order tie-break on one side alone (Codex P2). Uid is
+    // the key neither view supplies.
     const TIE = 500;
-    const strong: EmailPlayer = {
-      uid: 'strong',
-      displayName: 'Strong',
+    const zed: EmailPlayer = {
+      uid: 'zed',
+      displayName: 'Zed',
       bingoCount: 2,
       squaresMarked: 20,
       firstBingoAt: TIE,
       dayStats: { 0: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE } },
     };
-    const weak: EmailPlayer = {
-      uid: 'weak',
-      displayName: 'Weak',
+    const ace: EmailPlayer = {
+      uid: 'ace',
+      displayName: 'Ace',
       bingoCount: 1,
       squaresMarked: 5,
       firstBingoAt: TIE,
       dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE } },
     };
-    // Either query order resolves to the standings leader.
-    expect(modelFor([weak, strong], 'strong').standings.rows.find((r) => r.starred)?.uid).toBe('strong');
-    expect(modelFor([strong, weak], 'strong').standings.rows.find((r) => r.starred)?.uid).toBe('strong');
-    // Stated directly on the selector: roster order decides the tie, so the
-    // caller must hand it the ranked roster rather than a raw query page.
+    // Either query order stars the same Player — and it is NOT the standings
+    // leader, which is what proves the honour stopped riding on the ranking.
+    expect(modelFor([zed, ace], 'zed').standings.rows.find((r) => r.starred)?.uid).toBe('ace');
+    expect(modelFor([ace, zed], 'zed').standings.rows.find((r) => r.starred)?.uid).toBe('ace');
+    expect(modelFor([zed, ace], 'zed').standings.rows.map((r) => r.uid)).toEqual(['zed', 'ace']);
+    // Stated directly on the selector: raw query order, reversed query order and
+    // the standings-ordered rows all resolve to the same holder.
     const tutorial = tutorialDayIndexes(days);
-    expect(eventFirstBingoUid([weak, strong], 3, tutorial)).toBe('weak');
-    expect(eventFirstBingoUid(standingsThrough([weak, strong], 3, tutorial, ceremonialDayIndexes(days)), 3, tutorial)).toBe('strong');
+    const ceremonial = ceremonialDayIndexes(days);
+    expect(eventFirstBingoUid([zed, ace], 3, tutorial)).toBe('ace');
+    expect(eventFirstBingoUid([ace, zed], 3, tutorial)).toBe('ace');
+    expect(eventFirstBingoUid(standingsThrough([zed, ace], 3, tutorial, ceremonial), 3, tutorial)).toBe('ace');
+    // And the uid never overtakes an EARLIER bingo: one millisecond of daylight
+    // and the timestamp decides, whichever way the uids sort.
+    const zedEarlier: EmailPlayer = {
+      ...zed,
+      firstBingoAt: TIE - 1,
+      dayStats: { 0: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE - 1 } },
+    };
+    expect(eventFirstBingoUid([ace, zedEarlier], 3, tutorial)).toBe('zed');
   });
 });
 

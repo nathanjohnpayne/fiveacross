@@ -545,25 +545,27 @@ const emailClientDays = (): DayDef[] => emailDays() as unknown as DayDef[];
  *  earliest bingo on the Event but on a Tutorial Day; Cera's whole haul is on
  *  the ceremonial Day, which is inert for score and eligible for the honour;
  *  Late's only bingo lands after the freeze. */
+const emailPlayer = (
+  uid: string,
+  displayName: string,
+  bingoCount: number,
+  squaresMarked: number,
+  firstBingoAt: number | null,
+  dayStats: PlayerDoc['dayStats'],
+): PlayerDoc => ({
+  uid,
+  displayName,
+  photoURL: null,
+  joinedAt: 0,
+  bingoCount,
+  squaresMarked,
+  firstBingoAt,
+  reshufflesUsed: 0,
+  dayStats,
+});
+
 function emailRoster(): PlayerDoc[] {
-  const p = (
-    uid: string,
-    displayName: string,
-    bingoCount: number,
-    squaresMarked: number,
-    firstBingoAt: number | null,
-    dayStats: PlayerDoc['dayStats'],
-  ): PlayerDoc => ({
-    uid,
-    displayName,
-    photoURL: null,
-    joinedAt: 0,
-    bingoCount,
-    squaresMarked,
-    firstBingoAt,
-    reshufflesUsed: 0,
-    dayStats,
-  });
+  const p = emailPlayer;
   return [
     p('ana', 'Ana', 2, 22, 500, {
       0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
@@ -653,6 +655,67 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
     // score, eligible for the headline — while Ana's numerically earlier
     // Tutorial-Day bingo takes nothing and Late's post-freeze one is cut off.
     expect(client.firstBingo).toEqual({ uid: 'cera', displayName: 'Cera', at: 200 });
+  });
+
+  it('breaks an exact ⭐ tie identically on both sides, whatever order each sees', () => {
+    // The one input the two views can never share is roster ORDER: the email
+    // resolves the honour over a through-yesterday window, while the in-app pin
+    // and the podium resolve it over live root totals that include today's
+    // marks. So a Player marking today's card before a delayed or retried send
+    // used to flip which of two tied Players each surface starred (Codex P2,
+    // #1052). Both selectors now break the tie on uid, ascending.
+    //
+    // Uids chosen so the stable answer disagrees with every ordering in play:
+    // `zed` leads the standings, `ace` sorts first by uid, and Day 2 is the
+    // ordinary competitive Day, so both bingos are eligible and pre-freeze.
+    const TIE = 250;
+    const tied: PlayerDoc[] = [
+      emailPlayer('zed', 'Zed', 2, 20, TIE, {
+        2: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE },
+      }),
+      emailPlayer('ace', 'Ace', 1, 5, TIE, {
+        2: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE },
+      }),
+    ];
+    const reversed = [...tied].reverse();
+    const isTutorial = (i: number) => tutorial.has(i);
+
+    // Email — either query order, and the standings-ordered rows.
+    expect(eventFirstBingoUid(asEmailPlayers(tied), 3, tutorial, freezeAt)).toBe('ace');
+    expect(eventFirstBingoUid(asEmailPlayers(reversed), 3, tutorial, freezeAt)).toBe('ace');
+    expect(
+      eventFirstBingoUid(
+        standingsThrough(asEmailPlayers(tied), 3, tutorial, ceremonial),
+        3,
+        tutorial,
+        freezeAt,
+      ),
+    ).toBe('ace');
+
+    // In-app pin and both podiums, from the same roster in either order.
+    expect(cruiseFirstBingoUid(tied, isTutorial, EMAIL_FREEZE)).toBe('ace');
+    expect(cruiseFirstBingoUid(reversed, isTutorial, EMAIL_FREEZE)).toBe('ace');
+    expect(buildPodium(tied, emailClientDays(), undefined, true, EMAIL_FREEZE).firstBingo).toEqual({
+      uid: 'ace',
+      displayName: 'Ace',
+      at: TIE,
+    });
+    expect(
+      buildPodiumPayload(
+        asFinalePlayers(tied),
+        emailDays() as unknown as FinaleDay[],
+        [],
+        EMAIL_FREEZE,
+      ).firstBingo,
+    ).toEqual({ uid: 'ace', displayName: 'Ace', at: TIE });
+
+    // …while the ranking still puts `zed` first on both sides, which is what
+    // proves the honour stopped riding on whatever order it was handed.
+    expect(standingsThrough(asEmailPlayers(tied), 3, tutorial, ceremonial).map((r) => r.uid)).toEqual([
+      'zed',
+      'ace',
+    ]);
+    expect(buildPodium(tied, emailClientDays(), undefined, true, EMAIL_FREEZE).champion?.uid).toBe('zed');
   });
 
   it('keeps the ⭐ holder in the email snapshot at her true rank', () => {

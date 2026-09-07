@@ -1318,7 +1318,21 @@ export function cruiseFirstBingoUid(
  * millisecond is not eligible (Phase 4b P2). Absent/`null` means no cutoff,
  * which is every pre-freeze render.
  *
- * Ties go to the first Player in roster order, unchanged.
+ * AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING — a key that belongs to
+ * no caller's ordering, and the same key the two decoupled mirrors apply
+ * (`eventFirstBingoUid` in `functions/src/dailyEmailContent.ts`, and the podium
+ * payload's own loop in `functions/src/finaleContent.ts`). The three selectors
+ * never see the same roster order: this one is handed a roster sorted by LIVE
+ * root totals (today's marks included, via `useLeaderboard`), the email resolves
+ * the honour over a THROUGH-YESTERDAY window, and the scheduler's podium reads
+ * its own roster query. So any rule that read the caller's order would let a
+ * Player who marks today's card before a delayed or retried send flip which of
+ * two tied Players the email stars versus this pin (Codex P2, #1052). Sorting
+ * the tie by uid removes the one input the three views disagree about, and
+ * `tests/functions/finale-parity.test.ts` fails if any side changes alone.
+ *
+ * The tie-break applies ONLY when the eligible timestamps are exactly equal, so
+ * a Player never overtakes an earlier bingo by owning a smaller uid.
  */
 export function eventFirstBingoWinner(
   players: readonly PlayerDoc[],
@@ -1330,7 +1344,9 @@ export function eventFirstBingoWinner(
     const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
     if (at == null) continue;
     if (freezeAt != null && at >= freezeAt) continue;
-    if (!best || at < best.at) best = { uid: p.uid, displayName: p.displayName, at };
+    if (!best || at < best.at || (at === best.at && p.uid < best.uid)) {
+      best = { uid: p.uid, displayName: p.displayName, at };
+    }
   }
   return best;
 }
