@@ -1223,6 +1223,31 @@ export function eventFirstBingoAt(
   return earliest;
 }
 
+/**
+ * The First-to-BINGO stamp that governs ONE Board — the value a Mark, a proof
+ * attach, or a proof deletion PRESERVES rather than re-stamps (#1049).
+ *
+ * In daily-cards mode every Day Card is its own Board, so that stamp is that
+ * Day's OWN `dayStats` bucket. The root `firstBingoAt` is an AGGREGATE over
+ * every Day (`eventFirstBingoAt`), so reading it here would copy an earlier
+ * Day's instant into the Day being written — awarding that Day's honour to the
+ * wrong Player and, once the copy is summed back up, corrupting the Event-wide
+ * headline too. A legacy single-Board Player carries no `dayStats`, so their
+ * root IS that one Board's stamp and is returned unchanged.
+ *
+ * Callers that distinguish "no prior stamp" from "prior state unknown" (the #75
+ * omit) keep doing so around this helper: it answers only WHICH field holds the
+ * Board's stamp, never whether the row itself was knowable.
+ */
+export function boardFirstBingoAt(
+  row: { firstBingoAt?: number | null; dayStats?: DayStats } | null | undefined,
+  daily: boolean,
+  dayIndex: number,
+): number | null {
+  if (!daily) return row?.firstBingoAt ?? null;
+  return row?.dayStats?.[dayIndex]?.firstBingoAt ?? null;
+}
+
 /** Derive a Player's Event-wide root totals from their per-Day `dayStats`:
  *  bingos/squares summed over all Days, First to BINGO restricted to
  *  non-Tutorial Days. This is exactly the `PlayerDoc` root shape the
