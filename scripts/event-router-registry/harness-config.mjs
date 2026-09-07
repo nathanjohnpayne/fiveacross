@@ -208,6 +208,18 @@ export function validateRegistryLookupBinding(config, subject) {
   // false. Refuse the whole prefix rather than the two names, because the
   // claim being made is "no Firebase credential of any kind", not "not these
   // two". A `[vars]` value is never read: only its keys are judged.
+  // `keep_vars = true` tells Wrangler to PRESERVE dashboard-defined plain-text
+  // vars that the file does not mention, so a `FIREBASE_API_KEY` set in the
+  // dashboard would survive every deploy while `[vars]` looked clean and the
+  // secret readback saw nothing (a plain-text var is not a secret). The file
+  // must therefore be the whole truth about vars: the key may be absent or
+  // literally `false`, never anything else.
+  if (Object.hasOwn(document, 'keep_vars') && document.keep_vars !== false) {
+    throw new Error(
+      `${subject} sets keep_vars; the router's vars must come from this file alone so a dashboard-defined Firebase credential cannot survive a deploy (#972)`,
+    );
+  }
+
   if (Object.hasOwn(document, 'vars')) {
     const vars = document.vars;
     if (!isTable(vars)) throw new Error(`${subject} declares a [vars] entry that is not a table`);

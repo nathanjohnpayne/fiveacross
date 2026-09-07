@@ -594,6 +594,13 @@ describe('the shared binding validator, read as TOML', () => {
     );
   });
 
+  it.each([
+    ['true', 'keep_vars = true'],
+    ['a non-boolean', 'keep_vars = "false"'],
+  ])('refuses keep_vars set to %s, because dashboard vars would outlive the file', (_label, entry) => {
+    expect(() => validateRouterServiceBinding(`${entry}\n\n${ONLY_BINDING}\n`)).toThrow(/keep_vars/);
+  });
+
   it('judges [vars] by its keys only, and accepts an ordinary Worker var', () => {
     expect(
       validateRouterServiceBinding(`${ONLY_BINDING}\n\n[vars]\nROUTER_VERSION = "v1"\n`),
