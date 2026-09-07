@@ -1409,9 +1409,11 @@ export type HeadlineBingoRow = Pick<PlayerDoc, 'uid' | 'firstBingoAt' | 'dayStat
  * smaller one, forever. A tie therefore blocks exactly the Player the selector
  * does not name, and never both (the mutual-suppression case above).
  *
- * Blocking therefore coincides with the shared headline selector: this returns
- * true exactly when `eventFirstBingoWinner` over the same roster and cutoff names
- * a Player who is not the candidate.
+ * Blocking therefore coincides with the shared headline selector BY CONSTRUCTION:
+ * this delegates to `selectHeadlineBingoWinner`, the one loop
+ * `eventFirstBingoWinner` also runs, and returns true exactly when it names a
+ * Player who is not the candidate (Codex P1 on #1128: a re-implementation that
+ * merely agreed today could be edited apart tomorrow).
  */
 export function earlierEligibleHeadlineBingoExists(params: {
   roster: readonly HeadlineBingoRow[];
@@ -1420,24 +1422,15 @@ export function earlierEligibleHeadlineBingoExists(params: {
   freezeAt?: number | null;
 }): boolean {
   const { roster, candidateUid, isTutorialDay, freezeAt } = params;
-  const eligibleAt = (row: HeadlineBingoRow): number | null => {
-    const at = effectiveCruiseFirstBingoAt(row, isTutorialDay);
-    if (at == null) return null;
-    return freezeAt != null && at >= freezeAt ? null : at;
-  };
-  const candidateRow = roster.find((p) => p.uid === candidateUid);
-  const candidateAt = candidateRow ? eligibleAt(candidateRow) : null;
-  return roster.some((p) => {
-    if (p.uid === candidateUid) return false;
-    const at = eligibleAt(p);
-    if (at == null) return false;
-    if (candidateAt == null || at < candidateAt) return true;
-    // An exact-millisecond tie is broken by uid, ascending — the same key
-    // `eventFirstBingoWinner` applies for the Leaderboard and podium, so the
-    // one Player that selector names is the one Player left eligible to claim
-    // the singleton, and the Feed can never disagree with the standings on a tie.
-    return at === candidateAt && p.uid < candidateUid;
-  });
+  // Not a second implementation of the rule: the SAME selection the Leaderboard
+  // pin and the podium run, asked one question — does it name somebody else?
+  // Every case in the contract above falls out of that: a candidate with no
+  // eligible instant is never the winner, so any eligible rival blocks (the
+  // presence fallback); an eligible candidate is blocked exactly by a rival the
+  // selector orders ahead (earlier, or the same instant and a smaller uid); and
+  // with nobody eligible there is no winner, so nothing blocks.
+  const winner = selectHeadlineBingoWinner(roster, isTutorialDay, freezeAt);
+  return winner !== undefined && winner.row.uid !== candidateUid;
 }
 
 /** The uid of the Event-wide First to BINGO holder across a roster — the
@@ -1496,13 +1489,32 @@ export function eventFirstBingoWinner(
   isTutorialDay: (dayIndex: number) => boolean,
   freezeAt?: number | null,
 ): { uid: string; displayName: string; at: number } | undefined {
-  let best: { uid: string; displayName: string; at: number } | undefined;
-  for (const p of players) {
-    const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
+  const best = selectHeadlineBingoWinner(players, isTutorialDay, freezeAt);
+  return best && { uid: best.row.uid, displayName: best.row.displayName, at: best.at };
+}
+
+/**
+ * THE headline selection, over the minimal row shape, shared by every reader
+ * of the Event-wide First to BINGO on the client: the Leaderboard pin and the
+ * podium (`eventFirstBingoWinner`) and the Moment gate
+ * (`earlierEligibleHeadlineBingoExists`). One loop owns the eligibility cutoff
+ * (tutorial Days out, the inclusive freeze cutoff) and the ordering (eligible
+ * instant ascending, uid ascending on an exact tie), so the immutable Feed
+ * singleton and the standings cannot be made to disagree by a future edit to
+ * one of two copies (Codex P1 on #1128).
+ */
+export function selectHeadlineBingoWinner<Row extends HeadlineBingoRow>(
+  rows: readonly Row[],
+  isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
+): { row: Row; at: number } | undefined {
+  let best: { row: Row; at: number } | undefined;
+  for (const row of rows) {
+    const at = effectiveCruiseFirstBingoAt(row, isTutorialDay);
     if (at == null) continue;
     if (freezeAt != null && at >= freezeAt) continue;
-    if (!best || at < best.at || (at === best.at && p.uid < best.uid)) {
-      best = { uid: p.uid, displayName: p.displayName, at };
+    if (!best || at < best.at || (at === best.at && row.uid < best.row.uid)) {
+      best = { row, at };
     }
   }
   return best;
