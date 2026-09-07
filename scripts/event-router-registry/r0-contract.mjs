@@ -120,6 +120,15 @@ export const REGISTRY_R0_CONTRACT = Object.freeze({
           distinctHostsGreaterThan: 64,
           windowSeconds: 300,
         }),
+        // Stored state the registry cannot parse is a permanent per-host
+        // failure (spec § Failure semantics): the host renders not-found until
+        // a human repairs it, so the event pages rather than merely logs.
+        Object.freeze({
+          id: 'malformed-state',
+          outcome: 'malformed',
+          countGreaterThan: 0,
+          windowSeconds: 60,
+        }),
       ]),
     }),
   }),
@@ -197,6 +206,7 @@ export function validateRegistryR0Contract(contract = REGISTRY_R0_CONTRACT) {
       distinctHostsGreaterThan: 64,
       windowSeconds: 300,
     },
+    { id: 'malformed-state', outcome: 'malformed', countGreaterThan: 0, windowSeconds: 60 },
   ];
   if (
     observability?.semanticEvent !== 'event-router-registry.semantic' ||

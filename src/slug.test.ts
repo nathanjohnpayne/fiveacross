@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  isRehearsalEventLabel,
+  isRehearsalLabel,
+  isRehearsalRootLabel,
   isReservedLabel,
   normalizeSlug,
   RESERVED_LABELS,
@@ -68,6 +71,50 @@ describe('reserved infrastructure labels', () => {
       expect(validateSlug(label)).toEqual({ ok: false, reason: 'reserved-label' });
     },
   );
+});
+
+/**
+ * The rehearsal classes are recognised HERE, beside the reservation that makes
+ * them unclaimable, because they are one decision with two sides: an organizer
+ * may claim no `r2-` label at all, and the edge router must route exactly two
+ * closed shapes of them (#972). Splitting the two rules across modules is how
+ * one of them widens without the other noticing.
+ */
+describe('the closed rehearsal label classes', () => {
+  it.each([
+    ['r2-abcdefghijklmnopqrstuvwxyz', true, false],
+    ['r2-2345672345672345672345672a', true, false],
+    ['r2-root-abcdefghijklmnopqrst', false, true],
+    ['r2-root-2345672345672345672a', false, true],
+  ] as const)('recognises %s', (label, event, root) => {
+    expect(isRehearsalEventLabel(label)).toBe(event);
+    expect(isRehearsalRootLabel(label)).toBe(root);
+    expect(isRehearsalLabel(label)).toBe(true);
+    // Recognised as a rehearsal class AND still unclaimable. Both, always.
+    expect(isReservedLabel(label)).toBe(true);
+    expect(validateSlug(label)).toEqual({ ok: false, reason: 'reserved-label' });
+  });
+
+  it.each([
+    'r2-short',
+    'r2-abcdefghijklmnopqrstuvwxy', // 25
+    'r2-abcdefghijklmnopqrstuvwxyza', // 27
+    'r2-ABCDEFGHIJKLMNOPQRSTUVWXYZ', // base32 is lowercase here
+    'r2-abcdefghijklmnopqrstuvwxy1', // 1 and 8/9 are outside RFC 4648 base32
+    'r2-root-abcdefghijklmnopqrs', // 19
+    'r2-root-abcdefghijklmnopqrstu', // 21
+    'r2-root-abcdefghijklmnopqr-t',
+    'bodega-bay',
+    'r2',
+  ])('does not recognise %s as a rehearsal class', (label) => {
+    expect(isRehearsalLabel(label)).toBe(false);
+  });
+
+  it('leaves every other reserved label outside the rehearsal classes', () => {
+    for (const label of RESERVED_LABELS) {
+      expect(isRehearsalLabel(label), label).toBe(false);
+    }
+  });
 });
 
 /**

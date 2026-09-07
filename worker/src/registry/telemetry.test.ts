@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createMalformedSemanticEvent,
   createCardinalitySemanticEvent,
   createRecoverySemanticEvent,
   createSyncSemanticEvent,
@@ -92,6 +93,29 @@ describe('registry semantic telemetry', () => {
       outcome: 'empty-object',
       revision: null,
       latencyMs: 3,
+    });
+  });
+
+  it('records a malformed committed replica as its own closed lookup outcome', () => {
+    expect(
+      createMalformedSemanticEvent({
+        registryVersion: 'registry-1',
+        host: 'bodega-bay.fiveacross.app',
+        startedAt: 1_000,
+        finishedAt: 1_004,
+      }),
+    ).toEqual({
+      schemaVersion: 1,
+      event: 'event-router-registry.semantic',
+      operation: 'lookup',
+      outcome: 'malformed',
+      registryVersion: 'registry-1',
+      host: 'bodega-bay.fiveacross.app',
+      revision: null,
+      latencyMs: 4,
+      gapAgeMs: null,
+      keyVersion: null,
+      recoveryAction: null,
     });
   });
 

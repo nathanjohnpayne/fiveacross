@@ -1,566 +1,1103 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CACHE_VERSION,
-  parseHostnameDocument,
+  decide,
   resolveHost,
-  type CacheEnvelope,
-  type HostnameCache,
+  type NotFoundReason,
   type ResolveConfig,
   type ResolveDeps,
+  type RegistryLookupService,
 } from './resolve';
+import type { ReplicaDesired } from './registry/contracts';
+import type { RegistryLookup } from './registry/state';
 
-const CONFIG: ResolveConfig = {
-  projectId: 'fiveacross',
-  apiKey: 'test-web-api-key',
-  lookupTimeoutMs: 2_000,
-  cacheTtlMs: 300_000,
-};
-
-/** Firestore REST's type-tagged document shape. */
-function firestoreDoc(fields: Record<string, string>): unknown {
-  return {
-    name: 'projects/fiveacross/databases/(default)/documents/hostnames/bodega-bay.fiveacross.app',
-    fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, { stringValue: v }])),
-  };
-}
-
-function memoryCache(seed?: Record<string, CacheEnvelope>): HostnameCache & { store: Map<string, CacheEnvelope> } {
-  const store = new Map<string, CacheEnvelope>(Object.entries(seed ?? {}));
-  return {
-    store,
-    read: async (host) => store.get(host) ?? null,
-    write: async (host, envelope) => void store.set(host, envelope),
-    drop: async (host) => void store.delete(host),
-  };
-}
-
-function deps(
-  fetchImpl: ResolveDeps['fetch'],
-  cache: HostnameCache,
-  clock = 1_000_000,
-): ResolveDeps {
-  return { fetch: fetchImpl, cache, now: () => clock };
-}
-
-function respondWith(body: unknown, status = 200): ResolveDeps['fetch'] {
-  return vi.fn(async () => new Response(JSON.stringify(body), { status })) as ResolveDeps['fetch'];
-}
-
-const ACTIVE = firestoreDoc({ eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' });
+const CONFIG: ResolveConfig = { lookupTimeoutMs: 2_000 };
 const HOST = 'bodega-bay.fiveacross.app';
+const SLUG = 'bodega-bay';
 
-describe('resolveHost — servable', () => {
-  it('serves an active, well-formed, address-matching record', async () => {
-    const cache = memoryCache();
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-  });
+function committed(desired: ReplicaDesired, revision = '7'): RegistryLookup {
+  return { kind: 'committed', schemaVersion: 1, revision, desired };
+}
 
-  it('serves the apex without a Slug cross-check', async () => {
-    // The apex document's `slug` names the Event's WILDCARD address, so
-    // comparing it against a first label the apex does not have would refuse a
-    // host that is registered and in service.
-    const cache = memoryCache();
-    const result = await resolveHost('fiveacross.app', null, CONFIG, deps(respondWith(ACTIVE), cache));
-    expect(result).toMatchObject({ kind: 'serve', eventId: 'bodega-bay-2026' });
-  });
+const ACTIVE_ROUTE = committed({
+  kind: 'route',
+  eventId: 'bodega-bay-2026',
+  status: 'active',
+  slug: SLUG,
+  edition: 'fiveacross',
+  pathNamespace: null,
 });
 
-describe('resolveHost — fail closed', () => {
-  it.each([
-    ['unknown host (404 from Firestore)', 404, undefined, 'unknown-host'],
-    ['disabled', 200, { eventId: 'e', status: 'disabled', slug: 'bodega-bay' }, 'inactive'],
-    ['archived', 200, { eventId: 'e', status: 'archived', slug: 'bodega-bay' }, 'inactive'],
-    ['absent status', 200, { eventId: 'e', slug: 'bodega-bay' }, 'inactive'],
-    ['unrecognised status', 200, { eventId: 'e', status: 'ACTIVE', slug: 'bodega-bay' }, 'inactive'],
-    ['no eventId', 200, { status: 'active', slug: 'bodega-bay' }, 'malformed'],
-    ['no slug', 200, { eventId: 'e', status: 'active' }, 'slug-missing'],
-    ['slug names another address', 200, { eventId: 'e', status: 'active', slug: 'elsewhere' }, 'slug-mismatch'],
-  ] as const)('refuses %s', async (_label, status, fields, reason) => {
-    const cache = memoryCache();
-    const body = fields === undefined ? {} : firestoreDoc(fields as Record<string, string>);
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(body, status), cache));
-    expect(result).toEqual({ kind: 'not-found', reason });
-  });
+/** Every seam the resolver has is one method, so the harness is one spy. That
+ *  is the whole point of #972: there is no cache to seed, no Firestore to stub
+ *  and no envelope to age. */
+function harness(answer: RegistryLookup | (() => Promise<RegistryLookup>)) {
+  const lookup = vi.fn(typeof answer === 'function' ? answer : async () => answer);
+  const registry: RegistryLookupService = { lookup };
+  const deps: ResolveDeps = { registry };
+  return { deps, lookup };
+}
 
-  it('never infers active from a missing status, on the cache path either', async () => {
-    const cache = memoryCache({
-      [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: '', slug: 'bodega-bay', edition: null } },
+async function refusalFor(
+  lookup: RegistryLookup,
+  expectedSlug: string | null = SLUG,
+): Promise<{ reason: NotFoundReason; revision: string | null }> {
+  const { deps } = harness(lookup);
+  const resolution = await resolveHost(HOST, expectedSlug, CONFIG, deps);
+  expect(resolution.kind).toBe('not-found');
+  if (resolution.kind !== 'not-found') throw new Error('expected a fail-closed resolution');
+  return { reason: resolution.reason, revision: resolution.revision };
+}
+
+async function reasonFor(lookup: RegistryLookup, expectedSlug: string | null = SLUG): Promise<string> {
+  return (await refusalFor(lookup, expectedSlug)).reason;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('a servable committed projection', () => {
+  it('serves an active route and carries its revision through', async () => {
+    const { deps, lookup } = harness(ACTIVE_ROUTE);
+    const resolution = await resolveHost(HOST, SLUG, CONFIG, deps);
+
+    expect(resolution).toEqual({
+      kind: 'serve',
+      record: {
+        eventId: 'bodega-bay-2026',
+        revision: '7',
+        pathNamespace: null,
+        edition: 'fiveacross',
+        root: null,
+      },
     });
-    const fetchImpl = respondWith(ACTIVE);
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // One point lookup for the address that was asked for, and nothing else.
+    expect(lookup).toHaveBeenCalledExactlyOnceWith(HOST);
   });
 
-  it.each([
-    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay', edition: null }],
-    ['malformed', { eventId: '', status: 'active', slug: 'bodega-bay', edition: null }],
-    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere', edition: null }],
-  ])('bypasses a fresh but non-serving cached %s record', async (_label, record) => {
-    const cache = memoryCache({
-      [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record },
-    });
-    const fetchImpl = respondWith(ACTIVE);
-
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-    expect(cache.store.get(HOST)?.record.eventId).toBe('bodega-bay-2026');
-  });
-
-  it('fails closed when the lookup is unavailable and nothing is cached', async () => {
-    const cache = memoryCache();
-    const fetchImpl = vi.fn(async () => {
-      throw new Error('network down');
-    }) as unknown as ResolveDeps['fetch'];
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
-  });
-
-  it('fails closed rather than serving when the router is unconfigured', async () => {
-    const cache = memoryCache();
-    const fetchImpl = respondWith(ACTIVE);
-    const result = await resolveHost(
-      HOST,
-      'bodega-bay',
-      { ...CONFIG, apiKey: '' },
-      deps(fetchImpl, cache),
+  it('serves the Namespace apex without a Slug cross-check', async () => {
+    const { deps } = harness(
+      committed({
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        // The apex projection's slug names the Event's WILDCARD address, not
+        // this one, so cross-checking it here would refuse a host that is
+        // correct. It must still be PRESENT — the schema requires a non-empty
+        // slug on every route, and the apex exemption removes the comparison
+        // rather than the requirement.
+        slug: 'bodega-bay',
+        edition: 'fiveacross',
+        // The apex is a path-addressed host class, so its projection carries
+        // the matching namespace rather than null.
+        pathNamespace: 'fiveacross.app',
+      }),
     );
-    expect(result).toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
   });
 
-  it.each([401, 403])(
-    'reports a Firestore refusal (%s) as lookup-forbidden, not as an unavailable dependency',
-    async (status) => {
-      // App Check enforcement on Cloud Firestore is the expected cause: this
-      // Worker reads unauthenticated with only the web api key. The two
-      // reasons demand opposite responses — an unavailable lookup usually
-      // self-heals, a refused one never does and takes every uncached host
-      // down as the cache drains — so an operator must be able to tell them
-      // apart from outside.
-      const cache = memoryCache();
-      const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, status), cache));
-      expect(result).toEqual({ kind: 'not-found', reason: 'lookup-forbidden' });
+  it.each(['doorway', 'not-found'] as const)(
+    'serves a %s root marker: the marker controls the app’s / outcome, not whether the edge may serve',
+    async (root) => {
+      const { deps } = harness(
+        committed({ kind: 'root', root, edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+      );
+      await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
+        kind: 'serve',
+        record: {
+          eventId: null,
+          revision: '7',
+          pathNamespace: 'fiveacross.app',
+          edition: 'fiveacross',
+          root,
+        },
+      });
     },
   );
 
-  it('still prefers a stale servable entry over reporting a refusal', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000 - CONFIG.cacheTtlMs - 1,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 403), cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true, edition: null });
-  });
-
-  it('treats a Firestore 5xx as unavailable rather than as an absent document', async () => {
-    const cache = memoryCache();
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 503), cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
-  });
-});
-
-describe('resolveHost — the cache', () => {
-  it('answers a fresh entry with no network read at all', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 999_000,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const fetchImpl = respondWith(ACTIVE);
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it('revalidates past the TTL boundary and restamps', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000 - CONFIG.cacheTtlMs,
-        record: { eventId: 'old-event', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const fetchImpl = respondWith(ACTIVE);
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-    expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
-  });
-
-  it('revalidates an envelope stamped in the FUTURE rather than treating it as eternally fresh', async () => {
-    // A negative age satisfies a bare `< ttl` test, so a clock-skewed writer —
-    // or another deployment on this shared cache — could pin an obsolete
-    // mapping for the whole retention window without ever revalidating.
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000 + 60_000,
-        record: { eventId: 'obsolete-event', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const fetchImpl = respondWith(ACTIVE);
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(fetchImpl).toHaveBeenCalled();
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-    expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
-  });
-
-  it('reads a version-drifted envelope as a miss rather than coercing it', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION + 1,
-        fetchedAt: 1_000_000,
-        record: { eventId: 'from-the-future', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
-    expect(result).toMatchObject({ eventId: 'bodega-bay-2026' });
-  });
-
-  it('serves a stale-but-active entry when revalidation fails, WITHOUT restamping it', async () => {
-    const staleAt = 1_000_000 - CONFIG.cacheTtlMs - 1;
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: staleAt,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const fetchImpl = vi.fn(async () => {
-      throw new Error('firestore unreachable');
-    }) as unknown as ResolveDeps['fetch'];
-
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true, edition: null });
-    // A bound that renews itself is not a bound.
-    expect(cache.store.get(HOST)?.fetchedAt).toBe(staleAt);
-  });
-
-  it('never stale-serves an envelope stamped in the future when revalidation fails', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000 + 60_000,
-        record: { eventId: 'future-event', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const fetchImpl = vi.fn(async () => {
-      throw new Error('firestore unreachable');
-    }) as unknown as ResolveDeps['fetch'];
-
-    await expect(resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache))).resolves.toEqual({
-      kind: 'not-found',
-      reason: 'lookup-unavailable',
-    });
-  });
-
-  it('drops the entry outright when the mapping is gone, rather than letting it expire', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 0,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 404), cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'unknown-host' });
-    expect(cache.store.has(HOST)).toBe(false);
-  });
-
-  it.each([
-    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay' }],
-    ['malformed', { status: 'active', slug: 'bodega-bay' }],
-    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere' }],
-  ])('caches an EXISTING but unservable (%s) record no more than an absent one', async (_label, fields) => {
-    // The P1 this closes: a record that exists but does not serve was being
-    // written before the decision table ran, so a briefly-partial document
-    // pinned its own failure for a full TTL after being corrected.
-    const cache = memoryCache();
-    const result = await resolveHost(
-      HOST,
-      'bodega-bay',
-      CONFIG,
-      deps(respondWith(firestoreDoc(fields as Record<string, string>)), cache),
+  it('serves the guarded r2-root rehearsal class, which carries a first label but no slug', async () => {
+    // The synthetic root-test host is the one place a root projection is
+    // reached at a LABELLED address. A Slug cross-check against a projection
+    // that structurally has no slug would refuse the whole rehearsal class.
+    const { deps } = harness(
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null }),
     );
-    expect(result.kind).toBe('not-found');
-    expect(cache.store.has(HOST)).toBe(false);
+    await expect(
+      resolveHost(
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+        'r2-root-abcdefghijklmnopqrst',
+        CONFIG,
+        deps,
+      ),
+    ).resolves.toMatchObject({ kind: 'serve', record: { eventId: null, root: 'doorway' } });
   });
 
-  it('drops a previously servable entry when the Event goes inactive', async () => {
-    // Otherwise the stale-serve path could resurrect an Event that has been
-    // disabled, the moment the next revalidation failed.
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 0,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
-      },
-    });
-    const disabled = firestoreDoc({ eventId: 'bodega-bay-2026', status: 'disabled', slug: 'bodega-bay' });
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(disabled), cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'inactive' });
-    expect(cache.store.has(HOST)).toBe(false);
-  });
-
-  it.each([
-    ['a null record at the current version', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: null }],
-    ['a missing record', { version: CACHE_VERSION, fetchedAt: 1_000_000 }],
-    ['a record missing status', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e' } }],
-    ['a record missing eventId', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { status: 'active' } }],
-    ['a non-string slug', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 7 } }],
-    // `edition` is validated like every other dereferenced field: an envelope
-    // missing it would hand `undefined` to the manifest builder, which resolves
-    // that to the DEFAULT Edition — a silently wrong installed name (#546).
-    ['a missing edition', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 'bodega-bay' } }],
-    ['a non-string edition', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 'bodega-bay', edition: 7 } }],
-    ['a non-numeric fetchedAt', { version: CACHE_VERSION, fetchedAt: 'soon', record: { eventId: 'e', status: 'active', slug: 'bodega-bay', edition: null } }],
-    ['a bare string', 'not an envelope'],
-  ])('reads %s as a MISS rather than dereferencing it', async (_label, junk) => {
-    // A version check alone let a current-version envelope with a partial
-    // record reach `decide`, which threw on `record.status` — a Worker runtime
-    // error in place of the documented fail-closed page.
-    const cache: HostnameCache = {
-      read: async () => junk as never,
-      write: async () => {},
-      drop: async () => {},
-    };
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
-    // Fell through to the network read rather than throwing.
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-  });
-
-  it('does not resurrect a malformed envelope on the stale-serve path either', async () => {
-    const cache: HostnameCache = {
-      read: async () => ({ version: CACHE_VERSION, fetchedAt: 0, record: { eventId: 'e' } }) as never,
-      write: async () => {},
-      drop: async () => {},
-    };
-    const fetchImpl = vi.fn(async () => {
-      throw new Error('firestore unreachable');
-    }) as unknown as ResolveDeps['fetch'];
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
-  });
-
-  it('treats a failing cache as a miss rather than as a Worker error', async () => {
-    // The cache is an optimisation; a rejecting Cache API must cost an extra
-    // Firestore read, never the rendered fail-closed state and its headers.
-    const exploding: HostnameCache = {
-      read: async () => {
-        throw new Error('cache unavailable');
-      },
-      write: async () => {
-        throw new Error('cache unavailable');
-      },
-      drop: async () => {
-        throw new Error('cache unavailable');
-      },
-    };
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), exploding));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
-  });
-
-  it('caches no negatives, so a newly provisioned address serves on the next request', async () => {
-    const cache = memoryCache();
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('{}', { status: 404 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(ACTIVE), { status: 200 }));
-
-    const first = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as unknown as ResolveDeps['fetch'], cache));
-    const second = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as unknown as ResolveDeps['fetch'], cache));
-
-    expect(first).toEqual({ kind: 'not-found', reason: 'unknown-host' });
-    expect(second).toMatchObject({ kind: 'serve', eventId: 'bodega-bay-2026' });
+  it('does not pin the rehearsal class to an Edition, unlike a real brand root', async () => {
+    // The asymmetry is deliberate and worth pinning: a configured root origin
+    // brands itself, so `fiveacross.app` may not carry `vacay`. The synthetic
+    // class exists to exercise the SHAPE rather than a brand, so it carries
+    // whichever Edition the rehearsal manifest chose.
+    const { deps } = harness(
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+    );
+    await expect(
+      resolveHost(
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+        'r2-root-abcdefghijklmnopqrst',
+        CONFIG,
+        deps,
+      ),
+    ).resolves.toMatchObject({ kind: 'serve', record: { edition: 'vacay' } });
   });
 });
 
-describe('the Edition it carries (#546)', () => {
-  const WITH_EDITION = firestoreDoc({
+describe('the fail-closed decision table', () => {
+  it('reports the two refusals the spec pages on, and only those, through the diagnostic seam', async () => {
+    const events: unknown[] = [];
+    const withDiagnostics = (lookup: RegistryLookup | (() => Promise<RegistryLookup>)) => {
+      const { deps } = harness(lookup);
+      return { ...deps, diagnostics: (event: unknown) => events.push(event) };
+    };
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'malformed' }));
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'unavailable' }));
+    await resolveHost(HOST, SLUG, CONFIG, { ...withDiagnostics({ kind: 'unknown-host' }), registry: null });
+    expect(events).toEqual([
+      { event: 'event-router.diagnostic', outcome: 'replica-malformed', host: HOST },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: HOST },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: HOST },
+    ]);
+
+    // Ordinary refusals and serves are silent: an unknown host is expected traffic,
+    // and a slug mismatch is about the address, not the router.
+    events.length = 0;
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'unknown-host' }));
+    const route: ReplicaDesired = {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: SLUG,
+      edition: 'fiveacross',
+      pathNamespace: null,
+    };
+    await resolveHost(HOST, 'someone-else', CONFIG, withDiagnostics(committed(route)));
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics(committed(route)));
+    expect(events).toEqual([]);
+
+    // A listener that throws never turns a closed refusal into an escaping error.
+    const { deps } = harness({ kind: 'malformed' });
+    await expect(
+      resolveHost(HOST, SLUG, CONFIG, {
+        ...deps,
+        diagnostics: () => {
+          throw new Error('sink down');
+        },
+      }),
+    ).resolves.toMatchObject({ kind: 'not-found', reason: 'replica-malformed' });
+  });
+
+  it('answers an uninitialized object as an unknown address', async () => {
+    await expect(reasonFor({ kind: 'unknown-host' })).resolves.toBe('unknown-host');
+  });
+
+  it('refuses unknown-host metadata that is named but undefined', async () => {
+    // Codex P2 on #1120: the service binding carries `undefined` values intact,
+    // so a version-skewed registry can answer `{ revision: undefined,
+    // schemaVersion: undefined }`. Those keys are NAMED, which an uninitialized
+    // object never does; reading absence off them would downgrade a malformed
+    // tombstone to an ordinary unknown host and suppress the diagnostic.
+    await expect(
+      reasonFor({ kind: 'unknown-host', revision: undefined, schemaVersion: undefined }),
+    ).resolves.toBe('replica-malformed');
+    await expect(reasonFor({ kind: 'unknown-host', revision: undefined })).resolves.toBe(
+      'replica-malformed',
+    );
+    await expect(reasonFor({ kind: 'unknown-host', schemaVersion: undefined })).resolves.toBe(
+      'replica-malformed',
+    );
+  });
+
+  it('refuses an array-shaped envelope even when it carries the committed property names', async () => {
+    const lookup = Object.assign([] as unknown as Record<string, unknown>, {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '7',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+    }) as unknown as RegistryLookup;
+    await expect(refusalFor(lookup)).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
+
+  it('refuses an array-shaped projection even when it carries the route property names', async () => {
+    // `typeof [] === 'object'`, and an array with `kind`, `eventId`, `status`,
+    // `slug`, `edition` and `pathNamespace` set as properties has exactly the
+    // route key set — so only an explicit array check keeps it out.
+    const desired = Object.assign([] as unknown as Record<string, unknown>, {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: SLUG,
+      edition: 'fiveacross',
+      pathNamespace: null,
+    }) as unknown as ReplicaDesired;
+    await expect(refusalFor(committed(desired))).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('answers a tombstone as unknown rather than advertising that the address existed', async () => {
+    await expect(reasonFor(committed({ kind: 'tombstone' }))).resolves.toBe('unknown-host');
+  });
+
+  it.each(['disabled', 'archived'] as const)('refuses a %s route as inactive', async (status) => {
+    await expect(
+      reasonFor(
+        committed({
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status,
+          slug: SLUG,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        }),
+      ),
+    ).resolves.toBe('inactive');
+  });
+
+  it('reports a malformed committed state distinctly from an unreachable one', async () => {
+    // The two demand opposite operator responses: a malformed replica alerts
+    // and will not heal on a retry, an unavailable object usually does.
+    await expect(reasonFor({ kind: 'malformed' })).resolves.toBe('replica-malformed');
+  });
+
+  it('refuses a route whose denormalised slug names a different first label', async () => {
+    await expect(
+      reasonFor(
+        committed({
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: 'somewhere-else',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        }),
+      ),
+    ).resolves.toBe('slug-mismatch');
+  });
+
+  it('refuses a route carrying no slug to cross-check against', async () => {
+    await expect(
+      reasonFor(
+        committed({
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: '' as string,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        }),
+      ),
+    ).resolves.toBe('slug-missing');
+  });
+
+  it('requires a slug on an APEX route too, where there is no first label to compare it with', async () => {
+    // The apex exemption removes the COMPARISON, not the requirement. A route
+    // that has lost its slug is half-written whatever host it was reached at,
+    // and `expectedSlug === null` must not turn that into a serve.
+    const { deps } = harness(
+      committed({
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: '' as string,
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    );
+    await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'slug-missing' satisfies NotFoundReason,
+      revision: null,
+    });
+  });
+
+  it.each(['admin', 'bad/slash', 'ab', '-edge', 'xn--80ak6aa92e'])(
+    'refuses an APEX route whose slug (%s) is present but breaks the Slug contract',
+    async (slug) => {
+      // On the apex there is no first label to compare against, so the
+      // contract itself is the only check left. Non-empty is not the same as
+      // valid, and `parseDesired` applies the full contract to this host
+      // class — the boundary revalidation has to as well or version skew
+      // serves an apex from a projection naming a reserved infrastructure
+      // label.
+      const { deps } = harness(
+        committed({
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug,
+          edition: 'fiveacross',
+          pathNamespace: 'fiveacross.app',
+        }),
+      );
+      await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
+        kind: 'not-found',
+        reason: 'replica-malformed' satisfies NotFoundReason,
+        revision: null,
+      });
+    },
+  );
+});
+
+describe('re-validating the projection at the service boundary', () => {
+  // The binding crosses two separately deployed Workers, and one field of what
+  // comes back is reflected into a response header, so what arrives is a
+  // contract rather than a value this module wrote.
+  it.each([
+    ['a non-canonical revision', { ...ACTIVE_ROUTE, revision: '007' } as RegistryLookup],
+    ['a zero revision', { ...ACTIVE_ROUTE, revision: '0' } as RegistryLookup],
+    ['a non-numeric revision', { ...ACTIVE_ROUTE, revision: '3; drop' } as RegistryLookup],
+    [
+      'an unknown Edition',
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: SLUG,
+        edition: 'bodega' as never,
+        pathNamespace: null,
+      }),
+    ],
+    [
+      'an unknown path namespace',
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: 'example.com' as never,
+      }),
+    ],
+    [
+      'an unrecognised status',
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'live' as never,
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+      }),
+    ],
+    [
+      'an empty eventId',
+      committed({
+        kind: 'route',
+        eventId: '',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+      }),
+    ],
+    [
+      'an unrecognised root marker',
+      committed({ kind: 'root', root: 'landing' as never, edition: 'fiveacross', pathNamespace: null }),
+    ],
+    ['an unrecognised desired kind', committed({ kind: 'redirect' } as never)],
+    [
+      'a null projection',
+      { kind: 'committed', schemaVersion: 1, revision: '7', desired: null } as unknown as RegistryLookup,
+    ],
+    ['a lookup arm this Worker does not know', { kind: 'quarantined' } as unknown as RegistryLookup],
+    ['a null envelope', null as unknown as RegistryLookup],
+    ['an undefined envelope', undefined as unknown as RegistryLookup],
+    ['a non-object envelope', 'unknown-host' as unknown as RegistryLookup],
+  ])('refuses %s as replica-malformed rather than coercing it', async (_label, lookup) => {
+    await expect(reasonFor(lookup)).resolves.toBe('replica-malformed');
+  });
+
+  // Closed-set membership is not the whole rule: `fiveacross.app` is a valid
+  // path namespace AND an invalid value for an Event subdomain, and a root
+  // shape is valid on an apex and a defect on a wildcard address. A boundary
+  // check that ignored the host would accept exactly the combinations that
+  // publish a false path capability.
+  it.each([
+    [
+      'a root shape returned for an ordinary Event subdomain',
+      HOST,
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null }),
+    ],
+    [
+      'a non-null path namespace on an Event subdomain',
+      HOST,
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    ],
+    [
+      'the WRONG Namespace on the apex that has one',
+      'fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
+    ],
+    [
+      'a null path namespace on the apex that requires one',
+      'vacaybingo.com',
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+    ],
+    [
+      // A configured root origin brands itself, so a root marker whose Edition
+      // disagrees with its host would render the wrong product's doorway on a
+      // real brand domain.
+      'a root marker whose Edition disagrees with its host class',
+      'fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'fiveacross.app' }),
+    ],
+    [
+      'the mirrored Edition mismatch on the other apex',
+      'vacaybingo.com',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
+    ],
+    [
+      'a non-null path namespace on the synthetic root-test class',
+      'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+    ],
+    [
+      // The class accepts no route on either side of the registry.
+      // `parseDesired` refuses one at ingestion; this is the same rule applied
+      // to a projection that reached the binding anyway, which is what a
+      // separately deployed consumer revalidates for.
+      'a ROUTE projection on the synthetic root-test class, whose slug matches its label',
+      'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: 'r2-root-abcdefghijklmnopqrst',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      }),
+    ],
+  ])('refuses %s', async (_label, host, lookup) => {
+    const { deps } = harness(lookup);
+    await expect(resolveHost(host, null, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
+    });
+  });
+
+  it('classifies an absent envelope rather than throwing on its discriminant', () => {
+    // A registry mid-rollout, or an entrypoint that returned nothing at all,
+    // hands back `null`. Reading `.kind` off that throws, and the rejection
+    // escapes `resolveHost` — which does not catch it, because `decide` runs
+    // outside the bounded call — into an unversioned Cloudflare error page
+    // instead of the rendered fail-closed response.
+    expect(() => decide(HOST, null as unknown as RegistryLookup, SLUG)).not.toThrow();
+    expect(decide(HOST, undefined as unknown as RegistryLookup, SLUG)).toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
+    });
+  });
+
+  it('refuses an unrecognised status BEFORE reading it as inactive', () => {
+    // An unknown status is a projection this Worker cannot judge, not an
+    // inferred disabled — and certainly not an inferred active.
+    const resolution = decide(
+      HOST,
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'paused' as never,
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+      }),
+      SLUG,
+    );
+    expect(resolution).toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
+    });
+  });
+});
+
+describe('the exact key set the ENVELOPE itself may carry', () => {
+  // One level up from the projection, and the same rule for the same reason. An
+  // envelope carrying a field its arm does not define is a registry
+  // contradicting itself — `{kind: 'unknown-host', …, desired}` says "nothing
+  // here" and hands over a projection in the same breath — and an arm that
+  // validated only the fields it happens to read would publish that revision as
+  // canonical recovery evidence off a record this Worker never agreed with.
+  it.each([
+    [
+      'a tombstone-shaped unknown-host that also carries a projection',
+      {
+        kind: 'unknown-host',
+        revision: '12',
+        schemaVersion: 1,
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: SLUG,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      },
+    ],
+    ['an unavailable arm carrying a revision', { kind: 'unavailable', revision: '12' }],
+    ['a malformed arm carrying a projection', { kind: 'malformed', desired: { kind: 'tombstone' } }],
+    [
+      'a committed arm carrying a field the envelope does not define',
+      { kind: 'committed', schemaVersion: 1, revision: '7', desired: { kind: 'tombstone' }, host: HOST },
+    ],
+    ['an uninitialized unknown-host carrying a stray field', { kind: 'unknown-host', cached: true }],
+  ])('refuses %s as replica-malformed', async (_label, lookup) => {
+    await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it.each([
+    ['constructor'],
+    ['toString'],
+    ['__proto__'],
+    ['hasOwnProperty'],
+  ])('refuses `kind: %s` rather than reading the key set off Object.prototype', async (kind) => {
+    // The envelope table is an ordinary object literal, so it inherits every
+    // member of `Object.prototype`. Indexed with one of their names, an
+    // `in`-style lookup returns an inherited member that is not an array of
+    // key names, and `allowed.includes` throws on it — and the throw does not
+    // stay inside the module: `decide` runs OUTSIDE `resolveHost`'s catch,
+    // which brackets the bounded service call only, so a registry answering
+    // with one of these strings would hand the request to Cloudflare as an
+    // unversioned error page instead of the fail-closed refusal this table
+    // promises for every arm it does not recognise (Codex P2 on #1120).
+    await expect(refusalFor({ kind } as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('refuses a non-string discriminant for the same reason', async () => {
+    // Not a discriminant this envelope defines, and indexing the table with it
+    // would coerce it to a string that might name an inherited member.
+    for (const kind of [0, null, undefined, { toString: () => 'committed' }]) {
+      await expect(refusalFor({ kind } as unknown as RegistryLookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    }
+  });
+
+  it('still accepts every arm written exactly, including the optional pair', async () => {
+    // The `unknown-host` arm's two fields are OPTIONAL, so the rule is the keys
+    // ALLOWED rather than the keys required — a bare `{kind}` and a full
+    // tombstone envelope are both exact.
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+    await expect(refusalFor({ kind: 'unavailable' })).resolves.toEqual({
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
+    const { deps } = harness(ACTIVE_ROUTE);
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
+  });
+});
+
+describe('the exact key set a `desired` arm may carry', () => {
+  // The registry refuses every one of these on the way IN (`parseDesired`
+  // compares the key set, not just the values), so a committed projection
+  // carrying an undefined field is a defect however it got there — and this
+  // boundary exists for defects the registry did not catch. It is not tidiness:
+  // these arms publish a revision, and § Audit and recovery makes the public
+  // `{reason, revision}` pair the evidence `clear-lock` compares against
+  // committed state, so accepting a shape the registry itself would have
+  // rejected would offer it to the recovery machine as canonical.
+  it.each([
+    // The example that motivates the rule: a tombstone whose extra field is a
+    // route field. Read arm-first it is a perfectly ordinary tombstone, and it
+    // would publish `unknown-host` with its revision.
+    ['a tombstone carrying an eventId', HOST, SLUG, { kind: 'tombstone', eventId: 'event-1' }],
+    ['a tombstone carrying a slug', HOST, SLUG, { kind: 'tombstone', slug: SLUG }],
+    [
+      'a route carrying a field this schema does not define',
+      HOST,
+      SLUG,
+      {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+        adultContent: true,
+      },
+    ],
+    [
+      'a route missing one of its own',
+      HOST,
+      SLUG,
+      { kind: 'route', eventId: 'bodega-bay-2026', status: 'active', slug: SLUG, edition: 'fiveacross' },
+    ],
+    [
+      'a root carrying a slug it has no first label for',
+      'fiveacross.app',
+      null,
+      {
+        kind: 'root',
+        root: 'doorway',
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+        slug: 'bodega-bay',
+      },
+    ],
+  ] as const)('refuses %s', async (_label, host, expectedSlug, desired) => {
+    const { deps } = harness({
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '7',
+      desired: desired as unknown as ReplicaDesired,
+    });
+    const resolution = await resolveHost(host, expectedSlug, CONFIG, deps);
+    // Fail closed, with no revision — this is the router answering ABOUT a
+    // record it cannot use, not FROM one it read for the address.
+    expect(resolution).toEqual({ kind: 'not-found', reason: 'replica-malformed', revision: null });
+  });
+
+  it.each([['constructor'], ['toString'], ['__proto__'], ['hasOwnProperty']])(
+    'refuses a desired `kind: %s` rather than reading its key set off Object.prototype',
+    async (kind) => {
+      // `DESIRED_KEYS` is the same shape of object literal as the envelope
+      // table one level up, and inherits `Object.prototype` the same way. The
+      // consequence here is quieter than the envelope's — `hasExactKeys`
+      // reads `.length` and numeric indices rather than calling a method, so
+      // an inherited member makes it decide a projection's key set from
+      // `Object.prototype` instead of throwing — and the answer it happens to
+      // reach today is already `replica-malformed`. These cases therefore PIN
+      // that answer rather than reproduce a crash: the own-property lookup is
+      // what makes it the answer by rule instead of by arithmetic accident
+      // (Codex P2 on #1120).
+      const { deps } = harness({
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '7',
+        desired: { kind } as unknown as ReplicaDesired,
+      });
+      await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+        kind: 'not-found',
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    },
+  );
+
+  it('still serves the exact shapes, so the rule is a key set and not a refusal of everything', async () => {
+    const { deps } = harness(ACTIVE_ROUTE);
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
+
+    const root = harness(
+      committed({
+        kind: 'root',
+        root: 'doorway',
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    );
+    await expect(resolveHost('fiveacross.app', null, CONFIG, root.deps)).resolves.toMatchObject({
+      kind: 'serve',
+    });
+
+    await expect(refusalFor(committed({ kind: 'tombstone' }, '12'))).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+});
+
+describe('the projection schema version, refused before the projection is read', () => {
+  // The registry is a SEPARATELY DEPLOYED Worker, so its schema can move ahead
+  // of this router's. `desired` is a closed union whose discriminants an
+  // additive v2 would keep, so a projection written under a schema this build
+  // has never seen arrives looking exactly like a v1 route — and would be
+  // served under v1 rules — unless the version itself is carried and checked.
+  // `specs/event-router-registry.md` § Failure semantics gives that state the
+  // same closed answer as malformed state: rendered not-found,
+  // `replica-malformed`, alert, and no second source of truth.
+  const ROUTE: ReplicaDesired = {
+    kind: 'route',
     eventId: 'bodega-bay-2026',
     status: 'active',
-    slug: 'bodega-bay',
-    edition: 'vacay',
-  });
+    slug: SLUG,
+    edition: 'fiveacross',
+    pathNamespace: null,
+  };
 
-  it('carries the resolved Edition on a serving resolution', async () => {
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(WITH_EDITION), memoryCache()));
-    expect(result).toEqual({
+  it('serves a version this build understands, exactly as before', async () => {
+    const { deps } = harness({ kind: 'committed', schemaVersion: 1, revision: '7', desired: ROUTE });
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
       kind: 'serve',
-      eventId: 'bodega-bay-2026',
-      stale: false,
-      edition: 'vacay',
-    });
-  });
-
-  it('reads it out of the SAME document as the routing fields, in one request', async () => {
-    // One read, one answer. Two point-gets of one document are two answers that
-    // can disagree, which is the failure the cache posture exists to prevent —
-    // so the mask widened rather than a second lookup being added.
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(WITH_EDITION), { status: 200 }));
-    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as ResolveDeps['fetch'], memoryCache()));
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it('round-trips it through the cache', async () => {
-    const cache = memoryCache();
-    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(WITH_EDITION), cache));
-    expect(cache.store.get(HOST)!.record.edition).toBe('vacay');
-
-    // Second call answers from the cache with no network read at all, and must
-    // still know the Edition — a cached hit that lost it would install the
-    // default Edition's name for the length of the TTL.
-    const fetchImpl = vi.fn();
-    const cached = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as ResolveDeps['fetch'], cache));
-    expect(cached).toMatchObject({ kind: 'serve', edition: 'vacay' });
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it('carries it on a stale serve too', async () => {
-    const cache = memoryCache({
-      [HOST]: {
-        version: CACHE_VERSION,
-        fetchedAt: 1_000_000 - 400_000,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: 'vacay' },
+      record: {
+        eventId: 'bodega-bay-2026',
+        revision: '7',
+        pathNamespace: null,
+        edition: 'fiveacross',
+        root: null,
       },
     });
-    const failing = vi.fn(async () => {
-      throw new Error('network down');
-    }) as unknown as ResolveDeps['fetch'];
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(failing, cache));
-    expect(result).toEqual({
-      kind: 'serve',
-      eventId: 'bodega-bay-2026',
-      stale: true,
-      edition: 'vacay',
+  });
+
+  it.each([
+    ['a version this build does not know', 2],
+    ['a version below the supported one', 0],
+    ['a non-integer version', 1.5],
+    ['a version encoded as a string', '1'],
+    ['a null version', null],
+    ['no version at all', undefined],
+  ])('refuses %s on an ACTIVE route rather than serving it', async (_label, schemaVersion) => {
+    const lookup = { kind: 'committed', revision: '7', desired: ROUTE } as Record<string, unknown>;
+    if (schemaVersion !== undefined) lookup.schemaVersion = schemaVersion;
+    await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
     });
   });
 
-  it('reads an absent or non-string edition as null rather than coercing it', () => {
-    // `null` is what the manifest builder resolves to the default Edition,
-    // matching the client (`src/data/hostnames.ts` coerces to `''`, and
-    // `setActiveEdition('')` resets to the default). Edge and client must not
-    // disagree even about the fallback.
-    expect(parseHostnameDocument(ACTIVE).edition).toBeNull();
-    expect(
-      parseHostnameDocument({ fields: { edition: { integerValue: '7' } } }).edition,
-    ).toBeNull();
+  it('refuses an unsupported version before it reads `desired` at all', async () => {
+    // The ordering is the fix, not a detail. A projection whose `desired` is
+    // outright nonsense and a projection that is a perfectly well-formed v2
+    // route must produce the SAME answer, because the router cannot judge
+    // either under rules it does not have. If the shape checks ran first, the
+    // well-formed v2 route would pass every one of them and be served.
+    for (const desired of [ROUTE, { kind: 'route', eventId: 42 } as unknown as ReplicaDesired]) {
+      await expect(
+        refusalFor({ kind: 'committed', schemaVersion: 2, revision: '7', desired }),
+      ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+    }
   });
 
-  it('never lets the Edition decide whether an address serves', async () => {
-    // The structural guarantee is the narrowed `RoutingFields` parameter the
-    // decision table takes; this is its observable half. An unrecognised
-    // Edition must not change the routing outcome by one bit.
-    const nonsense = firestoreDoc({
-      eventId: 'bodega-bay-2026',
-      status: 'active',
-      slug: 'bodega-bay',
-      edition: 'not-an-edition',
-    });
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(nonsense), memoryCache()));
-    expect(result).toMatchObject({ kind: 'serve', eventId: 'bodega-bay-2026' });
+  it('refuses an unsupported version on a root marker, which serves without a Slug check', async () => {
+    // A root marker has no Slug to cross-check, so the version gate is the only
+    // thing standing between an unreadable v2 record and a served doorway.
+    await expect(
+      refusalFor(
+        {
+          kind: 'committed',
+          schemaVersion: 2,
+          revision: '7',
+          desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
+        },
+        null,
+      ),
+    ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
 
-    // ...and an Edition on an INACTIVE record does not rescue it either.
-    const inactive = firestoreDoc({
-      eventId: 'bodega-bay-2026',
-      status: 'disabled',
-      slug: 'bodega-bay',
-      edition: 'vacay',
+  it('refuses an unsupported version on the tombstone arm rather than publishing its revision', async () => {
+    // A tombstone reads as `unknown-host` WITH the revision it was deleted at,
+    // and that revision is evidence: § Audit and recovery has `clear-lock`
+    // compare three public `{reason, revision}` observations against committed
+    // state. Quoting one out of a record written under a schema this build
+    // cannot read would attribute a revision the router never actually
+    // understood, so the version gates that arm too.
+    for (const lookup of [
+      { kind: 'unknown-host', schemaVersion: 2, revision: '12' },
+      { kind: 'unknown-host', revision: '12' },
+    ] as RegistryLookup[]) {
+      await expect(refusalFor(lookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    }
+  });
+
+  it('still answers a versionless UNINITIALIZED object as a plain unknown address', async () => {
+    // No committed record means no version to stamp and none to check. This is
+    // the ordinary unknown-address case and must not be dragged into
+    // `replica-malformed` by the gate above.
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
     });
-    expect(
-      await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(inactive), memoryCache())),
-    ).toEqual({ kind: 'not-found', reason: 'inactive' });
+  });
+
+  it.each([
+    ['a supported version with no revision', { kind: 'unknown-host', schemaVersion: 1 }],
+    ['an unsupported version with no revision', { kind: 'unknown-host', schemaVersion: 2 }],
+    ['a revision with no version', { kind: 'unknown-host', revision: '12' }],
+  ] as RegistryLookup[][])(
+    'refuses %s, because the two are stamped from one record and travel together',
+    async (_label, lookup) => {
+      // Only BOTH-absent is the ordinary unknown address. Either half alone is
+      // a half-written envelope — something committed existed to stamp one of
+      // them — and reading "no record here" off it would infer an absence from
+      // a defect. An unsupported-version tombstone that lost its revision has
+      // to raise the alert, not pass as an unknown host.
+      await expect(refusalFor(lookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    },
+  );
+});
+
+describe('a lookup that cannot be completed', () => {
+  it('fails closed when the registry binding is absent', async () => {
+    const deps: ResolveDeps = { registry: null };
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
+  });
+
+  it('fails closed when the object reports itself unavailable', async () => {
+    await expect(reasonFor({ kind: 'unavailable' })).resolves.toBe('lookup-unavailable');
+  });
+
+  it('fails closed when the service call rejects, rather than letting the rejection escape', async () => {
+    const { deps } = harness(async () => {
+      throw new Error('registry binding is not bound to a running service');
+    });
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
+  });
+
+  it('bounds a hung lookup at the configured timeout instead of waiting for it', async () => {
+    vi.useFakeTimers();
+    // Never settles. Unbounded, this request would sit behind a stalled
+    // dependency for as long as the platform allowed.
+    const { deps } = harness(() => new Promise<never>(() => {}));
+
+    const pending = resolveHost(HOST, SLUG, { lookupTimeoutMs: 2_000 }, deps);
+    await vi.advanceTimersByTimeAsync(1_999);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
+  });
+
+  it('clears the timer once a lookup answers, so a fast call leaves nothing pending', async () => {
+    vi.useFakeTimers();
+    const { deps } = harness(ACTIVE_ROUTE);
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('adds no negative, stale or second-source fallback behind the failure', async () => {
+    // The whole point of the removal: two answers to "is this address in
+    // service?" that can disagree is worse than one answer that fails closed.
+    const { deps, lookup } = harness({ kind: 'unavailable' });
+    await resolveHost(HOST, SLUG, CONFIG, deps);
+    await resolveHost(HOST, SLUG, CONFIG, deps);
+    // Nothing was remembered between the two, so the second request asked
+    // again rather than serving a cached refusal or a cached positive.
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(Object.keys(deps)).toEqual(['registry']);
   });
 });
 
-describe('the Firestore request', () => {
-  let seen: string;
-
-  beforeEach(() => {
-    seen = '';
-  });
-
-  it('point-gets the same hostnames/{host} document the client reads, unauthenticated and masked', async () => {
-    const fetchImpl = vi.fn(async (input: unknown) => {
-      seen = String(input);
-      return new Response(JSON.stringify(ACTIVE), { status: 200 });
-    }) as unknown as ResolveDeps['fetch'];
-
-    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, memoryCache()));
-
-    const url = new URL(seen);
-    expect(url.origin).toBe('https://firestore.googleapis.com');
-    expect(url.pathname).toBe(
-      `/v1/projects/fiveacross/databases/(default)/documents/hostnames/${encodeURIComponent(HOST)}`,
-    );
-    expect(url.searchParams.get('key')).toBe('test-web-api-key');
-    // Four fields since #546, and one request rather than two: `edition` joins
-    // the EXISTING mask so the Edition served at the edge and the Event routed
-    // to come out of the same read of the same document.
-    expect(url.searchParams.getAll('mask.fieldPaths')).toEqual([
-      'eventId',
-      'status',
-      'slug',
-      'edition',
-    ]);
-    // No Authorization header anywhere: the router reads exactly what a browser
-    // on the same address can read, and firestore.rules is what enforces it.
-    const init = (fetchImpl as unknown as { mock: { calls: [unknown, RequestInit][] } }).mock.calls[0][1];
-    expect(new Headers(init.headers).has('authorization')).toBe(false);
-  });
-
-  it('bounds the read, so a hung dependency cannot hang the request', async () => {
-    // The assertion is deliberately OUTSIDE the fake. Asserting inside it is
-    // worthless here: `resolveHost` wraps the `deps.fetch` await in the
-    // try/catch that produces `lookup-unavailable`, so a thrown assertion is
-    // swallowed and the test passes no matter what the signal is.
-    let seenSignal: unknown = 'never called';
-    const fetchImpl = vi.fn(async (_input: unknown, init: RequestInit) => {
-      seenSignal = init.signal;
-      return new Response(JSON.stringify(ACTIVE), { status: 200 });
-    }) as unknown as ResolveDeps['fetch'];
-
-    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, memoryCache()));
-
-    expect(result.kind).toBe('serve');
-    expect(seenSignal).toBeInstanceOf(AbortSignal);
-    expect((seenSignal as AbortSignal).aborted).toBe(false);
-  });
-});
-
-describe('parseHostnameDocument', () => {
-  it('reads a well-formed document', () => {
-    expect(parseHostnameDocument(ACTIVE)).toEqual({
-      eventId: 'bodega-bay-2026',
-      status: 'active',
-      slug: 'bodega-bay',
-      edition: null,
-    });
-  });
-
-  it.each([null, undefined, 42, 'a string', {}, { fields: null }, { fields: 'nope' }])(
-    'reads %s as an unservable record rather than throwing',
-    (body) => {
-      expect(parseHostnameDocument(body)).toEqual({ eventId: '', status: '', slug: null, edition: null });
+describe('the revision a refusal was decided from', () => {
+  // `specs/event-router-registry.md` § Failure semantics and § Audit and
+  // recovery make this pair, not the reason alone, the public contract: a
+  // `canonical-after-unblock` probe observes `{reason, revision}` together for
+  // `null`, `inactive` AND `unknown-host`, and `clear-lock` consumes three
+  // attestations whose revision equals committed state. A refusal that dropped
+  // the revision on the two states a recovery most often ends in would leave
+  // those hosts unable to clear a lock, and therefore unable to accept another
+  // publisher update, for as long as the state persisted.
+  it.each(['disabled', 'archived'] as const)(
+    'carries the committed revision on a %s route, because recovery has to observe it',
+    async (status) => {
+      await expect(
+        refusalFor(
+          committed(
+            {
+              kind: 'route',
+              eventId: 'bodega-bay-2026',
+              status,
+              slug: SLUG,
+              edition: 'fiveacross',
+              pathNamespace: null,
+            },
+            '12',
+          ),
+        ),
+      ).resolves.toEqual({ reason: 'inactive', revision: '12' });
     },
   );
 
-  it('ignores a non-string typed value rather than coercing it', () => {
-    const body = { fields: { eventId: { integerValue: '7' }, status: { stringValue: 'active' } } };
-    expect(parseHostnameDocument(body)).toEqual({
-      eventId: '',
-      status: 'active',
-      slug: null,
-      edition: null,
+  it('carries the committed revision on a tombstone, while still reading as unknown', async () => {
+    // The object reports a tombstone through its `unknown-host` arm, keeping
+    // the revision and dropping the projection. The address stays
+    // indistinguishable from an unknown one in its REASON; what it does not
+    // hide is a revision the threat model already calls public metadata.
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+
+  it('carries it on a committed tombstone too, so the boundary agrees with the object', async () => {
+    // Defense in depth for version skew: a registry that handed back the
+    // committed tombstone instead of collapsing it must produce the identical
+    // public answer, reason and revision alike.
+    await expect(refusalFor(committed({ kind: 'tombstone' }, '12'))).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+
+  it('carries NO revision for an uninitialized object, which has none', async () => {
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+  });
+
+  it('refuses a non-canonical revision on the unknown-host arm as malformed', async () => {
+    // The shape rule belongs to the projection rather than to the arm: a
+    // revision that reaches this module is canonical or the state is
+    // malformed, and a tombstone is not exempt from it.
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '007' })).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it.each([
+    [
+      'a slug-mismatched route, whose record is not this address’s to quote',
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: 'somewhere-else',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        '12',
+      ),
+      'slug-mismatch',
+    ],
+    [
+      'a slug-less route',
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: '' as string,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        '12',
+      ),
+      'slug-missing',
+    ],
+    ['a malformed committed state', { kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
+    ['an unavailable object', { kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
+  ] as const)('carries NO revision for %s', async (_label, lookup, reason) => {
+    // None of these is a state the recovery contract models, and in each the
+    // router is answering ABOUT a record it cannot use rather than FROM one it
+    // read for this address. Stamping a revision would claim the edge is
+    // serving from a projection it has just declared inadmissible.
+    await expect(refusalFor(lookup)).resolves.toEqual({ reason, revision: null });
+  });
+
+  it.each([
+    [
+      'a disabled route whose slug names a different address',
+      'somewhere-else',
+      'slug-mismatch' as const,
+    ],
+    ['a disabled route carrying no slug at all', '', 'slug-missing' as const],
+  ])('judges %s by its shape before its state, and quotes no revision', async (_label, slug, reason) => {
+    // The ordering is load-bearing now that `inactive` publishes a revision. A
+    // half-written route, or one belonging to another host, is not a record
+    // THIS address may quote: answering `inactive` with its revision would
+    // contradict the slug rules above and hand the recovery machine a
+    // cross-host projection as this host's canonical evidence.
+    await expect(
+      refusalFor(
+        committed(
+          {
+            kind: 'route',
+            eventId: 'bodega-bay-2026',
+            status: 'disabled',
+            slug,
+            edition: 'fiveacross',
+            pathNamespace: null,
+          },
+          '12',
+        ),
+      ),
+    ).resolves.toEqual({ reason, revision: null });
+  });
+
+  it('judges a disabled route with no eventId as malformed rather than inactive', async () => {
+    // Same rule as the unrecognised-`status` arm: the projection violates its
+    // own schema, so its state is not the router's to report and its revision
+    // is not the router's to publish.
+    await expect(
+      refusalFor(
+        committed(
+          {
+            kind: 'route',
+            eventId: '',
+            status: 'archived',
+            slug: SLUG,
+            edition: 'fiveacross',
+            pathNamespace: null,
+          },
+          '12',
+        ),
+      ),
+    ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
+
+  it('carries NO revision when the binding is absent', async () => {
+    const deps: ResolveDeps = { registry: null };
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
     });
   });
 });

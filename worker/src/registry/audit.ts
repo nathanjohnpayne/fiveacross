@@ -11,7 +11,10 @@ export type RegistryAuditPage = {
   highestAuthenticatedPublisherEpoch: string;
   highestQuarantinedPublisherEpoch: string;
   recoveryLock: RegistryState['recoveryLock'];
-  lookup: { kind: 'unknown-host' } | { kind: 'unavailable' } | { kind: 'committed'; revision: string };
+  lookup:
+    | { kind: 'unknown-host'; revision?: string }
+    | { kind: 'unavailable' }
+    | { kind: 'committed'; revision: string };
   records: RecoveryRecord[];
   nextAfter: string | null;
 };
@@ -42,6 +45,18 @@ export function createAuditPage(
     }
   }
   const lookup = registryLookup(state);
+  // The audit surface is projected field by field rather than passed through,
+  // so what an operator reads back stays exactly what
+  // `specs/event-router-registry.md` § Audit and recovery says it exposes. The
+  // lookup envelope's `schemaVersion` is the router's version-skew gate and is
+  // not part of that enumerated surface, and `committed` already carries the
+  // revision/digest an audit compares against source.
+  const auditLookup: RegistryAuditPage['lookup'] =
+    lookup.kind === 'committed'
+      ? { kind: 'committed', revision: lookup.revision }
+      : lookup.revision === undefined
+        ? { kind: 'unknown-host' }
+        : { kind: 'unknown-host', revision: lookup.revision };
   return {
     committed:
       state.committed === null
@@ -54,7 +69,7 @@ export function createAuditPage(
     highestAuthenticatedPublisherEpoch: state.highestAuthenticatedPublisherEpoch,
     highestQuarantinedPublisherEpoch: state.highestQuarantinedPublisherEpoch,
     recoveryLock: state.recoveryLock,
-    lookup: lookup.kind === 'committed' ? { kind: 'committed', revision: lookup.revision } : lookup,
+    lookup: auditLookup,
     records,
     nextAfter: hasMore ? (records.at(-1)?.sequence ?? null) : null,
   };

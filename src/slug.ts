@@ -116,6 +116,40 @@ export function isReservedLabel(label: string): boolean {
 }
 
 /**
+ * The two CLOSED rehearsal label classes from `specs/event-router-registry.md`
+ * § Lookup, cache, and abuse posture: an ordinary synthetic host and the
+ * disjoint root-shaped test host.
+ *
+ * They live here, beside the `r2-` reservation, because the two rules are one
+ * decision seen from two sides and separating them is how they drift. An
+ * organizer may never claim ANY `r2-` label — `validateSlug` refuses the whole
+ * prefix above, deliberately wider than these classes. The edge router must
+ * nonetheless ROUTE these exact two shapes, or the guarded rehearsal that
+ * produces the only real-Namespace evidence for the cutover has nothing to
+ * measure. Anything else beginning `r2-` is refused by both.
+ *
+ * `[a-z2-7]` is RFC 4648 base32's lowercase alphabet, and the lengths are the
+ * spec's: 26 characters for a synthetic Event host, 20 for a root-test host.
+ * Both are matched anchored and exactly, so widening the class is an edit here
+ * rather than an emergent property of a prefix test.
+ */
+const REHEARSAL_EVENT_LABEL = /^r2-[a-z2-7]{26}$/;
+const REHEARSAL_ROOT_LABEL = /^r2-root-[a-z2-7]{20}$/;
+
+export function isRehearsalEventLabel(label: string): boolean {
+  return REHEARSAL_EVENT_LABEL.test(label);
+}
+
+export function isRehearsalRootLabel(label: string): boolean {
+  return REHEARSAL_ROOT_LABEL.test(label);
+}
+
+/** Either closed rehearsal class. Never a claimable Slug — see above. */
+export function isRehearsalLabel(label: string): boolean {
+  return isRehearsalEventLabel(label) || isRehearsalRootLabel(label);
+}
+
+/**
  * Whether `candidate` is a dealable Event Slug, exactly as written.
  *
  * Order is chosen for the message a wizard shows, not for brevity: a person who

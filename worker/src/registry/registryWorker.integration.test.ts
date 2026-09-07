@@ -144,7 +144,11 @@ describe('HostRegistryObject runtime transactions', () => {
       }),
     ).resolves.toEqual({ status: 200, result: 'applied' });
 
-    await expect(rpc(instance, { op: 'lookup' })).resolves.toEqual({ kind: 'unavailable' });
+    // Reported as `malformed`, not `unavailable` (#972): stored state that
+    // exists and does not parse for THIS object is a standing data fact that
+    // alerts and will not heal on a retry, and the router renders it as
+    // `replica-malformed` rather than folding it into the transient class.
+    await expect(rpc(instance, { op: 'lookup' })).resolves.toEqual({ kind: 'malformed' });
   });
 
   it('serializes concurrent arrivals, survives response loss/reset, and atomically locks with consumed probe evidence', async () => {

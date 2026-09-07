@@ -1,7 +1,13 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
-import { handleRequest, type RouterConfig, type RouterDeps } from './router';
-import { CACHE_VERSION, type CacheEnvelope, type HostnameCache } from './resolve';
+import {
+  handleRequest,
+  PATH_CAPABILITY_PATH,
+  type RouterConfig,
+  type RouterDeps,
+} from './router';
+import { WEB_MANIFEST_PATH } from './manifest';
+import type { RegistryLookup } from './registry/state';
 import { RESERVED_LABELS } from '../../src/slug';
 // `edition-brands`, not `editions`: this program has no DOM lib and no
 // `vite/client`, which is why #546 split the table out in the first place.
@@ -9,52 +15,60 @@ import { brandFor } from '../../src/edition-brands';
 
 const CONFIG: RouterConfig = {
   originHost: 'fiveacross.web.app',
-  projectId: 'fiveacross',
-  apiKey: 'test-web-api-key',
   lookupTimeoutMs: 2_000,
-  cacheTtlMs: 300_000,
   version: 'test-1',
 };
 
-const SERVING: CacheEnvelope = {
-  version: CACHE_VERSION,
-  fetchedAt: 1_000_000,
-  record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
+const SERVING: RegistryLookup = {
+  kind: 'committed',
+  schemaVersion: 1,
+  revision: '42',
+  desired: {
+    kind: 'route',
+    eventId: 'bodega-bay-2026',
+    status: 'active',
+    slug: 'bodega-bay',
+    edition: 'fiveacross',
+    pathNamespace: null,
+  },
 };
 
-/** Every test below seeds the resolution through the cache so the assertions
- *  are about ROUTING; `resolve.test.ts` owns the lookup's own decision table. */
-function harness(options: { seed?: Record<string, CacheEnvelope>; origin?: Response; originError?: Error } = {}) {
-  const store = new Map<string, CacheEnvelope>(Object.entries(options.seed ?? {}));
-  const cache: HostnameCache = {
-    read: async (host) => store.get(host) ?? null,
-    write: async (host, envelope) => void store.set(host, envelope),
-    drop: async (host) => void store.delete(host),
-  };
+const APEX_ROOT: RegistryLookup = {
+  kind: 'committed',
+  schemaVersion: 1,
+  revision: '5',
+  desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
+};
 
-  // The lookup calls `fetch(urlString, init)` and the proxy calls
-  // `fetch(request)`; normalise both so assertions can read either.
+/**
+ * Every test below seeds the resolution through the registry seam so the
+ * assertions are about ROUTING; `resolve.test.ts` owns the lookup's own
+ * decision table.
+ *
+ * There is deliberately no cache, no Firestore stub and no api key here any
+ * more. `fetch` is recorded rather than merely stubbed so each test can assert
+ * what the router did NOT reach for — the "no Firebase, KV or Cache API
+ * request" property is only checkable if every outbound call is observable.
+ */
+function harness(
+  options: { seed?: Record<string, RegistryLookup>; origin?: Response; originError?: Error } = {},
+) {
+  const seed = options.seed ?? {};
+  const lookup = vi.fn(async (host: string): Promise<RegistryLookup> => seed[host] ?? { kind: 'unknown-host' });
+
   const requests: Request[] = [];
   const fetchImpl = vi.fn(async (input: unknown, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(String(input), init);
     requests.push(request);
-    // Compare the parsed ORIGIN, not a URL prefix: a `startsWith` test would
-    // also match `https://firestore.googleapis.com.example.test/…`, and a
-    // harness that mis-routes a request is a harness that proves the wrong
-    // thing (CodeQL js/incomplete-url-substring-sanitization).
-    if (new URL(request.url).origin === 'https://firestore.googleapis.com') {
-      return new Response('{}', { status: 404 });
-    }
     if (options.originError) throw options.originError;
     return options.origin ?? new Response('<!doctype html><title>app</title>', { status: 200 });
   });
 
   const deps: RouterDeps = {
     fetch: fetchImpl as unknown as RouterDeps['fetch'],
-    cache,
-    now: () => 1_000_000,
+    registry: { lookup },
   };
-  return { deps, requests, store };
+  return { deps, requests, lookup };
 }
 
 const servingSeed = {
@@ -110,7 +124,7 @@ describe('routing a serving address', () => {
     expect(requests.at(-1)!.method).toBe('POST');
   });
 
-  it('returns the origin status and headers, plus its own version stamp', async () => {
+  it('returns the origin status and headers, plus its own version and revision stamps', async () => {
     const { deps } = harness({
       seed: servingSeed,
       origin: new Response('nope', { status: 503, headers: { 'x-origin-marker': 'yes' } }),
@@ -119,6 +133,18 @@ describe('routing a serving address', () => {
     expect(response.status).toBe(503);
     expect(response.headers.get('x-origin-marker')).toBe('yes');
     expect(response.headers.get('x-event-router')).toBe('test-1');
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('overwrites an origin-supplied revision header rather than relaying it', async () => {
+    // The revision is the edge's own validated decimal. An origin that emitted
+    // a header by that name must not be able to have it read as one.
+    const { deps } = harness({
+      seed: servingSeed,
+      origin: new Response('ok', { headers: { 'x-event-router-revision': '999999' } }),
+    });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
   });
 
   it.each([
@@ -136,10 +162,11 @@ describe('routing a serving address', () => {
     expect(await response.text()).not.toContain('TLS handshake leaked detail');
   });
 
-  it('serves the Namespace apex', async () => {
-    const { deps, requests } = harness({ seed: { 'fiveacross.app': SERVING } });
+  it('serves the Namespace apex from a root marker', async () => {
+    const { deps, requests } = harness({ seed: { 'fiveacross.app': APEX_ROOT } });
     const response = await handleRequest(get('https://fiveacross.app/'), CONFIG, deps);
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-event-router-revision')).toBe('5');
     expect(new URL(requests.at(-1)!.url).hostname).toBe('fiveacross.web.app');
   });
 });
@@ -155,10 +182,11 @@ describe('the no-redirect regression guard (#599 as amended)', () => {
       'https://ab.fiveacross.app/',
       'https://bodega-bay.example.com/',
       'https://bodega-bay.fiveacross.app/__/auth/handler',
-      'https://bodega-bay.fiveacross.app/manifest.webmanifest',
-      'https://unknown-event.fiveacross.app/manifest.webmanifest',
+      `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+      `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
+      `https://unknown-event.fiveacross.app${WEB_MANIFEST_PATH}`,
     ];
-    const { deps } = harness({ seed: servingSeed });
+    const { deps } = harness({ seed: { ...servingSeed, 'fiveacross.app': APEX_ROOT } });
 
     for (const url of hosts) {
       const response = await handleRequest(get(url), CONFIG, deps);
@@ -192,30 +220,136 @@ describe('the no-redirect regression guard (#599 as amended)', () => {
 });
 
 describe('failing closed', () => {
-  it.each([...RESERVED_LABELS])('refuses the reserved label %s WITHOUT consulting the lookup', async (label) => {
-    const { deps, requests } = harness({
-      // Even a routing document that names this host must not promote it: the
-      // guard is decided before any data is read.
-      seed: { [`${label}.fiveacross.app`]: SERVING },
-    });
-    const response = await handleRequest(get(`https://${label}.fiveacross.app/`), CONFIG, deps);
-    expect(response.status).toBe(404);
-    expect(response.headers.get('x-event-router-reason')).toBe('reserved-label');
-    expect(requests).toHaveLength(0);
-  });
+  it.each([...RESERVED_LABELS])(
+    'refuses the reserved label %s WITHOUT consulting the registry',
+    async (label) => {
+      const { deps, requests, lookup } = harness({
+        // Even a committed projection that names this host must not promote it:
+        // the guard is decided before any registry work is created.
+        seed: { [`${label}.fiveacross.app`]: SERVING },
+      });
+      const response = await handleRequest(get(`https://${label}.fiveacross.app/`), CONFIG, deps);
+      expect(response.status).toBe(404);
+      expect(response.headers.get('x-event-router-reason')).toBe('reserved-label');
+      expect(lookup).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(0);
+    },
+  );
 
   it.each([
-    ['https://unknown-event.fiveacross.app/', 'unknown-host'],
     ['https://bodega-bay.example.com/', 'out-of-namespace'],
     ['https://a.bodega-bay.fiveacross.app/', 'nested-label'],
     ['https://ab.fiveacross.app/', 'invalid-slug:too-short'],
     ['https://xn--80ak6aa92e.fiveacross.app/', 'invalid-slug:reserved-tag'],
     ['https://-bodega.fiveacross.app/', 'invalid-slug:edge-hyphen'],
-  ] as const)('refuses %s with reason %s', async (url, reason) => {
-    const { deps } = harness();
-    const response = await handleRequest(get(url), CONFIG, deps);
+  ] as const)(
+    'refuses %s with reason %s before the registry binding is touched',
+    async (url, reason) => {
+      const { deps, lookup } = harness();
+      const response = await handleRequest(get(url), CONFIG, deps);
+      expect(response.status).toBe(404);
+      expect(response.headers.get('x-event-router-reason')).toBe(reason);
+      expect(lookup).not.toHaveBeenCalled();
+    },
+  );
+
+  // The third column is the `x-event-router-revision` the refusal carries, and
+  // it is not decoration: `specs/event-router-registry.md` § Audit and
+  // recovery makes the public `{reason, revision}` pair the evidence a
+  // recovery lock is cleared with, so `inactive` and a tombstone's
+  // `unknown-host` must publish the committed revision they were refused from
+  // while every refusal with no record to attribute publishes none.
+  it.each([
+    [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host', null],
+    [{ kind: 'unknown-host', schemaVersion: 1, revision: '9' } as RegistryLookup, 'unknown-host', '9'],
+    [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable', null],
+    [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed', null],
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'disabled',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'inactive',
+      '3',
+    ],
+    [
+      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      'unknown-host',
+      '9',
+    ],
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'somewhere-else',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'slug-mismatch',
+      null,
+    ],
+    // A projection committed under a schema version this router build cannot
+    // read is refused with the documented header and reason, and — the part
+    // that matters — the origin is never reached for it. An additive v2 whose
+    // `desired` kept today's discriminants would otherwise be proxied as a
+    // perfectly ordinary active route (`specs/event-router-registry.md`
+    // § Failure semantics, "malformed/unsupported committed state").
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 2,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'replica-malformed',
+      null,
+    ],
+    [
+      { kind: 'unknown-host', schemaVersion: 2, revision: '9' } as RegistryLookup,
+      'replica-malformed',
+      null,
+    ],
+  ] as const)('renders reason %#: %s', async (answer, reason, revision) => {
+    const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': answer } });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe(reason);
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+    expect(response.headers.get('x-event-router-revision')).toBe(revision);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('stamps no revision on a guard that refuses before the lookup', async () => {
+    // A reserved label never reaches a record, so there is nothing for it to
+    // quote a revision from — and the binding is never touched to find one.
+    const { deps, lookup } = harness();
+    const response = await handleRequest(get('https://admin.fiveacross.app/'), CONFIG, deps);
+    expect(response.headers.get('x-event-router-reason')).toBe('reserved-label');
+    expect(response.headers.get('x-event-router-revision')).toBeNull();
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it('names the broken Slug rule while keeping the class greppable as a prefix', async () => {
@@ -247,24 +381,147 @@ describe('failing closed', () => {
   it('does not reach the origin on a fail-closed path', async () => {
     const { deps, requests } = harness();
     await handleRequest(get('https://unknown-event.fiveacross.app/assets/app.js'), CONFIG, deps);
-    expect(requests.every((r) => !r.url.includes('fiveacross.web.app'))).toBe(true);
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe('the path-capability projection', () => {
+  const capabilityUrl = (host: string) => `https://${host}${PATH_CAPABILITY_PATH}`;
+
+  it('answers an exact GET from the same lookup, with no Event ID and no catalogue', async () => {
+    const { deps, requests, lookup } = harness({ seed: { 'fiveacross.app': APEX_ROOT } });
+    const response = await handleRequest(get(capabilityUrl('fiveacross.app')), CONFIG, deps);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+    expect(response.headers.get('x-event-router-revision')).toBe('5');
+
+    const body: unknown = await response.json();
+    expect(body).toEqual({ schemaVersion: 1, pathNamespace: 'fiveacross.app', revision: '5' });
+    // Exactly three fields: anything more is an enumeration surface on a
+    // public, unauthenticated endpoint.
+    expect(Object.keys(body as object).sort()).toEqual(['pathNamespace', 'revision', 'schemaVersion']);
+    // From the SAME point lookup that decided the request may proceed — one
+    // call, and no second source behind it.
+    expect(lookup).toHaveBeenCalledExactlyOnceWith('fiveacross.app');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('reports a null path namespace on an Event subdomain rather than omitting the field', async () => {
+    const { deps } = harness({ seed: servingSeed });
+    const response = await handleRequest(get(capabilityUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    await expect(response.json()).resolves.toEqual({
+      schemaVersion: 1,
+      pathNamespace: null,
+      revision: '42',
+    });
+  });
+
+  it.each([
+    [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host'],
+    [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
+    [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
+    [
+      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      'unknown-host',
+    ],
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'archived',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'inactive',
+    ],
+    // The path capability is projected from the SAME lookup, so an unreadable
+    // schema version withholds it for the same reason it withholds the shell.
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 2,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'replica-malformed',
+    ],
+  ])('returns NO capability when the lookup fails closed (%#)', async (answer, reason) => {
+    const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': answer } });
+    const response = await handleRequest(get(capabilityUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe(reason);
+    expect(response.headers.get('content-type')).toContain('text/html');
+  });
+
+  it('applies the namespace guard to the capability path like any other', async () => {
+    const { deps, lookup } = harness();
+    const response = await handleRequest(get(capabilityUrl('admin.fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('reserved-label');
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it.each(['HEAD', 'POST'])('proxies a %s on that path instead of answering it', async (method) => {
+    // Exact path AND exact method. Anything else is an ordinary request to the
+    // host and gets the answer the origin would have given.
+    const { deps, requests } = harness({ seed: servingSeed });
+    const response = await handleRequest(
+      get(capabilityUrl('bodega-bay.fiveacross.app'), { method }),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0].url).pathname).toBe(PATH_CAPABILITY_PATH);
+  });
+
+  it('does not answer a sibling well-known path', async () => {
+    const { deps, requests } = harness({ seed: servingSeed });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/.well-known/fiveacross-path-capability-extra'),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(1);
   });
 });
 
 describe('the per-hostname PWA manifest (#546)', () => {
-  const VACAY: CacheEnvelope = {
-    version: CACHE_VERSION,
-    fetchedAt: 1_000_000,
-    record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: 'vacay' },
+  const VACAY: RegistryLookup = {
+    kind: 'committed',
+    schemaVersion: 1,
+    revision: '42',
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'vacay',
+      pathNamespace: null,
+    },
   };
+  const manifestUrl = (host: string) => `https://${host}${WEB_MANIFEST_PATH}`;
 
   it('answers from the resolved Edition rather than proxying to the origin', async () => {
-    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
-    const response = await handleRequest(
-      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest'),
-      CONFIG,
-      deps,
-    );
+    const { deps, requests, lookup } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -273,39 +530,66 @@ describe('the per-hostname PWA manifest (#546)', () => {
     });
     // The origin serves ONE bundle to every address, so proxying this would
     // hand a Vacay guest the bundle Edition's manifest — which is the whole
-    // defect. Nothing left for the origin at all here.
+    // defect. Nothing left for the origin at all here, and the Edition came
+    // out of the SAME point lookup that decided the request may proceed.
     expect(requests).toHaveLength(0);
+    expect(lookup).toHaveBeenCalledExactlyOnceWith('bodega-bay.vacaybingo.com');
     expect(response.headers.get('x-event-router')).toBe('test-1');
   });
 
-  it('answers the same hostname document on either Namespace', async () => {
+  it('carries the revision stamp like every other served response', async () => {
+    // The header is a property of a resolved edge record, not of the proxy
+    // path: the recovery machine reads it off whatever the edge answered.
+    const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('answers the same committed projection on either Namespace', async () => {
     const { deps } = harness({
       seed: { 'bodega-bay.fiveacross.app': VACAY, 'bodega-bay.vacaybingo.com': VACAY },
     });
-    const canonical = await handleRequest(
-      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
-      CONFIG,
-      deps,
-    );
-    const alternate = await handleRequest(
-      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest'),
-      CONFIG,
-      deps,
-    );
+    const canonical = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    const alternate = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
     // #599 as amended: both hosts SERVE, each with its Event's Edition, and
     // neither is bounced at the other. Per-origin installed apps are the
     // accepted consequence — with the same name on both.
     expect(await canonical.text()).toBe(await alternate.text());
   });
 
-  it('falls back to the default Edition when the record names none', async () => {
-    const { deps } = harness({ seed: servingSeed });
-    const response = await handleRequest(
-      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
-      CONFIG,
-      deps,
-    );
-    expect(await response.json()).toMatchObject({ name: brandFor(null).appName });
+  it('serves the apex root marker its own Edition', async () => {
+    const { deps } = harness({ seed: { 'fiveacross.app': APEX_ROOT } });
+    const response = await handleRequest(get(manifestUrl('fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ name: brandFor('fiveacross').appName });
+    expect(response.headers.get('x-event-router-revision')).toBe('5');
+  });
+
+  it('fails closed on a projection naming an Edition this build does not know, rather than defaulting', async () => {
+    // There is no "default Edition" arm at the edge. The shared builder keeps
+    // its fallback for the build-side consumer, but a committed projection
+    // whose `edition` the boundary re-validation cannot place is refused as
+    // malformed BEFORE this route sees it — so an installed app is never named
+    // for a product the registry did not actually commit.
+    const unknownEdition: RegistryLookup = {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '42',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: 'bodega-bay',
+        edition: 'bodega' as never,
+        pathNamespace: null,
+      },
+    };
+    const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': unknownEdition } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('replica-malformed');
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(requests).toHaveLength(0);
   });
 
   // The route sits AFTER the namespace guard and AFTER resolution, and this is
@@ -313,56 +597,82 @@ describe('the per-hostname PWA manifest (#546)', () => {
   // opposite: it strictly depends on the resolution it derives from, so an
   // address that does not serve an app does not serve an app identity either.
   it.each([
-    ['https://admin.fiveacross.app/manifest.webmanifest', 'reserved-label'],
-    ['https://unknown-event.fiveacross.app/manifest.webmanifest', 'unknown-host'],
-    ['https://bodega-bay.example.com/manifest.webmanifest', 'out-of-namespace'],
-    ['https://ab.fiveacross.app/manifest.webmanifest', 'invalid-slug:too-short'],
-  ] as const)('fails closed at %s with reason %s', async (url, reason) => {
-    const { deps } = harness({ seed: { 'admin.fiveacross.app': VACAY } });
-    const response = await handleRequest(get(url), CONFIG, deps);
+    ['admin.fiveacross.app', 'reserved-label'],
+    ['unknown-event.fiveacross.app', 'unknown-host'],
+    ['bodega-bay.example.com', 'out-of-namespace'],
+    ['ab.fiveacross.app', 'invalid-slug:too-short'],
+  ] as const)('fails closed at %s with reason %s', async (host, reason) => {
+    const { deps, requests } = harness({ seed: { 'admin.fiveacross.app': VACAY } });
+    const response = await handleRequest(get(manifestUrl(host)), CONFIG, deps);
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe(reason);
     expect(response.headers.get('content-type')).toContain('text/html');
+    expect(requests).toHaveLength(0);
   });
 
   it('fails closed for an inactive Event rather than serving its identity', async () => {
-    const { deps } = harness({
-      seed: {
-        'bodega-bay.fiveacross.app': {
-          version: CACHE_VERSION,
-          fetchedAt: 1_000_000,
-          record: { eventId: 'e', status: 'disabled', slug: 'bodega-bay', edition: 'vacay' },
-        },
+    const disabled: RegistryLookup = {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '42',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'disabled',
+        slug: 'bodega-bay',
+        edition: 'vacay',
+        pathNamespace: null,
       },
-    });
-    const response = await handleRequest(
-      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
-      CONFIG,
-      deps,
-    );
+    };
+    const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': disabled } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('inactive');
   });
 
   it('fails closed on an unconfigured router, like every other path', async () => {
-    const { deps } = harness({ seed: servingSeed });
-    const response = await handleRequest(
-      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
-      { ...CONFIG, apiKey: '' },
-      deps,
-    );
+    const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': VACAY } });
+    const response = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, {
+      ...deps,
+      registry: null,
+    });
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('reports the absent binding through the diagnostic seam, ahead of the auth exemption', async () => {
+    // Codex P2 on #1120: the unconfigured early return bypasses `resolveHost`,
+    // which was the only path that reported, so production answered
+    // `lookup-unavailable` with no `event-router.diagnostic` line — invisible
+    // to the alerting the spec's Failure semantics require for exactly this case.
+    const events: unknown[] = [];
+    const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': VACAY } });
+    const unconfigured = { ...deps, registry: null, diagnostics: (event: unknown) => events.push(event) };
+    await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, unconfigured);
+    await handleRequest(get('https://bodega-bay.fiveacross.app/__/auth/handler'), CONFIG, unconfigured);
+    expect(events).toEqual([
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: 'bodega-bay.fiveacross.app' },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: 'bodega-bay.fiveacross.app' },
+    ]);
+    // Foreign and malformed hosts are refused before the binding is consulted,
+    // so they never report: the guard ordering keeps invalid traffic silent.
+    events.length = 0;
+    await handleRequest(get('https://bodega-bay.example.com/'), CONFIG, unconfigured);
+    await handleRequest(get('https://x.fiveacross.app/'), CONFIG, unconfigured);
+    expect(events).toEqual([]);
   });
 
   it('answers HEAD with no body', async () => {
     const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
     const response = await handleRequest(
-      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest', { method: 'HEAD' }),
+      get(manifestUrl('bodega-bay.vacaybingo.com'), { method: 'HEAD' }),
       CONFIG,
       deps,
     );
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('');
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
   });
 
   it('leaves a non-GET/HEAD request on that path to the proxy', async () => {
@@ -370,7 +680,7 @@ describe('the per-hostname PWA manifest (#546)', () => {
     // relay; that would be a behaviour change hiding inside a branding fix.
     const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
     const response = await handleRequest(
-      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest', { method: 'POST' }),
+      get(manifestUrl('bodega-bay.vacaybingo.com'), { method: 'POST' }),
       CONFIG,
       deps,
     );
@@ -380,27 +690,31 @@ describe('the per-hostname PWA manifest (#546)', () => {
 
   it('leaves every other path to the proxy', async () => {
     const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
-    await handleRequest(get('https://bodega-bay.vacaybingo.com/manifest.webmanifest.bak'), CONFIG, deps);
+    await handleRequest(get(`${manifestUrl('bodega-bay.vacaybingo.com')}.bak`), CONFIG, deps);
     expect(requests.at(-1)!.url).toContain('fiveacross.web.app');
   });
 });
 
 describe('/__/auth/* passthrough', () => {
   it.each(['/__/auth/handler', '/__/auth/iframe', '/__/auth'])(
-    'proxies %s intact without a lookup, so a Firestore blip cannot break sign-in mid-transaction',
+    'proxies %s intact without a lookup, so a registry blip cannot break sign-in mid-transaction',
     async (path) => {
-      const { deps, requests } = harness();
+      const { deps, requests, lookup } = harness();
       const response = await handleRequest(
         get(`https://bodega-bay.fiveacross.app${path}?state=abc`),
         CONFIG,
         deps,
       );
       expect(response.status).toBe(200);
+      expect(lookup).not.toHaveBeenCalled();
       expect(requests).toHaveLength(1);
       const proxied = new URL(requests[0].url);
       expect(proxied.hostname).toBe('fiveacross.web.app');
       expect(proxied.pathname).toBe(path);
       expect(proxied.search).toBe('?state=abc');
+      // No record was resolved, so there is no revision to stamp.
+      expect(response.headers.get('x-event-router')).toBe('test-1');
+      expect(response.headers.get('x-event-router-revision')).toBeNull();
     },
   );
 
@@ -426,14 +740,14 @@ describe('/__/auth/* passthrough', () => {
   });
 
   it('is NOT exempt from the unconfigured-router refusal', async () => {
-    // A missing api key is a total misconfiguration, not the transient
+    // A missing binding is a total misconfiguration, not the transient
     // dependency failure the exemption exists to survive — so "fails closed on
     // every address" has to include the one path that skips the lookup.
     const { deps, requests } = harness({ seed: servingSeed });
     const response = await handleRequest(
       get('https://bodega-bay.fiveacross.app/__/auth/handler'),
-      { ...CONFIG, apiKey: '' },
-      deps,
+      CONFIG,
+      { ...deps, registry: null },
     );
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
@@ -447,11 +761,62 @@ describe('an unconfigured router', () => {
     'https://bodega-bay.fiveacross.app/assets/app.js',
     'https://fiveacross.app/',
     'https://bodega-bay.fiveacross.app/__/auth/handler',
-  ])('fails closed on %s rather than serving', async (url) => {
+    `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+    `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
+  ])('fails closed on %s rather than serving when the origin host is unbound', async (url) => {
+    const { deps, requests, lookup } = harness({ seed: servingSeed });
+    const response = await handleRequest(get(url), { ...CONFIG, originHost: '' }, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(0);
+  });
+
+  it.each([
+    'https://bodega-bay.fiveacross.app/',
+    'https://fiveacross.app/',
+    'https://bodega-bay.fiveacross.app/__/auth/handler',
+    `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
+  ])('fails closed on %s when the registry binding is absent', async (url) => {
     const { deps, requests } = harness({ seed: servingSeed });
-    const response = await handleRequest(get(url), { ...CONFIG, projectId: '' }, deps);
+    const response = await handleRequest(get(url), CONFIG, { ...deps, registry: null });
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe('what the router no longer reaches for', () => {
+  it('makes no request other than the origin proxy, on any outcome', async () => {
+    // The Firebase read is gone, and so is the Cache API envelope in front of
+    // it. `RouterDeps` has exactly two members, so there is nowhere else for a
+    // lookup to come from — which is what "no Firestore, KV, negative, stale or
+    // other fallback" means in code rather than in prose.
+    const { deps, requests } = harness({ seed: { ...servingSeed, 'fiveacross.app': APEX_ROOT } });
+    for (const url of [
+      'https://bodega-bay.fiveacross.app/',
+      'https://fiveacross.app/',
+      'https://unknown-event.fiveacross.app/',
+      'https://admin.fiveacross.app/',
+      'https://bodega-bay.fiveacross.app/__/auth/handler',
+      `https://bodega-bay.fiveacross.app${PATH_CAPABILITY_PATH}`,
+      `https://bodega-bay.fiveacross.app${WEB_MANIFEST_PATH}`,
+    ]) {
+      await handleRequest(get(url), CONFIG, deps);
+    }
+
+    expect(Object.keys(deps).sort()).toEqual(['fetch', 'registry']);
+    for (const request of requests) {
+      expect(new URL(request.url).hostname).toBe('fiveacross.web.app');
+    }
+    expect(requests.every((request) => request.headers.get('authorization') === null)).toBe(true);
+  });
+
+  it('bounds the registry call at the configured timeout rather than the origin fetch', async () => {
+    const { deps } = harness({ seed: servingSeed });
+    expect(CONFIG.lookupTimeoutMs).toBe(2_000);
+    await expect(
+      handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps),
+    ).resolves.toMatchObject({ status: 200 });
   });
 });
