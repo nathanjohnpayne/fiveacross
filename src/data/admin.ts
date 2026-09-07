@@ -10,7 +10,8 @@ import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
+import { buildEventArchive } from './eventArchive';
+import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
@@ -628,6 +629,72 @@ export async function resnapshotDayNow(dayIndex: number): Promise<ResnapshotDayR
 export const banUser = (uid: string): Promise<void> =>
   isSystemAuthor(uid) ? Promise.resolve() : updateDoc(evt(), { bannedUids: arrayUnion(uid) });
 export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRemove(uid) });
+
+/** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
+ *  the Admin surface can say what happened instead of inferring it from a
+ *  resolved promise. */
+export type ArchiveEventResult = 'archived' | 'already-archived' | 'no-event';
+
+/**
+ * Freeze this Event after the occasion (#134, specs/post-sailing-archive.md):
+ * ONE update that flips `status` to `'archived'`, stamps `archivedAt`, and
+ * persists the frozen final record `buildEventArchive` snapshots from the
+ * roster the caller is watching.
+ *
+ * ONE update on ONE document is the whole atomicity requirement here, and it is
+ * load-bearing: the rules deny gameplay writes on an archived Event and the
+ * Leaderboard renders from `archive`, so an observer that could see
+ * `status: 'archived'` with no record — or a record with the Event still live —
+ * would see either an empty archive or a writable one.
+ * `specs/path-addressing-and-root.md` § D8 additionally requires the Event's
+ * ROUTING documents to move in that same transaction; that half waits on path
+ * addressing, which ships nothing today (see the spec's § Out of scope).
+ *
+ * Archiving is ONE-WAY from the client. The transaction re-reads the Event
+ * inside itself and reports `already-archived` rather than re-freezing, so a
+ * double tap (or a second Admin's tap) can never overwrite the record with a
+ * later roster — and the rules refuse the rewrite besides. Un-archiving is
+ * deliberately not a client operation at all; see the spec's § Recovery.
+ *
+ * The roster comes from the CALLER (`useLeaderboard`'s live subscription)
+ * rather than being re-read here: this is a snapshot of the standings the
+ * Admin is looking at, not a server-side recompute of them (ADR 0001). The
+ * Event doc, by contrast, is re-read RAW inside the transaction — the same
+ * discipline `setDayTheme`/`confirmClaim` use — so the ban roster and schedule
+ * the record freezes against are the stored ones.
+ */
+export async function archiveEvent(params: {
+  players: readonly PlayerDoc[];
+  dayMetas?: ReadonlyMap<number, DayMetaDoc>;
+  dayMetasLoaded?: boolean;
+  now?: number;
+}): Promise<ArchiveEventResult> {
+  const eventRef = evt();
+  return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return 'no-event';
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') return 'already-archived';
+    const archivedAt = params.now ?? Date.now();
+    tx.update(eventRef, {
+      status: 'archived',
+      archivedAt,
+      archive: buildEventArchive({
+        players: params.players,
+        event: {
+          days: Array.isArray(data.days) ? data.days : [],
+          bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
+          frozenAt: data.frozenAt,
+          standingsFreezeAt: data.standingsFreezeAt,
+        },
+        dayMetas: params.dayMetas,
+        dayMetasLoaded: params.dayMetasLoaded,
+        archivedAt,
+      }),
+    });
+    return 'archived';
+  });
+}
 
 /** Recompute a player's stats after an admin resolves one of their claims. */
 /**

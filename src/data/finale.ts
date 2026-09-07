@@ -104,7 +104,17 @@ function podiumStandingRow(
  * per-Day `dayStats`, with the farewell Day frozen out so a post-freeze goodbye
  * mark never changes who is on the podium.
  */
-function pinnedOrDerivedDailyHonors(
+/**
+ * The per-Day First to BINGO honours: the write-once day-meta pin when the Day
+ * has one, the roster-derived fallback when it does not, and nothing at all for
+ * a Day whose pinned holder is not in the supplied (ban-filtered) roster —
+ * hidden, never reassigned.
+ *
+ * Exported since #134 so the post-Event archive freezes the SAME honours the
+ * podium shows rather than restating the pin-versus-derived precedence a third
+ * time (`src/data/eventArchive.ts`).
+ */
+export function pinnedOrDerivedDailyHonors(
   players: readonly PlayerDoc[],
   days: readonly DayDef[] | undefined,
   dayMetas: ReadonlyMap<number, DayMetaDoc> | undefined,
