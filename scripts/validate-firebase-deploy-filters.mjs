@@ -483,6 +483,20 @@ function runCapturedProcess(
         child.stdout?.destroy();
         child.stderr?.destroy();
       }
+      // And the descendant itself goes with them (Codex P1, round 14 on
+      // #1107). Firebase moves on when the immediate shell exits, but a hook
+      // that backgrounded `(cd shared; sleep 20; write) &` would otherwise keep
+      // running — holding the LIVE directory it entered through the overlay
+      // link as its cwd, past the final drift fingerprint and into the build
+      // and publish that follow. The child is its own process group precisely
+      // so the whole tree can be ended at once; an empty group is a no-op.
+      if (POSIX && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
       if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}`, channel });
       else settle({ ok: code === 0, output, code, channel });
     });
@@ -1177,7 +1191,7 @@ function targetResourceRel(target, config) {
  * module-scope code runs, and it can write over another codebase's artifact
  * before this classifier reads it (Codex P2, round 14).
  */
-function targetCodebases(only, configs, codebaseNames) {
+export function targetCodebases(only, configs, codebaseNames) {
   const all = configs.map((config) => config.codebase);
   if (!only) return new Set(all);
   const named = new Set();
@@ -2059,6 +2073,68 @@ async function eventInvitationServiceInventory(configSource, configPath) {
  * an id no branch recognises falls to the conservative arm, which is the
  * fail-closed direction.
  */
+/** The configured Functions codebase names, `default` when none is named. */
+function functionsCodebaseNames(configSource) {
+  const configs = Array.isArray(configSource?.functions)
+    ? configSource.functions
+    : [configSource?.functions];
+  const names = new Set();
+  for (const config of configs) {
+    if (config && typeof config === "object") names.add(config.codebase ?? "default");
+  }
+  return names.size === 0 ? ["default"] : [...names];
+}
+
+/**
+ * The selector Firebase will ACT on once Hosting has added its pinned
+ * functions, computed once and before anything is planned from it (Codex P1,
+ * round 14 on #1107): hook planning, codebase discovery and the invoker
+ * classification all have to see the same widened request, or the rehearsal
+ * can skip a codebase's predeploy hook that the deploy runs and exempt an
+ * artifact that hook rewrites.
+ *
+ * Firebase resolves each pinned function's codebase from the live backend,
+ * which this classifier does not consult. Every configured codebase is
+ * widened to instead — `functions:<codebase>:<id>` for each — so whichever
+ * codebase owns the function has its hooks planned and its artifact
+ * discovered; the others cost a rehearsal and change no verdict, because an
+ * id a codebase does not export selects nothing there.
+ *
+ * `functionsReAdded` mirrors `targetNames.unshift("functions")`: with Hosting
+ * deployed and a pinned rewrite present, Functions deploys even when the
+ * request excluded or never named it.
+ */
+export function pinnedRewriteWidening({ only, exceptTargets, configSource, project }) {
+  const none = { only, ids: [], functionsReAdded: false };
+  let hostingConfigs;
+  try {
+    hostingConfigs = filterExcept(
+      filterOnly(extract({ config: { src: configSource }, site: project || undefined }), only),
+      exceptTargets,
+    );
+  } catch {
+    // A request the pinned CLI rejects is rejected by the boundary below
+    // exactly as before; nothing here may pre-empt or soften that.
+    return none;
+  }
+  const ids = pinnedHostingFunctionIds(hostingConfigs);
+  if (ids.length === 0) return none;
+  const selectors = only ? only.split(",") : [];
+  const hostingDeployed = only
+    ? selectors.some((selector) => selector === "hosting" || selector.startsWith("hosting:"))
+    : !(exceptTargets ? exceptTargets.split(",") : []).includes("hosting");
+  if (!hostingDeployed) return none;
+  if (!only) return { only, ids, functionsReAdded: true };
+  const widened = [...selectors];
+  for (const id of ids) {
+    for (const codebase of functionsCodebaseNames(configSource)) {
+      const selector = `functions:${codebase}:${id}`;
+      if (!widened.includes(selector)) widened.push(selector);
+    }
+  }
+  return { only: widened.join(","), ids, functionsReAdded: true };
+}
+
 function pinnedHostingFunctionIds(hostingConfigs) {
   const ids = [];
   for (const config of hostingConfigs ?? []) {
@@ -2127,16 +2203,9 @@ async function classifyInvokerScope(
       eventInvitationsInvokerSelected = true;
     };
 
-    // Mirror the CLI's own widening: when Hosting is deployed and a rewrite
-    // pins a function, that function joins the selector before hooks run.
-    const requestedSelectors = only.split(",");
-    const hostingDeployed = requestedSelectors.some(
-      (selector) => selector === "hosting" || selector.startsWith("hosting:"),
-    );
-    const effectiveSelectors = hostingDeployed
-      ? [...requestedSelectors, ...pinnedFunctionIds.map((id) => `functions:${id}`)]
-      : requestedSelectors;
-    for (const selector of effectiveSelectors) {
+    // `only` arrives already widened for pinned Hosting rewrites
+    // (`pinnedRewriteWidening`), the same selector hook planning saw.
+    for (const selector of only.split(",")) {
       if (selector === "hosting" || selector.startsWith("hosting:")) {
         hostingAttempted = true;
       } else if (selector === "functions" || selector === "functions:default") {
@@ -2331,13 +2400,18 @@ export async function classifyFirebaseDeployRequest(
   const only = normalizedFilter(options.only);
   const exceptTargets = normalizedFilter(options.except);
   const configSource = JSON.parse(await readFile(configPath, "utf8"));
+  // What Firebase will deploy once Hosting has added its pinned functions —
+  // resolved BEFORE anything is planned, so the rehearsal, the discovery and
+  // the classification below all act on one request.
+  const pinned = pinnedRewriteWidening({ only, exceptTargets, configSource, project });
+  const effectiveOnly = pinned.only;
   const exportedEventInvitationServices =
     await eventInvitationServiceInventory(configSource, configPath);
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
     { project, projectAlias },
-    only,
+    effectiveOnly,
     predeployTimeoutMs,
   );
   // deploy's before-chain runs this target reduction before
@@ -2356,6 +2430,9 @@ export async function classifyFirebaseDeployRequest(
   // `deploy/index.js` runs EVERY selected target's predeploy hooks before it
   // prepares any of them, so the mirror needs the whole selected target list,
   // in this order, and the raw config those non-Functions hooks come from.
+  // `targetNames.unshift("functions")`: Hosting with a pinned rewrite deploys
+  // Functions whether or not the request named it.
+  if (pinned.functionsReAdded && !deployTargets.includes("functions")) deployTargets.unshift("functions");
   singleEndpointExports.staging.deployTargets = deployTargets;
   singleEndpointExports.staging.configSource = configSource;
   await checkValidTargetFilters({ only, except: exceptTargets });
@@ -2372,11 +2449,11 @@ export async function classifyFirebaseDeployRequest(
   // scratch copy. Everything cheap and everything that can reject the request
   // outright has already happened.
   const invokerScope = await classifyInvokerScope(
-    only,
+    effectiveOnly,
     exceptTargets,
     exportedEventInvitationServices,
     singleEndpointExports,
-    pinnedHostingFunctionIds(hostingConfigs),
+    pinned.ids,
   );
 
   return {

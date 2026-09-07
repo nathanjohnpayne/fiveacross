@@ -10,6 +10,8 @@ import {
   LiveCheckoutDriftError,
   RepositoryMetadataDriftError,
   classifyFirebaseDeployRequest,
+  pinnedRewriteWidening,
+  targetCodebases,
 } from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -2237,6 +2239,29 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ends a successful hook's lingering descendants before accepting the tree", async () => {
+    // Codex P1, round 14: a hook that backgrounds a process and exits keeps
+    // that descendant alive with the LIVE directory as its cwd, past the final
+    // fingerprint and into the build. The rehearsal now ends the hook's whole
+    // process group when the immediate shell settles, so the write below never
+    // lands — not during the run, and not after it either.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, "(cd shared; sleep 3; printf x >> toggle) &"],
+        },
+        files: { "shared/toggle": "" },
+      },
+      async (configPath) => {
+        await classify(["--only", "functions:daily"], configPath);
+        await new Promise((settle) => setTimeout(settle, 4500));
+        const { readFile: read } = await import("node:fs/promises");
+        const { dirname: dir, join: under } = await import("node:path");
+        await expect(read(under(dir(configPath), "shared", "toggle"), "utf8")).resolves.toBe("");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
@@ -2373,6 +2398,89 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
       async (configPath) => {
         const result = await classify(["--only", "functions:daily,hosting"], configPath);
         expect(result).toMatchObject({ hostingAttempted: true, ...NO_INVOKER_SELECTED });
+      },
+    );
+  });
+
+  it("widens BEFORE planning, so every codebase's hooks and discovery see the pinned id", () => {
+    // Codex P1, round 14: the widening has to reach hook planning and
+    // discovery, not just the classification loop. Firebase resolves the
+    // pinned function's codebase from the live backend; offline, every
+    // configured codebase is widened to, so a mixed request such as
+    // `functions:alpha:daily,hosting` whose pinned rewrite lives in `beta`
+    // plans beta's predeploy hook in the rehearsal that proves alpha's
+    // endpoint — exactly the hook that could rewrite alpha's artifact.
+    const configSource = {
+      functions: [
+        { source: "alpha", codebase: "alpha" },
+        { source: "beta", codebase: "beta" },
+      ],
+      hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport", pinTag: true } }] },
+    };
+    const widened = pinnedRewriteWidening({
+      only: "functions:alpha:daily,hosting",
+      exceptTargets: "",
+      configSource,
+      project: "fiveacross",
+    });
+    expect(widened).toEqual({
+      only: "functions:alpha:daily,hosting,functions:alpha:submitBugReport,functions:beta:submitBugReport",
+      ids: ["submitBugReport"],
+      functionsReAdded: true,
+    });
+    const configs = configSource.functions;
+    const names = new Set(["alpha", "beta"]);
+    expect([...targetCodebases("functions:alpha:daily,hosting", configs, names)]).toEqual(["alpha"]);
+    expect([...targetCodebases(widened.only, configs, names)].sort()).toEqual(["alpha", "beta"]);
+
+    // Hosting alone: nothing to widen a selector with, but Functions is re-added.
+    expect(pinnedRewriteWidening({ only: "hosting", exceptTargets: "", configSource, project: "" })).toMatchObject({
+      only: "hosting,functions:alpha:submitBugReport,functions:beta:submitBugReport",
+      functionsReAdded: true,
+    });
+    // `--except functions` still deploys Functions when Hosting pins one.
+    expect(pinnedRewriteWidening({ only: "", exceptTargets: "functions", configSource, project: "" })).toEqual({
+      only: "",
+      ids: ["submitBugReport"],
+      functionsReAdded: true,
+    });
+    // No Hosting in the deploy, or no pinned rewrite: the request is untouched.
+    expect(pinnedRewriteWidening({ only: "functions:alpha:daily", exceptTargets: "", configSource, project: "" })).toEqual({
+      only: "functions:alpha:daily",
+      ids: [],
+      functionsReAdded: false,
+    });
+    expect(pinnedRewriteWidening({ only: "", exceptTargets: "hosting", configSource, project: "" })).toMatchObject({ functionsReAdded: false });
+    const unpinned = { ...configSource, hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport" } }] } };
+    expect(pinnedRewriteWidening({ only: "functions:alpha:daily,hosting", exceptTargets: "", configSource: unpinned, project: "" })).toMatchObject({ only: "functions:alpha:daily,hosting", functionsReAdded: false });
+  });
+
+  it("runs no Functions hook for a Hosting-only request whose rewrite is not pinned", async () => {
+    const unpinned = { hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport" } }] } };
+    await withFunctionsProject(
+      {
+        config: unpinned,
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
+        files: { "public/index.html": "", "shared/toggle": "" },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "hosting"], configPath);
+        expect(result).toMatchObject({ hostingAttempted: true, functionsAttempted: false });
+      },
+    );
+  });
+
+  it("widens a codebase-qualified request to the pinned callable as well", async () => {
+    await withFunctionsProject(
+      { config: pinned(), files: { "public/index.html": "" } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:default:daily,hosting"], configPath);
+        expect(result).toMatchObject({
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          authHandoffInvokerSelected: false,
+        });
       },
     );
   });
