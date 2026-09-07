@@ -13,15 +13,16 @@
  * sign-in origin itself to fail, and a failure here takes down sign-in for every
  * Event at once.
  *
- * ALWAYS REDIRECT, NEVER POPUP, and this is the one place in the app where that
- * is unconditionally right. `AuthContext` picks between popup and redirect
- * because it is protecting live app state and an installed-PWA window that loses
- * its OAuth popup (#395, #347). This page has no state to lose: everything it
- * needs is in its own query string, which survives the round trip in the address
- * bar, and its OAuth helper is same-origin by construction (the host is in
- * `FIRST_PARTY_AUTH_HOSTS`, which is exactly the condition under which
- * `AuthContext` itself calls redirect stable). So there is no UA sniffing here
- * and no second copy of that decision to drift.
+ * ALWAYS REDIRECT, NEVER POPUP, and this page shares that rule with `AuthContext`
+ * rather than carrying its own copy (#765): `AuthContext` redirects on every
+ * surface whose OAuth handler is same-origin and keeps the popup only for a
+ * cross-origin handler (local development, the Auth Emulator); the device
+ * matrix that once protected live app state and installed-PWA windows (#395,
+ * #347) is gone. This page has no state to lose: everything it needs is in its
+ * own query string, which survives the round trip in the address bar, and its
+ * OAuth helper is same-origin by construction (the host is in
+ * `FIRST_PARTY_AUTH_HOSTS`), so it sits squarely inside the redirect branch.
+ * There is no UA sniffing here and no second copy of that decision to drift.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getRedirectResult, onAuthStateChanged, signInWithRedirect } from 'firebase/auth';
