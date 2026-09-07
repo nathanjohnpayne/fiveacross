@@ -6,6 +6,7 @@ import {
   capturePendingEventInvitation,
   forgetPendingEventInvitationIf,
   hasEventInvitationFragment,
+  persistPendingEventInvitation,
   readPendingEventInvitation,
   readEventInvitationCode,
 } from './pendingEventInvitation';
@@ -273,6 +274,48 @@ describe('capture and recovery', () => {
     // Tab A consumes the winner (as a redemption would); nothing resurrects.
     expect(forgetPendingEventInvitationIf(winner!.record)).toBe(true);
     expect(readPendingEventInvitation({ origin, now: 4_000 })).toBeNull();
+  });
+
+  it('re-persists a memory-only record once the stores accept writes again', () => {
+    const origin = window.location.origin;
+    const blocked = () => {
+      throw new Error('QuotaExceededError');
+    };
+    const sessionSet = vi.spyOn(sessionStorage, 'setItem').mockImplementation(blocked);
+    const localSet = vi.spyOn(localStorage, 'setItem').mockImplementation(blocked);
+    const captured = capturePendingEventInvitation({ hash: `#fa_invite=${'M'.repeat(43)}`, origin, now: 1_000 });
+    sessionSet.mockRestore();
+    localSet.mockRestore();
+    expect(captured?.durable).toBe(false);
+    expect(readPendingEventInvitation({ origin, now: 1_500 })?.durable).toBe(false);
+
+    const persisted = persistPendingEventInvitation({ origin, now: 2_000 });
+    expect(persisted?.durable).toBe(true);
+    expect(persisted?.record.code).toBe('M'.repeat(43));
+    const again = readPendingEventInvitation({ origin, now: 2_500 });
+    expect(again?.durable).toBe(true);
+    expect(again?.record.captureId).toBe(persisted?.record.captureId);
+    // The consumer holds the persisted identity, so a compare-delete names it.
+    expect(forgetPendingEventInvitationIf(persisted!.record)).toBe(true);
+    expect(readPendingEventInvitation({ origin, now: 3_000 })).toBeNull();
+  });
+
+  it('reports the record still memory-only when the stores keep refusing', () => {
+    const origin = window.location.origin;
+    const blocked = () => {
+      throw new Error('QuotaExceededError');
+    };
+    const sessionSet = vi.spyOn(sessionStorage, 'setItem').mockImplementation(blocked);
+    const localSet = vi.spyOn(localStorage, 'setItem').mockImplementation(blocked);
+    try {
+      capturePendingEventInvitation({ hash: `#fa_invite=${'N'.repeat(43)}`, origin, now: 1_000 });
+      const persisted = persistPendingEventInvitation({ origin, now: 2_000 });
+      expect(persisted?.durable).toBe(false);
+      expect(persisted?.record.code).toBe('N'.repeat(43));
+    } finally {
+      sessionSet.mockRestore();
+      localSet.mockRestore();
+    }
   });
 
   it('falls back to localStorage when the session copy is lost across authentication', () => {

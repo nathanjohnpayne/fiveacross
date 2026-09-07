@@ -573,6 +573,38 @@ export function readPendingEventInvitation(
 }
 
 /**
+ * Give a memory-only invitation a durable copy before the document is left.
+ *
+ * `capturePendingEventInvitation` keeps the memory copy when both stores
+ * refuse the write (quota, privacy mode). A caller about to navigate away —
+ * the central-auth handoff, a top-level redirect — would destroy that only
+ * copy, so it asks here first: if the current usable record has no stored
+ * copy, the write is attempted again under a fresh immutable key, and the
+ * memory copy is replaced by the stored identity so a later compare-delete
+ * names one record. Returns the state after the attempt, or `null` when the
+ * origin holds no usable invitation at all. `durable: false` on return means
+ * the stores still refuse and the caller must not leave the document.
+ */
+export function persistPendingEventInvitation(
+  input: ReadPendingEventInvitationInput,
+): PendingEventInvitationState | null {
+  const current = readPendingEventInvitation(input);
+  if (current === null || current.durable) return current;
+  const identity = newCaptureIdentity();
+  if (identity.storageKey === null) return current;
+  const record: PendingEventInvitationRecord = { ...current.record, captureId: identity.captureId };
+  const serialized = JSON.stringify(record);
+  const session = writeStore('sessionStorage', identity.storageKey, serialized);
+  const local = writeStore('localStorage', identity.storageKey, serialized);
+  const durable =
+    (session && storeHasRecord('sessionStorage', identity.storageKey, record)) ||
+    (local && storeHasRecord('localStorage', identity.storageKey, record));
+  if (!durable) return current;
+  memoryRecord = record;
+  return { record, durable: true };
+}
+
+/**
  * Delete only immutable entries that equal the invitation the caller consumed.
  *
  * localStorage is shared across tabs. An older redemption has no mutable slot
