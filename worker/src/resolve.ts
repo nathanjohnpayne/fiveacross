@@ -25,6 +25,7 @@
 // that knows it is running on Cloudflare.
 
 import {
+  hasExactDesiredKeys,
   isCanonicalRevision,
   isRegistryEdition,
   isRegistryRootHost,
@@ -330,6 +331,22 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   const revision = lookup.revision;
   const desired = lookup.desired;
   if (typeof desired !== 'object' || desired === null) return notFound('replica-malformed');
+
+  // The exact KEY SET, before any arm reads a value out of it, and from the
+  // same table `parseDesired` uses at ingestion.
+  //
+  // Checking values without checking the key set accepts exactly the shapes
+  // that carry a field their arm does not define — a tombstone with an
+  // `eventId`, a root with a `slug`, a route with a field this schema has never
+  // heard of. Every one of them is refused on the way IN, so a committed
+  // projection carrying one is a registry defect however it got there, and this
+  // boundary exists to answer for defects the registry did not catch. It
+  // matters more than tidiness because these arms publish a revision: § Audit
+  // and recovery makes the public `{reason, revision}` pair the evidence
+  // `clear-lock` compares against committed state, so serving — or
+  // `unknown-host`-ing — a shape the registry itself would have rejected would
+  // offer it to the recovery machine as canonical.
+  if (!hasExactDesiredKeys(desired)) return notFound('replica-malformed');
 
   switch (desired.kind) {
     case 'tombstone':

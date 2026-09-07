@@ -138,6 +138,34 @@ export function isSyntheticRegistryHost(host: string): boolean {
   return isSyntheticEventHostClass(host) || isSyntheticRootTestHost(host);
 }
 
+/**
+ * The exact key set each `desired` arm may carry — the SAME closed-key rule
+ * `parseDesired` applies on the way in, exported so the router can apply it to
+ * a projection arriving across the service binding on the way out.
+ *
+ * Checking values without checking the key set leaves the shapes that carry a
+ * field their arm does not define: a tombstone with an `eventId`, a root with a
+ * `slug`, a route with something neither this schema nor this Worker knows what
+ * to do with. Ingestion refuses every one of them, so a committed projection
+ * that has one is a defect however it got there — and the router publishes a
+ * revision off these arms, which is recovery evidence, so accepting a shape the
+ * registry itself would have rejected would offer it as canonical.
+ *
+ * Declared here rather than restated in `worker/src/resolve.ts` for the reason
+ * the value predicates above are: two answers to "what may this arm carry?" is
+ * one answer too many.
+ */
+const DESIRED_KEYS: Record<string, readonly string[]> = {
+  route: ROUTE_KEYS,
+  root: ROOT_KEYS,
+  tombstone: TOMBSTONE_KEYS,
+};
+
+export function hasExactDesiredKeys(desired: ReplicaDesired): boolean {
+  const expected = DESIRED_KEYS[(desired as { kind?: unknown }).kind as string];
+  return expected !== undefined && hasExactKeys(desired as unknown as Record<string, unknown>, expected);
+}
+
 export function isRegistryRootHost(host: string): boolean {
   return ROOT_HOSTS.has(host) || isSyntheticRootTestHost(host);
 }

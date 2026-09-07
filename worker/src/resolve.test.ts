@@ -443,6 +443,89 @@ describe('re-validating the projection at the service boundary', () => {
   });
 });
 
+describe('the exact key set a `desired` arm may carry', () => {
+  // The registry refuses every one of these on the way IN (`parseDesired`
+  // compares the key set, not just the values), so a committed projection
+  // carrying an undefined field is a defect however it got there — and this
+  // boundary exists for defects the registry did not catch. It is not tidiness:
+  // these arms publish a revision, and § Audit and recovery makes the public
+  // `{reason, revision}` pair the evidence `clear-lock` compares against
+  // committed state, so accepting a shape the registry itself would have
+  // rejected would offer it to the recovery machine as canonical.
+  it.each([
+    // The example that motivates the rule: a tombstone whose extra field is a
+    // route field. Read arm-first it is a perfectly ordinary tombstone, and it
+    // would publish `unknown-host` with its revision.
+    ['a tombstone carrying an eventId', HOST, SLUG, { kind: 'tombstone', eventId: 'event-1' }],
+    ['a tombstone carrying a slug', HOST, SLUG, { kind: 'tombstone', slug: SLUG }],
+    [
+      'a route carrying a field this schema does not define',
+      HOST,
+      SLUG,
+      {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: null,
+        adultContent: true,
+      },
+    ],
+    [
+      'a route missing one of its own',
+      HOST,
+      SLUG,
+      { kind: 'route', eventId: 'bodega-bay-2026', status: 'active', slug: SLUG, edition: 'fiveacross' },
+    ],
+    [
+      'a root carrying a slug it has no first label for',
+      'fiveacross.app',
+      null,
+      {
+        kind: 'root',
+        root: 'doorway',
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+        slug: 'bodega-bay',
+      },
+    ],
+  ] as const)('refuses %s', async (_label, host, expectedSlug, desired) => {
+    const { deps } = harness({
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '7',
+      desired: desired as unknown as ReplicaDesired,
+    });
+    const resolution = await resolveHost(host, expectedSlug, CONFIG, deps);
+    // Fail closed, with no revision — this is the router answering ABOUT a
+    // record it cannot use, not FROM one it read for the address.
+    expect(resolution).toEqual({ kind: 'not-found', reason: 'replica-malformed', revision: null });
+  });
+
+  it('still serves the exact shapes, so the rule is a key set and not a refusal of everything', async () => {
+    const { deps } = harness(ACTIVE_ROUTE);
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
+
+    const root = harness(
+      committed({
+        kind: 'root',
+        root: 'doorway',
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    );
+    await expect(resolveHost('fiveacross.app', null, CONFIG, root.deps)).resolves.toMatchObject({
+      kind: 'serve',
+    });
+
+    await expect(refusalFor(committed({ kind: 'tombstone' }, '12'))).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+});
+
 describe('the projection schema version, refused before the projection is read', () => {
   // The registry is a SEPARATELY DEPLOYED Worker, so its schema can move ahead
   // of this router's. `desired` is a closed union whose discriminants an
