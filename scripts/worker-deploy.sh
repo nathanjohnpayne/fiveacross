@@ -137,8 +137,20 @@ MSG
   # EXACT name comparison, for the same reason the presence check needed one:
   # an unanchored match would report a leftover `OLD_FIREBASE_API_KEY` as the
   # live binding, or miss the live one behind a near-miss neighbour.
-  if printf '%s' "$secrets" | jq -e --arg name "$FORBIDDEN_SECRET" \
-      'if type=="array" then any(.[]; .name == $name) else true end' >/dev/null 2>&1; then
+  #
+  # `present` is compared against the literal `false` rather than tested for
+  # truthiness, so ONLY a parsed array that demonstrably lacks the name passes.
+  # Inverting a check inverts its failure mode too: with the old presence test,
+  # unparseable output made `jq` exit non-zero and the deploy failed closed by
+  # accident; here the same accident would read as proof of absence. A listing
+  # that is not an array, or not JSON at all, is evidence of nothing.
+  local present
+  if ! present="$(printf '%s' "$secrets" | jq -r --arg name "$FORBIDDEN_SECRET" \
+      'if type=="array" then (any(.[]; .name == $name) | tostring) else "true" end' 2>/dev/null)"; then
+    present="true"
+  fi
+
+  if [[ "$present" != "false" ]]; then
     cat >&2 <<MSG
 
 ❌ ${FORBIDDEN_SECRET} is STILL bound on the deployed Worker.

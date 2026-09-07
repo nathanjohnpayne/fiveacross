@@ -160,8 +160,16 @@ describe('worker deploy guard — no surviving Firebase credential', () => {
     expect(result.stderr).toContain('FAILED verification');
   });
 
-  it('fails closed when the secret listing is not the array it should be', () => {
-    const result = runWithStubbedNpm({ secretListJson: '{"unexpected":"shape"}' });
+  it.each([
+    ['is not the array it should be', '{"unexpected":"shape"}'],
+    ['is not JSON at all', 'wrangler: unexpected diagnostic output'],
+    ['is empty', ''],
+  ])('fails closed when the secret listing %s', (_label, secretListJson) => {
+    // Inverting a check inverts its failure mode. Under the old presence test
+    // an unparseable listing made `jq` exit non-zero and the deploy failed
+    // closed by accident; under the absence test the same accident would read
+    // as proof that no credential is bound.
+    const result = runWithStubbedNpm({ secretListJson });
     expect(result.status).toBe(1);
   });
 });

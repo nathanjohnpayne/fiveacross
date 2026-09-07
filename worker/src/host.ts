@@ -42,10 +42,12 @@ export type HostRejection =
 
 export type HostClass =
   /** The Namespace apex itself — `fiveacross.app`. A registered serving host
-   *  with its own `hostnames/{host}` document, but no first label, so there is
-   *  no Slug to validate or cross-check. */
+   *  with its own committed registry projection, but no first label, so there
+   *  is no Slug to validate or cross-check. */
   | { kind: 'apex'; host: string; namespace: string; slug: null }
-  /** A wildcard Event address — `bodega-bay.fiveacross.app`. */
+  /** A labelled address under a Namespace — `bodega-bay.fiveacross.app`, or one
+   *  of the two closed rehearsal classes. Whether it SERVES is `resolve.ts`'s
+   *  question; this only says the address may reach the lookup. */
   | { kind: 'event'; host: string; namespace: string; slug: string }
   | { kind: 'rejected'; host: string; reason: HostRejection; detail?: SlugRejection };
 
