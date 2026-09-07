@@ -3,6 +3,7 @@ import {
   createAdmissionCoordinator,
   INVITATION_NO_LONGER_VALID_MESSAGE,
   mayDealUnderAdmission,
+  sameAdmissionState,
   type AdmissionCoordinatorDependencies,
   type AdmissionState,
   type AdmissionVisit,
@@ -90,6 +91,34 @@ describe('the deal gate', () => {
     expect(mayDealUnderAdmission({ kind: 'pending', captureId: 'c' })).toBe(false);
     expect(mayDealUnderAdmission({ kind: 'retryable', captureId: 'c', reason: 'unavailable' })).toBe(false);
     expect(mayDealUnderAdmission({ kind: 'blocked', message: 'm' })).toBe(false);
+  });
+});
+
+describe('structural equality for a React mirror', () => {
+  it('treats equal states as the same and any differing field as a change', () => {
+    expect(sameAdmissionState({ kind: 'clear' }, { kind: 'clear' })).toBe(true);
+    expect(
+      sameAdmissionState({ kind: 'pending', captureId: 'c' }, { kind: 'pending', captureId: 'c' }),
+    ).toBe(true);
+    expect(
+      sameAdmissionState({ kind: 'pending', captureId: 'c' }, { kind: 'pending', captureId: 'd' }),
+    ).toBe(false);
+    expect(
+      sameAdmissionState(
+        { kind: 'retryable', captureId: 'c', reason: 'unavailable' },
+        { kind: 'retryable', captureId: 'c', reason: 'rate-limited' },
+      ),
+    ).toBe(false);
+    expect(
+      sameAdmissionState({ kind: 'blocked', message: 'm' }, { kind: 'blocked', message: 'm' }),
+    ).toBe(true);
+    expect(
+      sameAdmissionState(
+        { kind: 'admitted', outcome: 'already-member' },
+        { kind: 'admitted', outcome: 'membership-created' },
+      ),
+    ).toBe(false);
+    expect(sameAdmissionState({ kind: 'clear' }, { kind: 'pending', captureId: 'c' })).toBe(false);
   });
 });
 

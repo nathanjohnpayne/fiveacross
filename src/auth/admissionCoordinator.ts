@@ -88,6 +88,28 @@ export function mayDealUnderAdmission(state: AdmissionState): boolean {
   return state.kind === 'clear' || state.kind === 'admitted';
 }
 
+/**
+ * Structural equality, so a consumer mirroring the state into React can keep
+ * the previous object when nothing changed. `begin` on a visit with no
+ * Invitation publishes `clear` over `clear`; a mirror that treated that as a
+ * change would re-run the deal effect and deal twice.
+ */
+export function sameAdmissionState(a: AdmissionState, b: AdmissionState): boolean {
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case 'clear':
+      return true;
+    case 'pending':
+      return a.captureId === (b as typeof a).captureId;
+    case 'retryable':
+      return a.captureId === (b as typeof a).captureId && a.reason === (b as typeof a).reason;
+    case 'blocked':
+      return a.message === (b as typeof a).message;
+    case 'admitted':
+      return a.outcome === (b as typeof a).outcome;
+  }
+}
+
 export function createAdmissionCoordinator(
   deps: AdmissionCoordinatorDependencies,
 ): AdmissionCoordinator {

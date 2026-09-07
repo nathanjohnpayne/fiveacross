@@ -32,6 +32,18 @@ import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import { consumePostUpdateDealGrace } from '../postUpdateDeal';
 import { consumeHandoffAttestation, debugHandoff } from './handoffAttestation';
+import {
+  createAdmissionCoordinator,
+  mayDealUnderAdmission,
+  sameAdmissionState,
+  type AdmissionCoordinator,
+  type AdmissionState,
+} from './admissionCoordinator';
+import {
+  forgetPendingEventInvitationIf,
+  readPendingEventInvitation,
+} from '../pendingEventInvitation';
+import { redeemEventInvitation } from '../data/eventInvitations';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
@@ -515,6 +527,13 @@ interface AuthContextValue {
   // ensureUserProfile + readAdultAttestation bootstrap (#112 round 2) — never the
   // deal itself while the attestation is unsettled (Finding 1).
   retryDeal: () => void;
+  // Where this visit stands on Invitation redemption (#804, spec
+  // `event-invitations.md` § ordering). `joinAndDeal` runs only under `clear`
+  // or `admitted`; `pending`, `retryable` and `blocked` hold it at zero calls.
+  // Carries the capture's opaque id at most — never the bearer.
+  admission: AdmissionState;
+  // Re-attempt a `retryable` redemption in place. A no-op in every other state.
+  retryAdmission: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -531,6 +550,8 @@ const AuthContext = createContext<AuthContextValue>({
   signOutUser: async () => {},
   attest: async () => {},
   retryDeal: () => {},
+  admission: { kind: 'clear' },
+  retryAdmission: () => {},
 });
 
 // A pool-shortfall deal failure (the ADR 0003/0004 below-floor guard) vs any other
@@ -649,6 +670,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // False from the moment a signed-in User is published until THAT User's
   // ensureUserProfile bootstrap settles (#77) — see the interface note.
   const [profileReady, setProfileReady] = useState(false);
+  // The admission coordinator (#804) — created once per provider, with the
+  // capture seam, the callable seam and the clock injected, so its decision
+  // table stays the pure one `admissionCoordinator.test.ts` proves. `admission`
+  // mirrors its state for rendering; the coordinator itself is the source of
+  // truth the deal effect reads SYNCHRONOUSLY, because a state mirror lags one
+  // render and a deal fired in that gap would be the zero-calls violation the
+  // ordering contract forbids.
+  const [admission, setAdmission] = useState<AdmissionState>({ kind: 'clear' });
+  const admissionRef = useRef<AdmissionCoordinator | null>(null);
+  if (admissionRef.current === null) {
+    admissionRef.current = createAdmissionCoordinator({
+      readPending: ({ origin, now }) => readPendingEventInvitation({ origin, now }),
+      forgetIf: forgetPendingEventInvitationIf,
+      // Bounded like the deal (#403): the callable is a network round trip
+      // that never completes offline. A timeout is a transient failure — the
+      // record stays and Retry is offered — never a verdict on the invitation.
+      redeem: (input) =>
+        withTimeout(
+          redeemEventInvitation(input),
+          DEAL_TIMEOUT_MS,
+          'Invitation redemption timed out',
+        ).catch(() => ({ ok: false as const, reason: 'unavailable' as const })),
+      now: () => Date.now(),
+    });
+  }
+  useEffect(
+    () =>
+      admissionRef.current!.subscribe((next) =>
+        // Keep the previous object when nothing changed: `begin` on a visit
+        // with no Invitation publishes `clear` over `clear`, and a fresh object
+        // there would re-run the deal effect and deal a second time.
+        setAdmission((previous) => (sameAdmissionState(previous, next) ? previous : next)),
+      ),
+    [],
+  );
+  // The visit the coordinator was last begun for, so a re-render never
+  // re-begins (and re-redeems) the same signed-in visit, while a new account
+  // or a new Event does begin afresh. `null` between visits.
+  const admissionVisitRef = useRef<string | null>(null);
   // Tri-state 18+ attestation for the current User (#23): `undefined` = UNKNOWN
   // (bootstrap unsettled, or an indeterminate read); `true` = attested; `false` =
   // a SETTLED profile with no stamp → re-prompt. A missing stamp during load is
@@ -787,6 +847,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     profileAttemptRef.current += 1;
     pendingEventBootstrapRef.current = eventId;
     setStoredDealState(neutralDealState(eventId));
+    admissionVisitRef.current = null;
+    admissionRef.current?.reset();
   }, [eventId]);
   // TWO-TIER same-session attestation (Codex #117 round 7): keep the OPTIMISTIC-UI
   // tier and the DURABLE-AUTHORITY tier strictly separate — optimistic-for-UI is
@@ -1324,6 +1386,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authUidRef.current = u?.uid ?? null;
       const profileAttempt = (profileAttemptRef.current += 1);
       dealAttemptRef.current += 1;
+      // The previous account's admission is over: a redemption still in flight
+      // for it settles into a stale generation and is dropped, never deleting
+      // a record the incoming account may redeem itself. `reset` deletes
+      // nothing, and the next authoritative render begins the new visit.
+      admissionVisitRef.current = null;
+      admissionRef.current!.reset();
       clearDealError(ownedEventId);
       setDealingFor(ownedEventId, false);
       // The incoming User's profile bootstrap has not settled yet (#77), so the
@@ -1670,9 +1738,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // (Codex P2 on #615). The offline branch never sets it, and `online` gates
   // besides.
   const mayDeal = attestationRequired ? attested === true && attestedAuthoritative : profileBootstrapOk;
+  // Step 3 of the ordering contract sits between authority and the deal: once
+  // this visit is signed in, online and authoritative, begin admission for it
+  // (a one-time read of the origin's pending Invitation and, if there is one,
+  // its redemption) and deal only when the coordinator says the visit is
+  // `clear` or `admitted`. `begin` answers synchronously, so the very render
+  // that first satisfies `mayDeal` cannot deal past a pending Invitation; the
+  // `admission` dependency re-runs this once the redemption settles.
+  const beginAdmissionIfNeeded = useCallback(
+    (u: User, ownedEventId: string): AdmissionState => {
+      const coordinator = admissionRef.current!;
+      const visitKey = `${ownedEventId}\u0000${u.uid}`;
+      if (admissionVisitRef.current === visitKey) return coordinator.state();
+      admissionVisitRef.current = visitKey;
+      return coordinator.begin({ eventId: ownedEventId, uid: u.uid, origin: window.location.origin });
+    },
+    [],
+  );
   useEffect(() => {
-    if (user && mayDeal && online) void runDeal(user, eventId);
-  }, [eventId, user, mayDeal, online, runDeal]);
+    if (!(user && mayDeal && online)) return;
+    if (!mayDealUnderAdmission(beginAdmissionIfNeeded(user, eventId))) return;
+    void runDeal(user, eventId);
+  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
@@ -1828,13 +1915,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
     } else if (mayDeal) {
-      // Online + authoritative → re-deal in place.
-      void runDeal(user, eventId);
+      // Online + authoritative → re-deal in place, unless admission still
+      // holds the deal: a retryable redemption retries ITSELF, and a pending
+      // or blocked one is not something a deal retry may step past (#804).
+      const admissionState = beginAdmissionIfNeeded(user, eventId);
+      if (admissionState.kind === 'retryable') {
+        admissionRef.current!.retry();
+      } else if (mayDealUnderAdmission(admissionState)) {
+        void runDeal(user, eventId);
+      }
     } else {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
@@ -2323,6 +2417,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const canRenderEventContent =
     user != null && (attestationRequired ? attested === true : profileReady);
 
+  const retryAdmission = useCallback(() => {
+    admissionRef.current!.retry();
+  }, []);
+
   return (
     <AuthContext.Provider
       value={{
@@ -2339,6 +2437,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signOutUser,
         attest,
         retryDeal,
+        admission,
+        retryAdmission,
       }}
     >
       {/* The confirm-path Moment emitter (#41) mounts for ANY signed-in user,

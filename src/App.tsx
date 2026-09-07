@@ -29,8 +29,31 @@ export default function App() {
   return <EventApp key={EVENT_ID} />;
 }
 
+/**
+ * The terminal invitation state (#804): the one message the ordering contract
+ * specifies, rendered where the Board would be, with no Retry because nothing
+ * the Player can do from here makes that Invitation valid again.
+ */
+function AdmissionBlocked({ message }: { message: string }) {
+  return (
+    <div className="signin" role="alert">
+      <p className="muted">{message}</p>
+    </div>
+  );
+}
+
 function EventApp() {
-  const { user, loading, dealError, dealErrorReason, dealing, retryDeal, canRenderEventContent } = useAuth();
+  const {
+    user,
+    loading,
+    dealError,
+    dealErrorReason,
+    dealing,
+    retryDeal,
+    canRenderEventContent,
+    admission,
+    retryAdmission,
+  } = useAuth();
   // The tab-switch transition's key (specs/motion-polish.md): the TOP-LEVEL
   // route segment only, so `.route-view` replays its entrance when the tab
   // changes but sub-navigation inside a tab (More → admin → section) never
@@ -55,6 +78,28 @@ function EventApp() {
     ) : (
       <LoadingState label={editionBrand().passCheckLabel} />
     );
+  }
+
+  // Invitation admission (#804) stands between authority and the dealt Board,
+  // and it gates the WHOLE shell rather than only the Card: a visit whose
+  // Invitation is still being redeemed, or has turned out invalid, is not a
+  // member and does not get the Feed or More either. `blocked` is terminal for
+  // this visit — the one message, no Retry — while `retryable` keeps the
+  // bounded record and offers the same Retry surface a failed deal does.
+  if (admission.kind === 'pending') {
+    return <LoadingState label={editionBrand().passCheckLabel} />;
+  }
+  if (admission.kind === 'retryable') {
+    return (
+      <DealError
+        message="We couldn't check your invitation. Try again."
+        onRetry={retryAdmission}
+        retrying={false}
+      />
+    );
+  }
+  if (admission.kind === 'blocked') {
+    return <AdmissionBlocked message={admission.message} />;
   }
 
   // Frozen route -> page-component mapping, one entry per stable mount

@@ -9,6 +9,7 @@ import type { Cell } from './types';
 // AuthProvider. The default is a signed-in Player with no deal error.
 const authState: { value: Record<string, unknown> } = { value: {} };
 const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
+const authMocks = vi.hoisted(() => ({ retryAdmission: vi.fn() }));
 vi.mock('./firebase', () => ({
   get EVENT_ID() {
     return eventScope.eventId;
@@ -23,6 +24,8 @@ vi.mock('./auth/AuthContext', () => ({
     canRenderEventContent: true,
     dealing: false,
     retryDeal: () => {},
+    admission: { kind: 'clear' },
+    retryAdmission: authMocks.retryAdmission,
     ...authState.value,
   }),
 }));
@@ -181,6 +184,35 @@ describe('App — Card route deal-error routing (#434)', () => {
     expect(screen.getByText(DEAL_ERROR)).toBeInTheDocument();
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
     expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  // Invitation admission (#804) gates the WHOLE shell between authority and the
+  // dealt Board: no Board, no nav, for a visit that is not (yet) a member.
+  it('withholds the routed shell while an Invitation is being redeemed', () => {
+    authState.value = { admission: { kind: 'pending', captureId: 'c' } };
+    renderApp();
+    expect(screen.getByText(/Checking your cruise pass/)).toBeInTheDocument();
+    expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('offers Retry for a transient redemption failure, wired to the admission retry', () => {
+    authState.value = { admission: { kind: 'retryable', captureId: 'c', reason: 'unavailable' } };
+    renderApp();
+    expect(screen.getByRole('alert')).toHaveTextContent(/check your invitation/i);
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(authMocks.retryAdmission).toHaveBeenCalledOnce();
+  });
+
+  it('shows the one terminal message for an invalid Invitation, with no Retry and no Board', () => {
+    const message = 'This invitation is no longer valid. Ask the organizer for a new one.';
+    authState.value = { admission: { kind: 'blocked', message } };
+    renderApp();
+    expect(screen.getByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
   });
 
   it('withholds the routed shell while attestation authority is still settling', () => {
