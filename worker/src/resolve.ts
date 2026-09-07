@@ -30,6 +30,7 @@ import {
   isRegistryRootHost,
   isReplicaRootMarker,
   isReplicaRouteStatus,
+  isSyntheticRootTestHost,
   registryHostPathNamespace,
   type PathNamespace,
   type RegistryEdition,
@@ -270,6 +271,12 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
     }
 
     case 'route': {
+      // The root-test rehearsal class accepts no route, on either side of the
+      // registry. `parseDesired` refuses one at ingestion; this refuses one
+      // that reached the binding anyway, which is the whole reason a
+      // separately deployed consumer revalidates at all — an ingestion-only
+      // rule is not a rule the router can rely on across version skew.
+      if (isSyntheticRootTestHost(host)) return notFound('replica-malformed');
       if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
         return notFound('replica-malformed');
       }

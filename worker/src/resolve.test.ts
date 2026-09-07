@@ -311,6 +311,22 @@ describe('re-validating the projection at the service boundary', () => {
       'r2-root-abcdefghijklmnopqrst.fiveacross.app',
       committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
     ],
+    [
+      // The class accepts no route on either side of the registry.
+      // `parseDesired` refuses one at ingestion; this is the same rule applied
+      // to a projection that reached the binding anyway, which is what a
+      // separately deployed consumer revalidates for.
+      'a ROUTE projection on the synthetic root-test class, whose slug matches its label',
+      'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: 'r2-root-abcdefghijklmnopqrst',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      }),
+    ],
   ])('refuses %s', async (_label, host, lookup) => {
     const { deps } = harness(lookup);
     await expect(resolveHost(host, null, CONFIG, deps)).resolves.toEqual({

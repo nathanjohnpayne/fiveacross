@@ -80,7 +80,17 @@ function isSyntheticHost(host: string, isLabel: (label: string) => boolean): boo
   );
 }
 
-const isSyntheticRootHostClass = (host: string): boolean => isSyntheticHost(host, isRehearsalRootLabel);
+/**
+ * The root-test rehearsal class, exported because it is the one host class that
+ * accepts NO route projection at all, and both sides of the registry have to
+ * enforce that: `parseDesired` when a payload arrives, and
+ * `worker/src/resolve.ts` when a committed projection comes back across the
+ * service binding. An ingestion-only refusal would leave registry version skew
+ * able to serve an Event from the single host reserved to prove root behaviour.
+ */
+export const isSyntheticRootTestHost = (host: string): boolean =>
+  isSyntheticHost(host, isRehearsalRootLabel);
+
 const isSyntheticEventHostClass = (host: string): boolean => isSyntheticHost(host, isRehearsalEventLabel);
 const ROOT_HOSTS = new Map<string, { edition: RegistryEdition; pathNamespace: PathNamespace }>([
   ['fiveacross.app', { edition: 'fiveacross', pathNamespace: 'fiveacross.app' }],
@@ -125,11 +135,11 @@ export function isCanonicalRevision(value: unknown): value is string {
 }
 
 export function isSyntheticRegistryHost(host: string): boolean {
-  return isSyntheticEventHostClass(host) || isSyntheticRootHostClass(host);
+  return isSyntheticEventHostClass(host) || isSyntheticRootTestHost(host);
 }
 
 export function isRegistryRootHost(host: string): boolean {
-  return ROOT_HOSTS.has(host) || isSyntheticRootHostClass(host);
+  return ROOT_HOSTS.has(host) || isSyntheticRootTestHost(host);
 }
 
 /**
@@ -195,7 +205,7 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     // without this line the branch below would read it as an ordinary labelled
     // Event address and admit a route whose slug happened to match — letting
     // the one host reserved to prove root behaviour serve an Event instead.
-    if (isSyntheticRootHostClass(host)) {
+    if (isSyntheticRootTestHost(host)) {
       throw new Error('the root-test rehearsal class accepts no route projection');
     }
     const classified = classifyHost(host);
@@ -225,7 +235,7 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
   if (value.kind === 'root') {
     if (!hasExactKeys(value, ROOT_KEYS)) throw new Error('invalid root fields');
     if (!isReplicaRootMarker(value.root)) throw new Error('invalid root marker');
-    const syntheticRoot = isSyntheticRootHostClass(host);
+    const syntheticRoot = isSyntheticRootTestHost(host);
     const rootClass = ROOT_HOSTS.get(host);
     if (!syntheticRoot && rootClass === undefined) throw new Error('invalid root shape');
     if (syntheticRoot) {
