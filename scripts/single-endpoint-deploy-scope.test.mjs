@@ -854,6 +854,75 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("refuses an artifact that reads the runtime config through its descriptor", async () => {
+    // A descriptor read hands the value over as well as a plain `get` does
+    // (Codex P2, round 13), so the env watcher traps that form too.
+    await withPrewrittenArtifact(
+      [
+        'const d = Object.getOwnPropertyDescriptor(process.env, "CLOUD_RUNTIME_CONFIG");',
+        'const runtime = JSON.parse((d && d.value) || "{}");',
+        "exports.daily = runtime.someLegacyNamespace ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("sees an export mutation queued in a resolved promise", async () => {
+    // `loadStack` awaits an async `loadModule` before calling `extractStack`,
+    // so a microtask-queued mutation has already run when the deploy walks the
+    // exports. Walking synchronously would report the pre-mutation surface
+    // (Codex P2, round 13).
+    await withPrewrittenArtifact(
+      [
+        "exports.daily = endpoint();",
+        "Promise.resolve().then(() => { exports.daily = { submitBugReport: endpoint() }; });",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses an artifact that tries to forge its own inventory", async () => {
+    // The artifact runs inside the walker, so module-scope code can replace
+    // `fs.writeFileSync` and write whatever answer it likes. The walker holds
+    // the originals from before the load, so the forgery lands nowhere and the
+    // real (grouped) surface is what gets reported (Codex P2, round 13).
+    await withPrewrittenArtifact(
+      [
+        'const fs = require("node:fs");',
+        "const real = fs.writeFileSync;",
+        "fs.writeFileSync = (file, data) => real.call(fs, file, \"ok\\n\\nendpoints\\ndaily\\ngroups\\n\");",
+        "exports.daily = { submitBugReport: endpoint() };",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses an artifact that branches on the discovery PORT", async () => {
+    // The default discovery path serves on a PORT (`serveAdmin`), so an
+    // environment without one is not the environment Firebase discovers under
+    // (Codex P2, round 13).
+    await withPrewrittenArtifact(
+      "exports.daily = process.env.PORT ? { submitBugReport: endpoint() } : endpoint();",
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it("refuses an artifact that throws while loading", async () => {
     await withPrewrittenArtifact(
       'throw new Error("entrypoint blew up");',
@@ -1335,6 +1404,44 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
       },
       async (configPath) => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("relinks a nested node_modules so it does not resolve to the outer one", async () => {
+    // The copy skips `node_modules` at every depth; relinking only the source
+    // root's would let a nested package resolve an OUTER version of its
+    // dependency, and a different version can export a different surface
+    // (Codex P2, round 13). Here only the nested copy exports the group.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/node_modules/shared/package.json": JSON.stringify({
+            name: "shared",
+            version: "1.0.0",
+            main: "index.js",
+          }),
+          "functions/node_modules/shared/index.js": "exports.grouped = false;\n",
+          "functions/nested/node_modules/shared/package.json": JSON.stringify({
+            name: "shared",
+            version: "2.0.0",
+            main: "index.js",
+          }),
+          "functions/nested/node_modules/shared/index.js": "exports.grouped = true;\n",
+          "functions/nested/decide.js": 'module.exports = require("shared").grouped;\n',
+          "functions/lib/index.js": artifact(
+            [
+              'const grouped = require("../nested/decide.js");',
+              "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
       },
     );
   });

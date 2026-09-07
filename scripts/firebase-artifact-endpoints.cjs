@@ -60,6 +60,21 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+/**
+ * The primitives this script reports with, captured BEFORE any customer code
+ * runs.
+ *
+ * The artifact is loaded into this process, so module-scope code can replace
+ * anything shared — `fs.writeFileSync`, `JSON.stringify`, `Array.prototype.join`
+ * — and forge the "authoritative" answer the caller trusts (Codex P2, round
+ * 13). Holding the originals, and reporting as plain text built from primitive
+ * strings rather than through a serializer, leaves nothing for a later
+ * redefinition to reach.
+ */
+const writeFileSync = fs.writeFileSync;
+const joinArray = Array.prototype.join;
+const exitProcess = process.exit;
+
 // A group id nested this deep is not a real Functions surface; it is a runaway
 // object graph. The SDK's loader has no such bound and would recurse forever.
 const MAX_DEPTH = 32;
@@ -80,20 +95,70 @@ const MAX_DEPTH = 32;
  */
 let readRuntimeConfig = false;
 
+/**
+ * Whether the code that just touched `process.env` is the ARTIFACT's own.
+ *
+ * Dependencies copy the environment wholesale — `{...process.env}` reads every
+ * key's descriptor — and those reads are not branches on the deployed surface.
+ * Counting them would refuse every codebase with a config library in its graph.
+ * A branch that could change what gets deployed lives in the codebase's own
+ * compiled files, so the caller's frame is the discriminator.
+ */
+function calledFromArtifact() {
+  const sourceDir = artifactRoot();
+  if (!sourceDir) return false;
+  const stack = new Error().stack ?? "";
+  for (const line of stack.split("\n").slice(1)) {
+    const match = /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line);
+    if (!match) continue;
+    const file = match[1];
+    if (file === __filename) continue;
+    if (!file.startsWith(sourceDir)) return false;
+    return !file.split(path.sep).includes("node_modules");
+  }
+  return false;
+}
+
+let artifactRootCache;
+function artifactRoot() {
+  if (artifactRootCache === undefined) {
+    try {
+      // Realpath, because Node reports module filenames resolved (on macOS the
+      // scratch dir's `/var/…` is `/private/var/…`) and a prefix test against
+      // the unresolved path would silently never match — failing OPEN.
+      artifactRootCache = fs.realpathSync(path.resolve(process.argv[2] ?? ""));
+    } catch {
+      artifactRootCache = null;
+    }
+  }
+  return artifactRootCache;
+}
+
 function watchRuntimeConfigReads() {
   const env = process.env;
+  // Every way of getting at the value, not just `get`: a descriptor read hands
+  // it over just as well (Codex P2, round 13).
+  const noticed = (property) => {
+    if (property !== "CLOUD_RUNTIME_CONFIG") return;
+    if (!calledFromArtifact()) return;
+    readRuntimeConfig = true;
+  };
   Object.defineProperty(process, "env", {
     configurable: true,
     enumerable: true,
     writable: true,
     value: new Proxy(env, {
       get(target, property) {
-        if (property === "CLOUD_RUNTIME_CONFIG") readRuntimeConfig = true;
+        noticed(property);
         return target[property];
       },
       has(target, property) {
-        if (property === "CLOUD_RUNTIME_CONFIG") readRuntimeConfig = true;
+        noticed(property);
         return property in target;
+      },
+      getOwnPropertyDescriptor(target, property) {
+        noticed(property);
+        return Reflect.getOwnPropertyDescriptor(target, property);
       },
     }),
   });
@@ -141,14 +206,27 @@ function walkExports(moduleExports, endpoints, groups, prefix, depth, ancestors)
 
 const outFile = process.argv[3];
 
-function emit(result) {
-  fs.writeFileSync(outFile, JSON.stringify(result));
+/**
+ * The report format is deliberately not JSON: a first line of `ok` or
+ * `refused`, then one id per line under `endpoints`/`groups` headers, or the
+ * reason after `refused`. Ids are primitive strings straight off
+ * `Object.entries`, so nothing in the payload can be hijacked by a redefined
+ * serializer.
+ */
+function emit(status, detail, endpoints, groups) {
+  const lines = [status, detail ?? ""];
+  if (status === "ok") {
+    lines.push("endpoints", joinArray.call(endpoints ?? [], "\n"), "groups", joinArray.call(groups ?? [], "\n"));
+  }
+  writeFileSync(outFile, joinArray.call(lines, "\n"));
 }
 
-function main() {
+const refuse = (reason) => emit("refused", reason);
+
+async function main() {
   const sourceDir = process.argv[2];
   if (!sourceDir || !outFile) {
-    if (outFile) emit({ authoritative: false, reason: "no source directory given" });
+    if (outFile) refuse("no source directory given");
     return;
   }
 
@@ -165,21 +243,24 @@ function main() {
   try {
     // `require(<dir>)` is what the SDK's own `loadModule` does, so Node's
     // directory resolution (`package.json.main`, else `index.js`) picks the
-    // same artifact the deploy loads.
-    moduleExports = require(path.resolve(sourceDir));
+    // same artifact the deploy loads. The AWAIT matters: `loadStack` awaits an
+    // async `loadModule` before calling `extractStack`, so a mutation queued in
+    // an already-resolved promise has run by the time the deploy walks the
+    // exports. Walking synchronously would miss it (Codex P2, round 13).
+    moduleExports = await (async () => require(path.resolve(sourceDir)))();
   } catch (error) {
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
     const code = error && error.code ? `${error.code}: ` : "";
     const message = error instanceof Error ? error.message : String(error);
-    emit({ authoritative: false, reason: `artifact did not load — ${code}${message}` });
+    refuse(`artifact did not load — ${code}${message}`);
     return;
   }
   process.stdout.write = stdoutWrite;
   process.stderr.write = stderrWrite;
 
   if (!isObject(moduleExports) || Array.isArray(moduleExports)) {
-    emit({ authoritative: false, reason: "artifact's top-level exports are not an object" });
+    refuse("artifact's top-level exports are not an object");
     return;
   }
 
@@ -189,32 +270,31 @@ function main() {
     walkExports(moduleExports, endpoints, groups, "", 0, new Set());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    emit({ authoritative: false, reason: `export walk failed — ${message}` });
+    refuse(`export walk failed — ${message}`);
     return;
   }
   if (readRuntimeConfig) {
-    emit({
-      authoritative: false,
-      reason:
-        "the artifact consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
+    refuse(
+      "the artifact consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
         "namespaces only the deploy's authenticated fetch can supply",
-    });
+    );
     return;
   }
-  emit({ authoritative: true, endpoints, groups });
+  emit("ok", "", endpoints, groups);
 }
 
-try {
-  main();
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  try {
-    emit({ authoritative: false, reason: `unexpected failure — ${message}` });
-  } catch {
-    // An unwritable output path is itself a fail-closed answer: the caller
-    // finds no file and refuses.
-  }
-}
-// Customer code can leave timers or handles open; the answer is already
-// written, so exit rather than let the child outlive its usefulness.
-process.exit(0);
+main()
+  .catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      refuse(`unexpected failure — ${message}`);
+    } catch {
+      // An unwritable output path is itself a fail-closed answer: the caller
+      // finds no file and refuses.
+    }
+  })
+  .then(() => {
+    // Customer code can leave timers or handles open; the answer is already
+    // written, so exit rather than let the child outlive its usefulness.
+    exitProcess.call(process, 0);
+  });

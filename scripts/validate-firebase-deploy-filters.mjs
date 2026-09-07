@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -439,15 +439,25 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
   };
 
   const copySourceDir = async (realDir, scratchDir) => {
+    /** Every `node_modules` the copy skipped, at whatever depth it sat. */
+    const skipped = [];
     await cp(realDir, scratchDir, {
       recursive: true,
       dereference: false,
       // `node_modules` is symlinked instead: copying it would cost minutes,
-      // and the deploy's own build reads the very same tree.
-      filter: (entry) => basename(entry) !== "node_modules",
+      // and the deploy's own build reads the very same tree. EVERY one is
+      // relinked, not just the source root's — a nested package resolves its
+      // dependencies from its own tree, and dropping it would silently shift
+      // resolution to an outer version (Codex P2, round 13).
+      filter: (entry) => {
+        if (basename(entry) !== "node_modules") return true;
+        skipped.push(entry);
+        return false;
+      },
     });
-    const modules = join(realDir, "node_modules");
-    if (existsSync(modules)) await linkTo(modules, join(scratchDir, "node_modules"));
+    for (const modules of skipped) {
+      await linkTo(modules, join(scratchDir, relative(realDir, modules)));
+    }
   };
 
   const overlay = async (realDir, scratchDir, remaining) => {
@@ -501,6 +511,13 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
  * which takes the same (false) branch under both probes. No offline classifier
  * can close that one: the real value is precisely what it cannot obtain.
  */
+/**
+ * The port `serveAdmin` would hand the discovery process. The CLI picks a free
+ * one at random; only its PRESENCE is reproducible, and nothing may bind it
+ * here, so a fixed placeholder is both sufficient and honest.
+ */
+const DISCOVERY_PORT = "8080";
+
 const CONFIG_PROBES = Object.freeze([
   Object.freeze({ label: "minimal", extraFirebaseConfig: {}, extraRuntimeConfig: {} }),
   Object.freeze({
@@ -552,6 +569,14 @@ function discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe
     }),
     GOOGLE_CLOUD_QUOTA_PROJECT: project,
     FUNCTIONS_CONTROL_API: "true",
+    // `discoverBuild` picks one of two shapes and the delegate exports a
+    // different control variable for each: the default HTTP path serves on a
+    // PORT, while FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH switches it to a
+    // one-shot process writing a manifest. Mirror whichever the deploy will
+    // take, rather than neither (Codex P2, round 13).
+    ...(process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH
+      ? { FUNCTIONS_MANIFEST_OUTPUT_PATH: join(scratchProject, "functions.yaml") }
+      : { PORT: DISCOVERY_PORT }),
     HOME: process.env.HOME,
     PATH: process.env.PATH,
     NODE_ENV: process.env.NODE_ENV,
@@ -764,6 +789,28 @@ async function buildAndInventoryProject({
 }
 
 /**
+ * Read the walker's report.
+ *
+ * Plain text, not JSON, because the walker builds it from captured primitives:
+ * the artifact runs in that process and could otherwise redefine a serializer
+ * and forge an authoritative answer (Codex P2, round 13).
+ */
+function parseWalkReport(text) {
+  const lines = text.split("\n");
+  if (lines[0] !== "ok") return { ok: false, reason: lines.slice(1).join("\n").trim() };
+  const endpointsAt = lines.indexOf("endpoints", 2);
+  const groupsAt = lines.indexOf("groups", endpointsAt + 1);
+  if (endpointsAt === -1 || groupsAt === -1) return { ok: false, reason: "malformed walk report" };
+  const ids = (from, to) =>
+    lines.slice(from, to).flatMap((line) => (line === "" ? [] : [line]));
+  return {
+    ok: true,
+    endpoints: ids(endpointsAt + 1, groupsAt),
+    groups: ids(groupsAt + 1, lines.length),
+  };
+}
+
+/**
  * Load one built codebase in a sandboxed child and read back its endpoint ids,
  * once per config probe.
  *
@@ -822,20 +869,16 @@ async function inventoryCodebaseArtifact({
     );
     let reported;
     try {
-      reported = JSON.parse(await readFile(outFile, "utf8"));
+      reported = parseWalkReport(await readFile(outFile, "utf8"));
     } catch {
       return refused(
         `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
       );
     }
-    if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
-      return refused(reported?.reason ?? "the artifact walk was inconclusive");
+    if (!reported.ok) {
+      return refused(reported.reason || "the artifact walk was inconclusive");
     }
-    results.push({
-      probe,
-      endpoints: reported.endpoints,
-      groups: Array.isArray(reported.groups) ? reported.groups : [],
-    });
+    results.push({ probe, endpoints: reported.endpoints, groups: reported.groups });
   }
 
   const [first, ...rest] = results;
