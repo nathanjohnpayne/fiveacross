@@ -37,6 +37,8 @@ const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
   'not-closing': 'Play reopened before the record was taken—nothing was frozen.',
   'quiesce-changed':
     'Play was reopened and shut again while the record was being taken, so nothing was frozen. Archive again from where the Event stands now.',
+  'config-changed':
+    'The Event settings changed while the record was being taken, so the standings were read against settings the freeze no longer matches. Nothing was frozen—archive again.',
   'claims-pending':
     'A claim arrived as play was closing, so nothing was frozen. Resolve the Review queue, then archive again.',
   'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
@@ -198,13 +200,20 @@ export default function ArchiveEvent({
     // deliberately does NOT reopen: that Event was already shut when the Admin
     // arrived, and `Reopen play` sits beside the button they pressed.)
     //
+    // `config-changed` joins them for the same reason: the Event configuration
+    // the snapshot was defined by moved underneath this call, this call is what
+    // shut the Event, and the Admin cannot even see the mismatch from a shut
+    // Event (Codex P2, PR #1139).
+    //
     // `quiesce-changed` is deliberately NOT in that set (Codex P1, PR #1139).
     // It means the closing state now in force is a DIFFERENT one — play was
     // reopened and shut again underneath this call — so the Event standing
     // there is not the one this handler shut, and reopening it would clear
     // someone else's quiesce out from under their own in-flight freeze. The
     // Event is reported and left exactly as found.
-    if (outcome === 'claims-pending' || outcome === 'too-large') await abandonArchive();
+    if (outcome === 'claims-pending' || outcome === 'too-large' || outcome === 'config-changed') {
+      await abandonArchive();
+    }
     setResult(outcome);
   };
 

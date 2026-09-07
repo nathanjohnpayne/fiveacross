@@ -139,6 +139,69 @@ export function isEventArchiving(
 }
 
 /**
+ * JSON with object keys in a fixed order, so two reads of an UNCHANGED document
+ * always serialize identically. `JSON.stringify` follows insertion order, which
+ * the Firestore SDK does not promise to reproduce across two decodes of the
+ * same document — and a comparison that can report a spurious change would
+ * abort archives at random.
+ */
+function stableJson(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(',')}}`;
+}
+
+/**
+ * A fingerprint of the Event configuration THE SNAPSHOT IS DEFINED BY (#134,
+ * Codex P2 on PR #1139).
+ *
+ * `archiveEvent` reads the Claim queue, the roster and the Day honour pins
+ * against the Event it PRE-READ, and then builds the record against the Event
+ * its transaction reads. Between the two, an Admin can change the Event's
+ * configuration — the quiesce shuts gameplay, not administration — and the
+ * freeze would then combine reads taken for one configuration with a record
+ * built for another. Two concrete ways that goes wrong:
+ *
+ *  - **`claimMode`.** The drain gate is scoped to `claimsQueueOpen`, so a queue
+ *    read while the Event was on `honor` passes VACUOUSLY. Flipping to
+ *    `admin_confirmed` afterwards makes every one of those pending Claims
+ *    blocking — and unresolvable, because the freeze denies both writes their
+ *    resolution consists of.
+ *  - **`days`.** The schedule decides which Day honour pins were fetched at
+ *    all, which Days are Tutorial (excluded from the headline honour), where a
+ *    missing Standings Freeze is derived from, and the label each frozen
+ *    honour chip carries. A schedule edited after the pins were read produces a
+ *    record built from pins for a schedule that no longer exists.
+ *
+ * `standingsFreezeAt` and `frozenAt` ride along because they resolve the
+ * honour cutoff the same reads were selected under.
+ *
+ * `bannedUids` is deliberately OUT. Moderation is not a gameplay write and
+ * stays available through the quiesce on purpose; a ban is applied to the rows
+ * the record keeps rather than deciding which rows were read, so a ban landing
+ * mid-snapshot changes what the record CONTAINS in exactly the way it should.
+ * Aborting on it would make the freeze race the one administrative action the
+ * spec keeps open across it.
+ */
+export function archiveSnapshotFingerprint(
+  event:
+    | Partial<Pick<EventDoc, 'claimMode' | 'days' | 'standingsFreezeAt' | 'frozenAt'>>
+    | null
+    | undefined,
+): string {
+  return stableJson({
+    claimMode: event?.claimMode ?? null,
+    days: Array.isArray(event?.days) ? event.days : [],
+    standingsFreezeAt: event?.standingsFreezeAt ?? null,
+    frozenAt: event?.frozenAt ?? null,
+  });
+}
+
+/**
  * Is this a `uid` the record can carry? (#134, Codex P2 on PR #1139.)
  *
  * A row with no usable id is unusable in every direction the archive needs: it

@@ -10,7 +10,7 @@ import { honorDisplayName, markerDisplayName } from './attribution';
 import { claimsAwaitingAdmin, isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import { draftEventArchive } from './eventArchive';
+import { archiveSnapshotFingerprint, draftEventArchive } from './eventArchive';
 import { claimsCol, dayMetaRef, playersCol } from './paths';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
@@ -654,16 +654,20 @@ export type AbandonArchiveResult = 'reopened' | 'already-archived' | 'no-event';
  *  abandoned under this call), which the rules refuse to archive from;
  *  `quiesce-changed` means play was reopened and shut AGAIN while the record
  *  was being read, so the closing state the snapshot describes is not the one
- *  the write would land on (Codex P1, PR #1139); `claims-pending` means a Claim
- *  was still awaiting an Admin when the Event shut, which the freeze would make
- *  unresolvable; `too-large` means the record built from the server re-read
- *  would not fit on the Event document. All three write NOTHING (#134). */
+ *  the write would land on (Codex P1, PR #1139); `config-changed` means the
+ *  Event configuration the snapshot was defined by moved underneath it, so the
+ *  reads and the record no longer describe the same Event (Codex P2, PR #1139);
+ *  `claims-pending` means a Claim was still awaiting an Admin when the Event
+ *  shut, which the freeze would make unresolvable; `too-large` means the record
+ *  built from the server re-read would not fit on the Event document. All four
+ *  write NOTHING (#134). */
 export type ArchiveEventResult =
   | 'archived'
   | 'already-archived'
   | 'no-event'
   | 'not-closing'
   | 'quiesce-changed'
+  | 'config-changed'
   | 'claims-pending'
   | 'too-large';
 
@@ -806,9 +810,17 @@ export async function abandonArchive(): Promise<AbandonArchiveResult> {
  * inside the transaction — the `setDayTheme`/`confirmClaim` discipline — so the
  * ban roster and schedule the record freezes against are the stored ones.
  *
- * TWO THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and both
- * report instead of throwing so the console can say what happened and put play
- * back (Codex P2, PR #1139):
+ * FOUR THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
+ * reports instead of throwing so the console can say what happened and, where
+ * this call is what shut the Event, put play back (Codex P1+P2, PR #1139):
+ *
+ *  - `quiesce-changed` — play was reopened and shut AGAIN under this call, so
+ *    the closing state the reads describe is not the one the write would land
+ *    on. This is the ONE refusal that leaves the Event shut: that closing state
+ *    belongs to whoever took it.
+ *  - `config-changed` — the Event configuration the snapshot is defined by
+ *    (`claimMode`, `days`, the freeze boundary) moved between the pre-read and
+ *    the commit, so the reads and the record would describe different Events.
  *
  *  - `claims-pending` — a Claim was still awaiting an Admin when the Event shut.
  *    The freeze never reads that collection, so a claim resolved after it is not
@@ -850,6 +862,16 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
   // mints one, so reopening and archiving again is the way through.
   const quiesce = preData.archiveToken;
   if (!usableArchiveToken(quiesce)) return 'quiesce-changed';
+  // …and the CONFIGURATION those reads are about to be taken under (Codex P2,
+  // PR #1139). The quiesce shuts gameplay, not administration, so an Admin can
+  // still change the Event between this read and the commit — and the drain
+  // gate below is evaluated against THIS document while the record is built
+  // against the transaction's. A `claimMode` flipped from `honor` afterwards
+  // turns a gate that passed vacuously into a queue full of Claims the freeze
+  // has just made unresolvable; an edited `days` leaves the record built from
+  // honour pins fetched for a schedule that no longer exists. The transaction
+  // refuses rather than combining the two.
+  const configAtRead = archiveSnapshotFingerprint(preData);
 
   // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
   // #1139). The console's own gate reads a passive listener, and a Claim can
@@ -909,6 +931,13 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
     // reopen an Event underneath their in-flight freeze. The console's
     // closing-state surface is where that Event is picked back up.
     if (data.archiveToken !== quiesce) return 'quiesce-changed';
+    // The snapshot-defining configuration, held across the same window. Every
+    // read above describes the Event under `configAtRead`; this record would be
+    // built under whatever the transaction found. `bannedUids` is deliberately
+    // outside the fingerprint — moderation stays open through the quiesce on
+    // purpose, and a ban is applied to the rows the record keeps rather than
+    // deciding which rows were read (see `archiveSnapshotFingerprint`).
+    if (archiveSnapshotFingerprint(data) !== configAtRead) return 'config-changed';
     const archivedAt = params.now ?? Date.now();
     const draft = draftEventArchive({
       players,

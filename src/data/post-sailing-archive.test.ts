@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  archiveSnapshotFingerprint,
   buildEventArchive,
   draftEventArchive,
   isEventArchived,
@@ -778,6 +779,107 @@ describe('the quiesce is identified, and the snapshot is bound to the one it rea
     };
     expect(await archiveEvent({ now: 5 })).toBe('not-closing');
     expect(A.updates).toEqual([]);
+  });
+});
+
+// Codex P2, PR #1139 round 4. The quiesce shuts GAMEPLAY, not administration —
+// deliberately, so an Admin can still moderate and still reopen. That leaves the
+// Event's own configuration movable between `archiveEvent`'s pre-read (which the
+// drain gate is evaluated against, and which decides which Day honour pins are
+// fetched) and its transaction (which the record is built against), so a freeze
+// that checked neither would combine reads taken for one configuration with a
+// record built for another.
+describe('archiveEvent — the snapshot configuration is held across the reads', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 'quiesce-1',
+    claimMode: 'honor',
+    days: [mkDay(0), mkDay(1)],
+    bannedUids: [],
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.updates = [];
+    A.serverReads = [];
+    A.betweenReadsAndTx = null;
+  });
+
+  it('freezes when the configuration held (the control)', async () => {
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+  });
+
+  it('ABORTS when Claim Mode flips mid-snapshot, and writes nothing', async () => {
+    // The drain gate is scoped to `claimsQueueOpen`, so a queue read on an
+    // `honor` Event passes VACUOUSLY. Flipping to `admin_confirmed` afterwards
+    // makes every one of those pending Claims blocking — and unresolvable,
+    // because the freeze denies both writes their resolution consists of.
+    A.claims = [{ status: 'pending' }];
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ claimMode: 'admin_confirmed' });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when the schedule is edited mid-snapshot, and writes nothing', async () => {
+    // `days` decides which Day honour pins were fetched at all, which Days are
+    // Tutorial, where a missing Standings Freeze is derived from, and the label
+    // each frozen honour chip carries.
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ days: [mkDay(0, { theme: 'get-sporty' }), mkDay(1)] });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when a Day is added or removed mid-snapshot', async () => {
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ days: [mkDay(0), mkDay(1), mkDay(2)] });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when the Standings Freeze moves mid-snapshot', async () => {
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ standingsFreezeAt: 9_999 });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('does NOT abort on a ban landing mid-snapshot — moderation stays open', async () => {
+    // The one administrative action the spec deliberately keeps available
+    // across the quiesce. A ban is applied to the rows the record keeps rather
+    // than deciding which rows were read, so it changes what the record
+    // CONTAINS in exactly the way it should; aborting would make the freeze
+    // race a takedown.
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ bannedUids: ['alice'] });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    expect((A.updates[0].archive as { standings: unknown[] }).standings).toEqual([]);
+  });
+
+  it('does not mistake a re-serialized document for a changed one', async () => {
+    // The fingerprint sorts object keys, because `JSON.stringify` follows
+    // insertion order and the SDK promises nothing about reproducing it across
+    // two decodes — a comparison that could report a spurious change would
+    // abort archives at random.
+    const a = { claimMode: 'honor', days: [{ index: 0, theme: 'x', unlockAt: 1 }] };
+    const b = { days: [{ unlockAt: 1, theme: 'x', index: 0 }], claimMode: 'honor' };
+    expect(archiveSnapshotFingerprint(a as never)).toBe(archiveSnapshotFingerprint(b as never));
+    // …and a real edit still moves it.
+    expect(archiveSnapshotFingerprint({ ...a, claimMode: 'admin_confirmed' } as never)).not.toBe(
+      archiveSnapshotFingerprint(a as never),
+    );
   });
 });
 

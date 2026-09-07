@@ -733,6 +733,46 @@ describe('the archive control drains the claim queue first', () => {
     );
   });
 
+  // Codex P2, PR #1139 round 4. The quiesce shuts gameplay, not administration,
+  // so the Event's own configuration can move between the reads the record is
+  // taken from and the transaction that writes it. This handler is what shut
+  // the Event, so it is what puts play back.
+  it('reopens play when the Event settings move between the tap and the close', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'config-changed';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /The Event settings changed while the record was being taken/,
+    );
+  });
+
+  it('leaves an already-closing Event shut when the settings move under it', async () => {
+    // Same refusal from the closing-state surface, which deliberately does not
+    // reopen: that Event was already shut when the Admin arrived, and `Reopen
+    // play` sits beside the button they pressed.
+    const user = userEvent.setup();
+    H.event = closingEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'config-changed';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    expect(H.writes).toEqual(['archive']);
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+  });
+
   // Codex P1, PR #1139 round 4. `quiesce-changed` is the one refusal that must
   // NOT reopen play: the closing state now in force belongs to whoever took it
   // — play was reopened and shut again underneath this call — so clearing it
