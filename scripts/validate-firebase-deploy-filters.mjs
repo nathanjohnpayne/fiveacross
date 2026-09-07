@@ -504,6 +504,19 @@ function selectorIsProvableSingleEndpoint(selector, inventory) {
   return entry.endpoints.has(name);
 }
 
+/**
+ * Codebase precedence, checked BEFORE any endpoint-name branch. The pinned CLI
+ * resolves a bare `functions:<name>` whose name is a CONFIGURED codebase to
+ * that codebase's entire surface (`functionsDeployHelper.js:43-53`), even when
+ * the same string is also the id of a protected endpoint. Such a surface may
+ * carry any protected callable, so the caller treats it as an unfamiliar group.
+ */
+function selectorNamesConfiguredCodebase(selector, inventory) {
+  if (!selector.startsWith("functions:")) return false;
+  const tail = selector.slice("functions:".length);
+  return tail !== "" && !tail.includes(":") && inventory.codebaseNames.has(tail);
+}
+
 async function eventInvitationServiceInventory(configSource, configPath) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -569,6 +582,22 @@ function classifyInvokerScope(
     let fullEventInvitationScopeNamed = false;
     let unknownFunctionsSelectorNamed = false;
     const namedEventInvitationServices = new Set();
+    // An unfamiliar Functions selector may release anything, so every invoker
+    // not already selected by an explicit branch turns conservative.
+    const selectEveryInvokerConservatively = () => {
+      functionsAttempted = true;
+      unknownFunctionsSelectorNamed = true;
+      if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
+      if (!emailUnsubscribeInvokerSelected)
+        emailUnsubscribeInvokerConservative = true;
+      if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
+      if (!eventInvitationsInvokerSelected)
+        eventInvitationsInvokerConservative = true;
+      bugReportInvokerSelected = true;
+      emailUnsubscribeInvokerSelected = true;
+      authHandoffInvokerSelected = true;
+      eventInvitationsInvokerSelected = true;
+    };
 
     for (const selector of only.split(",")) {
       if (selector === "hosting" || selector.startsWith("hosting:")) {
@@ -586,6 +615,13 @@ function classifyInvokerScope(
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
+      } else if (
+        selectorNamesConfiguredCodebase(selector, singleEndpointExports)
+      ) {
+        // A configured codebase that happens to share a protected endpoint's
+        // name deploys its whole surface, not that endpoint: precedence must
+        // win before the name branches below can read it as one callable.
+        selectEveryInvokerConservatively();
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
         functionsAttempted = true;
         bugReportInvokerSelected = true;
@@ -631,17 +667,7 @@ function classifyInvokerScope(
           // here — each has its own branch above.
           continue;
         }
-        unknownFunctionsSelectorNamed = true;
-        if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
-        if (!emailUnsubscribeInvokerSelected)
-          emailUnsubscribeInvokerConservative = true;
-        if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
-        if (!eventInvitationsInvokerSelected)
-          eventInvitationsInvokerConservative = true;
-        bugReportInvokerSelected = true;
-        emailUnsubscribeInvokerSelected = true;
-        authHandoffInvokerSelected = true;
-        eventInvitationsInvokerSelected = true;
+        selectEveryInvokerConservatively();
       }
     }
 

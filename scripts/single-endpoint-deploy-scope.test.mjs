@@ -302,6 +302,47 @@ describe("codebase precedence and per-codebase keying", () => {
     );
   });
 
+  it("applies codebase precedence before the protected-name branches", async () => {
+    // A configured codebase named `submitBugReport` makes
+    // `--only functions:submitBugReport` deploy that codebase's WHOLE surface
+    // (here it also carries a handoff callable), not the one protected endpoint
+    // the name suggests. The explicit endpoint branch must not see it first,
+    // or the other invokers stay unselected while their services are released.
+    await withCodebases(
+      {
+        submitBugReport: [
+          BUILDER_IMPORT,
+          "export const submitBugReport = onSchedule('every day 00:00', () => {});",
+          "export const mintAuthHandoff = onSchedule('every day 00:00', () => {});",
+        ].join("\n"),
+      },
+      async (configPath) => {
+        const result = await classify(
+          ["--only", "functions:submitBugReport"],
+          configPath,
+        );
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+    // Control: with no such codebase the same selector is still the one
+    // protected endpoint, selecting only its own invoker, non-conservatively.
+    await withCodebases(
+      { default: endpoint("unrelated") },
+      async (configPath) => {
+        const result = await classify(
+          ["--only", "functions:submitBugReport"],
+          configPath,
+        );
+        expect(result).toMatchObject({
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          authHandoffInvokerSelected: false,
+          emailUnsubscribeInvokerSelected: false,
+        });
+      },
+    );
+  });
+
   it("does not let one codebase's export vouch for another codebase's selector", async () => {
     // `endpointMatchesFilter` rejects an endpoint whose codebase differs from
     // the filter's, so a union across codebases would be unsound.
