@@ -1787,7 +1787,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     const state = beginAdmissionIfNeeded(user, eventId);
-    if (!mayDealUnderAdmission(state)) return;
+    if (!mayDealUnderAdmission(state)) {
+      // `retryBootstrap` leaves `dealing` true for the deal it expects to
+      // follow. When admission holds that deal at a state the Player must act
+      // on (Retry) or cannot act on at all (blocked), nothing else would clear
+      // the flag, and the invitation Retry surface would render its one button
+      // disabled forever (Codex P1 on #1131). `pending` keeps it: the shell is
+      // on the pass-check loading state and a redemption IS in flight.
+      if (state.kind === 'retryable' || state.kind === 'blocked') setDealingFor(eventId, false);
+      return;
+    }
     // Deal once per (visit, admission answer, gate inputs). The coordinator
     // answers synchronously, so the run triggered by an Event or account
     // change already dealt from its answer; the run the admission mirror then
@@ -2332,7 +2341,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const sameOriginHandler =
         auth.config?.authDomain !== undefined &&
         auth.config.authDomain === window.location.hostname;
-      if (sameOriginHandler) {
+      // A pending Invitation that only memory holds (`durable: false`: both
+      // browser stores refused the write) would not survive a top-level
+      // redirect — the return would classify the visit `clear` and deal
+      // without ever redeeming it (Codex P1 on #1131). The capture seam
+      // leaves that recovery choice to callers that leave the document, and
+      // this is the one: keep the document alive by signing in through the
+      // popup instead. A popup that fails surfaces as a sign-in error with
+      // the record still in memory, which is the fail-closed direction.
+      const invitationHeldInMemoryOnly =
+        readPendingEventInvitation({ origin: window.location.origin, now: Date.now() })?.durable ===
+        false;
+      if (sameOriginHandler && !invitationHeldInMemoryOnly) {
         // One top-level redirect on EVERY surface whose OAuth handler is
         // same-origin (#765): the tap navigates this tab or app window to
         // Google, and Google returns the Player to the page they started from
@@ -2385,8 +2405,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Cross-origin handler only — local development and the Auth Emulator
-      // (#765). A redirect against a foreign authDomain is exactly the
+      // Cross-origin handler — local development and the Auth Emulator (#765)
+      // — or a same-origin surface whose pending Invitation lives in memory
+      // only (above). A redirect against a foreign authDomain is exactly the
       // storage-partition failure the same-origin pin exists to avoid (#161),
       // and the e2e harness drives the emulator's account-chooser popup.
       try {
@@ -2454,6 +2475,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const canRenderEventContent =
     user != null && (attestationRequired ? attested === true : profileReady);
 
+  const admissionAllowsEventWatchers = mayDealUnderAdmission(admission);
+
   return (
     <AuthContext.Provider
       value={{
@@ -2486,14 +2509,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           Deliberately NOT gated on `user`, unlike the watchers below it: the
           posture decides what the SIGNED-OUT gate renders. */}
       <AdultContentWatcher />
-      {user && <ConfirmWinMoments />}
+      {/* The three Event watchers below open board, Event, leaderboard and
+          claim subscriptions the moment they mount. A visit that admission
+          still holds — `held`, `pending`, `blocked` — is not a member, so the
+          "whole shell" gate has to cover these provider-level mounts too, not
+          only what App renders below the Router (Codex P1 on #1131). A visit
+          with no Invitation classifies `clear` synchronously at the identity
+          change, so nothing here mounts later than it used to. */}
+      {user && admissionAllowsEventWatchers && <ConfirmWinMoments />}
       {/* The retraction-path fall observer (#479) mounts at the SAME shell spot
           and for the same reason: a published win can stop standing while Board
           is unmounted (a proof deleted from the Feed tab, an admin rejecting a
           confirmed claim), and Board's remount would baseline the fall away.
           Renders nothing; all irreversibility gates live in src/data/moments.ts
           (createRetractionFallObserver). */}
-      {user && <RetractWinMoments />}
+      {user && admissionAllowsEventWatchers && <RetractWinMoments />}
       {/* The pool-recovery auto-retry watcher (#70), mounted HERE — above the tab
           Router, beside the attestation gate — for the same reason ConfirmWinMoments
           is: it must survive the exact recovery path. The Card-route DealError panel
@@ -2503,7 +2533,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           a pool subscription while a pool-shortfall deal error is up (it renders null
           otherwise), and fires the SAME retryDeal a manual Retry does — so it inherits
           #117's online && attestedAuthoritative deal gate rather than re-deriving it. */}
-      {user && <PoolRecoveryWatcher />}
+      {user && admissionAllowsEventWatchers && <PoolRecoveryWatcher />}
       {needsAttestation ? <SignIn /> : children}
     </AuthContext.Provider>
   );

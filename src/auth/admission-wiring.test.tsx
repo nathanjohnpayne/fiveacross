@@ -49,9 +49,27 @@ vi.mock('../firebase', () => ({
     return eventScope.eventId;
   },
 }));
-vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
-vi.mock('../components/RetractWinMoments', () => ({ default: () => null }));
-vi.mock('../components/PoolRecoveryWatcher', () => ({ default: () => null }));
+// Spy mounts: the provider-level Event watchers must not mount for a visit
+// admission still holds (Codex P1 on #1131).
+const watcherMounts = vi.hoisted(() => ({ confirm: 0, retract: 0, pool: 0 }));
+vi.mock('../components/ConfirmWinMoments', () => ({
+  default: () => {
+    watcherMounts.confirm += 1;
+    return null;
+  },
+}));
+vi.mock('../components/RetractWinMoments', () => ({
+  default: () => {
+    watcherMounts.retract += 1;
+    return null;
+  },
+}));
+vi.mock('../components/PoolRecoveryWatcher', () => ({
+  default: () => {
+    watcherMounts.pool += 1;
+    return null;
+  },
+}));
 vi.mock('../data/api', () => ({
   ensureUserProfile: mocks.ensureUserProfile,
   attestAdult: mocks.attestAdult,
@@ -93,12 +111,13 @@ function deferred<T>() {
 }
 
 function Harness() {
-  const { admission, dealing, retryDeal } = useAuth();
+  const { admission, dealing, retryDeal, signIn } = useAuth();
   return (
     <div>
       <span data-testid="admission">{JSON.stringify(admission)}</span>
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <button onClick={retryDeal}>retry deal</button>
+      <button onClick={() => void signIn(false).catch(() => {})}>sign in</button>
     </div>
   );
 }
@@ -133,6 +152,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
   delete (mockedAuth as { currentUser?: unknown }).currentUser;
+  delete (mockedAuth as { config?: unknown }).config;
+  watcherMounts.confirm = 0;
+  watcherMounts.retract = 0;
+  watcherMounts.pool = 0;
   eventScope.eventId = 'event-a';
   emitAuth = () => {};
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
@@ -163,6 +186,36 @@ describe('a visit with no Invitation', () => {
     });
     expect(mocks.redeemEventInvitation).not.toHaveBeenCalled();
     expect(admissionKind()).toBe('clear');
+  });
+});
+
+describe('signing in with an Invitation that only memory holds', () => {
+  it('keeps the document alive with the popup instead of the redirect', async () => {
+    // Both browser stores refused the write, so the record exists only in
+    // memory and a top-level redirect would destroy it (Codex P1 on #1131).
+    (mockedAuth as { config?: { authDomain?: string } }).config = {
+      authDomain: window.location.hostname,
+    };
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: false });
+    mocks.signInWithPopup.mockResolvedValue({});
+
+    mount();
+    await userEvent.click(screen.getByRole('button', { name: 'sign in' }));
+    await waitFor(() => expect(mocks.signInWithPopup).toHaveBeenCalledOnce());
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+  });
+
+  it('still redirects on the same-origin surface when the record is durable', async () => {
+    (mockedAuth as { config?: { authDomain?: string } }).config = {
+      authDomain: window.location.hostname,
+    };
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: true });
+    mocks.signInWithRedirect.mockResolvedValue(undefined);
+
+    mount();
+    await userEvent.click(screen.getByRole('button', { name: 'sign in' }));
+    await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalledOnce());
+    expect(mocks.signInWithPopup).not.toHaveBeenCalled();
   });
 });
 
@@ -325,10 +378,49 @@ describe('a visit carrying a pending Invitation', () => {
     await act(async () => void (await Promise.resolve()));
     expect(mocks.redeemEventInvitation).toHaveBeenCalledTimes(1);
     expect(admissionKind()).toBe('retryable');
+    // The bootstrap retry left `dealing` true for a deal that admission is
+    // holding; the Retry surface's button reads it, so it must be cleared.
+    expect(screen.getByTestId('dealing')).toHaveTextContent('idle');
 
     await userEvent.click(screen.getByRole('button', { name: 'retry deal' }));
     await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
     expect(mocks.redeemEventInvitation).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the provider-level Event watchers unmounted until the visit is admitted', async () => {
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: true });
+    const redemption = deferred<RedeemEventInvitationResult>();
+    mocks.redeemEventInvitation.mockReturnValue(redemption.promise);
+
+    mount();
+    await signInUser();
+    await waitFor(() => expect(admissionKind()).toBe('pending'));
+    expect(watcherMounts).toEqual({ confirm: 0, retract: 0, pool: 0 });
+
+    await act(async () => {
+      redemption.settle({ ok: true, eventId: 'event-a', outcome: 'membership-created' });
+      await redemption.promise;
+    });
+    await waitFor(() => expect(admissionKind()).toBe('admitted'));
+    expect(watcherMounts.confirm).toBeGreaterThan(0);
+    expect(watcherMounts.retract).toBeGreaterThan(0);
+    expect(watcherMounts.pool).toBeGreaterThan(0);
+  });
+
+  it('never mounts the Event watchers for a blocked visit', async () => {
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: true });
+    mocks.redeemEventInvitation.mockResolvedValue({ ok: false, reason: 'invitation-unavailable' });
+    mount();
+    await signInUser();
+    await waitFor(() => expect(admissionKind()).toBe('blocked'));
+    expect(watcherMounts).toEqual({ confirm: 0, retract: 0, pool: 0 });
+  });
+
+  it('mounts the Event watchers at once for a visit with no Invitation', async () => {
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+    expect(watcherMounts.confirm).toBeGreaterThan(0);
   });
 
   it('deals exactly once for the next Event after an admitted visit switches Events', async () => {
