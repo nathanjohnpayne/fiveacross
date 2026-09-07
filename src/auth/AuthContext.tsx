@@ -1,6 +1,7 @@
 import {
   createContext,
   useCallback,
+  useMemo,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -677,7 +678,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // truth the deal effect reads SYNCHRONOUSLY, because a state mirror lags one
   // render and a deal fired in that gap would be the zero-calls violation the
   // ordering contract forbids.
-  const [admission, setAdmission] = useState<AdmissionState>({ kind: 'clear' });
+  // The published answer carries the Event it was classified FOR. A consumer
+  // rendering for a different Event must not read it: on an Event switch the
+  // first render of the new tree happens before the layout effect below has
+  // reclassified, and React flushes that committed tree's passive effects —
+  // `useData`'s onSnapshot subscriptions among them — before the
+  // reclassification's update lands (Phase 4b P1 on #1131). So the answer is
+  // scoped, and a mismatch renders a provisional `held`/`clear` computed from
+  // the origin's pending record instead of the previous Event's verdict.
+  const [publishedAdmission, setPublishedAdmission] = useState<{
+    scope: string | null;
+    state: AdmissionState;
+  }>({ scope: null, state: { kind: 'clear' } });
+  const admissionScopeRef = useRef<string | null>(null);
   const admissionRef = useRef<AdmissionCoordinator | null>(null);
   if (admissionRef.current === null) {
     admissionRef.current = createAdmissionCoordinator({
@@ -697,12 +710,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
   useEffect(
     () =>
-      admissionRef.current!.subscribe((next) =>
+      admissionRef.current!.subscribe((next) => {
+        const scope = admissionScopeRef.current;
         // Keep the previous object when nothing changed: `begin` on a visit
         // with no Invitation publishes `clear` over `clear`, and a fresh object
         // there would re-run the deal effect and deal a second time.
-        setAdmission((previous) => (sameAdmissionState(previous, next) ? previous : next)),
-      ),
+        setPublishedAdmission((previous) =>
+          previous.scope === scope && sameAdmissionState(previous.state, next)
+            ? previous
+            : { scope, state: next },
+        );
+      }),
     [],
   );
   // The visit the coordinator was last begun for, so a re-render never
@@ -718,6 +736,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // invitation had never been checked at all.
   const classifyAdmission = useCallback((uid: string, ownedEventId: string) => {
     admissionVisitRef.current = null;
+    admissionScopeRef.current = ownedEventId;
     admissionRef.current!.classify({ eventId: ownedEventId, uid, origin: window.location.origin });
   }, []);
   // The gate inputs the deal effect last fired under, so a re-run whose only
@@ -725,6 +744,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // already answered from — `admitted` retired to `clear` by an Event switch,
   // then that `clear` arriving through React state — does not deal twice.
   const lastDealGateRef = useRef<string | null>(null);
+  // Scoped read (see `publishedAdmission`): the published answer only when it
+  // was classified for THIS Event; otherwise a provisional answer from the
+  // origin's pending record — `held` withholds everything, `clear` is what the
+  // real classification will publish a commit later for a visit with no
+  // Invitation. A signed-out shell reads `clear`, which gates nothing anyway.
+  const admission = useMemo<AdmissionState>(() => {
+    if (publishedAdmission.scope === eventId) return publishedAdmission.state;
+    if (user === null) return { kind: 'clear' };
+    const pending = readPendingEventInvitation({ origin: window.location.origin, now: Date.now() });
+    return pending === null ? { kind: 'clear' } : { kind: 'held', captureId: pending.record.captureId };
+  }, [publishedAdmission, eventId, user]);
   // Tri-state 18+ attestation for the current User (#23): `undefined` = UNKNOWN
   // (bootstrap unsettled, or an indeterminate read); `true` = attested; `false` =
   // a SETTLED profile with no stamp → re-prompt. A missing stamp during load is
@@ -865,6 +895,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStoredDealState(neutralDealState(eventId));
     admissionVisitRef.current = null;
     lastDealGateRef.current = null;
+    admissionScopeRef.current = null;
     admissionRef.current?.reset();
     const uid = authUidRef.current;
     if (uid !== null) classifyAdmission(uid, eventId);
@@ -1411,6 +1442,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // nothing, and the next authoritative render begins the new visit.
       admissionVisitRef.current = null;
       lastDealGateRef.current = null;
+      admissionScopeRef.current = null;
       admissionRef.current!.reset();
       if (u) classifyAdmission(u.uid, ownedEventId);
       clearDealError(ownedEventId);
@@ -1772,6 +1804,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const visitKey = `${ownedEventId}\u0000${u.uid}`;
       if (admissionVisitRef.current === visitKey) return coordinator.state();
       admissionVisitRef.current = visitKey;
+      admissionScopeRef.current = ownedEventId;
       return coordinator.begin({ eventId: ownedEventId, uid: u.uid, origin: window.location.origin });
     },
     [],

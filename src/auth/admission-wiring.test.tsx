@@ -423,6 +423,38 @@ describe('a visit carrying a pending Invitation', () => {
     expect(watcherMounts.confirm).toBeGreaterThan(0);
   });
 
+  it('withholds the watchers on the very first render of a new Event that holds an Invitation', async () => {
+    // Phase 4b P1 on #1131: the first render of Event B must not publish A's
+    // `admitted` answer, or the watchers (and useData's subscriptions) run
+    // for one commit before the reclassification lands.
+    const view = mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+    expect(admissionKind()).toBe('clear');
+    expect(watcherMounts.confirm).toBeGreaterThan(0);
+
+    // Event B holds a pending Invitation; A did not.
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: true });
+    const redemption = deferred<RedeemEventInvitationResult>();
+    mocks.redeemEventInvitation.mockReturnValue(redemption.promise);
+    watcherMounts.confirm = 0;
+    watcherMounts.retract = 0;
+    watcherMounts.pool = 0;
+    eventScope.eventId = 'event-b';
+    await act(async () => {
+      view.rerender(
+        <AuthProvider>
+          <Harness />
+        </AuthProvider>,
+      );
+    });
+    await act(async () => void (await Promise.resolve()));
+
+    expect(['held', 'pending']).toContain(admissionKind());
+    expect(watcherMounts).toEqual({ confirm: 0, retract: 0, pool: 0 });
+    expect(mocks.joinAndDeal).toHaveBeenCalledOnce();
+  });
+
   it('deals exactly once for the next Event after an admitted visit switches Events', async () => {
     // Phase 4b P2 on #1131: the Event switch resets `admitted` to `clear`;
     // the deal for Event B must fire once, not once per way that `clear`

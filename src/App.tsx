@@ -88,7 +88,17 @@ function EventApp() {
   // `held` is an invitation the visit has not been able to check yet (not
   // authoritative, or offline): still not a member, still no shell.
   if (admission.kind === 'held' || admission.kind === 'pending') {
-    return <LoadingState label={editionBrand().passCheckLabel} />;
+    // A bootstrap that FAILED while admission is held must keep its recovery
+    // surface (Phase 4b P1 on #1131): `ensureUserProfile` failing on a
+    // non-adult Event sets `dealError` with `canRenderEventContent` true, and
+    // an unconditional loading state here would hide that error and its Retry
+    // for as long as the Invitation stays unchecked. Event content stays
+    // withheld either way; only the retry surface is allowed through.
+    return dealError ? (
+      <DealError message={dealError} onRetry={retryDeal} retrying={dealing} />
+    ) : (
+      <LoadingState label={editionBrand().passCheckLabel} />
+    );
   }
   if (admission.kind === 'retryable') {
     // Retry goes through `retryDeal`, which re-establishes authority and

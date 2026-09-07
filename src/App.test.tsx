@@ -135,6 +135,7 @@ describe('App — Card route deal-error routing (#434)', () => {
     vi.stubGlobal('localStorage', new MemoryStorage());
     authState.value = {};
     eventScope.eventId = 'event-a';
+    authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -193,6 +194,21 @@ describe('App — Card route deal-error routing (#434)', () => {
     expect(screen.getByText(/Checking your cruise pass/)).toBeInTheDocument();
     expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
     expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('keeps a failed bootstrap\u2019s Retry surface reachable while an Invitation is held', () => {
+    authState.value = {
+      admission: { kind: 'held', captureId: 'c' },
+      dealError: DEAL_ERROR,
+      dealErrorReason: 'connection',
+      dealing: false,
+    };
+    renderApp();
+    expect(screen.getByRole('alert')).toHaveTextContent(DEAL_ERROR);
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(authMocks.retryDeal).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
   });
 
   it('offers Retry for a transient redemption failure, routed through the deal retry', () => {
