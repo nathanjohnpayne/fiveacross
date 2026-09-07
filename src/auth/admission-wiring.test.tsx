@@ -81,6 +81,7 @@ vi.mock('../data/api', () => ({
 }));
 vi.mock('../analytics', () => ({ track: mocks.track }));
 vi.mock('../pendingEventInvitation', () => ({
+  EVENT_INVITATION_FRAGMENT_KEY: 'fa_invite',
   readPendingEventInvitation: mocks.readPendingEventInvitation,
   forgetPendingEventInvitationIf: mocks.forgetPendingEventInvitationIf,
 }));
@@ -216,6 +217,48 @@ describe('signing in with an Invitation that only memory holds', () => {
     await userEvent.click(screen.getByRole('button', { name: 'sign in' }));
     await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalledOnce());
     expect(mocks.signInWithPopup).not.toHaveBeenCalled();
+  });
+});
+
+describe('the automatic web.app handoff', () => {
+  it('carries a pending Invitation to the canonical origin in the fragment and retires this copy', async () => {
+    // Codex P1 on #1131: this hop fires from the auth callback before SignIn
+    // renders, entry.tsx has already cleared the fragment, and the stored
+    // record is bound to the web.app origin — so without carrying the code the
+    // firebaseapp.com visit would classify clear and deal without redeeming.
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      hostname: 'gaycruisebingo.web.app',
+      origin: 'https://gaycruisebingo.web.app',
+      pathname: '/card',
+      search: '',
+      hash: '',
+      replace,
+    });
+    const pending = record();
+    mocks.readPendingEventInvitation.mockReturnValue({ record: pending, durable: true });
+    mount();
+    await act(async () => void (await emitAuth(null)));
+
+    expect(replace).toHaveBeenCalledWith(`https://gaycruisebingo.firebaseapp.com/card#fa_invite=${CODE}`);
+    expect(mocks.forgetPendingEventInvitationIf).toHaveBeenCalledWith(pending);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('hands off without a fragment when the origin holds no Invitation', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', {
+      hostname: 'gaycruisebingo.web.app',
+      origin: 'https://gaycruisebingo.web.app',
+      pathname: '/card',
+      search: '',
+      hash: '',
+      replace,
+    });
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/card');
+    expect(mocks.forgetPendingEventInvitationIf).not.toHaveBeenCalled();
   });
 });
 

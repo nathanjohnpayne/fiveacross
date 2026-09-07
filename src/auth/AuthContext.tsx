@@ -936,9 +936,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handoffSignedOutWebApp = useCallback((): boolean => {
     if (redirectReturnPendingRef.current) return false;
     if (webAppHandoffStartedRef.current) return true;
-    const target = firebaseAuthOriginRedirectUrl(window.location);
+    // This hop fires from the auth callback, before SignIn renders, so neither
+    // durability check below it runs here. A pending Invitation on this origin
+    // is carried to the destination in the fragment — the one form that
+    // survives a cross-origin replacement — and this origin's copy is
+    // retired, because the destination captures its own (Codex P1 on #1131).
+    const pending = readPendingEventInvitation({ origin: window.location.origin, now: Date.now() });
+    const target = firebaseAuthOriginRedirectUrl(window.location, {
+      invitationCode: pending === null ? null : pending.record.code,
+    });
     if (!target) return false;
     webAppHandoffStartedRef.current = true;
+    if (pending !== null) forgetPendingEventInvitationIf(pending.record);
     window.location.replace(target);
     return true;
   }, []);

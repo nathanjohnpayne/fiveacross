@@ -39,6 +39,7 @@ vi.mock('../auth/handoffClient', () => ({
   consumeHandoffFailure: mocks.consumeHandoffFailure,
 }));
 vi.mock('../pendingEventInvitation', () => ({
+  EVENT_INVITATION_FRAGMENT_KEY: 'fa_invite',
   persistPendingEventInvitation: mocks.persistPendingEventInvitation,
 }));
 
