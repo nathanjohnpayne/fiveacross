@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { mayDealUnderAdmission } from './auth/admissionCoordinator';
 import { ThemeProvider } from './theme/ThemeContext';
 import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
@@ -84,7 +85,7 @@ if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
 // force-activate the fleet on an armed floor with no stale tab anywhere and
 // then navigate the probe out of the very load it is asserting — turning the
 // incident deploy the floor exists for into a false outage alert, the same trap
-// the `/__/*` sign-in-popup filter exists to avoid. The invariant the rescue
+// the `/__/*` sign-in-handler filter exists to avoid. The invariant the rescue
 // rests on is "absent from the registry means this module scope never ran", so
 // nothing that DOES run it may opt out of naming itself.
 postClientBuild(__BUILD_STAMP__);
@@ -116,9 +117,16 @@ if (!rootEl) throw new Error('root element missing');
  * `playerTheme` doc (Codex P2 on #232).
  */
 function ThemedApp() {
-  const { user, loading } = useAuth();
-  const { data: event } = useEventDoc(!!user);
-  const { data: player } = useMyPlayer(user?.uid);
+  const { user, loading, admission } = useAuth();
+  // The two subscriptions this shell opens for a signed-in User wait for
+  // admission (#804): a visit whose Invitation is held, pending or blocked is
+  // not a member, and the whole-shell gate has to cover the Event and Player
+  // documents opened HERE, above App, not only what App renders below it
+  // (Codex P1 on #1131). A visit with no Invitation classifies `clear` in the
+  // same batch as the identity change, so nothing opens later than it did.
+  const admitted = mayDealUnderAdmission(admission);
+  const { data: event } = useEventDoc(!!user && admitted);
+  const { data: player } = useMyPlayer(admitted ? user?.uid : undefined);
   // Edition default, not a hardcoded cruise Theme (#555). This line runs on the
   // signed-out shell too, where `useEventDoc(false)` means there is no Event doc
   // at all — so a Vacay build opened in Neon Playground and only changed skin

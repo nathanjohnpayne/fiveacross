@@ -54,7 +54,7 @@ describe('resolveHost — servable', () => {
   it('serves an active, well-formed, address-matching record', async () => {
     const cache = memoryCache();
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
   });
 
   it('serves the apex without a Slug cross-check', async () => {
@@ -86,18 +86,18 @@ describe('resolveHost — fail closed', () => {
 
   it('never infers active from a missing status, on the cache path either', async () => {
     const cache = memoryCache({
-      [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: '', slug: 'bodega-bay' } },
+      [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: '', slug: 'bodega-bay', edition: null } },
     });
     const fetchImpl = respondWith(ACTIVE);
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it.each([
-    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay' }],
-    ['malformed', { eventId: '', status: 'active', slug: 'bodega-bay' }],
-    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere' }],
+    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay', edition: null }],
+    ['malformed', { eventId: '', status: 'active', slug: 'bodega-bay', edition: null }],
+    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere', edition: null }],
   ])('bypasses a fresh but non-serving cached %s record', async (_label, record) => {
     const cache = memoryCache({
       [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record },
@@ -107,7 +107,7 @@ describe('resolveHost — fail closed', () => {
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
     expect(cache.store.get(HOST)?.record.eventId).toBe('bodega-bay-2026');
   });
 
@@ -153,11 +153,11 @@ describe('resolveHost — fail closed', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 1_000_000 - CONFIG.cacheTtlMs - 1,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 403), cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true, edition: null });
   });
 
   it('treats a Firestore 5xx as unavailable rather than as an absent document', async () => {
@@ -173,12 +173,12 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 999_000,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const fetchImpl = respondWith(ACTIVE);
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -187,12 +187,12 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 1_000_000 - CONFIG.cacheTtlMs,
-        record: { eventId: 'old-event', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'old-event', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const fetchImpl = respondWith(ACTIVE);
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
     expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
   });
 
@@ -204,13 +204,13 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 1_000_000 + 60_000,
-        record: { eventId: 'obsolete-event', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'obsolete-event', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const fetchImpl = respondWith(ACTIVE);
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
     expect(fetchImpl).toHaveBeenCalled();
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
     expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
   });
 
@@ -219,7 +219,7 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION + 1,
         fetchedAt: 1_000_000,
-        record: { eventId: 'from-the-future', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'from-the-future', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
@@ -232,7 +232,7 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: staleAt,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const fetchImpl = vi.fn(async () => {
@@ -240,7 +240,7 @@ describe('resolveHost — the cache', () => {
     }) as unknown as ResolveDeps['fetch'];
 
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true, edition: null });
     // A bound that renews itself is not a bound.
     expect(cache.store.get(HOST)?.fetchedAt).toBe(staleAt);
   });
@@ -250,7 +250,7 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 1_000_000 + 60_000,
-        record: { eventId: 'future-event', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'future-event', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const fetchImpl = vi.fn(async () => {
@@ -268,7 +268,7 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 0,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 404), cache));
@@ -302,7 +302,7 @@ describe('resolveHost — the cache', () => {
       [HOST]: {
         version: CACHE_VERSION,
         fetchedAt: 0,
-        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
       },
     });
     const disabled = firestoreDoc({ eventId: 'bodega-bay-2026', status: 'disabled', slug: 'bodega-bay' });
@@ -317,7 +317,12 @@ describe('resolveHost — the cache', () => {
     ['a record missing status', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e' } }],
     ['a record missing eventId', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { status: 'active' } }],
     ['a non-string slug', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 7 } }],
-    ['a non-numeric fetchedAt', { version: CACHE_VERSION, fetchedAt: 'soon', record: { eventId: 'e', status: 'active', slug: 'bodega-bay' } }],
+    // `edition` is validated like every other dereferenced field: an envelope
+    // missing it would hand `undefined` to the manifest builder, which resolves
+    // that to the DEFAULT Edition — a silently wrong installed name (#546).
+    ['a missing edition', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 'bodega-bay' } }],
+    ['a non-string edition', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 'bodega-bay', edition: 7 } }],
+    ['a non-numeric fetchedAt', { version: CACHE_VERSION, fetchedAt: 'soon', record: { eventId: 'e', status: 'active', slug: 'bodega-bay', edition: null } }],
     ['a bare string', 'not an envelope'],
   ])('reads %s as a MISS rather than dereferencing it', async (_label, junk) => {
     // A version check alone let a current-version envelope with a partial
@@ -330,7 +335,7 @@ describe('resolveHost — the cache', () => {
     };
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
     // Fell through to the network read rather than throwing.
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
   });
 
   it('does not resurrect a malformed envelope on the stale-serve path either', async () => {
@@ -361,7 +366,7 @@ describe('resolveHost — the cache', () => {
       },
     };
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), exploding));
-    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false, edition: null });
   });
 
   it('caches no negatives, so a newly provisioned address serves on the next request', async () => {
@@ -376,6 +381,104 @@ describe('resolveHost — the cache', () => {
 
     expect(first).toEqual({ kind: 'not-found', reason: 'unknown-host' });
     expect(second).toMatchObject({ kind: 'serve', eventId: 'bodega-bay-2026' });
+  });
+});
+
+describe('the Edition it carries (#546)', () => {
+  const WITH_EDITION = firestoreDoc({
+    eventId: 'bodega-bay-2026',
+    status: 'active',
+    slug: 'bodega-bay',
+    edition: 'vacay',
+  });
+
+  it('carries the resolved Edition on a serving resolution', async () => {
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(WITH_EDITION), memoryCache()));
+    expect(result).toEqual({
+      kind: 'serve',
+      eventId: 'bodega-bay-2026',
+      stale: false,
+      edition: 'vacay',
+    });
+  });
+
+  it('reads it out of the SAME document as the routing fields, in one request', async () => {
+    // One read, one answer. Two point-gets of one document are two answers that
+    // can disagree, which is the failure the cache posture exists to prevent —
+    // so the mask widened rather than a second lookup being added.
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(WITH_EDITION), { status: 200 }));
+    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as ResolveDeps['fetch'], memoryCache()));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('round-trips it through the cache', async () => {
+    const cache = memoryCache();
+    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(WITH_EDITION), cache));
+    expect(cache.store.get(HOST)!.record.edition).toBe('vacay');
+
+    // Second call answers from the cache with no network read at all, and must
+    // still know the Edition — a cached hit that lost it would install the
+    // default Edition's name for the length of the TTL.
+    const fetchImpl = vi.fn();
+    const cached = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl as ResolveDeps['fetch'], cache));
+    expect(cached).toMatchObject({ kind: 'serve', edition: 'vacay' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('carries it on a stale serve too', async () => {
+    const cache = memoryCache({
+      [HOST]: {
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000 - 400_000,
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: 'vacay' },
+      },
+    });
+    const failing = vi.fn(async () => {
+      throw new Error('network down');
+    }) as unknown as ResolveDeps['fetch'];
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(failing, cache));
+    expect(result).toEqual({
+      kind: 'serve',
+      eventId: 'bodega-bay-2026',
+      stale: true,
+      edition: 'vacay',
+    });
+  });
+
+  it('reads an absent or non-string edition as null rather than coercing it', () => {
+    // `null` is what the manifest builder resolves to the default Edition,
+    // matching the client (`src/data/hostnames.ts` coerces to `''`, and
+    // `setActiveEdition('')` resets to the default). Edge and client must not
+    // disagree even about the fallback.
+    expect(parseHostnameDocument(ACTIVE).edition).toBeNull();
+    expect(
+      parseHostnameDocument({ fields: { edition: { integerValue: '7' } } }).edition,
+    ).toBeNull();
+  });
+
+  it('never lets the Edition decide whether an address serves', async () => {
+    // The structural guarantee is the narrowed `RoutingFields` parameter the
+    // decision table takes; this is its observable half. An unrecognised
+    // Edition must not change the routing outcome by one bit.
+    const nonsense = firestoreDoc({
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'not-an-edition',
+    });
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(nonsense), memoryCache()));
+    expect(result).toMatchObject({ kind: 'serve', eventId: 'bodega-bay-2026' });
+
+    // ...and an Edition on an INACTIVE record does not rescue it either.
+    const inactive = firestoreDoc({
+      eventId: 'bodega-bay-2026',
+      status: 'disabled',
+      slug: 'bodega-bay',
+      edition: 'vacay',
+    });
+    expect(
+      await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(inactive), memoryCache())),
+    ).toEqual({ kind: 'not-found', reason: 'inactive' });
   });
 });
 
@@ -400,7 +503,15 @@ describe('the Firestore request', () => {
       `/v1/projects/fiveacross/databases/(default)/documents/hostnames/${encodeURIComponent(HOST)}`,
     );
     expect(url.searchParams.get('key')).toBe('test-web-api-key');
-    expect(url.searchParams.getAll('mask.fieldPaths')).toEqual(['eventId', 'status', 'slug']);
+    // Four fields since #546, and one request rather than two: `edition` joins
+    // the EXISTING mask so the Edition served at the edge and the Event routed
+    // to come out of the same read of the same document.
+    expect(url.searchParams.getAll('mask.fieldPaths')).toEqual([
+      'eventId',
+      'status',
+      'slug',
+      'edition',
+    ]);
     // No Authorization header anywhere: the router reads exactly what a browser
     // on the same address can read, and firestore.rules is what enforces it.
     const init = (fetchImpl as unknown as { mock: { calls: [unknown, RequestInit][] } }).mock.calls[0][1];
@@ -432,18 +543,24 @@ describe('parseHostnameDocument', () => {
       eventId: 'bodega-bay-2026',
       status: 'active',
       slug: 'bodega-bay',
+      edition: null,
     });
   });
 
   it.each([null, undefined, 42, 'a string', {}, { fields: null }, { fields: 'nope' }])(
     'reads %s as an unservable record rather than throwing',
     (body) => {
-      expect(parseHostnameDocument(body)).toEqual({ eventId: '', status: '', slug: null });
+      expect(parseHostnameDocument(body)).toEqual({ eventId: '', status: '', slug: null, edition: null });
     },
   );
 
   it('ignores a non-string typed value rather than coercing it', () => {
     const body = { fields: { eventId: { integerValue: '7' }, status: { stringValue: 'active' } } };
-    expect(parseHostnameDocument(body)).toEqual({ eventId: '', status: 'active', slug: null });
+    expect(parseHostnameDocument(body)).toEqual({
+      eventId: '',
+      status: 'active',
+      slug: null,
+      edition: null,
+    });
   });
 });

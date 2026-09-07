@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { handleRequest, type RouterConfig, type RouterDeps } from './router';
 import { CACHE_VERSION, type CacheEnvelope, type HostnameCache } from './resolve';
 import { RESERVED_LABELS } from '../../src/slug';
+// `edition-brands`, not `editions`: this program has no DOM lib and no
+// `vite/client`, which is why #546 split the table out in the first place.
+import { brandFor } from '../../src/edition-brands';
 
 const CONFIG: RouterConfig = {
   originHost: 'fiveacross.web.app',
@@ -16,7 +19,7 @@ const CONFIG: RouterConfig = {
 const SERVING: CacheEnvelope = {
   version: CACHE_VERSION,
   fetchedAt: 1_000_000,
-  record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+  record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: null },
 };
 
 /** Every test below seeds the resolution through the cache so the assertions
@@ -152,6 +155,8 @@ describe('the no-redirect regression guard (#599 as amended)', () => {
       'https://ab.fiveacross.app/',
       'https://bodega-bay.example.com/',
       'https://bodega-bay.fiveacross.app/__/auth/handler',
+      'https://bodega-bay.fiveacross.app/manifest.webmanifest',
+      'https://unknown-event.fiveacross.app/manifest.webmanifest',
     ];
     const { deps } = harness({ seed: servingSeed });
 
@@ -243,6 +248,140 @@ describe('failing closed', () => {
     const { deps, requests } = harness();
     await handleRequest(get('https://unknown-event.fiveacross.app/assets/app.js'), CONFIG, deps);
     expect(requests.every((r) => !r.url.includes('fiveacross.web.app'))).toBe(true);
+  });
+});
+
+describe('the per-hostname PWA manifest (#546)', () => {
+  const VACAY: CacheEnvelope = {
+    version: CACHE_VERSION,
+    fetchedAt: 1_000_000,
+    record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay', edition: 'vacay' },
+  };
+
+  it('answers from the resolved Edition rather than proxying to the origin', async () => {
+    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(
+      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest'),
+      CONFIG,
+      deps,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      name: brandFor('vacay').appName,
+      short_name: brandFor('vacay').appShortName,
+    });
+    // The origin serves ONE bundle to every address, so proxying this would
+    // hand a Vacay guest the bundle Edition's manifest — which is the whole
+    // defect. Nothing left for the origin at all here.
+    expect(requests).toHaveLength(0);
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+  });
+
+  it('answers the same hostname document on either Namespace', async () => {
+    const { deps } = harness({
+      seed: { 'bodega-bay.fiveacross.app': VACAY, 'bodega-bay.vacaybingo.com': VACAY },
+    });
+    const canonical = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
+      CONFIG,
+      deps,
+    );
+    const alternate = await handleRequest(
+      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest'),
+      CONFIG,
+      deps,
+    );
+    // #599 as amended: both hosts SERVE, each with its Event's Edition, and
+    // neither is bounced at the other. Per-origin installed apps are the
+    // accepted consequence — with the same name on both.
+    expect(await canonical.text()).toBe(await alternate.text());
+  });
+
+  it('falls back to the default Edition when the record names none', async () => {
+    const { deps } = harness({ seed: servingSeed });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
+      CONFIG,
+      deps,
+    );
+    expect(await response.json()).toMatchObject({ name: brandFor(null).appName });
+  });
+
+  // The route sits AFTER the namespace guard and AFTER resolution, and this is
+  // the block that proves it. It is not an exemption like `/__/auth/*` — the
+  // opposite: it strictly depends on the resolution it derives from, so an
+  // address that does not serve an app does not serve an app identity either.
+  it.each([
+    ['https://admin.fiveacross.app/manifest.webmanifest', 'reserved-label'],
+    ['https://unknown-event.fiveacross.app/manifest.webmanifest', 'unknown-host'],
+    ['https://bodega-bay.example.com/manifest.webmanifest', 'out-of-namespace'],
+    ['https://ab.fiveacross.app/manifest.webmanifest', 'invalid-slug:too-short'],
+  ] as const)('fails closed at %s with reason %s', async (url, reason) => {
+    const { deps } = harness({ seed: { 'admin.fiveacross.app': VACAY } });
+    const response = await handleRequest(get(url), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe(reason);
+    expect(response.headers.get('content-type')).toContain('text/html');
+  });
+
+  it('fails closed for an inactive Event rather than serving its identity', async () => {
+    const { deps } = harness({
+      seed: {
+        'bodega-bay.fiveacross.app': {
+          version: CACHE_VERSION,
+          fetchedAt: 1_000_000,
+          record: { eventId: 'e', status: 'disabled', slug: 'bodega-bay', edition: 'vacay' },
+        },
+      },
+    });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it('fails closed on an unconfigured router, like every other path', async () => {
+    const { deps } = harness({ seed: servingSeed });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/manifest.webmanifest'),
+      { ...CONFIG, apiKey: '' },
+      deps,
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+  });
+
+  it('answers HEAD with no body', async () => {
+    const { deps } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(
+      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest', { method: 'HEAD' }),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('');
+  });
+
+  it('leaves a non-GET/HEAD request on that path to the proxy', async () => {
+    // The router does not start refusing methods at an address it used to
+    // relay; that would be a behaviour change hiding inside a branding fix.
+    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    const response = await handleRequest(
+      get('https://bodega-bay.vacaybingo.com/manifest.webmanifest', { method: 'POST' }),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(requests.at(-1)!.url).toContain('fiveacross.web.app');
+  });
+
+  it('leaves every other path to the proxy', async () => {
+    const { deps, requests } = harness({ seed: { 'bodega-bay.vacaybingo.com': VACAY } });
+    await handleRequest(get('https://bodega-bay.vacaybingo.com/manifest.webmanifest.bak'), CONFIG, deps);
+    expect(requests.at(-1)!.url).toContain('fiveacross.web.app');
   });
 });
 

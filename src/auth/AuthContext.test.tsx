@@ -644,14 +644,17 @@ describe('AuthContext deal-error hardening', () => {
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
-  it('uses one top-level redirect instead of a popup on iOS Safari', async () => {
+  it('starts one top-level redirect on a same-origin handler and ignores an abandoned acknowledgement', async () => {
+    // A desktop Mac in an ordinary browser tab — the surface the retired
+    // heuristic used to send to the popup (#765). The same-origin handler is
+    // the only condition now.
     vi.stubGlobal('navigator', {
       ...window.navigator,
       onLine: true,
       userAgent:
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1',
-      platform: 'iPhone',
-      maxTouchPoints: 5,
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
+      platform: 'MacIntel',
+      maxTouchPoints: 0,
     });
     const authMock = mockedAuth as { config?: { authDomain?: string } };
     authMock.config = { authDomain: window.location.hostname };
@@ -770,111 +773,171 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps popup sign-in in an installed iOS PWA with a stable app window', async () => {
+  it('releases the single-flight guard and retires the attempt records when Back restores the page from bfcache (#1123)', async () => {
+    // The redirect promise never settles once navigation starts, so without
+    // recovery the guard holds the stale attempt until reload.
+    mocks.signInWithRedirect.mockReturnValueOnce(new Promise<never>(() => {}));
     vi.stubGlobal('navigator', {
       ...window.navigator,
       onLine: true,
-      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
+      platform: 'MacIntel',
+      maxTouchPoints: 0,
+    });
+    const authMock = mockedAuth as { config?: { authDomain?: string } };
+    authMock.config = { authDomain: window.location.hostname };
+
+    mount();
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+    const token = sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
+    expect(token).not.toBeNull();
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).not.toBeNull();
+
+    // A non-persisted pageshow (an ordinary load) changes nothing: the guard
+    // still coalesces a second tap into the in-flight attempt.
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false }));
+    });
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).not.toBeNull();
+
+    // Back from Google: the page comes out of the bfcache. The attempt is
+    // abandoned — records retired, guard released — and a fresh tap starts a
+    // fresh attempt under a new token.
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    });
+    expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).toBeNull();
+
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(2);
+    const nextToken = sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
+    expect(nextToken).not.toBeNull();
+    expect(nextToken).not.toBe(token);
+
+    delete authMock.config;
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves a popup attempt alone on a persisted pageshow, since nothing navigated away (#1123)', async () => {
+    const popup = deferred<Record<string, never>>();
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    mount();
+    await userEvent.click(screen.getByText('signin'));
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    });
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
+    popup.settle({});
+  });
+
+  // The retired device matrix, kept only as the INPUT space the rule must be
+  // indifferent to (#765): every one of these surfaces used to pick a
+  // different transaction; all of them now pick the redirect whenever the
+  // OAuth handler is same-origin.
+  const SAME_ORIGIN_SURFACES: Array<{
+    surface: string;
+    navigator: Partial<Navigator> & { standalone?: boolean };
+    standaloneDisplayMode?: boolean;
+  }> = [
+    {
+      surface: 'installed iOS PWA (mobile UA, navigator.standalone)',
+      navigator: {
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+        platform: 'iPhone',
+        maxTouchPoints: 5,
+        standalone: true,
+      },
+    },
+    {
+      surface: 'iOS Safari browser tab',
+      navigator: {
+        userAgent:
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1',
+        platform: 'iPhone',
+        maxTouchPoints: 5,
+      },
+    },
+    {
+      surface: 'iPadOS desktop-UA masquerade (MacIntel with touch points)',
+      navigator: {
+        userAgent:
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
+        platform: 'MacIntel',
+        maxTouchPoints: 5,
+      },
+    },
+    {
+      surface: 'installed desktop PWA (display-mode: standalone)',
+      navigator: {
+        userAgent:
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        platform: 'MacIntel',
+        maxTouchPoints: 0,
+      },
+      standaloneDisplayMode: true,
+    },
+  ];
+
+  it.each(SAME_ORIGIN_SURFACES)(
+    'uses one top-level redirect on a same-origin handler from a $surface (#765)',
+    async ({ navigator, standaloneDisplayMode }) => {
+      vi.stubGlobal('navigator', { ...window.navigator, onLine: true, ...navigator });
+      if (standaloneDisplayMode) {
+        vi.stubGlobal('matchMedia', (query: string) => ({
+          matches: query === '(display-mode: standalone)',
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }));
+      }
+      const authMock = mockedAuth as { config?: { authDomain?: string } };
+      authMock.config = { authDomain: window.location.hostname };
+
+      mount();
+      await userEvent.click(screen.getByText('signin'));
+
+      expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+      expect(mocks.signInWithRedirect).toHaveBeenCalledWith(mockedAuth, expect.anything());
+      expect(mocks.signInWithPopup).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).not.toBeNull();
+
+      delete authMock.config;
+      sessionStorage.clear();
+      vi.unstubAllGlobals();
+    },
+  );
+
+  it('keeps popup sign-in only where the OAuth handler is cross-origin (#765)', async () => {
+    // Local development and the Auth Emulator: the configured authDomain is
+    // not this hostname, so a redirect would be the storage-partition failure
+    // #161 fixed. The most redirect-favouring device of the old matrix proves
+    // the device no longer participates in the decision.
+    vi.stubGlobal('navigator', {
+      ...window.navigator,
+      onLine: true,
+      userAgent:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1',
       platform: 'iPhone',
       maxTouchPoints: 5,
-      standalone: true,
     });
     const authMock = mockedAuth as { config?: { authDomain?: string } };
-    authMock.config = { authDomain: window.location.hostname };
+    authMock.config = { authDomain: 'demo-project.firebaseapp.com' };
 
     mount();
     await userEvent.click(screen.getByText('signin'));
 
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
     expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
 
     delete authMock.config;
-    vi.unstubAllGlobals();
-  });
-
-  it('routes the iPadOS desktop-UA masquerade (MacIntel + touch points) to redirect sign-in (#347)', async () => {
-    // iPadOS Safari reports a Mac platform/UA; maxTouchPoints > 1 is the
-    // accepted discriminator (real Macs report 0). See prefersRedirectSignIn.
-    vi.stubGlobal('navigator', {
-      ...window.navigator,
-      onLine: true,
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
-      platform: 'MacIntel',
-      maxTouchPoints: 5,
-    });
-    const authMock = mockedAuth as { config?: { authDomain?: string } };
-    authMock.config = { authDomain: window.location.hostname };
-
-    mount();
-    await userEvent.click(screen.getByText('signin'));
-
-    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
-    expect(mocks.signInWithPopup).not.toHaveBeenCalled();
-
-    delete authMock.config;
-    sessionStorage.clear();
-    vi.unstubAllGlobals();
-  });
-
-  it('keeps popup sign-in on a real Mac (MacIntel, no touch points) (#347)', async () => {
-    // The documented tradeoff boundary: only a TOUCH-reporting MacIntel matches
-    // the masquerade clause — a conventional Mac stays on the popup path.
-    vi.stubGlobal('navigator', {
-      ...window.navigator,
-      onLine: true,
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
-      platform: 'MacIntel',
-      maxTouchPoints: 0,
-    });
-    const authMock = mockedAuth as { config?: { authDomain?: string } };
-    authMock.config = { authDomain: window.location.hostname };
-
-    mount();
-    await userEvent.click(screen.getByText('signin'));
-
-    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
-    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
-
-    delete authMock.config;
-    vi.unstubAllGlobals();
-  });
-
-  it('uses one top-level redirect instead of a popup in an installed desktop PWA (#395)', async () => {
-    // The same real Mac as above (MacIntel, no touch points → prefersRedirectSignIn
-    // is false), but INSTALLED as a Chrome/Edge desktop app: it runs in a
-    // standalone window (display-mode: standalone) with no address bar, where the
-    // OAuth popup is silently blocked and never appears. isStandaloneApp() is the
-    // only differing input from the browser-tab case, and it flips the flow to the
-    // same same-origin redirect the mobile tab uses.
-    vi.stubGlobal('navigator', {
-      ...window.navigator,
-      onLine: true,
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      platform: 'MacIntel',
-      maxTouchPoints: 0,
-    });
-    vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: query === '(display-mode: standalone)',
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    }));
-    const authMock = mockedAuth as { config?: { authDomain?: string } };
-    authMock.config = { authDomain: window.location.hostname };
-
-    mount();
-    await userEvent.click(screen.getByText('signin'));
-
-    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
-    expect(mocks.signInWithRedirect).toHaveBeenCalledWith(mockedAuth, expect.anything());
-    expect(mocks.signInWithPopup).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).not.toBeNull();
-
-    delete authMock.config;
-    sessionStorage.clear();
     vi.unstubAllGlobals();
   });
 

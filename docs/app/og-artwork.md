@@ -19,7 +19,7 @@ Before #688, they had no generator. The three per-Edition renders landed as bina
 
 ## Changing what the artwork says
 
-Almost every change is a brand-table edit, because the generator reads its copy from `src/editions.ts`:
+Almost every change is a brand-table edit, because the generator reads its copy from the `BRANDS` table in `src/edition-brands.ts` (reached through `editionBrand()` in `src/editions.ts`):
 
 | On the artwork | Brand-table field |
 |---|---|
@@ -33,7 +33,7 @@ So the whole of #681 is: change `shareMark`, re-render Vacay. The whole of #688'
 
 `src/recon-share-og.test.ts` enforces this — it strips comments from the renderer and fails if any brand-table-owned string was retyped into the code.
 
-**The domain line is the one deliberate exception.** It defaults to the `ogUrl` hostname, which for `gcb` and `fiveacross` *is* the brand's apex. Vacay's `ogUrl` is Event-scoped (`bodega-bay.fiveacross.app`) until the #546 Worker rewrites it per hostname, and an unfurl is a brand impression, so that row overrides the domain to `vacaybingo.com` in the renderer with a comment saying why.
+**The domain line is the one deliberate exception.** It defaults to the `ogUrl` hostname, which for `gcb` and `fiveacross` *is* the brand's apex. Vacay's `ogUrl` is Event-scoped (`bodega-bay.fiveacross.app`) until the edge HTML rewrite (#1118) emits it per hostname, and an unfurl is a brand impression, so that row overrides the domain to `vacaybingo.com` in the renderer with a comment saying why.
 
 Art direction shared by the generated cards and the annotated wireframes — eyebrow treatment, board pattern, prompt-rule variation, cell radius, free-square ink, board shadow, and marked-cell glow — lives in `scripts/og/og-edition-art.mjs`. Render-only composition such as full palettes, lockup geometry, and the Vacay passport frame stays in the `ART` table in `scripts/og/render-og-editions.mjs`. Neither belongs in the brand table because the app has no runtime consumer for it.
 
@@ -91,5 +91,5 @@ Unlike the unfurl artwork, these **are** quantised: they are soft-focus referenc
 
 1. `npx vitest run src/recon-share-og.test.ts` — mirrors byte-identical, dimensions still 1200×630, no brand copy retyped into the generator.
 2. Check the file sizes the renderer prints. The renders are **truecolor**, like the #609 originals, and land near 250 KB — comfortably inside WhatsApp's 600 KB `og:image` cap. The renderer only reaches for `pngquant` if a render misses a 500 KB budget, and says so loudly when it does. That is deliberate: `render-og-default.mjs` next door always quantises because at 2400×1260 it is ~1.6 MB lossless, but at 1200×630 there is nothing to buy, and the palette is not free — it takes a corner radial wash from ~70 distinct values across a row to ~16, which is invisible at size but shows as contour rings under contrast amplification.
-3. These are static assets under `public/`, so they publish on the next hosting deploy of the project that serves them — `og-vacay.png` and `og-fiveacross.png` are served from `fiveacross.web.app` per `src/editions.ts`, `og-gcb.png` from the GCB project.
+3. These are static assets under `public/`, so they publish on the next hosting deploy of the project that serves them — `og-vacay.png` and `og-fiveacross.png` are served from `fiveacross.web.app` per the `ogImage` rows in `src/edition-brands.ts`, `og-gcb.png` from the GCB project.
 4. Crawler caches hold old unfurls. The URLs do not change, so previously-unfurled links keep the old picture until each platform re-fetches.

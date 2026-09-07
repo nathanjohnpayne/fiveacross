@@ -1,6 +1,7 @@
 import {
   createContext,
   useCallback,
+  useMemo,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -32,6 +33,18 @@ import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import { consumePostUpdateDealGrace } from '../postUpdateDeal';
 import { consumeHandoffAttestation, debugHandoff } from './handoffAttestation';
+import {
+  createAdmissionCoordinator,
+  mayDealUnderAdmission,
+  sameAdmissionState,
+  type AdmissionCoordinator,
+  type AdmissionState,
+} from './admissionCoordinator';
+import {
+  forgetPendingEventInvitationIf,
+  readPendingEventInvitation,
+} from '../pendingEventInvitation';
+import { redeemEventInvitation } from '../data/eventInvitations';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
@@ -69,54 +82,6 @@ export const DEAL_TIMEOUT_MS = 20_000;
 // room for a slow device without preserving an unbounded signed-out stall.
 export const WEB_APP_AUTH_SETTLE_TIMEOUT_MS = 3_000;
 export const PENDING_REDIRECT_ATTESTATION_KEY = 'gcb:pending-redirect-attestation';
-
-// Mobile browser tabs sign in via one top-level redirect; everything else keeps
-// the popup (see signIn()). The UA regex catches devices that say so outright.
-// The second clause is the iPadOS desktop-UA masquerade (#347): iPadOS Safari
-// reports `platform === 'MacIntel'` and a Mac UA string, and `maxTouchPoints > 1`
-// is the accepted discriminator — real Macs report 0. KNOWN TRADEOFF: a future
-// touch-enabled Mac would match and get redirect sign-in in a browser tab. That
-// failure mode is benign — redirect sign-in is fully supported on desktop; the
-// popup is only a preference where the window is stable — and installed PWAs are
-// unaffected (the call site checks isStandaloneApp() separately). Revisit when a
-// capability signal distinguishes iPadOS from a touch Mac (e.g. a UA-Client-Hints
-// platform value Safari actually ships); no such signal exists today, and the
-// alternatives (UA sniffing deeper, or dropping the clause and sending iPad
-// Safari down the popup path it demonstrably loses state on) are strictly worse.
-function prefersRedirectSignIn(nav: Pick<Navigator, 'userAgent' | 'platform' | 'maxTouchPoints'>): boolean {
-  return (
-    /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent) || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1)
-  );
-}
-
-function isStandaloneApp(): boolean {
-  const iosStandalone = Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
-  return iosStandalone || window.matchMedia?.('(display-mode: standalone)').matches === true;
-}
-
-// Route sign-in through a single top-level redirect instead of a popup in the two
-// environments where the popup is unreliable but the same-origin handler keeps
-// redirect stable (the caller still gates this on `sameOriginHandler`):
-//   1. Mobile browser tabs — Firebase's recommendation; the popup opens as a new
-//      tab there, and iOS Safari loses the helper's sessionStorage across it.
-//   2. Installed DESKTOP PWAs (Chrome/Edge "Install app") — the standalone window
-//      has no address bar and silently blocks/never surfaces the OAuth popup, so
-//      the Sign in tap appears to do nothing (#395).
-// Installed iOS/Android PWAs deliberately stay on the popup: they report a mobile
-// UA (prefersRedirectSignIn === true) AND run standalone, so NEITHER clause
-// matches. On iOS the popup opens as a stable in-app view, while redirect drops
-// the helper's sessionStorage across the provider round-trip — the iOS-standalone
-// case the popup exception was built for. A desktop browser tab (non-mobile UA,
-// not standalone) also matches neither clause and keeps the popup, which is
-// reliable inside a normal tab.
-function shouldRedirectSignIn(
-  nav: Pick<Navigator, 'userAgent' | 'platform' | 'maxTouchPoints'>,
-  standalone: boolean,
-): boolean {
-  const isMobileBrowserTab = prefersRedirectSignIn(nav) && !standalone;
-  const isDesktopInstalledApp = standalone && !prefersRedirectSignIn(nav);
-  return isMobileBrowserTab || isDesktopInstalledApp;
-}
 
 // A random per-attempt identifier (Phase 4b P1 round 3 on #836), generated
 // once at redirect start and threaded through every durable AND session
@@ -563,6 +528,14 @@ interface AuthContextValue {
   // ensureUserProfile + readAdultAttestation bootstrap (#112 round 2) — never the
   // deal itself while the attestation is unsettled (Finding 1).
   retryDeal: () => void;
+  // Where this visit stands on Invitation redemption (#804, spec
+  // `event-invitations.md` § ordering). `joinAndDeal` runs only under `clear`
+  // or `admitted`; `pending`, `retryable` and `blocked` hold it at zero calls.
+  // Carries the capture's opaque id at most — never the bearer.
+  admission: AdmissionState;
+  // A `retryable` redemption is retried through `retryDeal`, which applies the
+  // same authority and connectivity gates as the deal itself before restarting
+  // it; there is deliberately no separate retry that could skip them.
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -579,6 +552,7 @@ const AuthContext = createContext<AuthContextValue>({
   signOutUser: async () => {},
   attest: async () => {},
   retryDeal: () => {},
+  admission: { kind: 'clear' },
 });
 
 // A pool-shortfall deal failure (the ADR 0003/0004 below-floor guard) vs any other
@@ -697,6 +671,90 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // False from the moment a signed-in User is published until THAT User's
   // ensureUserProfile bootstrap settles (#77) — see the interface note.
   const [profileReady, setProfileReady] = useState(false);
+  // The admission coordinator (#804) — created once per provider, with the
+  // capture seam, the callable seam and the clock injected, so its decision
+  // table stays the pure one `admissionCoordinator.test.ts` proves. `admission`
+  // mirrors its state for rendering; the coordinator itself is the source of
+  // truth the deal effect reads SYNCHRONOUSLY, because a state mirror lags one
+  // render and a deal fired in that gap would be the zero-calls violation the
+  // ordering contract forbids.
+  // The published answer carries the Event it was classified FOR. A consumer
+  // rendering for a different Event must not read it: on an Event switch the
+  // first render of the new tree happens before the layout effect below has
+  // reclassified, and React flushes that committed tree's passive effects —
+  // `useData`'s onSnapshot subscriptions among them — before the
+  // reclassification's update lands (Phase 4b P1 on #1131). So the answer is
+  // scoped, and a mismatch renders a provisional `held`/`clear` computed from
+  // the origin's pending record instead of the previous Event's verdict.
+  const [publishedAdmission, setPublishedAdmission] = useState<{
+    scope: string | null;
+    state: AdmissionState;
+  }>({ scope: null, state: { kind: 'clear' } });
+  const admissionScopeRef = useRef<string | null>(null);
+  const admissionRef = useRef<AdmissionCoordinator | null>(null);
+  if (admissionRef.current === null) {
+    admissionRef.current = createAdmissionCoordinator({
+      readPending: ({ origin, now }) => readPendingEventInvitation({ origin, now }),
+      forgetIf: forgetPendingEventInvitationIf,
+      // Bounded like the deal (#403): the callable is a network round trip
+      // that never completes offline. A timeout is a transient failure — the
+      // record stays and Retry is offered — never a verdict on the invitation.
+      redeem: (input) =>
+        withTimeout(
+          redeemEventInvitation(input),
+          DEAL_TIMEOUT_MS,
+          'Invitation redemption timed out',
+        ).catch(() => ({ ok: false as const, reason: 'unavailable' as const })),
+      now: () => Date.now(),
+    });
+  }
+  useEffect(
+    () =>
+      admissionRef.current!.subscribe((next) => {
+        const scope = admissionScopeRef.current;
+        // Keep the previous object when nothing changed: `begin` on a visit
+        // with no Invitation publishes `clear` over `clear`, and a fresh object
+        // there would re-run the deal effect and deal a second time.
+        setPublishedAdmission((previous) =>
+          previous.scope === scope && sameAdmissionState(previous.state, next)
+            ? previous
+            : { scope, state: next },
+        );
+      }),
+    [],
+  );
+  // The visit the coordinator was last begun for, so a re-render never
+  // re-begins (and re-redeems) the same signed-in visit, while a new account
+  // or a new Event does begin afresh. `null` between visits.
+  const admissionVisitRef = useRef<string | null>(null);
+  // Classify the moment an account is known for an Event — synchronously, in
+  // the same batch as the identity change, so the FIRST render of the shell
+  // already carries `held` when the origin holds an invitation. Classification
+  // needs no authority and no network; only redemption does. Without it a
+  // cached render permission (an offline cold boot with a cached 18+ stamp)
+  // would release Board, Nav and their subscriptions to a visit whose
+  // invitation had never been checked at all.
+  const classifyAdmission = useCallback((uid: string, ownedEventId: string) => {
+    admissionVisitRef.current = null;
+    admissionScopeRef.current = ownedEventId;
+    admissionRef.current!.classify({ eventId: ownedEventId, uid, origin: window.location.origin });
+  }, []);
+  // The gate inputs the deal effect last fired under, so a re-run whose only
+  // change is the admission mirror catching up with a state the coordinator
+  // already answered from — `admitted` retired to `clear` by an Event switch,
+  // then that `clear` arriving through React state — does not deal twice.
+  const lastDealGateRef = useRef<string | null>(null);
+  // Scoped read (see `publishedAdmission`): the published answer only when it
+  // was classified for THIS Event; otherwise a provisional answer from the
+  // origin's pending record — `held` withholds everything, `clear` is what the
+  // real classification will publish a commit later for a visit with no
+  // Invitation. A signed-out shell reads `clear`, which gates nothing anyway.
+  const admission = useMemo<AdmissionState>(() => {
+    if (publishedAdmission.scope === eventId) return publishedAdmission.state;
+    if (user === null) return { kind: 'clear' };
+    const pending = readPendingEventInvitation({ origin: window.location.origin, now: Date.now() });
+    return pending === null ? { kind: 'clear' } : { kind: 'held', captureId: pending.record.captureId };
+  }, [publishedAdmission, eventId, user]);
   // Tri-state 18+ attestation for the current User (#23): `undefined` = UNKNOWN
   // (bootstrap unsettled, or an indeterminate read); `true` = attested; `false` =
   // a SETTLED profile with no stamp → re-prompt. A missing stamp during load is
@@ -711,6 +769,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
+  // The token of the redirect attempt this tab most recently STARTED and has
+  // not yet seen fail — the handle the bfcache recovery below needs to retire
+  // that attempt's records without touching any other tab's (#1123).
+  const redirectAttemptTokenRef = useRef<string | null>(null);
   const redirectResultHandledRef = useRef(false);
   // Whether onAuthStateChanged has ever fired for this mount — see its own
   // check-and-clear site (Phase 4b P1 on #836) for why signal (b) is scoped
@@ -831,7 +893,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     profileAttemptRef.current += 1;
     pendingEventBootstrapRef.current = eventId;
     setStoredDealState(neutralDealState(eventId));
-  }, [eventId]);
+    admissionVisitRef.current = null;
+    lastDealGateRef.current = null;
+    admissionScopeRef.current = null;
+    admissionRef.current?.reset();
+    const uid = authUidRef.current;
+    if (uid !== null) classifyAdmission(uid, eventId);
+  }, [eventId, classifyAdmission]);
   // TWO-TIER same-session attestation (Codex #117 round 7): keep the OPTIMISTIC-UI
   // tier and the DURABLE-AUTHORITY tier strictly separate — optimistic-for-UI is
   // NOT authoritative-for-writes.
@@ -868,9 +936,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handoffSignedOutWebApp = useCallback((): boolean => {
     if (redirectReturnPendingRef.current) return false;
     if (webAppHandoffStartedRef.current) return true;
-    const target = firebaseAuthOriginRedirectUrl(window.location);
+    // This hop fires from the auth callback, before SignIn renders, so neither
+    // durability check below it runs here. A pending Invitation on this origin
+    // is carried to the destination in the fragment — the one form that
+    // survives a cross-origin replacement — and this origin's copy is
+    // retired, because the destination captures its own (Codex P1 on #1131).
+    const pending = readPendingEventInvitation({ origin: window.location.origin, now: Date.now() });
+    const target = firebaseAuthOriginRedirectUrl(window.location, {
+      invitationCode: pending === null ? null : pending.record.code,
+    });
     if (!target) return false;
     webAppHandoffStartedRef.current = true;
+    if (pending !== null) forgetPendingEventInvitationIf(pending.record);
     window.location.replace(target);
     return true;
   }, []);
@@ -1368,6 +1445,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authUidRef.current = u?.uid ?? null;
       const profileAttempt = (profileAttemptRef.current += 1);
       dealAttemptRef.current += 1;
+      // The previous account's admission is over: a redemption still in flight
+      // for it settles into a stale generation and is dropped, never deleting
+      // a record the incoming account may redeem itself. `reset` deletes
+      // nothing, and the next authoritative render begins the new visit.
+      admissionVisitRef.current = null;
+      lastDealGateRef.current = null;
+      admissionScopeRef.current = null;
+      admissionRef.current!.reset();
+      if (u) classifyAdmission(u.uid, ownedEventId);
       clearDealError(ownedEventId);
       setDealingFor(ownedEventId, false);
       // The incoming User's profile bootstrap has not settled yet (#77), so the
@@ -1714,9 +1800,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // (Codex P2 on #615). The offline branch never sets it, and `online` gates
   // besides.
   const mayDeal = attestationRequired ? attested === true && attestedAuthoritative : profileBootstrapOk;
+  // Step 3 of the ordering contract sits between authority and the deal: once
+  // this visit is signed in, online and authoritative, begin admission for it
+  // (a one-time read of the origin's pending Invitation and, if there is one,
+  // its redemption) and deal only when the coordinator says the visit is
+  // `clear` or `admitted`. `begin` answers synchronously, so the very render
+  // that first satisfies `mayDeal` cannot deal past a pending Invitation; the
+  // `admission` dependency re-runs this once the redemption settles.
+  const beginAdmissionIfNeeded = useCallback(
+    (u: User, ownedEventId: string): AdmissionState => {
+      const coordinator = admissionRef.current!;
+      const visitKey = `${ownedEventId}\u0000${u.uid}`;
+      if (admissionVisitRef.current === visitKey) return coordinator.state();
+      admissionVisitRef.current = visitKey;
+      admissionScopeRef.current = ownedEventId;
+      return coordinator.begin({ eventId: ownedEventId, uid: u.uid, origin: window.location.origin });
+    },
+    [],
+  );
   useEffect(() => {
-    if (user && mayDeal && online) void runDeal(user, eventId);
-  }, [eventId, user, mayDeal, online, runDeal]);
+    if (!(user && mayDeal && online)) {
+      // The gate closed (offline, authority retired, signed out). Forget the
+      // last deal's inputs so the re-open deals again exactly as it always
+      // has — a reconnect re-runs joinAndDeal, whose board-exists early-return
+      // makes it a no-op for a boarded Player and a real join for a first
+      // timer. The dedupe below is only for two runs under ONE open gate.
+      lastDealGateRef.current = null;
+      return;
+    }
+    const state = beginAdmissionIfNeeded(user, eventId);
+    if (!mayDealUnderAdmission(state)) {
+      // `retryBootstrap` leaves `dealing` true for the deal it expects to
+      // follow. When admission holds that deal at a state the Player must act
+      // on (Retry) or cannot act on at all (blocked), nothing else would clear
+      // the flag, and the invitation Retry surface would render its one button
+      // disabled forever (Codex P1 on #1131). `pending` keeps it: the shell is
+      // on the pass-check loading state and a redemption IS in flight.
+      if (state.kind === 'retryable' || state.kind === 'blocked') setDealingFor(eventId, false);
+      return;
+    }
+    // Deal once per (visit, admission answer, gate inputs). The coordinator
+    // answers synchronously, so the run triggered by an Event or account
+    // change already dealt from its answer; the run the admission mirror then
+    // triggers is the same answer arriving through state, not a new one.
+    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}`;
+    if (lastDealGateRef.current === gate) return;
+    lastDealGateRef.current = gate;
+    void runDeal(user, eventId);
+  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
@@ -1872,13 +2003,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
     } else if (mayDeal) {
-      // Online + authoritative → re-deal in place.
-      void runDeal(user, eventId);
+      // Online + authoritative → re-deal in place, unless admission still
+      // holds the deal: a retryable redemption retries ITSELF, and a pending
+      // or blocked one is not something a deal retry may step past (#804).
+      const admissionState = beginAdmissionIfNeeded(user, eventId);
+      if (admissionState.kind === 'retryable') {
+        admissionRef.current!.retry();
+      } else if (mayDealUnderAdmission(admissionState)) {
+        void runDeal(user, eventId);
+      }
     } else {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
@@ -2193,6 +2331,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }, [completeRedirectReturn, consumeAppOwnedRedirectTokenOnce]);
 
+  // Back from Google restores this page from the bfcache with the redirect
+  // still "in flight" (#1123): `signInWithRedirect`'s promise deliberately
+  // never settles once navigation starts, so neither the caller's catch nor the
+  // `finally` below ever releases the single-flight guard, and the button stays
+  // on "Signing in…" until a reload — where cancelling the retired popup used to
+  // allow a retry. A persisted `pageshow` IS that abandonment: nothing signed
+  // in (a completed return is a fresh navigation, never a bfcache restore), so
+  // release the guard and retire exactly this attempt's records, the same
+  // terminal cleanup a failed start performs. Token-addressed removal keeps a
+  // different tab's live attempt untouched.
+  useEffect(() => {
+    const onPageShow = (event: Event) => {
+      if ((event as PageTransitionEvent).persisted !== true) return;
+      const token = redirectAttemptTokenRef.current;
+      if (token === null) return;
+      redirectAttemptTokenRef.current = null;
+      signInAttemptRef.current = null;
+      clearPendingRedirectAttestationIfToken(token);
+      clearCollectedAcknowledgementIfToken(token);
+      clearRedirectPendingIfToken(token);
+      clearRedirectLoginLoggedIfToken(token);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, []);
+
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
 
@@ -2219,12 +2383,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const sameOriginHandler =
         auth.config?.authDomain !== undefined &&
         auth.config.authDomain === window.location.hostname;
-      if (sameOriginHandler && shouldRedirectSignIn(window.navigator, isStandaloneApp())) {
-        // One top-level redirect keeps the browser on a single origin so the
-        // helper's sessionStorage survives the Google round-trip — the flow the
-        // mobile tab and the installed desktop PWA (#395) both need. See
-        // shouldRedirectSignIn; the popup path below still serves desktop browser
-        // tabs and installed iOS PWAs.
+      // A pending Invitation that only memory holds (`durable: false`: both
+      // browser stores refused the write) would not survive a top-level
+      // redirect — the return would classify the visit `clear` and deal
+      // without ever redeeming it (Codex P1 on #1131). The capture seam
+      // leaves that recovery choice to callers that leave the document, and
+      // this is the one: keep the document alive by signing in through the
+      // popup instead. A popup that fails surfaces as a sign-in error with
+      // the record still in memory, which is the fail-closed direction.
+      const invitationHeldInMemoryOnly =
+        readPendingEventInvitation({ origin: window.location.origin, now: Date.now() })?.durable ===
+        false;
+      if (sameOriginHandler && !invitationHeldInMemoryOnly) {
+        // One top-level redirect on EVERY surface whose OAuth handler is
+        // same-origin (#765): the tap navigates this tab or app window to
+        // Google, and Google returns the Player to the page they started from
+        // with the session restored — no second window ever opens. There is no
+        // device or display-mode heuristic here on purpose: the same-origin
+        // handler is the only condition, because it is what keeps the helper's
+        // sessionStorage on one origin across the round trip (#161), and the
+        // durable redirect-return records below carry the surfaces that lose
+        // even that (#346, #836). Every production host pins its own hostname
+        // as authDomain (src/auth-domain.ts), so this IS the production flow;
+        // the popup below is the cross-origin-handler fallback only.
         // One random id for this attempt (Phase 4b P1 round 3 on #836),
         // threaded through the session marker and token-addressed durable
         // records below. A failed or abandoned prior attempt lives under a
@@ -2232,6 +2413,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // one (#907).
         pruneExpiredRedirectAttemptRecords();
         const attemptToken = generateAttemptToken();
+        redirectAttemptTokenRef.current = attemptToken;
         markPendingRedirectAttestation(attemptToken);
         // The durable #346 signal (b) companion to the marker above — written
         // alongside it, in the same store as the acknowledgement record, for
@@ -2256,12 +2438,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearCollectedAcknowledgementIfToken(attemptToken);
           clearRedirectPendingIfToken(attemptToken);
           clearRedirectLoginLoggedIfToken(attemptToken);
+          if (redirectAttemptTokenRef.current === attemptToken) {
+            redirectAttemptTokenRef.current = null;
+          }
           trackSignInFailure(err);
           throw err;
         }
         return;
       }
 
+      // Cross-origin handler — local development and the Auth Emulator (#765)
+      // — or a same-origin surface whose pending Invitation lives in memory
+      // only (above). A redirect against a foreign authDomain is exactly the
+      // storage-partition failure the same-origin pin exists to avoid (#161),
+      // and the e2e harness drives the emulator's account-chooser popup.
       try {
         await signInWithPopup(auth, googleProvider);
       } catch (err) {
@@ -2327,6 +2517,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const canRenderEventContent =
     user != null && (attestationRequired ? attested === true : profileReady);
 
+  const admissionAllowsEventWatchers = mayDealUnderAdmission(admission);
+
   return (
     <AuthContext.Provider
       value={{
@@ -2343,6 +2535,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signOutUser,
         attest,
         retryDeal,
+        admission,
       }}
     >
       {/* The confirm-path Moment emitter (#41) mounts for ANY signed-in user,
@@ -2358,14 +2551,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           Deliberately NOT gated on `user`, unlike the watchers below it: the
           posture decides what the SIGNED-OUT gate renders. */}
       <AdultContentWatcher />
-      {user && <ConfirmWinMoments />}
+      {/* The three Event watchers below open board, Event, leaderboard and
+          claim subscriptions the moment they mount. A visit that admission
+          still holds — `held`, `pending`, `blocked` — is not a member, so the
+          "whole shell" gate has to cover these provider-level mounts too, not
+          only what App renders below the Router (Codex P1 on #1131). A visit
+          with no Invitation classifies `clear` synchronously at the identity
+          change, so nothing here mounts later than it used to. */}
+      {user && admissionAllowsEventWatchers && <ConfirmWinMoments />}
       {/* The retraction-path fall observer (#479) mounts at the SAME shell spot
           and for the same reason: a published win can stop standing while Board
           is unmounted (a proof deleted from the Feed tab, an admin rejecting a
           confirmed claim), and Board's remount would baseline the fall away.
           Renders nothing; all irreversibility gates live in src/data/moments.ts
           (createRetractionFallObserver). */}
-      {user && <RetractWinMoments />}
+      {user && admissionAllowsEventWatchers && <RetractWinMoments />}
       {/* The pool-recovery auto-retry watcher (#70), mounted HERE — above the tab
           Router, beside the attestation gate — for the same reason ConfirmWinMoments
           is: it must survive the exact recovery path. The Card-route DealError panel
@@ -2375,7 +2575,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           a pool subscription while a pool-shortfall deal error is up (it renders null
           otherwise), and fires the SAME retryDeal a manual Retry does — so it inherits
           #117's online && attestedAuthoritative deal gate rather than re-deriving it. */}
-      {user && <PoolRecoveryWatcher />}
+      {user && admissionAllowsEventWatchers && <PoolRecoveryWatcher />}
       {needsAttestation ? <SignIn /> : children}
     </AuthContext.Provider>
   );

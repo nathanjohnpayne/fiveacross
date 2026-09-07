@@ -28,7 +28,7 @@ function envelope(eventId: string, fetchedAt: number): CacheEnvelope {
   return {
     version: CACHE_VERSION,
     fetchedAt,
-    record: { eventId, status: 'active', slug: 'bodega-bay' },
+    record: { eventId, status: 'active', slug: 'bodega-bay', edition: null },
   };
 }
 
@@ -80,7 +80,7 @@ describe('the Cloudflare cache adapter', () => {
   });
 
   it.each([
-    ['a version-drifted envelope', JSON.stringify({ version: CACHE_VERSION + 1, fetchedAt: 1, record: { eventId: 'e', status: 'active', slug: 'bodega-bay' } })],
+    ['a version-drifted envelope', JSON.stringify({ version: CACHE_VERSION + 1, fetchedAt: 1, record: { eventId: 'e', status: 'active', slug: 'bodega-bay', edition: null } })],
     ['a partial record at the current version', JSON.stringify({ version: CACHE_VERSION, fetchedAt: 1, record: { eventId: 'e' } })],
     ['a null record', JSON.stringify({ version: CACHE_VERSION, fetchedAt: 1, record: null })],
     ['unparseable JSON', '{not json'],

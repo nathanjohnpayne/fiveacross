@@ -28,8 +28,11 @@ const SRC = resolve(__dirname);
  */
 const ALLOWED = new Map<string, string>([
   // The Edition table IS the vocabulary. Its `gcb` rows are cruise by
-  // definition; `edition-lexicon.test.ts` guards the other two registers.
-  ['editions.ts', 'the Edition table — cruise is one of the three registers it holds'],
+  // definition; `edition-lexicon.test.ts` guards the other two registers. The
+  // table moved out of `editions.ts` in #546 so the edge Worker could read the
+  // same rows, and this entry moved with it — `editions.ts` itself now holds
+  // only the session state and the chrome repair, and is back under the guard.
+  ['edition-brands.ts', 'the Edition table — cruise is one of the three registers it holds'],
   // Per-EVENT seed data for the Gay Cruise Bingo Event, not code copy. Owned by
   // #563 / #564; a Bodega or Five Across Event seeds its own pool.
   ['data/seed.ts', "Gay Cruise Bingo's own Event seed data (#563 / #564)"],
@@ -120,7 +123,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
       offenders,
       offenders.length
         ? `Cruise vocabulary in a string that every Edition renders:\n${report}\n\n` +
-            'Move it to `src/editions.ts` — a token on `EditionLexicon` if the sentence ' +
+            'Move it to the Edition table in `src/edition-brands.ts` — a token on `EditionLexicon` if the sentence ' +
             'skeleton survives the swap, a whole-string override on `EditionBrand` if it ' +
             'does not (#608). If the string is genuinely Gay Cruise Bingo content or an ' +
             "Edition-scoped value, add the file to this test's ALLOWED map with the reason."

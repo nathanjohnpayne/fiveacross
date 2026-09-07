@@ -2,6 +2,8 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { assertDeployFirebaseApiKey, resolveAppVersion } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
@@ -10,6 +12,16 @@ import { assertDeployFirebaseApiKey, resolveAppVersion } from './src/build-confi
 // module-scope `import.meta.env` / `document` so it can be loaded in this Node
 // context — see the note at the top of that file before adding anything to it.
 import { brandHtmlIdentity, buildTimeEdition, editionBrand, type EditionBrand } from './src/editions';
+// The PWA manifest is built by the SAME module the edge Worker builds it from
+// (#546), so `dist/manifest.webmanifest` and a per-hostname edge response are
+// the same bytes. This config emits the file itself; `VitePWA` is told
+// `manifest: false` below, which is what keeps the entry out of the precache.
+import {
+  buildWebManifest,
+  serializeWebManifest,
+  WEB_MANIFEST_FILENAME,
+} from './src/web-manifest';
+import { precachedUrls } from './src/sw-precache-audit';
 
 function appVersion(): string {
   return resolveAppVersion(process.env, () => execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }));
@@ -39,6 +51,112 @@ function editionHtmlIdentity(brand: EditionBrand): Plugin {
   };
 }
 
+/**
+ * Emit `manifest.webmanifest` and link it from the document (#546).
+ *
+ * This is work `vite-plugin-pwa` used to do, taken over here because its
+ * manifest support cannot be separated from the precache entry it appends (see
+ * the `manifest: false` note below). Nothing about the artifact changes: the
+ * bytes come from `src/web-manifest.ts`, which reproduces the plugin's output
+ * member-for-member and in the same order, and the link tag lands in the built
+ * document's head exactly where the plugin put it.
+ *
+ * `apply: 'build'` matches the behaviour it replaces rather than extending it.
+ * `devOptions` is not enabled, so `vite dev` served no manifest and injected no
+ * link tag before this ticket either; emitting a tag in dev that pointed at a
+ * file only the build produces would be a new 404, not a fix.
+ *
+ * The Worker builds its per-hostname response from the same two functions, so
+ * "the file the build ships" and "the file the edge serves" are one definition
+ * with two callers rather than two definitions kept in step by review.
+ */
+function editionWebManifest(brand: EditionBrand): Plugin {
+  return {
+    name: 'edition-web-manifest',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: WEB_MANIFEST_FILENAME,
+        source: serializeWebManifest(buildWebManifest(brand)),
+      });
+    },
+    transformIndexHtml: {
+      // 'post' so the tag is appended after the app's own markup has been
+      // transformed — the position the plugin's injection had.
+      order: 'post',
+      handler: () => [
+        {
+          tag: 'link',
+          attrs: { rel: 'manifest', href: `/${WEB_MANIFEST_FILENAME}` },
+          injectTo: 'head' as const,
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Fail the BUILD if `manifest.webmanifest` ever re-enters the precache (#546).
+ *
+ * The exclusion is structural, but it is structural inside a dependency: a
+ * `vite-plugin-pwa` upgrade that appends the manifest entry regardless of
+ * `manifest: false`, or a later edit that re-enables the plugin's manifest
+ * without reading why it is off, would silently restore the defect this ticket
+ * exists to remove — and it is invisible in every surface a reviewer looks at.
+ * The config would not mention it, and `grep` cannot find it in the emitted
+ * worker: `dist/sw.js` is minified past the point where grep classifies it as
+ * binary, so a search reports NOTHING and exits 1. That false all-clear is
+ * exactly how the entry went unnoticed in the first place.
+ *
+ * So the emitted worker is parsed here, in the build, and not only in a test:
+ * `npm test` runs BEFORE `npm run build` in CI (`.github/workflows/app-ci.yml`),
+ * so on the run that matters a test has no built artifact to read. `closeBundle`
+ * with `order: 'post'` places this after `vite-plugin-pwa`'s own `closeBundle`,
+ * which is where it generates the worker.
+ */
+function precacheExclusionGuard(): Plugin {
+  let outDir = 'dist';
+  return {
+    name: 'precache-exclusion-guard',
+    apply: 'build',
+    configResolved(config) {
+      outDir = resolvePath(config.root, config.build.outDir);
+    },
+    closeBundle: {
+      order: 'post',
+      sequential: true,
+      handler() {
+        const swPath = resolvePath(outDir, 'sw.js');
+        // An SSR pass, or a build configuration that emits no worker, has
+        // nothing to audit. Absence is not evidence of the defect.
+        if (!existsSync(swPath)) return;
+        const urls = precachedUrls(readFileSync(swPath, 'utf8'));
+        // Positive control FIRST. A reader that has stopped matching returns an
+        // empty list, and "the manifest is not in an empty list" is a pass that
+        // proves nothing — the same shape of false all-clear as the grep.
+        if (urls.length === 0) {
+          throw new Error(
+            `precache-exclusion-guard: no precache entries found in ${swPath}. Either the ` +
+              'service worker precaches nothing (an app shell that cannot load offline) or ' +
+              'src/sw-precache-audit.ts no longer understands the emitted format. Either way ' +
+              'this guard has stopped checking anything.',
+          );
+        }
+        if (urls.includes(WEB_MANIFEST_FILENAME)) {
+          throw new Error(
+            `precache-exclusion-guard: ${WEB_MANIFEST_FILENAME} is back in the service-worker ` +
+              'precache. Workbox then answers it cache-first, so the edge Worker per-hostname ' +
+              'manifest (#546) can never reach a controlled client, and the entry revision is ' +
+              'an MD5 of the build-time bytes, so an installed shell never re-fetches it ' +
+              'either. See the `manifest: false` note in vite.config.ts.',
+          );
+        }
+      },
+    },
+  };
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
   const targetBuild = process.env.DEPLOY_TARGET_BUILD === '1';
@@ -48,8 +166,9 @@ export default defineConfig(({ command, mode }) => {
   // mode-specific root file after that wrapper has removed ambient values.
   const env = targetBuild ? process.env : loadEnv(mode, process.cwd(), 'VITE_');
   // `buildTimeEdition` keeps a hostname-resolved bundle independent of stale
-  // VITE_EDITION. A named target may carry a trusted static fallback solely for
-  // browser/PWA chrome that the edge cannot yet rewrite per host (#546). Always
+  // VITE_EDITION. A named target may carry a trusted static fallback for the
+  // static HTML identity the edge cannot yet rewrite per host (#1118) and for
+  // the manifest a host serves before the Worker routes are attached. Always
   // an EXPLICIT id, never `editionBrand()`'s default argument: that resolves
   // through `activeEdition()`, which reads `import.meta.env` and does not exist
   // here.
@@ -99,6 +218,8 @@ export default defineConfig(({ command, mode }) => {
     plugins: [
       react(),
       editionHtmlIdentity(brand),
+      editionWebManifest(brand),
+      precacheExclusionGuard(),
       VitePWA({
         // 'prompt': the new SW installs and WAITS instead of activating under the
         // running page; UpdatePrompt (src/components/UpdatePrompt.tsx, #178) owns
@@ -127,35 +248,29 @@ export default defineConfig(({ command, mode }) => {
         // otherwise would, and historically did for og-default.png) taxes
         // every phone ~1 MB at install time for files no client ever loads.
         includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
-        // The installed app's identity, from the build's Edition rather than
-        // from a hardcoded product name (#586). This is what Android's install
-        // prompt, home-screen label and app info read — a Vacay Event used to
-        // install itself as "Gay Bingo" on a general-audience guest's phone,
-        // and an installed app keeps that name until it is uninstalled.
+        // `false`, and this single word is the load-bearing half of #546.
         //
-        // This is the BUILD-TIME half only. A hostname-resolved build cannot be
-        // fixed here (one bundle, many Editions) and cannot be fixed at runtime
-        // either — the manifest is fetched as a file at install time — so it
-        // gets a per-hostname manifest from the edge Worker (#546).
-        manifest: {
-          name: brand.appName,
-          // The home-screen label, and Android's only source for it — iOS reads
-          // `apple-mobile-web-app-title` from index.html instead, which is why
-          // the two platforms can differ (#364). `EditionBrand.appShortName`
-          // owns the ~12-char budget per Edition; for `gcb` that is still "Gay
-          // Bingo", dropping "Cruise" rather than "Gay" (#359).
-          short_name: brand.appShortName,
-          description: brand.appDescription,
-          theme_color: '#07060d',
-          background_color: '#07060d',
-          display: 'standalone',
-          orientation: 'portrait',
-          icons: [
-            { src: 'pwa-192.png', sizes: '192x192', type: 'image/png' },
-            { src: 'pwa-512.png', sizes: '512x512', type: 'image/png' },
-            { src: 'pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
-          ]
-        },
+        // The plugin's manifest support is not just "generate the file": when
+        // it is enabled it ALSO appends `{url: 'manifest.webmanifest'}` to
+        // `injectManifest.additionalManifestEntries`, unconditionally and
+        // downstream of every knob this config exposes. `globPatterns` cannot
+        // exclude it (the glob never matched it in the first place — the entry
+        // arrives by a different route), and neither can a `manifestTransforms`
+        // filter, because Workbox runs `additionalManifestEntriesTransform`
+        // strictly LAST, after every user transform has already seen the list.
+        //
+        // A precached manifest is fatal to this ticket. `precacheAndRoute`
+        // answers `/manifest.webmanifest` cache-first, so an edge-served
+        // per-hostname manifest never reaches a client the service worker
+        // controls; and the entry's `revision` is an MD5 of the BUILD-TIME
+        // bytes, so redeploying the same Edition reuses the same hash and the
+        // shells real players are already carrying keep their pre-cutover
+        // identity indefinitely. Turning the plugin's manifest off removes the
+        // entry structurally rather than filtering it after the fact.
+        //
+        // What this config takes over as a consequence — emitting the file and
+        // linking it from the document — is `editionWebManifest` below.
+        manifest: false,
         // Under `injectManifest` this block only decides WHAT gets precached;
         // the routing that used to live here (navigation fallback + its /__/*
         // denylist #182, and the proof-media CacheFirst #363) now lives in

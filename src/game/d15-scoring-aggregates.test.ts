@@ -3,7 +3,13 @@ import {
   sumDayStats,
   eventFirstBingoAt,
   aggregatePlayerStats,
+  boardFirstBingoAt,
+  ceremonialDayIndexSet,
+  earlierEligibleHeadlineBingoExists,
+  eventFirstBingoWinner,
   foldDayStat,
+  rankingExcludedDay,
+  resolvedStandingsFreezeAt,
   tutorialDayIndexSet,
   perDayHonors,
   effectiveCruiseFirstBingoAt,
@@ -246,6 +252,131 @@ describe('cruiseFirstBingoUid / effectiveCruiseFirstBingoAt', () => {
     expect(effectiveCruiseFirstBingoAt(legacy, isTutorialDay)).toBe(1234);
     expect(cruiseFirstBingoUid([legacy], isTutorialDay)).toBe('legacy');
   });
+
+  it('breaks an exact tie by uid, not by the order the roster arrives in', () => {
+    // The mirror of the daily email's ⭐ tie-break (`eventFirstBingoUid` in
+    // `functions/src/dailyEmailContent.ts`). The two selectors never see the
+    // same order — this one is handed a roster sorted by LIVE root totals,
+    // the email one a through-yesterday window — so a Player who marks today's
+    // card before a delayed or retried send could flip a roster-order tie-break
+    // on one side alone (Codex P2, #1052). Uid is the key neither view supplies.
+    const TIE = 777;
+    const zed = mkPlayer('zed', { 4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE } });
+    const ace = mkPlayer('ace', { 4: { bingoCount: 1, squaresMarked: 5, firstBingoAt: TIE } });
+    expect(cruiseFirstBingoUid([zed, ace], isTutorialDay)).toBe('ace');
+    expect(cruiseFirstBingoUid([ace, zed], isTutorialDay)).toBe('ace');
+    // Including the order the Leaderboard actually hands it: `sortPlayers` puts
+    // `zed` first on totals, and the honour still goes to `ace`.
+    expect(cruiseFirstBingoUid(sortPlayers([ace, zed]), isTutorialDay)).toBe('ace');
+    expect(sortPlayers([ace, zed]).map((p) => p.uid)).toEqual(['zed', 'ace']);
+    // One millisecond of daylight and the timestamp decides again — the uid is a
+    // secondary key, never a way to overtake an earlier bingo.
+    const zedEarlier = mkPlayer('zed', {
+      4: { bingoCount: 2, squaresMarked: 20, firstBingoAt: TIE - 1 },
+    });
+    expect(cruiseFirstBingoUid([ace, zedEarlier], isTutorialDay)).toBe('zed');
+  });
+});
+
+describe('boardFirstBingoAt — the stamp ONE Board preserves (#1049)', () => {
+  const row = {
+    firstBingoAt: 100,
+    dayStats: {
+      1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 },
+      2: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 },
+    } satisfies DayStats,
+  };
+
+  it("reads the VIEWED Day's own bucket in daily mode, never the Event-wide root", () => {
+    expect(boardFirstBingoAt(row, true, 2)).toBe(200);
+    // The root aggregate is Day 1's 100. Day 2's Board must not inherit it.
+    expect(boardFirstBingoAt(row, true, 2)).not.toBe(row.firstBingoAt);
+  });
+
+  it('is null for a Day with no bucket, or a bucket carrying no bingo yet', () => {
+    expect(boardFirstBingoAt(row, true, 5)).toBeNull();
+    expect(
+      boardFirstBingoAt(
+        { firstBingoAt: 100, dayStats: { 3: { bingoCount: 0, squaresMarked: 2, firstBingoAt: null } } },
+        true,
+        3,
+      ),
+    ).toBeNull();
+    expect(boardFirstBingoAt(null, true, 0)).toBeNull();
+    expect(boardFirstBingoAt(undefined, true, 0)).toBeNull();
+  });
+
+  it('returns the root unchanged for a legacy single-Board row (no dayStats)', () => {
+    expect(boardFirstBingoAt({ firstBingoAt: 1234 }, false, 0)).toBe(1234);
+    expect(boardFirstBingoAt(row, false, 2)).toBe(100);
+    expect(boardFirstBingoAt({ firstBingoAt: null }, false, 0)).toBeNull();
+    expect(boardFirstBingoAt(null, false, 0)).toBeNull();
+  });
+});
+
+// The scoring consequence the copy has, stated over the read surfaces that
+// award the honours. This is the regression #1049 exists to close: a Day-2 win
+// stamped with Day 1's instant is indistinguishable, downstream, from a genuine
+// Day-2 win at that time — `perDayHonors` and `eventFirstBingoAt` can only read
+// what the write path stored.
+describe('a copied root timestamp selects the WRONG daily and headline winner (#1049)', () => {
+  // Day 1: `veteran` bingoes at t=100, `rival` at t=150.
+  // Day 2: `rival` bingoes at t=180; `veteran` completes Day 2 through PROOF at
+  // t=200 — genuinely second on that Day.
+  const day2Correct = 200;
+  const day2Copied = 100; // veteran's Event-level root, copied off Day 1
+
+  const withVeteranDay2 = (stamp: number) => [
+    mkPlayer('veteran', {
+      1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+      2: { bingoCount: 1, squaresMarked: 12, firstBingoAt: stamp },
+    }),
+    mkPlayer('rival', {
+      1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 150 },
+      2: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 180 },
+    }),
+  ];
+
+  it("awards Day 2's First to BINGO to the rival who actually won it", () => {
+    const honors = perDayHonors(withVeteranDay2(day2Correct));
+    expect(honors.find((h) => h.dayIndex === 2)).toMatchObject({ uid: 'rival', firstBingoAt: 180 });
+  });
+
+  it("hands Day 2's honour to the wrong Player once the root stamp is copied in", () => {
+    const honors = perDayHonors(withVeteranDay2(day2Copied));
+    // Day 1's 100 now reads as a Day-2 bingo that beats the rival's real 180.
+    expect(honors.find((h) => h.dayIndex === 2)).toMatchObject({ uid: 'veteran', firstBingoAt: 100 });
+  });
+
+  it('leaves no trace of the copy in the Event-wide root the headline reads', () => {
+    const veteran = withVeteranDay2(day2Copied)[0];
+    // The correct Day-2 bucket leaves the headline anchored to the real Day-1 win…
+    expect(eventFirstBingoAt(withVeteranDay2(day2Correct)[0].dayStats, isTutorialDay)).toBe(100);
+    // …and so does the copy, so the corruption is INVISIBLE in the root: the
+    // evidence of which Day produced the instant is gone, which is why a later
+    // UI-only workaround cannot reconstruct it.
+    expect(eventFirstBingoAt(veteran.dayStats, isTutorialDay)).toBe(100);
+    expect(veteran.dayStats![2].firstBingoAt).toBe(100);
+  });
+
+  it('flips the podium when the copy lands on a Day the rival won outright', () => {
+    // Same shape one Day later: `rival` is the only Day-3 winner, and a proofed
+    // `veteran` Day-3 line stamped with the copied root steals both the daily
+    // honour and the tie-break the Leaderboard ranks on.
+    const correct = [
+      mkPlayer('veteran', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 400 } }),
+      mkPlayer('rival', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 300 } }),
+    ];
+    expect(sortPlayers(correct).map((p) => p.uid)).toEqual(['rival', 'veteran']);
+    expect(cruiseFirstBingoUid(correct, isTutorialDay)).toBe('rival');
+
+    const copied = [
+      mkPlayer('veteran', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 } }),
+      mkPlayer('rival', { 3: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 300 } }),
+    ];
+    expect(sortPlayers(copied).map((p) => p.uid)).toEqual(['veteran', 'rival']);
+    expect(cruiseFirstBingoUid(copied, isTutorialDay)).toBe('veteran');
+  });
 });
 
 describe('tie-break over aggregated totals (order unchanged)', () => {
@@ -266,5 +397,297 @@ describe('tie-break over aggregated totals (order unchanged)', () => {
     }); // 1 bingo, 6 squares, later
     const ordered = sortPlayers([later, earlier, moreSquares, topBingos]).map((p) => p.uid);
     expect(ordered).toEqual(['top', 'squares', 'earlier', 'later']);
+  });
+});
+
+describe('earlierEligibleHeadlineBingoExists — the shared First-to-BINGO gate (#1050)', () => {
+  // An ADR 0011 schedule the two live Events cannot produce: Day 8 STATES
+  // `scoring: 'ceremonial'` while carrying `tutorial: false`. That is the shape
+  // the defect lives on — the standings exclude Day 8, the headline honour does
+  // not, and the pre-#1050 gate read the standings root.
+  const adr11Days: DayDef[] = days.map((d) =>
+    d.index === 8 ? { ...d, scoring: 'ceremonial' as const, tutorial: false } : d,
+  );
+  const isTutorial = (i: number) => tutorialDayIndexSet(adr11Days).has(i);
+  const isCeremonial = (i: number) => ceremonialDayIndexSet(adr11Days).has(i);
+  /** A rival whose only bingo is on `dayIndex` at `at`, with the ROOT the ranked
+   *  fold actually derives — so a ceremonial or tutorial Day leaves it null. */
+  const rivalOn = (dayIndex: number, at: number): PlayerDoc =>
+    mkPlayer(
+      'rival',
+      { [dayIndex]: { bingoCount: 1, squaresMarked: 5, firstBingoAt: at } },
+      {
+        firstBingoAt: eventFirstBingoAt(
+          { [dayIndex]: { bingoCount: 1, squaresMarked: 5, firstBingoAt: at } },
+          rankingExcludedDay(isTutorial, isCeremonial),
+        ),
+      },
+    );
+
+  it('a ceremonial, non-tutorial Day is excluded from the STANDINGS root but not the headline', () => {
+    expect(isCeremonial(8)).toBe(true);
+    expect(isTutorial(8)).toBe(false);
+    const rival = rivalOn(8, 1_000);
+    // The root the standings rank on drops it — which is why reading that root
+    // as headline evidence made the earlier winner invisible.
+    expect(rival.firstBingoAt).toBeNull();
+    // The headline derivation counts it.
+    expect(effectiveCruiseFirstBingoAt(rival, isTutorial)).toBe(1_000);
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('a tutorial Day never blocks a later eligible claim, however early it is', () => {
+    for (const day of [0, 9]) {
+      expect(
+        earlierEligibleHeadlineBingoExists({
+          roster: [rivalOn(day, 1)],
+          candidateUid: 'me',
+          isTutorialDay: isTutorial,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('ceremonial policy ALONE never excludes a Day — only the tutorial flag does', () => {
+    // Day 8 is ceremonial and blocks; Day 9 is ceremonial AND tutorial and does not.
+    // The difference is the tutorial flag, never the Scoring Policy.
+    expect(isCeremonial(8) && isCeremonial(9)).toBe(true);
+    const blocked = earlierEligibleHeadlineBingoExists({
+      roster: [rivalOn(8, 1_000)],
+      candidateUid: 'me',
+      isTutorialDay: isTutorial,
+    });
+    const notBlocked = earlierEligibleHeadlineBingoExists({
+      roster: [rivalOn(9, 1_000)],
+      candidateUid: 'me',
+      isTutorialDay: isTutorial,
+    });
+    expect([blocked, notBlocked]).toEqual([true, false]);
+  });
+
+  it('breaks an exact-millisecond tie by uid, ascending, exactly as the shared selector does', () => {
+    // Codex P2 on #1128: a strict `<` let both tied Players claim the singleton,
+    // so whichever write landed first won — and if that was the larger uid, the
+    // immutable Feed Moment disagreed forever with `eventFirstBingoWinner`.
+    const tiedAt = 1_000;
+    const rowFor = (uid: string): PlayerDoc =>
+      mkPlayer(
+        uid,
+        { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: tiedAt } },
+        { firstBingoAt: null },
+      );
+    const roster = [rowFor('zed'), rowFor('ace')];
+    const gate = (candidateUid: string) =>
+      earlierEligibleHeadlineBingoExists({ roster, candidateUid, isTutorialDay: isTutorial });
+    // The selector names `ace`; `ace` stays eligible to claim, `zed` is blocked.
+    expect(eventFirstBingoWinner(roster, isTutorial)?.uid).toBe('ace');
+    expect(gate('ace')).toBe(false);
+    expect(gate('zed')).toBe(true);
+    // Roster order is not the key: reversing it changes nothing.
+    const reversed = [...roster].reverse();
+    expect(
+      earlierEligibleHeadlineBingoExists({ roster: reversed, candidateUid: 'ace', isTutorialDay: isTutorial }),
+    ).toBe(false);
+    expect(
+      earlierEligibleHeadlineBingoExists({ roster: reversed, candidateUid: 'zed', isTutorialDay: isTutorial }),
+    ).toBe(true);
+    // One millisecond of daylight and the earlier instant wins regardless of uid.
+    const earlierZed = [rowFor('ace'), mkPlayer('zed', { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: tiedAt - 1 } }, { firstBingoAt: null })];
+    expect(earlierEligibleHeadlineBingoExists({ roster: earlierZed, candidateUid: 'ace', isTutorialDay: isTutorial })).toBe(true);
+    expect(earlierEligibleHeadlineBingoExists({ roster: earlierZed, candidateUid: 'zed', isTutorialDay: isTutorial })).toBe(false);
+  });
+
+  it('the freeze boundary is inclusive: at-or-after is ineligible, strictly before is not', () => {
+    const freezeAt = 5_000;
+    const call = (at: number) =>
+      earlierEligibleHeadlineBingoExists({
+        roster: [rivalOn(8, at)],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+        freezeAt,
+      });
+    expect(call(4_999)).toBe(true); // strictly before → eligible, blocks
+    expect(call(5_000)).toBe(false); // AT the freeze → already frozen
+    expect(call(5_001)).toBe(false); // after → ineligible
+    // No cutoff supplied is every pre-freeze render: nothing is cut.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [rivalOn(8, 9_999)],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('a row with NO dayStats keeps the legacy root behaviour', () => {
+    const legacy: PlayerDoc = {
+      uid: 'legacy',
+      displayName: 'Legacy',
+      photoURL: null,
+      joinedAt: 0,
+      bingoCount: 1,
+      squaresMarked: 5,
+      firstBingoAt: 1_234,
+      reshufflesUsed: 0,
+    };
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [legacy],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [{ ...legacy, firstBingoAt: null }],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(false);
+    // And the legacy root still answers to the freeze cutoff.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [legacy],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+        freezeAt: 1_234,
+      }),
+    ).toBe(false);
+  });
+
+  it("the candidate's own row is never their own blocker", () => {
+    const me = mkPlayer('me', { 3: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 10 } });
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(false);
+  });
+
+  it('a LATER eligible rival does not void a candidate whose own instant is known', () => {
+    // The held-candidate window (Codex P2 on #1128): the candidate crossed first
+    // and their row records it, then a rival wins on a ceremonial Day while the
+    // claim is still parked at the roster gate. On a bare presence test the two
+    // clients suppress each other and the immutable singleton is never written.
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 } });
+    const later = rivalOn(8, 200);
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, later],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(false);
+    // The rival's own client still defers to the genuinely earlier candidate.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, later],
+        candidateUid: 'rival',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('an EARLIER rival still blocks a candidate whose own instant is known', () => {
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 300 } });
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, rivalOn(8, 200)],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to presence when the candidate's own instant is not knowable", () => {
+    const rival = rivalOn(8, 200);
+    // Row absent from the roster (a freshly-crossed win that has not echoed).
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+    // Row present but carrying no stamp (a concurrent unmark cleared it).
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [mkPlayer('me', {}), rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+    // Row present but tutorial-only, so it holds no HEADLINE instant.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [mkPlayer('me', { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 1 } }), rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('an exact TIE blocks only the Player the shared selector does not name', () => {
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 } });
+    const tied = rivalOn(8, 200);
+    const gate = (candidateUid: string) =>
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, tied],
+        candidateUid,
+        isTutorialDay: isTutorial,
+      });
+    // 'me' < 'rival', so the selector names 'me': 'me' may claim, 'rival' may not.
+    // Neither the old strict race (both attempt) nor mutual suppression (neither
+    // attempts) is acceptable — the Feed must name the selector's Player.
+    expect(eventFirstBingoWinner([me, tied], isTutorial)?.uid).toBe('me');
+    expect([gate('me'), gate('rival')]).toEqual([false, true]);
+  });
+
+  it('blocks exactly when the shared headline selector names someone else', () => {
+    // The Moment gate and the Leaderboard/podium pin answer ONE question: this
+    // client may claim the singleton iff the shared selector over the same roster
+    // and cutoff does not name a different Player. Distinct instants throughout —
+    // the tie case above is broken by uid, exactly as the selector breaks it.
+    const roster: PlayerDoc[] = [
+      rivalOn(8, 1_000), // ceremonial, non-tutorial — eligible
+      { ...rivalOn(0, 1), uid: 'warmup' }, // tutorial only — never eligible
+      { ...rivalOn(4, 8_000), uid: 'late' }, // main-game, cut by the tighter freezes
+      mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 2_000 } }),
+    ];
+    for (const freezeAt of [null, 500, 1_000, 5_000, 9_000]) {
+      for (const candidateUid of ['me', 'rival', 'warmup', 'late', 'stranger']) {
+        const winner = eventFirstBingoWinner(roster, isTutorial, freezeAt);
+        expect(
+          earlierEligibleHeadlineBingoExists({ roster, candidateUid, isTutorialDay: isTutorial, freezeAt }),
+        ).toBe(winner !== undefined && winner.uid !== candidateUid);
+      }
+    }
+  });
+});
+
+describe('resolvedStandingsFreezeAt — one cutoff for every headline surface (#1050)', () => {
+  const ceremonialAt = 7_000;
+  const schedule: DayDef[] = days.map((d) =>
+    d.index === 9 ? { ...d, unlockAt: ceremonialAt } : { ...d, unlockAt: 100 },
+  );
+
+  it("prefers the scheduler's frozenAt stamp, else the scheduled freeze", () => {
+    expect(resolvedStandingsFreezeAt({ days: schedule })).toBe(ceremonialAt);
+    expect(resolvedStandingsFreezeAt({ days: schedule, frozenAt: 6_500 })).toBe(6_500);
+    expect(resolvedStandingsFreezeAt({ days: schedule, standingsFreezeAt: 6_000 })).toBe(6_000);
+  });
+
+  it('is null for an Event with no freeze at all, and for no Event', () => {
+    expect(resolvedStandingsFreezeAt({ days: [] })).toBeNull();
+    expect(resolvedStandingsFreezeAt(null)).toBeNull();
+    expect(resolvedStandingsFreezeAt(undefined)).toBeNull();
   });
 });

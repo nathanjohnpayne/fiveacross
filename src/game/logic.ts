@@ -1127,6 +1127,28 @@ export function standingsFrozen(
   return freezeAt != null && now >= freezeAt;
 }
 
+/**
+ * The RESOLVED Standings Freeze instant every headline surface cuts on: the
+ * scheduler's `frozenAt` stamp when it has run, else the Event's scheduled
+ * freeze (`standingsFreezeAtFor`). `null` when the Event has neither, which is
+ * "no cutoff" — every pre-freeze render.
+ *
+ * The two halves answer the same question at different times, and both are
+ * needed: `frozenAt` is the authoritative record once the scheduler beat has
+ * landed, while the schedule is what a client offline at sea (or open across
+ * the boundary) has to fall back on. `frozenAt` is stamped to the scheduled
+ * instant, so once both exist they agree.
+ *
+ * Named and shared because the Leaderboard pin, the frozen podium and the
+ * ceremonial `first_bingo` Moment gate must cut on the SAME instant — a surface
+ * resolving it its own way is how two screens end up naming two winners.
+ */
+export function resolvedStandingsFreezeAt(
+  event: FreezeSchedule | null | undefined,
+): number | null {
+  return event?.frozenAt ?? standingsFreezeAtFor(event ?? null);
+}
+
 /** Sum `bingoCount` + `squaresMarked` across EVERY Day Card, tutorial Days
  *  included — the embark card is real pre-freeze play (spec § "Implementation
  *  notes": cruise-wide totals). `excludeDay` (#265) drops a Day's bucket from
@@ -1223,6 +1245,31 @@ export function eventFirstBingoAt(
   return earliest;
 }
 
+/**
+ * The First-to-BINGO stamp that governs ONE Board — the value a Mark, a proof
+ * attach, or a proof deletion PRESERVES rather than re-stamps (#1049).
+ *
+ * In daily-cards mode every Day Card is its own Board, so that stamp is that
+ * Day's OWN `dayStats` bucket. The root `firstBingoAt` is an AGGREGATE over
+ * every Day (`eventFirstBingoAt`), so reading it here would copy an earlier
+ * Day's instant into the Day being written — awarding that Day's honour to the
+ * wrong Player and, once the copy is summed back up, corrupting the Event-wide
+ * headline too. A legacy single-Board Player carries no `dayStats`, so their
+ * root IS that one Board's stamp and is returned unchanged.
+ *
+ * Callers that distinguish "no prior stamp" from "prior state unknown" (the #75
+ * omit) keep doing so around this helper: it answers only WHICH field holds the
+ * Board's stamp, never whether the row itself was knowable.
+ */
+export function boardFirstBingoAt(
+  row: { firstBingoAt?: number | null; dayStats?: DayStats } | null | undefined,
+  daily: boolean,
+  dayIndex: number,
+): number | null {
+  if (!daily) return row?.firstBingoAt ?? null;
+  return row?.dayStats?.[dayIndex]?.firstBingoAt ?? null;
+}
+
 /** Derive a Player's Event-wide root totals from their per-Day `dayStats`:
  *  bingos/squares summed over all Days, First to BINGO restricted to
  *  non-Tutorial Days. This is exactly the `PlayerDoc` root shape the
@@ -1283,6 +1330,109 @@ export function effectiveCruiseFirstBingoAt(
   return player.firstBingoAt;
 }
 
+/** The roster shape the headline-eligibility decision reads: a Player's uid plus
+ *  the two fields the Event-wide First to BINGO derives from. A full `PlayerDoc`
+ *  satisfies it, so every caller can pass its live roster straight through. */
+export type HeadlineBingoRow = Pick<PlayerDoc, 'uid' | 'firstBingoAt' | 'dayStats'>;
+
+/**
+ * Whether ANOTHER Player on the roster already holds an ELIGIBLE Event-wide
+ * First to BINGO — the ONE gate the immutable `first_bingo` Moment is claimed
+ * behind, on every path that can claim it (#1050).
+ *
+ * "Eligible" is the HEADLINE question, and it is deliberately NOT the standings
+ * question:
+ *
+ *   - Tutorial Days are excluded, and ONLY tutorial Days. A ceremonial Day with
+ *     `tutorial: false` still counts — ADR 0011 decoupled the two flags, and
+ *     `ceremonial` promises only that a Day's marks never move the STANDINGS.
+ *     Reading the root `firstBingoAt` here (the pre-#1050 gate) asked the
+ *     standings question instead: that root is folded through
+ *     `rankingExcludedDay`, so it drops ceremonial Days too and an earlier
+ *     eligible ceremonial winner was invisible to a later client, which then
+ *     contended for the create-only singleton and left the Feed naming a
+ *     different winner from the Leaderboard and the podium. The singleton is
+ *     immutable, so no later render can correct that.
+ *   - Anything at or after the resolved Standings Freeze is excluded, matching
+ *     `eventFirstBingoWinner`'s inclusive cutoff: a ceremonial Day keeps
+ *     recording Marks after the freeze, and those must not decide a headline the
+ *     frozen podium has already settled.
+ *
+ * The per-row derivation is `effectiveCruiseFirstBingoAt`, so the documented
+ * legacy fallback survives exactly where it applies: a row with NO `dayStats` (a
+ * pre-Phase-1.5 or single-Board roster) has no per-Day breakdown to read and its
+ * root `firstBingoAt` stands as that Board's own stamp.
+ *
+ * `candidateUid` never blocks itself: the question is whether someone ELSE was
+ * first, and the candidate's own row is self-evidence — their own win is what is
+ * being claimed. Their prior-win history is `hasPriorBingoWitness`'s question at
+ * birth time, never this one.
+ *
+ * "Earlier" is measured against the candidate's OWN eligible instant when the
+ * roster already carries one, and is otherwise a bare presence test (Codex P2 on
+ * #1128). Both halves are load-bearing:
+ *
+ *   - The comparison is what keeps a LATER rival from voiding a held candidate.
+ *     A claim can be parked at the roster gate for an arbitrarily long time — an
+ *     unconfirmed roster, an offline stretch, a delayed admin confirm — and a
+ *     rival can complete their own eligible bingo inside that window. On a bare
+ *     presence test the two clients then suppress EACH OTHER: the rival defers to
+ *     the (genuinely earlier) held candidate while the held candidate defers to
+ *     the rival's mere presence, so the immutable singleton is never written and
+ *     the Feed carries no ceremony at all while the podium names the winner.
+ *   - The presence fallback covers the candidate whose own instant is NOT
+ *     knowable: a freshly-crossed win whose row has not echoed back yet, a row
+ *     whose stamp a concurrent unmark cleared (`computeMark` clears it when the
+ *     last line falls), or one whose only bingos are tutorial or post-freeze.
+ *     Deferring to any eligible rival there is not merely conservative, it is
+ *     the CORRECT answer: with no eligible instant on the row, the shared
+ *     selector does not name this Player either, so standing down is what keeps
+ *     the Feed agreeing with the Leaderboard. Comparing against a missing
+ *     instant would instead read as "nobody else is ahead" precisely when both
+ *     the roster and the selector say otherwise.
+ *
+ * The candidate's instant is read from the roster row rather than carried from
+ * the completing action, and deliberately: it must be the SAME quantity the
+ * Leaderboard pin and the podium compare, or the gate is answering a second
+ * question with a second clock — the divergence this ticket exists to remove.
+ * The confirm path has no local win instant to carry anyway (`confirmClaim`
+ * mints `firstBingoAt` inside the ADMIN's transaction; the emitter never sees
+ * it). Reading the row is not a lag: `useLeaderboard` subscribes with
+ * `onSnapshot`, so a client observes its OWN write locally the moment it is
+ * enqueued — before the server has it, and therefore before any rival's client
+ * can see it (Codex P2 on #1128 round 2).
+ *
+ * An earlier instant blocks; an exact-millisecond tie is broken by uid,
+ * ascending — the same key `eventFirstBingoWinner` applies (Codex P2 on #1128
+ * round 4). Letting a tie race to the create-only singleton would let the
+ * larger uid win the Feed Moment while the Leaderboard and podium named the
+ * smaller one, forever. A tie therefore blocks exactly the Player the selector
+ * does not name, and never both (the mutual-suppression case above).
+ *
+ * Blocking therefore coincides with the shared headline selector BY CONSTRUCTION:
+ * this delegates to `selectHeadlineBingoWinner`, the one loop
+ * `eventFirstBingoWinner` also runs, and returns true exactly when it names a
+ * Player who is not the candidate (Codex P1 on #1128: a re-implementation that
+ * merely agreed today could be edited apart tomorrow).
+ */
+export function earlierEligibleHeadlineBingoExists(params: {
+  roster: readonly HeadlineBingoRow[];
+  candidateUid: string;
+  isTutorialDay: (dayIndex: number) => boolean;
+  freezeAt?: number | null;
+}): boolean {
+  const { roster, candidateUid, isTutorialDay, freezeAt } = params;
+  // Not a second implementation of the rule: the SAME selection the Leaderboard
+  // pin and the podium run, asked one question — does it name somebody else?
+  // Every case in the contract above falls out of that: a candidate with no
+  // eligible instant is never the winner, so any eligible rival blocks (the
+  // presence fallback); an eligible candidate is blocked exactly by a rival the
+  // selector orders ahead (earlier, or the same instant and a smaller uid); and
+  // with nobody eligible there is no winner, so nothing blocks.
+  const winner = selectHeadlineBingoWinner(roster, isTutorialDay, freezeAt);
+  return winner !== undefined && winner.row.uid !== candidateUid;
+}
+
 /** The uid of the Event-wide First to BINGO holder across a roster — the
  *  earliest effective Tutorial-excluded first bingo. `undefined` when nobody
  *  holds a qualifying non-Tutorial bingo. */
@@ -1318,19 +1468,54 @@ export function cruiseFirstBingoUid(
  * millisecond is not eligible (Phase 4b P2). Absent/`null` means no cutoff,
  * which is every pre-freeze render.
  *
- * Ties go to the first Player in roster order, unchanged.
+ * AN EXACT-MILLISECOND TIE IS BROKEN BY UID, ASCENDING — a key that belongs to
+ * no caller's ordering, and the same key the two decoupled mirrors apply
+ * (`eventFirstBingoUid` in `functions/src/dailyEmailContent.ts`, and the podium
+ * payload's own loop in `functions/src/finaleContent.ts`). The three selectors
+ * never see the same roster order: this one is handed a roster sorted by LIVE
+ * root totals (today's marks included, via `useLeaderboard`), the email resolves
+ * the honour over a THROUGH-YESTERDAY window, and the scheduler's podium reads
+ * its own roster query. So any rule that read the caller's order would let a
+ * Player who marks today's card before a delayed or retried send flip which of
+ * two tied Players the email stars versus this pin (Codex P2, #1052). Sorting
+ * the tie by uid removes the one input the three views disagree about, and
+ * `tests/functions/finale-parity.test.ts` fails if any side changes alone.
+ *
+ * The tie-break applies ONLY when the eligible timestamps are exactly equal, so
+ * a Player never overtakes an earlier bingo by owning a smaller uid.
  */
 export function eventFirstBingoWinner(
   players: readonly PlayerDoc[],
   isTutorialDay: (dayIndex: number) => boolean,
   freezeAt?: number | null,
 ): { uid: string; displayName: string; at: number } | undefined {
-  let best: { uid: string; displayName: string; at: number } | undefined;
-  for (const p of players) {
-    const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
+  const best = selectHeadlineBingoWinner(players, isTutorialDay, freezeAt);
+  return best && { uid: best.row.uid, displayName: best.row.displayName, at: best.at };
+}
+
+/**
+ * THE headline selection, over the minimal row shape, shared by every reader
+ * of the Event-wide First to BINGO on the client: the Leaderboard pin and the
+ * podium (`eventFirstBingoWinner`) and the Moment gate
+ * (`earlierEligibleHeadlineBingoExists`). One loop owns the eligibility cutoff
+ * (tutorial Days out, the inclusive freeze cutoff) and the ordering (eligible
+ * instant ascending, uid ascending on an exact tie), so the immutable Feed
+ * singleton and the standings cannot be made to disagree by a future edit to
+ * one of two copies (Codex P1 on #1128).
+ */
+export function selectHeadlineBingoWinner<Row extends HeadlineBingoRow>(
+  rows: readonly Row[],
+  isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
+): { row: Row; at: number } | undefined {
+  let best: { row: Row; at: number } | undefined;
+  for (const row of rows) {
+    const at = effectiveCruiseFirstBingoAt(row, isTutorialDay);
     if (at == null) continue;
     if (freezeAt != null && at >= freezeAt) continue;
-    if (!best || at < best.at) best = { uid: p.uid, displayName: p.displayName, at };
+    if (!best || at < best.at || (at === best.at && row.uid < best.row.uid)) {
+      best = { row, at };
+    }
   }
   return best;
 }

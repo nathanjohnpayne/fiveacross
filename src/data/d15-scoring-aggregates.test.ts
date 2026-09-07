@@ -60,7 +60,26 @@ function dealt(): Cell[] {
   }));
 }
 
+// The same dealt card with row 0 (LINES[0] = 0..4) one Square short of a line,
+// so marking index 4 is a genuine no-bingo → bingo transition.
+function oneShortOfRowZero(): Cell[] {
+  return dealt().map((cell) =>
+    cell.index <= 3 ? { ...cell, marked: true, markedAt: 1 } : cell,
+  );
+}
+
 const snap = (data: unknown): FakeSnap => ({ exists: () => true, data: () => data });
+
+// The player-row payload out of the batch, found by PATH rather than by call
+// index: the daily-mode board write lands on a different path, and a frozen
+// write can drop the player call entirely.
+function playerPayload(): Record<string, unknown> {
+  const call = setSpy.mock.calls.find((c) =>
+    (c[0] as { path: string }).path.includes('/players/'),
+  );
+  expect(call).toBeTruthy();
+  return call![1] as Record<string, unknown>;
+}
 
 describe('setMark folds into dayStats[dayIndex] and derives the cruise-wide root', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -120,6 +139,80 @@ describe('setMark folds into dayStats[dayIndex] and derives the cruise-wide root
     expect(playerWrite.dayStats).toEqual({
       0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
     });
+  });
+
+  // #1049 round 2 (Codex P2): the CACHE READ, not the caller's prop, is what
+  // reaches `computeMark` on the normal Board flow — a cached Player row always
+  // wins. Reading the Event-wide root there re-introduced the very copy
+  // `boardFirstBingoAt` exists to stop, and a component test that mocks
+  // `setMark` cannot see it, so these two drive the REAL fold.
+  it("a completing Mark on a later Day stamps THAT Day, never the cached root (#1049)", async () => {
+    // Day 1 holds this Player's Event-wide root stamp (t=100). The Board they
+    // are looking at is Day 2, one Square short of its own first line.
+    getDocFromCacheSpy
+      .mockResolvedValueOnce(snap({ cells: oneShortOfRowZero(), dayIndex: 2 })) // board read
+      .mockResolvedValueOnce(
+        snap({
+          firstBingoAt: 100,
+          displayName: 'Marker',
+          dayStats: {
+            1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 },
+            2: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null },
+          },
+        }),
+      ); // player read
+
+    const before = Date.now();
+    await setMark({
+      uid: 'u1',
+      cells: oneShortOfRowZero(),
+      index: 4, // completes row 0 on the Day-2 card
+      nextMarked: true,
+      claimMode: 'honor',
+      currentFirstBingoAt: null,
+      daily: true,
+      dayIndex: 2,
+    });
+
+    const playerWrite = playerPayload() as {
+      dayStats: Record<number, { bingoCount: number; squaresMarked: number; firstBingoAt: number | null }>;
+      bingoCount: number;
+      firstBingoAt: number | null;
+    };
+    const day2 = playerWrite.dayStats[2];
+    expect(day2.bingoCount).toBe(1);
+    // The Day-2 bucket carries THIS Mark's own instant. Reading the root would
+    // have written Day 1's 100 into it and handed Day 2's honour to the wrong
+    // Player.
+    expect(day2.firstBingoAt).not.toBe(100);
+    expect(day2.firstBingoAt).toBeGreaterThanOrEqual(before);
+    // The re-derived root is still the earliest across Days — Day 1's stamp.
+    expect(playerWrite.bingoCount).toBe(2);
+    expect(playerWrite.firstBingoAt).toBe(100);
+  });
+
+  it('a legacy single-Board Mark still preserves the cached ROOT stamp unchanged (#1049)', async () => {
+    // No `days` on the Event, so no `dayStats` on the row: the root IS this one
+    // Board's stamp and a further Mark while the line stands preserves it.
+    getDocFromCacheSpy
+      .mockResolvedValueOnce(snap({ cells: oneShortOfRowZero(), dayIndex: 0 })) // board read
+      .mockResolvedValueOnce(snap({ firstBingoAt: 100, displayName: 'Marker' })); // player read
+
+    await setMark({
+      uid: 'u1',
+      cells: oneShortOfRowZero(),
+      index: 4,
+      nextMarked: true,
+      claimMode: 'honor',
+      currentFirstBingoAt: null,
+    });
+
+    const playerWrite = playerPayload() as {
+      dayStats: Record<number, { firstBingoAt: number | null }>;
+      firstBingoAt: number | null;
+    };
+    expect(playerWrite.firstBingoAt).toBe(100);
+    expect(playerWrite.dayStats[0].firstBingoAt).toBe(100);
   });
 
   it('excludes the CEREMONIAL (farewell) bucket from the summed root totals while still writing its per-Day bucket (#265)', async () => {
