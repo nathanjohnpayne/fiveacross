@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,6 +60,32 @@ async function writeUnder(dir, relativePath, contents) {
   await writeFile(target, contents, "utf8");
 }
 
+const SHARED_MODULES = join(repoRoot, "functions", "node_modules");
+
+/**
+ * Make sure the tree the fixtures borrow exists.
+ *
+ * `npm test` can run before anything has installed the Functions
+ * dependencies — on a clean runner `app-ci` installs them later, for
+ * `test:functions`, which begins with this very command. Doing it here is the
+ * same install a few minutes earlier, and a no-op once it has happened, rather
+ * than a reason to skip the suite that proves the classifier's central claim.
+ */
+async function ensureFunctionsDependencies() {
+  if (existsSync(SHARED_MODULES)) return;
+  await new Promise((settle, fail) => {
+    const install = spawn(
+      "npm",
+      ["--prefix", "functions", "install", "--no-audit", "--no-fund", "--prefer-offline"],
+      { cwd: repoRoot, stdio: "ignore" },
+    );
+    install.on("error", fail);
+    install.on("exit", (code) =>
+      code === 0 ? settle() : fail(new Error(`npm --prefix functions install exited ${code}`)),
+    );
+  });
+}
+
 /**
  * A `node_modules` for one fixture codebase: every entry of this repository's
  * own `functions/node_modules`, symlinked.
@@ -73,11 +100,10 @@ async function writeUnder(dir, relativePath, contents) {
  * copying the tree would be minutes.
  */
 async function installToolchain(functionsDir) {
-  const shared = join(repoRoot, "functions", "node_modules");
   const modules = resolve(functionsDir, "node_modules");
   await mkdir(modules, { recursive: true });
-  for (const entry of await readdir(shared)) {
-    await symlink(join(shared, entry), resolve(modules, entry));
+  for (const entry of await readdir(SHARED_MODULES)) {
+    await symlink(join(SHARED_MODULES, entry), resolve(modules, entry));
   }
 }
 
@@ -256,58 +282,28 @@ const ALL_INVOKERS_CONSERVATIVE = {
   authHandoffInvokerConservative: true,
 };
 
-/**
- * Whether this checkout can BUILD its own Functions codebase.
- *
- * A clean CI runner cannot, at the point `npm test` runs: `app-ci` installs
- * `functions/` dependencies later, for `test:functions`. So the two assertions
- * below come as a total pair rather than one conditional test — with the
- * dependencies present the real config must reach the exemption, and without
- * them the classifier must fall back to conservative, which is the fail-closed
- * property that actually protects the deploy. Exactly one of the pair runs, and
- * neither environment leaves the real config unasserted. (The exemption path
- * itself is gated on every runner by the fixture suites below, which install a
- * `tsc` symlink and a stub SDK of their own.)
- */
-const CAN_BUILD_THIS_REPO = existsSync(resolve(repoRoot, "functions", "node_modules"));
+// Installing the Functions dependencies on a cold runner is the slowest thing
+// this file does, and every fixture needs them.
+beforeAll(ensureFunctionsDependencies, 600_000);
 
 describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
-  it.runIf(CAN_BUILD_THIS_REPO)(
-    "does not select any invoker for endpoints the artifact deploys alone",
-    async () => {
-      const result = await classify([
-        "--only",
-        "functions:dailyEngagementEmail,functions:adminAlertDigest",
-      ]);
-      expect(result).toMatchObject({
-        functionsAttempted: true,
-        hostingAttempted: false,
-        ...NO_INVOKER_SELECTED,
-      });
-    },
-  );
+  it("does not select any invoker for endpoints the artifact deploys alone", async () => {
+    const result = await classify([
+      "--only",
+      "functions:dailyEngagementEmail,functions:adminAlertDigest",
+    ]);
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      hostingAttempted: false,
+      ...NO_INVOKER_SELECTED,
+    });
+  });
 
-  it.runIf(CAN_BUILD_THIS_REPO)(
-    "accepts the codebase-qualified form of the same endpoint",
-    async () => {
-      // `functions:<codebase>:<name>` is Firebase's documented three-part form.
-      const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
-      expect(result).toMatchObject(EXEMPT);
-    },
-  );
-
-  it.skipIf(CAN_BUILD_THIS_REPO)(
-    "falls back to conservative when this codebase cannot be built",
-    async () => {
-      // No `functions/node_modules`, so the predeploy hook cannot run. An
-      // unprovable scope must select every invoker, never skip reconciliation.
-      const result = await classify([
-        "--only",
-        "functions:dailyEngagementEmail,functions:adminAlertDigest",
-      ]);
-      expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
-    },
-  );
+  it("accepts the codebase-qualified form of the same endpoint", async () => {
+    // `functions:<codebase>:<name>` is Firebase's documented three-part form.
+    const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
+    expect(result).toMatchObject(EXEMPT);
+  });
 
   it.each(["functions:mintAuthHandoff", "functions:exchangeAuthHandoff"])(
     "still selects the auth-handoff invoker for %s",
