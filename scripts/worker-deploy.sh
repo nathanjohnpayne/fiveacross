@@ -68,6 +68,77 @@ FORBIDDEN_SECRET_PREFIX="FIREBASE_"
 # announced here as "nothing the public sees".
 ROUTE_BEARING=false
 
+# Refuse an ignored dotenv file under worker/, and load none anywhere.
+#
+# The two ambient-variable refusals below read the SHELL this wrapper was
+# started in. Wrangler 4.129 reads more than that: every command resolves
+# `.env` and `.env.local` — plus `.env.<env>` and `.env.<env>.local` — against
+# its working directory and merges them into `process.env` inside a yargs
+# `.check()`, which runs AFTER this guard and BEFORE the command it guards does
+# anything. So a `WRANGLER_CI_OVERRIDE_NAME` or `CLOUDFLARE_ENV` written into
+# `worker/.env.local` applies the exact override those refusals
+# exist to prevent, through a guard that saw a clean shell — and `worker/.env`,
+# `worker/.env.local` and `worker/.dev.vars` are gitignored, so the clean-tree
+# guard cannot see them either (Codex P1 on #1120).
+#
+# Two answers, because they close different halves of it.
+#
+# 1. REFUSE THE FILES. The router carries no secrets: ADR 0014 removed the
+#    Firestore reader, `wrangler.toml` declares one service binding and no
+#    `[vars]`, and `verify_no_firebase_secret` below asserts the deployed
+#    Worker holds no credential at all. `worker/` therefore has no legitimate
+#    dotenv file, and their PRESENCE is the refusal — nothing here reads one.
+#    Parsing them would be a second definition of "what Wrangler would have
+#    loaded" (its own `.env` grammar, its `dotenv-expand` pass, its precedence)
+#    that can disagree with Wrangler's, and a guard that disagrees with the
+#    tool it guards is the failure this one is fixing.
+#
+# 2. `--env-file /dev/null` ON EVERY WRANGLER COMMAND. The flag REPLACES the
+#    default list rather than adding to it, so a run carrying it loads no
+#    dotenv file at all, wherever one sits. That is the half a presence check
+#    under `worker/` cannot cover: `npm exec` keeps THIS script's working
+#    directory, so the secret readback resolves its dotenv files at the
+#    REPOSITORY ROOT, where `.env.local` is the app build's legitimate and
+#    required input and refusing it would refuse every deploy.
+#
+# `.dev.vars` is `wrangler dev`'s local-secret file rather than `deploy`'s, and
+# is refused with the rest: it is the same ignored-file-changes-what-Wrangler-
+# sees hazard, it is read by `npm run dev` against this same `wrangler.toml`,
+# and a deploy tree carrying one is a tree someone has been experimenting in.
+refuse_worker_dotenv_files() {
+  local candidate found=""
+  # No `shopt -s nullglob`: every pattern starts with a literal dot, so an
+  # unmatched one stays literal and `-e` is false for it. Leaving the shell's
+  # globbing options alone keeps this guard from changing how anything else in
+  # the script expands.
+  for candidate in \
+    "$REPO_ROOT/worker"/.env \
+    "$REPO_ROOT/worker"/.env.* \
+    "$REPO_ROOT/worker"/.dev.vars \
+    "$REPO_ROOT/worker"/.dev.vars.*; do
+    if [[ -e "$candidate" ]]; then
+      found="${found:+$found, }worker/${candidate##*/}"
+    fi
+  done
+
+  if [[ -n "$found" ]]; then
+    echo "" >&2
+    echo "❌ A dotenv file is present under worker/: ${found}" >&2
+    echo "" >&2
+    echo "Wrangler loads worker/.env, worker/.env.local and worker/.env.<env>* into" >&2
+    echo "process.env while it validates the command line — after this guard has run." >&2
+    echo "A WRANGLER_CI_OVERRIDE_NAME or CLOUDFLARE_ENV defined in one of them would" >&2
+    echo "publish over a Worker this deploy never verified — and .env, .env.local and" >&2
+    echo ".dev.vars are gitignored, so the clean-tree guard does not see them either." >&2
+    echo "" >&2
+    echo "The router carries no secrets, so nothing here needs one. Remove or move it:" >&2
+    echo "" >&2
+    echo "    rm ${found//, / }" >&2
+    echo "" >&2
+    exit 65
+  fi
+}
+
 # Verify the registry lookup binding in the configuration about to be published.
 #
 # This replaces the old `FIREBASE_API_KEY` presence check, and the shape of the
@@ -201,7 +272,12 @@ verify_no_firebase_secret() {
   local when="$1" secrets
   echo "🔎 Verifying the deployed Worker carries no ${FORBIDDEN_SECRET_PREFIX}* binding (${when})…" >&2
 
-  if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json 2>/dev/null)"; then
+  # `--env-file /dev/null` for the reason in `refuse_worker_dotenv_files`: `npm
+  # exec` keeps THIS script's working directory, so without it Wrangler would
+  # load the repository root's `.env` and `.env.local` — the app build's own,
+  # which this guard deliberately does not refuse — and could read the target
+  # of this readback out of one of them.
+  if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json --env-file /dev/null 2>/dev/null)"; then
     # Inability to inspect is NOT a pass. The README presents this as
     # verification of the deployed artifact, so exiting 0 here would let
     # automation record an unverified deploy as a verified one.
@@ -212,7 +288,7 @@ verify_no_firebase_secret() {
 This is a FAILED verification, not a skipped one. Check \`wrangler\` auth and the
 Worker's existence, then re-run. To inspect by hand:
 
-    npm --prefix worker exec -- wrangler secret list
+    npm --prefix worker exec -- wrangler secret list --env-file /dev/null
 
 MSG
     exit 75
@@ -267,6 +343,7 @@ MSG
   echo "✅ No ${FORBIDDEN_SECRET_PREFIX}* binding on the deployed Worker." >&2
 }
 
+refuse_worker_dotenv_files
 verify_registry_lookup_binding
 
 # Install the reviewed Worker toolchain before ANY Wrangler command. A
@@ -291,7 +368,12 @@ else
   echo "✅ Guards passed. Publishing the Worker (no routes configured, so this changes nothing the public sees)." >&2
 fi
 
-npm --prefix worker run deploy
+# `--env-file /dev/null` again, on the one command that PUBLISHES. `npm run`
+# sets the working directory to `worker/`, so this is where a `worker/.env*`
+# would have been loaded; the file is refused above and this makes the refusal
+# belt and braces rather than the only thing standing between an ignored file
+# and the published Worker's name.
+npm --prefix worker run deploy -- --env-file /dev/null
 
 # Always verify after publishing too: a first deploy has no Worker to inspect
 # beforehand, so the pre-publish check above cannot be the only one.

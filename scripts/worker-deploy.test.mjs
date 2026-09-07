@@ -1,10 +1,74 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, copyFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const script = resolve(process.cwd(), 'scripts/worker-deploy.sh');
+
+/**
+ * A throwaway repository root the wrapper can be run from.
+ *
+ * `scripts/worker-deploy.sh` derives REPO_ROOT from its OWN location and reads
+ * `worker/` beneath it, so every other case here exercises the real checkout —
+ * which is what makes them honest about the committed configuration, and what
+ * makes them the wrong place to plant a fixture dotenv file. A gitignored
+ * `worker/.env.local` written into the live tree is invisible to `git status`,
+ * outlives a failed assertion, and is observable by any other test (or
+ * parallel Vitest worker) that shells out to Wrangler. So the dotenv cases get
+ * a staged copy instead: the script, the guard it sources, the two validator
+ * modules it runs, and the two `worker/` files those read.
+ *
+ * `node_modules` is SYMLINKED rather than copied — the validator parses the
+ * configuration with `smol-toml`, a root devDependency, and Node resolves the
+ * link to the real directory the same way it would in the checkout.
+ *
+ * `git` is stubbed for this root alone, because it is a directory and not a
+ * checkout: the source guard's questions are answered in
+ * `scripts/deploy-main-guard.test.mjs`, and answering them here as a clean,
+ * up-to-date `main` is what leaves the dotenv guard as the thing each case
+ * turns on.
+ */
+function stageRepoRoot(dir, dotenvFiles, bin) {
+  const root = join(dir, 'root');
+  mkdirSync(join(root, 'scripts', 'lib'), { recursive: true });
+  mkdirSync(join(root, 'scripts', 'event-router-registry'), { recursive: true });
+  mkdirSync(join(root, 'worker'), { recursive: true });
+  for (const relative of [
+    'scripts/worker-deploy.sh',
+    'scripts/lib/deploy-main-guard.sh',
+    'scripts/event-router-registry/check-router-binding.mjs',
+    'scripts/event-router-registry/harness-config.mjs',
+    'worker/wrangler.toml',
+    'worker/package.json',
+  ]) {
+    copyFileSync(resolve(process.cwd(), relative), join(root, relative));
+  }
+  symlinkSync(resolve(process.cwd(), 'node_modules'), join(root, 'node_modules'));
+
+  const stubbedGit = join(bin, 'git');
+  writeFileSync(
+    stubbedGit,
+    [
+      '#!/usr/bin/env bash',
+      'case "$*" in',
+      "  'rev-parse --abbrev-ref HEAD') echo main ;;",
+      `  'rev-parse HEAD'|'rev-parse origin/main') echo ${'0'.repeat(40)} ;;`,
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  chmodSync(stubbedGit, 0o755);
+
+  for (const name of dotenvFiles) {
+    // The value is the override the two ambient-variable refusals already
+    // catch in the shell, written where they cannot see it.
+    writeFileSync(join(root, 'worker', name), 'WRANGLER_CI_OVERRIDE_NAME=shadow-router\n', 'utf8');
+  }
+  return root;
+}
 
 /**
  * Run the guard with a stubbed `npm` (and optionally `node` and `grep`) on PATH.
@@ -19,6 +83,10 @@ const script = resolve(process.cwd(), 'scripts/worker-deploy.sh');
  * have, so the negative path is forced by replacing `node` on PATH rather than
  * by teaching the checker to fail on request; the checker's own decision table
  * is proved in `worker/src/routerBinding.test.ts`.
+ *
+ * `workerDotenvFiles` is the one option that changes WHERE the guard runs: any
+ * array (the empty one included) stages a repository root and runs the copy
+ * there, so a fixture dotenv file never lands in the live checkout.
  */
 function runWithStubbedNpm({
   secretListJson = null,
@@ -27,6 +95,7 @@ function runWithStubbedNpm({
   bindingCheckExit = 1,
   silentBindingCheck = false,
   routeBearing = false,
+  workerDotenvFiles = null,
   extraEnv = {},
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'worker-deploy-'));
@@ -81,7 +150,17 @@ exit 0
   // working checkout — without DEPLOY_ALLOW_DIRTY the script exits 1 on a dirty
   // tree, which silently looks like a verification failure and lets a broken
   // assertion pass for the wrong reason.
-  const result = spawnSync('bash', [script, '--force'], {
+  //
+  // The dotenv cases need a REPO ROOT of their own. The wrapper derives its
+  // root from its own location and reads `worker/` under it, so planting a
+  // fixture `.env.local` in the live checkout would be a real, gitignored
+  // dotenv file in the tree every other test — and every parallel worker — is
+  // running against. That is the same hazard the redirect probe was moved out
+  // of the live root for (Codex P2 on #1120); a staged copy is the fix there
+  // and here.
+  const stagedRoot = workerDotenvFiles === null ? null : stageRepoRoot(dir, workerDotenvFiles, bin);
+  const entry = stagedRoot === null ? script : join(stagedRoot, 'scripts/worker-deploy.sh');
+  const result = spawnSync('bash', [entry, '--force'], {
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -130,6 +209,70 @@ describe('worker deploy guard — ambient Wrangler environment', () => {
       const result = runWithStubbedNpm({ extraEnv });
       expect(result.stderr).not.toContain('CLOUDFLARE_ENV is set');
     }
+  });
+});
+
+describe('worker deploy guard — dotenv files Wrangler would load', () => {
+  // The two refusals above read the SHELL. Wrangler 4.129 reads more than
+  // that: its yargs `.check()` resolves `.env`, `.env.local` and
+  // `.env.<env>*` against the working directory and merges them into
+  // `process.env` — after this guard has run, and before the command it guards
+  // does anything. So the same WRANGLER_CI_OVERRIDE_NAME those refusals exist
+  // to catch, written into a gitignored `worker/.env.local`, would publish
+  // over a Worker this deploy never verified, past a guard that saw a clean
+  // shell (Codex P1 on #1120). The PRESENCE of the file is the refusal:
+  // nothing here parses one, because a parser is a second definition of what
+  // Wrangler would have loaded that can disagree with Wrangler's.
+  it.each([
+    ['.env.local'],
+    ['.env'],
+    ['.env.production'],
+    ['.env.production.local'],
+    ['.dev.vars'],
+    ['.dev.vars.staging'],
+  ])('refuses a deploy from a tree carrying worker/%s', (name) => {
+    const result = runWithStubbedNpm({ workerDotenvFiles: [name] });
+    expect(result.status).toBe(65);
+    expect(result.stderr).toContain(`A dotenv file is present under worker/: worker/${name}`);
+    // Refused before anything is installed, published or inspected — the
+    // same ordering the ambient-variable refusals get, and for the same
+    // reason.
+    expect(result.npmCalls).toEqual([]);
+  });
+
+  it('names every offending file, not just the first', () => {
+    const result = runWithStubbedNpm({ workerDotenvFiles: ['.env', '.env.local', '.dev.vars'] });
+    expect(result.status).toBe(65);
+    for (const name of ['worker/.env', 'worker/.env.local', 'worker/.dev.vars']) {
+      expect(result.stderr).toContain(name);
+    }
+  });
+
+  it('proceeds normally in the ordinary tree, which carries none', () => {
+    // The staged root without a planted file is the SAME root the refusal
+    // cases run in, so a passing case here is what proves the refusals turn
+    // on the dotenv file rather than on the staging.
+    const result = runWithStubbedNpm({ workerDotenvFiles: [], secretListJson: '[]' });
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain('A dotenv file is present');
+    expect(result.stderr).toContain('REGISTRY is bound explicitly to RegistryLookupEntrypoint');
+    expect(result.stderr).toContain('No FIREBASE_* binding on the deployed Worker');
+  });
+
+  it('loads no dotenv file on either Wrangler command, wherever one sits', () => {
+    // The presence check covers `worker/`, which is where `npm run deploy`
+    // resolves its dotenv files. It deliberately does NOT cover the
+    // repository root, where `.env.local` is the app build's own required
+    // input — and where `npm exec` (which keeps the caller's working
+    // directory) resolves the secret readback's. `--env-file` REPLACES
+    // Wrangler's default list rather than adding to it, so passing
+    // `/dev/null` is what closes that half.
+    const result = runWithStubbedNpm({ routeBearing: true, secretListJson: '[]' });
+    expect(result.status).toBe(0);
+    expect(result.npmCalls).toContain(
+      '--prefix worker exec -- wrangler secret list --format json --env-file /dev/null',
+    );
+    expect(result.npmCalls).toContain('--prefix worker run deploy -- --env-file /dev/null');
   });
 });
 
@@ -290,7 +433,7 @@ describe('worker deploy guard — route-bearing deploys', () => {
     expect(result.status).toBe(0);
     expect(result.npmCalls.slice(0, 2)).toEqual([
       '--prefix worker ci --include=dev',
-      '--prefix worker exec -- wrangler secret list --format json',
+      '--prefix worker exec -- wrangler secret list --format json --env-file /dev/null',
     ]);
   });
 
