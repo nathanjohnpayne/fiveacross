@@ -198,6 +198,10 @@ Ticket #804's admission coordinator must order:
 
 While redemption is pending, retryable, or terminally blocked, `joinAndDeal` must remain at zero calls. A transient network failure retains the bounded pending record and offers Retry. Unknown, consumed, expired, revoked, and a concurrent loser clear it and share: “This invitation is no longer valid. Ask the organizer for a new one.”
 
+### Admission coordinator (#804)
+
+`src/auth/admissionCoordinator.ts` owns steps 3 and 4 of that order as a pure state machine with every seam injected — the origin's pending record, the compare-delete, the redeem callable and the clock — so the decision table is proved with fakes and `AuthContext` only wires it. A **visit** is one `(eventId, uid, origin)`; `begin(visit)` reads the pending record for the origin and, when one exists, redeems it for the visit's Event. The deal gate admits only `clear` (no usable record) and `admitted` (`membership-created` or `already-member`); `pending`, `retryable` and `blocked` each hold `joinAndDeal` at zero calls. Success and terminal invalidity (`invitation-unavailable`, the callable's deliberate collapse of unknown, consumed, expired, revoked, cross-Event and concurrent-loser) compare-delete exactly the record that was redeemed, never a newer capture; every other failure, and a seam that rejects, keeps the record and offers Retry, which re-reads the origin so a newer capture supersedes the failed one and an expired one clears. A successful result naming another Event admits nobody. Each `begin`, `retry` and `reset` advances a generation, and a result whose generation is stale — another Event, another account, the same visit begun again, or a reset — is dropped without deleting or admitting. Public state carries the capture's opaque id only: the bearer reaches the callable body and nothing else, so React state, the DOM, error text and analytics cannot observe it.
+
 ## Rules
 
 Both server-owned collections contain leaf documents only and deny every client credential:
@@ -230,6 +234,7 @@ The projects' Domain Restricted Sharing policy rejects Firebase's `allUsers` Clo
 - Revoke/redeem concurrency converges according to transaction order with no partial cascade.
 - No client, including an Event Admin, can read or mutate Invitation, rate, or Membership grant state directly.
 - The public `hostnames/{host}` point lookup remains unchanged.
+- **Given** a signed-in visit whose origin holds a pending Invitation, **when** the deal gate is consulted, **then** `joinAndDeal` is not called until the redemption settles as `admitted`; a transient failure keeps the record and offers Retry, a terminal one compare-deletes it and shares the one message, and a result that settles after a newer visit began neither deletes nor admits.
 
 ## Test coverage
 
@@ -240,3 +245,4 @@ The projects' Domain Restricted Sharing policy rejects Firebase's `allUsers` Clo
 - `src/data/eventInvitations.test.ts` — exact callable names, payloads, sanitized results, and safe error mapping.
 - `scripts/materialize-event-membership-functions.test.mjs` — generated authorization source audit and fail-closed marker/drift handling.
 - `scripts/event-invitations-invoker.test.mjs`, `scripts/event-invitations-deploy.test.mjs`, and `tests/test_deploy.sh` — exact/whole/unknown Functions scopes preflight and reconcile all selected Invitation services without tolerating a selected service being absent.
+- `src/auth/admissionCoordinator.test.ts` — the client admission coordinator: the deal gate over every state, no-record and foreign-origin visits staying clear, pending exposing only the capture id, admit-and-forget on both outcomes, terminal blocking with the shared message, transient reasons and a rejecting seam retained for Retry, a cross-Event success refused, Retry re-reading the origin (newer capture, expired record, no-op states), and the stale-visit guards across Event, account, re-begin, reset and retry.
