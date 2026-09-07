@@ -139,6 +139,36 @@ function notFound(reason: NotFoundReason, revision: string | null = null): Resol
 }
 
 /**
+ * The exact key set each LOOKUP ENVELOPE arm may carry.
+ *
+ * The same rule the projection gets, one level up, and for the same reason. An
+ * envelope that carries a field its arm does not define is internally
+ * contradictory — `{kind: 'unknown-host', revision, schemaVersion, desired}` is
+ * a registry that has said "nothing here" and handed over a projection in the
+ * same breath — and validating only the fields the arm happens to read would
+ * publish that revision as canonical recovery evidence off a record this Worker
+ * never actually agreed with. `parseDesired` refuses contradictory shapes on
+ * the way in; a separately deployed consumer has to refuse them on the way out.
+ *
+ * `revision` and `schemaVersion` are optional on the `unknown-host` arm, so it
+ * is expressed as the keys ALLOWED rather than the keys required; the pairing
+ * rule below is what makes the optional pair coherent.
+ */
+const ENVELOPE_KEYS: Record<string, readonly string[]> = {
+  'unknown-host': ['kind', 'revision', 'schemaVersion'],
+  unavailable: ['kind'],
+  malformed: ['kind'],
+  committed: ['desired', 'kind', 'revision', 'schemaVersion'],
+};
+
+function hasExactEnvelopeKeys(lookup: RegistryLookup): boolean {
+  const allowed = ENVELOPE_KEYS[(lookup as { kind?: unknown }).kind as string];
+  if (allowed === undefined) return false;
+  const actual = Object.keys(lookup);
+  return actual.every((key) => allowed.includes(key));
+}
+
+/**
  * The projection schema versions THIS router build knows how to interpret.
  *
  * Declared here rather than imported from the registry's contracts module, and
@@ -277,6 +307,11 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   // crash-instead-of-fail-closed failure an unbound binding used to cause, and
   // it is exactly the response this module exists to never produce.
   if (typeof lookup !== 'object' || lookup === null) return notFound('replica-malformed');
+  // The envelope's own key set, before its discriminant is used to read
+  // anything out of it. An arm carrying a field it does not define is a
+  // registry contradicting itself, and the arms below would otherwise judge
+  // only the fields they happen to look at.
+  if (!hasExactEnvelopeKeys(lookup)) return notFound('replica-malformed');
 
   switch (lookup.kind) {
     case 'unknown-host': {

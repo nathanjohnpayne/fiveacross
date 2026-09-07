@@ -83,6 +83,31 @@ ROUTE_BEARING=false
 # control surface. The validator is shared with the synthetic harness so both
 # configurations are held to one definition of "bound to the lookup entrypoint".
 verify_registry_lookup_binding() {
+  # An ambient CLOUDFLARE_ENV selects a Wrangler environment with no
+  # command-line flag, and this wrapper forwards the operator's environment to
+  # every Wrangler command it runs. The committed configuration declares no
+  # `[env.<name>]` — the binding check refuses the key outright — but Wrangler
+  # treats a MISSING section as a warning rather than an error: it reuses the
+  # top-level configuration and appends the environment name to the Worker,
+  # publishing or inspecting `five-across-event-router-<env>` while every
+  # message here says the production router was handled. So the variable is
+  # refused before the binding is certified rather than certified around.
+  if [[ -n "${CLOUDFLARE_ENV:-}" ]]; then
+    echo "" >&2
+    echo "❌ CLOUDFLARE_ENV is set to '${CLOUDFLARE_ENV}'." >&2
+    echo "" >&2
+    echo "Wrangler selects an environment from that variable with no flag, and" >&2
+    echo "worker/wrangler.toml declares none — so Wrangler would fall back to the" >&2
+    echo "top-level configuration under the name five-across-event-router-${CLOUDFLARE_ENV}," >&2
+    echo "which is a different Worker from the one this deploy reports on." >&2
+    echo "" >&2
+    echo "Unset it and re-run:" >&2
+    echo "" >&2
+    echo "  unset CLOUDFLARE_ENV" >&2
+    echo "" >&2
+    exit 1
+  fi
+
   echo "🔎 Verifying worker/wrangler.toml binds the registry lookup entrypoint explicitly…" >&2
   local status=0 answer=""
   answer="$(node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs")" || status=$?

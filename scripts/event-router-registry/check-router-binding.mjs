@@ -37,8 +37,15 @@ const OUTRANKING_NAMES = ['wrangler.json', 'wrangler.jsonc'];
  * names another configuration to deploy in place of this one. That directory is
  * gitignored, so the redirect is invisible to `git status` and therefore to the
  * clean-tree guard as well.
+ *
+ * It is resolved the way the outranking filenames are — by ANCESTOR WALK, not
+ * at `worker/` alone. Wrangler looks the redirect up through the same
+ * ancestor-walking helper it uses for its ordinary configuration lookup, so a
+ * `.wrangler/deploy/config.json` at the repository root, or anywhere above it,
+ * redirects the deploy just as effectively as one inside `worker/` — and from
+ * outside the repository, where no guard here could otherwise see it.
  */
-const REDIRECT = resolve(WORKER, '.wrangler/deploy/config.json');
+const REDIRECT_PATH = '.wrangler/deploy/config.json';
 
 /** Exit code for "the check could not be performed", distinct from a refusal. */
 const UNAVAILABLE = 69;
@@ -88,8 +95,12 @@ if (outranking.length > 0) {
   process.exit(1);
 }
 
-if (isFile(REDIRECT)) {
-  process.stderr.write(`${REDIRECT}\nredirects the deploy away from worker/wrangler.toml\n`);
+const redirects = ancestors(WORKER)
+  .map((directory) => resolve(directory, REDIRECT_PATH))
+  .filter(isFile);
+if (redirects.length > 0) {
+  process.stderr.write(`${redirects.join('\n')}\n`);
+  process.stderr.write('redirect(s) above send the deploy away from worker/wrangler.toml\n');
   process.exit(1);
 }
 

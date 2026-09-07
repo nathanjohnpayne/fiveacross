@@ -97,6 +97,33 @@ exit 0
   };
 }
 
+describe('worker deploy guard — ambient Wrangler environment', () => {
+  it('refuses a set CLOUDFLARE_ENV before certifying the binding', () => {
+    // Wrangler selects an environment from the variable with no flag, and this
+    // wrapper forwards the operator's environment to every Wrangler command it
+    // runs. worker/wrangler.toml declares no `[env.<name>]`, and a MISSING
+    // section is a warning rather than an error: Wrangler reuses the top-level
+    // configuration under the name five-across-event-router-<env>. So the
+    // guarded command would publish or inspect a different Worker while every
+    // message reported on the production router.
+    const result = runWithStubbedNpm({ extraEnv: { CLOUDFLARE_ENV: 'staging' } });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('CLOUDFLARE_ENV is set');
+    expect(result.stderr).toContain('five-across-event-router-staging');
+    expect(result.stderr).toContain('unset CLOUDFLARE_ENV');
+    // Refused BEFORE the binding is certified, so no install or Wrangler call
+    // runs against the wrong environment.
+    expect(result.npmCalls).toEqual([]);
+  });
+
+  it('proceeds when it is empty or unset, which is the ordinary case', () => {
+    for (const extraEnv of [{}, { CLOUDFLARE_ENV: '' }]) {
+      const result = runWithStubbedNpm({ extraEnv });
+      expect(result.stderr).not.toContain('CLOUDFLARE_ENV is set');
+    }
+  });
+});
+
 describe('worker deploy guard — argument handling', () => {
   it.each(['--route', '--config', '--cwd', '--domain', '--'])(
     'refuses forwarded Wrangler argument %s',

@@ -443,6 +443,65 @@ describe('re-validating the projection at the service boundary', () => {
   });
 });
 
+describe('the exact key set the ENVELOPE itself may carry', () => {
+  // One level up from the projection, and the same rule for the same reason. An
+  // envelope carrying a field its arm does not define is a registry
+  // contradicting itself — `{kind: 'unknown-host', …, desired}` says "nothing
+  // here" and hands over a projection in the same breath — and an arm that
+  // validated only the fields it happens to read would publish that revision as
+  // canonical recovery evidence off a record this Worker never agreed with.
+  it.each([
+    [
+      'a tombstone-shaped unknown-host that also carries a projection',
+      {
+        kind: 'unknown-host',
+        revision: '12',
+        schemaVersion: 1,
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: SLUG,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      },
+    ],
+    ['an unavailable arm carrying a revision', { kind: 'unavailable', revision: '12' }],
+    ['a malformed arm carrying a projection', { kind: 'malformed', desired: { kind: 'tombstone' } }],
+    [
+      'a committed arm carrying a field the envelope does not define',
+      { kind: 'committed', schemaVersion: 1, revision: '7', desired: { kind: 'tombstone' }, host: HOST },
+    ],
+    ['an uninitialized unknown-host carrying a stray field', { kind: 'unknown-host', cached: true }],
+  ])('refuses %s as replica-malformed', async (_label, lookup) => {
+    await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('still accepts every arm written exactly, including the optional pair', async () => {
+    // The `unknown-host` arm's two fields are OPTIONAL, so the rule is the keys
+    // ALLOWED rather than the keys required — a bare `{kind}` and a full
+    // tombstone envelope are both exact.
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+    await expect(refusalFor({ kind: 'unavailable' })).resolves.toEqual({
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
+    const { deps } = harness(ACTIVE_ROUTE);
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
+  });
+});
+
 describe('the exact key set a `desired` arm may carry', () => {
   // The registry refuses every one of these on the way IN (`parseDesired`
   // compares the key set, not just the values), so a committed projection

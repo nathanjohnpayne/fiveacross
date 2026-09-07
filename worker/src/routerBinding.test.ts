@@ -7,8 +7,9 @@
 // — an omitted `entrypoint` line binds the registry's signed control plane to a
 // public edge Worker, and a surviving Firebase binding falsifies the App Check
 // posture the whole change exists to establish.
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -138,8 +139,46 @@ describe('what the router’s configuration no longer declares', () => {
       // ancestor for `wrangler.json` BEFORE it looks anywhere for a `.toml`.
       expect(existsSync(resolve(HERE, '../..', outranking)), outranking).toBe(false);
     }
-    // And the gitignored redirect, which `git status` cannot see either.
-    expect(existsSync(resolve(HERE, '../.wrangler/deploy/config.json'))).toBe(false);
+    // And the gitignored redirect, which `git status` cannot see either — on
+    // the SAME ancestor chain, because Wrangler looks it up through the same
+    // ancestor-walking helper it uses for the configuration itself. One at the
+    // repository root redirects the deploy exactly as one inside `worker/`.
+    for (const directory of ['..', '../..']) {
+      expect(existsSync(resolve(HERE, directory, '.wrangler/deploy/config.json')), directory).toBe(
+        false,
+      );
+    }
+  });
+
+  it('refuses a deploy redirect planted ANYWHERE above worker/, not only inside it', () => {
+    // The guard has to walk that chain rather than test one fixed path, and it
+    // is checked by planting one rather than by reading the source: Wrangler
+    // looks the redirect up through the same ancestor-walking helper it uses
+    // for its ordinary configuration lookup, so a `.wrangler/deploy/config.json`
+    // at the repository root redirects the deploy exactly as one inside
+    // `worker/` — and a redirect above the repository is invisible to every
+    // other check here, including the clean-tree guard (`.wrangler/` is
+    // gitignored).
+    const guard = resolve(HERE, '../../scripts/event-router-registry/check-router-binding.mjs');
+    const planted = resolve(HERE, '../../.wrangler/deploy/config.json');
+
+    const before = spawnSync('node', [guard], { encoding: 'utf8' });
+    expect(before.status, before.stderr).toBe(0);
+
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, '{"configPath":"../../elsewhere/wrangler.toml"}', 'utf8');
+    try {
+      const after = spawnSync('node', [guard], { encoding: 'utf8' });
+      expect(after.status).toBe(1);
+      expect(after.stderr).toContain(planted);
+      expect(after.stderr).toContain('away from worker/wrangler.toml');
+    } finally {
+      rmSync(planted, { force: true });
+    }
+
+    // And the refusal is the planted file's, not a latent one: removing it
+    // restores the clean answer.
+    expect(spawnSync('node', [guard], { encoding: 'utf8' }).status).toBe(0);
   });
 
   it('keeps BOTH wildcard route blocks commented out', async () => {
