@@ -167,6 +167,248 @@ describe('reserved-label mirrors in separately deployed programs', () => {
   });
 });
 
+/**
+ * The SECOND mirror class in those same two programs, and a different SHAPE of
+ * mirror from the reserved-label one above. The reserved set is a list, so its
+ * parity check can be textual: parse the literal, sort, compare. The rehearsal
+ * classes are not a list — they are regexes, and worse, they are regexes over a
+ * different subject. `src/slug.ts` classifies a LABEL; every copy below
+ * classifies a whole HOST, because that is what a Firestore document id and a
+ * CloudEvent payload actually carry. A textual comparison between
+ * `/^r2-[a-z2-7]{26}$/` and
+ * `/^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/` can only ever be a
+ * substring test, which would keep passing through exactly the edits that
+ * matter — a `{26}` widened to `{2,26}`, an anchor dropped, `[a-z2-7]` relaxed
+ * to `[a-z0-9]` in one copy and not the other.
+ *
+ * So this compares BEHAVIOUR. Each regex literal is lifted out of the source
+ * text, rebuilt with `new RegExp`, and run over one shared fixture of hosts
+ * alongside the canonical predicate it is supposed to agree with. The
+ * expectations are DERIVED from `isRehearsalEventLabel` / `isRehearsalRootLabel`
+ * rather than written down twice, so the canonical module stays the only place
+ * either class is defined.
+ *
+ * The three literals in `router-publisher/src/runtime.ts` are deliberately not
+ * all the same shape, and the table records which is which: `isRegistryHost`
+ * admits EITHER class, while the `route` and `root` branches of `validDesired`
+ * each test for the root class alone — the first to exclude root-shaped hosts
+ * from ordinary Event routes, the second to admit them. Pinning all three to
+ * "either" would have hidden a route row dealt at a root-test host.
+ *
+ * Each file's literal COUNT is pinned too. None of the three in
+ * `router-publisher/src/runtime.ts` is an exported constant — one is an inline
+ * expression and two are function-local `const`s — so there is no symbol a
+ * later edit would have to touch, and a fourth literal added beside them would
+ * otherwise be a mirror no test has ever seen.
+ */
+describe('rehearsal-class mirrors in separately deployed programs', () => {
+  /**
+   * The two wildcard Namespaces. This half of each host regex has no canonical
+   * counterpart in `src/slug.ts` on purpose — which Namespaces exist is a
+   * router concern, not a Slug one — so the pair is declared here and
+   * `gaycruisebingo.com` rides along as the near-miss: a real root host, but
+   * not a wildcard Namespace, so no rehearsal host may ever be dealt under it.
+   */
+  const NAMESPACES = ['fiveacross.app', 'vacaybingo.com'] as const;
+  const FOREIGN_NAMESPACE = 'gaycruisebingo.com';
+
+  type RehearsalClass = 'event' | 'root' | 'either';
+
+  interface MirrorSite {
+    /** Repo-relative path of the file the mirror lives in. */
+    readonly path: string;
+    /** Source text immediately preceding the literal, naming the call site. */
+    readonly anchor: string;
+    /** The class this particular regex is supposed to admit. */
+    readonly admits: RehearsalClass;
+    /** What the call site is FOR, so a failure names the behaviour it broke. */
+    readonly purpose: string;
+  }
+
+  const read = (path: string): string =>
+    // Resolved from the Vitest root, for the reason the block above records.
+    readFileSync(resolve(process.cwd(), path), 'utf-8');
+
+  /**
+   * Matches a regex literal that starts anchored and mentions `r2-`. The
+   * `[^\n/]` classes are what make it safe to do this with a regex at all: none
+   * of these literals contains a slash or spans a line, so the scan cannot run
+   * past its own closing delimiter into the rest of the file.
+   *
+   * Deliberately does NOT require the trailing `$`. Requiring it would make a
+   * copy whose end anchor was dropped invisible to the scan, which then binds
+   * the NEXT literal in the file and reports the failure against the wrong
+   * call site. Matching it in place lets the behavioural assertion name it.
+   */
+  const HOST_REGEX_LITERAL = /\/\^[^\n/]*r2-[^\n/]*\//;
+
+  /**
+   * How far past an anchor its literal may sit. Bounded so that deleting a
+   * mirror throws here instead of silently binding the anchor to some later
+   * regex; 512 comfortably clears the widest real gap, which is the ~260
+   * characters between `isRegistryHost` and its literal.
+   */
+  const ANCHOR_WINDOW = 512;
+
+  const countHostRegexes = (source: string): number =>
+    [...source.matchAll(new RegExp(HOST_REGEX_LITERAL, 'g'))].length;
+
+  const hostRegexAfter = (source: string, anchor: string): RegExp => {
+    const from = source.indexOf(anchor);
+    if (from === -1) throw new Error(`anchor not found: ${anchor}`);
+    const found = HOST_REGEX_LITERAL.exec(source.slice(from, from + ANCHOR_WINDOW));
+    if (found === null) throw new Error(`no rehearsal host regex after: ${anchor}`);
+    // Strip the delimiters; none of these literals carries flags.
+    return new RegExp(found[0].slice(1, -1));
+  };
+
+  const MIRROR_FILES: readonly (readonly [path: string, literals: number])[] = [
+    ['router-publisher/src/runtime.ts', 3],
+    ['scripts/event-router-registry/recovery-controller.mjs', 2],
+    ['scripts/event-router-registry/rehearsal-controller.mjs', 2],
+  ];
+
+  const SITES: readonly MirrorSite[] = [
+    {
+      path: 'router-publisher/src/runtime.ts',
+      anchor: 'function isRegistryHost',
+      admits: 'either',
+      purpose: 'admits both rehearsal classes as registry hosts',
+    },
+    {
+      path: 'router-publisher/src/runtime.ts',
+      anchor: 'const rootTest =',
+      admits: 'root',
+      purpose: 'keeps a route row off a root-test host',
+    },
+    {
+      path: 'router-publisher/src/runtime.ts',
+      anchor: 'const syntheticRoot =',
+      admits: 'root',
+      purpose: 'admits a root row on a root-test host',
+    },
+    {
+      path: 'scripts/event-router-registry/recovery-controller.mjs',
+      anchor: 'const SYNTHETIC_EVENT =',
+      admits: 'event',
+      purpose: 'recognises a synthetic Event host in recovery evidence',
+    },
+    {
+      path: 'scripts/event-router-registry/recovery-controller.mjs',
+      anchor: 'const SYNTHETIC_ROOT =',
+      admits: 'root',
+      purpose: 'recognises a root-test host in recovery evidence',
+    },
+    {
+      path: 'scripts/event-router-registry/rehearsal-controller.mjs',
+      anchor: 'const SYNTHETIC_EVENT =',
+      admits: 'event',
+      purpose: 'recognises a synthetic Event host in a rehearsal reservation',
+    },
+    {
+      path: 'scripts/event-router-registry/rehearsal-controller.mjs',
+      anchor: 'const SYNTHETIC_ROOT =',
+      admits: 'root',
+      purpose: 'recognises a root-test host in a rehearsal reservation',
+    },
+  ];
+
+  /**
+   * Canonical positives first, then the near-misses that a loosened copy would
+   * start admitting: wrong suffix length either way, uppercase, the base32
+   * exclusions `1`, `8` and `9`, and a hyphen inside a root suffix — which is
+   * the one that separates `[a-z2-7]{20}` from a lazier `[a-z0-9-]{20}`.
+   */
+  const LABELS = [
+    'r2-abcdefghijklmnopqrstuvwxyz',
+    'r2-234567abcdefghijklmnopqrst',
+    'r2-root-abcdefghijklmnopqrst',
+    'r2-root-234567abcdefghijklmn',
+    'r2-abcdefghijklmnopqrstuvwxy',
+    'r2-abcdefghijklmnopqrstuvwxyza',
+    'r2-ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'r2-abcdefghijklmnopqrstuvwxy1',
+    'r2-abcdefghijklmnopqrstuvwx89',
+    'r2-root-abcdefghijklmnopqrs',
+    'r2-root-abcdefghijklmnopqrstu',
+    'r2-root-abcdefghijklmnopqr-t',
+    'r2-root-ABCDEFGHIJKLMNOPQRST',
+    'r2-root-abcdefghijklmnopqrs1',
+    'r2-root-abcdefghijklmnopqrst-',
+    'r2',
+    'r2-',
+    'r2-root-',
+    'bodega-bay',
+  ] as const;
+
+  /**
+   * Hosts that are not a plain `<label>.<Namespace>` pair. They exist to pin
+   * the two anchors, which the cross product below cannot reach: a copy that
+   * lost its `^` admits a prefixed host, and one that lost its `$` admits a
+   * suffixed one, and both still classify every well-formed host correctly.
+   */
+  const UNANCHORED_NEAR_MISSES = [
+    'not-r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+    'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app.example.com',
+    'r2-root-abcdefghijklmnopqrst.vacaybingo.com.example.com',
+  ];
+
+  const HOSTS = [
+    ...LABELS.flatMap((label) => [
+      ...NAMESPACES.map((namespace) => `${label}.${namespace}`),
+      `${label}.${FOREIGN_NAMESPACE}`,
+    ]),
+    ...UNANCHORED_NEAR_MISSES,
+  ];
+
+  /** What the canonical predicates say about a host, for a given class. */
+  const canonical = (admits: RehearsalClass, host: string): boolean => {
+    const split = host.indexOf('.');
+    // A bare label is not a host, and must never be read as one: a negative
+    // index here would silently shorten the label and change its class.
+    if (split === -1) return false;
+    const label = host.slice(0, split);
+    const namespace = host.slice(split + 1);
+    if (!(NAMESPACES as readonly string[]).includes(namespace)) return false;
+    if (admits === 'event') return isRehearsalEventLabel(label);
+    if (admits === 'root') return isRehearsalRootLabel(label);
+    return isRehearsalLabel(label);
+  };
+
+  it.each(MIRROR_FILES)('%s carries exactly %d host-level rehearsal regexes', (path, literals) => {
+    // A new mirror in one of these files must arrive with a row in SITES, or
+    // it ships as the one copy nothing compares against.
+    expect(countHostRegexes(read(path))).toBe(literals);
+  });
+
+  it.each(SITES)('$path $purpose', ({ path, anchor, admits }) => {
+    const mirror = hostRegexAfter(read(path), anchor);
+    for (const host of HOSTS) {
+      expect(mirror.test(host), `${host} against ${mirror.source}`).toBe(canonical(admits, host));
+    }
+  });
+
+  it('exercises both classes on both Namespaces, and mostly on near-misses', () => {
+    // Without this the whole block could pass vacuously: a fixture of hosts
+    // that no regex matches agrees with a canonical predicate that matches
+    // nothing either, and a mistyped suffix length is exactly how you get one.
+    for (const namespace of NAMESPACES) {
+      const under = HOSTS.filter((host) => host.endsWith(`.${namespace}`));
+      expect(under.filter((host) => canonical('event', host)).length).toBeGreaterThan(0);
+      expect(under.filter((host) => canonical('root', host)).length).toBeGreaterThan(0);
+    }
+    const positives = HOSTS.filter((host) => canonical('either', host));
+    expect(HOSTS.length - positives.length).toBeGreaterThan(positives.length);
+  });
+
+  it('keeps the two classes disjoint, so no host is both', () => {
+    // The `either` expectation above is a union, and a union hides an overlap.
+    for (const label of LABELS) {
+      expect(isRehearsalEventLabel(label) && isRehearsalRootLabel(label), label).toBe(false);
+    }
+  });
+});
+
 describe('validateSlug', () => {
   it.each(['bodega-bay', 'med-2026', 'x7z', 'a-b-c', '2026', 'a'.repeat(SLUG_MAX_LENGTH)])(
     'accepts %s',
