@@ -547,6 +547,25 @@ describe('the projection schema version, refused before the projection is read',
       revision: null,
     });
   });
+
+  it.each([
+    ['a supported version with no revision', { kind: 'unknown-host', schemaVersion: 1 }],
+    ['an unsupported version with no revision', { kind: 'unknown-host', schemaVersion: 2 }],
+    ['a revision with no version', { kind: 'unknown-host', revision: '12' }],
+  ] as RegistryLookup[][])(
+    'refuses %s, because the two are stamped from one record and travel together',
+    async (_label, lookup) => {
+      // Only BOTH-absent is the ordinary unknown address. Either half alone is
+      // a half-written envelope — something committed existed to stamp one of
+      // them — and reading "no record here" off it would infer an absence from
+      // a defect. An unsupported-version tombstone that lost its revision has
+      // to raise the alert, not pass as an unknown host.
+      await expect(refusalFor(lookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    },
+  );
 });
 
 describe('a lookup that cannot be completed', () => {

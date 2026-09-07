@@ -278,22 +278,37 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   if (typeof lookup !== 'object' || lookup === null) return notFound('replica-malformed');
 
   switch (lookup.kind) {
-    case 'unknown-host':
-      // An uninitialized object carries no revision; a tombstone reads as
-      // `unknown-host` too but carries the one it was deleted at, because the
-      // recovery machine's canonical probe has to observe it. A revision that
-      // is present and NOT canonical is judged the same way one on a committed
-      // projection is — the shape rule is the projection's, not the arm's.
-      if (lookup.revision === undefined) return notFound('unknown-host');
-      // A revision on this arm came from a COMMITTED record, so it is subject
-      // to the same version gate the committed arm applies. Publishing it under
-      // an unsupported schema would offer the recovery machine a revision this
-      // Worker cannot claim to have read correctly, and § Audit and recovery
-      // makes that public `{reason, revision}` pair the evidence `clear-lock`
-      // compares against committed state.
-      if (!isSupportedProjectionSchemaVersion(lookup.schemaVersion)) return notFound('replica-malformed');
-      if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
-      return notFound('unknown-host', lookup.revision);
+    case 'unknown-host': {
+      // `revision` and `schemaVersion` travel TOGETHER on this arm, and are
+      // therefore judged together. Both are stamped from a committed record —
+      // the tombstone that reads as unknown from outside while keeping the
+      // revision the recovery machine's canonical probe has to observe — and
+      // both are absent when there is no committed record at all. ONLY that
+      // second case is the ordinary unknown address.
+      //
+      // Either half arriving alone is a half-written envelope: something
+      // committed existed to stamp one of them, and the other did not survive
+      // the crossing. Reading "no record here" off it would infer an absence
+      // from a defect, which is the one coercion this module refuses
+      // everywhere else — and it would let an unsupported-version tombstone
+      // that lost its revision pass as an ordinary unknown host instead of
+      // raising the `replica-malformed` alert that the state actually needs,
+      // leaving that host unable to produce the revision-bearing evidence
+      // `clear-lock` consumes.
+      //
+      // Past that pairing, the version gates the revision for the same reason
+      // it gates a projection: publishing a revision read out of a record
+      // written under a schema this build does not understand would attribute
+      // to the address a value this Worker cannot claim to have read
+      // correctly. A revision that is present and NOT canonical is judged the
+      // same way one on a committed projection is — the shape rule is the
+      // projection's, not the arm's.
+      const { revision, schemaVersion } = lookup;
+      if (revision === undefined && schemaVersion === undefined) return notFound('unknown-host');
+      if (!isSupportedProjectionSchemaVersion(schemaVersion)) return notFound('replica-malformed');
+      if (!isCanonicalRevision(revision)) return notFound('replica-malformed');
+      return notFound('unknown-host', revision);
+    }
     case 'unavailable':
       return notFound('lookup-unavailable');
     case 'malformed':
