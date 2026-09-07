@@ -30,6 +30,7 @@ import { normalizePool } from '../game/pool';
 import {
   dealBoard,
   dayDealState,
+  boardFirstBingoAt,
   completedLines,
   countMarked,
   isBlackout,
@@ -1821,7 +1822,15 @@ async function runSetMark(
       dayStats?: DayStats;
       blackout?: boolean;
     };
-    baseFirstBingoAt = cachedData.firstBingoAt ?? null;
+    // WHICH field on that row holds this Board's stamp is `boardFirstBingoAt`'s
+    // single rule (#1049): in daily-cards mode the Day's OWN `dayStats` bucket,
+    // for a legacy single-Board row the root. Reading the root here would defeat
+    // the caller's per-Day argument on the normal Board flow — a cached row
+    // always wins over the prop, so a bare Mark completing a line on a later Day
+    // would copy an EARLIER Day's First-to-BINGO instant into the new bucket
+    // (Codex P2, round 2). Legacy rows have no `dayStats`, so the root is still
+    // read unchanged.
+    baseFirstBingoAt = boardFirstBingoAt(cachedData, params.daily === true, dayIndex);
     cachedPlayerName = cachedData.displayName;
     priorDayStats = cachedData.dayStats;
     priorRootBlackout = cachedData.blackout === true;
