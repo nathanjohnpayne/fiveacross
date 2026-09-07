@@ -194,16 +194,20 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 #
 # For an exact `--only functions:<name>` scope the adapter also BUILDS that
 # codebase — it runs the config's own `predeploy` hooks in a scratch project
-# whose Functions source dir is a copy, then loads the resulting artifact in a
-# sandboxed child and inventories the endpoint ids the Functions runtime loader
-# would discover. That is what decides whether the selector releases exactly one
-# endpoint and may therefore skip the auth-handoff readiness step; the source
-# alone cannot say, because Firebase loads `package.json.main`, not
-# `src/index.ts`. It is not new trust — `firebase deploy` runs those same hooks
-# a few steps below — and it is not new mutation, because the build lands in the
-# scratch copy. It costs a couple of seconds, and only for that selector shape:
-# `--only hosting`, a whole-codebase `--only functions`, and every protected
-# callable classify without building anything.
+# whose Functions source dirs are copies, then asks that codebase's OWN Firebase
+# Functions SDK what it would deploy, exactly as the deploy does: it starts the
+# SDK's discovery server and reads `/__/functions.yaml`. That is what decides
+# whether the selector releases exactly one endpoint and may therefore skip the
+# auth-handoff readiness step; the source alone cannot say, because Firebase
+# loads `package.json.main`, not `src/index.ts`. It is not new trust —
+# `firebase deploy` runs those same hooks and the same discovery a few steps
+# below — and it is not new mutation, because the build lands in the scratch
+# copy.
+#
+# It costs a few seconds (about 6 on this repository, discovery being run twice
+# under two project configs), and only for that selector shape: `--only
+# hosting`, a whole-codebase `--only functions`, and every protected callable
+# classify without building anything.
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
 echo ">> Validating and classifying Firebase deploy request (local)"

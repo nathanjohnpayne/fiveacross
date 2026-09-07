@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,60 +22,11 @@ function classify(args, configPath = resolve(repoRoot, "firebase.json")) {
 // Fixtures
 //
 // The classifier answers by BUILDING a codebase the way the deploy will and
-// walking the artifact, so a fixture is a real (tiny) Functions package: a
-// `tsc` on PATH, a stub `firebase-functions` in its own `node_modules` (real
-// files, so the compile typechecks and nothing reaches the network), and
-// whatever package.json / tsconfig / predeploy shape the case is about.
+// asking that codebase's own SDK what it deploys, so a fixture is a real (tiny)
+// Functions package: this repository's `functions/node_modules` symlinked in
+// (the real SDK, its discovery binary, and `tsc`), and whatever package.json /
+// tsconfig / predeploy shape the case is about. Nothing reaches the network.
 // ---------------------------------------------------------------------------
-
-/**
- * A stub `firebase-functions` whose `onX` factories return exactly what the
- * runtime loader looks for: a FUNCTION carrying an `__endpoint` object
- * (`firebase-functions/lib/runtime/loader.js` `extractStack`).
- */
-const STUB_SDK_INDEX = [
-  '"use strict";',
-  "exports.builder = (factory) => (...args) => {",
-  "  const endpoint = function handler() {};",
-  '  endpoint.__endpoint = { platform: "gcfv2", factory, args: args.length };',
-  "  return endpoint;",
-  "};",
-].join("\n");
-
-const STUB_SDK_MODULES = {
-  "package.json": JSON.stringify({
-    name: "firebase-functions",
-    version: "0.0.0-stub",
-    main: "index.js",
-  }),
-  "index.js": [
-    STUB_SDK_INDEX,
-    // A real SDK export whose name matches the `onX` shape but which builds no
-    // endpoint: `onInit(callback): void`. The artifact walk must see what it
-    // really returns.
-    "exports.onInit = () => undefined;",
-  ].join("\n"),
-  "index.d.ts": [
-    "export declare function builder(factory: string): (...a: any[]) => any;",
-    "export declare function onInit(callback: () => void): void;",
-  ].join("\n"),
-  "v2/scheduler.js": 'module.exports = { onSchedule: require("../index.js").builder("onSchedule") };\n',
-  "v2/scheduler.d.ts":
-    "export declare function onSchedule(schedule: string, handler: (...a: any[]) => any): any;\n",
-  "v2/https.js":
-    'module.exports = { onCall: require("../index.js").builder("onCall"), HttpsError: function () {} };\n',
-  "v2/https.d.ts": [
-    "export declare function onCall(handler: (...a: any[]) => any): any;",
-    "export declare function HttpsError(code: string, message: string): any;",
-  ].join("\n"),
-  // A provider TWO levels deep: the classifier's stub recognises any SDK
-  // subpath, so this must be exempt without the subpath being enumerated
-  // anywhere.
-  "v2/alerts/billing.js":
-    'module.exports = { onPlanUpdatePublished: require("../../index.js").builder("onPlanUpdatePublished") };\n',
-  "v2/alerts/billing.d.ts":
-    "export declare function onPlanUpdatePublished(handler: (...a: any[]) => any): any;\n",
-};
 
 const DEFAULT_PACKAGE = {
   name: "fixture-functions",
@@ -108,21 +59,25 @@ async function writeUnder(dir, relativePath, contents) {
   await writeFile(target, contents, "utf8");
 }
 
-/** `tsc`, Node's ambient types, and the stub SDK, in one codebase's `node_modules`. */
+/**
+ * A `node_modules` for one fixture codebase: every entry of this repository's
+ * own `functions/node_modules`, symlinked.
+ *
+ * That is the REAL Firebase Functions SDK — its `.bin/firebase-functions`
+ * discovery binary, its `v2` provider subpaths, its `onInit`, its types — plus
+ * `tsc` and `@types/node`. Fixtures used to ship a hand-written stub SDK, which
+ * meant the tests exercised a mock of the very thing under test; the classifier
+ * now drives the SDK's own discovery program, so the fixtures must too.
+ *
+ * Symlinks, not copies: 209 entries per fixture is a few milliseconds, where
+ * copying the tree would be minutes.
+ */
 async function installToolchain(functionsDir) {
+  const shared = join(repoRoot, "functions", "node_modules");
   const modules = resolve(functionsDir, "node_modules");
-  await mkdir(resolve(modules, ".bin"), { recursive: true });
-  await mkdir(resolve(modules, "@types"), { recursive: true });
-  await symlink(
-    join(repoRoot, "node_modules", "typescript", "bin", "tsc"),
-    resolve(modules, ".bin", "tsc"),
-  );
-  // So a fixture can write `exports.x = …` — a Functions entrypoint really does
-  // have Node's globals, and the CommonJS-mutation cases are about what the
-  // ARTIFACT ends up exporting, not about whether the name typechecks.
-  await symlink(join(repoRoot, "node_modules", "@types", "node"), resolve(modules, "@types", "node"));
-  for (const [file, contents] of Object.entries(STUB_SDK_MODULES)) {
-    await writeUnder(resolve(modules, "firebase-functions"), file, contents);
+  await mkdir(modules, { recursive: true });
+  for (const entry of await readdir(shared)) {
+    await symlink(join(shared, entry), resolve(modules, entry));
   }
 }
 
@@ -141,7 +96,9 @@ const artifact = (body) =>
     '"use strict";',
     "function endpoint() {",
     "  const e = function handler() {};",
-    '  e.__endpoint = { platform: "gcfv2" };',
+    // What `extractStack` looks for, carrying the minimum `stackToWire` needs:
+    // a function whose `__endpoint` is an object.
+    '  e.__endpoint = { platform: "gcfv2", entryPoint: "handler" };',
     "  return e;",
     "}",
     body,
@@ -234,12 +191,15 @@ async function withCodebases(sources, run) {
  * running EVERY Functions config's hooks. The second codebase's hook therefore
  * runs even though the scope never mentions it.
  */
-async function withNeighbourCodebase({ neighbourPredeploy, files = {} }, run) {
+async function withNeighbourCodebase(
+  { neighbourPredeploy, neighbourSource, defaultSource, neighbourFirst = false, files = {} },
+  run,
+) {
   const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-neighbour-"));
   try {
     for (const [dir, source] of [
-      ["functions-default", endpoint("daily")],
-      ["functions-beta", endpoint("betaOnly")],
+      ["functions-default", defaultSource ?? endpoint("daily")],
+      ["functions-beta", neighbourSource ?? endpoint("betaOnly")],
     ]) {
       const codebaseDir = resolve(fixture, dir);
       await mkdir(resolve(codebaseDir, "src"), { recursive: true });
@@ -251,15 +211,17 @@ async function withNeighbourCodebase({ neighbourPredeploy, files = {} }, run) {
     for (const [file, contents] of Object.entries(files)) {
       await writeUnder(fixture, file, contents);
     }
+    const configs = [
+      { source: "functions-default", predeploy: PREDEPLOY },
+      { source: "functions-beta", codebase: "beta", predeploy: neighbourPredeploy },
+    ];
     await writeUnder(
       fixture,
       "firebase.json",
-      JSON.stringify({
-        functions: [
-          { source: "functions-default", predeploy: PREDEPLOY },
-          { source: "functions-beta", codebase: "beta", predeploy: neighbourPredeploy },
-        ],
-      }),
+      // Config ORDER is load-bearing: hooks and discovery both run in it, so a
+      // neighbour that must act BEFORE the selected codebase is read has to be
+      // declared first.
+      JSON.stringify({ functions: neighbourFirst ? [configs[1], configs[0]] : configs }),
     );
     await run(resolve(fixture, "firebase.json"));
   } finally {
@@ -889,16 +851,17 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("refuses an artifact that tries to forge its own inventory", async () => {
-    // The artifact runs inside the walker, so module-scope code can replace
-    // `fs.writeFileSync` and write whatever answer it likes. The walker holds
-    // the originals from before the load, so the forgery lands nowhere and the
-    // real (grouped) surface is what gets reported (Codex P2, round 13).
+  it("refuses an artifact that tries to write its own answer", async () => {
+    // An earlier revision walked the exports in a script of its own, whose
+    // report the artifact could forge by replacing `fs.writeFileSync` in the
+    // process they shared (Codex P2, round 13). The inventory now comes from
+    // the SDK's own discovery response, which the artifact has no channel to,
+    // so the grouped surface is what gets reported.
     await withPrewrittenArtifact(
       [
         'const fs = require("node:fs");',
         "const real = fs.writeFileSync;",
-        "fs.writeFileSync = (file, data) => real.call(fs, file, \"ok\\n\\nendpoints\\ndaily\\ngroups\\n\");",
+        'fs.writeFileSync = (file, data) => real.call(fs, file, "ok\\n\\nendpoints\\ndaily\\ngroups\\n");',
         "exports.daily = { submitBugReport: endpoint() };",
       ].join("\n"),
       async (configPath) => {
@@ -1164,6 +1127,38 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
           ALL_INVOKERS_CONSERVATIVE,
         );
+      },
+    );
+  });
+
+  it("does not load a codebase this deploy will not discover", async () => {
+    // `getReleventConfigs` runs every config's HOOKS for an endpoint-named
+    // scope, but `loadCodebases` still discovers only the codebases the filters
+    // name (`targetCodebases`). Loading one Firebase will not load runs its
+    // module-scope code, and here that code rewrites the SELECTED codebase's
+    // artifact into a group — so a classifier that loaded it would answer a
+    // question the deploy never asks (Codex P2, round 14).
+    await withNeighbourCodebase(
+      {
+        neighbourPredeploy: PREDEPLOY,
+        // Declared FIRST, so a load of it would land before the selected
+        // codebase is read — which is what makes this fixture discriminating.
+        neighbourFirst: true,
+        neighbourSource: [
+          "import { onSchedule } from 'firebase-functions/v2/scheduler';",
+          "import { copyFileSync } from 'node:fs';",
+          "import { resolve } from 'node:path';",
+          "const project = resolve(__dirname, '..', '..');",
+          "copyFileSync(",
+          "  resolve(project, 'group.js'),",
+          "  resolve(project, 'functions-default', 'lib', 'index.js'),",
+          ");",
+          "export const betaOnly = onSchedule('every day 00:00', () => {});",
+        ].join("\n"),
+        files: { "group.js": artifact("exports.daily = { submitBugReport: endpoint() };") },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
       },
     );
   });

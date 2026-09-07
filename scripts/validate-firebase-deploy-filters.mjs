@@ -36,6 +36,7 @@ const {
   filterOnly,
 } = require("firebase-tools/lib/hosting/config");
 const functionsEnv = require("firebase-tools/lib/functions/env");
+const portfinder = require("portfinder");
 
 // Deploy-command options come directly from the pinned firebase-tools module.
 // This small global subset covers options that change destination or whose
@@ -272,11 +273,11 @@ function normalizedSourcePath(source) {
 
 /** Hooks are given a generous ceiling; a real `tsc` build is seconds, not minutes. */
 const PREDEPLOY_HOOK_TIMEOUT_MS = 300_000;
-/** Loading the artifact is a require and a walk; anything slower is a hang. */
-const ARTIFACT_WALK_TIMEOUT_MS = 20_000;
+/** Serving the manifest is a load and a walk; anything slower is a hang. */
+const DISCOVERY_TIMEOUT_MS = 20_000;
 
-const ARTIFACT_WALKER = fileURLToPath(
-  new URL("./firebase-artifact-endpoints.cjs", import.meta.url),
+const DISCOVERY_PRELOAD = fileURLToPath(
+  new URL("./firebase-discovery-preload.cjs", import.meta.url),
 );
 
 /**
@@ -511,13 +512,6 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
  * which takes the same (false) branch under both probes. No offline classifier
  * can close that one: the real value is precisely what it cannot obtain.
  */
-/**
- * The port `serveAdmin` would hand the discovery process. The CLI picks a free
- * one at random; only its PRESENCE is reproducible, and nothing may bind it
- * here, so a fixed placeholder is both sufficient and honest.
- */
-const DISCOVERY_PORT = "8080";
-
 const CONFIG_PROBES = Object.freeze([
   Object.freeze({ label: "minimal", extraFirebaseConfig: {}, extraRuntimeConfig: {} }),
   Object.freeze({
@@ -569,14 +563,6 @@ function discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe
     }),
     GOOGLE_CLOUD_QUOTA_PROJECT: project,
     FUNCTIONS_CONTROL_API: "true",
-    // `discoverBuild` picks one of two shapes and the delegate exports a
-    // different control variable for each: the default HTTP path serves on a
-    // PORT, while FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH switches it to a
-    // one-shot process writing a manifest. Mirror whichever the deploy will
-    // take, rather than neither (Codex P2, round 13).
-    ...(process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH
-      ? { FUNCTIONS_MANIFEST_OUTPUT_PATH: join(scratchProject, "functions.yaml") }
-      : { PORT: DISCOVERY_PORT }),
     HOME: process.env.HOME,
     PATH: process.env.PATH,
     NODE_ENV: process.env.NODE_ENV,
@@ -638,6 +624,35 @@ function relevantFunctionsConfigs(only, configs) {
 }
 
 /**
+ * The codebases this deploy will actually LOAD, mirroring `targetCodebases`.
+ *
+ * A different set from the one whose hooks run: `getReleventConfigs` falls back
+ * to every config when an `--only functions:<x>` names no codebase, but
+ * `loadCodebases` still discovers only the codebases the filters name. Loading
+ * one Firebase will not load is not merely wasted work — that codebase's own
+ * module-scope code runs, and it can write over another codebase's artifact
+ * before this classifier reads it (Codex P2, round 14).
+ */
+function targetCodebases(only, configs, codebaseNames) {
+  const all = configs.map((config) => config.codebase);
+  if (!only) return new Set(all);
+  const named = new Set();
+  for (const selector of only.split(",")) {
+    if (selector === "functions") return new Set(all);
+    if (!selector.startsWith("functions:")) continue;
+    const fragments = selector.slice("functions:".length).split(":");
+    // `parseFunctionSelector`: a leading fragment that IS a configured codebase
+    // names it; otherwise two fragments name `fragments[0]` and one resolves to
+    // the default codebase.
+    if (codebaseNames.has(fragments[0]) || fragments[0] === "default") named.add(fragments[0]);
+    else if (fragments.length > 1) named.add(fragments[0]);
+    else named.add("default");
+  }
+  if (named.size === 0) return new Set(all);
+  return new Set(all.filter((codebase) => named.has(codebase)));
+}
+
+/**
  * Build the project the way the deploy will, then inventory the endpoint ids
  * the runtime loader would discover in each codebase's artifact.
  *
@@ -672,6 +687,7 @@ async function buildAndInventoryProject({
   project,
   predeployTimeoutMs,
   configs,
+  codebaseNames,
 }) {
   /** @type {Map<string, { authoritative: boolean, endpoints: string[], groups: string[] }>} */
   const inventories = new Map();
@@ -759,7 +775,9 @@ async function buildAndInventoryProject({
       }
     }
 
+    const targets = targetCodebases(only, configs, codebaseNames);
     for (const config of staged) {
+      if (!targets.has(config.codebase)) continue;
       inventories.set(
         config.codebase,
         await inventoryCodebaseArtifact({
@@ -774,7 +792,14 @@ async function buildAndInventoryProject({
     }
     for (const config of configs) {
       if (!inventories.has(config.codebase)) {
-        inventories.set(config.codebase, refused("codebase has no mirrorable local source"));
+        inventories.set(
+          config.codebase,
+          refused(
+            targets.has(config.codebase)
+              ? "codebase has no mirrorable local source"
+              : "this deploy does not load that codebase",
+          ),
+        );
       }
     }
     return inventories;
@@ -789,30 +814,137 @@ async function buildAndInventoryProject({
 }
 
 /**
- * Read the walker's report.
+ * The SDK binary the delegate would run for this codebase.
  *
- * Plain text, not JSON, because the walker builds it from captured primitives:
- * the artifact runs in that process and could otherwise redefine a serializer
- * and forge an authoritative answer (Codex P2, round 13).
+ * Mirrors `findFunctionsBinary`: the codebase's own `node_modules/.bin` first,
+ * then the project's, then wherever `firebase-functions` actually resolved
+ * from. Returns null when none exists, which is a refusal, not a fallback.
  */
-function parseWalkReport(text) {
-  const lines = text.split("\n");
-  if (lines[0] !== "ok") return { ok: false, reason: lines.slice(1).join("\n").trim() };
-  const endpointsAt = lines.indexOf("endpoints", 2);
-  const groupsAt = lines.indexOf("groups", endpointsAt + 1);
-  if (endpointsAt === -1 || groupsAt === -1) return { ok: false, reason: "malformed walk report" };
-  const ids = (from, to) =>
-    lines.slice(from, to).flatMap((line) => (line === "" ? [] : [line]));
-  return {
-    ok: true,
-    endpoints: ids(endpointsAt + 1, groupsAt),
-    groups: ids(groupsAt + 1, lines.length),
-  };
+function findFunctionsBinary(sourceDir, projectDir) {
+  const candidates = [join(sourceDir, "node_modules"), join(projectDir, "node_modules")];
+  try {
+    const sdk = require.resolve("firebase-functions", { paths: [sourceDir] });
+    const at = sdk.lastIndexOf("node_modules");
+    if (at !== -1) candidates.push(sdk.slice(0, at + "node_modules".length));
+  } catch {
+    // No SDK resolvable from the codebase: the candidates above may still hold
+    // a binary, and if none does this returns null and the caller refuses.
+  }
+  for (const modules of candidates) {
+    const binary = join(modules, ".bin", "firebase-functions");
+    if (existsSync(binary)) return binary;
+  }
+  return null;
 }
 
 /**
- * Load one built codebase in a sandboxed child and read back its endpoint ids,
- * once per config probe.
+ * Ask the codebase's OWN Firebase Functions SDK what it would deploy.
+ *
+ * This is the whole point of the design taken to its conclusion. An earlier
+ * revision reimplemented `extractStack` in a walker of its own, and every round
+ * of review found another way that reimplementation's host differed from the
+ * real one: a stubbed module changed control flow, a synchronous walk missed a
+ * microtask-queued mutation, `process.argv[1]` and `require.main` were this
+ * script's rather than the SDK binary's, and the walker's own report could be
+ * forged by the artifact sharing its process (Codex P2, rounds 10-14).
+ *
+ * None of those can differ from the deploy when the deploy's own program is
+ * what answers. `spawnFunctionsProcess` runs the SDK binary with the source dir
+ * as argv and cwd; `detectFromPort` then GETs `/__/functions.yaml` from it and
+ * reads the endpoint ids out of the wire manifest. So does this — with one
+ * addition, a `--require` preload that node consumes and never places in
+ * `process.argv`, which records whether anything consulted the one environment
+ * value the classifier cannot reproduce.
+ */
+async function discoverEndpointsFromSdk({
+  sourceDir,
+  projectDir,
+  environment,
+  markerFile,
+  timeout,
+}) {
+  const binary = findFunctionsBinary(sourceDir, projectDir);
+  if (!binary) return { ok: false, reason: "no firebase-functions binary for this codebase" };
+
+  // The delegate's own port choice (`8000 + randomInt(0, 1000)`, via
+  // portfinder), so a busy port behaves here as it does there.
+  let port;
+  try {
+    port = await portfinder.getPortPromise({ port: 8000 + Math.floor(Math.random() * 1000) });
+  } catch (error) {
+    return { ok: false, reason: `no free discovery port — ${error.message}` };
+  }
+
+  const deadline = Date.now() + timeout;
+  const server = runCapturedProcess(
+    process.execPath,
+    ["--require", DISCOVERY_PRELOAD, binary, sourceDir],
+    {
+      cwd: sourceDir,
+      timeout,
+      env: {
+        ...environment,
+        PORT: String(port),
+        FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER: markerFile,
+      },
+    },
+  );
+
+  let manifest;
+  try {
+    manifest = await pollDiscoveryManifest(port, deadline, server);
+  } finally {
+    // `serveAdmin`'s teardown: ask it to stop, then make sure of it.
+    await fetch(`http://127.0.0.1:${port}/__/quitquitquit`).catch(() => {});
+    await server;
+  }
+  return manifest;
+}
+
+/** `detectFromPort`, minus the parts that only matter to a real deploy. */
+async function pollDiscoveryManifest(port, deadline, server) {
+  const url = `http://127.0.0.1:${port}/__/functions.yaml`;
+  let exited = false;
+  server.then(() => {
+    exited = true;
+  });
+  for (;;) {
+    if (Date.now() > deadline) {
+      return { ok: false, reason: "discovery did not answer before the deadline" };
+    }
+    let response;
+    try {
+      response = await fetch(url);
+    } catch {
+      if (exited) {
+        const finished = await server;
+        return {
+          ok: false,
+          reason: `discovery exited before answering — ${finished.output.trim().slice(-400) || "no output"}`,
+        };
+      }
+      await new Promise((wake) => setTimeout(wake, 50));
+      continue;
+    }
+    if (response.status !== 200) {
+      const body = await response.text().catch(() => "");
+      return { ok: false, reason: `discovery answered ${response.status} — ${body.trim().slice(-400)}` };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(await response.text());
+    } catch (error) {
+      return { ok: false, reason: `discovery manifest did not parse — ${error.message}` };
+    }
+    if (!parsed || typeof parsed.endpoints !== "object" || parsed.endpoints === null) {
+      return { ok: false, reason: "discovery manifest carried no endpoints object" };
+    }
+    return { ok: true, endpoints: Object.keys(parsed.endpoints) };
+  }
+}
+
+/**
+ * Ask one built codebase what it deploys, once per config probe.
  *
  * Two runs, not one: the deployed surface must be the same under both
  * `CONFIG_PROBES` before it can be trusted, because the difference between them
@@ -845,48 +977,56 @@ async function inventoryCodebaseArtifact({
   }
 
   const slug = Buffer.from(sourceRel).toString("hex");
-  const results = [];
-  for (const probe of CONFIG_PROBES) {
-    let walkEnv;
-    try {
-      walkEnv = discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe });
-    } catch (error) {
-      return refused(
-        `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    const outFile = join(scratch, `endpoints-${slug}-${probe.label}.json`);
-    const walk = await runCapturedProcess(
-      process.execPath,
-      [ARTIFACT_WALKER, scratchSource, outFile],
-      {
-        // cwd and environment both mirror the SDK process the CLI spawns.
-        cwd: scratchSource,
-        timeout: ARTIFACT_WALK_TIMEOUT_MS,
-        env: walkEnv,
-      },
+  let environments;
+  try {
+    environments = CONFIG_PROBES.map((probe) => ({
+      probe,
+      environment: discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe }),
+      markerFile: join(scratch, `runtime-config-${slug}-${probe.label}.marker`),
+    }));
+  } catch (error) {
+    return refused(
+      `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
     );
-    let reported;
-    try {
-      reported = parseWalkReport(await readFile(outFile, "utf8"));
-    } catch {
-      return refused(
-        `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
-      );
-    }
-    if (!reported.ok) {
-      return refused(reported.reason || "the artifact walk was inconclusive");
-    }
-    results.push({ probe, endpoints: reported.endpoints, groups: reported.groups });
   }
 
-  const [first, ...rest] = results;
-  const signature = (result) => JSON.stringify([[...result.endpoints].sort(), [...result.groups].sort()]);
+  // The probes run CONCURRENTLY, on their own ports and marker files. They read
+  // one staged tree and share nothing else, and an artifact whose load has side
+  // effects that made them disagree is exactly the artifact this comparison is
+  // meant to refuse — so the parallelism cannot turn a refusal into an
+  // exemption. Sequential runs doubled the wall time of the slowest step.
+  const results = await Promise.all(
+    environments.map(async ({ probe, environment, markerFile }) => {
+      const discovered = await discoverEndpointsFromSdk({
+        sourceDir: scratchSource,
+        projectDir: scratchProject,
+        environment,
+        markerFile,
+        timeout: DISCOVERY_TIMEOUT_MS,
+      });
+      return { probe, markerFile, discovered };
+    }),
+  );
+
+  for (const { markerFile, discovered } of results) {
+    if (!discovered.ok) return refused(discovered.reason);
+    if (existsSync(markerFile)) {
+      return refused(
+        "the codebase consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
+          "namespaces only the deploy's authenticated fetch can supply",
+      );
+    }
+  }
+
+  const [first, ...rest] = results.map(({ probe, discovered }) => ({
+    probe,
+    endpoints: discovered.endpoints,
+  }));
+  const signature = (result) => [...result.endpoints].sort().join(" ");
   const divergent = rest.find((result) => signature(result) !== signature(first));
   if (divergent) {
     return refused(
-      `the deployed surface changes with project config this classifier cannot supply ` +
+      "the deployed surface changes with project config this classifier cannot supply " +
         `(${first.probe.label}: ${first.endpoints.join(", ") || "none"}; ` +
         `${divergent.probe.label}: ${divergent.endpoints.join(", ") || "none"})`,
     );
@@ -894,14 +1034,8 @@ async function inventoryCodebaseArtifact({
 
   if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
     console.error(`  classifier: ${sourceRel} deploys ${first.endpoints.join(", ")}`);
-    // Groups are the ids a `--only functions:<group>` scope expands to. They
-    // never grant the exemption — the prefix rule already refuses a selector
-    // any of their endpoints falls inside — but they make a refusal legible.
-    if (first.groups.length > 0) {
-      console.error(`  classifier: ${sourceRel} groups ${first.groups.join(", ")}`);
-    }
   }
-  return { authoritative: true, endpoints: first.endpoints, groups: first.groups };
+  return { authoritative: true, endpoints: first.endpoints };
 }
 
 /**
@@ -1059,6 +1193,7 @@ async function singleEndpointInventory(
       only,
       project: project || "",
       predeployTimeoutMs,
+      codebaseNames,
       configs,
     },
   };
