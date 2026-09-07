@@ -200,6 +200,23 @@ describe('the fail-closed decision table', () => {
     await expect(reasonFor({ kind: 'unknown-host' })).resolves.toBe('unknown-host');
   });
 
+  it('refuses unknown-host metadata that is named but undefined', async () => {
+    // Codex P2 on #1120: the service binding carries `undefined` values intact,
+    // so a version-skewed registry can answer `{ revision: undefined,
+    // schemaVersion: undefined }`. Those keys are NAMED, which an uninitialized
+    // object never does; reading absence off them would downgrade a malformed
+    // tombstone to an ordinary unknown host and suppress the diagnostic.
+    await expect(
+      reasonFor({ kind: 'unknown-host', revision: undefined, schemaVersion: undefined }),
+    ).resolves.toBe('replica-malformed');
+    await expect(reasonFor({ kind: 'unknown-host', revision: undefined })).resolves.toBe(
+      'replica-malformed',
+    );
+    await expect(reasonFor({ kind: 'unknown-host', schemaVersion: undefined })).resolves.toBe(
+      'replica-malformed',
+    );
+  });
+
   it('refuses an array-shaped envelope even when it carries the committed property names', async () => {
     const lookup = Object.assign([] as unknown as Record<string, unknown>, {
       kind: 'committed',

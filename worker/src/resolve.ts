@@ -403,8 +403,17 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       // correctly. A revision that is present and NOT canonical is judged the
       // same way one on a committed projection is — the shape rule is the
       // projection's, not the arm's.
+      // Absence is judged by OWN-KEY presence, not by value: the contract says
+      // an uninitialized object carries neither field, and the service binding
+      // carries `undefined` values intact where JSON would drop them. An
+      // envelope that names either key with an `undefined` value is a
+      // version-skewed or half-written tombstone, not an ordinary unknown
+      // address, and it falls through to the shape rules below, which refuse
+      // it (Codex P2 on #1120).
       const { revision, schemaVersion } = lookup;
-      if (revision === undefined && schemaVersion === undefined) return notFound('unknown-host');
+      const namesRevision = Object.hasOwn(lookup, 'revision');
+      const namesSchemaVersion = Object.hasOwn(lookup, 'schemaVersion');
+      if (!namesRevision && !namesSchemaVersion) return notFound('unknown-host');
       if (!isSupportedProjectionSchemaVersion(schemaVersion)) return notFound('replica-malformed');
       if (!isCanonicalRevision(revision)) return notFound('replica-malformed');
       return notFound('unknown-host', revision);
