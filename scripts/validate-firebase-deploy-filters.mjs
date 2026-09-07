@@ -290,18 +290,49 @@ function crossEnvShellPath() {
   return resolve(dirname(crossEnv), "bin", "cross-env-shell.js");
 }
 
-function runCapturedProcess(command, args, options) {
-  return new Promise((settle) => {
+/** A timed-out process gets this long to actually die before we stop waiting. */
+const KILL_GRACE_MS = 5_000;
+
+const POSIX = process.platform !== "win32";
+
+/**
+ * Run a child to completion, capturing its output, under a deadline that
+ * bounds the WHOLE process tree.
+ *
+ * `spawn`'s own `timeout` option is not enough: it signals the immediate child,
+ * and a shell's descendants keep the inherited stdio pipes open, so the awaited
+ * `close` waits on them and the documented ceiling bounds nothing (Codex P2,
+ * round 10, reproduced with `sleep 2` under a 100ms timeout). The child is
+ * therefore its own process group and the deadline kills the group, with a
+ * grace timer so that even an unkillable descendant cannot hold this open.
+ */
+function runCapturedProcess(command, args, { timeout, ...options }) {
+  return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(command, args, {
+        ...options,
+        detached: POSIX,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     } catch (error) {
-      settle({ ok: false, output: error instanceof Error ? error.message : String(error) });
+      resolve({ ok: false, output: error instanceof Error ? error.message : String(error) });
       return;
     }
+
     // Captured, never inherited: this classifier's own stdout is the
     // machine-readable classification `deploy.sh` parses.
     let output = "";
+    let settled = false;
+    let deadline;
+    let grace;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(grace);
+      resolve(result);
+    };
     const collect = (chunk) => {
       if (output.length < 8192) output += chunk.toString("utf8");
     };
@@ -312,6 +343,23 @@ function runCapturedProcess(command, args, options) {
       if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}` });
       else settle({ ok: code === 0, output, code });
     });
+
+    deadline = setTimeout(() => {
+      try {
+        if (POSIX && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Already gone; the grace timer below settles either way.
+        }
+      }
+      grace = setTimeout(
+        () => settle({ ok: false, output: `${output}timed out after ${timeout}ms` }),
+        KILL_GRACE_MS,
+      );
+    }, timeout);
   });
 }
 
@@ -321,7 +369,7 @@ function runCapturedProcess(command, args, options) {
  * `cross-env-shell` under a shell, with the PROJECT directory as cwd and the
  * codebase source directory exposed only through `$RESOURCE_DIR`.
  */
-function runPredeployHook(command, { projectDir, resourceDir, project }) {
+function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs }) {
   // firebase-tools escapes only `"` when it wraps the hook. That is incomplete
   // for a command containing a BACKSLASH, which could close its own quote — so
   // such a command is REFUSED before it gets here rather than quoted some other
@@ -334,8 +382,7 @@ function runPredeployHook(command, { projectDir, resourceDir, project }) {
   return runCapturedProcess(translated, [], {
     cwd: projectDir,
     shell: true,
-    timeout: PREDEPLOY_HOOK_TIMEOUT_MS,
-    killSignal: "SIGKILL",
+    timeout: timeoutMs ?? PREDEPLOY_HOOK_TIMEOUT_MS,
     env: {
       ...process.env,
       GCLOUD_PROJECT: project || "",
@@ -476,7 +523,13 @@ function refused(reason) {
  * failure, a non-zero or timed-out hook, a discovery manifest, an artifact that
  * will not load, or a walk that throws.
  */
-async function buildAndInventoryArtifact({ projectDir, sourceRel, predeploy, project }) {
+async function buildAndInventoryArtifact({
+  projectDir,
+  sourceRel,
+  predeploy,
+  project,
+  predeployTimeoutMs,
+}) {
   const steps =
     typeof predeploy === "string"
       ? [predeploy]
@@ -517,6 +570,7 @@ async function buildAndInventoryArtifact({ projectDir, sourceRel, predeploy, pro
         projectDir: scratchProject,
         resourceDir: scratchSource,
         project,
+        timeoutMs: predeployTimeoutMs,
       });
       if (!hook.ok) {
         return refused(`predeploy hook failed: ${command} — ${hook.output.trim().slice(-400)}`);
@@ -550,8 +604,7 @@ async function buildAndInventoryArtifact({ projectDir, sourceRel, predeploy, pro
         // cwd and environment both mirror the SDK process the CLI spawns.
         cwd: scratchSource,
         timeout: ARTIFACT_WALK_TIMEOUT_MS,
-        killSignal: "SIGKILL",
-        env: walkEnv,
+            env: walkEnv,
       },
     );
     let reported;
@@ -622,7 +675,7 @@ function artifactEndpointInventory(entry) {
  * whose codebase differs from the filter's, so uncertainty in `beta` cannot
  * widen an explicitly qualified `alpha` deployment.
  */
-async function singleEndpointInventory(configSource, configPath, project) {
+async function singleEndpointInventory(configSource, configPath, project, predeployTimeoutMs) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
@@ -704,6 +757,7 @@ async function singleEndpointInventory(configSource, configPath, project) {
       sourceRel,
       predeploy: functionsConfig.predeploy,
       project: project || "",
+      predeployTimeoutMs,
     };
 
     // The pre-check reads the conventional TypeScript entrypoint. A codebase
@@ -1014,6 +1068,11 @@ export async function classifyFirebaseDeployRequest(
     defaultProject = "",
     defaultConfigPath = "firebase.json",
     rejectDestinationOverrides = false,
+    // The predeploy-hook deadline, as an ARGUMENT rather than an environment
+    // variable: `main()` never passes it, so no shell can widen a safety bound
+    // from outside, while a test can shorten it enough to prove that a hook
+    // whose descendants outlive their shell still settles promptly.
+    predeployTimeoutMs = PREDEPLOY_HOOK_TIMEOUT_MS,
   } = {},
 ) {
   if (rejectDestinationOverrides && hasNamedDestinationOverride(args)) {
@@ -1045,6 +1104,7 @@ export async function classifyFirebaseDeployRequest(
     configSource,
     configPath,
     project,
+    predeployTimeoutMs,
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an

@@ -145,27 +145,58 @@ function builderFactory(moduleName, trail) {
   });
 }
 
-function isBareSpecifier(request) {
-  return !request.startsWith(".") && !path.isAbsolute(request) && !request.startsWith("node:");
-}
-
 function installModuleStubs() {
   const load = Module._load;
   Module._load = function stubbedLoad(request, parent, isMain) {
     if (BUILDER_MODULE.test(request)) return builderNamespace(request, "");
     if (INERT_MODULE.test(request)) return inertProxy();
-    try {
-      return load.call(this, request, parent, isMain);
-    } catch (error) {
-      // A dependency that is not installed in the scratch copy cannot
-      // contribute an endpoint of its own, and refusing the whole inventory
-      // over it would only cost the exemption. Anything else — a throwing
-      // module body, a syntax error — propagates and fails closed.
-      if (error && error.code === "MODULE_NOT_FOUND" && isBareSpecifier(request)) {
-        return inertProxy();
-      }
-      throw error;
-    }
+    // Everything else loads for real, and a failure PROPAGATES. Turning a
+    // `MODULE_NOT_FOUND` into an inert value would change control flow rather
+    // than preserve it: an entrypoint that catches an absent optional
+    // dependency takes its `catch` branch under the real loader — and may
+    // export a group from it — while a successful stub import keeps it on the
+    // `try` branch (Codex P2, round 10). Failing closed is the only reading
+    // that cannot invent a smaller surface than the deploy will discover.
+    return load.call(this, request, parent, isMain);
+  };
+}
+
+/**
+ * `FIREBASE_CONFIG` is the one part of the discovery environment this
+ * classifier cannot reproduce exactly: `prepare.js` passes the project's
+ * `adminSdkConfig` (projectId, databaseURL, storageBucket, …), which comes from
+ * an authenticated Management API call that a local preflight must not make.
+ * The `projectId` IS known, and reading it is the ordinary case.
+ *
+ * So rather than forfeit on any read — which would refuse a codebase that only
+ * wants its project id — this watches the boundary. The injected value is
+ * parsed exactly once, by whoever consumes it, so wrapping the RESULT of a
+ * `JSON.parse` of that exact string records which fields were actually asked
+ * for. A field this classifier could not supply is a field whose real value
+ * might have selected a different endpoint surface, so asking for one forfeits.
+ */
+let unsuppliedConfigField = null;
+const SUPPLIED_CONFIG_FIELDS = new Set(["projectId"]);
+
+function watchFirebaseConfigReads() {
+  const injected = process.env.FIREBASE_CONFIG;
+  if (typeof injected !== "string") return;
+  const parse = JSON.parse;
+  JSON.parse = function watchedParse(text, reviver) {
+    const value = parse.call(this, text, reviver);
+    if (text !== injected || value === null || typeof value !== "object") return value;
+    return new Proxy(value, {
+      get(target, property) {
+        if (
+          typeof property === "string" &&
+          !SUPPLIED_CONFIG_FIELDS.has(property) &&
+          target[property] === undefined
+        ) {
+          unsuppliedConfigField = unsuppliedConfigField ?? property;
+        }
+        return target[property];
+      },
+    });
   };
 }
 
@@ -173,10 +204,15 @@ const isObject = (value) => typeof value === "object" && value !== null;
 
 // Extension descriptors, verbatim from the loader: recognised so they are
 // neither counted as endpoints nor recursed into, exactly as the deploy does.
+// The `events` clause is part of that predicate and is load-bearing here — a
+// near-extension whose `events` is truthy but not an array is NOT an extension
+// to the loader, which recurses into it and can find endpoints inside. Skipping
+// it would hide them (Codex P2, round 10).
 const isExtension = (value) =>
   isObject(value) &&
   typeof value.instanceId === "string" &&
   isObject(value.params) &&
+  (!value.events || Array.isArray(value.events)) &&
   (typeof value.FIREBASE_EXTENSION_REFERENCE === "string" ||
     typeof value.FIREBASE_EXTENSION_LOCAL_PATH === "string");
 
@@ -218,6 +254,7 @@ function main() {
   }
 
   installModuleStubs();
+  watchFirebaseConfigReads();
 
   // Customer code at module scope may print, and the caller parses this
   // stream. Silence both streams across the load and restore them after.
@@ -255,6 +292,15 @@ function main() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     emit({ authoritative: false, reason: `export walk failed — ${message}` });
+    return;
+  }
+  if (unsuppliedConfigField) {
+    emit({
+      authoritative: false,
+      reason:
+        `the artifact read FIREBASE_CONFIG.${unsuppliedConfigField}, which only the ` +
+        "deploy's authenticated adminSdkConfig lookup can supply",
+    });
     return;
   }
   emit({ authoritative: true, endpoints, groups });

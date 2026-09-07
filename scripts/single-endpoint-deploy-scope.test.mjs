@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -242,24 +243,58 @@ const ALL_INVOKERS_CONSERVATIVE = {
   authHandoffInvokerConservative: true,
 };
 
-describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
-  it("does not select any invoker for endpoints the artifact deploys alone", async () => {
-    const result = await classify([
-      "--only",
-      "functions:dailyEngagementEmail,functions:adminAlertDigest",
-    ]);
-    expect(result).toMatchObject({
-      functionsAttempted: true,
-      hostingAttempted: false,
-      ...NO_INVOKER_SELECTED,
-    });
-  });
+/**
+ * Whether this checkout can BUILD its own Functions codebase.
+ *
+ * A clean CI runner cannot, at the point `npm test` runs: `app-ci` installs
+ * `functions/` dependencies later, for `test:functions`. So the two assertions
+ * below come as a total pair rather than one conditional test — with the
+ * dependencies present the real config must reach the exemption, and without
+ * them the classifier must fall back to conservative, which is the fail-closed
+ * property that actually protects the deploy. Exactly one of the pair runs, and
+ * neither environment leaves the real config unasserted. (The exemption path
+ * itself is gated on every runner by the fixture suites below, which install a
+ * `tsc` symlink and a stub SDK of their own.)
+ */
+const CAN_BUILD_THIS_REPO = existsSync(resolve(repoRoot, "functions", "node_modules"));
 
-  it("accepts the codebase-qualified form of the same endpoint", async () => {
-    // `functions:<codebase>:<name>` is Firebase's documented three-part form.
-    const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
-    expect(result).toMatchObject(EXEMPT);
-  });
+describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
+  it.runIf(CAN_BUILD_THIS_REPO)(
+    "does not select any invoker for endpoints the artifact deploys alone",
+    async () => {
+      const result = await classify([
+        "--only",
+        "functions:dailyEngagementEmail,functions:adminAlertDigest",
+      ]);
+      expect(result).toMatchObject({
+        functionsAttempted: true,
+        hostingAttempted: false,
+        ...NO_INVOKER_SELECTED,
+      });
+    },
+  );
+
+  it.runIf(CAN_BUILD_THIS_REPO)(
+    "accepts the codebase-qualified form of the same endpoint",
+    async () => {
+      // `functions:<codebase>:<name>` is Firebase's documented three-part form.
+      const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
+      expect(result).toMatchObject(EXEMPT);
+    },
+  );
+
+  it.skipIf(CAN_BUILD_THIS_REPO)(
+    "falls back to conservative when this codebase cannot be built",
+    async () => {
+      // No `functions/node_modules`, so the predeploy hook cannot run. An
+      // unprovable scope must select every invoker, never skip reconciliation.
+      const result = await classify([
+        "--only",
+        "functions:dailyEngagementEmail,functions:adminAlertDigest",
+      ]);
+      expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+    },
+  );
 
   it.each(["functions:mintAuthHandoff", "functions:exchangeAuthHandoff"])(
     "still selects the auth-handoff invoker for %s",
@@ -570,6 +605,105 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
             "    entryPoint: daily.submitBugReport",
           ].join("\n"),
         },
+      },
+    );
+  });
+
+  it("refuses a near-extension the loader would recurse into", async () => {
+    // The loader treats a value as an extension only when `events` is absent or
+    // an array; with a truthy non-array `events` it recurses instead and finds
+    // what is inside. Skipping such an object would hide `daily-hidden-…`.
+    await withPrewrittenArtifact(
+      [
+        "exports.daily = endpoint();",
+        'exports["daily-hidden"] = {',
+        '  instanceId: "looks-like-an-extension",',
+        "  params: {},",
+        '  FIREBASE_EXTENSION_REFERENCE: "firebase/x@1.0.0",',
+        '  events: "not-an-array",',
+        "  submitBugReport: endpoint(),",
+        "};",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("skips a real extension descriptor without recursing into it", async () => {
+    // Discriminates the clause above from "never skip anything": a descriptor
+    // whose `events` IS an array is an extension, the loader does not walk it,
+    // and its contents are not deployed endpoints.
+    await withPrewrittenArtifact(
+      [
+        "exports.daily = endpoint();",
+        'exports["daily-hidden"] = {',
+        '  instanceId: "a-real-extension",',
+        "  params: {},",
+        '  FIREBASE_EXTENSION_REFERENCE: "firebase/x@1.0.0",',
+        "  events: [],",
+        "  submitBugReport: endpoint(),",
+        "};",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("refuses an artifact whose optional dependency is absent", async () => {
+    // A missing module must PROPAGATE, not become an inert stub: an entrypoint
+    // that catches an absent optional dependency takes its `catch` branch under
+    // the real loader, and may export a group from there. Stubbing the import
+    // would keep it on the `try` branch and invent a smaller surface.
+    await withPrewrittenArtifact(
+      [
+        "try {",
+        '  require("an-optional-dependency-that-is-not-installed");',
+        "  exports.daily = endpoint();",
+        "} catch {",
+        "  exports.daily = { submitBugReport: endpoint() };",
+        "}",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses an artifact that branches on a FIREBASE_CONFIG field only the deploy can supply", async () => {
+    // `prepare.js` hands discovery the project's adminSdkConfig, which needs an
+    // authenticated lookup a local preflight must not make. Reading `projectId`
+    // is fine — it is known — but asking for a field this classifier could not
+    // supply means the real value might have selected a different surface.
+    await withPrewrittenArtifact(
+      [
+        'const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");',
+        "exports.daily = config.storageBucket ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts an artifact that reads only the project id from FIREBASE_CONFIG", async () => {
+    // Discriminates the rule above from "any FIREBASE_CONFIG read forfeits",
+    // which would refuse this repository's own Functions index.
+    await withPrewrittenArtifact(
+      [
+        'const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");',
+        "exports.daily = endpoint();",
+        "exports.daily.__endpoint.project = config.projectId;",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
       },
     );
   });
@@ -960,6 +1094,31 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
         ALL_INVOKERS_CONSERVATIVE,
       );
     });
+  });
+
+  it("kills a timed-out hook's whole process tree instead of waiting on it", async () => {
+    // `spawn`'s own `timeout` signals only the immediate shell, and this hook
+    // reaches the sleep through cross-env-shell and a second shell — those
+    // descendants keep the inherited stdio pipes open, so `close` waits on THEM
+    // and the ceiling bounds nothing. Under a 250ms deadline the whole group
+    // must die at once, and the classifier must answer conservatively long
+    // before the sleep would have ended.
+    //
+    // The 3s bound discriminates the group kill from the belt-and-braces grace
+    // timer behind it: killing only the shell still settles, but not until that
+    // fallback fires seconds later.
+    await withFunctionsProject(
+      { functionsConfig: { predeploy: ["sleep 30"] } },
+      async (configPath) => {
+        const started = Date.now();
+        const result = await classifyFirebaseDeployRequest(
+          ["fiveacross", "--only", "functions:daily"],
+          { defaultConfigPath: configPath, predeployTimeoutMs: 250 },
+        );
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+        expect(Date.now() - started).toBeLessThan(3_000);
+      },
+    );
   });
 
   it("refuses a predeploy hook containing a backslash", async () => {
