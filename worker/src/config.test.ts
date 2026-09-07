@@ -1,38 +1,43 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_CACHE_TTL_MS,
   DEFAULT_LOOKUP_TIMEOUT_MS,
   DEFAULT_ROUTER_VERSION,
+  registryFromEnv,
   routerConfigFromEnv,
   type RouterEnv,
 } from './config';
 import { handleRequest, isRouterConfigured, type RouterDeps } from './router';
-import type { HostnameCache } from './resolve';
+import type { RegistryLookupService } from './resolve';
+
+const REGISTRY: RegistryLookupService = { lookup: async () => ({ kind: 'unknown-host' }) };
 
 const FULL: RouterEnv = {
   ORIGIN_HOST: 'fiveacross.web.app',
-  FIREBASE_PROJECT_ID: 'fiveacross',
-  FIREBASE_API_KEY: 'web-key',
   ROUTER_VERSION: 'v9',
+  REGISTRY,
 };
 
 describe('routerConfigFromEnv', () => {
   it('carries every bound value through', () => {
-    expect(routerConfigFromEnv({ ...FULL, LOOKUP_TIMEOUT_MS: '750', HOSTNAME_CACHE_TTL_MS: '60000' })).toEqual({
+    expect(routerConfigFromEnv({ ...FULL, LOOKUP_TIMEOUT_MS: '750' })).toEqual({
       originHost: 'fiveacross.web.app',
-      projectId: 'fiveacross',
-      apiKey: 'web-key',
       lookupTimeoutMs: 750,
-      cacheTtlMs: 60_000,
       version: 'v9',
     });
   });
 
-  it('defaults the optional numeric and version bindings', () => {
+  it('carries no Firebase project id or api key, because the reader that needed them is gone', () => {
+    // The removal is the deliverable (#972 / ADR 0014): with no Firebase
+    // binding at all, the router is compatible with enforced App Check rather
+    // than dependent on an exemption from it.
     const config = routerConfigFromEnv(FULL);
-    expect(config.lookupTimeoutMs).toBe(DEFAULT_LOOKUP_TIMEOUT_MS);
-    expect(config.cacheTtlMs).toBe(DEFAULT_CACHE_TTL_MS);
+    expect(Object.keys(config).sort()).toEqual(['lookupTimeoutMs', 'originHost', 'version']);
+    expect(JSON.stringify(config)).not.toMatch(/api ?key|firebase|project/i);
+  });
+
+  it('defaults the optional numeric and version bindings', () => {
+    expect(routerConfigFromEnv(FULL).lookupTimeoutMs).toBe(DEFAULT_LOOKUP_TIMEOUT_MS);
     expect(routerConfigFromEnv({}).version).toBe(DEFAULT_ROUTER_VERSION);
   });
 
@@ -51,8 +56,8 @@ describe('routerConfigFromEnv', () => {
     (raw) => {
       // `Number.parseInt` accepts a valid prefix and discards the rest. `750.5`
       // becoming 750 merely looks like getting away with it; `1e3` becoming 1
-      // is a ONE-MILLISECOND lookup timeout that fails closed on every uncached
-      // host while the binding reads as if it said one second.
+      // is a ONE-MILLISECOND lookup timeout that fails closed on every host
+      // while the binding reads as if it said one second.
       expect(routerConfigFromEnv({ ...FULL, LOOKUP_TIMEOUT_MS: raw }).lookupTimeoutMs).toBe(
         DEFAULT_LOOKUP_TIMEOUT_MS,
       );
@@ -64,62 +69,67 @@ describe('routerConfigFromEnv', () => {
   });
 
   it('turns an UNBOUND string binding into an empty string, never undefined', () => {
-    // The P1 this closes. `wrangler.toml` deliberately does not commit
-    // FIREBASE_API_KEY, so "deployed but not yet configured" is a state the
-    // cutover procedure passes through on purpose. Typed as `string` while the
-    // runtime hands over `undefined`, the first `.length` read threw a Worker
-    // runtime error instead of rendering the documented fail-closed response.
+    // The P1 this closes. A binding typed `string` while the runtime hands over
+    // `undefined` is a lie the type checker cannot catch, and the first
+    // `.length` read on it throws a Worker runtime error instead of rendering
+    // the documented fail-closed response.
     const config = routerConfigFromEnv({});
-    expect(config).toMatchObject({ originHost: '', projectId: '', apiKey: '' });
-    for (const value of [config.originHost, config.projectId, config.apiKey]) {
-      expect(typeof value).toBe('string');
-    }
+    expect(config).toMatchObject({ originHost: '' });
+    expect(typeof config.originHost).toBe('string');
+  });
+});
+
+describe('registryFromEnv', () => {
+  it('passes a bound service binding through untouched', () => {
+    expect(registryFromEnv(FULL)).toBe(REGISTRY);
+  });
+
+  it('normalises an unbound binding to null rather than leaving it undefined', () => {
+    // Same reason a string binding becomes `''`: the router ANSWERS an unbound
+    // registry with `lookup-unavailable`, and an `undefined` that reaches a
+    // method call answers with a runtime error instead.
+    expect(registryFromEnv({})).toBeNull();
   });
 });
 
 describe('isRouterConfigured', () => {
   it('accepts a fully bound environment', () => {
-    expect(isRouterConfigured(routerConfigFromEnv(FULL))).toBe(true);
+    expect(isRouterConfigured(routerConfigFromEnv(FULL), { registry: registryFromEnv(FULL) })).toBe(true);
   });
 
-  it.each(['ORIGIN_HOST', 'FIREBASE_PROJECT_ID', 'FIREBASE_API_KEY'] as const)(
-    'refuses an environment missing %s',
-    (missing) => {
-      const env: RouterEnv = { ...FULL };
-      delete env[missing];
-      expect(isRouterConfigured(routerConfigFromEnv(env))).toBe(false);
-    },
-  );
+  it('refuses an environment missing ORIGIN_HOST', () => {
+    const env: RouterEnv = { ...FULL };
+    delete env.ORIGIN_HOST;
+    expect(isRouterConfigured(routerConfigFromEnv(env), { registry: registryFromEnv(env) })).toBe(false);
+  });
+
+  it('refuses an environment missing the REGISTRY binding', () => {
+    const env: RouterEnv = { ...FULL };
+    delete env.REGISTRY;
+    expect(isRouterConfigured(routerConfigFromEnv(env), { registry: registryFromEnv(env) })).toBe(false);
+  });
 });
 
 describe('an entirely unbound Worker', () => {
-  const cache: HostnameCache = {
-    read: async () => null,
-    write: async () => {},
-    drop: async () => {},
-  };
-
   it.each([
     'https://bodega-bay.fiveacross.app/',
     'https://bodega-bay.fiveacross.app/__/auth/handler',
     'https://fiveacross.app/',
+    'https://bodega-bay.fiveacross.app/.well-known/fiveacross-path-capability',
   ])('renders the fail-closed response for %s instead of throwing', async (url) => {
-    let fetched = 0;
+    const fetchImpl = vi.fn(async () => new Response('should never be reached'));
     const deps: RouterDeps = {
-      fetch: (async () => {
-        fetched += 1;
-        return new Response('should never be reached');
-      }) as RouterDeps['fetch'],
-      cache,
-      now: () => 0,
+      fetch: fetchImpl as unknown as RouterDeps['fetch'],
+      // `{}` is exactly what the runtime hands over before the registry service
+      // exists beside this Worker.
+      registry: registryFromEnv({}),
     };
 
-    // `{}` is exactly what the runtime hands over before `wrangler secret put`.
     const response = await handleRequest(new Request(url), routerConfigFromEnv({}), deps);
 
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
     expect(response.headers.get('content-type')).toContain('text/html');
-    expect(fetched).toBe(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

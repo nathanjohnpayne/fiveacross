@@ -7,16 +7,23 @@ import { describe, expect, it } from 'vitest';
 const script = resolve(process.cwd(), 'scripts/worker-deploy.sh');
 
 /**
- * Run the guard with a stub `npm` on PATH.
+ * Run the guard with a stubbed `npm` (and optionally `node` and `grep`) on PATH.
  *
- * The secret verification is shell, and every finding it has drawn was a shell
- * bug — an unanchored match, a swallowed failure, an unconditional message.
- * Stubbing the one command it shells out to is what makes those assertable
- * instead of reasoned about.
+ * The verification is shell, and every finding it has drawn was a shell bug —
+ * an unanchored match, a swallowed failure, an unconditional message. Stubbing
+ * the commands it shells out to is what makes those assertable instead of
+ * reasoned about.
+ *
+ * There is deliberately no test hook inside the wrapper itself. A deploy guard
+ * with an environment-variable bypass is the thing a deploy guard exists to not
+ * have, so the negative path is forced by replacing `node` on PATH rather than
+ * by teaching the checker to fail on request; the checker's own decision table
+ * is proved in `worker/src/routerBinding.test.ts`.
  */
 function runWithStubbedNpm({
   secretListJson = null,
   secretListFails = false,
+  bindingCheckFails = false,
   routeBearing = false,
   extraEnv = {},
 } = {}) {
@@ -25,6 +32,7 @@ function runWithStubbedNpm({
   mkdirSync(bin);
   const npm = join(bin, 'npm');
   const npmCallLog = join(dir, 'npm-calls.log');
+  writeFileSync(npmCallLog, '', 'utf8');
   writeFileSync(
     npm,
     `#!/usr/bin/env bash
@@ -43,6 +51,12 @@ exit 0
     'utf8',
   );
   chmodSync(npm, 0o755);
+
+  if (bindingCheckFails) {
+    const node = join(bin, 'node');
+    writeFileSync(node, '#!/usr/bin/env bash\nexit 1\n', 'utf8');
+    chmodSync(node, 0o755);
+  }
 
   if (routeBearing) {
     const grep = join(bin, 'grep');
@@ -76,7 +90,7 @@ exec /usr/bin/grep "$@"
   });
   return {
     ...result,
-    npmCalls: readFileSync(npmCallLog, 'utf8').trim().split('\n'),
+    npmCalls: readFileSync(npmCallLog, 'utf8').trim().split('\n').filter(Boolean),
   };
 }
 
@@ -91,30 +105,51 @@ describe('worker deploy guard — argument handling', () => {
   );
 });
 
-describe('worker deploy guard — required-secret verification', () => {
-  it('passes when the exact binding is present', () => {
+describe('worker deploy guard — registry lookup binding', () => {
+  it('verifies the committed binding before installing or publishing anything', () => {
+    const result = runWithStubbedNpm();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('REGISTRY is bound explicitly to RegistryLookupEntrypoint');
+  });
+
+  it('stops before any npm command when the binding check fails', () => {
+    // An omitted or `default` entrypoint binds the registry's control-plane
+    // fetch. Publishing that and then noticing is the wrong order, so the
+    // check runs while nothing has been installed or uploaded.
+    const result = runWithStubbedNpm({ bindingCheckFails: true });
+    expect(result.status).toBe(65);
+    expect(result.stderr).toContain('does not bind REGISTRY explicitly');
+    expect(result.npmCalls).toEqual([]);
+  });
+});
+
+describe('worker deploy guard — no surviving Firebase credential', () => {
+  it('passes when the deployed Worker carries no secrets at all', () => {
+    // The App Check-compatible router reads no Firebase resource, so the
+    // absence of the binding is the expected steady state (#972).
+    const result = runWithStubbedNpm({ secretListJson: '[]' });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('No FIREBASE_API_KEY binding on the deployed Worker');
+  });
+
+  it('refuses a deploy that leaves the old edge credential bound', () => {
     const result = runWithStubbedNpm({
       secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
     });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain('FIREBASE_API_KEY is bound');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('is STILL bound');
+    expect(result.stderr).toContain('wrangler secret delete FIREBASE_API_KEY');
   });
 
-  it('refuses a NEAR-MISS binding name rather than substring-matching it', () => {
-    // `grep -q FIREBASE_API_KEY` accepted these and printed a green success
-    // while the real binding was absent — a false pass that, once routes are
-    // attached, means every uncached hostname fails closed.
+  it('compares the name exactly rather than by substring', () => {
+    // The exactness requirement survived the inversion: an unanchored match
+    // would refuse a deploy over an unrelated leftover, or — worse, in the
+    // other direction — read a near-miss as the live binding.
     const result = runWithStubbedNpm({
       secretListJson:
         '[{"name":"OLD_FIREBASE_API_KEY","type":"secret_text"},{"name":"FIREBASE_API_KEY_BACKUP","type":"secret_text"}]',
     });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('is NOT bound');
-  });
-
-  it('fails when no bindings exist at all', () => {
-    const result = runWithStubbedNpm({ secretListJson: '[]' });
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(0);
   });
 
   it('treats an uninspectable Worker as a FAILED verification, not a skipped one', () => {
@@ -124,13 +159,18 @@ describe('worker deploy guard — required-secret verification', () => {
     expect(result.status).toBe(75);
     expect(result.stderr).toContain('FAILED verification');
   });
+
+  it('fails closed when the secret listing is not the array it should be', () => {
+    const result = runWithStubbedNpm({ secretListJson: '{"unexpected":"shape"}' });
+    expect(result.status).toBe(1);
+  });
 });
 
 describe('worker deploy guard — route-bearing deploys', () => {
-  it('installs the locked Wrangler before pre-publish secret verification', () => {
+  it('installs the locked Wrangler before the pre-publish verification', () => {
     const result = runWithStubbedNpm({
       routeBearing: true,
-      secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
+      secretListJson: '[]',
       extraEnv: { NPM_CONFIG_OMIT: 'dev', NODE_ENV: 'production' },
     });
     expect(result.status).toBe(0);
@@ -142,9 +182,7 @@ describe('worker deploy guard — route-bearing deploys', () => {
 
   it('does not claim routes are unattached when none are configured', () => {
     // The shipped wrangler.toml keeps `routes` commented out.
-    const result = runWithStubbedNpm({
-      secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
-    });
+    const result = runWithStubbedNpm({ secretListJson: '[]' });
     expect(result.stderr).toContain('no routes configured');
     expect(result.stderr).not.toContain('CHANGES LIVE TRAFFIC');
   });

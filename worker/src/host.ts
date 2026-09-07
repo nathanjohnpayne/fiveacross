@@ -8,7 +8,7 @@
 // namespace guard, NEVER an authorization layer, and the application still
 // verifies membership before reading Event data.
 
-import { isReservedLabel, validateSlug, type SlugRejection } from '../../src/slug';
+import { isRehearsalLabel, isReservedLabel, validateSlug, type SlugRejection } from '../../src/slug';
 import { hostnameKey } from '../../src/hostnameKey';
 
 /**
@@ -104,6 +104,19 @@ export function classifyHost(rawHost: string, namespaces: readonly string[] = NA
     const label = host.slice(0, host.length - namespace.length - 1);
     if (label.includes('.')) {
       return { kind: 'rejected', host, reason: 'nested-label' };
+    }
+    // The two CLOSED rehearsal classes are addressable even though `r2-*` is
+    // permanently unclaimable (#972; specs/event-router-registry.md § Lookup,
+    // cache, and abuse posture). The exception is narrow in three directions
+    // at once, which is what makes it safe to grant a public guard: only these
+    // two exact shapes qualify — every other `r2-` label falls through to the
+    // reserved refusal below — being addressable is not being SERVABLE, since
+    // a rehearsal host with no committed registry projection still fails
+    // closed as `unknown-host`; and only the guarded controller can create one
+    // of those projections, because every ordinary claim and mutation path
+    // rejects the prefix globally.
+    if (isRehearsalLabel(label)) {
+      return { kind: 'event', host, namespace, slug: label };
     }
     if (isReservedLabel(label)) {
       return { kind: 'rejected', host, reason: 'reserved-label' };

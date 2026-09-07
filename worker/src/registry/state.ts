@@ -15,8 +15,32 @@ export type SyncResponse = {
   result: SyncResult;
 };
 
+/**
+ * The whole result surface the public router is given.
+ *
+ * `malformed` is distinct from `unavailable` for the same reason the failure
+ * table in `specs/event-router-registry.md` separates them: a projection this
+ * object cannot parse is a standing data fact that alerts and will not heal on
+ * a retry, whereas an unavailable object is usually transient. Collapsing them
+ * would turn a diagnosable replica defect into a mystery outage. Both fail
+ * closed, and neither reaches for a second source of truth.
+ */
 export type RegistryLookup =
-  { kind: 'unknown-host' } | { kind: 'unavailable' } | { kind: 'committed'; revision: string; desired: ReplicaDesired };
+  | { kind: 'unknown-host' }
+  | { kind: 'unavailable' }
+  | { kind: 'malformed' }
+  | { kind: 'committed'; revision: string; desired: ReplicaDesired };
+
+/**
+ * The ONLY registry capability the public router holds, declared here — beside
+ * the result it returns and free of every Cloudflare type — rather than beside
+ * the Worker that implements it. `RegistryLookupEntrypoint` implements it, and
+ * `worker/src/resolve.ts` consumes it, so the router's decision modules depend
+ * on the shape of one method instead of on the registry Worker's module graph.
+ */
+export interface RegistryLookupService {
+  lookup(host: string): Promise<RegistryLookup>;
+}
 
 const CANONICAL_NON_NEGATIVE = /^(?:0|[1-9]\d*)$/;
 const CANONICAL_POSITIVE = /^[1-9]\d*$/;
@@ -124,7 +148,14 @@ export async function applyPublisherSync(
   };
 }
 
-export function registryLookup(state: RegistryState): RegistryLookup {
+/**
+ * A pure projection of already-parsed state, so its result is narrower than the
+ * seam's: `unavailable` and `malformed` describe reaching or reading the object
+ * and cannot arise from a state this function was handed.
+ */
+export function registryLookup(
+  state: RegistryState,
+): Extract<RegistryLookup, { kind: 'unknown-host' } | { kind: 'committed' }> {
   if (state.committed === null || state.committed.payload.desired.kind === 'tombstone') {
     return { kind: 'unknown-host' };
   }

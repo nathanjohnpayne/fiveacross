@@ -15,7 +15,13 @@ import {
 } from './verificationRecords';
 import { GoogleJwksCache } from './oidc';
 import { handleRegistryFetch, type HostRegistryNamespace, type RegistryRateLimiter } from './service';
-import { applyPublisherSync, initialRegistryState, registryLookup, type RegistryLookup } from './state';
+import {
+  applyPublisherSync,
+  initialRegistryState,
+  registryLookup,
+  type RegistryLookup,
+  type RegistryLookupService,
+} from './state';
 import { AUDIT_PAGE_SIZE, createAuditPage, type RegistryAuditPage } from './audit';
 import { applyRecovery, type ActivePublisherMapping, type RecoveryRecord, type RecoveryRequest } from './recovery';
 import {
@@ -195,7 +201,11 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     try {
       return registryLookup(await parseStoredRegistryState(stored, this.#host()));
     } catch {
-      return { kind: 'unavailable' };
+      // Reached only when stored state EXISTS and does not parse — the storage
+      // read above is outside this try, so an unavailable object rejects out of
+      // `lookup` instead. That makes this arm precisely the failure table's
+      // "malformed/unsupported committed state" row rather than a catch-all.
+      return { kind: 'malformed' };
     }
   }
 
@@ -472,11 +482,25 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   }
 }
 
-export interface RegistryLookupService {
-  lookup(host: string): Promise<RegistryLookup>;
-}
-
-export class RegistryLookupEntrypoint extends WorkerEntrypoint<RegistryWorkerEnv> {
+/**
+ * The registry's ONLY public capability, and the router's only door into it.
+ *
+ * It exposes `lookup` and nothing else: no `fetch` (so a consumer bound to this
+ * entrypoint cannot reach the default export's signed sync/audit/recovery
+ * control plane), no list, and no mutation. `HOST_REGISTRY` is read here and
+ * never handed on, so the consumer holds no Durable Object namespace either —
+ * the registry is not a directory, and a point lookup for an already-present
+ * hostname is the whole of what a public edge Worker may ask it.
+ *
+ * `implements RegistryLookupService` is load-bearing rather than decorative: it
+ * pins this class to the same one-method contract `worker/src/resolve.ts`
+ * consumes, so widening the router's seam and widening this entrypoint have to
+ * happen in the same edit.
+ */
+export class RegistryLookupEntrypoint
+  extends WorkerEntrypoint<RegistryWorkerEnv>
+  implements RegistryLookupService
+{
   async lookup(rawHost: string): Promise<RegistryLookup> {
     const host = normalizeHost(rawHost);
     const classified = classifyHost(rawHost);

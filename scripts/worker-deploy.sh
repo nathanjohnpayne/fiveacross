@@ -50,7 +50,7 @@ done
 
 guard_deploy_main_checkout "scripts/worker-deploy.sh" "$FORCE"
 
-REQUIRED_SECRET="FIREBASE_API_KEY"
+FORBIDDEN_SECRET="FIREBASE_API_KEY"
 
 # Is this a ROUTE-BEARING deploy? The cutover procedure uncomments `routes` in
 # worker/wrangler.toml and redeploys through this same script, so "publishing
@@ -64,22 +64,58 @@ else
   ROUTE_BEARING=false
 fi
 
-# Verify the required secret binding on the DEPLOYED Worker.
+# Verify the registry lookup binding in the configuration about to be published.
 #
-# Nothing else in the cutover ladder does. `wrangler dev --remote` uploads the
-# local checkout into a temporary preview with its own `.dev.vars`, so it can
-# pass while production has no binding at all; and the workers.dev URL is
-# refused as `out-of-namespace` before configuration is consulted, so it cannot
-# report the binding either.
+# This replaces the old `FIREBASE_API_KEY` presence check, and the shape of the
+# check changed with the shape of the dependency (#972). The api key was set
+# with `wrangler secret put` and deliberately NOT committed, so the only place
+# to observe it was the deployed Worker. The registry binding is the opposite:
+# it is declared in `worker/wrangler.toml` and travels with the upload, so the
+# committed configuration IS the deployed configuration and is answerable here,
+# before anything is published or installed.
 #
-# Secrets live on the Worker rather than in this bundle, so this is answerable
-# BEFORE publishing as well as after — which is what lets a route-bearing
-# deploy check its prerequisites while nothing has changed yet.
+# What it defends is a one-word difference with a large blast radius. Bound with
+# an explicit `entrypoint = "RegistryLookupEntrypoint"`, the router can call
+# `lookup(host)` and nothing else. Omit that line, or write `default`, and the
+# same binding reaches the registry's default export — the signed
+# sync/audit/recovery control plane — handing a public edge Worker the private
+# control surface. The validator is shared with the synthetic harness so both
+# configurations are held to one definition of "bound to the lookup entrypoint".
+verify_registry_lookup_binding() {
+  echo "🔎 Verifying worker/wrangler.toml binds the registry lookup entrypoint explicitly…" >&2
+  if node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs"; then
+    echo "✅ REGISTRY is bound explicitly to RegistryLookupEntrypoint." >&2
+    return 0
+  fi
+  echo "" >&2
+  echo "❌ worker/wrangler.toml does not bind REGISTRY explicitly to RegistryLookupEntrypoint." >&2
+  echo "" >&2
+  echo "An omitted or \`default\` entrypoint binds the registry's control-plane fetch" >&2
+  echo "instead of its lookup-only entrypoint. Fix the [[services]] block before" >&2
+  echo "deploying; see worker/README.md § The registry lookup binding." >&2
+  echo "" >&2
+  exit 65
+}
+
+# Verify the DEPLOYED Worker carries no Firebase credential.
+#
+# The inversion is the deliverable, not a leftover. ADR 0014 removed the
+# Firestore REST reader outright, and R0's evidence claim is that the public
+# router has no Firebase, KV, Cache, or Durable Object binding at all — a claim
+# a stale `FIREBASE_API_KEY` left on the Worker from the previous design would
+# quietly falsify. The code no longer reads it, so it grants nothing on its own;
+# it is refused because an unrouted router that still holds an edge credential
+# is not the artifact the App Check cutover is allowed to attach.
+#
+# Nothing else in the ladder can observe this. `wrangler dev --remote` uploads
+# the local checkout into a temporary preview with its own `.dev.vars`, and the
+# workers.dev URL is refused as `out-of-namespace` before configuration is
+# consulted, so neither can report what the deployed Worker holds.
 #
 # `wrangler secret list` returns names and types only, never values.
-verify_required_secret() {
+verify_no_firebase_secret() {
   local when="$1" secrets
-  echo "🔎 Verifying the deployed Worker's ${REQUIRED_SECRET} binding (${when})…" >&2
+  echo "🔎 Verifying the deployed Worker carries no ${FORBIDDEN_SECRET} binding (${when})…" >&2
 
   if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json 2>/dev/null)"; then
     # Inability to inspect is NOT a pass. The README presents this as
@@ -87,7 +123,7 @@ verify_required_secret() {
     # automation record an unverified deploy as a verified one.
     cat >&2 <<MSG
 
-❌ Could not list the deployed Worker's secrets, so ${REQUIRED_SECRET} could not be verified.
+❌ Could not list the deployed Worker's secrets, so its Firebase posture could not be verified.
 
 This is a FAILED verification, not a skipped one. Check \`wrangler\` auth and the
 Worker's existence, then re-run. To inspect by hand:
@@ -98,31 +134,32 @@ MSG
     exit 75
   fi
 
-  # EXACT name comparison. An unanchored substring match would accept
-  # `OLD_FIREBASE_API_KEY` or `FIREBASE_API_KEY_BACKUP` and report a green
-  # verification while the real binding is absent — a false pass that, after
-  # routes are attached, means every uncached hostname fails closed.
-  if printf '%s' "$secrets" | jq -e --arg name "$REQUIRED_SECRET" \
-      'if type=="array" then any(.[]; .name == $name) else false end' >/dev/null 2>&1; then
-    echo "✅ ${REQUIRED_SECRET} is bound on the deployed Worker." >&2
-    return 0
-  fi
+  # EXACT name comparison, for the same reason the presence check needed one:
+  # an unanchored match would report a leftover `OLD_FIREBASE_API_KEY` as the
+  # live binding, or miss the live one behind a near-miss neighbour.
+  if printf '%s' "$secrets" | jq -e --arg name "$FORBIDDEN_SECRET" \
+      'if type=="array" then any(.[]; .name == $name) else true end' >/dev/null 2>&1; then
+    cat >&2 <<MSG
 
-  cat >&2 <<MSG
+❌ ${FORBIDDEN_SECRET} is STILL bound on the deployed Worker.
 
-❌ ${REQUIRED_SECRET} is NOT bound on the deployed Worker.
+The router no longer reads it — ADR 0014 removed the Firestore REST reader — but
+an edge Firebase credential must not outlive the code that used it. Remove it
+before attaching any route:
 
-Every hostname will fail closed with \`x-event-router-reason: lookup-forbidden\`
-or \`lookup-unavailable\`. Bind it before attaching any route:
-
-    npm --prefix worker exec -- wrangler secret put ${REQUIRED_SECRET}
+    npm --prefix worker exec -- wrangler secret delete ${FORBIDDEN_SECRET}
 
 MSG
-  exit 1
+    exit 1
+  fi
+
+  echo "✅ No ${FORBIDDEN_SECRET} binding on the deployed Worker." >&2
 }
 
+verify_registry_lookup_binding
+
 # Install the reviewed Worker toolchain before ANY Wrangler command. A
-# route-bearing deploy verifies production secrets before publishing, so
+# route-bearing deploy verifies the deployed artifact before publishing, so
 # deferring this until the deploy step would make that prerequisite check run
 # through npm's unpinned fallback in a clean checkout with no node_modules.
 # `npm ci`, never `npm install`: the lockfile is part of the reviewed deploy.
@@ -138,7 +175,7 @@ This deploy ATTACHES those routes and CHANGES LIVE TRAFFIC. Verifying
 prerequisites before publishing rather than after.
 MSG
   # Before publishing, while nothing has changed yet.
-  verify_required_secret "pre-publish"
+  verify_no_firebase_secret "pre-publish"
 else
   echo "✅ Guards passed. Publishing the Worker (no routes configured, so this changes nothing the public sees)." >&2
 fi
@@ -147,4 +184,4 @@ npm --prefix worker run deploy
 
 # Always verify after publishing too: a first deploy has no Worker to inspect
 # beforehand, so the pre-publish check above cannot be the only one.
-verify_required_secret "post-publish"
+verify_no_firebase_secret "post-publish"

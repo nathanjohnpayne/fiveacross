@@ -11,7 +11,7 @@ main = "src/index.ts"
 compatibility_date = "2026-08-01"
 
 # The dedicated `*.workers.dev` address. Kept ON as a deployment/liveness check:
-# the router must reject it as `out-of-namespace` before any Firestore lookup or
+# the router must reject it as `out-of-namespace` before any registry lookup or
 # origin proxy. It cannot exercise a real Event hostname; use the temporary
 # preview environment documented in README.md § Deploying and attaching for that
 # production-shaped rehearsal (#569 carry-forward).
@@ -25,23 +25,39 @@ enabled = true
 # `*.web.app` address, which serves regardless of which public hostname the
 # guest typed — that is precisely why the Host header is rewritten to it.
 ORIGIN_HOST = "fiveacross.web.app"
-FIREBASE_PROJECT_ID = "fiveacross"
 # Stamped onto every response as `x-event-router`, so an operator can tell from
 # outside whether this Worker is in front of a host yet. Bump it per release.
 ROUTER_VERSION = "v1"
-# Optional overrides; the defaults in src/index.ts are 2000 and 300000.
+# Optional override; the default in src/config.ts is 2000. It bounds the whole
+# registry service call — there is no Firestore read left to bound.
 # LOOKUP_TIMEOUT_MS = "2000"
-# HOSTNAME_CACHE_TTL_MS = "300000"
 #
-# FIREBASE_API_KEY is deliberately absent from this file. It is the Firebase
-# WEB api key — not a secret, and the identical value already ships in every
-# production bundle — but committing it here would raise a standing
-# `google_api_key` finding on every future secret-scanning pass for no security
-# benefit at all. Set it at deploy time instead:
-#     npx wrangler secret put FIREBASE_API_KEY
-# With it unset the router fails CLOSED on every address and stamps
-# `x-event-router-reason: lookup-unavailable`, which is the intended posture for
-# a misconfigured router and the first thing the smoke check below catches.
+# There is deliberately no `FIREBASE_PROJECT_ID` var and no `FIREBASE_API_KEY`
+# secret. ADR 0014 removed the Firestore REST reader outright, so the router now
+# carries no Firebase credential, project reference, or data-plane binding of
+# any kind — which is what makes it compatible with enforced App Check rather
+# than dependent on an exemption from it.
+
+# ---------------------------------------------------------------------------
+# The registry lookup binding (#972, epic #888; specs/event-router-registry.md).
+# ---------------------------------------------------------------------------
+# The router's ONLY dependency for resolving an address, and `entrypoint` is
+# named EXPLICITLY rather than left to default. That one line is the capability
+# boundary: bound this way the router reaches `RegistryLookupEntrypoint.lookup`
+# and nothing else — not the registry's default public `fetch` (the signed
+# sync/audit/recovery control plane), not the `HOST_REGISTRY` Durable Object
+# namespace, and not any list or mutation method. Omitting `entrypoint`, or
+# naming `default`, silently binds that control-plane `fetch` instead and hands
+# a public edge Worker the private control surface — which is why
+# `routerBinding.test.ts` reads this file and rejects both spellings.
+#
+# There is deliberately NO KV, cache, or Durable Object binding beside it, and
+# no fallback behind it: a lookup that cannot be completed fails closed as
+# `lookup-unavailable` rather than reaching for a second source of truth.
+[[services]]
+binding = "REGISTRY"
+service = "five-across-event-registry"
+entrypoint = "RegistryLookupEntrypoint"
 
 # ---------------------------------------------------------------------------
 # Routes — the cutover. Uncomment ONLY as the deliberate Gate step.
@@ -76,6 +92,11 @@ ROUTER_VERSION = "v1"
 # classifies an apex correctly and would serve it, but moving them onto the
 # Worker is a separate decision from lighting up the wildcards, and doing both
 # in one step would leave nothing to roll back to.
+#
+# The bounded synthetic exact routes the registry spec authorises for R1/R2
+# evidence are created and removed by the guarded rehearsal controller
+# (#970/#971/#973), never by this file. #529 keeps exclusive authority over
+# wildcard, apex, or real-Event attachment.
 #
 # routes = [
 #   { pattern = "*.fiveacross.app/*", zone_name = "fiveacross.app" },

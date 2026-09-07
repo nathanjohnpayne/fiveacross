@@ -82,11 +82,22 @@ describe('registry Worker capability/configuration contract', () => {
     expect(sweepSource).toContain("throw new Error('probe expiry index is malformed')");
   });
 
-  it('does not alter or attach the public Event router', async () => {
+  it('gives the public Event router the lookup entrypoint and no route, object or KV', async () => {
     const routerConfig = await readFile(ROUTER_CONFIG, 'utf8');
+    const declarations = routerConfig
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
     expect(routerConfig).toContain('# routes = [');
     expect(routerConfig).not.toMatch(/^routes\s*=/m);
-    expect(routerConfig).not.toContain('HOST_REGISTRY');
+    // The router consumes the registry through the NAMED lookup entrypoint
+    // (#972). What it must still never hold is the object namespace itself:
+    // the registry is not a directory, and a binding to `HOST_REGISTRY` would
+    // hand a public edge Worker every method on the object.
+    expect(declarations).toContain('entrypoint = "RegistryLookupEntrypoint"');
+    expect(declarations).not.toContain('HOST_REGISTRY');
+    expect(declarations).not.toContain('durable_objects');
+    expect(declarations).not.toContain('kv_namespaces');
   });
 
   it('never treats omitted replacement evidence as proof of publisher integrity', async () => {
