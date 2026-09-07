@@ -773,6 +773,70 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
+  it('releases the single-flight guard and retires the attempt records when Back restores the page from bfcache (#1123)', async () => {
+    // The redirect promise never settles once navigation starts, so without
+    // recovery the guard holds the stale attempt until reload.
+    mocks.signInWithRedirect.mockReturnValueOnce(new Promise<never>(() => {}));
+    vi.stubGlobal('navigator', {
+      ...window.navigator,
+      onLine: true,
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15',
+      platform: 'MacIntel',
+      maxTouchPoints: 0,
+    });
+    const authMock = mockedAuth as { config?: { authDomain?: string } };
+    authMock.config = { authDomain: window.location.hostname };
+
+    mount();
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+    const token = sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
+    expect(token).not.toBeNull();
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).not.toBeNull();
+
+    // A non-persisted pageshow (an ordinary load) changes nothing: the guard
+    // still coalesces a second tap into the in-flight attempt.
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false }));
+    });
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).not.toBeNull();
+
+    // Back from Google: the page comes out of the bfcache. The attempt is
+    // abandoned — records retired, guard released — and a fresh tap starts a
+    // fresh attempt under a new token.
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    });
+    expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+    expect(localStorage.getItem(attemptRecordKey(REDIRECT_PENDING_KEY, token!))).toBeNull();
+
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithRedirect).toHaveBeenCalledTimes(2);
+    const nextToken = sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY);
+    expect(nextToken).not.toBeNull();
+    expect(nextToken).not.toBe(token);
+
+    delete authMock.config;
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves a popup attempt alone on a persisted pageshow, since nothing navigated away (#1123)', async () => {
+    const popup = deferred<Record<string, never>>();
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    mount();
+    await userEvent.click(screen.getByText('signin'));
+    act(() => {
+      window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    });
+    await userEvent.click(screen.getByText('signin'));
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
+    popup.settle({});
+  });
+
   // The retired device matrix, kept only as the INPUT space the rule must be
   // indifferent to (#765): every one of these surfaces used to pick a
   // different transaction; all of them now pick the redirect whenever the
