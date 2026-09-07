@@ -90,13 +90,15 @@ const RESERVED_HOSTING_PATH = /^\/__\//;
  * Whether a same-origin window is one of OUR pages (Codex P2 round 3 on #516).
  *
  * `clients.matchAll({ includeUncontrolled: true })` returns every window on
- * this origin, and the Google sign-in popup at `/__/auth/handler` is one of
- * them. That document is Firebase's, not ours: it never runs `main.tsx`, so it
- * never posts `CLIENT_BUILD` and is therefore absent from the registry — which
- * is exactly the shape this rescue reads as "an ancient client, condemn it".
- * Left unfiltered, an open sign-in popup would force-activate the fleet on an
- * armed floor with no stale app tab anywhere, and then `navigate()` the popup
- * itself mid-flow. `src/sw.ts` already refuses to serve the app shell into that
+ * this origin, and a window parked on the Google sign-in handler at
+ * `/__/auth/handler` is one of them — the app tab itself mid-redirect on every
+ * same-origin-handler surface since #765, or a popup window where the handler
+ * is cross-origin. That document is Firebase's, not ours: it never runs
+ * `main.tsx`, so it never posts `CLIENT_BUILD` and is therefore absent from the
+ * registry — which is exactly the shape this rescue reads as "an ancient
+ * client, condemn it". Left unfiltered, an open sign-in would force-activate
+ * the fleet on an armed floor with no stale app tab anywhere, and then
+ * `navigate()` that window itself mid-flow. `src/sw.ts` already refuses to serve the app shell into that
  * namespace for the same reason (#182); breaking sign-in to fix a stale tab is
  * a far worse trade than missing the rescue.
  *

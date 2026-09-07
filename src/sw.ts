@@ -13,7 +13,7 @@
 //   - precache + `cleanupOutdatedCaches` (the stale-shell hygiene whose absence
 //     let TWO `/index.html` revisions coexist during the 2026-07-24 incident);
 //   - SPA navigation fallback to `index.html`, with `/__/*` denied so the Google
-//     sign-in popup reaches Firebase's real OAuth handler instead of the app
+//     sign-in navigation reaches Firebase's real OAuth handler instead of the app
 //     shell (#182);
 //   - CacheFirst for proof media, opaque responses included (#363);
 //   - the `SKIP_WAITING` message handler that `registerType: 'prompt'` and
@@ -116,8 +116,10 @@ cleanupOutdatedCaches();
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('index.html'), {
     // #182: never intercept Firebase Hosting's reserved /__/* namespace — the
-    // Google sign-in popup navigates to /__/auth/handler on this same origin,
-    // and serving the SPA shell there dead-ends sign-in for every SW-controlled
+    // Google sign-in navigates the app tab itself to /__/auth/handler on this
+    // same origin (a top-level redirect on every same-origin-handler surface
+    // since #765; a popup window only where the handler is cross-origin), and
+    // serving the SPA shell there dead-ends sign-in for every SW-controlled
     // signed-out client.
     denylist: [/^\/__\//],
   }),
@@ -194,11 +196,12 @@ async function registerClientBuild(clientId: string, stamp: string): Promise<voi
  *  `includeUncontrolled` because an installing worker controls nothing yet, and
  *  the whole point of this registry is the tabs it does not yet own.
  *
- *  The `/__/*` filter is load-bearing (Codex P2 round 3 on #516): a Google
- *  sign-in popup is a same-origin window that never posts `CLIENT_BUILD`, so
- *  without it an open sign-in reads as an ancient client — force-activating the
- *  fleet on an armed floor with no stale app tab anywhere, and then navigating
- *  the popup out of the OAuth flow. See `isAppShellClientUrl`. */
+ *  The `/__/*` filter is load-bearing (Codex P2 round 3 on #516): a tab parked
+ *  on the same-origin OAuth handler — the app tab mid-redirect since #765, or a
+ *  popup window on a cross-origin-handler surface — never posts `CLIENT_BUILD`,
+ *  so without it an open sign-in reads as an ancient client — force-activating
+ *  the fleet on an armed floor with no stale app tab anywhere, and then
+ *  navigating that window out of the OAuth flow. See `isAppShellClientUrl`. */
 async function appShellWindows(options: ClientQueryOptions): Promise<Client[] | null> {
   try {
     const windows = await self.clients.matchAll({ type: 'window', ...options });
@@ -311,7 +314,8 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         // React tree already torn down, which is precisely how clients got
         // stranded in the first place.
         // Same `/__/*` exclusion as the decision above: `claim()` takes over
-        // the sign-in popup too, and navigating it would abort the OAuth flow.
+        // a tab parked on the sign-in handler too, and navigating it would
+        // abort the OAuth flow.
         const windows = (await appShellWindows({})) ?? [];
         // Only the windows the floor actually condemns (#516). A tab that has
         // already reloaded onto an accepted build is left alone: navigating it
