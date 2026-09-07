@@ -73,6 +73,28 @@ export const MAX_ARCHIVED_DISPLAY_NAME = 100;
  */
 export const MAX_ARCHIVE_BYTES = 256 * 1024;
 
+/**
+ * The size ceiling the WHOLE Event document must fit under once the record has
+ * landed on it, in bytes of serialized JSON (#134, Codex P2 on PR #1139).
+ *
+ * `MAX_ARCHIVE_BYTES` above bounds the record's own share of the budget. It
+ * cannot bound the document, because the archive is not written to an empty
+ * one: `days` carries a per-Day `snapshotItemIds` list, `bannedUids` holds up
+ * to 1000 entries, `mostLovedPhoto` keeps up to 100 winners, and every one of
+ * them is already there when the freeze commits. An Event that has grown large
+ * on its own could therefore pass the record's quarter-budget and still push
+ * the document past Firestore's 1 MiB limit — inside the transaction, AFTER the
+ * closing write had already shut the Event, which is the one failure the
+ * pre-quiesce validation exists to make impossible.
+ *
+ * So the guard measures the PROJECTED document: everything the update leaves in
+ * place, plus the four fields it writes. 900 KiB leaves ~148 KiB of margin
+ * under the real limit, which absorbs the difference between Firestore's own
+ * accounting (field-name bytes, per-field and per-document overhead, the
+ * document path) and `JSON.stringify`'s.
+ */
+export const MAX_ARCHIVED_EVENT_BYTES = 900 * 1024;
+
 /** The Event fields the archive builder and its callers read. */
 export type ArchivableEvent = Pick<
   EventDoc,
@@ -175,10 +197,45 @@ function toStandingRow(p: PlayerDoc): ArchivedStandingRow {
   };
 }
 
+/** UTF-8 bytes of a value's serialized JSON, the stand-in this module measures
+ *  Firestore payloads with. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value) ?? '').length;
+}
+
 /** How big this record would be on the Event document — UTF-8 bytes of its
  *  serialized JSON, which over-approximates Firestore's own accounting. */
 function archiveBytes(archive: EventArchive): number {
-  return new TextEncoder().encode(JSON.stringify(archive)).length;
+  return jsonBytes(archive);
+}
+
+/**
+ * How big the Event DOCUMENT would be once the freeze lands on it (#134, Codex
+ * P2 on PR #1139): the stored fields the archive update leaves in place, plus
+ * the four it writes.
+ *
+ * The record is not written to an empty document, and the fields it shares the
+ * 1 MiB budget with are the ones that grow — `days` with its per-Day snapshot
+ * id lists, `bannedUids`, `mostLovedPhoto`. Measuring the record alone let an
+ * already-large Event pass the check and then overflow inside the transaction,
+ * with gameplay already shut and no record to show for it.
+ *
+ * `archive` is dropped from the retained side because the update REPLACES it;
+ * the other three archive fields are re-stated at their post-write values for
+ * the same reason. Every other stored field is carried through as-is, which is
+ * what a partial update does.
+ */
+function projectedEventBytes(
+  existing: Readonly<Record<string, unknown>> | null | undefined,
+  archive: EventArchive,
+  archivedAt: number,
+): number {
+  const retained = { ...(existing ?? {}) };
+  delete retained.archive;
+  delete retained.archivedAt;
+  delete retained.status;
+  delete retained.archiving;
+  return jsonBytes({ ...retained, status: 'archived', archivedAt, archiving: false, archive });
 }
 
 /**
@@ -200,11 +257,21 @@ export interface EventArchiveDraft {
    *  in the record: the frozen shape is what the archived surfaces render, not a
    *  place to keep diagnostics. */
   skippedRows: number;
-  /** `archiveBytes(archive)` — reported so the refusal below can quote it. */
+  /** `archiveBytes(archive)` — the record's own size, reported so the refusal
+   *  below can quote it. */
   bytes: number;
+  /** How big the Event DOCUMENT would be once this record lands on it: the
+   *  stored fields the update retains plus the four it writes. `bytes` alone
+   *  cannot answer the question the write actually asks, because the archive
+   *  never lands on an empty document (#134, Codex P2 on PR #1139). Equal to
+   *  the record's own size plus the JSON envelope when no `existing` document
+   *  was supplied. */
+  projectedBytes: number;
   /** Non-null when this record must not be written. `'too-large'` means the
-   *  coerced, bounded record STILL exceeds `MAX_ARCHIVE_BYTES`, which no clamp
-   *  here can fix — the Admin has to be told rather than left with a shut Event. */
+   *  coerced, bounded record STILL exceeds `MAX_ARCHIVE_BYTES`, or the Event
+   *  document it would sit on exceeds `MAX_ARCHIVED_EVENT_BYTES` with it —
+   *  neither of which a clamp here can fix, so the Admin has to be told rather
+   *  than left with a shut Event. */
   refusal: 'too-large' | null;
 }
 
@@ -255,9 +322,11 @@ export interface EventArchiveDraft {
  *  - every other malformation is COERCED to a safe default: a missing name reads
  *    `'Anonymous'`, a missing or non-finite count reads `0`, a bad instant reads
  *    `null`, and every name is bounded at `MAX_ARCHIVED_DISPLAY_NAME`;
- *  - and the finished record is measured against `MAX_ARCHIVE_BYTES`, which
- *    `draftEventArchive` reports as a REFUSAL rather than a throw so the caller
- *    can decline before taking the quiesce.
+ *  - and the finished record is measured TWICE — against `MAX_ARCHIVE_BYTES`
+ *    for its own share of the budget, and, with `existing`, against
+ *    `MAX_ARCHIVED_EVENT_BYTES` for the whole document it would land on, since
+ *    the archive never lands on an empty one. Either is reported as a REFUSAL
+ *    rather than a throw, so the caller can decline before taking the quiesce.
  *
  * None of that adjudicates a stat (ADR 0001): it decides nothing about who won,
  * it only makes the row expressible in the record's own declared shape.
@@ -268,8 +337,20 @@ export function draftEventArchive(params: {
   dayMetas?: ReadonlyMap<number, DayMetaDoc>;
   dayMetasLoaded?: boolean;
   archivedAt: number;
+  /**
+   * The STORED Event document the record would land on, for the projected-size
+   * check (#134, Codex P2 on PR #1139). Deliberately separate from `event`
+   * above, which is the narrow `ArchivableEvent` slice the builder DERIVES
+   * from: this one is measured, not read, so it takes the whole document — the
+   * fields it shares the 1 MiB budget with (`days`, `bannedUids`,
+   * `mostLovedPhoto`) are exactly the ones the builder never looks at.
+   * Omitting it measures the record alone, which is the pre-#1139 behaviour and
+   * right only for a caller with no document in hand (the unit tests).
+   */
+  existing?: Readonly<Record<string, unknown>> | null;
   maxRows?: number;
   maxBytes?: number;
+  maxEventBytes?: number;
 }): EventArchiveDraft {
   const {
     players,
@@ -277,8 +358,10 @@ export function draftEventArchive(params: {
     dayMetas,
     dayMetasLoaded = true,
     archivedAt,
+    existing,
     maxRows = MAX_ARCHIVED_STANDING_ROWS,
     maxBytes = MAX_ARCHIVE_BYTES,
+    maxEventBytes = MAX_ARCHIVED_EVENT_BYTES,
   } = params;
   const bannedUids = event?.bannedUids ?? [];
   const days = event?.days;
@@ -341,7 +424,20 @@ export function draftEventArchive(params: {
     archivedAt,
   };
   const bytes = archiveBytes(archive);
-  return { archive, skippedRows, bytes, refusal: bytes > maxBytes ? 'too-large' : null };
+  // TWO ceilings, and the second is the one the write actually meets: the
+  // record must fit its own quarter of the Event document's budget, AND the
+  // document must still fit once it lands there. An Event already carrying
+  // large `days` / `bannedUids` / `mostLovedPhoto` fields could pass the first
+  // and overflow on the second — inside the transaction, with gameplay already
+  // shut (Codex P2, PR #1139).
+  const projectedBytes = projectedEventBytes(existing, archive, archivedAt);
+  return {
+    archive,
+    skippedRows,
+    bytes,
+    projectedBytes,
+    refusal: bytes > maxBytes || projectedBytes > maxEventBytes ? 'too-large' : null,
+  };
 }
 
 /** The frozen record alone, for the callers that only render it (the Admin

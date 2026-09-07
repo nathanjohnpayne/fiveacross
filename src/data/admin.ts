@@ -767,8 +767,11 @@ export async function abandonArchive(): Promise<AbandonArchiveResult> {
  *    resolvable at all; the same server-read discipline the roster gets is
  *    applied to the queue.
  *  - `too-large` — the record built from the server re-read would not fit on the
- *    Event document. `draftEventArchive` decides that on coerced, bounded inputs,
- *    so it is the residue no clamp can absorb rather than a malformed row.
+ *    Event document. `draftEventArchive` decides that on coerced, bounded inputs
+ *    and against the PROJECTED document — the stored fields this update retains
+ *    plus the four it writes — because the archive never lands on an empty one:
+ *    an Event whose own `days` / `bannedUids` / `mostLovedPhoto` already fill
+ *    the budget overflows on a perfectly ordinary record.
  *
  * Archiving is ONE-WAY from the client. The transaction re-reads the Event
  * inside itself and reports `already-archived` rather than re-freezing, so a
@@ -846,6 +849,12 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
       // thing `dayMetasLoaded` exists to tell apart.
       dayMetasLoaded: true,
       archivedAt,
+      // The STORED document, so the size check measures what the write
+      // actually produces rather than the record alone (Codex P2, PR #1139).
+      // `data` is the raw transactional read — the same one this update is
+      // about to be applied to — so `days`, `bannedUids` and `mostLovedPhoto`
+      // are counted at the sizes they will really have.
+      existing: data as Readonly<Record<string, unknown>>,
     });
     // The last line of the same defence the Admin console applies BEFORE the
     // quiesce (Codex P2, PR #1139). The console checks the record it previewed

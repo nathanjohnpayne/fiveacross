@@ -787,6 +787,28 @@ describe('the archive control refuses a record it could not store', () => {
     expect(H.beginArchive).not.toHaveBeenCalled();
   });
 
+  // Codex P2, PR #1139 round 4. The check used to measure the RECORD alone,
+  // which an Event already carrying large `days` / `bannedUids` /
+  // `mostLovedPhoto` fields can pass while the DOCUMENT the record lands on
+  // still overflows — inside the transaction, after the closing write.
+  it('will not arm when the Event document itself has no room left', () => {
+    // An entirely ordinary roster: it is the Event's own fields that are full.
+    H.event = liveEvent({
+      days: [
+        {
+          index: 0,
+          theme: 'neon-playground',
+          snapshotItemIds: Array.from({ length: 60_000 }, (_, i) => `item-${i}-padding`),
+        },
+      ],
+    } as unknown as Partial<EventDoc>);
+    H.players = [mkPlayer({ uid: 'ordinary', displayName: 'Ordinary', bingoCount: 1 })];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/too large to freeze onto the Event/);
+    expect(H.beginArchive).not.toHaveBeenCalled();
+  });
+
   it('holds the closing-state freeze shut too, and names the way out', () => {
     H.event = closingEvent();
     H.players = [whale()];

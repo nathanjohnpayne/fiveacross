@@ -19,9 +19,16 @@ function archivedOn(at: number | undefined): string {
 
 /** Stated identically wherever the oversized record is refused — before the
  *  quiesce (the disabled control) and after it (the second write's report) — so
- *  an Admin who meets it twice is told the same thing about the same cause. */
+ *  an Admin who meets it twice is told the same thing about the same cause.
+ *
+ *  It names the DOCUMENT rather than the record, because the check is on the
+ *  projected document: the record plus everything already on the Event
+ *  (`days`, `bannedUids`, `mostLovedPhoto`). The remedy is still the one an
+ *  Admin can actually take from the console, and an over-long Player row is
+ *  still overwhelmingly the cause once rows and names are both bounded — but
+ *  the copy no longer asserts a cause the size check cannot prove. */
 const TOO_LARGE_COPY =
-  'These standings are too large to freeze onto the Event—a Player row is carrying far more text than a name. Banning that Player drops their row from the record.';
+  'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. That is almost always a Player row carrying far more text than a name, and banning that Player drops their row from the record.';
 
 const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
   archived: 'Archived. The final standings are frozen.',
@@ -142,6 +149,12 @@ export default function ArchiveEvent({
     dayMetas,
     dayMetasLoaded,
     archivedAt: 0,
+    // The Event document the record would land on, so the size check measures
+    // the projected DOCUMENT and not just the record (Codex P2, PR #1139). An
+    // Event already carrying large `days` / `bannedUids` / `mostLovedPhoto`
+    // fields can leave a perfectly ordinary record unwritable, and this control
+    // is the one place that can still say so before anything is closed.
+    existing: event as Readonly<Record<string, unknown>> | null | undefined,
   });
   const preview = draft.archive;
   // THE THIRD PRECONDITION, and it has to be checked HERE rather than around the

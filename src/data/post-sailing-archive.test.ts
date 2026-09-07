@@ -6,6 +6,7 @@ import {
   isEventArchiving,
   MAX_ARCHIVED_DISPLAY_NAME,
   MAX_ARCHIVE_BYTES,
+  MAX_ARCHIVED_EVENT_BYTES,
   MAX_ARCHIVED_STANDING_ROWS,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
@@ -593,6 +594,60 @@ describe('draftEventArchive — the inputs are validated before the Event is shu
     expect(MAX_ARCHIVE_BYTES).toBeLessThan(1024 * 1024);
   });
 
+  // Codex P2, PR #1139 round 4. The ceiling above measures the RECORD, and the
+  // record is never written to an empty document: `days` carries per-Day
+  // snapshot id lists, `bannedUids` holds up to 1000 entries, `mostLovedPhoto`
+  // up to 100 winners — all of them already there when the freeze commits. An
+  // Event large on its own could pass the record's quarter-budget and still
+  // push the document past Firestore's 1 MiB limit, inside the transaction,
+  // with gameplay already shut.
+  it('REFUSES a perfectly ordinary record the Event document has no room left for', () => {
+    const players = [mkPlayer({ uid: 'p0', displayName: 'P0', squaresMarked: 3 })];
+    const event = { days: DAYS, bannedUids: [] };
+    // The Event is already carrying most of its budget in fields the builder
+    // never reads — which is exactly why the check cannot be made on `event`.
+    const heavy = {
+      ...event,
+      days: DAYS.map((d) => ({
+        ...d,
+        snapshotItemIds: Array.from({ length: 16_000 }, (_, i) => `item-${i}-padding`),
+      })),
+    };
+    const alone = draftEventArchive({ players, event, archivedAt: 1 });
+    expect(alone.refusal).toBeNull();
+    expect(alone.bytes).toBeLessThan(MAX_ARCHIVE_BYTES);
+
+    const onTheRealDocument = draftEventArchive({ players, event, archivedAt: 1, existing: heavy });
+    // The record itself is unchanged and still well inside its own ceiling…
+    expect(onTheRealDocument.bytes).toBe(alone.bytes);
+    // …and the document it would land on is not.
+    expect(onTheRealDocument.projectedBytes).toBeGreaterThan(MAX_ARCHIVED_EVENT_BYTES);
+    expect(onTheRealDocument.refusal).toBe('too-large');
+  });
+
+  it('measures the document the update PRODUCES, not the one it replaces', () => {
+    const players = [mkPlayer({ uid: 'p0', displayName: 'P0', squaresMarked: 3 })];
+    // A prior `archive` on the stored document is REPLACED by this write, so
+    // counting it would refuse a re-freeze the document has ample room for.
+    const stale = { standings: Array.from({ length: 5_000 }, (_, i) => ({ uid: `u${i}` })) };
+    const withStale = draftEventArchive({
+      players,
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+      existing: { name: 'Med 2026', days: DAYS, bannedUids: [], archive: stale },
+    });
+    const withoutStale = draftEventArchive({
+      players,
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+      existing: { name: 'Med 2026', days: DAYS, bannedUids: [] },
+    });
+    expect(withStale.projectedBytes).toBe(withoutStale.projectedBytes);
+    expect(withStale.refusal).toBeNull();
+    // The retained fields DO count — the whole point of the projection.
+    expect(withStale.projectedBytes).toBeGreaterThan(withStale.bytes);
+  });
+
   it('leaves a real Event nowhere near the ceiling', () => {
     // The bound is a backstop, not a limit any Event is expected to approach: a
     // FULL 200-row record with maximum-length names is still a fraction of it.
@@ -676,6 +731,26 @@ describe('archiveEvent — the drain gate is re-taken from the server after the 
     A.event = closingEvent({ claimMode: 'honor' });
     A.claims = [{ status: 'pending' }];
     expect(await archiveEvent({ now: 5 })).toBe('archived');
+  });
+
+  it('refuses when the stored Event has no room left for an ordinary record', async () => {
+    // Codex P2, PR #1139 round 4. The record is not written to an empty
+    // document: the check that matters is on the one the update PRODUCES. The
+    // roster here is a single ordinary row — it is the Event's own fields that
+    // have no room left — and the refusal still has to come before the write,
+    // because gameplay is already shut by the time this runs.
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.event = closingEvent({
+      days: [
+        {
+          index: 0,
+          theme: 'neon-playground',
+          snapshotItemIds: Array.from({ length: 60_000 }, (_, i) => `item-${i}-padding`),
+        },
+      ],
+    });
+    expect(await archiveEvent({ now: 5 })).toBe('too-large');
+    expect(A.updates).toEqual([]);
   });
 
   it('refuses a record the server re-read makes too large, and writes nothing', async () => {
