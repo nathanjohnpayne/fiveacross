@@ -35,7 +35,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -2131,9 +2131,7 @@ function EventBoard({ eventId }: { eventId: string }) {
       const currentFirstBingoAt =
         rootFirstBingoKnown === undefined
           ? undefined
-          : hasDays
-            ? (player?.dayStats?.[viewedIndex]?.firstBingoAt ?? null)
-            : rootFirstBingoKnown;
+          : boardFirstBingoAt(player, hasDays, viewedIndex);
       const res = await setMark({
         uid,
         cells,
@@ -2835,7 +2833,14 @@ function EventBoard({ eventId }: { eventId: string }) {
           cells={cells}
           cell={proofTarget}
           claimMode={claimMode}
-          currentFirstBingoAt={player?.firstBingoAt ?? null}
+          // The stamp a proofed Mark preserves is the VIEWED Day's, exactly as
+          // the bare-Mark path above derives it (#1049) — one helper, one rule.
+          // Passing the Event-wide root here let a proofed win on this Day
+          // inherit an EARLIER Day's First-to-BINGO instant and take that Day's
+          // honour. ProofSheet's prop is a plain `number | null`: the #75
+          // unknown-row tri-state does not apply, because `attachProof` re-reads
+          // the row inside its transaction and treats this only as a fallback.
+          currentFirstBingoAt={boardFirstBingoAt(player, hasDays, viewedIndex)}
           // Event admin knobs, read defensively with the spec defaults (#211).
           // `photoProofSource` is NEVER tied to claimMode — only this event-level
           // override hides the 🖼️ Library pick.

@@ -1839,6 +1839,99 @@ describe('Feed → Board square-opening intent (#261)', () => {
     __resetOpenSquareForTests();
   });
 
+  // #1049: both completing-Mark paths must hand the write layer the VIEWED
+  // Day's own first-bingo stamp. The Event-level root is an aggregate over
+  // every Day, so passing it let a proofed win on the viewed Day inherit an
+  // EARLIER Day's First to BINGO — persisted scoring evidence naming the wrong
+  // Day. The bare-Mark path already derived per-Day; these pin the proof path
+  // to the same value on the same Square, so proofed and bare Marks agree.
+  it("hands ProofSheet the viewed Day's own first-bingo stamp, matching the bare Mark (#1049)", async () => {
+    __resetOpenSquareForTests();
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, tutorial: true, pool: 'easy' }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: now - DAY_MS }),
+      ],
+    } as unknown as EventDoc;
+    // Day 0 was won at t=100 — the Event-level root. Day 1's own line landed
+    // later, at t=200: that is the stamp a Day-1 Mark must preserve.
+    H.player = {
+      uid: 'u1',
+      bingoCount: 2,
+      squaresMarked: 24,
+      firstBingoAt: 100,
+      dayStats: {
+        0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
+        1: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 200 },
+      },
+    } as unknown as PlayerDoc;
+    H.board = { uid: 'u1', dayIndex: 1, seed: 1, createdAt: 0, cells: dealt() };
+    requestOpenSquare({ dayIndex: 1, itemId: 'i5' });
+
+    const proofView = render(<Board />);
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    // The proofed path: a text Proof submitted from the open sheet.
+    fireEvent.click(screen.getByRole('button', { name: /callout/i }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'day one, my line' } });
+    fireEvent.click(screen.getByRole('button', { name: /mark it/i }));
+    await act(async () => {});
+
+    expect(H.attachProof).toHaveBeenCalledTimes(1);
+    expect(H.attachProof.mock.calls[0][0]).toMatchObject({
+      daily: true,
+      dayIndex: 1,
+      currentFirstBingoAt: 200,
+    });
+    expect(H.attachProof.mock.calls[0][0].currentFirstBingoAt).not.toBe(100);
+
+    // The bare path on the SAME Square resolves to the same Day-1 stamp.
+    proofView.unmount();
+    requestOpenSquare({ dayIndex: 1, itemId: 'i5' });
+    render(<Board />);
+    fireEvent.click(screen.getByRole('button', { name: /Cross My Heart/i }));
+    await act(async () => {});
+
+    expect(H.setMark).toHaveBeenCalledTimes(1);
+    expect(H.setMark.mock.calls[0][0]).toMatchObject({
+      daily: true,
+      dayIndex: 1,
+      currentFirstBingoAt: 200,
+    });
+    __resetOpenSquareForTests();
+  });
+
+  it('keeps a legacy single-Board proof on the root stamp (no schedule, #1049)', async () => {
+    __resetOpenSquareForTests();
+    // No `days`: the pre-1.5 shape, whose single Board's stamp IS the root.
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: [] } as unknown as EventDoc;
+    H.player = {
+      uid: 'u1',
+      bingoCount: 1,
+      squaresMarked: 12,
+      firstBingoAt: 100,
+    } as unknown as PlayerDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    fireEvent.click(
+      document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim')[5],
+    );
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /callout/i }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'legacy callout' } });
+    fireEvent.click(screen.getByRole('button', { name: /mark it/i }));
+    await act(async () => {});
+
+    expect(H.attachProof).toHaveBeenCalledTimes(1);
+    expect(H.attachProof.mock.calls[0][0].currentFirstBingoAt).toBe(100);
+    expect(H.attachProof.mock.calls[0][0].daily).toBe(false);
+  });
+
   it('does not consume an Event A intent on Event B, then resumes it on A', async () => {
     __resetOpenSquareForTests();
     H.event = {
