@@ -220,13 +220,21 @@ function singleEndpointExportsFromSource(source) {
     // EXACT package boundary. A prefix test would trust
     // `firebase-functions-wrapper`, whose factory may return an object the
     // runtime loader then discovers as a group of separate endpoints.
+    // …and only the SDK's endpoint-builder modules: `firebase-functions`,
+    // `/v1`, `/v2` and their provider subpaths. `firebase-functions/params`,
+    // `/logger` and `/options` export helpers such as `select`, whose return
+    // value can nest a callable the runtime loader then discovers as an
+    // endpoint of its own.
     const from = specifier.text;
-    if (from !== "firebase-functions" && !from.startsWith("firebase-functions/"))
-      continue;
+    if (!/^firebase-functions(?:\/v[12](?:\/[a-z]+)?)?$/.test(from)) continue;
     const bindings = statement.importClause?.namedBindings;
     if (bindings && ts.isNamedImports(bindings)) {
       for (const element of bindings.elements) {
-        if (!element.isTypeOnly) builders.add(element.name.text);
+        if (element.isTypeOnly) continue;
+        // Builders are the `onX` factories; `HttpsError`, `setGlobalOptions`
+        // and friends from the same modules are not endpoint constructors.
+        const imported = (element.propertyName ?? element.name).text;
+        if (/^on[A-Z]/.test(imported)) builders.add(element.name.text);
       }
     }
   }
@@ -429,7 +437,7 @@ async function singleEndpointInventory(configSource, configPath) {
     // `build()` is empty, so only the config's `predeploy` hook refreshes that
     // artifact from `src/index.ts`. Without a build step there, a stale
     // `lib/index.js` can export a group the source never mentions.
-    if (!predeployBuildsSource(functionsConfig.predeploy)) {
+    if (!predeployBuildsSource(functionsConfig.predeploy, functionsConfig.source)) {
       entry.authoritative = false;
       continue;
     }
@@ -485,16 +493,27 @@ async function singleEndpointInventory(configSource, configPath) {
  * direct `tsc` invocation is the only other shape accepted. Anything else
  * (absent, lint-only, an unfamiliar tool) cannot prove the artifact is fresh.
  */
-function predeployBuildsSource(predeploy) {
+function predeployBuildsSource(predeploy, source) {
   const steps =
     typeof predeploy === "string"
       ? [predeploy]
       : Array.isArray(predeploy)
         ? predeploy.filter((step) => typeof step === "string")
         : [];
-  return steps.some(
-    (step) => /\bnpm\b[^&|;]*\brun\s+build\b/.test(step) || /\btsc\b/.test(step),
+  // The CLI runs hooks with the PROJECT directory as cwd and exposes the
+  // Functions directory only through `$RESOURCE_DIR`
+  // (lifecycleHooks.js:74-76). A bare `npm run build` or bare `tsc` therefore
+  // builds the root project, not the Functions package, so only a hook that
+  // targets `$RESOURCE_DIR` (or the configured source path itself) counts.
+  const escaped = String(source).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const target = `(?:"?\\$RESOURCE_DIR"?|'?\\$RESOURCE_DIR'?|"?\\.?\\/?${escaped}\\/?"?)`;
+  const prefixed = new RegExp(
+    `\\bnpm\\s+--prefix\\s+${target}\\s+run\\s+build\\b`,
   );
+  const entered = new RegExp(
+    `\\bcd\\s+${target}\\s*&&\\s*(?:npm\\s+run\\s+build\\b|tsc\\b)`,
+  );
+  return steps.some((step) => prefixed.test(step) || entered.test(step));
 }
 
 async function entrypointIsConventionalTypeScript(sourceDir) {
@@ -524,6 +543,19 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
     tsconfig = JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ""));
   } catch {
     return false;
+  }
+  // The program must be exactly "everything under src": a `files` list,
+  // an `exclude`, an inherited `extends`, or project `references` can leave
+  // `src/index.ts` out of the emit while `tsc` still exits 0.
+  if ("extends" in tsconfig || "files" in tsconfig || "exclude" in tsconfig || "references" in tsconfig) {
+    return false;
+  }
+  if ("include" in tsconfig) {
+    const include = tsconfig.include;
+    const wholeSrc = /^\.?\/?src\/?(?:\*\*\/\*(?:\.ts)?)?$/;
+    if (!Array.isArray(include) || include.length !== 1 || !wholeSrc.test(String(include[0]))) {
+      return false;
+    }
   }
   const options = tsconfig.compilerOptions ?? {};
   if (options.noEmit === true || options.emitDeclarationOnly === true) return false;

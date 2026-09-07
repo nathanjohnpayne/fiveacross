@@ -599,6 +599,54 @@ describe("the config must be simple enough to analyse before any proof counts", 
     });
   });
 
+  it.each([
+    ["a bare npm run build, which builds the project root", { predeploy: ["npm run build"] }],
+    ["a bare tsc, which runs in the project root", { predeploy: ["tsc"] }],
+    ["a --prefix pointing somewhere else", { predeploy: ['npm --prefix "$RESOURCE_DIR/../other" run build'] }],
+  ])("refuses %s", async (_label, functionsConfig) => {
+    // Hooks run with the project directory as cwd and see the Functions
+    // directory only through $RESOURCE_DIR (lifecycleHooks.js:74-76).
+    await withManifests({ ...CONVENTIONAL, functionsConfig }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it.each([
+    ['npm --prefix "$RESOURCE_DIR" run build'],
+    ["npm --prefix functions run build"],
+    ['cd "$RESOURCE_DIR" && npm run build'],
+    ["cd functions && tsc"],
+  ])("accepts the Functions-targeted hook %s", async (hook) => {
+    await withManifests({ ...CONVENTIONAL, functionsConfig: { predeploy: [hook] } }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+    });
+  });
+
+  it.each([
+    ["a files list that omits the entry point", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, files: ["src/other.ts"] } }],
+    ["an exclude", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, include: ["src"], exclude: ["src/index.ts"] } }],
+    ["an extends", { tsconfig: { extends: "./tsconfig.base.json", compilerOptions: { outDir: "lib", rootDir: "src" } } }],
+    ["project references", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, references: [{ path: "../shared" }] } }],
+    ["an include narrower than src", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, include: ["src/other.ts"] } }],
+  ])("refuses a tsconfig with %s, which can leave main stale while tsc exits 0", async (_label, override) => {
+    await withManifests({ ...CONVENTIONAL, ...override }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("accepts include: [\"src\"], the conventional whole-directory program", async () => {
+    await withManifests(
+      { ...CONVENTIONAL, tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, include: ["src"] } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
+  });
+
   it("refuses when package.json has no tsc build script for the predeploy hook to run", async () => {
     await withManifests(
       { ...CONVENTIONAL, pkg: { main: "lib/index.js", engines: { node: "22" } } },
@@ -681,6 +729,17 @@ describe("the config must be simple enough to analyse before any proof counts", 
         expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
       },
     );
+  });
+
+  it.each([
+    ["params.select wrapping a callable", "import { select } from 'firebase-functions/params';\nimport { onCall } from 'firebase-functions/v2/https';\nexport const daily = select([onCall(() => {})]);"],
+    ["a non-builder export of an endpoint module", "import { HttpsError } from 'firebase-functions/v2/https';\nexport const daily = HttpsError('internal', 'x');"],
+    ["a builder-named import from the logger module", "import { onInit } from 'firebase-functions/logger';\nexport const daily = onInit(() => {});"],
+  ])("refuses %s, since only onX factories from endpoint modules build endpoints", async (_label, source) => {
+    await withFunctionsSource(source, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
   });
 
   it("refuses when a CommonJS assignment can overwrite a proven export", async () => {
