@@ -27,7 +27,11 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+// Captured before any codebase code runs, for the same reason the marker is
+// written with a captured `writeFileSync`: this module shares its process with
+// the artifact, so anything it needs later must be held now.
 const writeFileSync = fs.writeFileSync;
+const abortProcess = process.abort;
 const marker = process.env.FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER;
 
 // This module is loaded with `--require`, which node consumes rather than
@@ -92,7 +96,7 @@ if (marker) {
       // direction. There is no other channel out of this process that the
       // codebase cannot also reach, so the honest report is to die: discovery
       // then never answers and the classifier refuses (Codex P2, round 15).
-      process.abort();
+      abortProcess.call(process);
     }
   };
   Object.defineProperty(process, "env", {
