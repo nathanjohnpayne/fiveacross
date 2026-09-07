@@ -259,6 +259,22 @@ describe('capture and recovery', () => {
     expect(seenByA?.durable).toBe(true);
   });
 
+  it('retires the captures a read out-ordered, so consuming the winner leaves no older bearer behind', async () => {
+    const origin = window.location.origin;
+    capturePendingEventInvitation({ hash: `#fa_invite=${'A'.repeat(43)}`, origin, now: 1_000 });
+    vi.resetModules();
+    const tabB = await import('./pendingEventInvitation');
+    tabB.capturePendingEventInvitation({ hash: `#fa_invite=${'B'.repeat(43)}`, origin, now: 2_000 });
+
+    // Tab A reads: B wins, and A's older memory/session copies are retired.
+    const winner = readPendingEventInvitation({ origin, now: 3_000 });
+    expect(winner?.record.code).toBe('B'.repeat(43));
+
+    // Tab A consumes the winner (as a redemption would); nothing resurrects.
+    expect(forgetPendingEventInvitationIf(winner!.record)).toBe(true);
+    expect(readPendingEventInvitation({ origin, now: 4_000 })).toBeNull();
+  });
+
   it('falls back to localStorage when the session copy is lost across authentication', () => {
     capturePendingEventInvitation({
       hash: `#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`,
