@@ -4,7 +4,7 @@ import { uploadProofMedia, deleteStoragePath } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
 import { resolveProofMediaUrl } from './proofMediaUrl';
 import { markerDisplayName } from './attribution';
-import { completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
+import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
@@ -260,9 +260,17 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     const blackout = isBlackout(next);
     // Derive firstBingoAt from the live player row, not the caller's stale prop,
     // so a concurrent proof/mark can't overwrite an earlier first-bingo stamp;
-    // clear it when no bingo stands (mirrors setMark/deleteProof).
+    // clear it when no bingo stands (mirrors setMark/deleteProof). In daily mode
+    // the stamp being preserved is the VIEWED Day's bucket, never the Event-wide
+    // root (#1049) — `boardFirstBingoAt` owns that choice for every write path.
     const existingFirst =
-      (playerSnap.data()?.firstBingoAt as number | null | undefined) ?? currentFirstBingoAt ?? null;
+      boardFirstBingoAt(
+        playerSnap.data() as { firstBingoAt?: number | null; dayStats?: DayStats } | undefined,
+        daily === true,
+        dayIndex ?? 0,
+      ) ??
+      currentFirstBingoAt ??
+      null;
     const firstBingoAt = bingoCount > 0 ? (existingFirst ?? now) : null;
 
     tx.set(pRef, {
@@ -479,7 +487,16 @@ export async function deleteProof(
                   .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId))),
               )
             : [];
-        const existingFirst = (playerSnap.data()?.firstBingoAt as number | null | undefined) ?? null;
+        // The stamp a deletion preserves belongs to the Day whose Board it is
+        // unmarking (#1049): when a line still stands on THIS Day, that Day's
+        // own bucket keeps its instant — reading the Event-wide root here would
+        // write some other Day's First-to-BINGO into it. Legacy events have one
+        // bucket, so the root is that Board's stamp and is read unchanged.
+        const existingFirst = boardFirstBingoAt(
+          playerSnap.data() as { firstBingoAt?: number | null; dayStats?: DayStats } | undefined,
+          daily,
+          proofDayIndex,
+        );
         const next: Cell[] = cells.map((c) => {
           if (c.index !== proof.cellIndex) return c;
           // Deleting a proof unmarks the cell — mirror computeMark's manual
