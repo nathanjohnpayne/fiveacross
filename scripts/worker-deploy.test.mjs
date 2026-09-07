@@ -98,6 +98,15 @@ exit 0
 }
 
 describe('worker deploy guard — ambient Wrangler environment', () => {
+  it('refuses an ambient WRANGLER_CI_OVERRIDE_NAME before certifying the binding', () => {
+    // Wrangler deploys under that name while the secret readback still reads
+    // the configured one, so the published Worker would go unverified.
+    const result = runWithStubbedNpm({ extraEnv: { WRANGLER_CI_OVERRIDE_NAME: 'shadow-router' } });
+    expect(result.status).toBe(65);
+    expect(result.stderr).toContain('WRANGLER_CI_OVERRIDE_NAME is set');
+    expect(result.stderr).toContain('unset WRANGLER_CI_OVERRIDE_NAME');
+  });
+
   it('refuses a set CLOUDFLARE_ENV before certifying the binding', () => {
     // Wrangler selects an environment from the variable with no flag, and this
     // wrapper forwards the operator's environment to every Wrangler command it
@@ -225,6 +234,18 @@ describe('worker deploy guard — no surviving Firebase credential', () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`is STILL bound on the deployed Worker: ${name}`);
+  });
+
+  it.each([
+    ['an entry with no name', '[{}]'],
+    ['an entry whose name is not a string', '[{"name":123,"type":"secret_text"}]'],
+    ['a non-object entry', '["FIREBASE_API_KEY"]'],
+  ])('fails closed when the listing carries %s', (_label, listing) => {
+    // The command documents its output as the complete secret list; an element
+    // the check cannot read is evidence of nothing, like a non-array listing.
+    const result = runWithStubbedNpm({ secretListJson: listing });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unreadable listing');
   });
 
   it('anchors the prefix at the start of the name rather than matching a substring', () => {

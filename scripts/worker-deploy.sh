@@ -95,6 +95,25 @@ verify_registry_lookup_binding() {
   # publishing or inspecting `five-across-event-router-<env>` while every
   # message here says the production router was handled. So the variable is
   # refused before the binding is certified rather than certified around.
+  # The same shape of ambient override, one level up: Wrangler 4.129's deploy
+  # handler replaces the configured Worker NAME with WRANGLER_CI_OVERRIDE_NAME
+  # (a Workers Builds convenience), while `wrangler secret list` keeps reading
+  # the name from wrangler.toml. With it set, this wrapper would verify
+  # five-across-event-router, publish the bundle over a different Worker, and
+  # verify five-across-event-router again — the published target unchecked.
+  if [[ -n "${WRANGLER_CI_OVERRIDE_NAME:-}" ]]; then
+    echo "" >&2
+    echo "❌ WRANGLER_CI_OVERRIDE_NAME is set to '${WRANGLER_CI_OVERRIDE_NAME}'." >&2
+    echo "" >&2
+    echo "Wrangler deploys under that name instead of the configured one, while the" >&2
+    echo "secret readback still inspects five-across-event-router — so the Worker" >&2
+    echo "this deploy would publish is not the one it verifies. Unset it and re-run:" >&2
+    echo "" >&2
+    echo "    unset WRANGLER_CI_OVERRIDE_NAME" >&2
+    echo "" >&2
+    exit 65
+  fi
+
   if [[ -n "${CLOUDFLARE_ENV:-}" ]]; then
     echo "" >&2
     echo "❌ CLOUDFLARE_ENV is set to '${CLOUDFLARE_ENV}'." >&2
@@ -220,7 +239,10 @@ MSG
   # parse error AND empty output, which a single filter would read as "no
   # names found"), and only then the prefix scan over a listing proven to be
   # an array.
-  if ! printf '%s' "$secrets" | jq -e 'type=="array"' >/dev/null 2>&1; then
+  # ...and every entry must be an object carrying a string `name`: the pinned
+  # command documents the output as the complete secret list, so an element
+  # this check cannot read is evidence of nothing, exactly like a non-array.
+  if ! printf '%s' "$secrets" | jq -e 'type=="array" and all(.[]; type=="object" and (.name|type)=="string")' >/dev/null 2>&1; then
     found="<unreadable listing>"
   elif ! found="$(printf '%s' "$secrets" | jq -r --arg prefix "$FORBIDDEN_SECRET_PREFIX" \
       '[.[] | .name | select(type=="string" and startswith($prefix))] | join(", ")' 2>/dev/null)"; then
