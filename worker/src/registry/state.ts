@@ -26,18 +26,34 @@ export type SyncResponse = {
  * closed, and neither reaches for a second source of truth.
  */
 export type RegistryLookup =
-  /** No servable address here. `revision` is present only for a TOMBSTONE — a
-   *  committed record that reads as unknown from outside but still has a
-   *  revision the public response must carry, because
+  /** No servable address here. `revision` and `schemaVersion` are present only
+   *  for a TOMBSTONE — a committed record that reads as unknown from outside
+   *  but still has a revision the public response must carry, because
    *  `specs/event-router-registry.md` § Audit and recovery makes the publicly
    *  observed revision the evidence a tombstoned host's recovery lock is
-   *  cleared with. It is absent, not null, for an uninitialized object, so a
+   *  cleared with. They are absent, not null, for an uninitialized object, so a
    *  router built against the earlier shape reads the same `unknown-host` it
    *  always did instead of failing on an unrecognised field. */
-  | { kind: 'unknown-host'; revision?: string }
+  | { kind: 'unknown-host'; revision?: string; schemaVersion?: number }
   | { kind: 'unavailable' }
   | { kind: 'malformed' }
-  | { kind: 'committed'; revision: string; desired: ReplicaDesired };
+  /**
+   * A committed projection, stamped with the SCHEMA VERSION it was committed
+   * under.
+   *
+   * The version is carried rather than dropped because the registry is a
+   * separately deployed Worker whose schema may move ahead of this router's.
+   * `desired` is a closed union today, so a v2 that keeps the current
+   * discriminants and merely adds meaning to them — an additive field, a
+   * narrowed `status`, a new constraint on `pathNamespace` — would arrive here
+   * looking exactly like a v1 route and be served under v1 rules. That is the
+   * version-skew hole `specs/event-router-registry.md` § Failure semantics
+   * closes with its "malformed/unsupported committed state" row: the consumer
+   * has to be able to SEE the version to refuse it. It is typed `number`, not
+   * the literal this deployment happens to accept, because the whole point is
+   * that the value may be one this build does not know.
+   */
+  | { kind: 'committed'; schemaVersion: number; revision: string; desired: ReplicaDesired };
 
 /**
  * The ONLY registry capability the public router holds, declared here — beside
@@ -175,11 +191,17 @@ export function registryLookup(
 ): Extract<RegistryLookup, { kind: 'unknown-host' } | { kind: 'committed' }> {
   const committed = state.committed;
   if (committed === null) return { kind: 'unknown-host' };
+  // The committed record's own schema version travels with everything derived
+  // from it — the projection AND the tombstone's revision — so a consumer on
+  // the far side of the service binding can decide whether it understands this
+  // record before it reads anything else out of it.
+  const schemaVersion = committed.payload.schemaVersion;
   if (committed.payload.desired.kind === 'tombstone') {
-    return { kind: 'unknown-host', revision: committed.revision };
+    return { kind: 'unknown-host', revision: committed.revision, schemaVersion };
   }
   return {
     kind: 'committed',
+    schemaVersion,
     revision: committed.revision,
     desired: committed.payload.desired,
   };

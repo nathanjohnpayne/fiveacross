@@ -5,6 +5,7 @@ import type { RegistryLookup } from './registry/state';
 
 const SERVING: RegistryLookup = {
   kind: 'committed',
+  schemaVersion: 1,
   revision: '42',
   desired: {
     kind: 'route',

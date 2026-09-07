@@ -16,7 +16,7 @@ const HOST = 'bodega-bay.fiveacross.app';
 const SLUG = 'bodega-bay';
 
 function committed(desired: ReplicaDesired, revision = '7'): RegistryLookup {
-  return { kind: 'committed', revision, desired };
+  return { kind: 'committed', schemaVersion: 1, revision, desired };
 }
 
 const ACTIVE_ROUTE = committed({
@@ -318,7 +318,10 @@ describe('re-validating the projection at the service boundary', () => {
       committed({ kind: 'root', root: 'landing' as never, edition: 'fiveacross', pathNamespace: null }),
     ],
     ['an unrecognised desired kind', committed({ kind: 'redirect' } as never)],
-    ['a null projection', { kind: 'committed', revision: '7', desired: null } as unknown as RegistryLookup],
+    [
+      'a null projection',
+      { kind: 'committed', schemaVersion: 1, revision: '7', desired: null } as unknown as RegistryLookup,
+    ],
     ['a lookup arm this Worker does not know', { kind: 'quarantined' } as unknown as RegistryLookup],
     ['a null envelope', null as unknown as RegistryLookup],
     ['an undefined envelope', undefined as unknown as RegistryLookup],
@@ -440,6 +443,112 @@ describe('re-validating the projection at the service boundary', () => {
   });
 });
 
+describe('the projection schema version, refused before the projection is read', () => {
+  // The registry is a SEPARATELY DEPLOYED Worker, so its schema can move ahead
+  // of this router's. `desired` is a closed union whose discriminants an
+  // additive v2 would keep, so a projection written under a schema this build
+  // has never seen arrives looking exactly like a v1 route — and would be
+  // served under v1 rules — unless the version itself is carried and checked.
+  // `specs/event-router-registry.md` § Failure semantics gives that state the
+  // same closed answer as malformed state: rendered not-found,
+  // `replica-malformed`, alert, and no second source of truth.
+  const ROUTE: ReplicaDesired = {
+    kind: 'route',
+    eventId: 'bodega-bay-2026',
+    status: 'active',
+    slug: SLUG,
+    edition: 'fiveacross',
+    pathNamespace: null,
+  };
+
+  it('serves a version this build understands, exactly as before', async () => {
+    const { deps } = harness({ kind: 'committed', schemaVersion: 1, revision: '7', desired: ROUTE });
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+      kind: 'serve',
+      record: {
+        eventId: 'bodega-bay-2026',
+        revision: '7',
+        pathNamespace: null,
+        edition: 'fiveacross',
+        root: null,
+      },
+    });
+  });
+
+  it.each([
+    ['a version this build does not know', 2],
+    ['a version below the supported one', 0],
+    ['a non-integer version', 1.5],
+    ['a version encoded as a string', '1'],
+    ['a null version', null],
+    ['no version at all', undefined],
+  ])('refuses %s on an ACTIVE route rather than serving it', async (_label, schemaVersion) => {
+    const lookup = { kind: 'committed', revision: '7', desired: ROUTE } as Record<string, unknown>;
+    if (schemaVersion !== undefined) lookup.schemaVersion = schemaVersion;
+    await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('refuses an unsupported version before it reads `desired` at all', async () => {
+    // The ordering is the fix, not a detail. A projection whose `desired` is
+    // outright nonsense and a projection that is a perfectly well-formed v2
+    // route must produce the SAME answer, because the router cannot judge
+    // either under rules it does not have. If the shape checks ran first, the
+    // well-formed v2 route would pass every one of them and be served.
+    for (const desired of [ROUTE, { kind: 'route', eventId: 42 } as unknown as ReplicaDesired]) {
+      await expect(
+        refusalFor({ kind: 'committed', schemaVersion: 2, revision: '7', desired }),
+      ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+    }
+  });
+
+  it('refuses an unsupported version on a root marker, which serves without a Slug check', async () => {
+    // A root marker has no Slug to cross-check, so the version gate is the only
+    // thing standing between an unreadable v2 record and a served doorway.
+    await expect(
+      refusalFor(
+        {
+          kind: 'committed',
+          schemaVersion: 2,
+          revision: '7',
+          desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
+        },
+        null,
+      ),
+    ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
+
+  it('refuses an unsupported version on the tombstone arm rather than publishing its revision', async () => {
+    // A tombstone reads as `unknown-host` WITH the revision it was deleted at,
+    // and that revision is evidence: § Audit and recovery has `clear-lock`
+    // compare three public `{reason, revision}` observations against committed
+    // state. Quoting one out of a record written under a schema this build
+    // cannot read would attribute a revision the router never actually
+    // understood, so the version gates that arm too.
+    for (const lookup of [
+      { kind: 'unknown-host', schemaVersion: 2, revision: '12' },
+      { kind: 'unknown-host', revision: '12' },
+    ] as RegistryLookup[]) {
+      await expect(refusalFor(lookup)).resolves.toEqual({
+        reason: 'replica-malformed',
+        revision: null,
+      });
+    }
+  });
+
+  it('still answers a versionless UNINITIALIZED object as a plain unknown address', async () => {
+    // No committed record means no version to stamp and none to check. This is
+    // the ordinary unknown-address case and must not be dragged into
+    // `replica-malformed` by the gate above.
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+  });
+});
+
 describe('a lookup that cannot be completed', () => {
   it('fails closed when the registry binding is absent', async () => {
     const deps: ResolveDeps = { registry: null };
@@ -543,7 +652,7 @@ describe('the revision a refusal was decided from', () => {
     // the revision and dropping the projection. The address stays
     // indistinguishable from an unknown one in its REASON; what it does not
     // hide is a revision the threat model already calls public metadata.
-    await expect(refusalFor({ kind: 'unknown-host', revision: '12' })).resolves.toEqual({
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
       reason: 'unknown-host',
       revision: '12',
     });
@@ -570,7 +679,7 @@ describe('the revision a refusal was decided from', () => {
     // The shape rule belongs to the projection rather than to the arm: a
     // revision that reaches this module is canonical or the state is
     // malformed, and a tombstone is not exempt from it.
-    await expect(refusalFor({ kind: 'unknown-host', revision: '007' })).resolves.toEqual({
+    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '007' })).resolves.toEqual({
       reason: 'replica-malformed',
       revision: null,
     });

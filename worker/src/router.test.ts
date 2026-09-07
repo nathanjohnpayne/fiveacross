@@ -17,6 +17,7 @@ const CONFIG: RouterConfig = {
 
 const SERVING: RegistryLookup = {
   kind: 'committed',
+  schemaVersion: 1,
   revision: '42',
   desired: {
     kind: 'route',
@@ -30,6 +31,7 @@ const SERVING: RegistryLookup = {
 
 const APEX_ROOT: RegistryLookup = {
   kind: 'committed',
+  schemaVersion: 1,
   revision: '5',
   desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
 };
@@ -253,12 +255,13 @@ describe('failing closed', () => {
   // while every refusal with no record to attribute publishes none.
   it.each([
     [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host', null],
-    [{ kind: 'unknown-host', revision: '9' } as RegistryLookup, 'unknown-host', '9'],
+    [{ kind: 'unknown-host', schemaVersion: 1, revision: '9' } as RegistryLookup, 'unknown-host', '9'],
     [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable', null],
     [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed', null],
     [
       {
         kind: 'committed',
+        schemaVersion: 1,
         revision: '3',
         desired: {
           kind: 'route',
@@ -273,13 +276,14 @@ describe('failing closed', () => {
       '3',
     ],
     [
-      { kind: 'committed', revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
       'unknown-host',
       '9',
     ],
     [
       {
         kind: 'committed',
+        schemaVersion: 1,
         revision: '3',
         desired: {
           kind: 'route',
@@ -291,6 +295,34 @@ describe('failing closed', () => {
         },
       } as RegistryLookup,
       'slug-mismatch',
+      null,
+    ],
+    // A projection committed under a schema version this router build cannot
+    // read is refused with the documented header and reason, and — the part
+    // that matters — the origin is never reached for it. An additive v2 whose
+    // `desired` kept today's discriminants would otherwise be proxied as a
+    // perfectly ordinary active route (`specs/event-router-registry.md`
+    // § Failure semantics, "malformed/unsupported committed state").
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 2,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'replica-malformed',
+      null,
+    ],
+    [
+      { kind: 'unknown-host', schemaVersion: 2, revision: '9' } as RegistryLookup,
+      'replica-malformed',
       null,
     ],
   ] as const)('renders reason %#: %s', async (answer, reason, revision) => {
@@ -385,10 +417,14 @@ describe('the path-capability projection', () => {
     [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host'],
     [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
     [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
-    [{ kind: 'committed', revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup, 'unknown-host'],
+    [
+      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      'unknown-host',
+    ],
     [
       {
         kind: 'committed',
+        schemaVersion: 1,
         revision: '3',
         desired: {
           kind: 'route',
@@ -400,6 +436,24 @@ describe('the path-capability projection', () => {
         },
       } as RegistryLookup,
       'inactive',
+    ],
+    // The path capability is projected from the SAME lookup, so an unreadable
+    // schema version withholds it for the same reason it withholds the shell.
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 2,
+        revision: '3',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'replica-malformed',
     ],
   ])('returns NO capability when the lookup fails closed (%#)', async (answer, reason) => {
     const { deps } = harness({ seed: { 'bodega-bay.fiveacross.app': answer } });

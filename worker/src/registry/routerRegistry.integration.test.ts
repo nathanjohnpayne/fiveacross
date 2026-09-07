@@ -269,6 +269,76 @@ describe('the router’s registry binding, on the platform rather than on a stub
     }
   });
 
+  it('hands the committed record’s schema version across the binding, on every committed arm', async () => {
+    // The envelope is the contract between two SEPARATELY DEPLOYED Workers, so
+    // its shape is pinned here — over the real service binding, off the real
+    // Durable Object — rather than only against the projection function. What
+    // must survive the crossing is `schemaVersion`: without it an additive v2
+    // whose `desired` kept today's discriminants would reach the router looking
+    // exactly like a v1 route, and `worker/src/resolve.ts` could not return the
+    // `replica-malformed` that `specs/event-router-registry.md` § Failure
+    // semantics requires for unsupported committed state.
+    const instance = miniflare();
+    const probe = await instance.getWorker('probe');
+    const envelope = async (host: string): Promise<unknown> =>
+      ((await (await probe.fetch(`https://probe.test/?host=${host}`)).json()) as Record<string, unknown>)
+        .lookup;
+
+    await publish(instance, routePayload(ACTIVE_HOST, 'active'));
+    await publish(instance, routePayload(INACTIVE_HOST, 'disabled'));
+    await publish(instance, {
+      schemaVersion: 1,
+      revision: '1',
+      host: ROOT_TEST_HOST,
+      desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null },
+      updatedAt: new Date().toISOString(),
+    });
+    await publish(instance, {
+      schemaVersion: 1,
+      revision: '1',
+      host: TOMBSTONE_HOST,
+      desired: { kind: 'tombstone' },
+      updatedAt: new Date().toISOString(),
+    });
+
+    for (const [host, status] of [
+      [ACTIVE_HOST, 'active'],
+      [INACTIVE_HOST, 'disabled'],
+    ] as const) {
+      await expect(envelope(host), host).resolves.toEqual({
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '1',
+        desired: {
+          kind: 'route',
+          eventId: `${host.split('.')[0]}-event`,
+          status,
+          slug: host.split('.')[0],
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      });
+    }
+
+    await expect(envelope(ROOT_TEST_HOST)).resolves.toEqual({
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '1',
+      desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null },
+    });
+
+    // A tombstone collapses to `unknown-host` and keeps both the revision the
+    // recovery machine observes and the version that revision was written
+    // under; an uninitialized object has no committed record and carries
+    // neither.
+    await expect(envelope(TOMBSTONE_HOST)).resolves.toEqual({
+      kind: 'unknown-host',
+      revision: '1',
+      schemaVersion: 1,
+    });
+    await expect(envelope(UNKNOWN_HOST)).resolves.toEqual({ kind: 'unknown-host' });
+  }, 30_000);
+
   it('places an attacker’s first unknown-host lookup at the fixed hint without blocking later admission', async () => {
     // An unknown-host lookup instantiates and reads an empty object. If that
     // first touch could be placed by the caller's geography, an attacker could

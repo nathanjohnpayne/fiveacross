@@ -138,6 +138,38 @@ function notFound(reason: NotFoundReason, revision: string | null = null): Resol
 }
 
 /**
+ * The projection schema versions THIS router build knows how to interpret.
+ *
+ * Declared here rather than imported from the registry's contracts module, and
+ * the distinction is the whole mechanism: the registry stamps a committed
+ * record with the version it was WRITTEN under, and this set is the version or
+ * versions this deployment can READ. They are different facts about two
+ * separately deployed Workers, and a single shared constant would silently make
+ * every registry schema bump look supported to a router that had merely been
+ * rebuilt against it.
+ *
+ * Widening it is therefore a deliberate edit made together with the code that
+ * understands the new shape — never a consequence of the registry moving.
+ */
+const SUPPORTED_PROJECTION_SCHEMA_VERSIONS: ReadonlySet<number> = new Set([1]);
+
+/**
+ * Fail-closed on the version BEFORE anything is read out of the record.
+ *
+ * `specs/event-router-registry.md` § Failure semantics gives unsupported
+ * committed state the same closed answer as malformed state, and this is the
+ * only check that can deliver it: a future schema whose `desired` keeps today's
+ * discriminants — an additive v2 — is byte-indistinguishable from a v1 route
+ * once the version is gone, so a router that reads the projection first has
+ * already served it under the wrong rules. Absent, non-numeric and merely
+ * unrecognised versions are all the same answer, because "I cannot tell what
+ * this record means" is one condition however it arrives.
+ */
+function isSupportedProjectionSchemaVersion(value: unknown): value is number {
+  return typeof value === 'number' && SUPPORTED_PROJECTION_SCHEMA_VERSIONS.has(value);
+}
+
+/**
  * Whether the projection's `pathNamespace` is the one this host may carry.
  *
  * Compared against a single expected VALUE rather than against membership of
@@ -253,6 +285,13 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       // is present and NOT canonical is judged the same way one on a committed
       // projection is — the shape rule is the projection's, not the arm's.
       if (lookup.revision === undefined) return notFound('unknown-host');
+      // A revision on this arm came from a COMMITTED record, so it is subject
+      // to the same version gate the committed arm applies. Publishing it under
+      // an unsupported schema would offer the recovery machine a revision this
+      // Worker cannot claim to have read correctly, and § Audit and recovery
+      // makes that public `{reason, revision}` pair the evidence `clear-lock`
+      // compares against committed state.
+      if (!isSupportedProjectionSchemaVersion(lookup.schemaVersion)) return notFound('replica-malformed');
       if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
       return notFound('unknown-host', lookup.revision);
     case 'unavailable':
@@ -267,6 +306,11 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       return notFound('replica-malformed');
   }
 
+  // THE VERSION FIRST, then everything the record says. `desired` is read
+  // under the rules of a particular schema, so a version this build does not
+  // understand has to be refused before any field of it is interpreted — that
+  // ordering is the fail-closed half of the contract, not a stylistic choice.
+  if (!isSupportedProjectionSchemaVersion(lookup.schemaVersion)) return notFound('replica-malformed');
   if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
   const revision = lookup.revision;
   const desired = lookup.desired;
