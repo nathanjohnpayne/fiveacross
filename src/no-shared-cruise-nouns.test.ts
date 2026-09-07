@@ -123,7 +123,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
       offenders,
       offenders.length
         ? `Cruise vocabulary in a string that every Edition renders:\n${report}\n\n` +
-            'Move it to `src/editions.ts` — a token on `EditionLexicon` if the sentence ' +
+            'Move it to the Edition table in `src/edition-brands.ts` — a token on `EditionLexicon` if the sentence ' +
             'skeleton survives the swap, a whole-string override on `EditionBrand` if it ' +
             'does not (#608). If the string is genuinely Gay Cruise Bingo content or an ' +
             "Edition-scoped value, add the file to this test's ALLOWED map with the reason."
