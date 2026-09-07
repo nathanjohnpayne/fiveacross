@@ -393,56 +393,79 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
 }
 
 /**
- * A project directory whose Functions codebase is a WRITABLE COPY and whose
- * every other entry is a symlink to the original.
+ * A project directory in which EVERY configured Functions source dir is a
+ * writable copy and every other entry is a symlink to the original.
  *
  * A Functions build is not self-contained — this repository's own
  * `functions/src` imports `../../src/domainTypes`, and a hook may be spelled
- * with a project-relative `--prefix` — so the copy has to sit at the same
+ * with a project-relative `--prefix` — so each copy has to sit at the same
  * project-relative path inside a directory that otherwise looks like the whole
  * project. Symlinks give that view for the cost of one `readdir` per path
  * segment, where copying the project would mean copying whatever build output,
  * test artifacts, or nested worktrees happen to live in it.
  *
+ * ALL source dirs are copied, not just the one being inventoried, because
+ * Firebase may run another codebase's hook in the same deploy and that hook can
+ * write anywhere (`getReleventConfigs`; see `relevantFunctionsConfigs`).
+ *
  * `.git` is deliberately NOT exposed: no Functions build needs it, and a hook
  * that reached through it would be reaching into the real repository.
  *
  * The boundary this draws is therefore exact rather than absolute: everything a
- * Functions build WRITES — the source dir and its artifact — is a copy, while
- * everything it READS outside that dir is the original. A hook that deliberately
- * wrote through one of the symlinks would touch the real tree, but that hook
- * writes to the same place a few steps later when `firebase deploy` runs it for
- * real, and `deploy.sh` builds the app after this point, so nothing it could
- * leave behind survives the deploy it precedes.
+ * Functions build WRITES — a source dir and its artifact — is a copy, while
+ * everything it READS outside those dirs is the original. A hook that
+ * deliberately wrote through one of the symlinks would touch the real tree, but
+ * that hook writes to the same place a few steps later when `firebase deploy`
+ * runs it for real, and `deploy.sh` builds the app after this point, so nothing
+ * it could leave behind survives the deploy it precedes.
  */
-async function stageProjectOverlay({ projectDir, scratchProject, sourceRel, links }) {
+async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, links }) {
   const linkTo = async (from, to) => {
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
     await symlink(from, to, type);
     links.push(to);
   };
 
-  let realDir = projectDir;
-  let scratchDir = scratchProject;
-  for (const segment of sourceRel.split("/")) {
+  const copySourceDir = async (realDir, scratchDir) => {
+    await cp(realDir, scratchDir, {
+      recursive: true,
+      dereference: false,
+      // `node_modules` is symlinked instead: copying it would cost minutes,
+      // and the deploy's own build reads the very same tree.
+      filter: (entry) => basename(entry) !== "node_modules",
+    });
+    const modules = join(realDir, "node_modules");
+    if (existsSync(modules)) await linkTo(modules, join(scratchDir, "node_modules"));
+  };
+
+  const overlay = async (realDir, scratchDir, remaining) => {
     await mkdir(scratchDir, { recursive: true });
+    const claimed = new Set(remaining.map((segments) => segments[0]));
     for (const entry of await readdir(realDir)) {
-      if (entry === segment || entry === ".git") continue;
+      if (claimed.has(entry) || entry === ".git") continue;
       await linkTo(join(realDir, entry), join(scratchDir, entry));
     }
-    realDir = join(realDir, segment);
-    scratchDir = join(scratchDir, segment);
-  }
+    for (const segment of claimed) {
+      const nextReal = join(realDir, segment);
+      const nextScratch = join(scratchDir, segment);
+      const deeper = remaining
+        .filter((segments) => segments[0] === segment)
+        .map((segments) => segments.slice(1));
+      // A source dir that also CONTAINS another source dir is copied whole,
+      // which places the nested one too.
+      if (deeper.some((segments) => segments.length === 0)) {
+        await copySourceDir(nextReal, nextScratch);
+      } else {
+        await overlay(nextReal, nextScratch, deeper);
+      }
+    }
+  };
 
-  await cp(realDir, scratchDir, {
-    recursive: true,
-    dereference: false,
-    // `node_modules` is symlinked instead: copying it would cost minutes, and
-    // the deploy's own build reads the very same tree.
-    filter: (entry) => basename(entry) !== "node_modules",
-  });
-  const modules = join(realDir, "node_modules");
-  if (existsSync(modules)) await linkTo(modules, join(scratchDir, "node_modules"));
+  await overlay(
+    projectDir,
+    scratchProject,
+    sourceRels.map((relative) => relative.split("/")),
+  );
 }
 
 /**
@@ -455,8 +478,9 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRel, link
  * GOOGLE_CLOUD_QUOTA_PROJECT}` from the codebase's own dotenv files and hands
  * it to the delegate, whose `spawnFunctionsProcess` then passes through only
  * `HOME`, `PATH`, `NODE_ENV` and `FUNCTIONS_CONTROL_API` — deliberately NOT the
- * whole ambient environment. Both halves are mirrored, the dotenv half through
- * firebase-tools' own loader reading the staged copy.
+ * whole ambient environment — plus the serialized runtime config. All of that
+ * is mirrored, the dotenv half through firebase-tools' own loader reading the
+ * staged copy.
  */
 function discoveryEnvironment({ scratchProject, scratchSource, project }) {
   const userEnvs = functionsEnv.loadUserEnvs({
@@ -464,9 +488,19 @@ function discoveryEnvironment({ scratchProject, scratchSource, project }) {
     projectId: project,
     projectDir: scratchProject,
   });
+  const firebaseConfig = { projectId: project };
   const environment = {
     ...userEnvs,
-    ...functionsEnv.loadFirebaseEnvs({ projectId: project }, project),
+    ...functionsEnv.loadFirebaseEnvs(firebaseConfig, project),
+    // `spawnFunctionsProcess` serializes the codebase's runtime config here
+    // whenever it is non-empty, and `prepare.js` makes it at least
+    // `{firebase: firebaseConfig}` — so omitting it entirely is itself a
+    // divergence a `process.env.CLOUD_RUNTIME_CONFIG` branch could see (Codex
+    // P2, round 11). The legacy `functions.config()` namespaces on top of it
+    // come from an authenticated fetch, so the child watches this value the
+    // same way it watches FIREBASE_CONFIG and forfeits if the ARTIFACT's own
+    // code consults something neither can supply.
+    CLOUD_RUNTIME_CONFIG: JSON.stringify({ firebase: firebaseConfig }),
     GOOGLE_CLOUD_QUOTA_PROJECT: project,
     FUNCTIONS_CONTROL_API: "true",
     HOME: process.env.HOME,
@@ -492,142 +526,169 @@ function refused(reason) {
 }
 
 /**
- * Build a codebase the way the deploy will, then inventory the endpoint ids the
- * runtime loader would discover in the result.
+ * The Functions configs whose `predeploy` hooks THIS deploy will run, in the
+ * order `firebase-tools` runs them.
+ *
+ * Mirrors `lifecycleHooks.js` `getReleventConfigs`, whose fallback is the part
+ * that matters: when an `--only functions:<x>` selector does not name a
+ * configured codebase — the ordinary case, where `<x>` is an endpoint id — NO
+ * target is matched and the CLI reverts to running EVERY Functions config's
+ * hooks. So a second codebase's hook runs even for a scope that names only the
+ * first, and it can overwrite the first's artifact (Codex P2, round 11).
+ */
+function relevantFunctionsConfigs(only, configs) {
+  if (!only) return configs;
+  const targets = only.split(",");
+  if (targets.includes("functions")) return configs;
+  const functionTargets = targets
+    .filter((target) => target.startsWith("functions:"))
+    .map((target) => target.replace("functions:", ""));
+  const matched = new Map(functionTargets.map((target) => [target, false]));
+  const selected = [];
+  for (const config of configs) {
+    // The RAW field, as `getReleventConfigs` reads it: a config without a
+    // `codebase` key takes the unconditional branch, and is NOT the string
+    // "default" there even though that is the codebase it deploys as.
+    if (!config.rawCodebase) {
+      selected.push(config);
+      continue;
+    }
+    const found = functionTargets.find((target) => config.rawCodebase === target.split(":")[0]);
+    if (found !== undefined) {
+      selected.push(config);
+      matched.set(found, true);
+    }
+  }
+  if (![...matched.values()].every(Boolean)) return configs;
+  return selected;
+}
+
+/**
+ * Build the project the way the deploy will, then inventory the endpoint ids
+ * the runtime loader would discover in each codebase's artifact.
  *
  * WHY BUILD. `--only functions:<name>` matches DEPLOYED ids, and those come
  * from `package.json.main` — the artifact — never from `src/index.ts`. Between
  * the two sit the `predeploy` hooks, the npm build script, npm's implicit
  * `pre`/`post` lifecycle scripts, and tsconfig; each is an arbitrary shell
- * program, and eight rounds of review found a new way for one of them to make
- * the artifact disagree with the source (`true || tsc`,
+ * program, and successive rounds of review found a new way for one of them to
+ * make the artifact disagree with the source (`true || tsc`,
  * `tsc && cp group.js lib/index.js`, a `postbuild` swap, an earlier hook that
- * rewrites `src/index.ts`). Modelling shell semantics statically is unbounded;
- * running the program is exact.
+ * rewrites `src/index.ts`, another codebase's hook entirely). Modelling shell
+ * semantics statically is unbounded; running the program is exact.
  *
  * WHY THIS IS NOT NEW TRUST. These are the same hooks, from the same config,
  * that `firebase deploy` executes minutes later in the same working tree. The
  * only new thing is WHEN.
  *
  * WHY A SCRATCH PROJECT. Building in place would leave the classifier's own
- * artifact in the developer's tree. Instead `stageProjectOverlay` builds a
- * temporary project directory in which the CODEBASE SOURCE DIR is a real copy
- * (minus `node_modules`, symlinked so `tsc` and the SDK resolve) and every
- * other project entry is a symlink to the original. The copy is where a build
- * writes, so the working tree's Functions source and artifact are untouched;
- * the symlinks are what let a cross-directory import such as
- * `../../src/domainTypes` and a hook spelled `npm --prefix functions run build`
- * resolve exactly as they do in the real project.
+ * artifacts in the developer's tree. `stageProjectOverlay` builds a temporary
+ * project in which every Functions source dir is a copy and everything else is
+ * a symlink to the original.
  *
  * FAILS CLOSED on every uncertainty: an unmirrorable source path, a staging
  * failure, a non-zero or timed-out hook, a discovery manifest, an artifact that
- * will not load, or a walk that throws.
+ * will not load, or a walk that throws — each of which refuses only what it
+ * makes unprovable, except a hook failure, which refuses the whole project
+ * because the tree it left behind is not the one the deploy will produce.
  */
-async function buildAndInventoryArtifact({
+async function buildAndInventoryProject({
   projectDir,
-  sourceRel,
-  predeploy,
+  only,
   project,
   predeployTimeoutMs,
+  configs,
 }) {
-  const steps =
-    typeof predeploy === "string"
-      ? [predeploy]
-      : Array.isArray(predeploy)
-        ? predeploy
-        : predeploy === undefined || predeploy === null
-          ? []
-          : null;
-  if (steps === null || steps.some((step) => typeof step !== "string")) {
-    return refused("predeploy is not a string or list of strings");
+  /** @type {Map<string, { authoritative: boolean, endpoints: string[], groups: string[] }>} */
+  const inventories = new Map();
+  const refuseAll = (reason) => {
+    const answer = refused(reason);
+    for (const config of configs) inventories.set(config.codebase, answer);
+    return inventories;
+  };
+
+  const relevant = relevantFunctionsConfigs(only, configs);
+  const unstageable = relevant.find((config) => !config.sourceRel);
+  if (unstageable) {
+    // Its hooks run in the real deploy and cannot be reproduced here, so no
+    // codebase's artifact in this project can be trusted.
+    return refuseAll(
+      `codebase ${unstageable.codebase} has no mirrorable local source, so its predeploy hooks cannot be reproduced`,
+    );
   }
-  // See `runPredeployHook`: the CLI's own quoting does not survive a backslash,
-  // so a hook containing one cannot be reproduced exactly and is refused rather
-  // than approximated.
-  if (steps.some((step) => step.includes("\\"))) {
-    return refused("a predeploy hook contains a backslash, whose quoting cannot be mirrored");
+  for (const config of relevant) {
+    if (config.steps === null) return refuseAll(`codebase ${config.codebase} has a malformed predeploy`);
+    // See `runPredeployHook`: the CLI's own quoting does not survive a
+    // backslash, so a hook containing one cannot be reproduced and is refused
+    // rather than approximated.
+    if (config.steps.some((step) => step.includes("\\"))) {
+      return refuseAll(
+        `a predeploy hook of codebase ${config.codebase} contains a backslash, whose quoting cannot be mirrored`,
+      );
+    }
   }
 
-  const realSource = resolve(projectDir, sourceRel);
-  if (!existsSync(realSource)) return refused(`no Functions source at ${sourceRel}`);
+  const staged = configs.filter((config) => config.sourceRel);
+  if (staged.length === 0) return refuseAll("no Functions codebase has a mirrorable local source");
+  for (const config of staged) {
+    if (!existsSync(resolve(projectDir, config.sourceRel))) {
+      return refuseAll(`no Functions source at ${config.sourceRel}`);
+    }
+  }
 
   const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
   const scratchProject = join(scratch, "project");
-  const scratchSource = resolve(scratchProject, sourceRel);
   /** Every symlink this staging created, so cleanup can unlink them by name. */
   const links = [];
   try {
     try {
-      await stageProjectOverlay({ projectDir, scratchProject, sourceRel, links });
+      await stageProjectOverlay({
+        projectDir,
+        scratchProject,
+        sourceRels: staged.map((config) => config.sourceRel),
+        links,
+      });
     } catch (error) {
-      return refused(
-        `could not stage the Functions source — ${error instanceof Error ? error.message : String(error)}`,
+      return refuseAll(
+        `could not stage the Functions sources — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
-    for (const command of steps) {
-      const hook = await runPredeployHook(command, {
-        projectDir: scratchProject,
-        resourceDir: scratchSource,
-        project,
-        timeoutMs: predeployTimeoutMs,
-      });
-      if (!hook.ok) {
-        return refused(`predeploy hook failed: ${command} — ${hook.output.trim().slice(-400)}`);
+    for (const config of relevant) {
+      const resourceDir = resolve(scratchProject, config.sourceRel);
+      for (const command of config.steps) {
+        const hook = await runPredeployHook(command, {
+          projectDir: scratchProject,
+          resourceDir,
+          project,
+          timeoutMs: predeployTimeoutMs,
+        });
+        if (!hook.ok) {
+          return refuseAll(
+            `predeploy hook failed: ${command} — ${hook.output.trim().slice(-400)}`,
+          );
+        }
       }
     }
 
-    // The Node delegate tries `functions.yaml` BEFORE running the SDK's
-    // discovery, so a manifest — committed, or written by a hook — decides the
-    // deployed surface and the artifact no longer does
-    // (`runtimes/node/index.js` `discoverBuild`). Refuse rather than parse it.
-    const manifests = (await readdir(scratchSource)).filter((name) =>
-      /^functions\.ya?ml$/i.test(name),
-    );
-    if (manifests.length > 0) {
-      return refused(`${manifests[0]} supplies discovery instead of the artifact`);
-    }
-
-    let walkEnv;
-    try {
-      walkEnv = discoveryEnvironment({ scratchProject, scratchSource, project });
-    } catch (error) {
-      return refused(
-        `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+    for (const config of staged) {
+      inventories.set(
+        config.codebase,
+        await inventoryCodebaseArtifact({
+          scratchProject,
+          scratchSource: resolve(scratchProject, config.sourceRel),
+          sourceRel: config.sourceRel,
+          scratch,
+          project,
+        }),
       );
     }
-    const outFile = join(scratch, "endpoints.json");
-    const walk = await runCapturedProcess(
-      process.execPath,
-      [ARTIFACT_WALKER, scratchSource, outFile],
-      {
-        // cwd and environment both mirror the SDK process the CLI spawns.
-        cwd: scratchSource,
-        timeout: ARTIFACT_WALK_TIMEOUT_MS,
-            env: walkEnv,
-      },
-    );
-    let reported;
-    try {
-      reported = JSON.parse(await readFile(outFile, "utf8"));
-    } catch {
-      return refused(
-        `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
-      );
+    for (const config of configs) {
+      if (!inventories.has(config.codebase)) {
+        inventories.set(config.codebase, refused("codebase has no mirrorable local source"));
+      }
     }
-    if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
-      return refused(reported?.reason ?? "the artifact walk was inconclusive");
-    }
-    const groups = Array.isArray(reported.groups) ? reported.groups : [];
-    if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
-      console.error(`  classifier: ${sourceRel} deploys ${reported.endpoints.join(", ")}`);
-      // Groups are the ids a `--only functions:<group>` scope expands to. They
-      // never grant the exemption — the prefix rule below already refuses a
-      // selector any of their endpoints falls inside — but they are what makes
-      // such a refusal legible.
-      if (groups.length > 0) console.error(`  classifier: ${sourceRel} groups ${groups.join(", ")}`);
-    }
-    return { authoritative: true, endpoints: reported.endpoints, groups };
+    return inventories;
   } finally {
     // Unlink the borrowed `node_modules` explicitly before the recursive
     // remove. `fs.rm` already unlinks symlinks rather than descending them,
@@ -638,24 +699,94 @@ async function buildAndInventoryArtifact({
   }
 }
 
+/** Load one built codebase in a sandboxed child and read back its endpoint ids. */
+async function inventoryCodebaseArtifact({
+  scratchProject,
+  scratchSource,
+  sourceRel,
+  scratch,
+  project,
+}) {
+  // The Node delegate tries `functions.yaml` BEFORE running the SDK's
+  // discovery, so a manifest — committed, or written by a hook — decides the
+  // deployed surface and the artifact no longer does
+  // (`runtimes/node/index.js` `discoverBuild`). Refuse rather than parse it.
+  let manifests;
+  try {
+    manifests = (await readdir(scratchSource)).filter((name) =>
+      /^functions\.ya?ml$/i.test(name),
+    );
+  } catch (error) {
+    return refused(
+      `could not read ${sourceRel} — ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (manifests.length > 0) {
+    return refused(`${manifests[0]} supplies discovery instead of the artifact`);
+  }
+
+  let walkEnv;
+  try {
+    walkEnv = discoveryEnvironment({ scratchProject, scratchSource, project });
+  } catch (error) {
+    return refused(
+      `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const outFile = join(scratch, `endpoints-${Buffer.from(sourceRel).toString("hex")}.json`);
+  const walk = await runCapturedProcess(
+    process.execPath,
+    [ARTIFACT_WALKER, scratchSource, outFile],
+    {
+      // cwd and environment both mirror the SDK process the CLI spawns.
+      cwd: scratchSource,
+      timeout: ARTIFACT_WALK_TIMEOUT_MS,
+      env: walkEnv,
+    },
+  );
+  let reported;
+  try {
+    reported = JSON.parse(await readFile(outFile, "utf8"));
+  } catch {
+    return refused(
+      `the artifact walk produced no result — ${walk.output.trim().slice(-400) || "no output"}`,
+    );
+  }
+  if (!reported || reported.authoritative !== true || !Array.isArray(reported.endpoints)) {
+    return refused(reported?.reason ?? "the artifact walk was inconclusive");
+  }
+  const groups = Array.isArray(reported.groups) ? reported.groups : [];
+  if (process.env.FIREBASE_DEPLOY_CLASSIFIER_DEBUG) {
+    console.error(`  classifier: ${sourceRel} deploys ${reported.endpoints.join(", ")}`);
+    // Groups are the ids a `--only functions:<group>` scope expands to. They
+    // never grant the exemption — the prefix rule already refuses a selector
+    // any of their endpoints falls inside — but they make a refusal legible.
+    if (groups.length > 0) console.error(`  classifier: ${sourceRel} groups ${groups.join(", ")}`);
+  }
+  return { authoritative: true, endpoints: reported.endpoints, groups };
+}
+
 /**
- * The artifact inventory for one codebase, built at most once per process.
+ * The artifact inventories for this project, built at most once per process.
  *
  * Lazy on purpose: a `--only hosting` run, a whole-codebase `--only functions`,
  * and every selector the source pre-check already refuses all classify without
- * building anything.
+ * building anything. Project-wide rather than per-codebase because the hook set
+ * Firebase runs is chosen by the `--only` string, not by the codebase.
  *
  * Once per process is also the right lifetime. `deploy.sh` classifies once per
  * deploy, so the inventory describes the tree as it stood a few steps before
  * the release — the same window in which the app build and the deploy's own
- * predeploy run. Editing the codebase inside that window invalidates the
+ * predeploy run. Editing a codebase inside that window invalidates the
  * classification exactly as it invalidates everything else the deploy computed.
  */
-function artifactEndpointInventory(entry) {
-  if (!entry.artifactInventory) {
-    entry.artifactInventory = buildAndInventoryArtifact(entry.build);
+async function artifactEndpointInventory(inventory, codebase) {
+  if (!inventory.artifacts) {
+    inventory.artifacts = buildAndInventoryProject(inventory.staging);
   }
-  return entry.artifactInventory;
+  const inventories = await inventory.artifacts;
+  return inventories.get(codebase) ?? { authoritative: false, endpoints: [], groups: [] };
 }
 
 /**
@@ -675,26 +806,29 @@ function artifactEndpointInventory(entry) {
  * whose codebase differs from the filter's, so uncertainty in `beta` cannot
  * widen an explicitly qualified `alpha` deployment.
  */
-async function singleEndpointInventory(configSource, configPath, project, predeployTimeoutMs) {
+async function singleEndpointInventory(
+  configSource,
+  configPath,
+  project,
+  only,
+  predeployTimeoutMs,
+) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
   /**
-   * @type {Map<string, {
-   *   candidates: Set<string>,
-   *   blocked: string | null,
-   *   build: { projectDir: string, sourceRel: string, predeploy: unknown, project: string } | null,
-   *   artifactInventory?: Promise<{ authoritative: boolean, endpoints: string[] }>,
-   * }>}
+   * @type {Map<string, { candidates: Set<string>, blocked: string | null }>}
    */
   const byCodebase = new Map();
   const codebaseNames = new Set();
   const projectDir = dirname(configPath);
+  /** Every config, in order, as the staging and hook mirror needs them. */
+  const configs = [];
 
   const entryFor = (codebase) => {
     let entry = byCodebase.get(codebase);
     if (!entry) {
-      entry = { candidates: new Set(), blocked: null, build: null };
+      entry = { candidates: new Set(), blocked: null };
       byCodebase.set(codebase, entry);
     }
     return entry;
@@ -709,6 +843,7 @@ async function singleEndpointInventory(configSource, configPath, project, predep
       for (const instance of Object.keys(functionsConfig.instances ?? {})) {
         codebaseNames.add(instance);
         entryFor(instance).blocked = "kit codebase";
+        configs.push({ codebase: instance, rawCodebase: instance, sourceRel: null, steps: [] });
       }
       continue;
     }
@@ -720,8 +855,17 @@ async function singleEndpointInventory(configSource, configPath, project, predep
     if (explicitCodebase) codebaseNames.add(explicitCodebase);
     const codebase = explicitCodebase || "default";
     const entry = entryFor(codebase);
-
     const sourceRel = normalizedSourcePath(functionsConfig.source);
+    configs.push({
+      // Two names, because they differ: `codebase` is what this classifier
+      // inventories under (an implicit config deploys as "default"), while
+      // `rawCodebase` is the config field `getReleventConfigs` reads.
+      codebase,
+      rawCodebase: explicitCodebase,
+      sourceRel,
+      steps: predeploySteps(functionsConfig.predeploy),
+    });
+
     if (!sourceRel) {
       // A remoteSource codebase (or any shape without a mirrorable local
       // source) exists and can be deployed; it simply cannot be built here.
@@ -748,17 +892,11 @@ async function singleEndpointInventory(configSource, configPath, project, predep
 
     // Two configs sharing one codebase name would each need their own build;
     // the exemption is not worth the ambiguity.
-    if (entry.build) {
+    if (entry.staged) {
       entry.blocked = "several configs share this codebase";
       continue;
     }
-    entry.build = {
-      projectDir,
-      sourceRel,
-      predeploy: functionsConfig.predeploy,
-      project: project || "",
-      predeployTimeoutMs,
-    };
+    entry.staged = true;
 
     // The pre-check reads the conventional TypeScript entrypoint. A codebase
     // written some other way simply offers no candidates and is refused
@@ -772,7 +910,32 @@ async function singleEndpointInventory(configSource, configPath, project, predep
     }
     for (const name of sourceEndpointCandidates(source)) entry.candidates.add(name);
   }
-  return { byCodebase, codebaseNames };
+
+  return {
+    byCodebase,
+    codebaseNames,
+    staging: {
+      projectDir,
+      only,
+      project: project || "",
+      predeployTimeoutMs,
+      configs,
+    },
+  };
+}
+
+/** `predeploy` as the list of shell commands the CLI would run, or `null`. */
+function predeploySteps(predeploy) {
+  const steps =
+    typeof predeploy === "string"
+      ? [predeploy]
+      : Array.isArray(predeploy)
+        ? predeploy
+        : predeploy === undefined || predeploy === null
+          ? []
+          : null;
+  if (steps === null || steps.some((step) => typeof step !== "string")) return null;
+  return steps;
 }
 
 /**
@@ -812,12 +975,12 @@ async function selectorIsProvableSingleEndpoint(selector, inventory) {
   if (name.includes(".") || name.includes("-")) return false;
 
   const entry = inventory.byCodebase.get(codebase);
-  if (!entry || entry.blocked || !entry.build) return false;
+  if (!entry || entry.blocked) return false;
   // Fast pre-check: no build for a name the source never declares as a builder
   // call. This can only withhold an exemption, never grant one.
   if (!entry.candidates.has(name)) return false;
 
-  const artifact = await artifactEndpointInventory(entry);
+  const artifact = await artifactEndpointInventory(inventory, codebase);
   if (!artifact.authoritative) return false;
   // `endpointMatchesFilter`, applied to the ids the runtime loader would
   // actually discover: the selector is one endpoint only when exactly one
@@ -1104,6 +1267,7 @@ export async function classifyFirebaseDeployRequest(
     configSource,
     configPath,
     project,
+    only,
     predeployTimeoutMs,
   );
   // deploy's before-chain runs this target reduction before

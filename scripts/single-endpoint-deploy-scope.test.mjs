@@ -48,8 +48,17 @@ const STUB_SDK_MODULES = {
     version: "0.0.0-stub",
     main: "index.js",
   }),
-  "index.js": STUB_SDK_INDEX,
-  "index.d.ts": "export declare function builder(factory: string): (...a: any[]) => any;\n",
+  "index.js": [
+    STUB_SDK_INDEX,
+    // A real SDK export whose name matches the `onX` shape but which builds no
+    // endpoint: `onInit(callback): void`. The artifact walk must see what it
+    // really returns.
+    "exports.onInit = () => undefined;",
+  ].join("\n"),
+  "index.d.ts": [
+    "export declare function builder(factory: string): (...a: any[]) => any;",
+    "export declare function onInit(callback: () => void): void;",
+  ].join("\n"),
   "v2/scheduler.js": 'module.exports = { onSchedule: require("../index.js").builder("onSchedule") };\n',
   "v2/scheduler.d.ts":
     "export declare function onSchedule(schedule: string, handler: (...a: any[]) => any): any;\n",
@@ -210,6 +219,48 @@ async function withCodebases(sources, run) {
       );
     }
     await writeUnder(fixture, "firebase.json", JSON.stringify({ functions }));
+    await run(resolve(fixture, "firebase.json"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A project with a default codebase plus one named codebase whose predeploy
+ * hook is under the test's control.
+ *
+ * The point is `getReleventConfigs`: an `--only functions:<endpoint>` scope
+ * names no configured codebase, so NO target matches and the CLI reverts to
+ * running EVERY Functions config's hooks. The second codebase's hook therefore
+ * runs even though the scope never mentions it.
+ */
+async function withNeighbourCodebase({ neighbourPredeploy, files = {} }, run) {
+  const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-neighbour-"));
+  try {
+    for (const [dir, source] of [
+      ["functions-default", endpoint("daily")],
+      ["functions-beta", endpoint("betaOnly")],
+    ]) {
+      const codebaseDir = resolve(fixture, dir);
+      await mkdir(resolve(codebaseDir, "src"), { recursive: true });
+      await installToolchain(codebaseDir);
+      await writeUnder(codebaseDir, "package.json", JSON.stringify(DEFAULT_PACKAGE));
+      await writeUnder(codebaseDir, "tsconfig.json", JSON.stringify(DEFAULT_TSCONFIG));
+      await writeUnder(codebaseDir, "src/index.ts", source);
+    }
+    for (const [file, contents] of Object.entries(files)) {
+      await writeUnder(fixture, file, contents);
+    }
+    await writeUnder(
+      fixture,
+      "firebase.json",
+      JSON.stringify({
+        functions: [
+          { source: "functions-default", predeploy: PREDEPLOY },
+          { source: "functions-beta", codebase: "beta", predeploy: neighbourPredeploy },
+        ],
+      }),
+    );
     await run(resolve(fixture, "firebase.json"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -515,6 +566,26 @@ describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, 
     );
   });
 
+  it("refuses an onX SDK export that builds no endpoint", async () => {
+    // `onInit(callback): void` matches the `onX` shape the source pre-check
+    // admits, but really returns `undefined`, so the fallback below runs and
+    // the artifact carries a group. The pre-check is allowed to over-admit
+    // precisely because the artifact answers (Codex P2, round 11).
+    await withFunctionsSource(
+      [
+        "import { onInit } from 'firebase-functions';",
+        BUILDER_IMPORT,
+        "export let daily: any = onInit(() => {});",
+        "if (!daily) daily = { submitBugReport: onSchedule('every day 00:00', () => {}) };",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it("exempts a reassignable binding that is never reassigned", async () => {
     // Discriminates the case above: `let` is not itself the hazard, the
     // overwrite is, and only the artifact can tell them apart.
@@ -675,26 +746,33 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("refuses an artifact that branches on a FIREBASE_CONFIG field only the deploy can supply", async () => {
-    // `prepare.js` hands discovery the project's adminSdkConfig, which needs an
-    // authenticated lookup a local preflight must not make. Reading `projectId`
-    // is fine — it is known — but asking for a field this classifier could not
-    // supply means the real value might have selected a different surface.
-    await withPrewrittenArtifact(
-      [
-        'const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");',
-        "exports.daily = config.storageBucket ? { submitBugReport: endpoint() } : endpoint();",
-      ].join("\n"),
-      async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
-          ALL_INVOKERS_CONSERVATIVE,
-        );
-      },
-    );
-  });
+  it.each([
+    ["a direct read", 'exports.daily = config.storageBucket ? { submitBugReport: endpoint() } : endpoint();'],
+    ["a membership test", 'exports.daily = "storageBucket" in config ? { submitBugReport: endpoint() } : endpoint();'],
+    ["an own-property test", 'exports.daily = Object.hasOwn(config, "storageBucket") ? { submitBugReport: endpoint() } : endpoint();'],
+    ["enumeration", 'exports.daily = Object.keys(config).length > 1 ? { submitBugReport: endpoint() } : endpoint();'],
+  ])(
+    "refuses an artifact that branches on FIREBASE_CONFIG by %s",
+    async (_label, branch) => {
+      // `prepare.js` hands discovery the project's adminSdkConfig, which needs
+      // an authenticated lookup a local preflight must not make. Reading
+      // `projectId` is fine — it is known — but any way of asking about a field
+      // this classifier could not supply means the real value might have
+      // selected a different surface. Membership, descriptor and enumeration
+      // discriminate just as well as a read (Codex P2, round 11).
+      await withPrewrittenArtifact(
+        ['const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");', branch].join("\n"),
+        async (configPath) => {
+          expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+            ALL_INVOKERS_CONSERVATIVE,
+          );
+        },
+      );
+    },
+  );
 
   it("exempts an artifact that reads only the project id from FIREBASE_CONFIG", async () => {
-    // Discriminates the rule above from "any FIREBASE_CONFIG read forfeits",
+    // Discriminates the rule above from "any FIREBASE_CONFIG access forfeits",
     // which would refuse this repository's own Functions index.
     await withPrewrittenArtifact(
       [
@@ -704,6 +782,67 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       ].join("\n"),
       async (configPath) => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("refuses an artifact that branches on a legacy runtime-config namespace", async () => {
+    // `spawnFunctionsProcess` serializes the runtime config into
+    // CLOUD_RUNTIME_CONFIG, and every namespace beyond `firebase` comes from an
+    // authenticated `functions.config()` fetch.
+    await withPrewrittenArtifact(
+      [
+        'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
+        "exports.daily = runtime.someLegacyNamespace ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts an artifact that reads only the firebase half of the runtime config", async () => {
+    await withPrewrittenArtifact(
+      [
+        'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
+        "exports.daily = endpoint();",
+        "exports.daily.__endpoint.project = runtime.firebase.projectId;",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("refuses an artifact whose branch reads a real dependency's value", async () => {
+    // Nothing is stubbed, so a branch on a dependency's actual value behaves as
+    // it will at deploy time. A stub that answered `.length` with something
+    // truthy would take the other branch and miss the nested callable
+    // (Codex P2, round 11).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/node_modules/an-installed-package/package.json": JSON.stringify({
+            name: "an-installed-package",
+            version: "0.0.0",
+            main: "index.js",
+          }),
+          "functions/node_modules/an-installed-package/index.js": "exports.apps = [];\n",
+          "functions/lib/index.js": artifact(
+            [
+              'const pkg = require("an-installed-package");',
+              "exports.daily = pkg.apps.length === 0 ? { submitBugReport: endpoint() } : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
       },
     );
   });
@@ -927,6 +1066,37 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     await withCodebases({ alpha: endpoint("alphaOnly") }, async (configPath) => {
       const result = await classify(["--only", "functions:ghost:alphaOnly"], configPath);
       expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("refuses when another codebase's hook overwrites the selected artifact", async () => {
+    // `getReleventConfigs` matches `--only functions:<x>` against CODEBASE
+    // names; `daily` is an endpoint id, so nothing matches and the CLI runs
+    // EVERY config's hooks. Running only the selected codebase's would miss
+    // this entirely (Codex P2, round 11).
+    await withNeighbourCodebase(
+      {
+        neighbourPredeploy: [
+          ...PREDEPLOY,
+          "cp functions-beta/group.js functions-default/lib/index.js",
+        ],
+        files: {
+          "functions-beta/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts when the neighbouring codebase's hook leaves the artifact alone", async () => {
+    // Discriminates the case above from "any second codebase forfeits": the
+    // neighbour's hook still runs, it just does not change the answer.
+    await withNeighbourCodebase({ neighbourPredeploy: PREDEPLOY }, async (configPath) => {
+      expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
     });
   });
 

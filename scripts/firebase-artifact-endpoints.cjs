@@ -12,6 +12,18 @@
  * Modelling those shells statically is unbounded, so this script does what the
  * deploy does: it loads the artifact and asks it.
  *
+ * NOTHING IS STUBBED. An early revision replaced `firebase-functions`,
+ * `firebase-admin` and the native packages with proxies, which was a mistake of
+ * the same shape as the static modelling it replaced: a stub changes control
+ * flow. A caught `MODULE_NOT_FOUND` takes its `catch` branch under the real
+ * loader; `admin.apps.length === 0` is true under the real uninitialized SDK and
+ * false against a proxy; `onInit()` really returns `undefined` while a marker
+ * factory returns something truthy — and each divergence can hide a nested
+ * endpoint (Codex P2, rounds 10 and 11). The codebase's own dependencies are
+ * installed, the deploy loads them, and so does this: the artifact is required
+ * exactly as `firebase-functions/lib/runtime/loader.js` `loadModule` requires
+ * it, under the environment `prepare.js` gives the discovery process.
+ *
  * Run as a CHILD process
  * (`node firebase-artifact-endpoints.cjs <sourceDir> <outFile>`) against a
  * scratch copy of an ALREADY-BUILT codebase, because loading customer code is
@@ -24,21 +36,21 @@
  * because `process.stdout` is asynchronous on a pipe, so an exit could truncate
  * the answer. `authoritative: false` (with a `reason`) is the answer to every
  * uncertainty: an ESM artifact, an unexpected top-level export shape, a cyclic
- * or absurdly deep export graph, or any thrown error. The caller treats an
+ * or absurdly deep export graph, a read of a config field only the deploy's
+ * authenticated lookup could supply, or any thrown error. The caller treats an
  * absent or malformed file the same way, so a crash, a signal, or a timeout
  * also fails closed.
  *
- * Discovery is mirrored from the pinned SDK, not paraphrased:
- * `firebase-functions/lib/runtime/loader.js` `extractStack` treats a value as an
- * endpoint when it is a FUNCTION carrying an `__endpoint` OBJECT, recurses into
- * any other object under a `parent-child` id, and skips extension descriptors.
- * `firebase-tools`' Node delegate spawns the SDK's own binary with the source
- * dir as both argv and cwd, and the SDK's `loadModule` does `require(sourceDir)`
- * — so Node's own directory resolution (`package.json.main`, else `index.js`)
- * picks the artifact, and this script resolves it the same way.
+ * Discovery is mirrored from the pinned SDK, not paraphrased: `extractStack`
+ * treats a value as an endpoint when it is a FUNCTION carrying an `__endpoint`
+ * OBJECT, recurses into any other object under a `parent-child` id, and skips
+ * extension descriptors. `firebase-tools`' Node delegate spawns the SDK's own
+ * binary with the source dir as both argv and cwd, and the SDK's `loadModule`
+ * does `require(sourceDir)` — so Node's own directory resolution
+ * (`package.json.main`, else `index.js`) picks the artifact, and this script
+ * resolves it the same way.
  */
 
-const Module = require("node:module");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -47,156 +59,129 @@ const path = require("node:path");
 const MAX_DEPTH = 32;
 
 /**
- * The SDK modules whose `onX` factories BUILD endpoints: the package root, the
- * `v1`/`v2` roots, and their provider subpaths (`v2/scheduler`,
- * `v2/alerts/billing`, …). Deliberately NOT `firebase-functions/params`,
- * `/logger` or `/options`: those export helpers such as `select`, whose real
- * return value is a plain object the loader recurses INTO, so stubbing them as
- * endpoint factories would claim one endpoint where the deploy has several.
- * They load for real (or, if unresolvable, become inert like any other bare
- * module) and their real shapes flow through the walk.
- */
-const BUILDER_MODULE = /^firebase-functions(?:\/(?:v1|v2)(?:\/[A-Za-z0-9_.-]+)*)?$/;
-
-/**
- * Native or network-backed packages a Functions entrypoint commonly pulls in at
- * require time. Stubbing them keeps classification offline and credential-free;
- * none of them can produce an endpoint, so an inert value loses no information.
- */
-const INERT_MODULE =
-  /^(?:firebase-admin|@google-cloud\/[^/]+|@grpc\/[^/]+|sharp|resend|nodemailer)(?:\/.*)?$/;
-
-/**
- * A proxy that answers any access without ever looking like an endpoint.
+ * The environment variables whose CONTENT this classifier can only partly
+ * reproduce, mapped to the fields it can vouch for.
  *
- * Every stub here wraps a FUNCTION target on purpose. `typeof` is then
- * "function", so the loader's `isObject` never recurses into a stub; a
- * function's own properties (`length`, `name`, `prototype`) are all
- * non-enumerable, so `Object.entries` of one is empty with no `ownKeys` trap
- * (which could not report an empty list anyway — `prototype` is
- * non-configurable); and it is both callable and constructible, which is what a
- * stubbed client such as `new vision.ImageAnnotatorClient()` needs.
- */
-function inertProxy() {
-  return new Proxy(function stub() {}, {
-    get(_target, property) {
-      if (typeof property === "symbol") return undefined;
-      if (property === "__endpoint" || property === "__requiredAPIs") return undefined;
-      return inertProxy();
-    },
-    apply: () => inertProxy(),
-    construct: () => inertProxy(),
-  });
-}
-
-/** The stand-in for a value a real `onX` factory returned. */
-function endpointMarker(moduleName, factory) {
-  return new Proxy(function stub() {}, {
-    get(_target, property) {
-      if (typeof property === "symbol") return undefined;
-      // The loader's exact discriminator: a function whose `__endpoint` is an
-      // object. Mirroring the shape rather than a private tag means a nested
-      // provider subpath the SDK adds tomorrow is recognised with no edit here.
-      if (property === "__endpoint") return { module: moduleName, factory };
-      if (property === "__requiredAPIs") return undefined;
-      return inertProxy();
-    },
-    apply: () => endpointMarker(moduleName, factory),
-    construct: () => endpointMarker(moduleName, factory),
-  });
-}
-
-/**
- * A stubbed SDK namespace. Reading an `onX` name yields a factory whose call
- * returns an endpoint marker; every other name yields another namespace, so
- * v1's chained forms (`functions.region("…").https.onRequest(…)`) resolve
- * without the real SDK, and non-builders (`HttpsError`, `setGlobalOptions`)
- * stay inert exactly as they are at runtime.
- */
-function builderNamespace(moduleName, trail) {
-  return new Proxy(function stub() {}, {
-    get(_target, property) {
-      if (typeof property === "symbol") return undefined;
-      if (property === "__endpoint" || property === "__requiredAPIs") return undefined;
-      // TypeScript's `__importDefault`/`__importStar` helpers branch on this;
-      // a truthy answer keeps them from rebuilding the namespace from the
-      // target's (non-enumerable) own keys.
-      if (property === "__esModule") return true;
-      const next = trail ? `${trail}.${property}` : property;
-      return /^on[A-Z]/.test(property)
-        ? builderFactory(moduleName, next)
-        : builderNamespace(moduleName, next);
-    },
-    apply: () => builderNamespace(moduleName, trail),
-    construct: () => builderNamespace(moduleName, trail),
-  });
-}
-
-/** An `onX` factory: calling it produces an endpoint, reading it does not. */
-function builderFactory(moduleName, trail) {
-  return new Proxy(function stub() {}, {
-    get(_target, property) {
-      if (typeof property === "symbol") return undefined;
-      if (property === "__endpoint" || property === "__requiredAPIs") return undefined;
-      return builderNamespace(moduleName, `${trail}.${String(property)}`);
-    },
-    apply: () => endpointMarker(moduleName, trail),
-    construct: () => endpointMarker(moduleName, trail),
-  });
-}
-
-function installModuleStubs() {
-  const load = Module._load;
-  Module._load = function stubbedLoad(request, parent, isMain) {
-    if (BUILDER_MODULE.test(request)) return builderNamespace(request, "");
-    if (INERT_MODULE.test(request)) return inertProxy();
-    // Everything else loads for real, and a failure PROPAGATES. Turning a
-    // `MODULE_NOT_FOUND` into an inert value would change control flow rather
-    // than preserve it: an entrypoint that catches an absent optional
-    // dependency takes its `catch` branch under the real loader — and may
-    // export a group from it — while a successful stub import keeps it on the
-    // `try` branch (Codex P2, round 10). Failing closed is the only reading
-    // that cannot invent a smaller surface than the deploy will discover.
-    return load.call(this, request, parent, isMain);
-  };
-}
-
-/**
- * `FIREBASE_CONFIG` is the one part of the discovery environment this
- * classifier cannot reproduce exactly: `prepare.js` passes the project's
- * `adminSdkConfig` (projectId, databaseURL, storageBucket, …), which comes from
- * an authenticated Management API call that a local preflight must not make.
- * The `projectId` IS known, and reading it is the ordinary case.
+ * `prepare.js` hands discovery the project's `adminSdkConfig` in
+ * `FIREBASE_CONFIG` and its legacy runtime config in `CLOUD_RUNTIME_CONFIG`,
+ * both of which come from authenticated API calls a local preflight must not
+ * make. The project id IS known, and reading it is the ordinary case — this
+ * repository's own `visionGate.ts` does — so forfeiting on any read would
+ * refuse the very codebase this exists to exempt.
  *
- * So rather than forfeit on any read — which would refuse a codebase that only
- * wants its project id — this watches the boundary. The injected value is
- * parsed exactly once, by whoever consumes it, so wrapping the RESULT of a
- * `JSON.parse` of that exact string records which fields were actually asked
- * for. A field this classifier could not supply is a field whose real value
- * might have selected a different endpoint surface, so asking for one forfeits.
+ * So the boundary is watched instead. Each variable's value is parsed by
+ * whoever consumes it, so wrapping the RESULT of a `JSON.parse` of that exact
+ * string records what was actually asked for. A field this classifier could not
+ * supply is a field whose real value might have selected a different endpoint
+ * surface, so touching one forfeits — and "touching" covers membership,
+ * descriptor and enumeration access, not just reads, because `"x" in config`
+ * discriminates just as well as `config.x` (Codex P2, round 11).
  */
+const SUPPLIED_CONFIG_FIELDS = {
+  FIREBASE_CONFIG: new Set(["projectId"]),
+  // Only the `firebase` key is reproducible; every legacy `functions.config()`
+  // namespace comes from the API. The nested value is itself the
+  // FIREBASE_CONFIG object and is wrapped with those rules.
+  CLOUD_RUNTIME_CONFIG: new Set(["firebase"]),
+};
+
+/** The first unsupplied field any watched config object was asked about. */
 let unsuppliedConfigField = null;
-const SUPPLIED_CONFIG_FIELDS = new Set(["projectId"]);
 
-function watchFirebaseConfigReads() {
-  const injected = process.env.FIREBASE_CONFIG;
-  if (typeof injected !== "string") return;
+/**
+ * Whether the code that just touched a watched config object is the ARTIFACT's
+ * own, as opposed to a dependency's.
+ *
+ * This matters because the SDKs read these objects themselves — `firebase-admin`
+ * probes `credential`, `databaseURL` and `storageBucket` while initializing —
+ * and those reads are not branches on the endpoint surface. Forfeiting on them
+ * would refuse every codebase that calls `initializeApp()`, which is all of
+ * them. A branch that could change what gets deployed lives in the codebase's
+ * own compiled files, so the caller's frame is the discriminator.
+ */
+let artifactRootCache;
+function artifactRoot() {
+  if (artifactRootCache === undefined) {
+    try {
+      artifactRootCache = fs.realpathSync(path.resolve(process.argv[2] ?? ""));
+    } catch {
+      artifactRootCache = null;
+    }
+  }
+  return artifactRootCache;
+}
+
+function calledFromArtifact() {
+  // Realpath, because Node reports module filenames resolved (on macOS the
+  // scratch dir's `/var/...` is `/private/var/...`) and a prefix test against
+  // the unresolved path would silently never match — failing OPEN.
+  const sourceDir = artifactRoot();
+  if (!sourceDir) return false;
+  const stack = new Error().stack ?? "";
+  for (const line of stack.split("\n").slice(1)) {
+    const match = /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line);
+    if (!match) continue;
+    const file = match[1];
+    if (file === __filename) continue;
+    if (!file.startsWith(sourceDir)) return false;
+    return !file.split(path.sep).includes("node_modules");
+  }
+  return false;
+}
+
+function watchedConfigObject(value, variable) {
+  const supplied = SUPPLIED_CONFIG_FIELDS[variable];
+  const flag = (property) => {
+    if (typeof property !== "string" || supplied.has(property)) return;
+    if (!calledFromArtifact()) return;
+    unsuppliedConfigField = unsuppliedConfigField ?? `${variable}.${property}`;
+  };
+  const enumerated = () => {
+    if (!calledFromArtifact()) return;
+    unsuppliedConfigField = unsuppliedConfigField ?? `${variable} (enumerated)`;
+  };
+  return new Proxy(value, {
+    get(target, property) {
+      // A field that IS supplied and is itself a watched shape stays watched.
+      if (variable === "CLOUD_RUNTIME_CONFIG" && property === "firebase") {
+        const nested = target[property];
+        return nested && typeof nested === "object"
+          ? watchedConfigObject(nested, "FIREBASE_CONFIG")
+          : nested;
+      }
+      // Reading an absent field is what a branch does; reading a supplied one
+      // is the ordinary case and must stay free.
+      if (target[property] === undefined) flag(property);
+      return target[property];
+    },
+    has(target, property) {
+      flag(property);
+      return property in target;
+    },
+    getOwnPropertyDescriptor(target, property) {
+      flag(property);
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+    ownKeys(target) {
+      // Enumeration cannot say which key mattered, and the real object has
+      // more of them, so any enumeration is a difference.
+      enumerated();
+      return Reflect.ownKeys(target);
+    },
+  });
+}
+
+function watchConfigReads() {
+  const watched = Object.keys(SUPPLIED_CONFIG_FIELDS)
+    .map((variable) => [variable, process.env[variable]])
+    .filter(([, injected]) => typeof injected === "string");
+  if (watched.length === 0) return;
   const parse = JSON.parse;
   JSON.parse = function watchedParse(text, reviver) {
     const value = parse.call(this, text, reviver);
-    if (text !== injected || value === null || typeof value !== "object") return value;
-    return new Proxy(value, {
-      get(target, property) {
-        if (
-          typeof property === "string" &&
-          !SUPPLIED_CONFIG_FIELDS.has(property) &&
-          target[property] === undefined
-        ) {
-          unsuppliedConfigField = unsuppliedConfigField ?? property;
-        }
-        return target[property];
-      },
-    });
+    if (value === null || typeof value !== "object") return value;
+    const match = watched.find(([, injected]) => text === injected);
+    return match ? watchedConfigObject(value, match[0]) : value;
   };
 }
 
@@ -253,11 +238,10 @@ function main() {
     return;
   }
 
-  installModuleStubs();
-  watchFirebaseConfigReads();
+  watchConfigReads();
 
-  // Customer code at module scope may print, and the caller parses this
-  // stream. Silence both streams across the load and restore them after.
+  // Customer code at module scope may print, and the caller captures this
+  // stream for diagnostics. Silence both across the load and restore after.
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   const stderrWrite = process.stderr.write.bind(process.stderr);
   process.stdout.write = () => true;
@@ -298,8 +282,8 @@ function main() {
     emit({
       authoritative: false,
       reason:
-        `the artifact read FIREBASE_CONFIG.${unsuppliedConfigField}, which only the ` +
-        "deploy's authenticated adminSdkConfig lookup can supply",
+        `the artifact consulted ${unsuppliedConfigField}, which only the deploy's ` +
+        "authenticated project-config lookup can supply",
     });
     return;
   }
@@ -317,6 +301,6 @@ try {
     // finds no file and refuses.
   }
 }
-// Customer code can leave timers or handles open; the answer is already on
-// stdout, so exit rather than let the child outlive its usefulness.
+// Customer code can leave timers or handles open; the answer is already
+// written, so exit rather than let the child outlive its usefulness.
 process.exit(0);
