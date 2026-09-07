@@ -19,22 +19,42 @@ const BINDING_KEYS = ['binding', 'service', 'entrypoint'];
  * unlisted; enumerating what the file may contain does not. A new top-level
  * key is then a deliberate review moment rather than a silent capability.
  *
- * `routes` is permitted because attaching it IS the documented cutover and
- * `scripts/worker-deploy.sh` supports a route-bearing deploy; keeping the
- * wildcard blocks commented is `routerBinding.test.ts`'s assertion, not this
- * validator's.
+ * An allowlist only survives that trade if it actually LISTS the ordinary
+ * settings, though. A gate that refused `preview_urls = false` — a hardening
+ * key — while accepting the file without it would be teaching operators that
+ * the gate is the obstacle, which is how one gets switched off. So every
+ * capability-free deployment setting below is admitted: they configure how the
+ * Worker is uploaded and observed, and none of them can mint a binding.
+ *
+ * `routes` and `route` are permitted because attaching one IS the documented
+ * cutover and `scripts/worker-deploy.sh` supports a route-bearing deploy;
+ * keeping the wildcard blocks commented is `routerBinding.test.ts`'s
+ * assertion, not this validator's.
  */
 const TOP_LEVEL_KEYS = [
   'name',
   'main',
+  'account_id',
   'compatibility_date',
   'compatibility_flags',
   'workers_dev',
+  'preview_urls',
   'observability',
+  'logpush',
+  'upload_source_maps',
+  'send_metrics',
+  'keep_vars',
+  'minify',
+  'limits',
+  'placement',
   'vars',
   'services',
   'routes',
+  'route',
 ];
+
+/** The keys Wrangler reads a route from. Attaching one is the cutover. */
+const ROUTE_KEYS = ['routes', 'route'];
 
 /**
  * Wrangler's configuration, judged as a PARSED TOML DOCUMENT rather than as
@@ -202,6 +222,32 @@ export function validateRegistryLookupBinding(config, subject) {
     throw new Error(`${subject} must bind explicitly to ${REQUIRED_ENTRYPOINT}`);
   }
   return { binding, service, entrypoint };
+}
+
+/**
+ * Whether this configuration ATTACHES ROUTES — read as TOML, for the same
+ * reason the binding is.
+ *
+ * `scripts/worker-deploy.sh` uses this to decide whether it is performing a
+ * cutover or an inert republish, and it says so out loud: "no routes
+ * configured, so this changes nothing the public sees" is a reassurance at
+ * exactly the moment an operator might be changing live traffic. It used to be
+ * a line grep for `^\s*routes\s*=`, which is blind to `[[routes]]` and to a
+ * quoted `"routes" = [ … ]` — both of which Wrangler resolves into real routes,
+ * and the first of which this repo's own tests bless as a valid shape.
+ *
+ * Throws on a configuration it cannot read, so the caller assumes the
+ * dangerous answer rather than the convenient one.
+ */
+export function declaresRoutes(config) {
+  let document;
+  try {
+    document = parseToml(config.replace(/^﻿/, ''));
+  } catch {
+    throw new Error('cannot read the configuration to decide whether it attaches routes');
+  }
+  if (!isTable(document)) throw new Error('the configuration is not a TOML table');
+  return ROUTE_KEYS.some((key) => Object.hasOwn(document, key));
 }
 
 export function validateHarnessServiceBinding(config) {

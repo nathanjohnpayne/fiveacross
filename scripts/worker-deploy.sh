@@ -52,17 +52,18 @@ guard_deploy_main_checkout "scripts/worker-deploy.sh" "$FORCE"
 
 FORBIDDEN_SECRET="FIREBASE_API_KEY"
 
-# Is this a ROUTE-BEARING deploy? The cutover procedure uncomments `routes` in
-# worker/wrangler.toml and redeploys through this same script, so "publishing
-# changes nothing the public sees" is true for an ordinary deploy and FALSE for
-# that one. Saying it unconditionally would reassure an operator at the exact
-# moment they are changing live traffic. Matches an uncommented `routes` key
-# only; the shipped file keeps the block commented out.
-if grep -Eq '^[[:space:]]*routes[[:space:]]*=' worker/wrangler.toml; then
-  ROUTE_BEARING=true
-else
-  ROUTE_BEARING=false
-fi
+# Is this a ROUTE-BEARING deploy? The cutover procedure uncomments the routes
+# block in worker/wrangler.toml and redeploys through this same script, so
+# "publishing changes nothing the public sees" is true for an ordinary deploy
+# and FALSE for that one. Saying it unconditionally would reassure an operator
+# at the exact moment they are changing live traffic.
+#
+# The answer comes from the binding check below, which reads it off the PARSED
+# configuration. It used to be a line grep for `^\s*routes\s*=`, which is blind
+# to `[[routes]]` and to a quoted `"routes" = [ … ]` — both of which Wrangler
+# resolves into real routes. A cutover written either way would have been
+# announced here as "nothing the public sees".
+ROUTE_BEARING=false
 
 # Verify the registry lookup binding in the configuration about to be published.
 #
@@ -83,11 +84,28 @@ fi
 # configurations are held to one definition of "bound to the lookup entrypoint".
 verify_registry_lookup_binding() {
   echo "🔎 Verifying worker/wrangler.toml binds the registry lookup entrypoint explicitly…" >&2
-  local status=0
-  node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs" || status=$?
+  local status=0 answer=""
+  answer="$(node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs")" || status=$?
   if [[ "$status" -eq 0 ]]; then
     echo "✅ REGISTRY is bound explicitly to RegistryLookupEntrypoint." >&2
+    # Read off the same parsed document the binding was read from, so the two
+    # answers cannot disagree about the file they describe.
+    if [[ "$answer" == *"routes=true"* ]]; then
+      ROUTE_BEARING=true
+    elif [[ "$answer" == *"routes=false"* ]]; then
+      ROUTE_BEARING=false
+    else
+      # The check passed but said nothing about routes. Assume the dangerous
+      # answer: a wrongly-quiet cutover is the failure this variable prevents.
+      ROUTE_BEARING=true
+    fi
     return 0
+  fi
+  # Only exit 1 is a REFUSAL. 69 is "could not run" (below), and anything else —
+  # 127 for a missing `node`, 126 for one that will not execute — is the same
+  # thing: the check did not reach a verdict, so it must not be reported as one.
+  if [[ "$status" -ne 1 && "$status" -ne 69 ]]; then
+    status=69
   fi
   # 69 is "the check could not run", not "the binding is wrong". Announcing a
   # binding problem here would send the operator to edit the one block that is

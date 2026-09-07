@@ -25,6 +25,7 @@ function runWithStubbedNpm({
   secretListFails = false,
   bindingCheckFails = false,
   bindingCheckExit = 1,
+  silentBindingCheck = false,
   routeBearing = false,
   extraEnv = {},
 } = {}) {
@@ -59,19 +60,20 @@ exit 0
     chmodSync(node, 0o755);
   }
 
+  if (silentBindingCheck) {
+    const node = join(bin, 'node');
+    writeFileSync(node, '#!/usr/bin/env bash\nexit 0\n', 'utf8');
+    chmodSync(node, 0o755);
+  }
+
   if (routeBearing) {
-    const grep = join(bin, 'grep');
-    writeFileSync(
-      grep,
-      `#!/usr/bin/env bash
-if [[ "$*" == *"worker/wrangler.toml"* ]]; then
-  exit 0
-fi
-exec /usr/bin/grep "$@"
-`,
-      'utf8',
-    );
-    chmodSync(grep, 0o755);
+    // Route-bearing is now read off the PARSED configuration by the binding
+    // check, which prints its answer, rather than grepped for a line. Stubbing
+    // `node` is therefore how a route-bearing config is simulated — and it is
+    // the same seam `bindingCheckFails` uses, so the two are exclusive.
+    const node = join(bin, 'node');
+    writeFileSync(node, '#!/usr/bin/env bash\necho "routes=true"\nexit 0\n', 'utf8');
+    chmodSync(node, 0o755);
   }
 
   // `--force` waives the branch/freshness guards; the clean-tree guard has its
@@ -134,6 +136,28 @@ describe('worker deploy guard — registry lookup binding', () => {
     expect(result.stderr).toContain('npm ci');
     expect(result.stderr).not.toContain('does not bind REGISTRY explicitly');
     expect(result.npmCalls).toEqual([]);
+  });
+
+  it.each([
+    // A missing `node`, and one that will not execute. Neither is a verdict
+    // about the binding, and only exit 1 is.
+    ['a missing interpreter', 127],
+    ['an interpreter that cannot run', 126],
+  ])('does not report %s as a wrong binding', (_label, exitCode) => {
+    const result = runWithStubbedNpm({ bindingCheckFails: true, bindingCheckExit: exitCode });
+    expect(result.status).toBe(69);
+    expect(result.stderr).toContain('Could not run the registry binding check');
+    expect(result.stderr).not.toContain('does not bind REGISTRY explicitly');
+    expect(result.npmCalls).toEqual([]);
+  });
+
+  it('assumes a cutover when the check passes without answering about routes', () => {
+    // Fail-closed in the direction that matters: a route-bearing deploy that
+    // announced "changes nothing the public sees" is the reassurance this
+    // variable exists to withhold.
+    const result = runWithStubbedNpm({ silentBindingCheck: true, secretListJson: '[]' });
+    expect(result.stderr).toContain('ROUTES CONFIGURED');
+    expect(result.stderr).not.toContain('no routes configured');
   });
 });
 

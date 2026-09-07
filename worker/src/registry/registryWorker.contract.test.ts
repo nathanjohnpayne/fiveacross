@@ -88,7 +88,11 @@ describe('registry Worker capability/configuration contract', () => {
       .split('\n')
       .filter((line) => !line.trimStart().startsWith('#'))
       .join('\n');
-    expect(routerConfig).toContain('# routes = [');
+    // The cutover block stays commented, and stays an array-of-tables: it sits
+    // below the `[[services]]` header, so a `routes = [ … ]` uncommented there
+    // would become a key of the service binding rather than a top-level route.
+    expect(routerConfig).toContain('# [[routes]]');
+    expect(routerConfig).not.toMatch(/^\[\[routes\]\]/m);
     expect(routerConfig).not.toMatch(/^routes\s*=/m);
     // The router consumes the registry through the NAMED lookup entrypoint
     // (#972). What it must still never hold is the object namespace itself:

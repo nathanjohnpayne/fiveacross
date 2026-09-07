@@ -12,7 +12,10 @@ import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { validateRouterServiceBinding } from '../../scripts/event-router-registry/harness-config.mjs';
+import {
+  declaresRoutes,
+  validateRouterServiceBinding,
+} from '../../scripts/event-router-registry/harness-config.mjs';
 import type { RegistryLookupService } from './resolve';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -110,6 +113,19 @@ describe('what the router’s configuration no longer declares', () => {
     expect(declarations).not.toContain('HOSTNAME_CACHE_TTL_MS');
   });
 
+  it('is deployed by a plain `wrangler deploy`, with no configuration of its own', async () => {
+    // The gate certifies the CONFIGURATION; the wrapper then runs
+    // `npm --prefix worker run deploy`, so this script is the one place a
+    // different configuration could still be selected — `-c alt.json`, an
+    // `--env`, or a predeploy hook — without any flag reaching the wrapper.
+    const manifest = JSON.parse(await readFile(resolve(HERE, '../package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(manifest.scripts.deploy).toBe('wrangler deploy');
+    expect(manifest.scripts.predeploy).toBeUndefined();
+    expect(manifest.scripts.postdeploy).toBeUndefined();
+  });
+
   it('is the configuration Wrangler would actually read', async () => {
     // Wrangler resolves `wrangler.json`, then `wrangler.jsonc`, then
     // `wrangler.toml`. A committed `worker/wrangler.json` would pass the
@@ -118,17 +134,40 @@ describe('what the router’s configuration no longer declares', () => {
     // Wrangler never reads. `check-router-binding.mjs` refuses the same way.
     for (const outranking of ['wrangler.json', 'wrangler.jsonc']) {
       expect(existsSync(resolve(HERE, '..', outranking)), outranking).toBe(false);
+      // The repo root is on the same ancestor chain: Wrangler searches every
+      // ancestor for `wrangler.json` BEFORE it looks anywhere for a `.toml`.
+      expect(existsSync(resolve(HERE, '../..', outranking)), outranking).toBe(false);
     }
+    // And the gitignored redirect, which `git status` cannot see either.
+    expect(existsSync(resolve(HERE, '../.wrangler/deploy/config.json'))).toBe(false);
   });
 
   it('keeps BOTH wildcard route blocks commented out', async () => {
     const config = await readFile(ROUTER_CONFIG, 'utf8');
     // Attaching a route IS the cutover, and #529 keeps exclusive authority over
     // it. A registry consumer change must never be able to perform one.
-    expect(config).not.toMatch(/^\s*routes\s*=/m);
-    expect(config).toContain('# routes = [');
-    expect(config).toContain('#   { pattern = "*.fiveacross.app/*", zone_name = "fiveacross.app" },');
-    expect(config).toContain('#   { pattern = "*.vacaybingo.com/*", zone_name = "vacaybingo.com" },');
+    expect(declaresRoutes(config)).toBe(false);
+    expect(config).toContain('# [[routes]]');
+    expect(config).toContain('# pattern = "*.fiveacross.app/*"');
+    expect(config).toContain('# pattern = "*.vacaybingo.com/*"');
+
+    // And uncommenting them EXACTLY WHERE THEY SIT attaches both, which is the
+    // whole reason they are an array-of-tables. This block is the last thing in
+    // the file, below the `[[services]]` header, and in TOML every key after a
+    // header belongs to that table — so `routes = [ … ]` uncommented here would
+    // become a key of the service binding. Wrangler accepts that without a
+    // warning and resolves no top-level routes, so the documented cutover would
+    // report success and change nothing.
+    const uncommented = config
+      .split('\n')
+      .map((line) => (/^# (\[\[routes\]\]|pattern = |zone_name = )/.test(line) ? line.slice(2) : line))
+      .join('\n');
+    expect(declaresRoutes(uncommented)).toBe(true);
+    expect(validateRouterServiceBinding(uncommented)).toEqual({
+      binding: 'REGISTRY',
+      service: 'five-across-event-registry',
+      entrypoint: 'RegistryLookupEntrypoint',
+    });
   });
 
   it('no longer verifies a Firebase secret at deploy time, and refuses a leftover one', async () => {
@@ -466,6 +505,30 @@ describe('the shared binding validator, read as TOML', () => {
       'a route beside the binding',
       `${ONLY_BINDING}\n\n[[routes]]\npattern = "r2-test.fiveacross.app/*"\nzone_name = "fiveacross.app"\n`,
     ],
+    [
+      // An allowlist only survives its trade if it LISTS the ordinary
+      // settings. Refusing `preview_urls = false` — a hardening key — while
+      // accepting the file without it would teach an operator that the gate is
+      // the obstacle, which is how one gets switched off. None of these can
+      // mint a binding.
+      'the capability-free deployment settings a real configuration carries',
+      `${beforeTheBinding(
+        [
+          `account_id = "${'a'.repeat(32)}"`,
+          'preview_urls = false',
+          'logpush = false',
+          'upload_source_maps = true',
+          'send_metrics = false',
+          'keep_vars = false',
+          'minify = true',
+          'compatibility_flags = ["nodejs_compat"]',
+        ].join('\n'),
+      )}\n[limits]\ncpu_ms = 50\n\n[placement]\nmode = "smart"\n`,
+    ],
+    [
+      'the singular route spelling Wrangler also accepts',
+      beforeTheBinding('route = { pattern = "r2-test.fiveacross.app/*", zone_name = "fiveacross.app" }'),
+    ],
   ])('accepts %s', (_label, config) => {
     expect(validateRouterServiceBinding(config)).toEqual({
       binding: 'REGISTRY',
@@ -483,6 +546,37 @@ describe('the shared binding validator, read as TOML', () => {
         '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\n\n[vars]\nentrypoint = "RegistryLookupEntrypoint"\n',
       ),
     ).toThrow('RegistryLookupEntrypoint');
+  });
+
+  /**
+   * Route-bearing is a question about the same document, so it is read the same
+   * way. `scripts/worker-deploy.sh` announces "no routes configured, so this
+   * changes nothing the public sees" on the strength of this answer — a
+   * reassurance offered at exactly the moment an operator might be attaching
+   * every wildcard Namespace hostname. It used to be a line grep for
+   * `^\s*routes\s*=`, which is blind to two spellings Wrangler honours, one of
+   * which is the shape the accept case above blesses.
+   */
+  it.each([
+    ['the array spelling', `routes = [{ pattern = "a.fiveacross.app/*", zone_name = "fiveacross.app" }]\n\n${ONLY_BINDING}\n`],
+    ['an array-of-tables header', `${ONLY_BINDING}\n\n[[routes]]\npattern = "a.fiveacross.app/*"\nzone_name = "fiveacross.app"\n`],
+    ['a quoted key', `"routes" = [{ pattern = "a.fiveacross.app/*", zone_name = "fiveacross.app" }]\n\n${ONLY_BINDING}\n`],
+    ['the singular spelling', `route = { pattern = "a.fiveacross.app/*", zone_name = "fiveacross.app" }\n\n${ONLY_BINDING}\n`],
+  ])('reads %s as a route-bearing configuration', (_label, config) => {
+    expect(declaresRoutes(config)).toBe(true);
+  });
+
+  it('reads the shipped configuration as attaching nothing', async () => {
+    expect(declaresRoutes(await readFile(ROUTER_CONFIG, 'utf8'))).toBe(false);
+    // A `routes` written inside a comment or a string is text here too.
+    expect(declaresRoutes(`${ONLY_BINDING}\n\n# routes = [ … ]\n`)).toBe(false);
+    expect(declaresRoutes(`${ONLY_BINDING}\n\n[vars]\nNOTE = """\nroutes = []\n"""\n`)).toBe(false);
+  });
+
+  it('refuses to answer about routes in a configuration it cannot read', () => {
+    // The caller assumes a cutover when this throws, so "unreadable" must not
+    // quietly become "no routes".
+    expect(() => declaresRoutes('["va\\qrs"]\n')).toThrow();
   });
 
   it('refuses a services block that names the key twice', () => {

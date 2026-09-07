@@ -98,7 +98,19 @@ entrypoint = "RegistryLookupEntrypoint"
 # (#970/#971/#973), never by this file. #529 keeps exclusive authority over
 # wildcard, apex, or real-Event attachment.
 #
-# routes = [
-#   { pattern = "*.fiveacross.app/*", zone_name = "fiveacross.app" },
-#   { pattern = "*.vacaybingo.com/*", zone_name = "vacaybingo.com" },
-# ]
+# Written as ARRAY-OF-TABLES rather than `routes = [ … ]`, and that is not a
+# style choice. This block is the last thing in the file, below the
+# `[[services]]` header — and in TOML every key after a table header belongs to
+# that table. Uncommented in place, `routes = [ … ]` would become a key of the
+# SERVICE BINDING: Wrangler accepts the file without a warning, resolves no
+# top-level routes, and the cutover reports success while attaching nothing. A
+# `[[routes]]` header opens its own table wherever it appears, so uncommenting
+# these lines exactly where they sit does what it says.
+#
+# [[routes]]
+# pattern = "*.fiveacross.app/*"
+# zone_name = "fiveacross.app"
+#
+# [[routes]]
+# pattern = "*.vacaybingo.com/*"
+# zone_name = "vacaybingo.com"
