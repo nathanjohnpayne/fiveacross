@@ -7,6 +7,7 @@
 // — an omitted `entrypoint` line binds the registry's signed control plane to a
 // public edge Worker, and a surviving Firebase binding falsifies the App Check
 // posture the whole change exists to establish.
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,6 +108,17 @@ describe('what the router’s configuration no longer declares', () => {
     expect(declarations).not.toContain('kv_namespaces');
     expect(declarations).not.toMatch(/FIREBASE_API_KEY|FIREBASE_PROJECT_ID/);
     expect(declarations).not.toContain('HOSTNAME_CACHE_TTL_MS');
+  });
+
+  it('is the configuration Wrangler would actually read', async () => {
+    // Wrangler resolves `wrangler.json`, then `wrangler.jsonc`, then
+    // `wrangler.toml`. A committed `worker/wrangler.json` would pass the
+    // clean-tree guard, the deploy gate and CI while being the file that
+    // actually uploads — the whole validator would be certifying a document
+    // Wrangler never reads. `check-router-binding.mjs` refuses the same way.
+    for (const outranking of ['wrangler.json', 'wrangler.jsonc']) {
+      expect(existsSync(resolve(HERE, '..', outranking)), outranking).toBe(false);
+    }
   });
 
   it('keeps BOTH wildcard route blocks commented out', async () => {
@@ -327,6 +339,32 @@ describe('the shared binding validator, read as TOML', () => {
       ),
     ],
     [
+      // Not every binding is a `services` entry. A cross-script Durable Object
+      // binding reaches the registry's `HOST_REGISTRY` namespace directly —
+      // the exact capability the named entrypoint exists to withhold — and it
+      // adds nothing for a `services` count to find.
+      'a cross-script Durable Object binding into the registry',
+      `${ONLY_BINDING}\n\n[[durable_objects.bindings]]\nname = "HOST_REGISTRY"\nclass_name = "HostRegistryObject"\nscript_name = "five-across-event-registry"\n`,
+    ],
+    [
+      'a KV namespace beside the binding',
+      `${ONLY_BINDING}\n\n[[kv_namespaces]]\nbinding = "CACHE"\nid = "${'0'.repeat(32)}"\n`,
+    ],
+    [
+      'an R2 bucket beside the binding',
+      `${ONLY_BINDING}\n\n[[r2_buckets]]\nbinding = "ARCHIVE"\nbucket_name = "five-across"\n`,
+    ],
+    [
+      'a dispatch namespace beside the binding',
+      `${ONLY_BINDING}\n\n[[dispatch_namespaces]]\nbinding = "DISPATCH"\nnamespace = "five-across"\n`,
+    ],
+    [
+      // The allowlist is what makes the four above total rather than a list
+      // that Cloudflare's next binding type would outgrow.
+      'a top-level key this configuration has no reviewed use for',
+      `${ONLY_BINDING}\n\nplacement = { mode = "smart" }\n`,
+    ],
+    [
       // `environment` binds a named environment of the TARGET service — a
       // different deployment of the registry, whose `RegistryLookupEntrypoint`
       // is whatever that deployment exports.
@@ -412,6 +450,21 @@ describe('the shared binding validator, read as TOML', () => {
     [
       'a [vars] entry that happens to be named unsafe',
       `${ONLY_BINDING}\n\n[vars]\nunsafe = "false"\n`,
+    ],
+    [
+      // Wrangler reads its own configuration through `removeBOMAndValidate`, so
+      // this file deploys correctly. Refusing it would point the operator at
+      // the one block that is right — the false positive that gets a gate
+      // switched off.
+      'a configuration saved with a byte-order mark',
+      `﻿${ONLY_BINDING}\n`,
+    ],
+    [
+      // `routes` is permitted because attaching it IS the documented cutover
+      // and the deploy wrapper supports a route-bearing deploy. Keeping the
+      // wildcard blocks commented is the assertion above, not this one.
+      'a route beside the binding',
+      `${ONLY_BINDING}\n\n[[routes]]\npattern = "r2-test.fiveacross.app/*"\nzone_name = "fiveacross.app"\n`,
     ],
   ])('accepts %s', (_label, config) => {
     expect(validateRouterServiceBinding(config)).toEqual({

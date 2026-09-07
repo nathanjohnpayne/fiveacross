@@ -7,6 +7,34 @@ const ENV_KEY = 'env';
 const UNSAFE_KEY = 'unsafe';
 /** The complete key set of the one binding this file may declare. */
 const BINDING_KEYS = ['binding', 'service', 'entrypoint'];
+/**
+ * Every top-level key these two configurations may declare.
+ *
+ * An ALLOWLIST, because the forbidden set is open-ended and grows with
+ * Wrangler. `[[durable_objects.bindings]]` with `script_name` reaches the
+ * registry's `HOST_REGISTRY` namespace directly — the exact capability the
+ * named entrypoint exists to withhold — and `kv_namespaces`, `r2_buckets` and
+ * `dispatch_namespaces` each grant something this router is documented as not
+ * having. Enumerating those would leave whatever Cloudflare ships next
+ * unlisted; enumerating what the file may contain does not. A new top-level
+ * key is then a deliberate review moment rather than a silent capability.
+ *
+ * `routes` is permitted because attaching it IS the documented cutover and
+ * `scripts/worker-deploy.sh` supports a route-bearing deploy; keeping the
+ * wildcard blocks commented is `routerBinding.test.ts`'s assertion, not this
+ * validator's.
+ */
+const TOP_LEVEL_KEYS = [
+  'name',
+  'main',
+  'compatibility_date',
+  'compatibility_flags',
+  'workers_dev',
+  'observability',
+  'vars',
+  'services',
+  'routes',
+];
 
 /**
  * Wrangler's configuration, judged as a PARSED TOML DOCUMENT rather than as
@@ -82,7 +110,13 @@ export function validateRegistryLookupBinding(config, subject) {
 
   let document;
   try {
-    document = parseToml(config);
+    // Wrangler reads its own configuration through `removeBOMAndValidate`, so a
+    // BOM-prefixed file deploys perfectly well. Stripping it here keeps this
+    // validator reading the SAME document Wrangler does — without it, a
+    // correct configuration saved by an editor that writes a BOM is refused
+    // with a message pointing at the one block that is right, which is how a
+    // capability gate gets switched off.
+    document = parseToml(config.replace(/^﻿/, ''));
   } catch {
     throw exactlyOnce;
   }
@@ -124,6 +158,18 @@ export function validateRegistryLookupBinding(config, subject) {
   if (Object.hasOwn(document, UNSAFE_KEY)) {
     throw new Error(
       `${subject} must declare no unsafe bindings: they bypass the ${REQUIRED_ENTRYPOINT} check`,
+    );
+  }
+
+  // Nothing else at the top level. A binding does not have to be a `services`
+  // entry to reach the registry: `[[durable_objects.bindings]]` carrying
+  // `script_name = "five-across-event-registry"` binds its `HOST_REGISTRY`
+  // namespace directly, which is the capability the named entrypoint exists to
+  // withhold, and it adds no `services` entry for a count to find.
+  const unknown = Object.keys(document).filter((key) => !TOP_LEVEL_KEYS.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${subject} declares ${unknown.join(', ')}, which the ${REQUIRED_ENTRYPOINT} check does not cover`,
     );
   }
 

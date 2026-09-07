@@ -83,9 +83,26 @@ fi
 # configurations are held to one definition of "bound to the lookup entrypoint".
 verify_registry_lookup_binding() {
   echo "🔎 Verifying worker/wrangler.toml binds the registry lookup entrypoint explicitly…" >&2
-  if node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs"; then
+  local status=0
+  node "$SCRIPT_DIR/event-router-registry/check-router-binding.mjs" || status=$?
+  if [[ "$status" -eq 0 ]]; then
     echo "✅ REGISTRY is bound explicitly to RegistryLookupEntrypoint." >&2
     return 0
+  fi
+  # 69 is "the check could not run", not "the binding is wrong". Announcing a
+  # binding problem here would send the operator to edit the one block that is
+  # correct — the validator parses the configuration with a ROOT devDependency,
+  # and this guard runs before any install.
+  if [[ "$status" -eq 69 ]]; then
+    echo "" >&2
+    echo "❌ Could not run the registry binding check." >&2
+    echo "" >&2
+    echo "It parses worker/wrangler.toml with a root devDependency, so install the" >&2
+    echo "root lockfile first and re-run:" >&2
+    echo "" >&2
+    echo "  npm ci" >&2
+    echo "" >&2
+    exit 69
   fi
   echo "" >&2
   echo "❌ worker/wrangler.toml does not bind REGISTRY explicitly to RegistryLookupEntrypoint." >&2

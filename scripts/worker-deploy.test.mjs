@@ -24,6 +24,7 @@ function runWithStubbedNpm({
   secretListJson = null,
   secretListFails = false,
   bindingCheckFails = false,
+  bindingCheckExit = 1,
   routeBearing = false,
   extraEnv = {},
 } = {}) {
@@ -54,7 +55,7 @@ exit 0
 
   if (bindingCheckFails) {
     const node = join(bin, 'node');
-    writeFileSync(node, '#!/usr/bin/env bash\nexit 1\n', 'utf8');
+    writeFileSync(node, `#!/usr/bin/env bash\nexit ${String(bindingCheckExit)}\n`, 'utf8');
     chmodSync(node, 0o755);
   }
 
@@ -119,6 +120,19 @@ describe('worker deploy guard — registry lookup binding', () => {
     const result = runWithStubbedNpm({ bindingCheckFails: true });
     expect(result.status).toBe(65);
     expect(result.stderr).toContain('does not bind REGISTRY explicitly');
+    expect(result.npmCalls).toEqual([]);
+  });
+
+  it('distinguishes a check that could not RUN from a binding that is wrong', () => {
+    // The validator parses the configuration with a ROOT devDependency, and
+    // this guard runs before any install. Reporting that as a binding problem
+    // would send the operator to edit the one block that is correct, so the
+    // "could not run" exit gets its own code and its own instruction.
+    const result = runWithStubbedNpm({ bindingCheckFails: true, bindingCheckExit: 69 });
+    expect(result.status).toBe(69);
+    expect(result.stderr).toContain('Could not run the registry binding check');
+    expect(result.stderr).toContain('npm ci');
+    expect(result.stderr).not.toContain('does not bind REGISTRY explicitly');
     expect(result.npmCalls).toEqual([]);
   });
 });
