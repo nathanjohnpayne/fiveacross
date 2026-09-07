@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { NAMESPACES } from '../worker/src/host';
 import {
   isRehearsalEventLabel,
   isRehearsalLabel,
@@ -204,16 +205,30 @@ describe('reserved-label mirrors in separately deployed programs', () => {
  * otherwise be a mirror no test has ever seen. Counting alone would not fix
  * that: a bare count reddens on the fourth literal and goes green again the
  * moment someone raises the number, with the new mirror still uncompared.
+ *
+ * KNOWN LIMIT, and it is inherent rather than an oversight. This compares the
+ * LITERAL, not its use. A mirror whose regex is untouched but whose call site
+ * changes around it — `.test(host.toLowerCase())` is the sharp example, which
+ * would make the publisher admit uppercase rehearsal hosts — passes every
+ * assertion here. Closing that needs the fixtures driven through each deployed
+ * entry point instead, which is a different test against a different surface;
+ * `router-publisher` has no suite of its own to put it in yet. Tracked in #1135;
+ * do not read a green run here as a claim about call sites.
  */
 describe('rehearsal-class mirrors in separately deployed programs', () => {
   /**
-   * The two wildcard Namespaces. This half of each host regex has no canonical
-   * counterpart in `src/slug.ts` on purpose — which Namespaces exist is a
-   * router concern, not a Slug one — so the pair is declared here and
+   * The Namespace half of each host regex has no counterpart in `src/slug.ts`
+   * on purpose — which Namespaces exist is a router concern, not a Slug one —
+   * so it comes from the router's own `NAMESPACES`, imported above rather than
+   * restated. Restating it would put a third copy of the pair beside the
+   * mirrors this block exists to keep honest: adding a Namespace to the router
+   * and to the mirrors would leave the local copy behind, and both the fixture
+   * and `canonical()` would go on agreeing about the old pair while every
+   * mirror drifted. `src/editions.test.ts` reaches for the same export.
+   *
    * `gaycruisebingo.com` rides along as the near-miss: a real root host, but
    * not a wildcard Namespace, so no rehearsal host may ever be dealt under it.
    */
-  const NAMESPACES = ['fiveacross.app', 'vacaybingo.com'] as const;
   const FOREIGN_NAMESPACE = 'gaycruisebingo.com';
 
   type RehearsalClass = 'event' | 'root' | 'either';
@@ -337,8 +352,10 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   /**
    * Canonical positives first, then the near-misses that a loosened copy would
    * start admitting: wrong suffix length either way, uppercase, the base32
-   * exclusions `1`, `8` and `9`, and a hyphen inside a root suffix — which is
-   * the one that separates `[a-z2-7]{20}` from a lazier `[a-z0-9-]{20}`.
+   * exclusions — ALL FOUR of `0`, `1`, `8` and `9`, since lowercase RFC 4648
+   * base32 omits every one of them and a widening to `[a-z02-7]` is as real as
+   * a widening to `[a-z0-9]` — and a hyphen inside a root suffix, which is the
+   * one that separates `[a-z2-7]{20}` from a lazier `[a-z0-9-]{20}`.
    */
   const LABELS = [
     'r2-abcdefghijklmnopqrstuvwxyz',
@@ -348,12 +365,14 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     'r2-abcdefghijklmnopqrstuvwxy',
     'r2-abcdefghijklmnopqrstuvwxyza',
     'r2-ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'r2-abcdefghijklmnopqrstuvwxy0',
     'r2-abcdefghijklmnopqrstuvwxy1',
     'r2-abcdefghijklmnopqrstuvwx89',
     'r2-root-abcdefghijklmnopqrs',
     'r2-root-abcdefghijklmnopqrstu',
     'r2-root-abcdefghijklmnopqr-t',
     'r2-root-ABCDEFGHIJKLMNOPQRST',
+    'r2-root-abcdefghijklmnopqrs0',
     'r2-root-abcdefghijklmnopqrs1',
     'r2-root-abcdefghijklmnopqrst-',
     'r2',
@@ -361,6 +380,12 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     'r2-root-',
     'bodega-bay',
   ] as const;
+
+  /** The two canonical positives, one per class, reused by the fixtures below. */
+  const [EVENT_POSITIVE, ROOT_POSITIVE] = [
+    'r2-abcdefghijklmnopqrstuvwxyz',
+    'r2-root-abcdefghijklmnopqrst',
+  ];
 
   /**
    * Hosts that are not a plain `<label>.<Namespace>` pair. They exist to pin
@@ -375,6 +400,25 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   ];
 
   /**
+   * The same two anchors again, defeated a different way. `m` rebinds `^` and
+   * `$` to LINE boundaries, so a mirror that acquired it would admit a host
+   * with a well-formed line buried in it while every single-line fixture above
+   * kept agreeing. That is not a hypothetical input class here: these mirrors
+   * validate a Firestore document id and a CloudEvent payload field, so the
+   * string arrives from outside.
+   *
+   * Checked behaviourally rather than by refusing `m` the way `g` and `y` are
+   * refused, because `g` breaks the comparison itself while `m` only changes
+   * the answer — and the answer is what this block compares.
+   */
+  const MULTILINE_NEAR_MISSES = [EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) =>
+    NAMESPACES.flatMap((namespace) => [
+      `attacker\n${label}.${namespace}`,
+      `${label}.${namespace}\nattacker`,
+    ]),
+  );
+
+  /**
    * Canonical positives with one dot spoiled: first the separator before the
    * Namespace, then the dot INSIDE it. Both classes, both Namespaces.
    *
@@ -384,10 +428,7 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
    * on the very regexes that ARE the host-validation boundary in the publisher
    * and in both controllers.
    */
-  const SEPARATOR_NEAR_MISSES = [
-    'r2-abcdefghijklmnopqrstuvwxyz',
-    'r2-root-abcdefghijklmnopqrst',
-  ].flatMap((label) =>
+  const SEPARATOR_NEAR_MISSES = [EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) =>
     NAMESPACES.flatMap((namespace) => [
       `${label}X${namespace}`,
       `${label}.${namespace.replace('.', 'X')}`,
@@ -399,7 +440,14 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
       ...NAMESPACES.map((namespace) => `${label}.${namespace}`),
       `${label}.${FOREIGN_NAMESPACE}`,
     ]),
+    // Every label again as a BARE host, with no Namespace at all. A mirror that
+    // made its `\.<Namespace>` suffix optional would answer yes to a label that
+    // names no host, and nothing above would have noticed — every other fixture
+    // carries a dot. These are also the only inputs that reach the dotless
+    // guard in `canonical()`.
+    ...LABELS,
     ...UNANCHORED_NEAR_MISSES,
+    ...MULTILINE_NEAR_MISSES,
     ...SEPARATOR_NEAR_MISSES,
   ];
 
@@ -411,7 +459,7 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     if (split === -1) return false;
     const label = host.slice(0, split);
     const namespace = host.slice(split + 1);
-    if (!(NAMESPACES as readonly string[]).includes(namespace)) return false;
+    if (!NAMESPACES.includes(namespace)) return false;
     if (admits === 'event') return isRehearsalEventLabel(label);
     if (admits === 'root') return isRehearsalRootLabel(label);
     return isRehearsalLabel(label);
@@ -445,6 +493,10 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     // Without this the whole block could pass vacuously: a fixture of hosts
     // that no regex matches agrees with a canonical predicate that matches
     // nothing either, and a mistyped suffix length is exactly how you get one.
+    // The foreign Namespace has to stay foreign. If the router ever adopted it,
+    // every near-miss built on it would quietly become a positive, and the
+    // failures would land on the site rows rather than naming the cause.
+    expect(NAMESPACES).not.toContain(FOREIGN_NAMESPACE);
     for (const namespace of NAMESPACES) {
       const under = HOSTS.filter((host) => host.endsWith(`.${namespace}`));
       expect(under.filter((host) => canonical('event', host)).length).toBeGreaterThan(0);
