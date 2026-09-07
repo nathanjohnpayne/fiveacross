@@ -125,7 +125,9 @@ There is no `worker/.dev.vars` step: the router has no secret to supply. Its one
 | The same Event on its other host | `-H 'Host: bodega-bay.vacaybingo.com'` | `200` and **no** `location` header — it serves in place |
 | A reserved label | `-H 'Host: admin.fiveacross.app'` | `404`, `x-event-router-reason: reserved-label` |
 | The PostHog ingest label | `-H 'Host: d.fiveacross.app'` | `404`, `x-event-router-reason: reserved-label` |
-| An unknown Event | `-H 'Host: no-such-event.fiveacross.app'` | `404`, `x-event-router-reason: unknown-host`, `cache-control: no-store` |
+| An unknown Event | `-H 'Host: no-such-event.fiveacross.app'` | `404`, `x-event-router-reason: unknown-host`, `cache-control: no-store`, **no** `x-event-router-revision` |
+| A disabled or archived Event | `-H 'Host: <inactive>.fiveacross.app'` | `404`, `x-event-router-reason: inactive`, **and** `x-event-router-revision: <decimal>` — the committed revision it was refused from |
+| A deleted (tombstoned) address | `-H 'Host: <tombstoned>.fiveacross.app'` | `404`, `x-event-router-reason: unknown-host`, **and** `x-event-router-revision: <decimal>` — a tombstone reads as unknown but keeps its revision |
 | A foreign hostname | `-H 'Host: example.com'` | `404`, `x-event-router-reason: out-of-namespace` |
 | The auth helper | `-H 'Host: bodega-bay.fiveacross.app' http://localhost:8787/__/auth/handler` | `200` or the origin's own status — never a router `404` |
 | An unbound registry | with the `[[services]]` block removed | `404`, `x-event-router-reason: lookup-unavailable` on **every** address |
@@ -210,7 +212,7 @@ There are no `wrangler secret` bindings, and that absence is checked at deploy t
 
 ## Diagnosing a live router
 
-Every response carries `x-event-router`. A response served from a resolved registry record also carries `x-event-router-revision`, a validated canonical decimal — it is the edge's own value and any header of that name from the origin is discarded, so it is safe to read as the projection the edge actually served. The auth pass-through carries none, because it resolves no record.
+Every response carries `x-event-router`. A response decided from a resolved registry record also carries `x-event-router-revision`, a validated canonical decimal — it is the edge's own value and any header of that name from the origin is discarded, so it is safe to read as the projection the edge actually read. That includes two REFUSALS: an `inactive` route and a tombstone's `unknown-host` each report the committed revision they were refused from, which is what lets a recovery probe compare the public answer against committed state. The auth pass-through, an unknown (never-published) address, a malformed or unavailable lookup, a slug-mismatched projection, and every guard that runs before the lookup carry none, because none of them has a revision to attribute to the address.
 
 Every fail-closed response carries `x-event-router-reason`, drawn from a closed set:
 

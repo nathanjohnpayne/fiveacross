@@ -38,11 +38,19 @@ function harness(answer: RegistryLookup | (() => Promise<RegistryLookup>)) {
   return { deps, lookup };
 }
 
-async function reasonFor(lookup: RegistryLookup, expectedSlug: string | null = SLUG): Promise<string> {
+async function refusalFor(
+  lookup: RegistryLookup,
+  expectedSlug: string | null = SLUG,
+): Promise<{ reason: NotFoundReason; revision: string | null }> {
   const { deps } = harness(lookup);
   const resolution = await resolveHost(HOST, expectedSlug, CONFIG, deps);
   expect(resolution.kind).toBe('not-found');
-  return resolution.kind === 'not-found' ? resolution.reason : '';
+  if (resolution.kind !== 'not-found') throw new Error('expected a fail-closed resolution');
+  return { reason: resolution.reason, revision: resolution.revision };
+}
+
+async function reasonFor(lookup: RegistryLookup, expectedSlug: string | null = SLUG): Promise<string> {
+  return (await refusalFor(lookup, expectedSlug)).reason;
 }
 
 afterEach(() => {
@@ -221,6 +229,7 @@ describe('the fail-closed decision table', () => {
     await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
       kind: 'not-found',
       reason: 'slug-missing' satisfies NotFoundReason,
+      revision: null,
     });
   });
 
@@ -246,6 +255,7 @@ describe('the fail-closed decision table', () => {
       await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
         kind: 'not-found',
         reason: 'replica-malformed' satisfies NotFoundReason,
+        revision: null,
       });
     },
   );
@@ -389,6 +399,7 @@ describe('re-validating the projection at the service boundary', () => {
     await expect(resolveHost(host, null, CONFIG, deps)).resolves.toEqual({
       kind: 'not-found',
       reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
     });
   });
 
@@ -402,6 +413,7 @@ describe('re-validating the projection at the service boundary', () => {
     expect(decide(HOST, undefined as unknown as RegistryLookup, SLUG)).toEqual({
       kind: 'not-found',
       reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
     });
   });
 
@@ -420,7 +432,11 @@ describe('re-validating the projection at the service boundary', () => {
       }),
       SLUG,
     );
-    expect(resolution).toEqual({ kind: 'not-found', reason: 'replica-malformed' satisfies NotFoundReason });
+    expect(resolution).toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+      revision: null,
+    });
   });
 });
 
@@ -430,6 +446,7 @@ describe('a lookup that cannot be completed', () => {
     await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
       kind: 'not-found',
       reason: 'lookup-unavailable',
+      revision: null,
     });
   });
 
@@ -444,6 +461,7 @@ describe('a lookup that cannot be completed', () => {
     await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
       kind: 'not-found',
       reason: 'lookup-unavailable',
+      revision: null,
     });
   });
 
@@ -463,7 +481,11 @@ describe('a lookup that cannot be completed', () => {
     expect(settled).toBe(false);
 
     await vi.advanceTimersByTimeAsync(1);
-    await expect(pending).resolves.toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
+    await expect(pending).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
   });
 
   it('clears the timer once a lookup answers, so a fast call leaves nothing pending', async () => {
@@ -483,5 +505,124 @@ describe('a lookup that cannot be completed', () => {
     // again rather than serving a cached refusal or a cached positive.
     expect(lookup).toHaveBeenCalledTimes(2);
     expect(Object.keys(deps)).toEqual(['registry']);
+  });
+});
+
+describe('the revision a refusal was decided from', () => {
+  // `specs/event-router-registry.md` § Failure semantics and § Audit and
+  // recovery make this pair, not the reason alone, the public contract: a
+  // `canonical-after-unblock` probe observes `{reason, revision}` together for
+  // `null`, `inactive` AND `unknown-host`, and `clear-lock` consumes three
+  // attestations whose revision equals committed state. A refusal that dropped
+  // the revision on the two states a recovery most often ends in would leave
+  // those hosts unable to clear a lock, and therefore unable to accept another
+  // publisher update, for as long as the state persisted.
+  it.each(['disabled', 'archived'] as const)(
+    'carries the committed revision on a %s route, because recovery has to observe it',
+    async (status) => {
+      await expect(
+        refusalFor(
+          committed(
+            {
+              kind: 'route',
+              eventId: 'bodega-bay-2026',
+              status,
+              slug: SLUG,
+              edition: 'fiveacross',
+              pathNamespace: null,
+            },
+            '12',
+          ),
+        ),
+      ).resolves.toEqual({ reason: 'inactive', revision: '12' });
+    },
+  );
+
+  it('carries the committed revision on a tombstone, while still reading as unknown', async () => {
+    // The object reports a tombstone through its `unknown-host` arm, keeping
+    // the revision and dropping the projection. The address stays
+    // indistinguishable from an unknown one in its REASON; what it does not
+    // hide is a revision the threat model already calls public metadata.
+    await expect(refusalFor({ kind: 'unknown-host', revision: '12' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+
+  it('carries it on a committed tombstone too, so the boundary agrees with the object', async () => {
+    // Defense in depth for version skew: a registry that handed back the
+    // committed tombstone instead of collapsing it must produce the identical
+    // public answer, reason and revision alike.
+    await expect(refusalFor(committed({ kind: 'tombstone' }, '12'))).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: '12',
+    });
+  });
+
+  it('carries NO revision for an uninitialized object, which has none', async () => {
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+  });
+
+  it('refuses a non-canonical revision on the unknown-host arm as malformed', async () => {
+    // The shape rule belongs to the projection rather than to the arm: a
+    // revision that reaches this module is canonical or the state is
+    // malformed, and a tombstone is not exempt from it.
+    await expect(refusalFor({ kind: 'unknown-host', revision: '007' })).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it.each([
+    [
+      'a slug-mismatched route, whose record is not this address’s to quote',
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: 'somewhere-else',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        '12',
+      ),
+      'slug-mismatch',
+    ],
+    [
+      'a slug-less route',
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: '' as string,
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        '12',
+      ),
+      'slug-missing',
+    ],
+    ['a malformed committed state', { kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
+    ['an unavailable object', { kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
+  ] as const)('carries NO revision for %s', async (_label, lookup, reason) => {
+    // None of these is a state the recovery contract models, and in each the
+    // router is answering ABOUT a record it cannot use rather than FROM one it
+    // read for this address. Stamping a revision would claim the edge is
+    // serving from a projection it has just declared inadmissible.
+    await expect(refusalFor(lookup)).resolves.toEqual({ reason, revision: null });
+  });
+
+  it('carries NO revision when the binding is absent', async () => {
+    const deps: ResolveDeps = { registry: null };
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+      revision: null,
+    });
   });
 });

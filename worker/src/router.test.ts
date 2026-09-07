@@ -245,10 +245,17 @@ describe('failing closed', () => {
     },
   );
 
+  // The third column is the `x-event-router-revision` the refusal carries, and
+  // it is not decoration: `specs/event-router-registry.md` § Audit and
+  // recovery makes the public `{reason, revision}` pair the evidence a
+  // recovery lock is cleared with, so `inactive` and a tombstone's
+  // `unknown-host` must publish the committed revision they were refused from
+  // while every refusal with no record to attribute publishes none.
   it.each([
-    [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host'],
-    [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
-    [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
+    [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host', null],
+    [{ kind: 'unknown-host', revision: '9' } as RegistryLookup, 'unknown-host', '9'],
+    [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable', null],
+    [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed', null],
     [
       {
         kind: 'committed',
@@ -263,8 +270,13 @@ describe('failing closed', () => {
         },
       } as RegistryLookup,
       'inactive',
+      '3',
     ],
-    [{ kind: 'committed', revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup, 'unknown-host'],
+    [
+      { kind: 'committed', revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      'unknown-host',
+      '9',
+    ],
     [
       {
         kind: 'committed',
@@ -279,15 +291,27 @@ describe('failing closed', () => {
         },
       } as RegistryLookup,
       'slug-mismatch',
+      null,
     ],
-  ])('renders reason %#: %s', async (answer, reason) => {
+  ] as const)('renders reason %#: %s', async (answer, reason, revision) => {
     const { deps, requests } = harness({ seed: { 'bodega-bay.fiveacross.app': answer } });
     const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe(reason);
     expect(response.headers.get('x-event-router')).toBe('test-1');
-    expect(response.headers.get('x-event-router-revision')).toBeNull();
+    expect(response.headers.get('x-event-router-revision')).toBe(revision);
+    expect(response.headers.get('cache-control')).toBe('no-store');
     expect(requests).toHaveLength(0);
+  });
+
+  it('stamps no revision on a guard that refuses before the lookup', async () => {
+    // A reserved label never reaches a record, so there is nothing for it to
+    // quote a revision from — and the binding is never touched to find one.
+    const { deps, lookup } = harness();
+    const response = await handleRequest(get('https://admin.fiveacross.app/'), CONFIG, deps);
+    expect(response.headers.get('x-event-router-reason')).toBe('reserved-label');
+    expect(response.headers.get('x-event-router-revision')).toBeNull();
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it('names the broken Slug rule while keeping the class greppable as a prefix', async () => {

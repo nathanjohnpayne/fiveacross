@@ -26,7 +26,15 @@ export type SyncResponse = {
  * closed, and neither reaches for a second source of truth.
  */
 export type RegistryLookup =
-  | { kind: 'unknown-host' }
+  /** No servable address here. `revision` is present only for a TOMBSTONE — a
+   *  committed record that reads as unknown from outside but still has a
+   *  revision the public response must carry, because
+   *  `specs/event-router-registry.md` § Audit and recovery makes the publicly
+   *  observed revision the evidence a tombstoned host's recovery lock is
+   *  cleared with. It is absent, not null, for an uninitialized object, so a
+   *  router built against the earlier shape reads the same `unknown-host` it
+   *  always did instead of failing on an unrecognised field. */
+  | { kind: 'unknown-host'; revision?: string }
   | { kind: 'unavailable' }
   | { kind: 'malformed' }
   | { kind: 'committed'; revision: string; desired: ReplicaDesired };
@@ -152,16 +160,27 @@ export async function applyPublisherSync(
  * A pure projection of already-parsed state, so its result is narrower than the
  * seam's: `unavailable` and `malformed` describe reaching or reading the object
  * and cannot arise from a state this function was handed.
+ *
+ * A tombstone collapses to `unknown-host` — a deleted address must not advertise
+ * that it ever existed as a ROUTE — but it keeps its revision, and that is not a
+ * contradiction. Individual replica revisions are public metadata by this
+ * spec's own threat model, and the recovery contract depends on this one being
+ * public: `clear-lock` consumes three attestations "whose host/result/revision
+ * equal committed state", and a tombstoned host whose public response carried no
+ * revision could never produce them. What stays hidden is the projection — no
+ * Event ID, Slug or Edition leaves this arm.
  */
 export function registryLookup(
   state: RegistryState,
 ): Extract<RegistryLookup, { kind: 'unknown-host' } | { kind: 'committed' }> {
-  if (state.committed === null || state.committed.payload.desired.kind === 'tombstone') {
-    return { kind: 'unknown-host' };
+  const committed = state.committed;
+  if (committed === null) return { kind: 'unknown-host' };
+  if (committed.payload.desired.kind === 'tombstone') {
+    return { kind: 'unknown-host', revision: committed.revision };
   }
   return {
     kind: 'committed',
-    revision: state.committed.revision,
-    desired: state.committed.payload.desired,
+    revision: committed.revision,
+    desired: committed.payload.desired,
   };
 }

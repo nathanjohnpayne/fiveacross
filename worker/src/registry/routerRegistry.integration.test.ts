@@ -21,10 +21,13 @@
 // property is observed rather than asserted about source text. No live account
 // is involved and no route is attached: the hosts below are the manifest-safe
 // `r2-` classes, and nothing here creates DNS, a route, or a real Event.
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Log, LogLevel, Miniflare } from 'miniflare';
-import type { RouterReplicaDesired } from './contracts';
+import { projectionDigest, type RouterReplicaDesired } from './contracts';
+import type { ProbeObservation, ProbePrincipal } from './probe';
+import type { RecoveryRequest, SourceAudit, WafEvidence } from './recovery';
 
 const NAMESPACE = 'fiveacross.app';
 const ACTIVE_HOST = `r2-${'a'.repeat(26)}.${NAMESPACE}`;
@@ -57,7 +60,17 @@ export default {
   async fetch(request, env) {
     const input = await request.json();
     const stub = env.HOST_REGISTRY.getByName(input.host, { locationHint: 'wnam' });
-    return Response.json(await stub.sync(input.payload, input.epoch));
+    const op = input.op ?? 'sync';
+    if (op === 'sync') return Response.json(await stub.sync(input.payload, input.epoch));
+    if (op === 'challenge') {
+      return Response.json(await stub.issueProbeChallenge(input.request, input.principal, input.now, input.nonce));
+    }
+    if (op === 'attest') {
+      return Response.json(await stub.attestProbe(input.observation, input.principal, input.now, input.id));
+    }
+    if (op === 'recover') return Response.json(await stub.recover(input.request, input.context));
+    if (op === 'audit') return Response.json(await stub.audit(input.after ?? '0'));
+    return Response.json({ error: 'unknown operation' }, { status: 400 });
   },
 };
 `;
@@ -211,19 +224,23 @@ function routePayload(
   };
 }
 
+async function control<T>(instance: Miniflare, input: Record<string, unknown>): Promise<T> {
+  const registry = await instance.getWorker('registry');
+  const response = await registry.fetch('https://registry.test/', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  expect(response.status).toBe(200);
+  return response.json() as Promise<T>;
+}
+
 async function publish(
   instance: Miniflare,
   payload: RouterReplicaDesired,
   epoch = '1',
 ): Promise<{ status: number; result: string }> {
-  const registry = await instance.getWorker('registry');
-  const response = await registry.fetch('https://registry.test/', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ host: payload.host, payload, epoch }),
-  });
-  expect(response.status).toBe(200);
-  return response.json() as Promise<{ status: number; result: string }>;
+  return control(instance, { op: 'sync', host: payload.host, payload, epoch });
 }
 
 async function request(instance: Miniflare, host: string, path = '/'): Promise<Response> {
@@ -311,17 +328,22 @@ describe('functional synthetic exact-route behaviour', () => {
     expect(rootTest.status).toBe(200);
     expect(rootTest.headers.get('x-event-router-revision')).toBe('1');
 
-    for (const [host, reason] of [
-      [INACTIVE_HOST, 'inactive'],
-      [TOMBSTONE_HOST, 'unknown-host'],
-      [`unknown-${'f'.repeat(20)}.${NAMESPACE}`, 'unknown-host'],
-      [`admin.${NAMESPACE}`, 'reserved-label'],
+    // The revision column is the recovery contract's, not a nicety: a
+    // `canonical-after-unblock` probe observes `{reason, revision}` together
+    // for `inactive` and `unknown-host` alike, so the two refusals decided
+    // from a committed record publish the revision they were refused from
+    // while the refusals with no record to attribute publish none.
+    for (const [host, reason, revision] of [
+      [INACTIVE_HOST, 'inactive', '1'],
+      [TOMBSTONE_HOST, 'unknown-host', '1'],
+      [`unknown-${'f'.repeat(20)}.${NAMESPACE}`, 'unknown-host', null],
+      [`admin.${NAMESPACE}`, 'reserved-label', null],
     ] as const) {
       const refused = await request(instance, host);
       expect(refused.status, host).toBe(404);
       expect(refused.headers.get('x-event-router-reason'), host).toBe(reason);
       expect(refused.headers.get('cache-control'), host).toBe('no-store');
-      expect(refused.headers.get('x-event-router-revision'), host).toBeNull();
+      expect(refused.headers.get('x-event-router-revision'), host).toBe(revision);
     }
   }, 30_000);
 
@@ -366,5 +388,451 @@ describe('functional synthetic exact-route behaviour', () => {
       const originHost = response.headers.get('x-origin-host');
       expect(originHost === null || originHost === ORIGIN_HOST, path).toBe(true);
     }
+  }, 30_000);
+});
+
+// --- The recovery round trip: router response -> probe attestation -> lock ---
+//
+// `specs/event-router-registry.md` § Audit and recovery closes the loop between
+// what this router PUBLISHES and what the registry will ACCEPT as proof: a
+// `canonical-after-unblock` observation carries `{reason, revision}` together,
+// and `clear-lock` consumes three of them "whose host/result/revision equal
+// committed state". So the public response is not merely a diagnostic — it is
+// the evidence, and a refusal that dropped its revision would leave a
+// tombstoned or disabled host permanently locked, and therefore unable to
+// accept another publisher update, for as long as the state persisted.
+//
+// Nothing below asserts a header shape and calls it done. The observations are
+// built from the real router responses, fed through the real
+// `attestProbe`/`recover` transactions on the real object, and the lock is
+// read back as cleared through the registry's own audit page.
+
+const ZONE_ID = '1'.repeat(32);
+const RULESET_ID = '2'.repeat(32);
+const RULE_ID = '3'.repeat(32);
+const RULE_REF = 'registry-recovery';
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function principals(phase: string): [ProbePrincipal, ProbePrincipal, ProbePrincipal] {
+  return [0, 1, 2].map((index) => ({
+    subject: `${phase}-runner-${index}`,
+    keyVersion: `probe-key/${phase}/${index}`,
+    keyFingerprint: sha256(`${phase}-key-${index}`),
+    region: ['us-west1', 'us-east1', 'europe-west1'][index],
+  })) as [ProbePrincipal, ProbePrincipal, ProbePrincipal];
+}
+
+type ProviderRequest = WafEvidence['providerRequests'][number];
+
+function providerRequest(
+  host: string,
+  index: number,
+  nonce: string,
+  status: number,
+  at: number,
+  blocked: boolean,
+): ProviderRequest {
+  const query = `nonce=${nonce}`;
+  return {
+    rayId: `ray-${blocked ? 'blocked' : 'canonical'}-${nonce}`,
+    eventAt: new Date(at).toISOString(),
+    verifiedAt: new Date(at + 1_000).toISOString(),
+    edgeColoCode: ['SJC', 'IAD', 'LHR'][index],
+    host,
+    path: '/',
+    query,
+    queryDigest: sha256(query),
+    edgeResponseStatus: status,
+    httpLogResponseDigest: sha256(`http-${String(blocked)}-${nonce}`),
+    firewall: blocked
+      ? {
+          action: 'block' as const,
+          source: 'firewallcustom' as const,
+          ruleId: RULE_ID,
+          ref: RULE_REF,
+          matchIndex: 0 as const,
+          logResponseDigest: sha256(`firewall-${nonce}`),
+        }
+      : null,
+  };
+}
+
+async function sourceAuditFor(payload: RouterReplicaDesired, at: number): Promise<SourceAudit> {
+  return {
+    revision: payload.revision,
+    digest: await projectionDigest(payload),
+    observedAt: new Date(at).toISOString(),
+    canonicalProjection: {
+      sourceDocumentDigest: sha256(`source-${payload.host}-${payload.revision}`),
+      host: payload.host,
+      desired: payload.desired,
+    },
+    ledgerPayload: payload,
+    ledgerDocumentDigest: sha256(`ledger-${payload.host}-${payload.revision}`),
+    attestorSub: 'source-attestor',
+    attestorKeyVersion: 'source-key/1',
+    attestorKeyFingerprint: sha256('source-attestor-key'),
+    attestationIssuedAt: new Date(at).toISOString(),
+    attestationSignature: 'signed-source',
+  };
+}
+
+function recoveryContext(now: number, lockId: string): Record<string, unknown> {
+  return {
+    now,
+    operatorSub: 'recovery-operator',
+    operatorKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+    operatorKeyFingerprint: sha256('recovery-operator-key'),
+    operatorSignature: 'signed-recovery-request',
+    operatorSignatureScheme: 'v1',
+    operatorSignedRole: 'recovery',
+    operatorSignedMethod: 'POST',
+    operatorSignedPath: '/__internal/hostname-replicas/v1/recover',
+    operatorIssuedAt: String(now),
+    requestBodyDigest: sha256(`recovery-body-${lockId}-${String(now)}`),
+    lockId,
+    expectedWafZone: { namespace: 'fiveacross.app', zoneId: ZONE_ID, rulesetId: RULESET_ID },
+  };
+}
+
+type RecoveryResult = { ok: true; sequence: string; action: string } | { ok: false; error: string };
+type ChallengeResult = { ok: true; challenge: { probeNonce: string } } | { ok: false; error: string };
+type AttestResult = { ok: true; attestation: { id: string } } | { ok: false; error: string };
+
+/** What the PUBLIC router answered, read off the response rather than assumed. */
+type RouterObservation = {
+  status: number;
+  reason: null | 'inactive' | 'unknown-host';
+  revision: string;
+  servesOrigin: boolean;
+  originRequestId: string | null;
+};
+
+async function observeRouter(
+  instance: Miniflare,
+  host: string,
+  nonce: string,
+): Promise<RouterObservation> {
+  const response = await request(instance, host, `/?nonce=${encodeURIComponent(nonce)}`);
+  const reason = response.headers.get('x-event-router-reason');
+  const originRequestId = response.headers.get('x-origin-host');
+  return {
+    status: response.status,
+    reason: reason === null ? null : (reason as 'inactive' | 'unknown-host'),
+    // A MISSING header reads as the empty string on purpose. That is what a
+    // probe runner would record, and recording it faithfully is what makes the
+    // registry's own refusal — rather than a hand-written assertion — the thing
+    // that catches a router which stopped publishing the revision.
+    revision: response.headers.get('x-event-router-revision') ?? '',
+    servesOrigin: originRequestId !== null,
+    originRequestId,
+  };
+}
+
+function canonicalObservation(
+  host: string,
+  nonce: string,
+  at: number,
+  observed: RouterObservation,
+): ProbeObservation {
+  return {
+    phase: 'canonical-after-unblock',
+    probeNonce: nonce,
+    observedAt: new Date(at).toISOString(),
+    rayId: `ray-canonical-${nonce}`,
+    host,
+    requestPath: `/?nonce=${nonce}`,
+    expectedStatus: observed.status,
+    observedStatus: observed.status,
+    expectedReason: observed.reason,
+    observedReason: observed.reason,
+    expectedRevision: observed.revision,
+    observedRevision: observed.revision,
+    expectedServesOrigin: observed.servesOrigin,
+    observedServesOrigin: observed.servesOrigin,
+    originRequestId: observed.servesOrigin ? observed.originRequestId : null,
+  };
+}
+
+/**
+ * Contain, acquire, unblock, prove, clear — the whole § Audit and recovery
+ * state machine against one host, with the canonical evidence taken from the
+ * router's own answer.
+ *
+ * The WAF and its provider logs are the one part that cannot be observed here:
+ * a `blocked-before-worker` request never reaches the Worker by definition, so
+ * that phase is synthesised. Everything after the unblock is real.
+ */
+async function recoverAndClear(
+  instance: Miniflare,
+  payload: RouterReplicaDesired,
+): Promise<{
+  observed: RouterObservation[];
+  audit: { recoveryLock: unknown; committed: { revision: string } | null };
+}> {
+  const host = payload.host;
+  const base = Date.now();
+  const digest = await projectionDigest(payload);
+  const blockNonce = `block-${host}`;
+  const blockDigest = sha256(JSON.stringify({ recoveryBlock: blockNonce }));
+
+  // 1. Contain and acquire, on three blocked attestations.
+  const blockedIds: [string, string, string] = [`b1-${host}`, `b2-${host}`, `b3-${host}`];
+  const blockedProviders: ProviderRequest[] = [];
+  for (const [index, principal] of principals('blocked').entries()) {
+    const nonce = `blocked-${String(index)}-${host}`;
+    await expect(
+      control<ChallengeResult>(instance, {
+        op: 'challenge',
+        host,
+        request: { host, phase: 'blocked-before-worker', expectedStateDigest: digest },
+        principal,
+        now: base,
+        nonce,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    blockedProviders.push(providerRequest(host, index, nonce, 403, base + 1_000, true));
+    const observation: ProbeObservation = {
+      phase: 'blocked-before-worker',
+      probeNonce: nonce,
+      observedAt: new Date(base + 1_000).toISOString(),
+      rayId: `ray-blocked-${nonce}`,
+      host,
+      requestPath: `/?nonce=${nonce}`,
+      expectedStatus: 403,
+      observedStatus: 403,
+      expectedBlockBodyDigest: blockDigest,
+      observedBlockBodyDigest: blockDigest,
+    };
+    await expect(
+      control<AttestResult>(instance, {
+        op: 'attest',
+        host,
+        observation,
+        principal,
+        now: base + 2_000,
+        id: blockedIds[index],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+  }
+
+  const wafEvidence: WafEvidence = {
+    zoneId: ZONE_ID,
+    rulesetId: RULESET_ID,
+    ruleId: RULE_ID,
+    host,
+    verifiedAt: new Date(base + 2_500).toISOString(),
+    blockNonce,
+    providerRule: {
+      enabled: true,
+      action: 'block',
+      expression: `http.host eq "${host}"`,
+      ref: RULE_REF,
+      customResponseBodyDigest: blockDigest,
+      responseDigest: sha256(`waf-response-${host}`),
+    },
+    probeAttestationIds: blockedIds,
+    providerRequests: blockedProviders as WafEvidence['providerRequests'],
+  };
+  const acquire: RecoveryRequest = {
+    schemaVersion: 1,
+    host,
+    expectedCommitted: { revision: payload.revision, digest },
+    sourceAudit: await sourceAuditFor(payload, base + 3_000),
+    action: { kind: 'acquire-lock', wafEvidence },
+    incidentUrl: 'https://example.com/incidents/972',
+    reason: 'publisher integrity incident',
+  };
+  await expect(
+    control<RecoveryResult>(instance, {
+      op: 'recover',
+      host,
+      request: acquire,
+      context: recoveryContext(base + 3_000, 'lock-1'),
+    }),
+  ).resolves.toEqual({ ok: true, sequence: '1', action: 'acquire-lock' });
+
+  // 2. Remove the block, then prove the canonical answer — from the ROUTER.
+  const wafRemovedAt = new Date(base + 4_000).toISOString();
+  const clearIds: [string, string, string] = [`c1-${host}`, `c2-${host}`, `c3-${host}`];
+  const clearProviders: ProviderRequest[] = [];
+  const observed: RouterObservation[] = [];
+  for (const [index, principal] of principals('canonical').entries()) {
+    const nonce = `canonical-${String(index)}-${host}`;
+    await expect(
+      control<ChallengeResult>(instance, {
+        op: 'challenge',
+        host,
+        request: {
+          host,
+          phase: 'canonical-after-unblock',
+          expectedStateDigest: digest,
+          recoveryLockId: 'lock-1',
+          recoverySequence: '1',
+          wafRemovedAt,
+        },
+        principal,
+        now: base + 5_000,
+        nonce,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    // THE public request, through the real router over the real binding, while
+    // the lock is held. The lock fences the publisher, not the lookup.
+    const answer = await observeRouter(instance, host, nonce);
+    observed.push(answer);
+    clearProviders.push(providerRequest(host, index, nonce, answer.status, base + 6_000, false));
+
+    await expect(
+      control<AttestResult>(instance, {
+        op: 'attest',
+        host,
+        observation: canonicalObservation(host, nonce, base + 6_000, answer),
+        principal,
+        now: base + 7_000,
+        id: clearIds[index],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+  }
+
+  const clear: RecoveryRequest = {
+    schemaVersion: 1,
+    host,
+    expectedCommitted: { revision: payload.revision, digest },
+    sourceAudit: await sourceAuditFor(payload, base + 8_000),
+    action: {
+      kind: 'clear-lock',
+      lockId: 'lock-1',
+      wafRemovedAt,
+      probeAttestationIds: clearIds,
+      providerRequests: clearProviders as WafEvidence['providerRequests'],
+    },
+    incidentUrl: 'https://example.com/incidents/972',
+    reason: 'canonical state proven from three regions',
+  };
+  await expect(
+    control<RecoveryResult>(instance, {
+      op: 'recover',
+      host,
+      request: clear,
+      context: recoveryContext(base + 8_000, 'unused-on-clear'),
+    }),
+  ).resolves.toEqual({ ok: true, sequence: '2', action: 'clear-lock' });
+
+  const audit = await control<{
+    ok: true;
+    page: { recoveryLock: unknown; committed: { revision: string } | null };
+  }>(instance, { op: 'audit', host, after: '0' });
+  return { observed, audit: audit.page };
+}
+
+describe('recovery evidence taken from the router’s own answer', () => {
+  it.each([
+    [
+      'a disabled route, publicly refused as inactive',
+      INACTIVE_HOST,
+      'inactive' as const,
+      '2',
+    ],
+    [
+      'a tombstone, publicly refused as unknown-host',
+      TOMBSTONE_HOST,
+      'unknown-host' as const,
+      '2',
+    ],
+  ])('clears the lock on %s', async (_label, host, reason, revision) => {
+    const instance = miniflare();
+    // Both states are reached the way a real one is: revision 1 active, then
+    // its exact successor carrying the withdrawal.
+    await expect(publish(instance, routePayload(host, 'active', '1'))).resolves.toEqual({
+      status: 200,
+      result: 'applied',
+    });
+    const payload: RouterReplicaDesired =
+      reason === 'inactive'
+        ? routePayload(host, 'disabled', revision)
+        : {
+            schemaVersion: 1,
+            revision,
+            host,
+            desired: { kind: 'tombstone' },
+            updatedAt: new Date().toISOString(),
+          };
+    await expect(publish(instance, payload)).resolves.toEqual({ status: 200, result: 'applied' });
+
+    const { observed, audit } = await recoverAndClear(instance, payload);
+
+    // Every one of the three public answers carried the reason AND the
+    // committed revision — the pair the registry then compared against
+    // committed state before it would consume them.
+    expect(observed).toHaveLength(3);
+    for (const answer of observed) {
+      expect(answer.status).toBe(404);
+      expect(answer.reason).toBe(reason);
+      expect(answer.revision).toBe(revision);
+      expect(answer.servesOrigin).toBe(false);
+    }
+    // And the lock is gone, so a queued publisher delivery can proceed again
+    // instead of being fenced with `503 recovery-locked` forever.
+    expect(audit.recoveryLock).toBeNull();
+    expect(audit.committed?.revision).toBe(revision);
+    await expect(publish(instance, routePayload(host, 'active', '3'))).resolves.toEqual(
+      reason === 'inactive'
+        ? { status: 200, result: 'applied' }
+        : { status: 409, result: 'tombstone-final' },
+    );
+  }, 30_000);
+
+  it('refuses a canonical attestation whose observed revision is missing', async () => {
+    // The negative control for the pair above, and the exact failure a router
+    // that dropped the revision on a refusal produces: the runner holds an
+    // expectation derived from committed state and observes a revision-less
+    // response, so the attestation is refused and no `clear-lock` evidence can
+    // ever be assembled for that host.
+    const instance = miniflare();
+    const payload: RouterReplicaDesired = {
+      schemaVersion: 1,
+      revision: '1',
+      host: TOMBSTONE_HOST,
+      desired: { kind: 'tombstone' },
+      updatedAt: new Date().toISOString(),
+    };
+    await publish(instance, payload);
+    const digest = await projectionDigest(payload);
+    const now = Date.now();
+    const [principal] = principals('missing-revision');
+    const nonce = 'missing-revision-nonce';
+    await expect(
+      control<ChallengeResult>(instance, {
+        op: 'challenge',
+        host: TOMBSTONE_HOST,
+        request: { host: TOMBSTONE_HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+        principal,
+        now,
+        nonce,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    const answer = await observeRouter(instance, TOMBSTONE_HOST, nonce);
+    expect(answer.revision).toBe('1');
+
+    await expect(
+      control<AttestResult>(instance, {
+        op: 'attest',
+        host: TOMBSTONE_HOST,
+        observation: {
+          ...canonicalObservation(TOMBSTONE_HOST, nonce, now, answer),
+          // What the runner would have recorded had the router published no
+          // revision header on this refusal.
+          observedRevision: '',
+        },
+        principal,
+        now: now + 1_000,
+        id: 'missing-revision-attestation',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
   }, 30_000);
 });

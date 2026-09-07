@@ -87,7 +87,36 @@ export interface ServedRecord {
 
 export type Resolution =
   | { kind: 'serve'; record: ServedRecord }
-  | { kind: 'not-found'; reason: NotFoundReason };
+  | {
+      kind: 'not-found';
+      reason: NotFoundReason;
+      /**
+       * The committed revision this refusal was decided FROM, or `null` when
+       * there was none to decide from.
+       *
+       * A fail-closed answer is not automatically a revision-less one.
+       * `specs/event-router-registry.md` § Failure semantics says a resolved
+       * edge record carries `x-event-router-revision`, and § Audit and recovery
+       * makes that header load-bearing rather than decorative: a
+       * `canonical-after-unblock` probe observation is `{reason, revision}`
+       * together for `null`, `inactive` AND `unknown-host`, and `clear-lock`
+       * consumes three of them "whose host/result/revision equal committed
+       * state". A router that dropped the revision on the two refusals the
+       * recovery machine can be asked to prove would leave those hosts unable
+       * to clear a lock — and therefore unable to accept another publisher
+       * update — for as long as the state persisted.
+       *
+       * So it is non-null for exactly the refusals the router decided FROM a
+       * committed record it could attribute to this address: `inactive`, and
+       * the `unknown-host` a tombstone produces. It is `null` for the refusals
+       * that are about the absence of a usable record rather than its content —
+       * an uninitialized object, an unavailable lookup, a malformed projection,
+       * and a record whose Slug names a different address, none of which the
+       * probe contract models and none of which the router may claim to be
+       * serving a revision for.
+       */
+      revision: string | null;
+    };
 
 export interface ResolveConfig {
   /** Hard bound on the whole registry service call. */
@@ -102,8 +131,10 @@ export interface ResolveDeps {
   registry: RegistryLookupService | null;
 }
 
-function notFound(reason: NotFoundReason): Resolution {
-  return { kind: 'not-found', reason };
+/** `revision` defaults to `null`, so a refusal only carries one where the arm
+ *  deciding it says so. */
+function notFound(reason: NotFoundReason, revision: string | null = null): Resolution {
+  return { kind: 'not-found', reason, revision };
 }
 
 /**
@@ -216,7 +247,14 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
 
   switch (lookup.kind) {
     case 'unknown-host':
-      return notFound('unknown-host');
+      // An uninitialized object carries no revision; a tombstone reads as
+      // `unknown-host` too but carries the one it was deleted at, because the
+      // recovery machine's canonical probe has to observe it. A revision that
+      // is present and NOT canonical is judged the same way one on a committed
+      // projection is — the shape rule is the projection's, not the arm's.
+      if (lookup.revision === undefined) return notFound('unknown-host');
+      if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
+      return notFound('unknown-host', lookup.revision);
     case 'unavailable':
       return notFound('lookup-unavailable');
     case 'malformed':
@@ -236,12 +274,17 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
 
   switch (desired.kind) {
     case 'tombstone':
-      // A deleted address is permanent and is indistinguishable from an
-      // unknown one from outside, which is the point: a tombstone must not
-      // advertise that the address ever existed. The object already collapses
-      // this arm before it answers; the router repeats it so a registry that
-      // ever stopped doing so still fails closed here.
-      return notFound('unknown-host');
+      // A deleted address is permanent and reads as `unknown-host` from
+      // outside, which is the point: a tombstone must not advertise that the
+      // address ever existed as a route. It keeps its REVISION, though — that
+      // is public metadata by the spec's own threat model, and the recovery
+      // contract requires it (see the `revision` note on `Resolution`).
+      //
+      // The object already reports this state through its `unknown-host` arm;
+      // the router repeats the classification so a registry that ever handed
+      // back the committed tombstone instead still fails closed here, with the
+      // same reason and the same revision either way.
+      return notFound('unknown-host', revision);
 
     case 'root': {
       // A root marker is a valid configured origin. `doorway` or `not-found`
@@ -296,7 +339,11 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       // projection this Worker cannot judge, not an inferred active — the same
       // rule ADR 0009 gives the source document, moved to the projection.
       if (!isReplicaRouteStatus(desired.status)) return notFound('replica-malformed');
-      if (desired.status !== 'active') return notFound('inactive');
+      // Disabled and archived are refusals decided FROM a committed record, so
+      // they carry its revision — the state a `canonical-after-unblock` probe
+      // observes as `{reason: 'inactive', revision}` and `clear-lock` compares
+      // against committed state.
+      if (desired.status !== 'active') return notFound('inactive', revision);
       if (typeof desired.eventId !== 'string' || desired.eventId.length === 0) {
         return notFound('replica-malformed');
       }

@@ -128,16 +128,22 @@ export async function handleRequest(
   // transaction with credentials already in flight. The surface it opens is
   // narrow and grants nothing: these paths serve Firebase Hosting's own helper,
   // carry no Event data, and Google matches `redirect_uri` exactly against a
-  // registration this router cannot create (ADR 0010). It is also the one path
-  // whose response carries no `x-event-router-revision`, because no record was
-  // resolved to have a revision.
+  // registration this router cannot create (ADR 0010). It is also the only
+  // PROXIED path whose response carries no `x-event-router-revision`, because
+  // it is the only one that reaches the origin without resolving a record to
+  // read a revision from.
   if (isAuthPassthrough(url.pathname)) {
     return proxyToOrigin(request, url, config, deps, null);
   }
 
+  // A refusal that was decided FROM a committed record carries that record's
+  // revision, so `inactive` and a tombstone's `unknown-host` are publicly
+  // observable as the `{reason, revision}` pair the registry's recovery
+  // evidence compares against committed state. Every other refusal resolves to
+  // `null` and stamps no revision header.
   const resolution = await resolveHost(classified.host, classified.slug, config, deps);
   if (resolution.kind === 'not-found') {
-    return notFoundResponse(resolution.reason, config.version);
+    return notFoundResponse(resolution.reason, config.version, undefined, resolution.revision);
   }
 
   // Served from the SAME lookup that decided the request may proceed, with no

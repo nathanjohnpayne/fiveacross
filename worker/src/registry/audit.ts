@@ -11,7 +11,10 @@ export type RegistryAuditPage = {
   highestAuthenticatedPublisherEpoch: string;
   highestQuarantinedPublisherEpoch: string;
   recoveryLock: RegistryState['recoveryLock'];
-  lookup: { kind: 'unknown-host' } | { kind: 'unavailable' } | { kind: 'committed'; revision: string };
+  lookup:
+    | { kind: 'unknown-host'; revision?: string }
+    | { kind: 'unavailable' }
+    | { kind: 'committed'; revision: string };
   records: RecoveryRecord[];
   nextAfter: string | null;
 };

@@ -210,7 +210,7 @@ Cold/warm evidence is executable rather than inferred from a 30-second wait. For
 | recovery CAS/source/monotonic/probe check fails | `409` | no change; repeat source/DO audit and containment |
 | origin fetch fails | existing generic `502 origin-unavailable` | unchanged |
 
-Every public response keeps `x-event-router`; fail-closed responses keep a closed `x-event-router-reason`. A resolved edge record carries `x-event-router-revision`, a validated decimal string. No caller-controlled diagnostic enters a header.
+Every public response keeps `x-event-router`; fail-closed responses keep a closed `x-event-router-reason`. A resolved edge record carries `x-event-router-revision`, a validated decimal string, and "resolved" is decided by whether a committed record was READ for this address rather than by whether it was served: an `inactive` route and a tombstone's `unknown-host` each carry the committed revision they were refused from, because the `canonical-after-unblock` probe above observes `{reason, revision}` together for `null`, `inactive` and `unknown-host` alike, and `clear-lock` compares that revision against committed state. An uninitialized object, an unavailable or malformed lookup, and a route whose Slug names a different address carry no revision — there is none the router may attribute to the address. No caller-controlled diagnostic enters a header.
 
 ## Observability, rollout, and rollback
 

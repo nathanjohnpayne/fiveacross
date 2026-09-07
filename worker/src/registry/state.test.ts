@@ -121,4 +121,22 @@ describe('per-host contiguous publisher state', () => {
       kind: 'unknown-host',
     });
   });
+
+  it('reports a tombstone as unknown but keeps the revision recovery has to observe', async () => {
+    // The projection is withheld — a deleted address must not advertise that
+    // it ever named an Event — but the revision is not. The spec's own threat
+    // model calls individual replica revisions public metadata, and
+    // `clear-lock` consumes three public attestations "whose host/result/
+    // revision equal committed state", which a tombstoned host could never
+    // produce if its public answer carried no revision.
+    const tombstone = {
+      ...desired('1'),
+      revision: '4',
+      desired: { kind: 'tombstone' } as const,
+    };
+    const applied = await applyPublisherSync(initialRegistryState(), { ...desired('1') }, '1');
+    const deleted = await applyPublisherSync(applied.state, { ...tombstone, revision: '2' }, '1');
+    expect(deleted.response).toEqual({ status: 200, result: 'applied' });
+    expect(registryLookup(deleted.state)).toEqual({ kind: 'unknown-host', revision: '2' });
+  });
 });
