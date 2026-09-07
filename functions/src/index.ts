@@ -22,6 +22,7 @@ import {
 } from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
+import { applyVisionFlagHide, type VisionFlaggedDoc } from './visionHide';
 import {
   applyEventAdultContent,
   applyItemAdultContent,
@@ -590,6 +591,40 @@ export const hideProofAtThreshold = onDocumentWritten(
       event.params.proofId,
       event.data?.before.data() as ReportableDoc | undefined,
       event.data?.after.data() as ReportableDoc | undefined,
+    ),
+);
+
+/**
+ * Server-authoritative Vision auto-hide (issue #133, ADR 0004 Phase 1) — the
+ * CONSUMER of the `visionFlag` `moderateProof` produces. When a Proof is left
+ * `'flagged'` with an extreme/illegal `visionFlag`, flip `status → 'hidden'` via
+ * the admin SDK, keeping `visionFlag` on the doc so the hide stays legible as a
+ * Vision hide rather than a plain one. The predicate, the allowlist that keeps
+ * raciness out of it, and the transactional live re-confirm live in
+ * `applyVisionFlagHide` (./visionHide); this is the thin trigger seam, mirroring
+ * the threshold pair above.
+ *
+ * A SECOND trigger on the same document path rather than a branch inside
+ * `hideProofAtThreshold`: the two hides share no input (one reads the Event's
+ * `reportHideThreshold`, the other reads the Proof's own verdict), no state (one
+ * owns `'active'` docs, the other `'flagged'` ones), and no failure mode, so
+ * keeping them separate is what makes "#133 does not regress #43" auditable —
+ * `autohide.ts`'s decision path is untouched.
+ *
+ * Exported UNCONDITIONALLY, unlike the `ENABLE_VISION_MODERATION`-gated
+ * `moderateProof`: with the producer off nothing writes a `visionFlag`, so this
+ * short-circuits on every write; with it on, the consumer is already deployed.
+ * `ADMIN_SDK_SERVICE_ACCOUNT` is pinned because the transactional re-read and
+ * the hide write are Firestore data-plane calls the default Gen2 compute
+ * identity cannot make in this project. Firestore triggers stay on us-central1.
+ */
+export const hideProofOnVisionFlag = onDocumentWritten(
+  { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (event) =>
+    applyVisionFlagHide(
+      event.params.eventId,
+      event.params.proofId,
+      event.data?.after.data() as VisionFlaggedDoc | undefined,
     ),
 );
 

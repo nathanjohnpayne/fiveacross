@@ -53,10 +53,12 @@ export type ModeratedCollection = 'items' | 'proofs';
  *   - Active-only (F2, Codex R1). ONLY an `'active'` doc is auto-hidden. A
  *     `'flagged'` (Vision) or `'pending'` (admin_confirmed claim) doc that a
  *     stale/queued report bump carries over the threshold is LEFT ALONE, so the
- *     stronger moderation state is never downgraded to a plain `'hidden'` (and an
- *     admin Restore can never expose a still-`visionFlag`ged proof). It is also
- *     the loop guard: our own hide write makes the doc `'hidden'` (not active),
- *     so the re-fired `onDocumentWritten` no-ops.
+ *     stronger moderation state is never downgraded to a plain `'hidden'` — one
+ *     an admin could Restore without ever learning the media was Vision-flagged.
+ *     Moving a `'flagged'` doc to `'hidden'` belongs to the writer that knows why
+ *     it is flagged and leaves `visionFlag` on the doc: `./visionHide` (#133).
+ *     This gate is also the loop guard: our own hide write makes the doc
+ *     `'hidden'` (not active), so the re-fired `onDocumentWritten` no-ops.
  *   - Rose, not a bare `count >= threshold`. Admin restore is preserved:
  *     `restoreItem`/`restoreProof` (src/data/admin.ts) set `status → 'active'`
  *     but deliberately leave `reportCount` over the threshold. That write does
@@ -132,7 +134,14 @@ function readThreshold(data: Record<string, unknown> | undefined): number | null
   return typeof settings?.reportHideThreshold === 'number' ? settings.reportHideThreshold : null;
 }
 
-async function adminFirestore(): Promise<AdminFirestore> {
+/**
+ * The lazily-imported admin-SDK Firestore handle every default in this module
+ * uses. EXPORTED (and only exported) so the sibling Vision hide (`./visionHide`,
+ * #133) shares one handle factory and one `AdminFirestore` surface instead of
+ * redeclaring them — the second server-authoritative writer must reach Firestore
+ * exactly the way this one does. Nothing about the report-count path changes.
+ */
+export async function adminFirestore(): Promise<AdminFirestore> {
   const { getFirestore } = await import('firebase-admin/firestore');
   return getFirestore() as unknown as AdminFirestore;
 }
