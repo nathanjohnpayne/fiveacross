@@ -1363,18 +1363,40 @@ export type HeadlineBingoRow = Pick<PlayerDoc, 'uid' | 'firstBingoAt' | 'dayStat
  * pre-Phase-1.5 or single-Board roster) has no per-Day breakdown to read and its
  * root `firstBingoAt` stands as that Board's own stamp.
  *
- * `candidateUid` is excluded from the scan: the question is whether SOMEONE ELSE
- * was first, and the candidate's own row is both self-evidence (their own win is
- * what is being claimed) and volatile — `computeMark` clears the stamp when the
- * last line falls. The candidate's own prior-win history is answered by
- * `hasPriorBingoWitness` at birth time, never here.
+ * `candidateUid` never blocks itself: the question is whether someone ELSE was
+ * first, and the candidate's own row is self-evidence — their own win is what is
+ * being claimed. Their prior-win history is `hasPriorBingoWitness`'s question at
+ * birth time, never this one.
  *
- * A bare presence test rather than a comparison against the candidate's own
- * stamp, unchanged from the gate it replaces: the claim is being decided at the
- * instant this Player's win crossed, so any already-recorded eligible bingo on
- * another row is by construction earlier — and the candidate's own row has
- * usually not echoed back yet, so comparing against it would read as "nobody
- * else is ahead" precisely when the roster says otherwise.
+ * "Earlier" is measured against the candidate's OWN eligible instant when the
+ * roster already carries one, and is otherwise a bare presence test (Codex P2 on
+ * #1128). Both halves are load-bearing:
+ *
+ *   - The comparison is what keeps a LATER rival from voiding a held candidate.
+ *     A claim can be parked at the roster gate for an arbitrarily long time — an
+ *     unconfirmed roster, an offline stretch, a delayed admin confirm — and a
+ *     rival can complete their own eligible bingo inside that window. On a bare
+ *     presence test the two clients then suppress EACH OTHER: the rival defers to
+ *     the (genuinely earlier) held candidate while the held candidate defers to
+ *     the rival's mere presence, so the immutable singleton is never written and
+ *     the Feed carries no ceremony at all while the podium names the winner.
+ *   - The presence fallback is what keeps the gate conservative when the
+ *     candidate's own instant is NOT knowable: a freshly-crossed win whose row
+ *     has not echoed back yet, a row whose stamp a concurrent unmark cleared
+ *     (`computeMark` clears it when the last line falls), or one whose only
+ *     bingos are tutorial or post-freeze. Comparing against a missing instant
+ *     would read as "nobody else is ahead" precisely when the roster says
+ *     otherwise, so an unknown candidate instant defers to any eligible rival —
+ *     the pre-#1050 posture, unchanged.
+ *
+ * The comparison is STRICT, so an exact tie blocks neither side and both attempt
+ * the claim. That is the documented honest race (ADR 0001): the create-only
+ * singleton resolves it to one Moment, whereas a non-strict test would resurrect
+ * the mutual-suppression case above at the tie.
+ *
+ * Blocking therefore coincides with the shared headline selector: this returns
+ * true exactly when `eventFirstBingoWinner` over the same roster and cutoff names
+ * a Player who is not the candidate (ties aside).
  */
 export function earlierEligibleHeadlineBingoExists(params: {
   roster: readonly HeadlineBingoRow[];
@@ -1383,11 +1405,18 @@ export function earlierEligibleHeadlineBingoExists(params: {
   freezeAt?: number | null;
 }): boolean {
   const { roster, candidateUid, isTutorialDay, freezeAt } = params;
+  const eligibleAt = (row: HeadlineBingoRow): number | null => {
+    const at = effectiveCruiseFirstBingoAt(row, isTutorialDay);
+    if (at == null) return null;
+    return freezeAt != null && at >= freezeAt ? null : at;
+  };
+  const candidateRow = roster.find((p) => p.uid === candidateUid);
+  const candidateAt = candidateRow ? eligibleAt(candidateRow) : null;
   return roster.some((p) => {
     if (p.uid === candidateUid) return false;
-    const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
+    const at = eligibleAt(p);
     if (at == null) return false;
-    return freezeAt == null || at < freezeAt;
+    return candidateAt == null || at < candidateAt;
   });
 }
 

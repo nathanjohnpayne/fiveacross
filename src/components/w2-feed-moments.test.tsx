@@ -366,6 +366,33 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
   });
 
+  it('a roster-HELD win still fires when the ceremonial rival won LATER (Codex P2 on #1128)', async () => {
+    // The held-candidate window: this Player crossed first and their own row
+    // records it, then the rival wins on a ceremonial Day while the claim is
+    // parked at the roster gate. Under a bare presence test both clients defer to
+    // each other and the immutable singleton is never written at all.
+    H.rosterConfirmed = false;
+    H.players = [];
+    H.board = boardWith([0, 1, 2, 3]);
+    const { rerender } = render(<Board />);
+    await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // held
+
+    H.board = boardWith(ROW0); // the listener echoes the standing win
+    rerender(<Board />);
+
+    // The roster confirms: this Player's own row carries their earlier instant,
+    // the rival's ceremonial win is later.
+    H.rosterConfirmed = true;
+    H.players = [
+      { uid: 'u1', firstBingoAt: 100, dayStats: { 3: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 } } } as unknown as PlayerDoc,
+      { ...CEREMONIAL_RIVAL, dayStats: { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 } } } as unknown as PlayerDoc,
+    ];
+    rerender(<Board />);
+    await flushAsync();
+    expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
+  });
+
   it('a RECONNECT that delivers the ceremonial rival with the identity gate drops the ceremony (#1050)', async () => {
     // The cold-cache/offline shape: the win completes while the player row is
     // still loading, so every Moment is held. The reconnect snapshot resolves

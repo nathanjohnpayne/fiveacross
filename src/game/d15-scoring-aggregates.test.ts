@@ -516,22 +516,100 @@ describe('earlierEligibleHeadlineBingoExists — the shared First-to-BINGO gate 
     ).toBe(false);
   });
 
-  it('agrees exactly with the shared headline selector over the same roster', () => {
-    // The Moment gate and the Leaderboard/podium pin must answer one question:
-    // the gate blocks iff the shared selector finds a winner among the OTHER
-    // Players, for every roster and every cutoff.
+  it('a LATER eligible rival does not void a candidate whose own instant is known', () => {
+    // The held-candidate window (Codex P2 on #1128): the candidate crossed first
+    // and their row records it, then a rival wins on a ceremonial Day while the
+    // claim is still parked at the roster gate. On a bare presence test the two
+    // clients suppress each other and the immutable singleton is never written.
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 } });
+    const later = rivalOn(8, 200);
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, later],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(false);
+    // The rival's own client still defers to the genuinely earlier candidate.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, later],
+        candidateUid: 'rival',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('an EARLIER rival still blocks a candidate whose own instant is known', () => {
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 300 } });
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, rivalOn(8, 200)],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to presence when the candidate's own instant is not knowable", () => {
+    const rival = rivalOn(8, 200);
+    // Row absent from the roster (a freshly-crossed win that has not echoed).
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+    // Row present but carrying no stamp (a concurrent unmark cleared it).
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [mkPlayer('me', {}), rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+    // Row present but tutorial-only, so it holds no HEADLINE instant.
+    expect(
+      earlierEligibleHeadlineBingoExists({
+        roster: [mkPlayer('me', { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 1 } }), rival],
+        candidateUid: 'me',
+        isTutorialDay: isTutorial,
+      }),
+    ).toBe(true);
+  });
+
+  it('an exact TIE blocks neither side — the create-only singleton resolves it', () => {
+    const me = mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 200 } });
+    const tied = rivalOn(8, 200);
+    const gate = (candidateUid: string) =>
+      earlierEligibleHeadlineBingoExists({
+        roster: [me, tied],
+        candidateUid,
+        isTutorialDay: isTutorial,
+      });
+    // A non-strict comparison here would re-create the mutual-suppression case:
+    // both defer, nobody writes, the Feed carries no ceremony at all.
+    expect([gate('me'), gate('rival')]).toEqual([false, false]);
+  });
+
+  it('blocks exactly when the shared headline selector names someone else', () => {
+    // The Moment gate and the Leaderboard/podium pin answer ONE question: this
+    // client may claim the singleton iff the shared selector over the same roster
+    // and cutoff does not name a different Player. Distinct instants throughout —
+    // the tie case above is the documented honest race.
     const roster: PlayerDoc[] = [
       rivalOn(8, 1_000), // ceremonial, non-tutorial — eligible
       { ...rivalOn(0, 1), uid: 'warmup' }, // tutorial only — never eligible
-      { ...rivalOn(4, 8_000), uid: 'late' }, // main-game, post-freeze in the cut case
+      { ...rivalOn(4, 8_000), uid: 'late' }, // main-game, cut by the tighter freezes
       mkPlayer('me', { 5: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 2_000 } }),
     ];
     for (const freezeAt of [null, 500, 1_000, 5_000, 9_000]) {
       for (const candidateUid of ['me', 'rival', 'warmup', 'late', 'stranger']) {
-        const others = roster.filter((p) => p.uid !== candidateUid);
+        const winner = eventFirstBingoWinner(roster, isTutorial, freezeAt);
         expect(
           earlierEligibleHeadlineBingoExists({ roster, candidateUid, isTutorialDay: isTutorial, freezeAt }),
-        ).toBe(eventFirstBingoWinner(others, isTutorial, freezeAt) !== undefined);
+        ).toBe(winner !== undefined && winner.uid !== candidateUid);
       }
     }
   });
