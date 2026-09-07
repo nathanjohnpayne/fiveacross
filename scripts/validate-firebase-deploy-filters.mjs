@@ -789,6 +789,27 @@ async function liveTreeFingerprint(liveDirs) {
       );
       // Dirents report the entry's OWN type, so a symlink is never descended:
       // the walk stays inside the directories the overlay actually exposed.
+      // Its TARGET is fingerprinted, though (Phase 4b / Codex P1, round 20): a
+      // link such as `tools/config-link -> ../firebase.json` is a path a hook
+      // can write THROUGH, and recording only the link's own inode would let
+      // the write land on a deployment input outside every watched tree
+      // without a single fingerprint changing. The target's stat — including
+      // its `ctime` — is keyed under the link path, so a replaced or edited
+      // target reads as drift on the link that reached it. Directory targets
+      // are recorded the same way (an entry added or removed moves their
+      // `mtime`); they are not walked, so a link cannot make the guard
+      // traverse the repository twice or escape it.
+      if (entry.isSymbolicLink()) {
+        try {
+          const target = await stat(path, { bigint: true });
+          fingerprint.set(
+            `${path} -> target`,
+            `${target.mode} ${target.ino} ${target.size} ${target.mtimeNs} ${target.ctimeNs}`,
+          );
+        } catch (error) {
+          fingerprint.set(`${path} -> target`, `absent ${error?.code ?? "?"}`);
+        }
+      }
       if (entry.isDirectory()) await walk(path);
     }
   };

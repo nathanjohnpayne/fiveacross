@@ -2163,6 +2163,32 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a hook writes THROUGH a symlink inside a linked directory", async () => {
+    // A linked project directory can hold a symlink back to a ROOT deployment
+    // input — a file the overlay copies rather than links, so the live copy
+    // sits under no walked directory. Fingerprinting only the link's own inode
+    // would let a hook write through it — replacing firebase.json, say — with
+    // no watched path changing (Phase 4b / Codex P1, round 20). The target is
+    // fingerprinted under the link, so the write reads as drift on the link
+    // that reached it, and the message names that link.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> tools/config-link"] },
+        files: { "toggle.txt": "", "tools/.keep": "" },
+        links: { "tools/config-link": "../toggle.txt" },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("tools/config-link");
+        expect(failure.message).toContain("Nothing has been restored");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
