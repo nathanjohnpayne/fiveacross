@@ -495,13 +495,20 @@ describe('client/functions parity — the Standings Freeze (ADR 0011)', () => {
     expect(fnsStandingsFreezeAtFor(null)).toEqual(clientStandingsFreezeAtFor(null));
   });
 
-  it('pins the two answers that matter, so a symmetric regression still fails', () => {
-    expect(clientStandingsFreezeAtFor({ standingsFreezeAt: 9_000, days: [] } as never)).toBe(9_000);
-    expect(
-      clientStandingsFreezeAtFor({
-        days: [{ index: 0, pool: 'farewell', unlockAt: 5_000 }],
-      } as never),
-    ).toBe(5_000);
+  it('pins every answer, so a symmetric regression on both sides still fails', () => {
+    const answers = FREEZE_CASES.map(({ standingsFreezeAt, days }) =>
+      fnsStandingsFreezeAtFor({ standingsFreezeAt, days }),
+    );
+    expect(answers).toEqual([
+      9_000, // configured wins outright
+      2_000, // the FIRST ceremonial Day, not the last
+      5_000, // the legacy `farewell` spelling of the closing pool
+      null, // the `unlockAt: 0` sentinel schedules nothing
+      2_000, // a configured 0 is ignored, so the schedule answers
+      null, // a stated-competitive closing Day is not ceremonial
+      null, // no schedule
+      null, // no days key
+    ]);
   });
 });
 

@@ -636,7 +636,7 @@ describe('the ⭐ honours the Standings Freeze (#1052)', () => {
       },
     },
   ];
-  const starAt = (at: number, over: Partial<EmailEvent> = {}): string | undefined =>
+  const standingsAt = (at: number, over: Partial<EmailEvent> = {}) =>
     buildDailyEmailModel({
       event: { ...event, ...over },
       day: days[2],
@@ -646,7 +646,9 @@ describe('the ⭐ honours the Standings Freeze (#1052)', () => {
       feedUrl: 'https://fiveacross.app/feed',
       unsubscribeUrl: 'https://example.com/u',
       preferencesUrl: 'https://example.com/u?a=preferences',
-    }).standings.rows.find((r) => r.starred)?.uid;
+    }).standings;
+  const starAt = (at: number, over: Partial<EmailEvent> = {}): string | undefined =>
+    standingsAt(at, over).rows.find((r) => r.starred)?.uid;
 
   it('derives the freeze from the first ceremonial Day when the Event configures none', () => {
     // The instant the pre-ADR-0011 `pool === 'closing'` derivation used, so both
@@ -661,6 +663,10 @@ describe('the ⭐ honours the Standings Freeze (#1052)', () => {
     expect(starAt(FREEZE - 1)).toBe('edge');
     expect(starAt(FREEZE)).toBeUndefined();
     expect(starAt(FREEZE + 1)).toBeUndefined();
+    // Not a false pass: the module renders a real snapshot in every case above
+    // (Grounded's Day-0 squares), so `undefined` means "no ⭐", not "no rows".
+    expect(standingsAt(FREEZE).rows.length).toBeGreaterThan(0);
+    expect(standingsAt(FREEZE).emptyLine).toBeNull();
   });
 
   it('honours a CONFIGURED freeze over the derived one, in both directions', () => {
@@ -681,6 +687,166 @@ describe('the ⭐ honours the Standings Freeze (#1052)', () => {
       'grounded:0/8',
       'edge:0/4',
     ]);
+  });
+});
+
+describe('a held ⭐ is never gated on the score (#1052)', () => {
+  /** An Event with an early ceremonial Day MUST configure its own freeze: the
+   *  derived one is the first ceremonial Day's `unlockAt`, which on this shape
+   *  would end scoring on the second morning. */
+  const FREEZE = Date.parse('2026-07-10T06:00:00Z');
+  const CEREMONIAL_BINGO_AT = Date.parse('2026-07-01T07:00:00Z');
+
+  const eventWith = (days: EmailDay[]): EmailEvent => ({
+    name: 'Ceremonial Opener',
+    timezone: 'UTC',
+    days,
+    standingsFreezeAt: FREEZE,
+    settings: { dailyEmailEnabled: true },
+  });
+  const modelFor = (event: EmailEvent, day: EmailDay, players: EmailPlayer[], recipient: string) =>
+    buildDailyEmailModel({
+      event,
+      day,
+      players,
+      recipient: { uid: recipient, displayName: recipient },
+      edition: 'fiveacross',
+      feedUrl: 'https://fiveacross.app/feed',
+      unsubscribeUrl: 'https://example.com/u',
+      preferencesUrl: 'https://example.com/u?a=preferences',
+    });
+
+  it('renders the snapshot and the ⭐ when the only play so far was ceremonial', () => {
+    // Every Mark on the board is inert for score, so the totals are all zero —
+    // and somebody still holds the Event-wide honour. Reporting the empty state
+    // here would print "every honor is wide open" while the Card and the
+    // Leaderboard show a First to BINGO: the email-versus-app contradiction this
+    // whole change removes.
+    const days: EmailDay[] = [
+      { index: 0, date: '2026-07-01', unlockAt: Date.parse('2026-07-01T06:00:00Z'), pool: 'main', tutorial: false, scoring: 'ceremonial', theme: 'glamiators' },
+      { index: 1, date: '2026-07-02', unlockAt: Date.parse('2026-07-02T06:00:00Z'), pool: 'main', theme: 'duty-free' },
+    ];
+    const players: EmailPlayer[] = [
+      {
+        uid: 'cera',
+        displayName: 'Cera',
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: CEREMONIAL_BINGO_AT } },
+      },
+      {
+        uid: 'zed',
+        displayName: 'Zed',
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+      },
+    ];
+    const model = modelFor(eventWith(days), days[1], players, 'zed');
+    expect(model.standings.emptyLine).toBeNull();
+    // Honest rows: nobody has scored, because none of those Marks count.
+    expect(model.standings.rows.map((r) => `${r.rank}:${r.uid}:${r.bingoCount}/${r.squaresMarked}:${r.starred}`)).toEqual([
+      '1:cera:0/0:true',
+      '2:zed:0/0:false',
+    ]);
+    // A Player with no bingo anywhere still gets the ordinary nudge.
+    expect(model.standings.youLine).toBe("You're #2—your first BINGO is still out there.");
+  });
+
+  it('never tells the ⭐ holder their first BINGO is still out there', () => {
+    // Their bingo happened; it simply landed on a Day whose Marks do not score.
+    // With no scoring squares either there is nothing true left to say, so the
+    // line is omitted rather than contradicting the ⭐ on their own row.
+    const days: EmailDay[] = [
+      { index: 0, date: '2026-07-01', unlockAt: Date.parse('2026-07-01T06:00:00Z'), pool: 'main', tutorial: false, scoring: 'ceremonial', theme: 'glamiators' },
+      { index: 1, date: '2026-07-02', unlockAt: Date.parse('2026-07-02T06:00:00Z'), pool: 'main', theme: 'duty-free' },
+    ];
+    const players: EmailPlayer[] = [
+      {
+        uid: 'cera',
+        displayName: 'Cera',
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: CEREMONIAL_BINGO_AT } },
+      },
+    ];
+    const bare = modelFor(eventWith(days), days[1], players, 'cera');
+    expect(bare.standings.rows.find((r) => r.starred)?.uid).toBe('cera');
+    expect(bare.standings.youLine).toBeNull();
+
+    // With scoring squares of her own the line stands, minus the false clause.
+    const withSquares: EmailPlayer[] = [
+      {
+        ...players[0],
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: CEREMONIAL_BINGO_AT },
+          1: { bingoCount: 0, squaresMarked: 6, firstBingoAt: null },
+        },
+      },
+    ];
+    const later: EmailDay = { index: 2, date: '2026-07-03', unlockAt: Date.parse('2026-07-03T06:00:00Z'), pool: 'main', theme: 'sporty-splash' };
+    const model = modelFor(eventWith([...days, later]), later, withSquares, 'cera');
+    expect(model.standings.youLine).toBe("You're #1—6 squares marked so far.");
+  });
+
+  it('still reports the empty state when nobody holds the honour', () => {
+    // The guard is the HONOUR, not the ceremonial Day: an all-zero board with no
+    // ⭐ is the original empty state and stays that way.
+    const days: EmailDay[] = [
+      { index: 0, date: '2026-07-01', unlockAt: Date.parse('2026-07-01T06:00:00Z'), pool: 'main', tutorial: false, scoring: 'ceremonial', theme: 'glamiators' },
+      { index: 1, date: '2026-07-02', unlockAt: Date.parse('2026-07-02T06:00:00Z'), pool: 'main', theme: 'duty-free' },
+    ];
+    const players: EmailPlayer[] = [
+      {
+        uid: 'zed',
+        displayName: 'Zed',
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+      },
+    ];
+    const model = modelFor(eventWith(days), days[1], players, 'zed');
+    expect(model.standings.rows).toEqual([]);
+    expect(model.standings.emptyLine).toContain('Still no standings');
+    expect(model.standings.youLine).toBeNull();
+  });
+
+  it('does not resurrect a BANNED holder’s honour on an empty board', () => {
+    // The sender passes the historical holder from the RAW roster and hands the
+    // model the ban-filtered one, so a banned holder is absent from `ranked`.
+    // Rendering an all-zero board on their behalf would show a ⭐ nowhere, and
+    // no visible Player is ever promoted into it (specs/w2-ban-console.md).
+    const days: EmailDay[] = [
+      { index: 0, date: '2026-07-01', unlockAt: Date.parse('2026-07-01T06:00:00Z'), pool: 'main', tutorial: false, scoring: 'ceremonial', theme: 'glamiators' },
+      { index: 1, date: '2026-07-02', unlockAt: Date.parse('2026-07-02T06:00:00Z'), pool: 'main', theme: 'duty-free' },
+    ];
+    const visible: EmailPlayer[] = [
+      {
+        uid: 'zed',
+        displayName: 'Zed',
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+      },
+    ];
+    const model = buildDailyEmailModel({
+      event: eventWith(days),
+      day: days[1],
+      players: visible,
+      starUid: 'banned-holder',
+      recipient: { uid: 'zed', displayName: 'Zed' },
+      edition: 'fiveacross',
+      feedUrl: 'https://fiveacross.app/feed',
+      unsubscribeUrl: 'https://example.com/u',
+      preferencesUrl: 'https://example.com/u?a=preferences',
+    });
+    expect(model.standings.rows).toEqual([]);
+    expect(model.standings.emptyLine).toContain('Still no standings');
   });
 });
 

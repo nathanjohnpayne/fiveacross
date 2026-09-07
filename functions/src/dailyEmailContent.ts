@@ -255,6 +255,13 @@ export function fromAddressFor(
  * `compareFinalePlayers`, so the email, the podium and the in-app Leaderboard
  * can never disagree about who is ahead.
  *
+ * A row that HAS buckets is always re-derived from them, where the podium
+ * additionally passes the roots through when the schedule states no ceremonial
+ * Day at all. The two are not in tension: this function reports a WINDOW ("through
+ * Day N-1"), which no root can answer, so it has nothing to pass through — the
+ * podium's extra branch exists to leave a legacy/hybrid row alone when it is
+ * reporting the whole Event and re-summing would rewrite it.
+ *
  * Malformed `dayStats` entries are SKIPPED rather than trusted: `players/{uid}`
  * is self-writable by design (ADR 0001), so a row like `{ dayStats: { 0: null } }`
  * is reachable, and one such row throwing here would suppress the whole Event's
@@ -653,12 +660,33 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const tutorialDays = tutorialDayIndexes(days);
   const ranked =
     args.ranked ?? standingsThrough(players, day.index, tutorialDays, ceremonialDayIndexes(days));
-  const played = hasPlay(ranked);
-  const starUid = played
-    ? args.starUid === undefined
-      ? eventFirstBingoUid(players, day.index, tutorialDays, standingsFreezeAtFor(event))
-      : args.starUid
-    : null;
+  const holderUid =
+    args.starUid === undefined
+      ? eventFirstBingoUid(
+          players,
+          day.index,
+          tutorialDays,
+          // The ALREADY-GUARDED `days`, not `event`: a raw Event doc whose
+          // `days` is not an array would otherwise make the resolver's
+          // `for…of` throw and take the whole send down, and this module's
+          // contract is that everything is a function of its arguments.
+          standingsFreezeAtFor({ standingsFreezeAt: event.standingsFreezeAt, days }),
+        )
+      : args.starUid;
+  // THE HONOUR IS NOT GATED ON THE SCORE (Codex P2 on this PR). An Event whose
+  // only play so far landed on ceremonial Days has an all-zero board AND a real
+  // ⭐ holder — the exact combination the policy above deliberately creates —
+  // and reporting the empty state there would print "every honor is wide open"
+  // while the Card and the Leaderboard show a First to BINGO. That is the
+  // email-versus-app contradiction this whole change exists to remove, so a held
+  // honour is itself reason enough to render the snapshot: every row honestly
+  // reads 0 bingos · 0 sq, because none of those Marks scored, and the ⭐ sits
+  // where it belongs. The holder must be VISIBLE for that to help — a banned
+  // holder is absent from `ranked` by design, and no visible Player is ever
+  // promoted into their honour (specs/w2-ban-console.md).
+  const holderVisible = holderUid != null && ranked.some((p) => p.uid === holderUid);
+  const played = hasPlay(ranked) || holderVisible;
+  const starUid = played ? holderUid : null;
   const rows: StandingsRow[] = played ? standingsRows(ranked, starUid) : [];
   const standingsHeading = played ? `Standings · through Day ${dayNumber - 1}` : `Standings · Day ${dayNumber}`;
   // Two empty states, not one. The OPENING Day has nothing to report because
@@ -677,13 +705,25 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const you = youIndex >= 0 ? ranked[youIndex] : null;
   let youLine: string | null = null;
   if (you && played) {
+    // "Your first BINGO is still out there" is FALSE for the ⭐ holder: they
+    // hold the Event-wide honour for one, it simply landed on a Day whose Marks
+    // do not score. Telling them otherwise beside their own ⭐ contradicts the
+    // same email. With no scoring squares either there is nothing true left to
+    // say about their standings, so the line is omitted — the choice this
+    // module already makes for an address that is not on the roster.
+    const bingoStillOpen = you.uid !== starUid;
+    const squares = `${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'}`;
     const tail =
       you.bingoCount > 0
-        ? `${you.bingoCount} bingo${you.bingoCount === 1 ? '' : 's'} and ${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'} so far.`
+        ? `${you.bingoCount} bingo${you.bingoCount === 1 ? '' : 's'} and ${squares} so far.`
         : you.squaresMarked > 0
-          ? `${you.squaresMarked} square${you.squaresMarked === 1 ? '' : 's'} marked—your first BINGO is still out there.`
-          : 'your first BINGO is still out there.';
-    youLine = `You're #${youIndex + 1}—${tail}`;
+          ? bingoStillOpen
+            ? `${squares} marked—your first BINGO is still out there.`
+            : `${squares} marked so far.`
+          : bingoStillOpen
+            ? 'your first BINGO is still out there.'
+            : null;
+    youLine = tail === null ? null : `You're #${youIndex + 1}—${tail}`;
   }
 
   // --- ④ Participation nudge ----------------------------------------------------
