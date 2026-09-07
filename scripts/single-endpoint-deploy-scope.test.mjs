@@ -2384,6 +2384,59 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a hook moves a remote-tracking ref", async () => {
+    // Codex P1, round 18: a hook's `git fetch` advances refs/remotes/origin/main
+    // without touching HEAD, the branch or the nearest tag, and the wrapper's
+    // approved-checkout guard asked whether HEAD equals origin/main BEFORE the
+    // rehearsal. Every remote-tracking ref is part of what git answers now.
+    await withFunctionsProject(
+      {
+        branch: "release",
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, "git update-ref refs/remotes/origin/main HEAD"],
+        },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
+        expect(failure.message).toContain("refs/remotes/origin/main");
+      },
+    );
+  });
+
+  it("ABORTS when a hook creates a new project-root entry through an absolute live path", async () => {
+    // Codex P1, round 18: the roots and copied files are the entries that
+    // existed when staging ran, so a marker a non-idempotent hook creates at
+    // the live root was in neither snapshot. The root's entry set is part of
+    // the fingerprint now.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf x > "$INIT_CWD/.deploy-mode"'],
+        },
+      },
+      async (configPath) => {
+        const { dirname: dir } = await import("node:path");
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = dir(configPath);
+        try {
+          const failure = await classify(["--only", "functions:daily"], configPath).then(
+            () => null,
+            (error) => error,
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("root entries");
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the

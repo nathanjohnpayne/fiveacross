@@ -909,6 +909,19 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   // contain: the project's OWN `node_modules` is one of the directories the
   // overlay symlinks, and walking it would cost more than the rest of the
   // checkout put together.
+  // The project root's ENTRY SET, so a creation or removal at the root is
+  // drift (Codex P1, round 18 on #1107): the roots below and the copied files
+  // further down are the entries that existed when staging ran, and a hook
+  // that creates `$INIT_CWD/.deploy-mode` through the inherited live path
+  // would otherwise be absent from both snapshots — present for Firebase's
+  // second run and never for this one. Names only: the entries themselves
+  // are fingerprinted by the walks and the file list.
+  try {
+    const names = await readdir(projectDir);
+    fingerprint.set(`${projectDir} (root entries)`, names.sort().join("\n"));
+  } catch (error) {
+    fingerprint.set(`${projectDir} (root entries)`, `unreadable ${error?.code ?? "?"}`);
+  }
   for (const dir of liveDirs) {
     if (basename(dir) === "node_modules") continue;
     await walk(dir);
@@ -1008,6 +1021,13 @@ async function gitAnswerFingerprint(projectDir) {
     ["rev-parse", "HEAD"],
     ["rev-parse", "--abbrev-ref", "HEAD"],
     ["describe", "--tags", "--always"],
+    // Every remote-tracking ref as well (Codex P1, round 18 on #1107): a hook
+    // that runs `git fetch` moves `refs/remotes/origin/main` without touching
+    // HEAD, the branch or the nearest tag, and `deploy.sh`'s approved-checkout
+    // guard asked exactly whether HEAD equals origin/main before this ran.
+    // Listed by name and object so a fetch that adds, moves or drops one is
+    // drift; FETCH_HEAD itself stays out, as the note above explains.
+    ["for-each-ref", "refs/remotes", "--format=%(refname) %(objectname)"],
   ]) {
     const run = await runCapturedProcess("git", args, { cwd: projectDir, timeout: 10_000 });
     answers.push(`git ${args.join(" ")} => ${run.ok ? run.output.trim() : `failed ${run.code ?? "?"}`}`);
