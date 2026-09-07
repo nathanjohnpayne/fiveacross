@@ -91,6 +91,15 @@ export function BanControl({
  * #107 finding 3). It is distinct from Restore, which lifts the `status` hard-hide,
  * so a doubly-hidden row (status hidden AND over threshold) shows both. `Ban author`
  * mutes the Proof's owner across the event (#108); the row stays reachable after.
+ *
+ * The Vision treatment (#133) is deliberately a SEPARATE pill from `auto-hidden`,
+ * because the two hides are separate mechanisms an admin resolves differently: a
+ * report-count hide is lifted with `Clear reports` (zero the counter), a Vision
+ * hide with `Restore` (there is no counter to clear). The pill states two facts
+ * the row already carries and never infers a cause — `hidden` from `status`, the
+ * verdict from `visionFlag` — so a Proof an admin restored after a Vision hide,
+ * and one the community later re-reported over the threshold, each read
+ * truthfully rather than being labelled with whichever hide came first.
  */
 function ProofQueueRow({
   proof: p,
@@ -117,13 +126,21 @@ function ProofQueueRow({
   standingsFreezeAt?: number;
 }) {
   const autoHidden = isReportHidden(p.reportCount, threshold);
+  // #133: the AI screen's verdict, and whether the Proof is currently hidden —
+  // two independent facts, so the pill never claims the AI screen caused a hide
+  // that the report threshold or an admin actually made.
+  const visionHidden = p.status === 'hidden' && !!p.visionFlag;
   return (
     <div className="row">
       <div className="grow">
         <div className="name">
           {p.displayName}
           <span className="pill">{p.reportCount} ⚑</span>
-          {p.visionFlag && <span className="pill">{p.visionFlag}</span>}
+          {p.visionFlag && (
+            <span className={visionHidden ? 'pill pill-hidden' : 'pill'}>
+              {visionHidden ? `hidden · AI screen: ${p.visionFlag}` : `AI screen: ${p.visionFlag}`}
+            </span>
+          )}
           {autoHidden && <span className="pill pill-hidden">auto-hidden</span>}
         </div>
         <div className="sub">
@@ -136,7 +153,20 @@ function ProofQueueRow({
         </AsyncButton>
       )}
       {p.status === 'hidden' ? (
-        <AsyncButton onAction={() => restoreProof(p.id)}>
+        // Restore keeps its exact label in every state — it is the same write —
+        // but says what it is about to undo when an AI verdict stands, because
+        // that is the one Restore that puts extreme/illegal media back in front
+        // of Players. `visionFlag` survives the write (src/data/admin.ts), so the
+        // row keeps its `AI screen: …` pill afterwards and the override stays
+        // visible and re-hideable rather than disappearing from the queue.
+        <AsyncButton
+          title={
+            p.visionFlag
+              ? `Put this proof back in the Feed. The AI screen flagged it: ${p.visionFlag}.`
+              : undefined
+          }
+          onAction={() => restoreProof(p.id)}
+        >
           Restore
         </AsyncButton>
       ) : (

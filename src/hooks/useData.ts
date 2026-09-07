@@ -1112,14 +1112,24 @@ export function useAllItems() {
 /**
  * The Proof moderation queue: every Proof needing admin attention, most-reported-
  * first. Queue membership is reported (`reportCount > 0`) OR `flagged` OR
- * hard-hidden (`status === 'hidden'`) — hidden content belongs in the queue
- * regardless of its count. The hidden arm is load-bearing (Codex P2, PR #107
+ * hard-hidden (`status === 'hidden'`) OR Vision-flagged (`visionFlag` set) —
+ * hidden content belongs in the queue regardless of its count. The hidden arm is
+ * load-bearing (Codex P2, PR #107
  * round 2): unlike Prompts, whose `useAllItems` lists EVERY Prompt, there is no
  * all-proofs admin list, so this queue is the ONLY admin surface for Proofs.
  * Without it, an admin who Clear-reports a doubly-hidden Proof (status 'hidden'
  * AND over the threshold) BEFORE restoring drops its reportCount to 0 and the
  * still-hidden Proof would vanish from the console with no UI path to restore or
  * delete it — the clear-then-restore ordering must never orphan anything.
+ * The `visionFlag` arm (#133) closes the same orphaning trap one step later in the
+ * Vision lifecycle. A Vision-hidden Proof is `status: 'hidden'` with `reportCount`
+ * 0, so it queues on the hidden arm — but the admin's Restore writes
+ * `status: 'active'` and deliberately leaves `visionFlag` set as the record of what
+ * was overridden, and on the three older arms that restored Proof would drop out of
+ * the ONLY admin surface for Proofs the moment it was restored, taking the AI
+ * verdict with it and leaving no way to re-hide it short of a report. Membership on
+ * the flag itself keeps every AI-screened Proof reachable for as long as the verdict
+ * stands, so the override is visible and reversible.
  * Like `useAllItems` it is UNfiltered by the ADR 0004 Phase 0 threshold — a Proof
  * whose `reportCount` has crossed `reportHideThreshold` (and so self-hid on every
  * Player's Feed via `useProofFeed`) still surfaces here so an Admin can reach it
@@ -1131,7 +1141,10 @@ export function useAllItems() {
 export function useReportedProofs() {
   const { data, loading } = useColSub<ProofDoc>(proofsCol(), eventSubscriptionKey('proofs-admin'));
   const flagged = data
-    .filter((p) => p.reportCount > 0 || p.status === 'flagged' || p.status === 'hidden')
+    .filter(
+      (p) =>
+        p.reportCount > 0 || p.status === 'flagged' || p.status === 'hidden' || !!p.visionFlag,
+    )
     .sort((a, b) => b.reportCount - a.reportCount);
   return { flagged, loading };
 }
