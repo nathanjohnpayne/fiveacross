@@ -32,6 +32,7 @@ import {
   isReplicaRouteStatus,
   isSyntheticRootTestHost,
   registryHostPathNamespace,
+  registryRootHostEdition,
   type PathNamespace,
   type RegistryEdition,
 } from './registry/contracts';
@@ -257,6 +258,16 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       if (!isRegistryRootHost(host)) return notFound('replica-malformed');
       if (!isReplicaRootMarker(desired.root)) return notFound('replica-malformed');
       if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
+        return notFound('replica-malformed');
+      }
+      // A configured root origin brands itself: `vacaybingo.com` is the Vacay
+      // doorway and `fiveacross.app` is the Five Across one. A root marker
+      // whose Edition disagrees with its host would render the wrong product's
+      // doorway on a real brand domain, so the pin is checked here as well as
+      // at ingestion. The synthetic root-test class pins none, and
+      // `registryRootHostEdition` returns `null` for it.
+      const pinnedEdition = registryRootHostEdition(host);
+      if (pinnedEdition !== null && desired.edition !== pinnedEdition) {
         return notFound('replica-malformed');
       }
       return {

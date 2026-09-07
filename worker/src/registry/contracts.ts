@@ -158,6 +158,22 @@ export function registryHostPathNamespace(host: string): PathNamespace {
   return ROOT_HOSTS.get(host)?.pathNamespace ?? null;
 }
 
+/**
+ * The ONE Edition a ROOT projection for this host may carry, or `null` where
+ * the host class does not pin one.
+ *
+ * A configured root origin brands itself — `vacaybingo.com` is the Vacay
+ * doorway and `fiveacross.app` is the Five Across one — so a root marker whose
+ * Edition disagrees with its host is a projection that would render the wrong
+ * product's doorway. `null` covers the synthetic root-test class, which is
+ * deliberately unpinned because it exists to exercise the shape rather than a
+ * brand. Route projections are not constrained here: an Event's Edition comes
+ * from the Event, not from the host it is reached at.
+ */
+export function registryRootHostEdition(host: string): RegistryEdition | null {
+  return ROOT_HOSTS.get(host)?.edition ?? null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -236,11 +252,16 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     if (!hasExactKeys(value, ROOT_KEYS)) throw new Error('invalid root fields');
     if (!isReplicaRootMarker(value.root)) throw new Error('invalid root marker');
     const syntheticRoot = isSyntheticRootTestHost(host);
-    const rootClass = ROOT_HOSTS.get(host);
-    if (!syntheticRoot && rootClass === undefined) throw new Error('invalid root shape');
+    if (!syntheticRoot && !ROOT_HOSTS.has(host)) throw new Error('invalid root shape');
     if (syntheticRoot) {
       if (pathNamespace !== null) throw new Error('synthetic root pathNamespace must be null');
-    } else if (rootClass?.pathNamespace !== pathNamespace || rootClass.edition !== edition) {
+      // Read through the same accessors the router's boundary revalidation
+      // uses, rather than through the map directly, so the two sides cannot
+      // start disagreeing about what a host class pins.
+    } else if (
+      registryHostPathNamespace(host) !== pathNamespace ||
+      registryRootHostEdition(host) !== edition
+    ) {
       throw new Error('root edition/pathNamespace must match its host class');
     }
     return {

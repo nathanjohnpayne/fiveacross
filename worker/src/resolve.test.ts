@@ -124,6 +124,24 @@ describe('a servable committed projection', () => {
       ),
     ).resolves.toMatchObject({ kind: 'serve', record: { eventId: null, root: 'doorway' } });
   });
+
+  it('does not pin the rehearsal class to an Edition, unlike a real brand root', async () => {
+    // The asymmetry is deliberate and worth pinning: a configured root origin
+    // brands itself, so `fiveacross.app` may not carry `vacay`. The synthetic
+    // class exists to exercise the SHAPE rather than a brand, so it carries
+    // whichever Edition the rehearsal manifest chose.
+    const { deps } = harness(
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+    );
+    await expect(
+      resolveHost(
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+        'r2-root-abcdefghijklmnopqrst',
+        CONFIG,
+        deps,
+      ),
+    ).resolves.toMatchObject({ kind: 'serve', record: { edition: 'vacay' } });
+  });
 });
 
 describe('the fail-closed decision table', () => {
@@ -331,6 +349,19 @@ describe('re-validating the projection at the service boundary', () => {
       'a null path namespace on the apex that requires one',
       'vacaybingo.com',
       committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+    ],
+    [
+      // A configured root origin brands itself, so a root marker whose Edition
+      // disagrees with its host would render the wrong product's doorway on a
+      // real brand domain.
+      'a root marker whose Edition disagrees with its host class',
+      'fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'fiveacross.app' }),
+    ],
+    [
+      'the mirrored Edition mismatch on the other apex',
+      'vacaybingo.com',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
     ],
     [
       'a non-null path namespace on the synthetic root-test class',
