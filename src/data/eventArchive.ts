@@ -12,7 +12,7 @@
 // selectors the live Leaderboard already renders with, reused rather than
 // restated: the frozen record must say what the last live Leaderboard said.
 import { isBanned } from './moderation';
-import { pinnedOrDerivedDailyHonors } from './finale';
+import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import {
   eventFirstBingoWinner,
   resolvedStandingsFreezeAt,
@@ -328,6 +328,14 @@ export function draftEventArchive(params: {
         uid: h.uid,
         displayName: archiveName(h.displayName),
         firstBingoAt: archiveCount(h.firstBingoAt),
+        // The chip LABEL, resolved here and stored (Codex P2, PR #1139). The
+        // archived strip used to look the Day's theme emoji up in the LIVE
+        // `EventDoc.days`, which the freeze deliberately leaves editable — so
+        // an Admin re-theming a Day after the archive re-labelled a frozen
+        // honour. `dayHonorChipLabel` is the live strip's own derivation,
+        // shared rather than restated, so the frozen label is by construction
+        // the one the last live strip rendered.
+        dayLabel: dayHonorChipLabel(h.dayIndex, days),
       })),
     freezeAt,
     archivedAt,

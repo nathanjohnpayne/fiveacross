@@ -325,14 +325,28 @@ export interface ArchivedFirstBingoRow extends ArchivedStandingRow {
   rank: number;
 }
 
-/** One Day's frozen First to BINGO honour — the same `{dayIndex, uid,
- *  displayName, firstBingoAt}` shape `DayHonor` carries live, resolved
- *  pinned-day-meta-first exactly as the Leaderboard's honours strip resolves it. */
+/** One Day's frozen First to BINGO honour — the `{dayIndex, uid, displayName,
+ *  firstBingoAt}` shape `DayHonor` carries live, resolved pinned-day-meta-first
+ *  exactly as the Leaderboard's honours strip resolves it, plus the chip LABEL
+ *  the strip renders it under. */
 export interface ArchivedDayHonor {
   dayIndex: number;
   uid: string;
   displayName: string;
   firstBingoAt: number;
+  /**
+   * The honour's chip label, frozen at the archive (#134, Codex P2 on PR
+   * #1139): the Day's theme emoji plus its ordinal, as `dayHonorChipLabel`
+   * rendered them from the schedule the record was taken against.
+   *
+   * Stored rather than looked up, because the live `EventDoc.days` is NOT
+   * frozen — `firestore.rules`' write-once clause protects `status`,
+   * `archivedAt` and `archive` and deliberately nothing else, so an Admin
+   * editing a Day's theme after the freeze would silently re-label a frozen
+   * honour. The whole promise of the archive is that the hall of fame renders
+   * from the record alone.
+   */
+  dayLabel: string;
 }
 
 /**

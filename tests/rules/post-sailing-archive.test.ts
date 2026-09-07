@@ -97,7 +97,9 @@ const FROZEN_RECORD = {
     firstBingoAt: 1000,
     rank: 1,
   },
-  dailyHonors: [{ dayIndex: 0, uid: ALICE, displayName: 'Alice', firstBingoAt: 1000 }],
+  dailyHonors: [
+    { dayIndex: 0, uid: ALICE, displayName: 'Alice', firstBingoAt: 1000, dayLabel: '🌈 D1' },
+  ],
   freezeAt: null,
   archivedAt: 1_700_000_000_000,
 };

@@ -9,12 +9,12 @@ import {
   resolvedStandingsFreezeAt,
   tutorialDayIndexSet,
 } from '../game/logic';
-import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
+import { dayHonorChipLabel } from '../data/finale';
 import { isEventArchived } from '../data/eventArchive';
 import ArchivedLeaderboard from './ArchivedLeaderboard';
 import Avatar from './Avatar';
@@ -281,11 +281,11 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     return { dayIndex: d.index, displayName: winner?.displayName ?? null };
   });
   const legacyHonors = event?.days?.length ? [] : derivedHonors;
-  const dayChipLabel = (dayIndex: number): string => {
-    const d = event?.days?.find((day) => day.index === dayIndex);
-    const emoji = d ? (THEMES.find((t) => t.id === d.theme)?.emoji ?? '') : '';
-    return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
-  };
+  // The strip's own derivation lives in `src/data/finale.ts` beside the honours
+  // it labels, because the post-Event archive freezes the SAME label onto each
+  // stored honour (#134) — two callers, one derivation, so a frozen chip cannot
+  // read differently from the live one it was taken from.
+  const dayChipLabel = (dayIndex: number): string => dayHonorChipLabel(dayIndex, event?.days);
 
   // Filters narrow this render's visible subset of the already-ranked,
   // ban-filtered roster — a plain `.filter`, never a `.sort`, so the relative

@@ -152,8 +152,23 @@ const FROZEN: EventArchive = {
     rank: 1,
   },
   dailyHonors: [
-    { dayIndex: 0, uid: 'early-bird', displayName: 'Early Bird', firstBingoAt: 1_000 },
-    { dayIndex: 1, uid: 'steady', displayName: 'Steady Eddie', firstBingoAt: 4_000 },
+    // The chip LABEL is part of the frozen record (#1139): the archived strip
+    // renders it rather than looking the Day's theme up in the live schedule,
+    // which the freeze deliberately leaves editable.
+    {
+      dayIndex: 0,
+      uid: 'early-bird',
+      displayName: 'Early Bird',
+      firstBingoAt: 1_000,
+      dayLabel: '🌈 D1',
+    },
+    {
+      dayIndex: 1,
+      uid: 'steady',
+      displayName: 'Steady Eddie',
+      firstBingoAt: 4_000,
+      dayLabel: '🏋️ D2',
+    },
   ],
   freezeAt: null,
   archivedAt: Date.UTC(2026, 6, 24, 12),
@@ -249,11 +264,54 @@ describe('the archived Leaderboard renders the frozen record', () => {
     const hall = screen.getByLabelText('Hall of fame');
     expect(hall).toHaveTextContent(/First to BINGO/);
     expect(hall).toHaveTextContent(/Early Bird · /);
-    // The frozen daily honours render as their own chips.
-    expect(hall).toHaveTextContent('D1');
-    expect(hall).toHaveTextContent('D2');
+    // The frozen daily honours render as their own chips, under the LABEL the
+    // record carries — theme emoji and all.
+    expect(hall).toHaveTextContent('🌈 D1');
+    expect(hall).toHaveTextContent('🏋️ D2');
     // The badge on the standings row names the same holder.
     expect(container.querySelector('.list .row.leader .name')).toHaveTextContent('Early Bird');
+  });
+
+  // Codex P2, PR #1139 round 4. The strip used to resolve each Day's theme
+  // emoji out of the LIVE `EventDoc.days`, which the freeze deliberately leaves
+  // editable (the write-once clause covers `status`/`archivedAt`/`archive` and
+  // nothing else) — so an Admin re-theming a Day after the archive changed a
+  // frozen honour's chip. The label is stored on the honour instead.
+  it('keeps a frozen honour chip when the live Day theme is edited afterwards', () => {
+    // The live schedule now says Day 1 is Get Sporty and Day 2 is Neon
+    // Playground — the exact swap of the labels the record froze.
+    H.event = archivedEvent({
+      days: [
+        { index: 0, theme: 'get-sporty' },
+        { index: 1, theme: 'neon-playground' },
+      ],
+    } as unknown as Partial<EventDoc>);
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    expect(hall).toHaveTextContent('🌈 D1');
+    expect(hall).toHaveTextContent('🏋️ D2');
+    // …and it is not merely showing the live labels by coincidence.
+    expect(hall).not.toHaveTextContent('🏋️ D1');
+    expect(hall).not.toHaveTextContent('🌈 D2');
+  });
+
+  it('labels a frozen honour by its ordinal when the record carries no label', () => {
+    // A record written by hand rather than by the serializer: the fallback
+    // stays frozen-safe — derived from the honour's own index — rather than
+    // reaching back into the live schedule the way the bug did.
+    H.event = archivedEvent({
+      days: [{ index: 0, theme: 'get-sporty' }],
+      archive: {
+        ...FROZEN,
+        dailyHonors: [
+          { dayIndex: 0, uid: 'early-bird', displayName: 'Early Bird', firstBingoAt: 1_000 },
+        ],
+      },
+    } as unknown as Partial<EventDoc>);
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    expect(hall).toHaveTextContent('D1');
+    expect(hall).not.toHaveTextContent('🏋️ D1');
   });
 
   it('offers no live controls — the archive is read-only', () => {

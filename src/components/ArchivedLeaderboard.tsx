@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react';
-import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
@@ -77,7 +76,9 @@ type WarmedCard = {
  * stored object and SUBSCRIBES TO NOTHING. There is no `useLeaderboard`
  * subscription here, no `sortPlayers`, no `cruiseFirstBingoUid`, and no
  * per-Day-meta read: every number, name and honour was decided once, at the
- * archive, by `buildEventArchive`. That is the whole point of the freeze (ADR
+ * archive, by `buildEventArchive` — down to the LABEL on each honour chip,
+ * which the record carries so a Day re-themed after the freeze cannot re-label
+ * a frozen honour. That is the whole point of the freeze (ADR
  * 0001 — a social record, not a ledger to re-derive), and it is also what makes
  * "opened later, the standings persist unchanged" true rather than merely
  * likely: nothing here recomputes a stat, a rank or an honour.
@@ -111,8 +112,10 @@ export default function ArchivedLeaderboard({
 }: {
   // `bannedUids` is the CURRENT roster off the live Event subscription, not a
   // frozen copy: a Player banned after the archive must disappear from here on
-  // the next snapshot, and an unban must bring them back.
-  event: Pick<EventDoc, 'name' | 'days' | 'archivedAt' | 'bannedUids'> | null | undefined;
+  // the next snapshot, and an unban must bring them back. It is the ONLY live
+  // Event field this surface reads — `days` came off the Pick when the honour
+  // chips started rendering their own frozen label (#1139).
+  event: Pick<EventDoc, 'name' | 'archivedAt' | 'bannedUids'> | null | undefined;
   archive: EventArchive;
 }) {
   const bannedUids = event?.bannedUids ?? [];
@@ -126,11 +129,21 @@ export default function ArchivedLeaderboard({
   const firstBingoUid = headline?.uid;
   const standings = archive.standings.filter((row) => !isBanned(row.uid, bannedUids));
   const dailyHonors = archive.dailyHonors.filter((h) => !isBanned(h.uid, bannedUids));
-  const dayChipLabel = (dayIndex: number): string => {
-    const d = event?.days?.find((day) => day.index === dayIndex);
-    const emoji = d ? (THEMES.find((t) => t.id === d.theme)?.emoji ?? '') : '';
-    return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
-  };
+  // THE CHIP LABEL COMES OUT OF THE RECORD (Codex P2, PR #1139). It used to be
+  // looked up in the LIVE `EventDoc.days` — the one Event field the freeze
+  // deliberately leaves editable, since the write-once clause protects `status`,
+  // `archivedAt` and `archive` and nothing else — so an Admin re-theming a Day
+  // after the archive silently re-labelled a frozen honour, which is exactly
+  // what "nothing here changes again" promises it cannot. The label is resolved
+  // once, at the freeze, by the live strip's own `dayHonorChipLabel`.
+  //
+  // The ordinal fallback is for a record written by hand rather than by the
+  // serializer: it stays frozen-safe (derived from the honour's own index)
+  // rather than reaching back into the live schedule.
+  const dayChipLabel = (honor: { dayIndex: number; dayLabel?: string }): string =>
+    typeof honor.dayLabel === 'string' && honor.dayLabel !== ''
+      ? honor.dayLabel
+      : `D${honor.dayIndex + 1}`;
 
   // The Share Card prints the VISIBLE rows, so a banned Player never appears on
   // a shared card (#108's rule, same as the live Leaderboard's).
@@ -270,7 +283,7 @@ export default function ArchivedLeaderboard({
             {dailyHonors.map((h) => (
               <li key={h.dayIndex} className="lb-honor">
                 <span className="lb-honor-day">
-                  <EmojiText text={dayChipLabel(h.dayIndex)} />
+                  <EmojiText text={dayChipLabel(h)} />
                 </span>
                 <span className="lb-honor-name">{h.displayName}</span>
               </li>

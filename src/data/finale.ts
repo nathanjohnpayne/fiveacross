@@ -4,6 +4,7 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
+import { THEMES } from '../theme/themes';
 import {
   ceremonialDayIndexSet,
   comparePlayers,
@@ -140,6 +141,31 @@ export function pinnedOrDerivedDailyHonors(
     const derived = derivedHonors.find((h) => h.dayIndex === day.index);
     return derived ? [derived] : [];
   });
+}
+
+/**
+ * How one Day's honour chip is LABELLED on an honours strip: the Day's theme
+ * emoji, if the schedule names a theme this build knows, then the Day's own
+ * ordinal (`D1`, `D2`, …).
+ *
+ * Shared rather than restated (#134, Codex P2 on PR #1139). The live
+ * Leaderboard's strip computes it from the CURRENT `EventDoc.days`, and the
+ * post-Event archive computes it ONCE, at the freeze, and stores the result on
+ * the honour — so an Admin who later re-themes a Day cannot change a frozen
+ * honour's chip. Two callers, one derivation, so the frozen label is by
+ * construction the label the last live strip rendered.
+ *
+ * The ordinal half is derived from the index rather than the schedule on
+ * purpose: it is what the strip shows for a Day the schedule has nothing to
+ * say about, and it cannot drift.
+ */
+export function dayHonorChipLabel(
+  dayIndex: number,
+  days: readonly DayDef[] | undefined,
+): string {
+  const day = days?.find((d) => d.index === dayIndex);
+  const emoji = day ? (THEMES.find((t) => t.id === day.theme)?.emoji ?? '') : '';
+  return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
 }
 
 export function buildPodium(

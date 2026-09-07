@@ -8,6 +8,7 @@ import {
   MAX_ARCHIVE_BYTES,
   MAX_ARCHIVED_STANDING_ROWS,
 } from './eventArchive';
+import { dayHonorChipLabel } from './finale';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
 // The write path's seam (#134, Codex P2 on PR #1139). `archiveEvent` is the half
@@ -293,8 +294,11 @@ describe('buildEventArchive — the hall of fame', () => {
       archivedAt: 1,
     });
     expect(archive.dailyHonors).toEqual([
-      { dayIndex: 1, uid: 'pinned', displayName: 'Pinned', firstBingoAt: 1500 },
-      { dayIndex: 2, uid: 'day2', displayName: 'Day Two', firstBingoAt: 7000 },
+      // The chip LABEL is frozen alongside the honour (#1139): the Day's theme
+      // emoji plus its ordinal, resolved once from the schedule the record was
+      // taken against, so re-theming that Day later cannot re-label it.
+      { dayIndex: 1, uid: 'pinned', displayName: 'Pinned', firstBingoAt: 1500, dayLabel: '🌈 D2' },
+      { dayIndex: 2, uid: 'day2', displayName: 'Day Two', firstBingoAt: 7000, dayLabel: '🌈 D3' },
     ]);
   });
 
@@ -345,6 +349,69 @@ describe('buildEventArchive — the hall of fame', () => {
     });
     expect(archive.firstBingo).toBeNull();
     expect(archive.firstBingoRow).toBeNull();
+  });
+
+  // Codex P2, PR #1139 round 4. The archived honours strip used to look each
+  // Day's theme emoji up in the LIVE `EventDoc.days`, which the freeze
+  // deliberately leaves editable — so an Admin re-theming a Day after the
+  // archive silently re-labelled a frozen honour. The label is resolved once,
+  // here, and stored.
+  it('freezes the Day chip label each honour renders under', () => {
+    const days = [mkDay(0, { theme: 'get-sporty' }), mkDay(1, { theme: 'neon-playground' })];
+    const archive = buildEventArchive({
+      players: [
+        mkPlayer({
+          uid: 'd0',
+          displayName: 'Day Nought',
+          bingoCount: 1,
+          squaresMarked: 3,
+          firstBingoAt: 500,
+          dayStats: { 0: { bingoCount: 1, squaresMarked: 3, firstBingoAt: 500 } },
+        }),
+        mkPlayer({
+          uid: 'd1',
+          displayName: 'Day One',
+          bingoCount: 1,
+          squaresMarked: 4,
+          firstBingoAt: 900,
+          dayStats: { 1: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 900 } },
+        }),
+      ],
+      event: { days, bannedUids: [] },
+      archivedAt: 1,
+    });
+    // The live strip's own derivation (`dayHonorChipLabel`), reused rather than
+    // restated, so the frozen label IS the label the last live strip rendered.
+    expect(archive.dailyHonors.map((h) => h.dayLabel)).toEqual(['🏋️ D1', '🌈 D2']);
+    expect(archive.dailyHonors.map((h) => h.dayLabel)).toEqual(
+      archive.dailyHonors.map((h) => dayHonorChipLabel(h.dayIndex, days)),
+    );
+    // Re-theming the Day AFTERWARDS moves the live label and leaves the frozen
+    // one exactly where it was: the record is what the archived strip renders.
+    const rethemed = [mkDay(0, { theme: 'neon-playground' }), mkDay(1, { theme: 'get-sporty' })];
+    expect(dayHonorChipLabel(0, rethemed)).toBe('🌈 D1');
+    expect(archive.dailyHonors[0].dayLabel).toBe('🏋️ D1');
+  });
+
+  it('labels an honour on a Day the schedule does not carry by its ordinal alone', () => {
+    // The derived fallback: with no schedule there is no theme to read, so the
+    // chip is the Day's own ordinal — which is what the live strip shows for
+    // the same Day, and which nothing can later re-theme.
+    const archive = buildEventArchive({
+      players: [
+        mkPlayer({
+          uid: 'orphan',
+          displayName: 'Orphan',
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: 100,
+          dayStats: { 4: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 } },
+        }),
+      ],
+      event: { days: [], bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(archive.dailyHonors.map((h) => h.dayLabel)).toEqual(['D5']);
   });
 });
 
