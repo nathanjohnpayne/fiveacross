@@ -583,6 +583,22 @@ describe("the config must be simple enough to analyse before any proof counts", 
     });
   });
 
+  it.each([
+    ["a tsc --noEmit build script", { pkg: { main: "lib/index.js", scripts: { build: "tsc --noEmit" }, engines: { node: "22" } } }],
+    ["a build script that redirects the emit", { pkg: { main: "lib/index.js", scripts: { build: "tsc --outDir dist" }, engines: { node: "22" } } }],
+    ["a project-mode build script", { pkg: { main: "lib/index.js", scripts: { build: "tsc -p tsconfig.build.json" }, engines: { node: "22" } } }],
+    ["noEmit in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", noEmit: true } } }],
+    ["emitDeclarationOnly in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", emitDeclarationOnly: true } } }],
+    ["outFile in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", outFile: "lib/index.js" } } }],
+  ])("refuses %s, whose successful build leaves main untouched", async (_label, override) => {
+    // `tsc --noEmit` exits 0 without writing, so the predeploy hook succeeds
+    // while a stale lib/index.js is what Firebase loads.
+    await withManifests({ ...CONVENTIONAL, ...override }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
   it("refuses when package.json has no tsc build script for the predeploy hook to run", async () => {
     await withManifests(
       { ...CONVENTIONAL, pkg: { main: "lib/index.js", engines: { node: "22" } } },

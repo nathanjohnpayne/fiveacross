@@ -508,9 +508,15 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
   // engine makes "this TypeScript is the entry point" a safe reading.
   if (!pkg.engines || typeof pkg.engines.node === "undefined") return false;
   // The predeploy hook runs `npm run build`; that script must be the TS
-  // compiler for `src/index.ts` to be what lands at `main`.
+  // compiler, and it must EMIT: `tsc --noEmit` (or `noEmit: true` below)
+  // exits 0 while leaving a stale `lib/index.js` exactly as it was.
   const build = pkg.scripts && typeof pkg.scripts.build === "string" ? pkg.scripts.build : "";
   if (!/\btsc\b/.test(build)) return false;
+  if (/--noEmit\b|--emitDeclarationOnly\b|--outDir\b|--outFile\b|(^|\s)-p\s|--project\b|--build\b|(^|\s)-b(\s|$)/.test(build)) {
+    // Any flag that redirects, suppresses, or re-scopes the emit makes the
+    // tsconfig below no longer describe what lands at `main`.
+    return false;
+  }
   const main = typeof pkg.main === "string" ? pkg.main : "index.js";
   let tsconfig;
   try {
@@ -520,6 +526,8 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
     return false;
   }
   const options = tsconfig.compilerOptions ?? {};
+  if (options.noEmit === true || options.emitDeclarationOnly === true) return false;
+  if (typeof options.outFile === "string") return false;
   if (options.rootDir !== "src") return false;
   if (typeof options.outDir !== "string" || !options.outDir) return false;
   const normalize = (value) => value.replace(/^\.\//, "").replace(/\/+/g, "/");
