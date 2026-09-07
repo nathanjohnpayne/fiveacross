@@ -2619,6 +2619,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 26 (#547 r3 — Codex P1): a classifier that detected it had MUTATED the
+# live checkout is a hard stop, not a conservative classification.
+#
+# The classifier runs the config's own predeploy hooks to decide whether an
+# exact `--only functions:<name>` scope releases one endpoint. Those hooks can
+# write through the staging overlay into tracked source — after the clean-tree
+# guard has already passed — and answering that with a successful, conservative
+# classification let the build and the publish below it ship whatever the hook
+# had just written. Exit status 3 is that detection, and deploy.sh must stop on
+# it before BUILD_CMD and before op-firebase-deploy.
+#
+# The classifier itself is proven by scripts/single-endpoint-deploy-scope.test.mjs
+# (it exits 3 for a real hook that writes into the checkout). What is under test
+# HERE is deploy.sh's handling of that status, so `node` is shimmed to produce
+# it for the classifier command and to defer to the real node for everything
+# else.
+# ---------------------------------------------------------------------------
+REPO26="$WORKDIR/case26-classifier-drift"
+init_fixture_repo "$REPO26"
+DRIFT_STUB_DIR="$WORKDIR/stub-bin-drift"
+mkdir -p "$DRIFT_STUB_DIR"
+REAL_NODE="$(command -v node)"
+cat >"$DRIFT_STUB_DIR/node" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *validate-firebase-deploy-filters.mjs)
+      echo "✗ The Firebase deploy preflight mutated the live checkout: a predeploy hook wrote into the live checkout (src/App.tsx was modified)." >&2
+      echo "  NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
+      exit 3
+      ;;
+  esac
+done
+exec "$REAL_NODE" "\$@"
+STUB
+chmod +x "$DRIFT_STUB_DIR/node"
+: >"$WORKDIR/ofd-calls-26.log"
+: >"$WORKDIR/npm-calls-26.log"
+set +e
+PATH="$DRIFT_STUB_DIR:$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-26.log" \
+NPM_LOG="$WORKDIR/npm-calls-26.log" \
+  bash -c "cd '$REPO26' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic -- fiveacross --only functions:dailyEngagementEmail" \
+  >"$WORKDIR/case26.out" 2>"$WORKDIR/case26.err"
+RC26=$?
+set -e
+if [[ $RC26 -eq 0 ]]; then
+  fail "classifier-drift: deploy returned 0 though the classifier reported it had mutated the checkout."
+elif [[ -s "$WORKDIR/ofd-calls-26.log" ]]; then
+  fail "classifier-drift: op-firebase-deploy ran after a detected live-checkout mutation."
+elif [[ -s "$WORKDIR/npm-calls-26.log" ]]; then
+  fail "classifier-drift: the build ran after a detected live-checkout mutation. npm log was:"
+  cat "$WORKDIR/npm-calls-26.log" >&2
+elif ! grep -q 'mutated this checkout during classification' "$WORKDIR/case26.err"; then
+  fail "classifier-drift: no mutation diagnostic. stderr was:"
+  cat "$WORKDIR/case26.err" >&2
+elif ! grep -q 'nothing has been restored' "$WORKDIR/case26.err"; then
+  fail "classifier-drift: the diagnostic did not say the tree was left as found. stderr was:"
+  cat "$WORKDIR/case26.err" >&2
+else
+  pass "classifier-drift: a detected live-checkout mutation stops the deploy before build and publish (rc=$RC26)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

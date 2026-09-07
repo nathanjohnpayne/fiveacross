@@ -6,7 +6,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filters.mjs";
+import {
+  LiveCheckoutDriftError,
+  classifyFirebaseDeployRequest,
+} from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -138,7 +141,10 @@ const artifact = (body) =>
  *   pkg?: object,               // functions/package.json (replaces the default)
  *   tsconfig?: object | null,   // functions/tsconfig.json (null omits it)
  *   functionsConfig?: object,   // merged into firebase.json's functions config
+ *   config?: object,            // merged into firebase.json itself (other targets)
  *   files?: Record<string, string>, // extra files, relative to the fixture root
+ *   links?: Record<string, string>, // symlinks (path -> target), fixture-relative
+ *   branch?: string,            // make the fixture a git repo on this branch
  * }} spec
  */
 async function withFunctionsProject(spec, run) {
@@ -163,13 +169,20 @@ async function withFunctionsProject(spec, run) {
     for (const [file, contents] of Object.entries(spec.files ?? {})) {
       await writeUnder(fixture, file, contents);
     }
+    for (const [link, target] of Object.entries(spec.links ?? {})) {
+      const at = resolve(fixture, link);
+      await mkdir(dirname(at), { recursive: true });
+      await symlink(target, at);
+    }
     await writeUnder(
       fixture,
       "firebase.json",
       JSON.stringify({
         functions: { source: "functions", predeploy: PREDEPLOY, ...spec.functionsConfig },
+        ...spec.config,
       }),
     );
+    if (spec.branch) await initFixtureRepository(fixture, spec.branch);
     await run(resolve(fixture, "firebase.json"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -178,6 +191,29 @@ async function withFunctionsProject(spec, run) {
 
 /** The shorthand most fail-closed cases need: only `src/index.ts` varies. */
 const withFunctionsSource = (source, run) => withFunctionsProject({ source }, run);
+
+/**
+ * Make a fixture a real git repository on a named branch.
+ *
+ * An EMPTY commit, deliberately: `git rev-parse --abbrev-ref HEAD` needs a born
+ * branch to answer, and committing the fixture's borrowed `node_modules` links
+ * would cost more than everything else the fixture does.
+ */
+async function initFixtureRepository(dir, branch) {
+  const git = (args) =>
+    new Promise((settle, fail) => {
+      const child = spawn("git", args, { cwd: dir, stdio: "ignore" });
+      child.on("error", fail);
+      child.on("exit", (code) =>
+        code === 0 ? settle() : fail(new Error(`git ${args.join(" ")} exited ${code}`)),
+      );
+    });
+  await git(["init", "--quiet", "-b", branch]);
+  await git(["config", "user.email", "fixture@example.com"]);
+  await git(["config", "user.name", "Fixture"]);
+  await git(["config", "commit.gpgsign", "false"]);
+  await git(["commit", "--quiet", "--allow-empty", "-m", "fixture"]);
+}
 
 /**
  * A temp project with several configured codebases. `sources` maps a codebase
@@ -1727,22 +1763,54 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("forfeits the exemption when a hook writes through the overlay into the checkout", async () => {
+  it("ABORTS when a hook writes through the overlay into the checkout", async () => {
     // Only the Functions sources are copied; every other project directory is a
     // symlink to the live tree, so a hook that writes a shared build input —
     // here a toggle whose second run differs from its first — mutates the real
-    // checkout AFTER the dirty-tree guard has passed. Firebase then reruns that
-    // hook against the tree this run left behind, and the artifact inventoried
-    // here need not be the artifact it produces (Codex P2, round 17).
+    // checkout AFTER the dirty-tree guard has passed (Codex P2, round 17).
+    //
+    // Answering that with a conservative classification was still wrong: the
+    // classification SUCCEEDS, so the build and the publish below it go ahead
+    // and ship whatever the hook just wrote into tracked source (Codex P1,
+    // round 18). Detected mutation is fatal, and it names the path.
     await withFunctionsProject(
       {
         functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
         files: { "shared/toggle": "" },
       },
       async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
-          ALL_INVOKERS_CONSERVATIVE,
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
         );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("shared/toggle");
+        expect(failure.message).toContain("Nothing has been restored");
+      },
+    );
+  });
+
+  it("exits with the live-checkout-drift status through the production wrapper", async () => {
+    // The status `deploy.sh` reads. It is distinct from the invalid-request
+    // status precisely because the request was valid: it is the TREE that is no
+    // longer the one the clean-tree guard approved.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
+        files: { "shared/toggle": "" },
+      },
+      async (configPath) => {
+        const run = await runClassifierWrapper(
+          configPath,
+          ["--only", "functions:daily"],
+          DEPLOY_SH_CLASSIFIER_ENV(configPath),
+        );
+        expect(run.code).toBe(3);
+        expect(run.output).toContain("mutated the live checkout");
+        expect(run.output).toContain("shared/toggle");
+        expect(run.output).toContain("NOTHING HAS BEEN BUILT OR PUBLISHED");
+        // And no classification reached stdout for `deploy.sh` to parse.
+        expect(run.output).not.toContain("FUNCTIONS_ATTEMPTED=");
       },
     );
   });
@@ -1765,10 +1833,11 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("forfeits the exemption when LOADING the artifact writes into the checkout", async () => {
+  it("ABORTS when LOADING the artifact writes into the checkout", async () => {
     // Module-scope code reaches the same symlinks a hook does, and it runs
     // after the hooks have already been cleared — so the live tree is checked
-    // again once every codebase has been discovered.
+    // again once every codebase has been discovered, and that check is fatal
+    // for the same reason the post-hook one is.
     await withFunctionsProject(
       {
         functionsConfig: { predeploy: [] },
@@ -1785,8 +1854,8 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
         },
       },
       async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
-          ALL_INVOKERS_CONSERVATIVE,
+        await expect(classify(["--only", "functions:daily"], configPath)).rejects.toThrow(
+          LiveCheckoutDriftError,
         );
       },
     );
@@ -1905,4 +1974,248 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
       });
     },
   );
+});
+
+describe("round-18 fresh evidence: the execution the deploy will actually run", RUNS_A_BUILD, () => {
+  it("keeps a relative source symlink pointing inside the staged copy", async () => {
+    // `fs.cp`'s default `verbatimSymlinks: false` REWRITES a copied link to
+    // point at its original target, so this relative link came out of the copy
+    // as an absolute link back into the developer's `functions/` — a directory
+    // `liveDirs` does not watch, so the write was both real and invisible
+    // (Codex P1, round 18). Copied verbatim, it resolves inside the copy.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf x >> "$RESOURCE_DIR/src/generated.txt"'],
+        },
+        files: { "functions/generated-target.txt": "" },
+        links: { "functions/src/generated.txt": "../generated-target.txt" },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        // The live file the hook wrote through is untouched.
+        expect(
+          await readFile(resolve(dirname(configPath), "functions", "generated-target.txt"), "utf8"),
+        ).toBe("");
+      },
+    );
+  });
+
+  it("refuses a Functions source that links out of the staged project", async () => {
+    // The other half of the same fix. A link the copy cannot reproduce INSIDE
+    // the scratch project is a route to somewhere this classifier is not
+    // watching, so it is refused rather than staged.
+    await withFunctionsProject(
+      {
+        links: { "functions/src/escape.txt": "../../../escape.txt" },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses an artifact that reads the runtime config through functions.config()", async () => {
+    // The watcher's own reason for existing, which it used to miss: the read
+    // happens inside `firebase-functions/lib/v1/config.js`, so the nearest
+    // stack frame is the SDK's and the codebase's is one line further down.
+    // Both probes see `undefined` here and agree on one endpoint, while the
+    // deploy's authenticated config can make it a group (Codex P2, round 18).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            [
+              'const functions = require("firebase-functions");',
+              "exports.daily = functions.config().feature?.enabled",
+              "  ? { grouped: endpoint() }",
+              "  : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("runs hooks under the production wrapper's own project variables", async () => {
+    // `scripts/firebase/op-firebase-deploy` exports GOOGLE_CLOUD_PROJECT and
+    // CLOUDSDK_BILLING_QUOTA_PROJECT before `firebase deploy`, and
+    // `lifecycleHooks` hands a hook the wrapper's whole environment. Supplying
+    // only GCLOUD_PROJECT let this hook build one endpoint here and a group
+    // during the deploy (Codex P2, round 18).
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [
+            'test "$GOOGLE_CLOUD_PROJECT/$CLOUDSDK_BILLING_QUOTA_PROJECT" = "fiveacross/fiveacross" ' +
+              "&& cp functions/group.js functions/lib/index.js " +
+              "|| cp functions/single.js functions/lib/index.js",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("runs every selected target's predeploy hooks, not only the Functions ones", async () => {
+    // `deploy/index.js` chains `lifecycleHooks(<target>, "predeploy")` for EVERY
+    // selected target before it chains a single `prepare`, and `firestore`
+    // precedes `functions` in VALID_DEPLOY_TARGETS. So a Firestore hook decides
+    // the artifact this selector is measured against (Codex P2, round 18).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        config: {
+          firestore: {
+            rules: "firestore.rules",
+            predeploy: ["cp functions/group.js functions/lib/index.js"],
+          },
+        },
+        files: {
+          "firestore.rules": "rules_version = '2';\n",
+          "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily,firestore"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("answers a git branch lookup the way the deployment will", async () => {
+    // A build that selects its exports with `git rev-parse --abbrev-ref HEAD`
+    // is an ordinary build. Omitting `.git` from the overlay did not withhold
+    // authority, it changed the answer: the lookup failed, the fallback ran,
+    // and both probes agreed on whatever that produced (Codex P2, round 18).
+    //
+    // Written so the GIT-VISIBLE branch is the exempt one: a run that could not
+    // see the branch — or that forfeited on a metadata write — fails this test
+    // rather than passing it for the wrong reason.
+    await withFunctionsProject(
+      {
+        branch: "release",
+        functionsConfig: {
+          predeploy: [
+            'test "$(git rev-parse --abbrev-ref HEAD)" = "release" ' +
+              "&& cp functions/single.js functions/lib/index.js " +
+              "|| cp functions/group.js functions/lib/index.js",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("forfeits the exemption when a hook changes what the repository answers", async () => {
+    // The other half of exposing `.git`: the view is live, so a hook can write
+    // through it. The guard is on what `git` ANSWERS rather than on the files
+    // under `.git`, because that is the property a build can observe — and
+    // because a file-level watch reports drift for a background fetch's
+    // FETCH_HEAD, which no build has ever branched on.
+    await withFunctionsProject(
+      {
+        branch: "release",
+        functionsConfig: { predeploy: [...PREDEPLOY, "git checkout -q -b rewritten"] },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("preserves the codebase loading sequence inside one project probe", async () => {
+    // `loadCodebases` walks the selected codebases sequentially against ONE
+    // project, so the first codebase's module initialization can replace the
+    // second's artifact. A fresh copy per codebase threw that write away before
+    // the second inventory started, and both probes approved single endpoints
+    // while the real second discovery found a group (Codex P2, round 18).
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-sequence-"));
+    try {
+      for (const [dir, name] of [
+        ["functions-default", "daily"],
+        ["functions-beta", "betaOnly"],
+      ]) {
+        const codebaseDir = resolve(fixture, dir);
+        await mkdir(resolve(codebaseDir, "src"), { recursive: true });
+        await installToolchain(codebaseDir);
+        await writeUnder(codebaseDir, "package.json", JSON.stringify(DEFAULT_PACKAGE));
+        await writeUnder(codebaseDir, "tsconfig.json", JSON.stringify(DEFAULT_TSCONFIG));
+        await writeUnder(codebaseDir, "src/index.ts", endpoint(name));
+      }
+      // The first codebase to be discovered rewrites the second's artifact,
+      // exactly as a shared generator would.
+      await writeUnder(
+        fixture,
+        "functions-default/lib/index.js",
+        artifact(
+          [
+            'const fs = require("node:fs");',
+            'const path = require("node:path");',
+            "fs.writeFileSync(",
+            '  path.join(__dirname, "..", "..", "functions-beta", "lib", "index.js"),',
+            "  fs.readFileSync(path.join(__dirname, \"..\", \"..\", \"grouped-beta.js\"), \"utf8\"),",
+            ");",
+            "exports.daily = endpoint();",
+          ].join("\n"),
+        ),
+      );
+      await writeUnder(
+        fixture,
+        "functions-beta/lib/index.js",
+        artifact("exports.betaOnly = endpoint();"),
+      );
+      await writeUnder(
+        fixture,
+        "grouped-beta.js",
+        artifact("exports.betaOnly = { grouped: endpoint() };"),
+      );
+      await writeUnder(
+        fixture,
+        "firebase.json",
+        JSON.stringify({
+          functions: [
+            { source: "functions-default", predeploy: [] },
+            { source: "functions-beta", codebase: "beta", predeploy: [] },
+          ],
+        }),
+      );
+      expect(
+        await classify(
+          ["--only", "functions:default:daily,functions:beta:betaOnly"],
+          resolve(fixture, "firebase.json"),
+        ),
+      ).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
 });

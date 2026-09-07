@@ -14,6 +14,7 @@ import {
   stat,
   symlink,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -336,6 +337,78 @@ function withoutClassifierPrivateEnv(environment) {
   return cleaned;
 }
 
+/**
+ * The environment `scripts/firebase/op-firebase-deploy` establishes before it
+ * invokes `firebase deploy`, so a predeploy hook run from here sees what its
+ * real run will see.
+ *
+ * `lifecycleHooks.js` `getChildEnvironment` hands a hook `{...process.env,
+ * GCLOUD_PROJECT, PROJECT_DIR, RESOURCE_DIR}` — and `process.env` there is the
+ * WRAPPER's, not a developer's bare shell. Supplying only `GCLOUD_PROJECT` left
+ * a hook that branches on `GOOGLE_CLOUD_PROJECT` (or on the quota project)
+ * building one artifact here and another during the deploy (Codex P2, round
+ * 18). Every name below is a pure function of the PINNED project, so it is
+ * reproducible exactly; the two per-run temporaries the wrapper also exports
+ * are handled by `productionCredentialEnvironment`.
+ *
+ * Discovery deliberately gets NONE of this. `spawnFunctionsProcess` builds its
+ * child's environment as `{...envs, FUNCTIONS_CONTROL_API, HOME, PATH,
+ * NODE_ENV, __FIREBASE_FRAMEWORKS_ENTRY__}` — the wrapper's variables never
+ * reach it — so adding them to `discoveryEnvironment` would MANUFACTURE the
+ * divergence this function exists to remove.
+ */
+function productionHookEnvironment(project) {
+  return {
+    GOOGLE_CLOUD_PROJECT: project,
+    GCLOUD_PROJECT: project,
+    CLOUDSDK_BILLING_QUOTA_PROJECT: project,
+    CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: "true",
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: "true",
+  };
+}
+
+/**
+ * The two variables the wrapper points at freshly made TEMPORARIES, reproduced
+ * inside the scratch dir.
+ *
+ * `XDG_CONFIG_HOME` is exact: the wrapper's is a `mktemp -d`, an empty
+ * directory that exists only for that deploy, and so is this one.
+ *
+ * `GOOGLE_APPLICATION_CREDENTIALS` cannot be. The wrapper writes a real ADC
+ * document for the pinned project, and minting one is precisely what an offline
+ * preflight cannot do. It is given the same SHAPE under an obviously synthetic
+ * account — the same answer `CONFIG_PROBES` gives for the project config it
+ * cannot obtain — so a hook that merely tests for the variable, or reads its
+ * JSON shape, behaves here as it will during the deploy, while a hook that
+ * actually AUTHENTICATES with it fails. A failed hook already refuses the whole
+ * project, so that residual is closed in the fail-closed direction rather than
+ * left open.
+ */
+async function productionCredentialEnvironment(scratch, project) {
+  const configHome = join(scratch, "configstore");
+  await mkdir(configHome, { recursive: true });
+  const credential = join(scratch, "application_default_credentials.json");
+  const account =
+    "firebase-deploy-scope-probe@firebase-deploy-scope-probe.iam.gserviceaccount.com";
+  await writeFile(
+    credential,
+    JSON.stringify({
+      type: "impersonated_service_account",
+      service_account_impersonation_url:
+        `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${account}:generateAccessToken`,
+      source_credentials: {
+        type: "authorized_user",
+        client_id: "firebase-deploy-scope-probe",
+        client_secret: "firebase-deploy-scope-probe",
+        refresh_token: "firebase-deploy-scope-probe",
+      },
+      quota_project_id: project || "firebase-deploy-scope-probe",
+    }),
+    "utf8",
+  );
+  return { XDG_CONFIG_HOME: configHome, GOOGLE_APPLICATION_CREDENTIALS: credential };
+}
+
 const POSIX = process.platform !== "win32";
 
 /**
@@ -438,7 +511,10 @@ function runCapturedProcess(
  * `cross-env-shell` under a shell, with the PROJECT directory as cwd and the
  * codebase source directory exposed only through `$RESOURCE_DIR`.
  */
-function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs }) {
+function runPredeployHook(
+  command,
+  { projectDir, resourceDir, project, timeoutMs, deployEnv },
+) {
   // firebase-tools escapes only `"` when it wraps the hook. That is incomplete
   // for a command containing a BACKSLASH, which could close its own quote — so
   // such a command is REFUSED before it gets here rather than quoted some other
@@ -460,6 +536,11 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
     timeout: timeoutMs ?? PREDEPLOY_HOOK_TIMEOUT_MS,
     env: {
       ...withoutClassifierPrivateEnv(process.env),
+      // The production wrapper's own exports, so the hook's view of the
+      // deployment is the one it will have when Firebase runs it.
+      ...productionHookEnvironment(project || ""),
+      ...deployEnv,
+      // `getChildEnvironment`'s three, applied LAST exactly as it applies them.
       GCLOUD_PROJECT: project || "",
       PROJECT_DIR: projectDir,
       RESOURCE_DIR: resourceDir,
@@ -483,8 +564,18 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
  * Firebase may run another codebase's hook in the same deploy and that hook can
  * write anywhere (`getReleventConfigs`; see `relevantFunctionsConfigs`).
  *
- * `.git` is deliberately NOT exposed: no Functions build needs it, and a hook
- * that reached through it would be reaching into the real repository.
+ * `.git` IS exposed, read-only in effect. Omitting it did not withhold
+ * authority, it changed valid behaviour: a build that selects its exports with
+ * `git rev-parse --abbrev-ref HEAD` sees `main` during the deploy and a failed
+ * lookup here, and if its fallback happens to be the single endpoint both
+ * probes agree and the group is wrongly exempted (Codex P2, round 18). So the
+ * repository's metadata is exposed the same way every other project directory
+ * is — a symlink — and guarded, by `gitAnswerFingerprint`, on the property that
+ * matters: a run that changed what `git` ANSWERS forfeits the exemption. It is
+ * registered in `metadataDirs` rather than `liveDirs` because the consequence
+ * differs: a write into the working tree changes what the deploy will publish
+ * and is fatal, while a change in what `git` says makes the inventory unusable
+ * but leaves nothing for the deploy to publish that this run put there.
  *
  * The boundary this draws is therefore exact rather than absolute: everything a
  * Functions build WRITES — a source dir and its artifact — is a copy, while
@@ -492,13 +583,56 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
  * deliberately writes THROUGH one of those symlinks still reaches the live
  * checkout, so every symlinked directory is registered in `liveDirs` and
  * `liveTreeFingerprint` watches the lot: a write there does not corrupt the
- * answer, it forfeits it (Codex P2, round 17).
+ * answer, it ends the deploy (Codex P2, round 17; made fatal in round 18 — see
+ * `LiveCheckoutDriftError`).
  */
-async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, links, liveDirs }) {
+async function stageProjectOverlay({
+  projectDir,
+  scratchProject,
+  sourceRels,
+  links,
+  liveDirs,
+  metadataDirs,
+}) {
   const linkTo = async (from, to) => {
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
     await symlink(from, to, type);
     links.push(to);
+  };
+
+  /**
+   * Every symlink the copy preserved, checked against the scratch project's
+   * boundary.
+   *
+   * `fs.cp`'s default `verbatimSymlinks: false` REWRITES a copied link to point
+   * at its original target, so a relative link inside a Functions source came
+   * out of the copy as an ABSOLUTE link back into the live checkout — and a
+   * hook writing through it mutated the developer's tree, in directories
+   * `liveDirs` does not watch (Codex P2, round 18). The copy is therefore
+   * verbatim, which lands a relative link inside the copy where it belongs, and
+   * anything still pointing OUT of the scratch project — every absolute link,
+   * and any relative one that climbs past the project root — is refused rather
+   * than reproduced. A link that resolves inside the project but outside the
+   * copy (this repository's own `functions/src` reaches `../../src`) is kept:
+   * it lands on one of the overlay's watched symlinks, where a write is
+   * detected rather than silent.
+   */
+  const refuseEscapingLinks = async (scratchDir) => {
+    for (const entry of await readdir(scratchDir, { withFileTypes: true })) {
+      const path = join(scratchDir, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = await readlink(path);
+        const resolved = resolve(dirname(path), target);
+        const inside = relative(scratchProject, resolved);
+        if (isAbsolute(target) || inside.startsWith("..") || isAbsolute(inside)) {
+          throw new Error(
+            `${relative(scratchProject, path)} is a symlink to ${target}, which leaves the staged project`,
+          );
+        }
+      } else if (entry.isDirectory()) {
+        await refuseEscapingLinks(path);
+      }
+    }
   };
 
   const copySourceDir = async (realDir, scratchDir) => {
@@ -507,6 +641,9 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
     await cp(realDir, scratchDir, {
       recursive: true,
       dereference: false,
+      // Links are copied as they are written, not rewritten to absolute paths
+      // into the live tree. See `refuseEscapingLinks`.
+      verbatimSymlinks: true,
       // `node_modules` is symlinked instead: copying it would cost minutes,
       // and the deploy's own build reads the very same tree. EVERY one is
       // relinked, not just the source root's — a nested package resolves its
@@ -518,18 +655,49 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
         return false;
       },
     });
+    // Before the borrowed `node_modules` links are added, which are absolute by
+    // construction and are the one exception this walk must not see.
+    await refuseEscapingLinks(scratchDir);
     for (const modules of skipped) {
       await linkTo(modules, join(scratchDir, relative(realDir, modules)));
     }
+  };
+
+  /**
+   * The repository's own metadata, exposed so a `git` call from a build answers
+   * as it does during the deploy.
+   *
+   * A worktree or submodule checkout spells `.git` as a FILE holding
+   * `gitdir: <path>`; copying it verbatim keeps the pointer working, where a
+   * symlink to the file would resolve the same way but leave the scratch
+   * project's own `.git` outside the copy. What is RECORDED either way is that
+   * a repository is now reachable from the scratch project, which is what makes
+   * `gitAnswerFingerprint` run at all.
+   */
+  const exposeGitMetadata = async (from, to) => {
+    if ((await lstat(from)).isDirectory()) {
+      await linkTo(from, to);
+      metadataDirs.push(from);
+      return;
+    }
+    await cp(from, to, { dereference: true });
+    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(from, "utf8"));
+    if (!pointer) return;
+    const gitDir = resolve(dirname(from), pointer[1]);
+    if (existsSync(gitDir)) metadataDirs.push(gitDir);
   };
 
   const overlay = async (realDir, scratchDir, remaining) => {
     await mkdir(scratchDir, { recursive: true });
     const claimed = new Set(remaining.map((segments) => segments[0]));
     for (const entry of await readdir(realDir)) {
-      if (claimed.has(entry) || entry === ".git") continue;
+      if (claimed.has(entry)) continue;
       const from = join(realDir, entry);
       const to = join(scratchDir, entry);
+      if (entry === ".git") {
+        await exposeGitMetadata(from, to);
+        continue;
+      }
       // FILES are copied, directories symlinked. A symlinked `firebase.json`
       // is a hook's route into the live checkout — `cp evil.json firebase.json`
       // would rewrite the very config the deploy is about to read, after the
@@ -633,6 +801,69 @@ async function liveTreeFingerprint(liveDirs) {
     await walk(dir);
   }
   return fingerprint;
+}
+
+/**
+ * The exit status `main()` uses for a detected live-checkout mutation, so
+ * `deploy.sh` can tell it apart from an ordinary invalid request.
+ */
+export const LIVE_CHECKOUT_DRIFT_EXIT_CODE = 3;
+
+/**
+ * A write that reached the developer's working tree while this classifier ran
+ * other people's programs.
+ *
+ * This is FATAL rather than a refusal. Falling back to the conservative
+ * classification and returning success was wrong in the one way that matters:
+ * the hook has already changed tracked application source AFTER `deploy.sh`'s
+ * clean-tree guard passed, so the build that follows would package those
+ * changes and the deploy would publish them (Codex P1, round 18). Nothing here
+ * tries to put the files back — a classifier that repaired a tree it does not
+ * understand would be guessing at which of the writes were the deploy's own —
+ * so the fail-closed answer is to stop, name the paths, and leave the tree for
+ * a human to inspect.
+ */
+export class LiveCheckoutDriftError extends Error {
+  constructor(drift, when) {
+    super(
+      `a ${when} wrote into the live checkout (${drift}). The working tree is no longer the ` +
+        "tree the clean-tree guard approved, so this deploy is refused rather than continued. " +
+        "Nothing has been restored: inspect the tree (git status) and decide what belongs in it.",
+    );
+    this.name = "LiveCheckoutDriftError";
+    this.drift = drift;
+  }
+}
+
+/**
+ * What the repository ANSWERS, for the lookups a build makes of it.
+ *
+ * The counterpart of `liveTreeFingerprint` for the `.git` view, and deliberately
+ * not the same mechanism. A file-level walk of `.git` reports drift for things
+ * no build can observe and nothing in this classifier caused — `FETCH_HEAD`
+ * after any background fetch, `logs/`, a gc — while the property that actually
+ * matters is whether the deploy's `git` call will answer what this run's did.
+ * These three cover it: the commit, the branch, and the nearest tag, which is
+ * every `git`-derived build input anyone writes.
+ *
+ * The residual is a hook that uses `.git` as scratch STORAGE — writing a marker
+ * there and reading it back on its second run. That is the residual this design
+ * documents everywhere else: state that outlives the process and lives outside
+ * the project and the scratch dir, exactly like `$HOME`, `/tmp` or a lock
+ * server, and no offline classifier closes it. Withholding `.git` did not close
+ * it either; it only changed what an ordinary build computes.
+ */
+async function gitAnswerFingerprint(projectDir) {
+  const answers = [];
+  for (const args of [
+    ["rev-parse", "HEAD"],
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    ["describe", "--tags", "--always"],
+  ]) {
+    const run = await runCapturedProcess("git", args, { cwd: projectDir, timeout: 10_000 });
+    answers.push(`git ${args.join(" ")} => ${run.ok ? run.output.trim() : `failed ${run.code ?? "?"}`}`);
+  }
+  return answers.join("\n");
 }
 
 /** The first path whose live-tree signature moved, or null. */
@@ -816,6 +1047,47 @@ function relevantFunctionsConfigs(only, configs) {
 }
 
 /**
+ * The configs of a NON-Functions target whose `predeploy` hooks this deploy
+ * will run, mirroring the else-branch of `getReleventConfigs`.
+ *
+ * `deploy/index.js` chains `lifecycleHooks(<target>, "predeploy")` for EVERY
+ * selected target before it chains a single `prepare`, so Functions discovery
+ * happens only after the last of them has run. A Firestore hook that replaces
+ * `functions/lib/index.js` therefore decides the deployed surface of a
+ * `--only functions:daily,firestore` request, and inventorying only the
+ * Functions hooks granted the exemption to a group (Codex P2, round 18).
+ */
+function relevantTargetConfigs(target, only, configSource) {
+  const raw = configSource[target];
+  if (raw === undefined || raw === null) return [];
+  const configs = Array.isArray(raw) ? raw : [raw];
+  if (!only) return configs;
+  const selectors = only.split(",");
+  if (selectors.includes(target)) return configs;
+  const named = selectors
+    .filter((selector) => selector.startsWith(`${target}:`))
+    .map((selector) => selector.replace(`${target}:`, ""));
+  return configs.filter(
+    (config) => config && typeof config === "object" && (!config.target || named.includes(config.target)),
+  );
+}
+
+/**
+ * `getChildEnvironment`'s `$RESOURCE_DIR` for a non-Functions target, as a
+ * PROJECT-RELATIVE path, or null when the config names one the overlay cannot
+ * place.
+ *
+ * Hosting resolves `public ?? source`; every other target resolves the project
+ * directory itself, which is the empty relative path.
+ */
+function targetResourceRel(target, config) {
+  if (target !== "hosting") return "";
+  const configured = config.public ?? config.source;
+  if (configured === undefined || configured === null) return null;
+  return normalizedSourcePath(configured);
+}
+
+/**
  * The codebases this deploy will actually LOAD, mirroring `targetCodebases`.
  *
  * A different set from the one whose hooks run: `getReleventConfigs` falls back
@@ -868,12 +1140,16 @@ function targetCodebases(only, configs, codebaseNames) {
  * a symlink to the original.
  *
  * FAILS CLOSED on every uncertainty: an unmirrorable source path, a staging
- * failure, a non-zero or timed-out hook, a write that reached the live checkout
- * through one of the overlay's symlinks, a discovery manifest, an artifact that
+ * failure, a symlink out of the staged tree, a non-zero or timed-out hook, a
+ * write into the repository metadata, a discovery manifest, an artifact that
  * will not load, or a walk that throws — each of which refuses only what it
- * makes unprovable, except a hook failure or a live-tree write, which refuse the
- * whole project because the tree left behind is not the one the deploy will
- * produce.
+ * makes unprovable, except a hook failure, which refuses the whole project
+ * because the tree left behind is not the one the deploy will produce.
+ *
+ * A write that reached the WORKING TREE is the one outcome that is not a
+ * refusal at all: it THROWS `LiveCheckoutDriftError`, which aborts the deploy.
+ * See that class for why continuing with a conservative classification was
+ * wrong.
  */
 async function buildAndInventoryProject({
   projectDir,
@@ -883,6 +1159,8 @@ async function buildAndInventoryProject({
   predeployTimeoutMs,
   configs,
   codebaseNames,
+  deployTargets,
+  configSource,
 }) {
   /** @type {Map<string, { authoritative: boolean, endpoints: string[], groups: string[] }>} */
   const inventories = new Map();
@@ -913,14 +1191,47 @@ async function buildAndInventoryProject({
   }
   for (const config of relevant) {
     if (config.steps === null) return refuseAll(`codebase ${config.codebase} has a malformed predeploy`);
-    // See `runPredeployHook`: the CLI's own quoting does not survive a
-    // backslash, so a hook containing one cannot be reproduced and is refused
-    // rather than approximated.
-    if (config.steps.some((step) => step.includes("\\"))) {
-      return refuseAll(
-        `a predeploy hook of codebase ${config.codebase} contains a backslash, whose quoting cannot be mirrored`,
-      );
+  }
+
+  /**
+   * Every predeploy hook this deploy runs before Functions discovery, in
+   * Firebase's order: `deploy/index.js` walks the selected targets in
+   * `VALID_DEPLOY_TARGETS` order, chaining each target's `predeploy` hooks, and
+   * only then chains the `prepare` that discovers Functions.
+   */
+  const hookPlan = [];
+  for (const target of deployTargets ?? ["functions"]) {
+    if (target === "functions") {
+      for (const config of relevant) {
+        for (const command of config.steps) {
+          hookPlan.push({ target, command, resourceRel: config.sourceRel, label: `codebase ${config.codebase}` });
+        }
+      }
+      continue;
     }
+    for (const config of relevantTargetConfigs(target, only, configSource ?? {})) {
+      const steps = predeploySteps(config.predeploy);
+      if (steps === null) return refuseAll(`the ${target} config has a malformed predeploy`);
+      if (steps.length === 0) continue;
+      const resourceRel = targetResourceRel(target, config);
+      if (resourceRel === null) {
+        return refuseAll(
+          `the ${target} config's predeploy resource directory is not a mirrorable project-relative path`,
+        );
+      }
+      for (const command of steps) {
+        hookPlan.push({ target, command, resourceRel, label: `the ${target} target` });
+      }
+    }
+  }
+  // See `runPredeployHook`: the CLI's own quoting does not survive a backslash,
+  // so a hook containing one cannot be reproduced and is refused rather than
+  // approximated.
+  const unquotable = hookPlan.find((hook) => hook.command.includes("\\"));
+  if (unquotable) {
+    return refuseAll(
+      `a predeploy hook of ${unquotable.label} contains a backslash, whose quoting cannot be mirrored`,
+    );
   }
 
   const staged = configs.filter((config) => config.sourceRel);
@@ -951,6 +1262,8 @@ async function buildAndInventoryProject({
   const links = [];
   /** The live directories those symlinks point at — the mutation guard's beat. */
   const liveDirs = [];
+  /** The repository metadata the overlay exposed, watched on its own terms. */
+  const metadataDirs = [];
   try {
     try {
       await stageProjectOverlay({
@@ -959,6 +1272,7 @@ async function buildAndInventoryProject({
         sourceRels: staged.map((config) => config.sourceRel),
         links,
         liveDirs,
+        metadataDirs,
       });
     } catch (error) {
       return refuseAll(
@@ -966,23 +1280,32 @@ async function buildAndInventoryProject({
       );
     }
 
+    let deployEnv;
+    try {
+      deployEnv = await productionCredentialEnvironment(scratch, project);
+    } catch (error) {
+      return refuseAll(
+        `could not establish the production hook environment — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     // Taken AFTER staging and before the first child process, so the window it
     // covers is exactly the window in which this classifier runs other people's
     // programs.
     let liveBaseline;
+    let metadataBaseline;
     try {
       liveBaseline = await liveTreeFingerprint(liveDirs);
+      metadataBaseline = metadataDirs.length > 0 ? await gitAnswerFingerprint(projectDir) : "";
     } catch (error) {
       return refuseAll(
         `could not fingerprint the live checkout — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     /**
-     * Whether anything reached through the overlay's symlinks since the
-     * baseline. A drift is not a corrupted answer, it is an unusable one: the
-     * deploy is about to run the same hook against a tree this run already
-     * changed, so the artifact it produces need not be the one inventoried
-     * here.
+     * Whether anything reached the WORKING TREE through the overlay's symlinks
+     * since the baseline. Fatal: the deploy is about to build and publish from
+     * a tree this run has already changed, after the clean-tree guard passed.
      */
     const liveDrift = async () => {
       try {
@@ -991,46 +1314,109 @@ async function buildAndInventoryProject({
         return `the live checkout could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
       }
     };
+    /**
+     * The same question for the repository metadata, asked of what `git`
+     * answers rather than of the files under `.git`. Not fatal: nothing the
+     * deploy publishes comes from `.git`, but a run that changed what `git`
+     * says answered its own lookups, so the inventory is unusable.
+     */
+    const metadataDrift = async () => {
+      if (metadataDirs.length === 0) return null;
+      try {
+        const now = await gitAnswerFingerprint(projectDir);
+        return now === metadataBaseline ? null : `\n${metadataBaseline}\nbecame\n${now}`;
+      } catch (error) {
+        return `the repository could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
+      }
+    };
 
-    for (const config of relevant) {
-      const resourceDir = resolve(scratchProject, config.sourceRel);
-      for (const command of config.steps) {
-        const hook = await runPredeployHook(command, {
-          projectDir: scratchProject,
-          resourceDir,
-          project,
-          timeoutMs: predeployTimeoutMs,
-        });
-        if (!hook.ok) {
-          return refuseAll(
-            `predeploy hook failed: ${command} — ${hook.output.trim().slice(-400)}`,
-          );
-        }
+    for (const hook of hookPlan) {
+      const result = await runPredeployHook(hook.command, {
+        projectDir: scratchProject,
+        resourceDir: hook.resourceRel ? resolve(scratchProject, hook.resourceRel) : scratchProject,
+        project,
+        timeoutMs: predeployTimeoutMs,
+        deployEnv,
+      });
+      if (!result.ok) {
+        return refuseAll(
+          `predeploy hook failed: ${hook.command} — ${result.output.trim().slice(-400)}`,
+        );
       }
     }
 
     const afterHooks = await liveDrift();
-    if (afterHooks) {
+    if (afterHooks) throw new LiveCheckoutDriftError(afterHooks, "predeploy hook");
+    const metadataAfterHooks = await metadataDrift();
+    if (metadataAfterHooks) {
       return refuseAll(
-        `a predeploy hook wrote into the live checkout (${afterHooks}), so the deploy's own ` +
-          "run of it starts from a different tree than this one did",
+        `a predeploy hook changed what the repository answers (${metadataAfterHooks}), so what ` +
+          "`git` told this run is not what it will tell the deploy",
       );
     }
 
     const targets = targetCodebases(only, configs, codebaseNames);
-    for (const config of staged) {
-      if (!targets.has(config.codebase)) continue;
+    const selected = staged.filter((config) => targets.has(config.codebase));
+
+    /**
+     * One private copy of the whole project per config probe, with EVERY
+     * selected codebase discovered inside it, in Firebase's own order.
+     *
+     * The probes still run one at a time from a private copy: two live peers
+     * can agree deliberately, and an artifact that appends a marker at load and
+     * waits for a second one would answer "one endpoint" to both while the
+     * deploy's single discovery sees a group (Codex P2, round 17).
+     *
+     * What changed in round 18 is the GRAIN. A fresh copy per codebase threw
+     * away the effects Firebase preserves between codebase discoveries:
+     * `loadCodebases` walks the selected codebases sequentially against ONE
+     * project, so the first codebase's module initialization can generate or
+     * replace the second's artifact — and with a copy each, that write landed
+     * in a directory deleted before the second inventory began, so both probes
+     * approved single endpoints while the real second discovery found a group.
+     * The probe is therefore project-level: one copy, every codebase in
+     * sequence, exactly the shape the deploy will run.
+     *
+     * The residual is unchanged: state that outlives the process and lives
+     * outside both the project and the scratch dir — `$HOME`, `/tmp`, a lock
+     * server. The cost is one project copy per probe rather than one per
+     * codebase per probe, which for a single-codebase repository is the same
+     * two copies it already paid.
+     */
+    const perProbe = [];
+    for (const probe of CONFIG_PROBES) {
+      /** @type {string[]} */
+      const probeLinks = [];
+      let probeRoot;
+      try {
+        probeRoot = await mkdtemp(join(scratch, "probe-"));
+        const probeProject = join(probeRoot, "project");
+        await copyStagedProject(scratchProject, probeProject, probeLinks);
+        const results = new Map();
+        for (const config of selected) {
+          results.set(
+            config.codebase,
+            await discoverCodebaseInProbe({ probeProject, config, project, projectAlias, probe }),
+          );
+        }
+        perProbe.push({ probe, results });
+      } catch (error) {
+        return refuseAll(
+          `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        for (const link of probeLinks) await unlink(link).catch(() => {});
+        if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+
+    for (const config of selected) {
       inventories.set(
         config.codebase,
-        await inventoryCodebaseArtifact({
-          scratchProject,
-          scratchSource: resolve(scratchProject, config.sourceRel),
-          scratchConfigDir: resolve(scratchProject, config.configDirRel ?? config.sourceRel),
-          sourceRel: config.sourceRel,
-          scratch,
-          project,
-          projectAlias,
-        }),
+        reconcileProbeResults(
+          config.sourceRel,
+          perProbe.map(({ probe, results }) => ({ probe, discovered: results.get(config.codebase) })),
+        ),
       );
     }
     for (const config of configs) {
@@ -1048,13 +1434,15 @@ async function buildAndInventoryProject({
 
     // Loading an artifact runs its module-scope code, which reaches the same
     // symlinks a hook does. Checked a second time rather than once at the end,
-    // so a hook that writes into the live checkout is refused before this
+    // so a hook that writes into the live checkout is caught before this
     // classifier spends a discovery on it.
     const afterDiscovery = await liveDrift();
-    if (afterDiscovery) {
+    if (afterDiscovery) throw new LiveCheckoutDriftError(afterDiscovery, "loaded codebase");
+    const metadataAfterDiscovery = await metadataDrift();
+    if (metadataAfterDiscovery) {
       return refuseAll(
-        `loading a codebase wrote into the live checkout (${afterDiscovery}), so its ` +
-          "discovered surface is a function of a tree this run changed",
+        `loading a codebase changed what the repository answers (${metadataAfterDiscovery}), so ` +
+          "its discovered surface is a function of state this run changed",
       );
     }
     return inventories;
@@ -1205,120 +1593,77 @@ async function pollDiscoveryManifest(port, deadline, server) {
 }
 
 /**
- * Ask one built codebase what it deploys, once per config probe.
+ * Ask ONE codebase, inside one already-copied project probe, what it deploys.
+ *
+ * Every uncertainty is reported as a per-codebase refusal rather than thrown,
+ * because a codebase this classifier cannot read must not veto a selector
+ * qualified to another one.
+ */
+async function discoverCodebaseInProbe({ probeProject, config, project, projectAlias, probe }) {
+  const scratchSource = resolve(probeProject, config.sourceRel);
+
+  // The Node delegate tries `functions.yaml` BEFORE running the SDK's
+  // discovery, so a manifest — committed, written by a hook, or written by an
+  // EARLIER codebase in this same probe — decides the deployed surface and the
+  // artifact no longer does (`runtimes/node/index.js` `discoverBuild`). Refuse
+  // rather than parse it. Checked inside the probe, where the deploy checks it.
+  let manifests;
+  try {
+    manifests = (await readdir(scratchSource)).filter((name) => /^functions\.ya?ml$/i.test(name));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `could not read ${config.sourceRel} — ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (manifests.length > 0) {
+    return { ok: false, reason: `${manifests[0]} supplies discovery instead of the artifact` };
+  }
+
+  // Read from the probe rather than from the staged original: `loadCodebases`
+  // loads each codebase's dotenv files at ITS turn in the sequence, so an
+  // earlier codebase that rewrote them is visible here exactly as it is to the
+  // deploy.
+  let environment;
+  try {
+    environment = discoveryEnvironment({
+      scratchProject: probeProject,
+      scratchConfigDir: resolve(probeProject, config.configDirRel ?? config.sourceRel),
+      project,
+      projectAlias,
+      probe,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  return discoverEndpointsFromSdk({
+    sourceDir: scratchSource,
+    projectDir: probeProject,
+    environment,
+    timeout: DISCOVERY_TIMEOUT_MS,
+  });
+}
+
+/**
+ * One codebase's inventory, from its discovery in each project probe.
  *
  * Two runs, not one: the deployed surface must be the same under both
  * `CONFIG_PROBES` before it can be trusted, because the difference between them
  * is exactly the project config this classifier could not obtain.
  */
-async function inventoryCodebaseArtifact({
-  scratchProject,
-  scratchSource,
-  scratchConfigDir,
-  sourceRel,
-  scratch,
-  project,
-  projectAlias,
-}) {
-  // The Node delegate tries `functions.yaml` BEFORE running the SDK's
-  // discovery, so a manifest — committed, or written by a hook — decides the
-  // deployed surface and the artifact no longer does
-  // (`runtimes/node/index.js` `discoverBuild`). Refuse rather than parse it.
-  let manifests;
-  try {
-    manifests = (await readdir(scratchSource)).filter((name) =>
-      /^functions\.ya?ml$/i.test(name),
-    );
-  } catch (error) {
-    return refused(
-      `could not read ${sourceRel} — ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (manifests.length > 0) {
-    return refused(`${manifests[0]} supplies discovery instead of the artifact`);
-  }
-
-  let environments;
-  try {
-    environments = CONFIG_PROBES.map((probe) => ({
-      probe,
-      environment: discoveryEnvironment({
-        scratchProject,
-        scratchConfigDir,
-        project,
-        projectAlias,
-        probe,
-      }),
-    }));
-  } catch (error) {
-    return refused(
-      `could not load the codebase environment — ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  // The probes run ONE AT A TIME, each from a private copy of the staged
-  // project.
-  //
-  // They used to run concurrently against one shared tree, on the reasoning
-  // that an artifact whose load had side effects would make them DISAGREE and
-  // so be refused. That reasoning had it backwards. Two live peers can AGREE
-  // deliberately: an artifact that appends a marker at load and waits for a
-  // second one answers "one endpoint" to both probes and "a group" to the
-  // deploy's single discovery, and the comparison sees two matching answers and
-  // grants the exemption (Codex P2, round 17).
-  //
-  // Sequence is what closes that, and a private copy is what makes sequence
-  // mean something: with no peer alive there is no one to wait for, and with no
-  // shared source dir a marker left by the first probe cannot even be found by
-  // the second. The first probe is then, by construction, a discovery of the
-  // same shape the deploy will run — one process, alone, against a tree nothing
-  // else is touching.
-  //
-  // The residual is state that outlives the process and lives outside both the
-  // project and the scratch dir — `$HOME`, `/tmp`, a lock server. That is the
-  // same residual as `functions.config()`: an artifact can be written to answer
-  // differently on its second load anywhere in the world, and no local
-  // classifier can see that coming. The cost is the second discovery no longer
-  // overlapping the first, plus its copy: a selector that needs one goes from
-  // about 5.8s to about 9.3s on this repository, and every other selector shape
-  // is unaffected because none of them builds anything.
-  const results = [];
-  for (const { probe, environment } of environments) {
-    /** @type {string[]} */
-    const probeLinks = [];
-    let probeRoot;
-    try {
-      probeRoot = await mkdtemp(join(scratch, "probe-"));
-      const probeProject = join(probeRoot, "project");
-      await copyStagedProject(scratchProject, probeProject, probeLinks);
-      results.push({
-        probe,
-        discovered: await discoverEndpointsFromSdk({
-          sourceDir: resolve(probeProject, sourceRel),
-          projectDir: probeProject,
-          environment,
-          timeout: DISCOVERY_TIMEOUT_MS,
-        }),
-      });
-    } catch (error) {
-      return refused(
-        `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      for (const link of probeLinks) await unlink(link).catch(() => {});
-      if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  for (const { discovered } of results) {
-    if (!discovered.ok) return refused(discovered.reason);
-  }
+function reconcileProbeResults(sourceRel, results) {
+  const failed = results.find(({ discovered }) => !discovered || !discovered.ok);
+  if (failed) return refused(failed.discovered?.reason ?? "the discovery probe produced no answer");
 
   const [first, ...rest] = results.map(({ probe, discovered }) => ({
     probe,
     endpoints: discovered.endpoints,
   }));
-  const signature = (result) => [...result.endpoints].sort().join(" ");
+  const signature = (result) => [...result.endpoints].sort().join(" ");
   const divergent = rest.find((result) => signature(result) !== signature(first));
   if (divergent) {
     return refused(
@@ -1865,7 +2210,7 @@ export async function classifyFirebaseDeployRequest(
   // option-looking required value such as `--only --dry-run`: Commander owns
   // `--dry-run` as the --only value, then filterTargets rejects that value as
   // an unknown deploy target before any build can start.
-  filterTargets(
+  const deployTargets = filterTargets(
     {
       only,
       except: exceptTargets,
@@ -1873,6 +2218,11 @@ export async function classifyFirebaseDeployRequest(
     },
     [...VALID_DEPLOY_TARGETS],
   );
+  // `deploy/index.js` runs EVERY selected target's predeploy hooks before it
+  // prepares any of them, so the mirror needs the whole selected target list,
+  // in this order, and the raw config those non-Functions hooks come from.
+  singleEndpointExports.staging.deployTargets = deployTargets;
+  singleEndpointExports.staging.configSource = configSource;
   await checkValidTargetFilters({ only, except: exceptTargets });
   const hostingOptions = {
     config: { src: configSource },
@@ -1943,6 +2293,15 @@ async function main() {
     else console.log(JSON.stringify(result));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof LiveCheckoutDriftError) {
+      // A DIFFERENT failure from an invalid request, and it gets its own exit
+      // status so `deploy.sh` can say so: the request was fine, the working
+      // tree is not.
+      console.error(`✗ The Firebase deploy preflight mutated the live checkout: ${message}`);
+      console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
+      process.exitCode = LIVE_CHECKOUT_DRIFT_EXIT_CODE;
+      return;
+    }
     console.error(`✗ Invalid Firebase deploy request: ${message}.`);
     console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
     process.exitCode = 1;

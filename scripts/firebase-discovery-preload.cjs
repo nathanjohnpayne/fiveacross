@@ -77,11 +77,10 @@ if (Array.isArray(process._preload_modules)) process._preload_modules.length = 0
  * The codebase's own compiled files, as the SDK binary was pointed at them.
  *
  * The filter matters because the SDK's discovery host reads the environment
- * itself — its own config module consults `CLOUD_RUNTIME_CONFIG` at import
- * time, and libraries in its graph copy the environment wholesale, which reads
+ * itself — libraries in its graph copy the environment wholesale, which reads
  * every key's descriptor. Counting those would refuse every codebase there is.
  * A branch that could change the deployed surface lives in the codebase's own
- * files, so the caller's frame is the discriminator.
+ * files, so a codebase frame ON THE STACK is the discriminator.
  */
 let sourceRootCache;
 function sourceRoot() {
@@ -98,6 +97,23 @@ function sourceRoot() {
   return sourceRootCache;
 }
 
+/**
+ * Whether the codebase is anywhere in the call that is reading the environment.
+ *
+ * The WHOLE stack, not just its first frame. Stopping at the first non-preload
+ * frame missed the very API this watch exists for: `functions.config()` reads
+ * `CLOUD_RUNTIME_CONFIG` inside `firebase-functions/lib/v1/config.js`, so the
+ * nearest frame is the SDK's and the codebase's own frame — the one that CALLED
+ * it — sat one line further down. A `functions.config().feature?.enabled`
+ * branch therefore selected a group during deployment while both synthetic
+ * probes read `undefined`, agreed on one endpoint, and reported no consultation
+ * (Codex P2, round 18).
+ *
+ * Frames inside any `node_modules` are skipped rather than answered on: the SDK
+ * reading the value on the codebase's behalf is the codebase reading it, and a
+ * dependency reading it for reasons of its own is not — what settles it either
+ * way is whether a file the codebase itself supplied is still on the stack.
+ */
 function calledFromCodebase() {
   const root = sourceRoot();
   if (!root) return false;
@@ -107,8 +123,8 @@ function calledFromCodebase() {
     if (!match) continue;
     const file = match[1];
     if (file === __filename) continue;
-    if (!file.startsWith(root)) return false;
-    return !file.split(path.sep).includes("node_modules");
+    if (file.split(path.sep).includes("node_modules")) continue;
+    if (file.startsWith(root)) return true;
   }
   return false;
 }

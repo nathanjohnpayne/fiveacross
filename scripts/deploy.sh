@@ -193,34 +193,51 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # for an argv shape firebase-tools will later classify differently.
 #
 # For an exact `--only functions:<name>` scope the adapter also BUILDS that
-# codebase — it runs the config's own `predeploy` hooks in a scratch project
-# whose Functions source dirs are copies, then asks that codebase's OWN Firebase
-# Functions SDK what it would deploy, exactly as the deploy does: it starts the
-# SDK's discovery server and reads `/__/functions.yaml`. That is what decides
-# whether the selector releases exactly one endpoint and may therefore skip the
-# auth-handoff readiness step; the source alone cannot say, because Firebase
-# loads `package.json.main`, not `src/index.ts`. It is not new trust —
-# `firebase deploy` runs those same hooks and the same discovery a few steps
-# below — and it is not new mutation, because the build lands in the scratch
-# copy.
+# codebase — it runs EVERY selected target's own `predeploy` hooks, in the order
+# Firebase runs them and under the environment `op-firebase-deploy` establishes,
+# in a scratch project whose Functions source dirs are copies, then asks that
+# codebase's OWN Firebase Functions SDK what it would deploy, exactly as the
+# deploy does: it starts the SDK's discovery server and reads
+# `/__/functions.yaml`. That is what decides whether the selector releases
+# exactly one endpoint and may therefore skip the auth-handoff readiness step;
+# the source alone cannot say, because Firebase loads `package.json.main`, not
+# `src/index.ts`. It is not new trust — `firebase deploy` runs those same hooks
+# and the same discovery a few steps below — and it is not new mutation, because
+# the build lands in the scratch copy.
 #
-# It costs a few seconds (about 9 on this repository: the codebase's build, then
-# discovery run twice, one probe at a time from a private copy so that two live
-# probes cannot agree with each other), and only for that selector shape:
-# `--only hosting`, a whole-codebase `--only functions`, and every protected
-# callable classify without building anything (about 0.7s).
+# It costs about 10s on this repository (the codebase's build, then discovery
+# run twice, one project probe at a time from a private copy so that two live
+# probes cannot agree with each other, with every selected codebase discovered
+# in sequence inside each), and only for that selector shape: `--only hosting`,
+# a whole-codebase `--only functions`, and every protected callable classify
+# without building anything (about 1s).
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
+#
+# Exit status 3 is its own outcome, not an invalid request: the classifier
+# detected that running the config's own predeploy hooks CHANGED the live
+# checkout — tracked source the clean-tree guard above had already approved. The
+# tree is no longer the tree that guard passed, so this deploy stops here rather
+# than building and publishing it, and nothing is restored: which of those
+# writes belong in the tree is a question for a human, not for a preflight.
 echo ">> Validating and classifying Firebase deploy request (local)"
 FIREBASE_REQUEST_CLASSIFICATION=""
-if ! FIREBASE_REQUEST_CLASSIFICATION="$(
+CLASSIFIER_STATUS=0
+FIREBASE_REQUEST_CLASSIFICATION="$(
   FIREBASE_DEPLOY_DEFAULT_PROJECT="${DEPLOY_TARGET_PROJECT:-}" \
   FIREBASE_DEPLOY_DEFAULT_CONFIG="$PWD/firebase.json" \
   FIREBASE_DEPLOY_REJECT_OVERRIDES="$([[ -n "${DEPLOY_TARGET_PROJECT:-}" ]] && printf true || printf false)" \
   FIREBASE_DEPLOY_CLASSIFIER_FORMAT=shell \
     node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" -- \
       ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
-)"; then
+)" || CLASSIFIER_STATUS=$?
+if [[ "$CLASSIFIER_STATUS" -ne 0 ]]; then
+  if [[ "$CLASSIFIER_STATUS" -eq 3 ]]; then
+    echo "✗ A predeploy hook mutated this checkout during classification." >&2
+    echo "  The working tree is no longer the one the clean-tree guard approved, and nothing has been restored." >&2
+    echo "  Inspect it with 'git status', decide what belongs in it, then deploy again." >&2
+    echo "  NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
+  fi
   exit 1
 fi
 
