@@ -178,8 +178,9 @@ describe('reserved-label mirrors in separately deployed programs', () => {
  * `/^r2-[a-z2-7]{26}$/` and
  * `/^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/` can only ever be a
  * substring test, which would keep passing through exactly the edits that
- * matter — a `{26}` widened to `{2,26}`, an anchor dropped, `[a-z2-7]` relaxed
- * to `[a-z0-9]` in one copy and not the other.
+ * matter — a `{26}` widened to `{2,26}`, an anchor dropped, a `\.` separator
+ * relaxed to a wildcard `.`, an `i` flag acquired, `[a-z2-7]` relaxed to
+ * `[a-z0-9]` in one copy and not the other.
  *
  * So this compares BEHAVIOUR. Each regex literal is lifted out of the source
  * text, rebuilt with `new RegExp`, and run over one shared fixture of hosts
@@ -195,11 +196,14 @@ describe('reserved-label mirrors in separately deployed programs', () => {
  * from ordinary Event routes, the second to admit them. Pinning all three to
  * "either" would have hidden a route row dealt at a root-test host.
  *
- * Each file's literal COUNT is pinned too. None of the three in
+ * Each file's literal COUNT is pinned too, and pinned TO the number of
+ * behavioural rows for that file. None of the three in
  * `router-publisher/src/runtime.ts` is an exported constant — one is an inline
  * expression and two are function-local `const`s — so there is no symbol a
  * later edit would have to touch, and a fourth literal added beside them would
- * otherwise be a mirror no test has ever seen.
+ * otherwise be a mirror no test has ever seen. Counting alone would not fix
+ * that: a bare count reddens on the fourth literal and goes green again the
+ * moment someone raises the number, with the new mirror still uncompared.
  */
 describe('rehearsal-class mirrors in separately deployed programs', () => {
   /**
@@ -230,17 +234,31 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     readFileSync(resolve(process.cwd(), path), 'utf-8');
 
   /**
-   * Matches a regex literal that starts anchored and mentions `r2-`. The
-   * `[^\n/]` classes are what make it safe to do this with a regex at all: none
-   * of these literals contains a slash or spans a line, so the scan cannot run
-   * past its own closing delimiter into the rest of the file.
+   * Matches a regex literal that starts anchored and mentions `r2-`, capturing
+   * its pattern and its FLAGS separately. The `[^\n/]` classes are what make it
+   * safe to do this with a regex at all: none of these literals contains a
+   * slash or spans a line, so the scan cannot run past its own closing
+   * delimiter into the rest of the file.
    *
    * Deliberately does NOT require the trailing `$`. Requiring it would make a
    * copy whose end anchor was dropped invisible to the scan, which then binds
    * the NEXT literal in the file and reports the failure against the wrong
    * call site. Matching it in place lets the behavioural assertion name it.
+   *
+   * The flags matter as much as the pattern. A mirror that acquired `i` would
+   * start admitting uppercase rehearsal hosts in production while a
+   * flags-discarding reconstruction stayed case-sensitive here, so the suite
+   * would pass through exactly the drift it exists to catch.
    */
-  const HOST_REGEX_LITERAL = /\/\^[^\n/]*r2-[^\n/]*\//;
+  const HOST_REGEX_LITERAL = /\/(\^[^\n/]*r2-[^\n/]*)\/([dgimsuvy]*)/;
+
+  /**
+   * `g` and `y` advance `lastIndex` between `test` calls. On a module-level
+   * constant reused across hosts — which is what every mirror here is — that
+   * makes the answer depend on call order, in the mirror as much as in this
+   * comparison. Refused rather than reproduced.
+   */
+  const STATEFUL_FLAGS = /[gy]/;
 
   /**
    * How far past an anchor its literal may sit. Bounded so that deleting a
@@ -258,8 +276,11 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     if (from === -1) throw new Error(`anchor not found: ${anchor}`);
     const found = HOST_REGEX_LITERAL.exec(source.slice(from, from + ANCHOR_WINDOW));
     if (found === null) throw new Error(`no rehearsal host regex after: ${anchor}`);
-    // Strip the delimiters; none of these literals carries flags.
-    return new RegExp(found[0].slice(1, -1));
+    const [, pattern, flags] = found;
+    if (STATEFUL_FLAGS.test(flags)) {
+      throw new Error(`mirror regex after ${anchor} carries a stateful flag: /${flags}`);
+    }
+    return new RegExp(pattern, flags);
   };
 
   const MIRROR_FILES: readonly (readonly [path: string, literals: number])[] = [
@@ -353,12 +374,33 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     'r2-root-abcdefghijklmnopqrst.vacaybingo.com.example.com',
   ];
 
+  /**
+   * Canonical positives with one dot spoiled: first the separator before the
+   * Namespace, then the dot INSIDE it. Both classes, both Namespaces.
+   *
+   * These are what a `\.` relaxed to a bare `.` costs. Every host in the cross
+   * product below carries its dots exactly where a mirror expects them, so a
+   * wildcarded separator changes no answer there and the drift ships silently —
+   * on the very regexes that ARE the host-validation boundary in the publisher
+   * and in both controllers.
+   */
+  const SEPARATOR_NEAR_MISSES = [
+    'r2-abcdefghijklmnopqrstuvwxyz',
+    'r2-root-abcdefghijklmnopqrst',
+  ].flatMap((label) =>
+    NAMESPACES.flatMap((namespace) => [
+      `${label}X${namespace}`,
+      `${label}.${namespace.replace('.', 'X')}`,
+    ]),
+  );
+
   const HOSTS = [
     ...LABELS.flatMap((label) => [
       ...NAMESPACES.map((namespace) => `${label}.${namespace}`),
       `${label}.${FOREIGN_NAMESPACE}`,
     ]),
     ...UNANCHORED_NEAR_MISSES,
+    ...SEPARATOR_NEAR_MISSES,
   ];
 
   /** What the canonical predicates say about a host, for a given class. */
@@ -375,10 +417,21 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     return isRehearsalLabel(label);
   };
 
-  it.each(MIRROR_FILES)('%s carries exactly %d host-level rehearsal regexes', (path, literals) => {
-    // A new mirror in one of these files must arrive with a row in SITES, or
-    // it ships as the one copy nothing compares against.
+  it.each(MIRROR_FILES)('%s carries exactly %d tabled host-level regexes', (path, literals) => {
     expect(countHostRegexes(read(path))).toBe(literals);
+    // The count alone would not be a coverage guarantee. A fourth literal
+    // reddens the line above, and raising 3 to 4 turns it green again with the
+    // new mirror still untested — so the count and the number of behavioural
+    // rows for this file have to move together, and each row has to name a
+    // DISTINCT anchor or several of them bind the same literal.
+    const rows = SITES.filter((site) => site.path === path);
+    expect(rows).toHaveLength(literals);
+    expect(new Set(rows.map((site) => site.anchor)).size).toBe(literals);
+  });
+
+  it('tables no mirror outside the counted files', () => {
+    const counted = new Set(MIRROR_FILES.map(([path]) => path));
+    for (const site of SITES) expect(counted.has(site.path), site.path).toBe(true);
   });
 
   it.each(SITES)('$path $purpose', ({ path, anchor, admits }) => {
