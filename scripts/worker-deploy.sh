@@ -295,7 +295,7 @@ verify_no_firebase_secret() {
 This is a FAILED verification, not a skipped one. Check \`wrangler\` auth and the
 Worker's existence, then re-run. To inspect by hand:
 
-    npm --prefix worker exec -- wrangler secret list --env-file /dev/null
+    npm --prefix worker exec -- wrangler secret list --config "$REPO_ROOT/worker/wrangler.toml" --env-file /dev/null
 
 MSG
     exit 75
