@@ -111,39 +111,101 @@ function codeLines(config) {
   return lines;
 }
 
-function unquote(value) {
-  const trimmed = value.trim();
-  const basic = /^"([^"]*)"$/.exec(trimmed);
-  if (basic !== null) return basic[1];
-  const literal = /^'([^']*)'$/.exec(trimmed);
-  if (literal !== null) return literal[1];
+const ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
+
+/**
+ * A quoted string starting at `start`, DECODED.
+ *
+ * The decoding is the point rather than tidiness. `[["services"]]` is a
+ * valid TOML spelling of `[[services]]`, and a reader that compared the raw
+ * bytes would see a differently-named table, skip it, and let a second binding
+ * through — the same bypass class as an uncounted trailing comment, one
+ * escape sequence lower. An escape TOML does not define returns `null` so the
+ * caller fails closed rather than guessing at Wrangler's reading of it.
+ */
+function readQuoted(text, start) {
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return null;
+  let value = '';
+  let index = start + 1;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === quote) return { value, end: index + 1 };
+    // A literal (single-quoted) string has no escapes at all: its backslash is
+    // a backslash.
+    if (quote === '"' && character === '\\') {
+      const escape = text[index + 1];
+      if (escape === 'u' || escape === 'U') {
+        const width = escape === 'u' ? 4 : 8;
+        const hex = text.slice(index + 2, index + 2 + width);
+        if (hex.length !== width || !/^[0-9A-Fa-f]+$/.test(hex)) return null;
+        const code = Number.parseInt(hex, 16);
+        if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
+        value += String.fromCodePoint(code);
+        index += 2 + width;
+        continue;
+      }
+      if (!Object.hasOwn(ESCAPES, escape)) return null;
+      value += ESCAPES[escape];
+      index += 2;
+      continue;
+    }
+    value += character;
+    index += 1;
+  }
   return null;
 }
 
-/** `a.b."c"` → `['a', 'b', 'c']`, splitting only on dots outside quotes. */
+/** A `key = value` right-hand side, when it is a plain string and nothing else. */
+function unquote(value) {
+  const text = value.trim();
+  if (text.length === 0) return null;
+  const read = readQuoted(text, 0);
+  if (read === null || text.slice(read.end).trim().length !== 0) return null;
+  return read.value;
+}
+
+/** One dotted segment: a bare key, or a single quoted key decoded. */
+function keySegment(raw) {
+  const text = raw.trim();
+  if (text.length === 0) return null;
+  if (text[0] === '"' || text[0] === "'") {
+    const read = readQuoted(text, 0);
+    if (read === null || text.slice(read.end).trim().length !== 0) return null;
+    return read.value;
+  }
+  return /^[A-Za-z0-9_-]+$/.test(text) ? text : null;
+}
+
+/**
+ * `a.b."c"` → `['a', 'b', 'c']`, splitting only on dots outside quotes and
+ * decoding each quoted segment. `null` for a name this reader cannot resolve.
+ */
 function dottedName(inner) {
-  const segments = [];
+  const parts = [];
   let current = '';
-  let quote = null;
-  for (const character of inner) {
-    if (quote !== null) {
-      if (character === quote) quote = null;
-      else current += character;
-      continue;
-    }
+  let index = 0;
+  while (index < inner.length) {
+    const character = inner[index];
     if (character === '"' || character === "'") {
-      quote = character;
+      const read = readQuoted(inner, index);
+      if (read === null) return null;
+      current += inner.slice(index, read.end);
+      index = read.end;
       continue;
     }
     if (character === '.') {
-      segments.push(current.trim());
+      parts.push(current);
       current = '';
+      index += 1;
       continue;
     }
     current += character;
+    index += 1;
   }
-  segments.push(current.trim());
-  return segments;
+  parts.push(current);
+  const segments = parts.map(keySegment);
+  return segments.includes(null) ? null : segments;
 }
 
 function tableHeader(line) {
@@ -156,7 +218,8 @@ function tableHeader(line) {
 
 /**
  * Every table in the file, each carrying only the `key = "string"` pairs
- * written UNDER its own header.
+ * written UNDER its own header, or `null` for a file this reader cannot
+ * resolve.
  *
  * A key repeated within one table resolves to `null` rather than to either
  * value: two answers is not an answer a capability check may pick between.
@@ -172,10 +235,18 @@ function parseTables(config) {
 
     const header = tableHeader(trimmed);
     if (header !== null) {
+      // A header whose name this reader cannot resolve must not degrade into
+      // "not a header": that would leave the table uncounted AND attribute its
+      // keys to the block above it, which is fail-OPEN in a capability check.
+      if (header.path === null) return null;
       current = { ...header, keys: new Map() };
       tables.push(current);
       continue;
     }
+    // Outside a string, a code line beginning with `[` can only be a table
+    // header in TOML — a value line always starts with its key. One that did
+    // not parse as a header above is therefore unreadable, not a value.
+    if (trimmed.startsWith('[')) return null;
 
     const pair = /^([^=]+)=(.*)$/.exec(trimmed);
     if (pair === null) continue;
@@ -210,10 +281,17 @@ function parseTables(config) {
 export function validateRegistryLookupBinding(config, subject) {
   const tables = parseTables(config);
   const exactlyOnce = new Error(`${subject} must bind exactly once to ${REQUIRED_ENTRYPOINT}`);
+  if (tables === null) throw exactlyOnce;
 
-  if (tables.some((table) => !table.array && table.keys.has(SERVICES_TABLE))) {
-    throw exactlyOnce;
-  }
+  // The inline spelling, and only where it would actually be a binding: the
+  // root table, or an `[env.<name>]` table. A `[vars]` entry that happens to be
+  // named `services` is an ordinary Worker var, and refusing THAT would be a
+  // false positive — the failure mode that gets a gate switched off.
+  const inlineServices = (table) =>
+    !table.array &&
+    (table.path.length === 0 || (table.path[0] === 'env' && table.path.length === 2)) &&
+    table.keys.has(SERVICES_TABLE);
+  if (tables.some(inlineServices)) throw exactlyOnce;
 
   const services = tables.filter(
     (table) => table.array && table.path.at(-1) === SERVICES_TABLE,

@@ -617,6 +617,57 @@ describe('the revision a refusal was decided from', () => {
     await expect(refusalFor(lookup)).resolves.toEqual({ reason, revision: null });
   });
 
+  it.each([
+    [
+      'a disabled route whose slug names a different address',
+      'somewhere-else',
+      'slug-mismatch' as const,
+    ],
+    ['a disabled route carrying no slug at all', '', 'slug-missing' as const],
+  ])('judges %s by its shape before its state, and quotes no revision', async (_label, slug, reason) => {
+    // The ordering is load-bearing now that `inactive` publishes a revision. A
+    // half-written route, or one belonging to another host, is not a record
+    // THIS address may quote: answering `inactive` with its revision would
+    // contradict the slug rules above and hand the recovery machine a
+    // cross-host projection as this host's canonical evidence.
+    await expect(
+      refusalFor(
+        committed(
+          {
+            kind: 'route',
+            eventId: 'bodega-bay-2026',
+            status: 'disabled',
+            slug,
+            edition: 'fiveacross',
+            pathNamespace: null,
+          },
+          '12',
+        ),
+      ),
+    ).resolves.toEqual({ reason, revision: null });
+  });
+
+  it('judges a disabled route with no eventId as malformed rather than inactive', async () => {
+    // Same rule as the unrecognised-`status` arm: the projection violates its
+    // own schema, so its state is not the router's to report and its revision
+    // is not the router's to publish.
+    await expect(
+      refusalFor(
+        committed(
+          {
+            kind: 'route',
+            eventId: '',
+            status: 'archived',
+            slug: SLUG,
+            edition: 'fiveacross',
+            pathNamespace: null,
+          },
+          '12',
+        ),
+      ),
+    ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
+  });
+
   it('carries NO revision when the binding is absent', async () => {
     const deps: ResolveDeps = { registry: null };
     await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({

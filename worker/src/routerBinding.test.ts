@@ -212,6 +212,22 @@ describe('the shared binding validator, read as TOML', () => {
       'the inline array spelling beside the block one',
       `services = [{ binding = "CONTROL", service = "five-across-event-registry" }]\n\n${ONLY_BINDING}\n`,
     ],
+    [
+      // TOML decodes a quoted key's escapes, so `[["services"]]` NAMES the
+      // services array. A reader comparing raw bytes would see a differently
+      // named table, skip it, and let the second binding through — the same
+      // bypass class as an uncounted trailing comment, one escape lower.
+      'a second services header written with an escaped quoted key',
+      `${ONLY_BINDING}\n\n[["serv\\u0069ces"]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
+    ],
+    [
+      // An escape TOML does not define is a name this reader cannot resolve,
+      // and an unresolvable header must not degrade into "not a header" — that
+      // would leave its table uncounted and attribute its keys to the block
+      // above it.
+      'a table header carrying an undefined escape',
+      `${ONLY_BINDING}\n\n["va\\qrs"]\nx = "1"\n`,
+    ],
   ])('refuses %s', (_label, config) => {
     expect(() => validateRouterServiceBinding(config)).toThrow('RegistryLookupEntrypoint');
   });
@@ -232,6 +248,24 @@ describe('the shared binding validator, read as TOML', () => {
     [
       'the one real header written with interior whitespace and a trailing comment',
       '[[ services ]] # the router’s only dependency\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
+    ],
+    [
+      // The inline-spelling refusal above is scoped to the tables where such a
+      // key would actually BE a binding. A Worker var that happens to be named
+      // `services` is not one, and refusing it would be the false positive that
+      // gets a capability gate switched off.
+      'a [vars] entry that happens to be named services',
+      `${ONLY_BINDING}\n\n[vars]\nservices = "human-readable note"\n`,
+    ],
+    [
+      // Decoding runs in the accepting direction too: the one real binding
+      // written with an escaped key is still that binding.
+      'the one real header written with an escaped quoted key',
+      '[["serv\\u0069ces"]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
+    ],
+    [
+      'an entrypoint value written with an escape',
+      '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoin\\u0074"\n',
     ],
   ])('accepts %s', (_label, config) => {
     expect(validateRouterServiceBinding(config)).toEqual({

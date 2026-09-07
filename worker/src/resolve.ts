@@ -339,11 +339,16 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       // projection this Worker cannot judge, not an inferred active — the same
       // rule ADR 0009 gives the source document, moved to the projection.
       if (!isReplicaRouteStatus(desired.status)) return notFound('replica-malformed');
-      // Disabled and archived are refusals decided FROM a committed record, so
-      // they carry its revision — the state a `canonical-after-unblock` probe
-      // observes as `{reason: 'inactive', revision}` and `clear-lock` compares
-      // against committed state.
-      if (desired.status !== 'active') return notFound('inactive', revision);
+
+      // SHAPE AND ADDRESS FIRST, STATE SECOND — and the order is load-bearing
+      // now that `inactive` publishes a revision. A disabled route with no
+      // `slug`, or one naming a different host, is not a record this address
+      // may quote a revision from: it is half-written or it belongs to
+      // somewhere else, and answering `inactive` with its revision would both
+      // contradict the rule that a slug-less or slug-mismatched projection
+      // carries none and offer a cross-host projection to the recovery machine
+      // as this host's canonical evidence. Judging the projection before its
+      // state is the same rule the unrecognised-`status` arm above applies.
       if (typeof desired.eventId !== 'string' || desired.eventId.length === 0) {
         return notFound('replica-malformed');
       }
@@ -372,6 +377,14 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       } else if (desired.slug !== expectedSlug) {
         return notFound('slug-mismatch');
       }
+
+      // Only now is this a complete route projection for THIS address, and
+      // therefore a record whose revision the router may publish. Disabled and
+      // archived are refusals decided FROM it, so they carry that revision —
+      // the state a `canonical-after-unblock` probe observes as
+      // `{reason: 'inactive', revision}` and `clear-lock` compares against
+      // committed state.
+      if (desired.status !== 'active') return notFound('inactive', revision);
 
       return {
         kind: 'serve',
