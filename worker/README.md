@@ -135,9 +135,15 @@ Then uncomment the `routes` block in `wrangler.toml` and redeploy. Attach **one 
 
 Before doing so, note the constraint carried forward from the closed Gate 3 issue ([#569](https://github.com/nathanjohnpayne/fiveacross/issues/569)): the epic's original protective rule — do not let real players install the PWA before the cutover — is spent. Real players are already carrying installed shells and service workers minted from the direct-to-Hosting path, so this cutover has to be verified against **already-installed** shells, not clean installs. Open the app on a device that already has it installed from the home screen, not just in a fresh browser tab.
 
-That is also where the #546 ordering constraint is checked, and it is checkable from outside. On an already-installed shell, request the manifest and read the headers: `x-event-router` present means this Worker answered, and a body naming the requested host's Edition means the shell is no longer serving the precached copy. A shell built before #546 will answer from its own precache with the build-time Edition's name no matter what the edge says — that is the state to resolve by deploying and updating, not by attaching more routes.
+That is also where the #546 ordering constraint is checked, and it can only be checked from INSIDE an already-installed shell. `curl` talks to the edge and bypasses the browser and its service worker entirely, so after the routes are attached it will always reach this Worker and always show `x-event-router`, even while every pre-#546 shell keeps serving its precached manifest: a `curl` that "passes" here proves nothing about installed identity. Instead, open the installed app from the home screen on a device that already had it before the cutover, attach DevTools to that page (desktop: `chrome://inspect` for an Android shell, Safari's Develop menu for an iOS shell), reload, and read the `manifest.webmanifest` request in the Network panel:
+
+- **Served by the service worker** (Chrome labels the size column `(ServiceWorker)`; the response carries no `x-event-router`): the shell is still on a pre-#546 build and answered from its own precache. Resolve by deploying the post-#546 bundle and letting `UpdatePrompt` take the shell forward; do not attach more routes.
+- **Fetched from the network with `x-event-router` present** and a body whose `name` is the requested host's Edition: the shell has taken a post-#546 build and the edge is answering it. This is the state the ordering gate requires.
+
+The DevTools **Application → Manifest** panel reads the manifest the browser last parsed, which is a useful second signal, but the Network row is the one that says WHO answered. Keep `curl` for what it can prove, namely that the edge routes and resolves the hostname at all:
 
 ```bash
+# Edge-routing check only. Says nothing about what an installed shell serves.
 curl -s https://<slug>.vacaybingo.com/manifest.webmanifest -D - -o /dev/stdout | head -20
 ```
 
@@ -166,6 +172,6 @@ Every response carries `x-event-router`. Every fail-closed response also carries
 
 `invalid-slug` is qualified with the rule the first label broke — `invalid-slug:too-short`, `invalid-slug:edge-hyphen`, `invalid-slug:invalid-characters`, `invalid-slug:reserved-tag` — so the class stays greppable as a prefix while the specific failure is still named.
 
-`/manifest.webmanifest` is the one address that answers with a BODY an operator can read a decision out of: its `name` is the Edition this router resolved for the requested hostname. `curl -s https://<host>/manifest.webmanifest` returning the wrong product's name (with `x-event-router` present) means the hostname document's `edition` is wrong or absent, not that the router is misbehaving; the same request answering with no `x-event-router` header at all means an installed shell served it from its own precache and has not yet taken a post-#546 build.
+`/manifest.webmanifest` is the one address that answers with a BODY an operator can read a decision out of: its `name` is the Edition this router resolved for the requested hostname. `curl -s https://<host>/manifest.webmanifest` returning the wrong product's name (with `x-event-router` present) means the hostname document's `edition` is wrong or absent, not that the router is misbehaving. The precache case is different: only a request made from a page the installed shell controls can be answered by that shell's service worker, so "no `x-event-router` header" is a diagnosis you read in that page's DevTools Network panel (see step 5), never from `curl`, which never passes through a service worker.
 
 `lookup-unavailable` is the only one that is about the router rather than about the address: it means the `hostnames/{host}` read could not be completed and no cached answer existed. Seeing it on **every** address, including `/__/auth/*`, points at configuration (a missing `FIREBASE_API_KEY` or `FIREBASE_PROJECT_ID`); seeing it intermittently points at Firestore.
