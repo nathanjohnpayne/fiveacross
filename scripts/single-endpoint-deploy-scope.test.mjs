@@ -227,6 +227,14 @@ const NO_INVOKER_SELECTED = {
 
 const EXEMPT = { ...NO_INVOKER_SELECTED, functionsAttempted: true };
 
+/**
+ * Proving a scope runs that codebase's real `predeploy` hooks, so these suites
+ * shell out to `npm` and `tsc`. A shared-CI runner is several times slower than
+ * a dev machine at both, and vitest's 5s default is not a budget any of this
+ * fits in; the ceiling below exists to catch a HANG, not to police duration.
+ */
+const RUNS_A_BUILD = { timeout: 120_000 };
+
 const ALL_INVOKERS_CONSERVATIVE = {
   bugReportInvokerSelected: true,
   emailUnsubscribeInvokerSelected: true,
@@ -234,7 +242,7 @@ const ALL_INVOKERS_CONSERVATIVE = {
   authHandoffInvokerConservative: true,
 };
 
-describe("exact single-endpoint scopes against the real Functions index", () => {
+describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
   it("does not select any invoker for endpoints the artifact deploys alone", async () => {
     const result = await classify([
       "--only",
@@ -295,7 +303,7 @@ describe("exact single-endpoint scopes against the real Functions index", () => 
   });
 });
 
-describe("the built artifact decides, not the TypeScript source", () => {
+describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, () => {
   it("exempts a single endpoint that survives the real build", async () => {
     // The positive control for this whole describe: without it, every
     // assertion below would still pass if the exemption never fired at all.
@@ -484,7 +492,7 @@ describe("the built artifact decides, not the TypeScript source", () => {
   });
 });
 
-describe("the artifact decides even when no hook rebuilds it", () => {
+describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () => {
   /**
    * No predeploy at all: whatever `main` already points at is exactly what
    * Firebase loads, so the artifact is inventoried as it stands.
@@ -592,7 +600,7 @@ describe("the artifact decides even when no hook rebuilds it", () => {
   });
 });
 
-describe("fail-closed: shapes the source pre-check refuses without building", () => {
+describe("fail-closed: shapes the source pre-check refuses without building", RUNS_A_BUILD, () => {
   it("refuses a require() group, whose initializer is also a CallExpression", async () => {
     // The exact hazard: `exports.metrics = require('./metrics')` deploys as
     // `--only functions:metrics` and may contain a protected callable. It is a
@@ -690,7 +698,7 @@ describe("fail-closed: shapes the source pre-check refuses without building", ()
   });
 });
 
-describe("codebase precedence and per-codebase keying", () => {
+describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
   it("refuses a selector naming a configured codebase, even when an endpoint shares the name", async () => {
     // firebase-tools' parseFunctionSelector gives a configured codebase name
     // precedence over any endpoint id, and a filter with no second fragment
@@ -798,7 +806,7 @@ describe("codebase precedence and per-codebase keying", () => {
   });
 });
 
-describe("selector resolution mirrors the pinned firebase-tools parser", () => {
+describe("selector resolution mirrors the pinned firebase-tools parser", RUNS_A_BUILD, () => {
   it("does not let a remoteSource codebase be read as a same-named local endpoint", async () => {
     // projectConfig accepts `remoteSource` as an alternative to `source`, and
     // such a config still carries a codebase. Dropping its NAME would let
@@ -892,7 +900,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
   });
 });
 
-describe("configs whose deployed surface this classifier cannot reproduce", () => {
+describe("configs whose deployed surface this classifier cannot reproduce", RUNS_A_BUILD, () => {
   it("refuses a non-Node runtime even when decoy TypeScript is present", async () => {
     // The CLI picks its runtime delegate from the configured runtime, so a
     // python codebase's endpoints never come from the Node artifact built here.
