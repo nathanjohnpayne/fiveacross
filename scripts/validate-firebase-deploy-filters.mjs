@@ -123,9 +123,17 @@ function parseFirebaseOptions(args) {
 }
 
 function normalizedFilter(value) {
-  // firebase-tools splits filter lists on commas only. Whitespace remains part
-  // of the selector and must reach its pinned validators unchanged.
-  return value || undefined;
+  // The pinned CLI's option parser splits a filter list on commas AND
+  // whitespace (`command.js`: `.split(/[\s,]+/)`), so `--only "functions:daily,
+  // functions:submitBugReport"` releases both functions. The same split is
+  // applied here before anything is planned or classified from the string
+  // (Codex P1, round 22 on #1107); the pieces are rejoined with commas, which
+  // is the form every consumer below already expects.
+  if (!value) return undefined;
+  const pieces = String(value)
+    .split(/[\s,]+/)
+    .filter((piece) => piece.length > 0);
+  return pieces.length > 0 ? pieces.join(",") : undefined;
 }
 
 const EVENT_INVITATION_EXPORTS = Object.freeze([
@@ -811,10 +819,14 @@ async function stageProjectOverlay({
  * covers its tracks is MORE visible, not less. Creations, deletions and renames
  * fall out of the path set rather than any timestamp.
  *
- * `node_modules` is out of scope at every depth, as it is out of scope for the
- * copy: it is relinked deliberately, because the deploy's own build reads and
- * writes that very tree, and walking it would cost more than everything else
- * combined. Nothing else is excluded.
+ * `node_modules` is watched ONE level deep at every depth it appears: it is
+ * relinked deliberately, because the deploy's own build reads and writes that
+ * very tree, and walking it would cost more than everything else combined —
+ * but a hook can leave a marker at its root for the deploy's second run to
+ * find (Codex P1, round 22), so the tree's own signature, its entry set and its
+ * top-level entries are recorded. A write buried inside one dependency's own
+ * files is the out-of-tree-state residual stated below. Nothing else is
+ * excluded.
  *
  * WHAT NO REHEARSAL CAN CLOSE. A hook that inspects the rehearsal itself — the
  * scratch path `$PROJECT_DIR` resolves to, the symlinked project directories
@@ -873,6 +885,44 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
       await walk(resolved);
     }
   };
+  /**
+   * A dependency tree, ONE level deep: the directory's own signature, its entry
+   * names, and each entry's own signature (Codex P1, round 22 on #1107). The
+   * tree is linked into the overlay, so a hook can leave a marker there that
+   * the deploy's second run will find; a full walk would cost more than the
+   * rest of the checkout, so the watch covers what such a marker moves — the
+   * tree's entry set and its top-level entries — and a write buried inside one
+   * dependency's own files is the stated out-of-tree-state residual.
+   */
+  const shallow = async (dir) => {
+    let real;
+    try {
+      real = await realpath(dir);
+    } catch {
+      real = dir;
+    }
+    if (visited.has(`shallow:${real}`)) return;
+    visited.add(`shallow:${real}`);
+    const signature = async (path) => {
+      const stats = await lstat(path, { bigint: true });
+      return `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`;
+    };
+    try {
+      fingerprint.set(dir, await signature(dir));
+      const names = (await readdir(dir)).sort();
+      fingerprint.set(`${dir} (entries)`, names.join("\n"));
+      for (const name of names) {
+        const path = join(dir, name);
+        try {
+          fingerprint.set(path, await signature(path));
+        } catch (error) {
+          fingerprint.set(path, `absent ${error?.code ?? "?"}`);
+        }
+      }
+    } catch (error) {
+      fingerprint.set(dir, `unreadable ${error?.code ?? "?"}`);
+    }
+  };
   const walk = async (dir) => {
     let real;
     try {
@@ -893,7 +943,10 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     }
     for (const entry of entries) {
       const path = join(dir, entry.name);
-      if (entry.name === "node_modules") continue;
+      if (entry.name === "node_modules") {
+        await shallow(path);
+        continue;
+      }
       let stats;
       try {
         stats = await lstat(path, { bigint: true });
@@ -949,7 +1002,10 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     }
   }
   for (const dir of liveDirs) {
-    if (basename(dir) === "node_modules") continue;
+    if (basename(dir) === "node_modules") {
+      await shallow(dir);
+      continue;
+    }
     await walk(dir);
   }
   // The copied root files, by their live paths: the overlay's copy is what a

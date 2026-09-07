@@ -406,6 +406,19 @@ describe("exact single-endpoint scopes against the real Functions index", RUNS_A
     });
   });
 
+  it("normalizes whitespace in the filter list exactly as the CLI does", async () => {
+    // Codex P1, round 22: the pinned CLI splits `--only` on commas AND
+    // whitespace, so a protected selector after ", " is released by Firebase;
+    // iterating the raw comma chunks let it slip past classification.
+    const result = await classify(["--only", "functions:dailyEngagementEmail, functions:submitBugReport"]);
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      bugReportInvokerSelected: true,
+      bugReportInvokerConservative: false,
+      authHandoffInvokerSelected: false,
+    });
+  });
+
   it("accepts the codebase-qualified form of the same endpoint", async () => {
     // `functions:<codebase>:<name>` is Firebase's documented three-part form.
     const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
@@ -2525,6 +2538,35 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
         } finally {
           if (previous === undefined) delete process.env.INIT_CWD;
           else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  });
+
+  it("ABORTS when a hook leaves a marker at the root of a linked node_modules", async () => {
+    // Codex P1, round 22: the dependency tree is linked into the overlay and
+    // was excluded from both fingerprints, so a marker a hook left there for
+    // the deploy's second run was invisible. Each node_modules is watched one
+    // level deep now.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf x > "$RESOURCE_DIR/node_modules/.deploy-marker"'],
+        },
+      },
+      async (configPath) => {
+        const { dirname: dir, join: under } = await import("node:path");
+        const { rm: remove } = await import("node:fs/promises");
+        const marker = under(dir(configPath), "functions", "node_modules", ".deploy-marker");
+        try {
+          const failure = await classify(["--only", "functions:daily"], configPath).then(
+            () => null,
+            (error) => error,
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("node_modules");
+        } finally {
+          await remove(marker, { force: true });
         }
       },
     );
