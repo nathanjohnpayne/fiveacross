@@ -55,6 +55,10 @@ import {
   type FinaleDayStat,
 } from './finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText } from './dailyEmailTemplate';
+// The SAME freeze predicate the scheduler's own writers use (#134), restated at
+// this boundary rather than spelled a second time — the two must never disagree
+// about what "this Event is over" means.
+import { eventClosedToPlay } from './unlockDay';
 import {
   ensureEmailPrefs,
   listUnsubscribeHeaders,
@@ -521,14 +525,31 @@ export interface DailySendResult {
   skipped: number;
   /** Transport failures — logged, never thrown. */
   failed: number;
-  /** Why nothing was attempted, when nothing was. */
-  reason?: 'no-event' | 'disabled' | 'not-due' | 'no-roster';
+  /** Why nothing was attempted, when nothing was. `'archived'` covers BOTH
+   *  halves of the post-Event freeze — archived and closing (#134). */
+  reason?: 'no-event' | 'disabled' | 'not-due' | 'no-roster' | 'archived';
 }
 
 /**
  * Send the daily email for ONE Event, if one is due. Idempotent: a second run
  * inside the same window sends nothing (every recipient's `lastSentDayIndex`
  * already covers the Day).
+ *
+ * A FROZEN EVENT IS A STOPPED ONE, and this is where that has to be decided
+ * (#134, Codex P2 on PR #1139). `runDailyEmailSweep` selects `status ==
+ * 'active'`, which excludes an archived Event but NOT a closing one — the
+ * quiesce deliberately leaves `status` alone — and the selection happens once
+ * per run, before any Event is processed, so a run selected moments before the
+ * freeze still arrives afterwards. Left unguarded, a paused or failed archive
+ * keeps mailing "here is today's card" at an Event where every gameplay write
+ * the mail invites is denied at the rules boundary.
+ *
+ * So the freeze is read TWICE: once off the Event this call opens with, and
+ * again from a fresh read taken immediately before delivery begins, after the
+ * origin resolution and the roster page that sit between them. The second read
+ * is what closes the selection-to-delivery window; the residual it leaves is
+ * stated in the spec — a freeze landing mid-loop still finishes the roster it
+ * had already started.
  */
 export async function sendDailyEmailForEvent(
   db: DailyEmailFirestore,
@@ -536,8 +557,12 @@ export async function sendDailyEmailForEvent(
   deps: DailyEmailDeps = {},
 ): Promise<DailySendResult> {
   const now = (deps.now ?? Date.now)();
-  const event = (await db.doc(`events/${eventId}`).get()).data() as EmailEvent | undefined;
+  const eventRef = db.doc(`events/${eventId}`);
+  const event = (await eventRef.get()).data() as EmailEvent | undefined;
   if (!event) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
+  // Checked ahead of the admin toggle, because it is the stronger statement: the
+  // occasion is over, whatever the settings say.
+  if (eventClosedToPlay(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
   if (!dailyEmailEnabled(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'disabled' };
 
   const day = dueDayForDailyEmail(event.days, now, event.timezone);
@@ -606,6 +631,16 @@ export async function sendDailyEmailForEvent(
   );
   const banned = new Set(event.bannedUids ?? []);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
+
+  // THE FRESH READ, immediately before the first send (#134). Everything above
+  // this line is preparation — the hostname resolution, the roster page, the
+  // standings snapshot — and it is exactly the elapsed time a sweep selected
+  // just before the freeze spends arriving here. Re-reading the ONE document
+  // that carries the freeze is what turns "this Event was active when the sweep
+  // started" into "this Event is still running now".
+  const atDelivery = (await eventRef.get()).data() as EmailEvent | undefined;
+  if (!atDelivery) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
+  if (eventClosedToPlay(atDelivery)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
   // EXAMINED, not attempted (Codex #623 P2). The cap used to count only real
@@ -695,6 +730,11 @@ export async function runDailyEmailSweep(
   db: DailyEmailFirestore,
   deps: DailyEmailDeps = {},
 ): Promise<void> {
+  // This selection is NOT the freeze check (#134). It excludes an archived
+  // Event, but the archive's closing state is deliberately still `'active'`, and
+  // the query runs ONCE before any Event is processed — so an Event frozen after
+  // this line is still in the list. `sendDailyEmailForEvent` reads the freeze off
+  // the document itself, twice, which is where that decision belongs.
   const events = await db.collection('events').where('status', '==', 'active').get();
   const transport = deps.send ?? (await import('./email')).sendEmail;
   const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;

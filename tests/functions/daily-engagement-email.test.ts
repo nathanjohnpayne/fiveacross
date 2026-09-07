@@ -1827,6 +1827,69 @@ describe('sendDailyEmailForEvent', () => {
     ).toMatchObject({ reason: 'no-event' });
   });
 
+  // specs/post-sailing-archive.md (#134, Codex P2 on PR #1139). A frozen Event
+  // is a stopped one, and this sweep is the last thing in the estate that would
+  // still be inviting people to play on it: every gameplay write the mail asks
+  // for is denied at the rules boundary from the moment the Event shuts.
+  describe('the post-Event freeze stops the mail', () => {
+    it('sends nothing on an archived Event', async () => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], status: 'archived' };
+      const { result, sent } = await run(docs);
+      expect(result).toMatchObject({ sent: 0, reason: 'archived' });
+      expect(sent).toEqual([]);
+    });
+
+    it('sends nothing while the Event is CLOSING, which its own selection query cannot see', async () => {
+      // The quiesce deliberately leaves `status: 'active'`, so the sweep's
+      // `status == 'active'` filter does not exclude this Event at all — and
+      // this is the state a paused or failed archive sits in indefinitely.
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], archiving: true };
+      const { result, sent } = await run(docs);
+      expect(result).toMatchObject({ sent: 0, reason: 'archived' });
+      expect(sent).toEqual([]);
+    });
+
+    it('re-reads the Event immediately before delivery, catching a freeze taken after selection', async () => {
+      // The window the sweep actually has: it selects its Events once per run,
+      // then resolves the origin and reads a roster page before mailing anyone.
+      // The archive commits DURING that preparation — which is what an Admin
+      // archiving while a sweep is in flight looks like — so the Event this call
+      // opened with is not the Event it is about to mail on behalf of.
+      const db = makeDb(seedEvent());
+      const readCollection = db.collection;
+      const frozenMidFlight: typeof db = {
+        ...db,
+        collection: (path: string) => {
+          if (path.endsWith('/players')) {
+            db.docs['events/med-2026'] = { ...db.docs['events/med-2026'], status: 'archived' };
+          }
+          return readCollection(path);
+        },
+      };
+      const sent: string[] = [];
+      const result = await sendDailyEmailForEvent(frozenMidFlight, 'med-2026', {
+        ...baseDeps(),
+        send: async (args) => {
+          sent.push(args.to[0]);
+          return true;
+        },
+      });
+      // Nothing was mailed, and the reason names the freeze rather than an empty
+      // roster: the roster and the standings snapshot above the read were fine.
+      expect(result).toMatchObject({ sent: 0, reason: 'archived' });
+      expect(sent).toEqual([]);
+    });
+
+    it('still mails an Event that is merely not archived (the control)', async () => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], status: 'active', archiving: false };
+      const { result } = await run(docs);
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+    });
+  });
+
   it('is idempotent — a second sweep inside the same window sends nothing', async () => {
     const docs = seedEvent();
     const first = await run(docs);

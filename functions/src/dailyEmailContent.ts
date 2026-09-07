@@ -64,7 +64,11 @@ export type EmailDay = Pick<DayDef, 'index' | 'unlockAt'> &
  *  headline ⭐ resolves it through `standingsFreezeAtFor`, which falls back to
  *  the first ceremonial Day's `unlockAt` when the doc carries none. */
 export type EmailEvent = Partial<
-  Pick<EventDoc, 'name' | 'timezone' | 'bannedUids' | 'standingsFreezeAt'>
+  // `status`/`archiving` are the post-Event freeze (#134): an archived or
+  // CLOSING Event is stopped, and the daily sweep has to read that off the
+  // document rather than trusting its own `status == 'active'` selection —
+  // the closing state is deliberately still `'active'`.
+  Pick<EventDoc, 'name' | 'timezone' | 'bannedUids' | 'standingsFreezeAt' | 'status' | 'archiving'>
 > & {
   days?: EmailDay[];
   settings?: Partial<Pick<EventDoc['settings'], 'dailyEmailEnabled'>>;

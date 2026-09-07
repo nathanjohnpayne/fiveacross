@@ -501,8 +501,17 @@ export function isEventAdmin(event: EventLike | undefined, uid: string | undefin
  * Every core below checks it against its FIRST read AND re-checks it inside the
  * transaction that writes, because the archive can commit between the two — the
  * same re-check discipline the snapshot's own `already-stamped` guard uses.
+ *
+ * Exported and structurally typed so the daily engagement email can restate the
+ * SAME predicate at its own boundary rather than spelling the comparison a third
+ * time (#134, Codex P2 on PR #1139): that sweep selects `status == 'active'`,
+ * which excludes an archived Event but not a CLOSING one, and it mails rather
+ * than writes — so it needs the predicate without needing this module's own
+ * `EventLike`.
  */
-export function eventClosedToPlay(event: EventLike | undefined): boolean {
+export function eventClosedToPlay(
+  event: Partial<Pick<EventLike, 'status' | 'archiving'>> | undefined,
+): boolean {
   return event?.status === 'archived' || event?.archiving === true;
 }
 
