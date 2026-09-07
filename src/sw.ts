@@ -118,9 +118,8 @@ registerRoute(
     // #182: never intercept Firebase Hosting's reserved /__/* namespace — the
     // Google sign-in navigates the app tab itself to /__/auth/handler on this
     // same origin (a top-level redirect on every same-origin-handler surface
-    // since #765; a popup window only where the handler is cross-origin), and
-    // serving the SPA shell there dead-ends sign-in for every SW-controlled
-    // signed-out client.
+    // since #765), and serving the SPA shell there dead-ends sign-in for every
+    // SW-controlled signed-out client.
     denylist: [/^\/__\//],
   }),
 );
@@ -196,12 +195,13 @@ async function registerClientBuild(clientId: string, stamp: string): Promise<voi
  *  `includeUncontrolled` because an installing worker controls nothing yet, and
  *  the whole point of this registry is the tabs it does not yet own.
  *
- *  The `/__/*` filter is load-bearing (Codex P2 round 3 on #516): a tab parked
- *  on the same-origin OAuth handler — the app tab mid-redirect since #765, or a
- *  popup window on a cross-origin-handler surface — never posts `CLIENT_BUILD`,
- *  so without it an open sign-in reads as an ancient client — force-activating
- *  the fleet on an armed floor with no stale app tab anywhere, and then
- *  navigating that window out of the OAuth flow. See `isAppShellClientUrl`. */
+ *  The `/__/*` filter is load-bearing (Codex P2 round 3 on #516): the app tab
+ *  parked on the same-origin OAuth handler mid-redirect (#765) never posts
+ *  `CLIENT_BUILD`, so without it an open sign-in reads as an ancient client —
+ *  force-activating the fleet on an armed floor with no stale app tab
+ *  anywhere, and then navigating that tab out of the OAuth flow. (A
+ *  cross-origin popup, the dev/emulator fallback, is not a client of this
+ *  origin at all.) See `isAppShellClientUrl`. */
 async function appShellWindows(options: ClientQueryOptions): Promise<Client[] | null> {
   try {
     const windows = await self.clients.matchAll({ type: 'window', ...options });

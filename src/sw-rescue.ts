@@ -90,10 +90,9 @@ const RESERVED_HOSTING_PATH = /^\/__\//;
  * Whether a same-origin window is one of OUR pages (Codex P2 round 3 on #516).
  *
  * `clients.matchAll({ includeUncontrolled: true })` returns every window on
- * this origin, and a window parked on the Google sign-in handler at
- * `/__/auth/handler` is one of them — the app tab itself mid-redirect on every
- * same-origin-handler surface since #765, or a popup window where the handler
- * is cross-origin. That document is Firebase's, not ours: it never runs
+ * this origin, and the app tab parked on the Google sign-in handler at
+ * `/__/auth/handler` mid-redirect (#765) is one of them. That document is
+ * Firebase's, not ours: it never runs
  * `main.tsx`, so it never posts `CLIENT_BUILD` and is therefore absent from the
  * registry — which is exactly the shape this rescue reads as "an ancient
  * client, condemn it". Left unfiltered, an open sign-in would force-activate
