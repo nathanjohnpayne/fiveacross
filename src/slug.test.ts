@@ -415,6 +415,52 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     'r2-root-abcdefghijklmnopqrst',
   ];
 
+  const BASE32 = /^[a-z2-7]*$/;
+  const EVENT_MARKER = 'r2-';
+  const ROOT_MARKER = 'r2-root-';
+  const EVENT_SUFFIX_LENGTH = 26;
+  const ROOT_SUFFIX_LENGTH = 20;
+
+  const isEventShaped = (label: string): boolean =>
+    label.startsWith(EVENT_MARKER) &&
+    label.length === EVENT_MARKER.length + EVENT_SUFFIX_LENGTH &&
+    BASE32.test(label.slice(EVENT_MARKER.length));
+
+  const isRootShaped = (label: string): boolean =>
+    label.startsWith(ROOT_MARKER) &&
+    label.length === ROOT_MARKER.length + ROOT_SUFFIX_LENGTH &&
+    BASE32.test(label.slice(ROOT_MARKER.length));
+
+  /** A base32 suffix of exactly `length` characters. */
+  const suffix = (length: number): string =>
+    'abcdefghijklmnopqrstuvwxyz234567'.slice(0, length);
+
+  /**
+   * Accepted labels placing EVERY valid base32 character at EVERY suffix
+   * position, for both classes.
+   *
+   * Every other fixture in this block hunts widenings. These hunt NARROWINGS,
+   * which are the same defect seen from the other side and which no near-miss
+   * can reach: the positive corpus had two Event suffixes, beginning `a` and
+   * `2`, so a mirror narrowed to `^r2-[a2][a-z2-7]{25}` accepted both and
+   * rejected every other canonical host while the suite stayed green. A dealt
+   * rehearsal Event would 404 and the fixture would have said nothing.
+   */
+  const BASE32_ALPHABET = [...'abcdefghijklmnopqrstuvwxyz234567'];
+
+  const everyPositionAndCharacter = (marker: string, length: number): string[] =>
+    Array.from({ length }, (_unused, position) =>
+      BASE32_ALPHABET.map((character) => {
+        const body = suffix(length);
+        return `${marker}${body.slice(0, position)}${character}${body.slice(position + 1)}`;
+      }),
+    ).flat();
+
+  const EXHAUSTIVE_POSITIVES = [
+    ...everyPositionAndCharacter(EVENT_MARKER, EVENT_SUFFIX_LENGTH),
+    ...everyPositionAndCharacter(ROOT_MARKER, ROOT_SUFFIX_LENGTH),
+  ];
+
   /**
    * Hosts that are not a plain `<label>.<Namespace>` pair. They exist to pin
    * the two anchors, which the cross product below cannot reach: a copy that
@@ -474,13 +520,18 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
    * single-edit neighbourhood closes the class instead of the instance, and is
    * shorter than the list of cases it replaces.
    */
+  /** Every character an LDH hostname label or Namespace can carry, plus `.`. */
+  const HOSTNAME_ALPHABET = [...'abcdefghijklmnopqrstuvwxyz0123456789-.'];
+
   const singleCharacterEdits = (text: string): string[] => {
-    // The substituted and inserted characters have to include the ones ALREADY
-    // in `text`. A mirror that widens a component by repeating one of its own
-    // characters — `fiveacrosss?\.app`, admitting `fiveacrosss.app` — is only
-    // caught by an edit that doubles that character, and a generator that only
-    // ever inserts a foreign `x` can never produce it.
-    const alphabet = [...new Set([...text, 'x', '-', '0'])];
+    // The whole hostname alphabet, not a sample of it and not the component's
+    // own characters. Two narrower alphabets were tried and each missed by one:
+    // a fixed foreign `x` could not produce `fiveacrosss.app` for a mirror
+    // widened to `fiveacrosss?\.app`, and adding the component's own characters
+    // still could not produce `fiveacrossq.app` for `fiveacrossq?\.app`,
+    // because `q` appears nowhere in `fiveacross.app`. Any character an LDH
+    // hostname can carry is a character a mirror can be widened to admit.
+    const alphabet = HOSTNAME_ALPHABET;
     const edits: string[] = [];
     for (let index = 0; index < text.length; index += 1) {
       edits.push(text.slice(0, index) + text.slice(index + 1));
@@ -604,6 +655,9 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
       NAMESPACES.map((namespace) => `${label}.${namespace}`),
     ),
     ...PADDED_NEAR_MISSES,
+    ...EXHAUSTIVE_POSITIVES.flatMap((label) =>
+      NAMESPACES.map((namespace) => `${label}.${namespace}`),
+    ),
   ];
 
   /** What the canonical predicates say about a host, for a given class. */
@@ -680,25 +734,49 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
    * fixture has to be told about the new shape before the mirrors can be
    * measured against it.
    */
-  const BASE32 = /^[a-z2-7]*$/;
-  const EVENT_MARKER = 'r2-';
-  const ROOT_MARKER = 'r2-root-';
-  const EVENT_SUFFIX_LENGTH = 26;
-  const ROOT_SUFFIX_LENGTH = 20;
 
-  const isEventShaped = (label: string): boolean =>
-    label.startsWith(EVENT_MARKER) &&
-    label.length === EVENT_MARKER.length + EVENT_SUFFIX_LENGTH &&
-    BASE32.test(label.slice(EVENT_MARKER.length));
+  /**
+   * The canonical patterns themselves, lifted out of `src/slug.ts` by the same
+   * scanner the mirrors go through, and pinned to their exact text.
+   *
+   * The first attempt at this pin sampled: a handful of segments a widened
+   * class might insert after the marker. That is the same mistake the fixture
+   * kept making elsewhere — `(?:preview-)?` was not among the five sampled
+   * segments and sailed through. A sample of an infinite space cannot pin it.
+   *
+   * So the pattern is pinned as TEXT, which is closed: any widening at all
+   * changes these strings. That is not the textual comparison this block argues
+   * against — that argument is about comparing two regexes over DIFFERENT
+   * subjects, where a substring test is all you get. Asserting one regex is
+   * exactly what it is supposed to be is a different act, and it is what
+   * `describe('reserved infrastructure labels')` does to `RESERVED_LABELS`.
+   *
+   * The behavioural checks below then say what that text MEANS, and catch an
+   * implementation that stopped consulting the pattern at all.
+   */
+  const CANONICAL_SOURCE = 'src/slug.ts';
+  const CANONICAL_PATTERNS: readonly (readonly [binding: string, source: string])[] = [
+    ['const REHEARSAL_EVENT_LABEL =', String.raw`^r2-[a-z2-7]{26}$`],
+    ['const REHEARSAL_ROOT_LABEL =', String.raw`^r2-root-[a-z2-7]{20}$`],
+  ];
 
-  const isRootShaped = (label: string): boolean =>
-    label.startsWith(ROOT_MARKER) &&
-    label.length === ROOT_MARKER.length + ROOT_SUFFIX_LENGTH &&
-    BASE32.test(label.slice(ROOT_MARKER.length));
+  it.each(CANONICAL_PATTERNS)('%s is pinned to its exact pattern', (binding, source) => {
+    const canonicalRegex = hostRegexAfter(read(CANONICAL_SOURCE), binding);
+    expect(canonicalRegex.source).toBe(source);
+    expect(canonicalRegex.flags).toBe('');
+  });
 
-  /** A base32 suffix of exactly `length` characters. */
-  const suffix = (length: number): string =>
-    'abcdefghijklmnopqrstuvwxyz234567'.slice(0, length);
+  it('keeps the exported predicates answering for the pinned patterns', () => {
+    // The pin above is text; this is what the text has to MEAN. An
+    // implementation that stopped consulting its pattern would pass the first
+    // and fail here.
+    const pinnedEvent = hostRegexAfter(read(CANONICAL_SOURCE), CANONICAL_PATTERNS[0][0]);
+    const pinnedRoot = hostRegexAfter(read(CANONICAL_SOURCE), CANONICAL_PATTERNS[1][0]);
+    for (const label of CANONICAL_PROBES) {
+      expect(isRehearsalEventLabel(label), `event: ${label}`).toBe(pinnedEvent.test(label));
+      expect(isRehearsalRootLabel(label), `root: ${label}`).toBe(pinnedRoot.test(label));
+    }
+  });
 
   /**
    * Shapes a widened canonical class would plausibly start accepting, none of
