@@ -204,10 +204,11 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # below — and it is not new mutation, because the build lands in the scratch
 # copy.
 #
-# It costs a few seconds (about 6 on this repository, discovery being run twice
-# under two project configs), and only for that selector shape: `--only
-# hosting`, a whole-codebase `--only functions`, and every protected callable
-# classify without building anything.
+# It costs a few seconds (about 9 on this repository: the codebase's build, then
+# discovery run twice, one probe at a time from a private copy so that two live
+# probes cannot agree with each other), and only for that selector shape:
+# `--only hosting`, a whole-codebase `--only functions`, and every protected
+# callable classify without building anything (about 0.7s).
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
 echo ">> Validating and classifying Firebase deploy request (local)"

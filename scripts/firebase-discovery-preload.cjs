@@ -43,11 +43,35 @@ const watching = process.env.FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG === "1";
 delete process.env.FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG;
 
 // This module is loaded with `--require`, which node consumes rather than
-// placing in `process.argv` — but it DOES leave it in `process.execArgv`, and
-// the real discovery process has none. Remove the trace before any codebase
-// code can read it, so the host this classifier presents is the host the deploy
-// presents (Codex P2, round 15).
+// placing in `process.argv` — but it leaves the trace in three other places the
+// codebase can read, and the real discovery process has none of them. All three
+// are erased HERE, at the top of the only module that runs before the codebase,
+// so the host this classifier presents is the host the deploy presents (Codex
+// P2, rounds 15 and 17).
+//
+// The comparison that fixes what "erased" means is a plain `node main.js` with
+// no `--require` at all: there `process.execArgv` is `[]`, `require.cache` holds
+// only the main module, and `process._preload_modules` is an EMPTY ARRAY — not
+// absent. So the list is emptied rather than deleted; deleting the property
+// would be a difference of its own.
 process.execArgv.length = 0;
+// `require.cache` is `Module._cache`, one object shared with every module the
+// artifact loads, so `Object.keys(require.cache)` from the artifact would list
+// this file by absolute path. Nothing requires this module again — node has
+// already run it — so dropping the entry costs nothing.
+delete require.cache[__filename];
+// `process._preload_modules` is the raw `--require` list node keeps for
+// `Module._preloadModules`. The property is non-writable but the ARRAY is
+// mutable, and emptying it in place is what leaves the unpreloaded shape.
+if (Array.isArray(process._preload_modules)) process._preload_modules.length = 0;
+// Preloads are children of node's internal `internal/preload` parent module,
+// whose `children` array is reachable from any module object. Splice this one
+// out of it.
+{
+  const parent = module.parent;
+  const at = parent && Array.isArray(parent.children) ? parent.children.indexOf(module) : -1;
+  if (at !== -1) parent.children.splice(at, 1);
+}
 
 /**
  * The codebase's own compiled files, as the SDK binary was pointed at them.

@@ -9,7 +9,9 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  readlink,
   rm,
+  stat,
   symlink,
   unlink,
 } from "node:fs/promises";
@@ -294,6 +296,46 @@ function crossEnvShellPath() {
 /** A timed-out process gets this long to actually die before we stop waiting. */
 const KILL_GRACE_MS = 5_000;
 
+/**
+ * Environment variables that exist ONLY because this classifier ran.
+ *
+ * `deploy.sh` sets each of these on the classifier's own command line — they
+ * are how it passes the pinned project, the pinned config path, the override
+ * policy and the output format — and it sets NONE of them on the `firebase
+ * deploy` that follows. A predeploy hook run from here would therefore see a
+ * variable its real run cannot, and a hook that branches on one produces an
+ * artifact the deploy will not (Codex P2, round 17). They are deleted from the
+ * hook environment for the same reason `process.execArgv` is emptied in the
+ * discovery preload: the host this classifier presents must be the host the
+ * deploy presents.
+ *
+ * `FIREBASE_DEPLOY_CLASSIFIER_DEBUG` is deliberately NOT in this list. Nothing
+ * sets it per-invocation; a developer exports it into the shell, where the real
+ * `firebase deploy` inherits it too. Stripping it would MANUFACTURE the
+ * divergence this list exists to remove.
+ *
+ * The discovery children need no such filter: `discoveryEnvironment` builds
+ * their environment from `{}` rather than from `process.env`, so nothing
+ * ambient reaches them in the first place (`assert`ed by the deployment-safety
+ * suite, because that is a property of the code rather than of a list).
+ */
+const CLASSIFIER_PRIVATE_ENV = Object.freeze([
+  "FIREBASE_DEPLOY_DEFAULT_PROJECT",
+  "FIREBASE_DEPLOY_DEFAULT_CONFIG",
+  "FIREBASE_DEPLOY_REJECT_OVERRIDES",
+  "FIREBASE_DEPLOY_CLASSIFIER_FORMAT",
+  // Never ambient — the classifier sets it on a discovery child — but a shell
+  // that had it set would make the preload's watch look like the codebase's own
+  // configuration.
+  "FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG",
+]);
+
+function withoutClassifierPrivateEnv(environment) {
+  const cleaned = { ...environment };
+  for (const key of CLASSIFIER_PRIVATE_ENV) delete cleaned[key];
+  return cleaned;
+}
+
 const POSIX = process.platform !== "win32";
 
 /**
@@ -417,7 +459,7 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
     settleOn: "exit",
     timeout: timeoutMs ?? PREDEPLOY_HOOK_TIMEOUT_MS,
     env: {
-      ...process.env,
+      ...withoutClassifierPrivateEnv(process.env),
       GCLOUD_PROJECT: project || "",
       PROJECT_DIR: projectDir,
       RESOURCE_DIR: resourceDir,
@@ -447,12 +489,12 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
  * The boundary this draws is therefore exact rather than absolute: everything a
  * Functions build WRITES — a source dir and its artifact — is a copy, while
  * everything it READS outside those dirs is the original. A hook that
- * deliberately wrote through one of the symlinks would touch the real tree, but
- * that hook writes to the same place a few steps later when `firebase deploy`
- * runs it for real, and `deploy.sh` builds the app after this point, so nothing
- * it could leave behind survives the deploy it precedes.
+ * deliberately writes THROUGH one of those symlinks still reaches the live
+ * checkout, so every symlinked directory is registered in `liveDirs` and
+ * `liveTreeFingerprint` watches the lot: a write there does not corrupt the
+ * answer, it forfeits it (Codex P2, round 17).
  */
-async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, links }) {
+async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, links, liveDirs }) {
   const linkTo = async (from, to) => {
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
     await symlink(from, to, type);
@@ -494,8 +536,12 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
       // dirty-tree guard has already passed (Codex P2, round 15). Project-root
       // files are small; copying them costs nothing and closes that route for
       // every deployment input at once.
-      if ((await lstat(from)).isDirectory()) await linkTo(from, to);
-      else await cp(from, to, { dereference: true });
+      if ((await lstat(from)).isDirectory()) {
+        await linkTo(from, to);
+        // The one remaining route from a hook into the live checkout, and so
+        // exactly what the mutation guard has to watch.
+        liveDirs.push(from);
+      } else await cp(from, to, { dereference: true });
     }
     for (const segment of claimed) {
       const nextReal = join(realDir, segment);
@@ -518,6 +564,119 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
     scratchProject,
     sourceRels.map((relative) => relative.split("/")),
   );
+}
+
+/**
+ * A signature of everything reachable through the overlay's symlinks, so that a
+ * write into the live checkout can be DETECTED even though it cannot be
+ * prevented.
+ *
+ * WHY NOT JUST COPY THE PROJECT. Because the directories at issue are exactly
+ * the ones whose size is unbounded — this repository's own checkout carries
+ * build output, coverage, and agent worktrees that are themselves full
+ * checkouts — and paying that copy on every deploy to guard against a hook
+ * nobody has written is the wrong trade. Detection is a metadata walk of about
+ * 1,500 entries here, some 15ms, and it is STRICTLY safer than a copy: a copy
+ * only relocates writes it anticipated, while this notices any write at all and
+ * forfeits the exemption, which is the conservative answer the classifier would
+ * have given without building.
+ *
+ * WHY IT CANNOT BE FORGED. The signature includes `ctimeNs`, the inode change
+ * time, which no userspace call can set — `utimensat` restores `mtime` but
+ * stamps `ctime` with the current time, so a hook that writes a file and then
+ * covers its tracks is MORE visible, not less. Creations, deletions and renames
+ * fall out of the path set rather than any timestamp.
+ *
+ * `node_modules` is out of scope at every depth, as it is out of scope for the
+ * copy: it is relinked deliberately, because the deploy's own build reads and
+ * writes that very tree, and walking it would cost more than everything else
+ * combined. Nothing else is excluded.
+ */
+async function liveTreeFingerprint(liveDirs) {
+  /** @type {Map<string, string>} */
+  const fingerprint = new Map();
+  const walk = async (dir) => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      // An unreadable directory is recorded AS unreadable: becoming readable
+      // (or not) between the two walks is itself a change worth refusing on.
+      fingerprint.set(dir, `unreadable ${error?.code ?? "?"}`);
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.name === "node_modules") continue;
+      let stats;
+      try {
+        stats = await lstat(path, { bigint: true });
+      } catch (error) {
+        fingerprint.set(path, `absent ${error?.code ?? "?"}`);
+        continue;
+      }
+      fingerprint.set(
+        path,
+        `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
+      );
+      // Dirents report the entry's OWN type, so a symlink is never descended:
+      // the walk stays inside the directories the overlay actually exposed.
+      if (entry.isDirectory()) await walk(path);
+    }
+  };
+  // The exclusion has to be applied to the roots as well as to what they
+  // contain: the project's OWN `node_modules` is one of the directories the
+  // overlay symlinks, and walking it would cost more than the rest of the
+  // checkout put together.
+  for (const dir of liveDirs) {
+    if (basename(dir) === "node_modules") continue;
+    await walk(dir);
+  }
+  return fingerprint;
+}
+
+/** The first path whose live-tree signature moved, or null. */
+function firstLiveTreeDrift(before, after) {
+  for (const [path, signature] of after) {
+    const previous = before.get(path);
+    if (previous === undefined) return `${path} was created`;
+    if (previous !== signature) return `${path} was modified`;
+  }
+  for (const path of before.keys()) if (!after.has(path)) return `${path} was removed`;
+  return null;
+}
+
+/**
+ * A private copy of the staged project, for one discovery probe.
+ *
+ * Copies what the staging copied and RELINKS what it linked, so the probe's
+ * project is the same view of the world at a different path: the post-hook
+ * source dirs are its own, while `node_modules` and the untouched project
+ * directories remain the one tree the deploy will read.
+ *
+ * Written out rather than delegated to `fs.cp`, because the links here point
+ * into the developer's checkout and every one of them has to come back in
+ * `links` for cleanup to unlink it by name rather than trust a recursive
+ * remove's symlink handling — the same care `stageProjectOverlay` takes.
+ */
+async function copyStagedProject(from, to, links) {
+  await mkdir(to, { recursive: true });
+  for (const entry of await readdir(from, { withFileTypes: true })) {
+    const source = join(from, entry.name);
+    const target = join(to, entry.name);
+    if (entry.isSymbolicLink()) {
+      const pointsAt = await readlink(source);
+      const isDirectory = await stat(source)
+        .then((stats) => stats.isDirectory())
+        .catch(() => false);
+      await symlink(pointsAt, target, isDirectory ? "junction" : "file");
+      links.push(target);
+    } else if (entry.isDirectory()) {
+      await copyStagedProject(source, target, links);
+    } else {
+      await cp(source, target, { dereference: false, preserveTimestamps: true });
+    }
+  }
 }
 
 /**
@@ -709,10 +868,12 @@ function targetCodebases(only, configs, codebaseNames) {
  * a symlink to the original.
  *
  * FAILS CLOSED on every uncertainty: an unmirrorable source path, a staging
- * failure, a non-zero or timed-out hook, a discovery manifest, an artifact that
+ * failure, a non-zero or timed-out hook, a write that reached the live checkout
+ * through one of the overlay's symlinks, a discovery manifest, an artifact that
  * will not load, or a walk that throws — each of which refuses only what it
- * makes unprovable, except a hook failure, which refuses the whole project
- * because the tree it left behind is not the one the deploy will produce.
+ * makes unprovable, except a hook failure or a live-tree write, which refuse the
+ * whole project because the tree left behind is not the one the deploy will
+ * produce.
  */
 async function buildAndInventoryProject({
   projectDir,
@@ -788,6 +949,8 @@ async function buildAndInventoryProject({
   const scratchProject = join(scratch, "project");
   /** Every symlink this staging created, so cleanup can unlink them by name. */
   const links = [];
+  /** The live directories those symlinks point at — the mutation guard's beat. */
+  const liveDirs = [];
   try {
     try {
       await stageProjectOverlay({
@@ -795,12 +958,39 @@ async function buildAndInventoryProject({
         scratchProject,
         sourceRels: staged.map((config) => config.sourceRel),
         links,
+        liveDirs,
       });
     } catch (error) {
       return refuseAll(
         `could not stage the Functions sources — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+
+    // Taken AFTER staging and before the first child process, so the window it
+    // covers is exactly the window in which this classifier runs other people's
+    // programs.
+    let liveBaseline;
+    try {
+      liveBaseline = await liveTreeFingerprint(liveDirs);
+    } catch (error) {
+      return refuseAll(
+        `could not fingerprint the live checkout — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    /**
+     * Whether anything reached through the overlay's symlinks since the
+     * baseline. A drift is not a corrupted answer, it is an unusable one: the
+     * deploy is about to run the same hook against a tree this run already
+     * changed, so the artifact it produces need not be the one inventoried
+     * here.
+     */
+    const liveDrift = async () => {
+      try {
+        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs));
+      } catch (error) {
+        return `the live checkout could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
+      }
+    };
 
     for (const config of relevant) {
       const resourceDir = resolve(scratchProject, config.sourceRel);
@@ -817,6 +1007,14 @@ async function buildAndInventoryProject({
           );
         }
       }
+    }
+
+    const afterHooks = await liveDrift();
+    if (afterHooks) {
+      return refuseAll(
+        `a predeploy hook wrote into the live checkout (${afterHooks}), so the deploy's own ` +
+          "run of it starts from a different tree than this one did",
+      );
     }
 
     const targets = targetCodebases(only, configs, codebaseNames);
@@ -846,6 +1044,18 @@ async function buildAndInventoryProject({
           ),
         );
       }
+    }
+
+    // Loading an artifact runs its module-scope code, which reaches the same
+    // symlinks a hook does. Checked a second time rather than once at the end,
+    // so a hook that writes into the live checkout is refused before this
+    // classifier spends a discovery on it.
+    const afterDiscovery = await liveDrift();
+    if (afterDiscovery) {
+      return refuseAll(
+        `loading a codebase wrote into the live checkout (${afterDiscovery}), so its ` +
+          "discovered surface is a function of a tree this run changed",
+      );
     }
     return inventories;
   } finally {
@@ -1046,22 +1256,59 @@ async function inventoryCodebaseArtifact({
     );
   }
 
-  // The probes run CONCURRENTLY, on their own ports and marker files. They read
-  // one staged tree and share nothing else, and an artifact whose load has side
-  // effects that made them disagree is exactly the artifact this comparison is
-  // meant to refuse — so the parallelism cannot turn a refusal into an
-  // exemption. Sequential runs doubled the wall time of the slowest step.
-  const results = await Promise.all(
-    environments.map(async ({ probe, environment }) => {
-      const discovered = await discoverEndpointsFromSdk({
-        sourceDir: scratchSource,
-        projectDir: scratchProject,
-        environment,
-        timeout: DISCOVERY_TIMEOUT_MS,
+  // The probes run ONE AT A TIME, each from a private copy of the staged
+  // project.
+  //
+  // They used to run concurrently against one shared tree, on the reasoning
+  // that an artifact whose load had side effects would make them DISAGREE and
+  // so be refused. That reasoning had it backwards. Two live peers can AGREE
+  // deliberately: an artifact that appends a marker at load and waits for a
+  // second one answers "one endpoint" to both probes and "a group" to the
+  // deploy's single discovery, and the comparison sees two matching answers and
+  // grants the exemption (Codex P2, round 17).
+  //
+  // Sequence is what closes that, and a private copy is what makes sequence
+  // mean something: with no peer alive there is no one to wait for, and with no
+  // shared source dir a marker left by the first probe cannot even be found by
+  // the second. The first probe is then, by construction, a discovery of the
+  // same shape the deploy will run — one process, alone, against a tree nothing
+  // else is touching.
+  //
+  // The residual is state that outlives the process and lives outside both the
+  // project and the scratch dir — `$HOME`, `/tmp`, a lock server. That is the
+  // same residual as `functions.config()`: an artifact can be written to answer
+  // differently on its second load anywhere in the world, and no local
+  // classifier can see that coming. The cost is the second discovery no longer
+  // overlapping the first, plus its copy: a selector that needs one goes from
+  // about 5.8s to about 9.3s on this repository, and every other selector shape
+  // is unaffected because none of them builds anything.
+  const results = [];
+  for (const { probe, environment } of environments) {
+    /** @type {string[]} */
+    const probeLinks = [];
+    let probeRoot;
+    try {
+      probeRoot = await mkdtemp(join(scratch, "probe-"));
+      const probeProject = join(probeRoot, "project");
+      await copyStagedProject(scratchProject, probeProject, probeLinks);
+      results.push({
+        probe,
+        discovered: await discoverEndpointsFromSdk({
+          sourceDir: resolve(probeProject, sourceRel),
+          projectDir: probeProject,
+          environment,
+          timeout: DISCOVERY_TIMEOUT_MS,
+        }),
       });
-      return { probe, discovered };
-    }),
-  );
+    } catch (error) {
+      return refused(
+        `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      for (const link of probeLinks) await unlink(link).catch(() => {});
+      if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 
   for (const { discovered } of results) {
     if (!discovered.ok) return refused(discovered.reason);

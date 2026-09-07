@@ -255,6 +255,73 @@ async function withNeighbourCodebase(
   }
 }
 
+/** Run `body` with `vars` in this process's environment, then put it back. */
+async function withEnv(vars, body) {
+  const previous = Object.keys(vars).map((key) => [key, process.env[key]]);
+  Object.assign(process.env, vars);
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
+ * The classifier as `deploy.sh` actually invokes it: a child process configured
+ * entirely through the environment, answering in shell-assignment format.
+ *
+ * The in-process `classify()` helper cannot see this path at all — `main()`,
+ * and the environment it reads, are the production wrapper.
+ */
+function runClassifierWrapper(configPath, args, extraEnv) {
+  return new Promise((settle, fail) => {
+    const child = spawn(
+      process.execPath,
+      [resolve(repoRoot, "scripts", "validate-firebase-deploy-filters.mjs"), "--", ...args],
+      { cwd: dirname(configPath), env: { ...process.env, ...extraEnv } },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    child.on("error", fail);
+    child.on("exit", (code) => settle({ code, output }));
+  });
+}
+
+/**
+ * A codebase whose predeploy hook publishes a GROUP when it can see any of the
+ * variables `deploy.sh` sets for the classifier alone, and the single endpoint
+ * otherwise. The exemption is therefore the assertion that the hook saw none of
+ * them.
+ */
+const ENV_SNIFFING_FIXTURE = {
+  functionsConfig: {
+    predeploy: [
+      "test -n " +
+        '"$FIREBASE_DEPLOY_DEFAULT_PROJECT$FIREBASE_DEPLOY_DEFAULT_CONFIG' +
+        '$FIREBASE_DEPLOY_REJECT_OVERRIDES$FIREBASE_DEPLOY_CLASSIFIER_FORMAT" ' +
+        "&& cp functions/group.js functions/lib/index.js " +
+        "|| cp functions/single.js functions/lib/index.js",
+    ],
+  },
+  files: {
+    "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+    "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+    "functions/single.js": artifact("exports.daily = endpoint();"),
+  },
+};
+
+/** The environment `deploy.sh` builds for the classifier and for nothing else. */
+const DEPLOY_SH_CLASSIFIER_ENV = (configPath) => ({
+  FIREBASE_DEPLOY_DEFAULT_PROJECT: "fiveacross",
+  FIREBASE_DEPLOY_DEFAULT_CONFIG: configPath,
+  FIREBASE_DEPLOY_REJECT_OVERRIDES: "true",
+  FIREBASE_DEPLOY_CLASSIFIER_FORMAT: "shell",
+});
+
 // Every invoker the conservative fallback would otherwise switch on. Asserting
 // the whole set matters: the bug this closes was one selector forcing ALL of
 // them true, not just the auth-handoff one.
@@ -1627,6 +1694,189 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
       },
       async (configPath) => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("leaves no trace of its discovery preload in the module system", async () => {
+    // `process.execArgv` was only the first of three places `--require` shows
+    // up. `require.cache` is one object shared with every module the artifact
+    // loads, node keeps the raw preload list in `process._preload_modules`, and
+    // the preloaded module is a child of an internal parent module whose
+    // `children` array is reachable. An artifact that finds any of them can take
+    // a branch the deploy's own unpreloaded discovery never takes (Codex P2,
+    // round 17).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            [
+              "const traced =",
+              '  Object.keys(require.cache).some((key) => key.includes("firebase-discovery-preload")) ||',
+              "  (process._preload_modules || []).length > 0 ||",
+              "  process.execArgv.length > 0;",
+              "exports.daily = traced ? { submitBugReport: endpoint() } : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("forfeits the exemption when a hook writes through the overlay into the checkout", async () => {
+    // Only the Functions sources are copied; every other project directory is a
+    // symlink to the live tree, so a hook that writes a shared build input —
+    // here a toggle whose second run differs from its first — mutates the real
+    // checkout AFTER the dirty-tree guard has passed. Firebase then reruns that
+    // hook against the tree this run left behind, and the artifact inventoried
+    // here need not be the artifact it produces (Codex P2, round 17).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
+        files: { "shared/toggle": "" },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("still exempts when that same write lands inside the staged source dir", async () => {
+    // The discriminator for the case above: the guard watches the live
+    // boundary, not writing as such. A hook that writes into its own
+    // `$RESOURCE_DIR` writes into the scratch copy, which is the whole point of
+    // staging one.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, 'printf x >> "$RESOURCE_DIR/toggle"'] },
+        files: { "functions/toggle": "" },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        // And the live file the hook could have reached is untouched.
+        expect(await readFile(resolve(dirname(configPath), "functions", "toggle"), "utf8")).toBe("");
+      },
+    );
+  });
+
+  it("forfeits the exemption when LOADING the artifact writes into the checkout", async () => {
+    // Module-scope code reaches the same symlinks a hook does, and it runs
+    // after the hooks have already been cleared — so the live tree is checked
+    // again once every codebase has been discovered.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "shared/toggle": "",
+          "functions/lib/index.js": artifact(
+            [
+              'const fs = require("node:fs");',
+              'const path = require("node:path");',
+              'fs.appendFileSync(path.join(__dirname, "..", "..", "shared", "toggle"), "x");',
+              "exports.daily = endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("keeps its own environment out of the predeploy hooks it runs", async () => {
+    // `deploy.sh` passes the pinned project, config path, override policy and
+    // output format to the classifier and to NOTHING else, so a hook run from
+    // here would see variables its real run cannot (Codex P2, round 17).
+    await withFunctionsProject(ENV_SNIFFING_FIXTURE, async (configPath) => {
+      await withEnv(DEPLOY_SH_CLASSIFIER_ENV(configPath), async () => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      });
+    });
+  });
+
+  it("keeps it out of the hooks the production wrapper runs too", async () => {
+    // The same claim about the path that actually reads those variables:
+    // `main()`, spawned the way `deploy.sh` spawns it.
+    await withFunctionsProject(ENV_SNIFFING_FIXTURE, async (configPath) => {
+      const run = await runClassifierWrapper(
+        configPath,
+        ["--only", "functions:daily"],
+        DEPLOY_SH_CLASSIFIER_ENV(configPath),
+      );
+      expect(run.code).toBe(0);
+      expect(run.output).toContain("FUNCTIONS_ATTEMPTED=true");
+      expect(run.output).toContain("AUTH_HANDOFF_INVOKER_SELECTED=false");
+      expect(run.output).toContain("BUG_REPORT_INVOKER_SELECTED=false");
+    });
+  });
+
+  it("keeps its own environment out of the discovery processes", async () => {
+    // Discovery's environment is built from `{}` rather than from
+    // `process.env`, so nothing ambient reaches it. That is a property of the
+    // code rather than of a list of names, and this pins it.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            "exports.daily = process.env.FIREBASE_DEPLOY_CLASSIFIER_FORMAT" +
+              " ? { submitBugReport: endpoint() }" +
+              " : endpoint();",
+          ),
+        },
+      },
+      async (configPath) => {
+        await withEnv(DEPLOY_SH_CLASSIFIER_ENV(configPath), async () => {
+          expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        });
+      },
+    );
+  });
+
+  it("does not let the two config probes agree with each other", async () => {
+    // The probes used to run concurrently against ONE staged source dir, on the
+    // reasoning that a load with side effects would make them disagree. But two
+    // live peers can agree deliberately: this artifact appends a marker, waits
+    // for a second one, and reports a single endpoint only when it finds a
+    // peer — so a shared tree makes both probes say "one endpoint" while the
+    // deploy's single fresh discovery gets the group (Codex P2, round 17).
+    // Sequential probes from private copies leave nobody to wait for.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            [
+              'const fs = require("node:fs");',
+              'const path = require("node:path");',
+              'const log = path.join(__dirname, "..", "probe-log");',
+              'fs.appendFileSync(log, "probe\\n");',
+              "const wake = new Int32Array(new SharedArrayBuffer(4));",
+              "const deadline = Date.now() + 2500;",
+              "let peers = 0;",
+              "while (Date.now() < deadline) {",
+              '  peers = fs.readFileSync(log, "utf8").split("probe").length - 1;',
+              "  if (peers > 1) break;",
+              "  Atomics.wait(wake, 0, 0, 25);",
+              "}",
+              "exports.daily = peers > 1 ? endpoint() : { submitBugReport: endpoint() };",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
       },
     );
   });
