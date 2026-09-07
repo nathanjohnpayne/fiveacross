@@ -7,7 +7,7 @@
 // — an omitted `entrypoint` line binds the registry's signed control plane to a
 // public edge Worker, and a surviving Firebase binding falsifies the App Check
 // posture the whole change exists to establish.
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import ts from 'typescript';
 import { readFile } from 'node:fs/promises';

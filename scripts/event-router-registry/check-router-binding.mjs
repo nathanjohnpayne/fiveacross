@@ -24,6 +24,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // An argument, not an environment variable, on purpose: `scripts/worker-deploy.sh`
 // runs this script with no arguments and refuses forwarded ones, so nothing
 // ambient in an operator's shell can point the deploy's check elsewhere.
+const UNAVAILABLE = 69;
 const WORKER = resolveWorkerDirectory(process.argv.slice(2));
 const CONFIG = resolve(WORKER, 'wrangler.toml');
 
@@ -55,7 +56,6 @@ const OUTRANKING_NAMES = ['wrangler.json', 'wrangler.jsonc'];
 const REDIRECT_PATH = '.wrangler/deploy/config.json';
 
 /** Exit code for "the check could not be performed", distinct from a refusal. */
-const UNAVAILABLE = 69;
 
 /** A real FILE, the way Wrangler's own resolver tests it — a directory of that
  *  name is not a configuration and refusing it would be a false positive. */
