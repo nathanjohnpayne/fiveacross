@@ -593,6 +593,28 @@ describe("the config must be simple enough to analyse before any proof counts", 
     );
   });
 
+  it.each([
+    ["Object.assign", "Object.assign(exports, { daily: { submitBugReport } });"],
+    ["Object.defineProperty", "Object.defineProperty(exports, 'daily', { value: { submitBugReport } });"],
+    ["an alias of exports", "const e = exports; e.daily = { submitBugReport };"],
+    ["Reflect.set on module.exports", "Reflect.set(module.exports, 'daily', { submitBugReport });"],
+  ])("refuses an indirect CommonJS export mutation via %s", async (_label, mutation) => {
+    // The mutation syntaxes are open-ended, so the guard rejects any runtime
+    // reference to `exports` / `module` rather than matching each shape.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        "const submitBugReport = onSchedule('every day 00:00', () => {});",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+        mutation,
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
+  });
+
   it("refuses when a CommonJS assignment can overwrite a proven export", async () => {
     // TypeScript preserves the reassignment in its emit, and the runtime loader
     // recursively deploys the final object as a group.

@@ -231,15 +231,21 @@ function singleEndpointExportsFromSource(source) {
     }
   }
 
-  // TypeScript preserves a CommonJS assignment in its emit, and the runtime
-  // loader recursively discovers an object's members as separate endpoints — so
-  // `export const daily = onSchedule(...)` followed by
-  // `exports.daily = require('./group')` deploys a GROUP under a name this
-  // parser proved was an endpoint. Any such mutation forfeits authority.
-  // `.` / `[` catch member mutation; `=` catches whole-object replacement
-  // (`module.exports = { daily: { submitBugReport } }`), which replaces the
-  // module wholesale and is otherwise invisible here.
-  if (/(^|[^.\w])(?:module\s*\.\s*)?exports\s*(?:\.|\[|=[^=])/.test(source)) {
+  // TypeScript preserves a CommonJS mutation in its emit, and the runtime
+  // loader recursively discovers the FINAL object's members as separate
+  // endpoints — so `export const daily = onSchedule(...)` followed by any
+  // runtime touch of the exports object deploys a GROUP under a name this
+  // parser proved was an endpoint. The mutation syntaxes are open-ended
+  // (`exports.daily =`, `module.exports =`, `Object.assign(exports, …)`,
+  // `Object.defineProperty(exports, …)`, an alias `const e = exports`), so
+  // rather than enumerate them, ANY reference to the `exports` or `module`
+  // identifier anywhere in the AST forfeits authority. A Functions entrypoint
+  // written as an ES module never needs either name.
+  const referencesCommonJsModuleObject = (node) =>
+    (ts.isIdentifier(node) &&
+      (node.text === "exports" || node.text === "module")) ||
+    ts.forEachChild(node, referencesCommonJsModuleObject) === true;
+  if (referencesCommonJsModuleObject(sourceFile)) {
     authoritative = false;
   }
 
