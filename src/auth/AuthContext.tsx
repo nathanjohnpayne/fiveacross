@@ -70,54 +70,6 @@ export const DEAL_TIMEOUT_MS = 20_000;
 export const WEB_APP_AUTH_SETTLE_TIMEOUT_MS = 3_000;
 export const PENDING_REDIRECT_ATTESTATION_KEY = 'gcb:pending-redirect-attestation';
 
-// Mobile browser tabs sign in via one top-level redirect; everything else keeps
-// the popup (see signIn()). The UA regex catches devices that say so outright.
-// The second clause is the iPadOS desktop-UA masquerade (#347): iPadOS Safari
-// reports `platform === 'MacIntel'` and a Mac UA string, and `maxTouchPoints > 1`
-// is the accepted discriminator — real Macs report 0. KNOWN TRADEOFF: a future
-// touch-enabled Mac would match and get redirect sign-in in a browser tab. That
-// failure mode is benign — redirect sign-in is fully supported on desktop; the
-// popup is only a preference where the window is stable — and installed PWAs are
-// unaffected (the call site checks isStandaloneApp() separately). Revisit when a
-// capability signal distinguishes iPadOS from a touch Mac (e.g. a UA-Client-Hints
-// platform value Safari actually ships); no such signal exists today, and the
-// alternatives (UA sniffing deeper, or dropping the clause and sending iPad
-// Safari down the popup path it demonstrably loses state on) are strictly worse.
-function prefersRedirectSignIn(nav: Pick<Navigator, 'userAgent' | 'platform' | 'maxTouchPoints'>): boolean {
-  return (
-    /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent) || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1)
-  );
-}
-
-function isStandaloneApp(): boolean {
-  const iosStandalone = Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
-  return iosStandalone || window.matchMedia?.('(display-mode: standalone)').matches === true;
-}
-
-// Route sign-in through a single top-level redirect instead of a popup in the two
-// environments where the popup is unreliable but the same-origin handler keeps
-// redirect stable (the caller still gates this on `sameOriginHandler`):
-//   1. Mobile browser tabs — Firebase's recommendation; the popup opens as a new
-//      tab there, and iOS Safari loses the helper's sessionStorage across it.
-//   2. Installed DESKTOP PWAs (Chrome/Edge "Install app") — the standalone window
-//      has no address bar and silently blocks/never surfaces the OAuth popup, so
-//      the Sign in tap appears to do nothing (#395).
-// Installed iOS/Android PWAs deliberately stay on the popup: they report a mobile
-// UA (prefersRedirectSignIn === true) AND run standalone, so NEITHER clause
-// matches. On iOS the popup opens as a stable in-app view, while redirect drops
-// the helper's sessionStorage across the provider round-trip — the iOS-standalone
-// case the popup exception was built for. A desktop browser tab (non-mobile UA,
-// not standalone) also matches neither clause and keeps the popup, which is
-// reliable inside a normal tab.
-function shouldRedirectSignIn(
-  nav: Pick<Navigator, 'userAgent' | 'platform' | 'maxTouchPoints'>,
-  standalone: boolean,
-): boolean {
-  const isMobileBrowserTab = prefersRedirectSignIn(nav) && !standalone;
-  const isDesktopInstalledApp = standalone && !prefersRedirectSignIn(nav);
-  return isMobileBrowserTab || isDesktopInstalledApp;
-}
-
 // A random per-attempt identifier (Phase 4b P1 round 3 on #836), generated
 // once at redirect start and threaded through every durable AND session
 // record this attempt writes. Durable records use this token in their keys,
@@ -2219,12 +2171,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const sameOriginHandler =
         auth.config?.authDomain !== undefined &&
         auth.config.authDomain === window.location.hostname;
-      if (sameOriginHandler && shouldRedirectSignIn(window.navigator, isStandaloneApp())) {
-        // One top-level redirect keeps the browser on a single origin so the
-        // helper's sessionStorage survives the Google round-trip — the flow the
-        // mobile tab and the installed desktop PWA (#395) both need. See
-        // shouldRedirectSignIn; the popup path below still serves desktop browser
-        // tabs and installed iOS PWAs.
+      if (sameOriginHandler) {
+        // One top-level redirect on EVERY surface whose OAuth handler is
+        // same-origin (#765): the tap navigates this tab or app window to
+        // Google, and Google returns the Player to the page they started from
+        // with the session restored — no second window ever opens. There is no
+        // device or display-mode heuristic here on purpose: the same-origin
+        // handler is the only condition, because it is what keeps the helper's
+        // sessionStorage on one origin across the round trip (#161), and the
+        // durable redirect-return records below carry the surfaces that lose
+        // even that (#346, #836). Every production host pins its own hostname
+        // as authDomain (src/auth-domain.ts), so this IS the production flow;
+        // the popup below is the cross-origin-handler fallback only.
         // One random id for this attempt (Phase 4b P1 round 3 on #836),
         // threaded through the session marker and token-addressed durable
         // records below. A failed or abandoned prior attempt lives under a
@@ -2262,6 +2220,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      // Cross-origin handler only — local development and the Auth Emulator
+      // (#765). A redirect against a foreign authDomain is exactly the
+      // storage-partition failure the same-origin pin exists to avoid (#161),
+      // and the e2e harness drives the emulator's account-chooser popup.
       try {
         await signInWithPopup(auth, googleProvider);
       } catch (err) {
