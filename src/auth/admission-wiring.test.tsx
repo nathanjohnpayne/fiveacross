@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -113,12 +114,23 @@ function deferred<T>() {
 
 function Harness() {
   const { admission, dealing, retryDeal, signIn } = useAuth();
+  const [signInResult, setSignInResult] = useState('');
   return (
     <div>
       <span data-testid="admission">{JSON.stringify(admission)}</span>
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
+      <span data-testid="sign-in-result">{signInResult}</span>
       <button onClick={retryDeal}>retry deal</button>
-      <button onClick={() => void signIn(false).catch(() => {})}>sign in</button>
+      <button
+        onClick={() =>
+          void signIn(false).then(
+            () => setSignInResult('settled'),
+            () => setSignInResult('failed'),
+          )
+        }
+      >
+        sign in
+      </button>
     </div>
   );
 }
@@ -204,6 +216,26 @@ describe('signing in with an Invitation that only memory holds', () => {
     await userEvent.click(screen.getByRole('button', { name: 'sign in' }));
     await waitFor(() => expect(mocks.signInWithPopup).toHaveBeenCalledOnce());
     expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a popup that fails as a sign-in error, with the record still in memory', async () => {
+    // The fail-closed direction (#1134, Phase 4b P2 on #1131): the popup was
+    // chosen so the document survives, so a popup the browser blocks must
+    // reject the sign-in for SignIn to say so — and must leave the record
+    // where it is, never redirect past it, and never redeem it.
+    (mockedAuth as { config?: { authDomain?: string } }).config = {
+      authDomain: window.location.hostname,
+    };
+    mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: false });
+    mocks.signInWithPopup.mockRejectedValue(new Error('auth/popup-blocked'));
+
+    mount();
+    await userEvent.click(screen.getByRole('button', { name: 'sign in' }));
+    await waitFor(() => expect(screen.getByTestId('sign-in-result')).toHaveTextContent('failed'));
+    expect(mocks.signInWithPopup).toHaveBeenCalledOnce();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    expect(mocks.forgetPendingEventInvitationIf).not.toHaveBeenCalled();
+    expect(mocks.redeemEventInvitation).not.toHaveBeenCalled();
   });
 
   it('still redirects on the same-origin surface when the record is durable', async () => {
