@@ -55,6 +55,24 @@ describe('the Event router’s registry service binding', () => {
       'a second service block',
       '[[services]]\nbinding="REGISTRY"\nservice="five-across-event-registry"\nentrypoint="RegistryLookupEntrypoint"\n[[services]]\nbinding="OTHER"\nservice="five-across-event-registry"',
     ],
+    [
+      // Wrangler would bind the default control-plane export here: the
+      // `entrypoint` key belongs to `[vars]`, not to the service. A validator
+      // that scanned to end of file would read it as the service's own and
+      // wave the deploy through.
+      'an entrypoint that belongs to a LATER table',
+      '[[services]]\nbinding="REGISTRY"\nservice="five-across-event-registry"\n\n[vars]\nentrypoint="RegistryLookupEntrypoint"',
+    ],
+    [
+      'a service key that belongs to a later table',
+      '[[services]]\nbinding="REGISTRY"\nentrypoint="RegistryLookupEntrypoint"\n\n[vars]\nservice="five-across-event-registry"',
+    ],
+    [
+      // Comments are text, not configuration. One that looks like the binding
+      // must not stand in for the binding.
+      'an entrypoint that is only present in a comment',
+      '[[services]]\nbinding="REGISTRY"\nservice="five-across-event-registry"\n# entrypoint="RegistryLookupEntrypoint"',
+    ],
   ])('rejects %s', (_label, config) => {
     // Each of these is a one-word difference that silently hands the public
     // router the registry's default export — the signed sync/audit/recovery

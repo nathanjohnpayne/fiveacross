@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "miniflare": "4.20260730.0",
-    "wrangler": "^4.123.0"
+    "wrangler": "^4.129.0"
   },
   "overrides": {
     "miniflare": {

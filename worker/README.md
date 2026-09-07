@@ -69,10 +69,10 @@ curl -sI http://localhost:8787/ -H 'Host: admin.fiveacross.app'      # expect 40
 
 **It starts BOTH Workers** — `wrangler dev -c wrangler.toml -c wrangler.registry.toml` — because a service binding connects to another Wrangler dev process rather than to a config file. Started with the router's config alone, Wrangler reports `env.REGISTRY … local [not connected]` and every otherwise-valid address answers `lookup-unavailable`: the guard, the auth pass-through and the fail-closed paths still work, but the one thing local dev exists to exercise does not.
 
-Two caveats worth knowing before you debug the wrong thing:
+Two things to know before you debug the wrong thing:
 
-- The pinned Wrangler's bundled `workerd` can be older than `wrangler.registry.toml`'s `compatibility_date`. It surfaces as `service core:user:five-across-event-registry: This Worker requires compatibility date "…", but the newest date supported by this server binary is "…"`, and the binding stays unconnected. The fix is a Wrangler bump in `worker/package.json`, not a change to the registry's compatibility date, which is a property of the deployed service rather than of your laptop.
-- Local dev gives the registry an empty Durable Object, so every host resolves as `unknown-host` until something publishes a projection into it. Use `wrangler dev --remote` (below) when you need the real committed state.
+- **The pinned Wrangler must bundle a `workerd` at least as new as `wrangler.registry.toml`'s `compatibility_date`.** When it does not, the registry service refuses to start with `service core:user:five-across-event-registry: This Worker requires compatibility date "…", but the newest date supported by this server binary is "…"`, and the binding stays unconnected. The fix is a Wrangler bump in `worker/package.json`, never a change to the registry's compatibility date, which is a property of the deployed service rather than of your laptop.
+- **Local dev gives the registry an EMPTY Durable Object**, so every host resolves as `unknown-host` until something publishes a projection into it. That is itself the useful signal that the binding is live — `unknown-host` means the RPC reached an empty object, where `lookup-unavailable` means it did not reach one at all. Use `wrangler dev --remote` (below) when you need real committed state.
 
 ## Deploying and attaching
 

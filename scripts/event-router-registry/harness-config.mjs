@@ -8,6 +8,25 @@ function parseStringValue(block, key) {
 }
 
 /**
+ * The `[[services]]` table, and ONLY it.
+ *
+ * Comments are stripped first, and the block is cut at the next TOML table
+ * header, because neither is a tidiness concern here — both are ways for a
+ * capability check to read a key that Wrangler will not. A `[[services]]` entry
+ * with no `entrypoint`, followed by a `[vars]` table that happens to contain
+ * `entrypoint = "RegistryLookupEntrypoint"`, binds the registry's default
+ * control-plane export while satisfying a validator that scanned to end of
+ * file. `^\s*\[` catches a table and an array-of-tables header alike, since a
+ * value line can never begin with `[` in TOML.
+ */
+function serviceBlock(config) {
+  const withoutComments = config.replace(/^[ \t]*#.*$/gm, '');
+  const blocks = withoutComments.split(/^\s*\[\[services\]\]\s*$/m);
+  if (blocks.length !== 2) return null;
+  return blocks[1].split(/^[ \t]*\[/m)[0];
+}
+
+/**
  * The registry's lookup binding, validated from a Wrangler configuration.
  *
  * ONE validator, two consumers — the private synthetic harness and the public
@@ -20,11 +39,10 @@ function parseStringValue(block, key) {
  * than left to review.
  */
 export function validateRegistryLookupBinding(config, subject) {
-  const serviceBlocks = config.split(/^\s*\[\[services\]\]\s*$/m);
-  if (serviceBlocks.length !== 2) {
+  const block = serviceBlock(config);
+  if (block === null) {
     throw new Error(`${subject} must bind exactly once to ${REQUIRED_ENTRYPOINT}`);
   }
-  const block = serviceBlocks[1];
   const binding = parseStringValue(block, 'binding');
   const service = parseStringValue(block, 'service');
   const entrypoint = parseStringValue(block, 'entrypoint');
