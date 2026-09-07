@@ -31,6 +31,9 @@ const BINDING_KEYS = ['binding', 'service', 'entrypoint'];
  * keeping the wildcard blocks commented is `routerBinding.test.ts`'s
  * assertion, not this validator's.
  */
+/** Any Worker var carrying the Firebase credential #972 removed from the router. */
+const FORBIDDEN_VAR_PREFIX = /^FIREBASE_/;
+
 const TOP_LEVEL_KEYS = [
   'name',
   'main',
@@ -195,6 +198,25 @@ export function validateRegistryLookupBinding(config, subject) {
     throw new Error(
       `${subject} declares ${unknown.join(', ')}, which the ${REQUIRED_ENTRYPOINT} check does not cover`,
     );
+  }
+
+  // `[vars]` is allowlisted as a TABLE, not as contents. A plain-text var is
+  // not a secret, so `wrangler secret list` — the deploy guard's readback —
+  // never sees it; a `FIREBASE_API_KEY` or `FIREBASE_PROJECT_ID` republished
+  // under `[vars]` would therefore pass the secret check while restoring the
+  // Firebase credential #972 removed, and the R0 capability evidence would be
+  // false. Refuse the whole prefix rather than the two names, because the
+  // claim being made is "no Firebase credential of any kind", not "not these
+  // two". A `[vars]` value is never read: only its keys are judged.
+  if (Object.hasOwn(document, 'vars')) {
+    const vars = document.vars;
+    if (!isTable(vars)) throw new Error(`${subject} declares a [vars] entry that is not a table`);
+    const firebase = Object.keys(vars).filter((key) => FORBIDDEN_VAR_PREFIX.test(key));
+    if (firebase.length > 0) {
+      throw new Error(
+        `${subject} declares ${firebase.join(', ')} under [vars]; the router carries no Firebase credential of any kind (#972)`,
+      );
+    }
   }
 
   if (!Object.hasOwn(document, SERVICES_KEY)) throw exactlyOnce;

@@ -135,7 +135,7 @@ Use `wrangler dev --remote` instead — as a **rehearsal of the code, not verifi
 - It **does not** execute the version you deployed in step 1. `wrangler dev --remote` uploads your local checkout into a temporary preview environment, so a green run here says nothing about what the deployed artifact holds.
 
 ```bash
-npm --prefix worker ci                                  # if you have not already
+npm --prefix worker ci --include=dev                    # if you have not already; dev holds the pinned Wrangler
 npm --prefix worker exec -- wrangler dev --remote       # leave running; requests below go to localhost:8787
 ```
 

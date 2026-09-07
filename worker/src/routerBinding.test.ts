@@ -581,6 +581,34 @@ describe('the shared binding validator, read as TOML', () => {
     });
   });
 
+  it.each([
+    ['the web api key', 'FIREBASE_API_KEY = "AIza-not-a-secret"'],
+    ['the project id', 'FIREBASE_PROJECT_ID = "fiveacross"'],
+    ['any other FIREBASE_-prefixed var', 'FIREBASE_AUTH_DOMAIN = "fiveacross.firebaseapp.com"'],
+  ])('refuses %s republished as a plain [vars] entry', (_label, entry) => {
+    // A plain-text var is not a secret, so the deploy guard's `wrangler secret
+    // list` readback never sees it. The validator is the only place a
+    // credential smuggled back under `[vars]` can be refused before publish.
+    expect(() => validateRouterServiceBinding(`${ONLY_BINDING}\n\n[vars]\n${entry}\n`)).toThrow(
+      /Firebase credential/,
+    );
+  });
+
+  it('judges [vars] by its keys only, and accepts an ordinary Worker var', () => {
+    expect(
+      validateRouterServiceBinding(`${ONLY_BINDING}\n\n[vars]\nROUTER_VERSION = "v1"\n`),
+    ).toEqual({
+      binding: 'REGISTRY',
+      service: 'five-across-event-registry',
+      entrypoint: 'RegistryLookupEntrypoint',
+    });
+    // Written BEFORE the binding: a bare key after a `[[services]]` header
+    // belongs to that table, which is a different refusal.
+    expect(() => validateRouterServiceBinding(`vars = "not a table"\n\n${ONLY_BINDING}\n`)).toThrow(
+      /not a table/,
+    );
+  });
+
   it('attributes keys to the table they were written under, not to the file', () => {
     // The #628-round-4 finding, kept: `entrypoint` in a LATER table is that
     // table's key, and reading it as the service's would wave through a
