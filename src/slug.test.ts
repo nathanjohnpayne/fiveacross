@@ -183,12 +183,30 @@ describe('reserved-label mirrors in separately deployed programs', () => {
  * relaxed to a wildcard `.`, an `i` flag acquired, `[a-z2-7]` relaxed to
  * `[a-z0-9]` in one copy and not the other.
  *
- * So this compares BEHAVIOUR. Each regex literal is lifted out of the source
- * text, rebuilt with `new RegExp`, and run over one shared fixture of hosts
- * alongside the canonical predicate it is supposed to agree with. The
- * expectations are DERIVED from `isRehearsalEventLabel` / `isRehearsalRootLabel`
- * rather than written down twice, so the canonical module stays the only place
- * either class is defined.
+ * So the block checks two things, and needs both.
+ *
+ * The CLOSED check composes: the canonical pattern is pinned as text, the
+ * Namespace list is imported from the router, and each mirror must equal the
+ * host pattern those two compose to. Composition is what makes a textual check
+ * legitimate here — the different-subject problem above is exactly the problem
+ * composing solves — and equality is closed under every widening and narrowing
+ * at once, which no table of example hosts can be.
+ *
+ * The BEHAVIOURAL check runs each rebuilt literal over one shared fixture of
+ * hosts beside the canonical predicate it must agree with, with expectations
+ * DERIVED from `isRehearsalEventLabel` / `isRehearsalRootLabel` rather than
+ * written twice. It says what the composition MEANS, it names an offending host
+ * when something breaks instead of handing over a diff of two regex sources,
+ * and it catches an implementation that stopped consulting its pattern at all.
+ *
+ * The fixture came first and could not finish the job. Seven review rounds each
+ * found another coordinate it sampled — the base32 exclusions, the edit
+ * alphabet, insertion position, narrowings as well as widenings, uppercase
+ * inside a fixed component, several positions varying at once, lengths further
+ * from the exact one, a second foreign Namespace. Every one was real, and
+ * closing one never closed the next, because a host is a string and no finite
+ * table of them pins an infinite space. That is the argument for the composed
+ * check, and the reason the fixture is kept for meaning rather than for proof.
  *
  * The three literals in `router-publisher/src/runtime.ts` are deliberately not
  * all the same shape, and the table records which is which: `isRegistryHost`
@@ -689,6 +707,52 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   it('tables no mirror outside the counted files', () => {
     const counted = new Set(MIRROR_FILES.map(([path]) => path));
     for (const site of SITES) expect(counted.has(site.path), site.path).toBe(true);
+  });
+
+  /**
+   * The composed pattern each mirror must BE, built from the pinned canonical
+   * body and the imported Namespace list.
+   *
+   * This is the check that closes the block, and it exists because the fixture
+   * could not. Seven rounds of review each found another coordinate of the
+   * input space the host table sampled — the base32 exclusions, the edit
+   * alphabet, insertion position, narrowings, uppercase inside a fixed
+   * component, several positions varying at once, lengths further from the
+   * exact one, a second foreign Namespace. Each was real, and closing one never
+   * closed the next, because a host is a string and a finite table of them
+   * cannot pin an infinite space.
+   *
+   * The original argument against a textual check was that the canonical
+   * pattern classifies a LABEL and every mirror classifies a HOST, so relating
+   * them textually could only be a substring test. That was true while the two
+   * halves were separate. It stops being true once the canonical pattern is
+   * pinned as text and the Namespace list is imported: the host pattern can
+   * then be COMPOSED exactly, and composition is not a substring test. Equality
+   * against it is closed under every mutation the fixture chased one at a time.
+   *
+   * The behavioural table below stays, and is still worth its keep. It says
+   * what the composition MEANS, it names an offending host when something
+   * breaks rather than a diff of two regex sources, and it catches an
+   * implementation that stopped consulting its pattern at all.
+   */
+  const escapeForRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /** `(?:` and `(` are the same group here. Nothing in these patterns captures. */
+  const normalizeGroups = (source: string): string => source.replaceAll('(?:', '(');
+
+  const composedSource = (admits: RehearsalClass): string => {
+    const body = (binding: string): string =>
+      hostRegexAfter(read(CANONICAL_SOURCE), binding).source.replace(/^\^/, '').replace(/\$$/, '');
+    const event = body(CANONICAL_PATTERNS[0][0]);
+    const root = body(CANONICAL_PATTERNS[1][0]);
+    const label = admits === 'event' ? event : admits === 'root' ? root : `(${event}|${root})`;
+    return `^${label}\\.(${NAMESPACES.map(escapeForRegex).join('|')})$`;
+  };
+
+  it.each(SITES)('$path $purpose — composed exactly', ({ path, anchor, admits }) => {
+    const mirror = hostRegexAfter(read(path), anchor);
+    expect(normalizeGroups(mirror.source)).toBe(composedSource(admits));
+    expect(mirror.flags).toBe('');
   });
 
   it.each(SITES)('$path $purpose', ({ path, anchor, admits }) => {
