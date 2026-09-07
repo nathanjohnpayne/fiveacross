@@ -1380,14 +1380,27 @@ export type HeadlineBingoRow = Pick<PlayerDoc, 'uid' | 'firstBingoAt' | 'dayStat
  *     the (genuinely earlier) held candidate while the held candidate defers to
  *     the rival's mere presence, so the immutable singleton is never written and
  *     the Feed carries no ceremony at all while the podium names the winner.
- *   - The presence fallback is what keeps the gate conservative when the
- *     candidate's own instant is NOT knowable: a freshly-crossed win whose row
- *     has not echoed back yet, a row whose stamp a concurrent unmark cleared
- *     (`computeMark` clears it when the last line falls), or one whose only
- *     bingos are tutorial or post-freeze. Comparing against a missing instant
- *     would read as "nobody else is ahead" precisely when the roster says
- *     otherwise, so an unknown candidate instant defers to any eligible rival —
- *     the pre-#1050 posture, unchanged.
+ *   - The presence fallback covers the candidate whose own instant is NOT
+ *     knowable: a freshly-crossed win whose row has not echoed back yet, a row
+ *     whose stamp a concurrent unmark cleared (`computeMark` clears it when the
+ *     last line falls), or one whose only bingos are tutorial or post-freeze.
+ *     Deferring to any eligible rival there is not merely conservative, it is
+ *     the CORRECT answer: with no eligible instant on the row, the shared
+ *     selector does not name this Player either, so standing down is what keeps
+ *     the Feed agreeing with the Leaderboard. Comparing against a missing
+ *     instant would instead read as "nobody else is ahead" precisely when both
+ *     the roster and the selector say otherwise.
+ *
+ * The candidate's instant is read from the roster row rather than carried from
+ * the completing action, and deliberately: it must be the SAME quantity the
+ * Leaderboard pin and the podium compare, or the gate is answering a second
+ * question with a second clock — the divergence this ticket exists to remove.
+ * The confirm path has no local win instant to carry anyway (`confirmClaim`
+ * mints `firstBingoAt` inside the ADMIN's transaction; the emitter never sees
+ * it). Reading the row is not a lag: `useLeaderboard` subscribes with
+ * `onSnapshot`, so a client observes its OWN write locally the moment it is
+ * enqueued — before the server has it, and therefore before any rival's client
+ * can see it (Codex P2 on #1128 round 2).
  *
  * The comparison is STRICT, so an exact tie blocks neither side and both attempt
  * the claim. That is the documented honest race (ADR 0001): the create-only
