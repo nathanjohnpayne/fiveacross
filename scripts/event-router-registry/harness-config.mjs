@@ -1,261 +1,76 @@
+import { parse as parseToml } from 'smol-toml';
+
 const REQUIRED_ENTRYPOINT = 'RegistryLookupEntrypoint';
 const REGISTRY_SERVICE = 'five-across-event-registry';
-const SERVICES_TABLE = 'services';
+const SERVICES_KEY = 'services';
+const ENV_KEY = 'env';
 
 /**
- * Wrangler's configuration, read the way TOML defines it rather than the way it
- * usually looks.
+ * Wrangler's configuration, judged as a PARSED TOML DOCUMENT rather than as
+ * text that resembles one.
  *
- * A capability gate that reads configuration with line regexes is only as
- * strong as the spellings its author happened to picture, and every spelling it
- * misses is a binding Wrangler will honour and the gate will not see. Three
- * of them matter here and none is exotic TOML:
+ * This file used to carry a hand-written reader that tracked strings and
+ * comments and attributed `key = "value"` lines to the header above them. It
+ * was only ever as strong as the spellings its author happened to picture, and
+ * TOML has more of them than anyone pictures. Three that it missed — each a
+ * second, control-plane service binding that Wrangler honours and the guard
+ * did not see — were reproduced against it:
  *
- *   - `[[services]] # control plane` is a valid header. A `^\s*\[\[services\]\]\s*$`
- *     line match does not see it, so a second service block written that way is
- *     invisible to the counter AND cut away by the truncation — the guard then
- *     reports exactly one lookup-only binding while Wrangler uploads two, the
- *     second bound to the registry's default control-plane export.
- *   - `[[services]]` inside a multi-line string or a comment is TEXT. Counting
- *     it would refuse a configuration that is in fact correct, which is the
- *     failure mode that gets a gate disabled.
- *   - `[[env.staging.services]]` is a services array too, under an environment.
+ *   - `[env.staging]` then `"services" = [ … ]`. The reader compared RAW key
+ *     text, so a quoted key was a different key.
+ *   - `env.staging.services = [ … ]` at the root. A dotted key names a nested
+ *     table; the reader only understood table HEADERS.
+ *   - `env = { staging = { services = [ … ] } }`. An inline table is a table.
  *
- * So the scanner below is a real (if small) TOML reader for the one shape this
- * file judges: it tracks strings and comments to decide what is code, then
- * attributes each `key = "value"` line to the table header above it. It parses
- * no arrays, dates, integers, or inline tables — anything it cannot judge is
- * refused rather than skipped, because "unrecognised" and "absent" must not be
- * the same answer in a capability check.
+ * None of the three needs a CLI flag to reach a deploy: `scripts/worker-
+ * deploy.sh` refuses Wrangler arguments, but Wrangler also selects an
+ * environment from `CLOUDFLARE_ENV`, which the wrapper forwards like any other
+ * variable. So "there is no `--env` on the command line" was never the same
+ * claim as "there is no other binding in this file".
+ *
+ * The lesson is not that the reader needed three more cases. It is that a
+ * capability gate must not own a parser for a format it does not define, so
+ * this one does not: `smol-toml` (a zero-dependency TOML 1.0.0 implementation)
+ * reads the whole document, and everything below is STRUCTURAL — it inspects
+ * the resulting object, where a quoted key, a dotted key, an inline table and a
+ * table header have already collapsed into the one shape they all denote.
  */
 
 /**
- * The configuration's logical lines, with comments removed and the contents of
- * strings excluded from what can look like structure.
+ * A TOML *table*, and nothing else that happens to be a JS object.
  *
- * A multi-line string's newlines do NOT start logical lines, which is the whole
- * point: `x = """\n[[services]]\n"""` is one value, not a table header.
+ * Arrays are values, and a TOML datetime parses to a `Date` subclass — neither
+ * is a table, and treating one as a table is how a scan walks into a shape it
+ * cannot judge and reports nothing rather than refusing.
  */
-function codeLines(config) {
-  const source = config.replace(/\r\n/g, '\n');
-  const lines = [];
-  let current = '';
-  let state = 'normal';
-  let index = 0;
-
-  while (index < source.length) {
-    const character = source[index];
-
-    if (state === 'normal') {
-      if (character === '\n') {
-        lines.push(current);
-        current = '';
-        index += 1;
-      } else if (character === '#') {
-        // A comment runs to end of line and is not configuration, so nothing
-        // written in one can stand in for a binding.
-        while (index < source.length && source[index] !== '\n') index += 1;
-      } else if (source.startsWith('"""', index) || source.startsWith("'''", index)) {
-        state = source[index] === '"' ? 'multilineBasic' : 'multilineLiteral';
-        current += source.slice(index, index + 3);
-        index += 3;
-      } else if (character === '"' || character === "'") {
-        state = character === '"' ? 'basic' : 'literal';
-        current += character;
-        index += 1;
-      } else {
-        current += character;
-        index += 1;
-      }
-      continue;
-    }
-
-    if (state === 'basic' || state === 'literal') {
-      if (state === 'basic' && character === '\\') {
-        current += source.slice(index, index + 2);
-        index += 2;
-      } else if (character === (state === 'basic' ? '"' : "'")) {
-        state = 'normal';
-        current += character;
-        index += 1;
-      } else if (character === '\n') {
-        // An unterminated single-line string is invalid TOML. Recover at the
-        // line break rather than swallowing the rest of the file, so a typo
-        // cannot hide a later table from the counter.
-        state = 'normal';
-        lines.push(current);
-        current = '';
-        index += 1;
-      } else {
-        current += character;
-        index += 1;
-      }
-      continue;
-    }
-
-    const terminator = state === 'multilineBasic' ? '"""' : "'''";
-    if (state === 'multilineBasic' && character === '\\') {
-      index += 2;
-    } else if (source.startsWith(terminator, index)) {
-      state = 'normal';
-      current += terminator;
-      index += terminator.length;
-    } else {
-      // Deliberately dropped: the CONTENT of a multi-line string is data, and
-      // its newlines do not end the logical line the value sits on.
-      index += 1;
-    }
-  }
-
-  lines.push(current);
-  return lines;
-}
-
-const ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
-
-/**
- * A quoted string starting at `start`, DECODED.
- *
- * The decoding is the point rather than tidiness. `[["services"]]` is a
- * valid TOML spelling of `[[services]]`, and a reader that compared the raw
- * bytes would see a differently-named table, skip it, and let a second binding
- * through — the same bypass class as an uncounted trailing comment, one
- * escape sequence lower. An escape TOML does not define returns `null` so the
- * caller fails closed rather than guessing at Wrangler's reading of it.
- */
-function readQuoted(text, start) {
-  const quote = text[start];
-  if (quote !== '"' && quote !== "'") return null;
-  let value = '';
-  let index = start + 1;
-  while (index < text.length) {
-    const character = text[index];
-    if (character === quote) return { value, end: index + 1 };
-    // A literal (single-quoted) string has no escapes at all: its backslash is
-    // a backslash.
-    if (quote === '"' && character === '\\') {
-      const escape = text[index + 1];
-      if (escape === 'u' || escape === 'U') {
-        const width = escape === 'u' ? 4 : 8;
-        const hex = text.slice(index + 2, index + 2 + width);
-        if (hex.length !== width || !/^[0-9A-Fa-f]+$/.test(hex)) return null;
-        const code = Number.parseInt(hex, 16);
-        if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
-        value += String.fromCodePoint(code);
-        index += 2 + width;
-        continue;
-      }
-      if (!Object.hasOwn(ESCAPES, escape)) return null;
-      value += ESCAPES[escape];
-      index += 2;
-      continue;
-    }
-    value += character;
-    index += 1;
-  }
-  return null;
-}
-
-/** A `key = value` right-hand side, when it is a plain string and nothing else. */
-function unquote(value) {
-  const text = value.trim();
-  if (text.length === 0) return null;
-  const read = readQuoted(text, 0);
-  if (read === null || text.slice(read.end).trim().length !== 0) return null;
-  return read.value;
-}
-
-/** One dotted segment: a bare key, or a single quoted key decoded. */
-function keySegment(raw) {
-  const text = raw.trim();
-  if (text.length === 0) return null;
-  if (text[0] === '"' || text[0] === "'") {
-    const read = readQuoted(text, 0);
-    if (read === null || text.slice(read.end).trim().length !== 0) return null;
-    return read.value;
-  }
-  return /^[A-Za-z0-9_-]+$/.test(text) ? text : null;
+function isTable(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
 }
 
 /**
- * `a.b."c"` → `['a', 'b', 'c']`, splitting only on dots outside quotes and
- * decoding each quoted segment. `null` for a name this reader cannot resolve.
- */
-function dottedName(inner) {
-  const parts = [];
-  let current = '';
-  let index = 0;
-  while (index < inner.length) {
-    const character = inner[index];
-    if (character === '"' || character === "'") {
-      const read = readQuoted(inner, index);
-      if (read === null) return null;
-      current += inner.slice(index, read.end);
-      index = read.end;
-      continue;
-    }
-    if (character === '.') {
-      parts.push(current);
-      current = '';
-      index += 1;
-      continue;
-    }
-    current += character;
-    index += 1;
-  }
-  parts.push(current);
-  const segments = parts.map(keySegment);
-  return segments.includes(null) ? null : segments;
-}
-
-function tableHeader(line) {
-  const array = /^\[\[(.*)\]\]$/.exec(line);
-  if (array !== null) return { array: true, path: dottedName(array[1]) };
-  const table = /^\[([^[].*)\]$/.exec(line);
-  if (table !== null) return { array: false, path: dottedName(table[1]) };
-  return null;
-}
-
-/**
- * Every table in the file, each carrying only the `key = "string"` pairs
- * written UNDER its own header, or `null` for a file this reader cannot
- * resolve.
+ * Every scope Wrangler would read a `services` array from: the top level, plus
+ * one per named environment.
  *
- * A key repeated within one table resolves to `null` rather than to either
- * value: two answers is not an answer a capability check may pick between.
+ * `null` for a document whose `env` is a shape this check cannot judge — a
+ * scalar, an array, or an environment that is not a table. Wrangler resolves an
+ * environment's own bindings for that environment's upload, so an `env` this
+ * function cannot enumerate is an unknown number of unexamined bindings, which
+ * must fail closed rather than count as zero. A nested `env` inside an
+ * environment is refused for the same reason: Wrangler has no nested
+ * environments, so the document is expressing something this validator has no
+ * reading of.
  */
-function parseTables(config) {
-  const root = { array: false, path: [], keys: new Map() };
-  const tables = [root];
-  let current = root;
+function bindingScopes(document) {
+  const scopes = [{ root: true, table: document }];
+  if (!Object.hasOwn(document, ENV_KEY)) return scopes;
 
-  for (const line of codeLines(config)) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-
-    const header = tableHeader(trimmed);
-    if (header !== null) {
-      // A header whose name this reader cannot resolve must not degrade into
-      // "not a header": that would leave the table uncounted AND attribute its
-      // keys to the block above it, which is fail-OPEN in a capability check.
-      if (header.path === null) return null;
-      current = { ...header, keys: new Map() };
-      tables.push(current);
-      continue;
-    }
-    // Outside a string, a code line beginning with `[` can only be a table
-    // header in TOML — a value line always starts with its key. One that did
-    // not parse as a header above is therefore unreadable, not a value.
-    if (trimmed.startsWith('[')) return null;
-
-    const pair = /^([^=]+)=(.*)$/.exec(trimmed);
-    if (pair === null) continue;
-    const key = pair[1].trim();
-    const value = unquote(pair[2]);
-    current.keys.set(key, current.keys.has(key) ? null : value);
+  const environments = document[ENV_KEY];
+  if (!isTable(environments)) return null;
+  for (const environment of Object.values(environments)) {
+    if (!isTable(environment) || Object.hasOwn(environment, ENV_KEY)) return null;
+    scopes.push({ root: false, table: environment });
   }
-
-  return tables;
+  return scopes;
 }
 
 /**
@@ -270,38 +85,61 @@ function parseTables(config) {
  * sync/audit/recovery control plane, so both spellings are refused here rather
  * than left to review.
  *
- * Counting is over EVERY services array in the file, including one under an
- * environment (`[[env.staging.services]]`) and one whose header carries a
- * trailing comment, because Wrangler honours each of them and a guard that
- * claims "exactly one lookup-only binding" has to have seen each of them to say
- * so. The inline spelling (`services = [ … ]`) is refused outright: it is a
- * shape this validator does not read, and treating unreadable as absent is how
- * a capability check passes a configuration it never examined.
+ * What it enforces, structurally:
+ *
+ *   - The document parses. A TOML error — an undefined escape, a duplicated
+ *     key, a redefined table — refuses, because "unreadable" and "absent" must
+ *     not be the same answer in a capability check.
+ *   - `env`, if present, is a table of tables, none of them nested.
+ *   - Every `services` value in every one of those scopes is an array of
+ *     tables. A `[vars]` entry that happens to be named `services` is an
+ *     ordinary Worker var in a scope Wrangler reads no binding from, and is
+ *     deliberately untouched — a false positive there is how a capability gate
+ *     gets switched off.
+ *   - There is EXACTLY ONE service binding in the whole document, top level and
+ *     every environment counted together, and it is declared at the top level.
+ *     A named environment does not inherit top-level bindings, so a config that
+ *     repeats even the identical lookup-only binding under `[env.<name>]` is
+ *     refused too: this gate's claim is "one binding exists in this file", and
+ *     a second copy is a second thing to keep correct, selectable by an
+ *     environment variable, that no reviewer of the top-level block would see.
+ *     If a routed environment is ever wanted, that decision changes the claim
+ *     and belongs in `specs/event-router-registry.md` first.
+ *   - That one binding names `REGISTRY`, the registry service, and the
+ *     lookup-only entrypoint explicitly.
  */
 export function validateRegistryLookupBinding(config, subject) {
-  const tables = parseTables(config);
   const exactlyOnce = new Error(`${subject} must bind exactly once to ${REQUIRED_ENTRYPOINT}`);
-  if (tables === null) throw exactlyOnce;
 
-  // The inline spelling, and only where it would actually be a binding: the
-  // root table, or an `[env.<name>]` table. A `[vars]` entry that happens to be
-  // named `services` is an ordinary Worker var, and refusing THAT would be a
-  // false positive — the failure mode that gets a gate switched off.
-  const inlineServices = (table) =>
-    !table.array &&
-    (table.path.length === 0 || (table.path[0] === 'env' && table.path.length === 2)) &&
-    table.keys.has(SERVICES_TABLE);
-  if (tables.some(inlineServices)) throw exactlyOnce;
+  let document;
+  try {
+    document = parseToml(config);
+  } catch {
+    throw exactlyOnce;
+  }
+  if (!isTable(document)) throw exactlyOnce;
 
-  const services = tables.filter(
-    (table) => table.array && table.path.at(-1) === SERVICES_TABLE,
-  );
-  if (services.length !== 1 || services[0].path.length !== 1) throw exactlyOnce;
+  const scopes = bindingScopes(document);
+  if (scopes === null) throw exactlyOnce;
 
-  const [block] = services;
-  const binding = block.keys.get('binding') ?? null;
-  const service = block.keys.get('service') ?? null;
-  const entrypoint = block.keys.get('entrypoint') ?? null;
+  const bindings = [];
+  let atTopLevel = 0;
+  for (const scope of scopes) {
+    if (!Object.hasOwn(scope.table, SERVICES_KEY)) continue;
+    const declared = scope.table[SERVICES_KEY];
+    if (!Array.isArray(declared) || !declared.every(isTable)) throw exactlyOnce;
+    if (scope.root) atTopLevel += declared.length;
+    bindings.push(...declared);
+  }
+  if (bindings.length !== 1 || atTopLevel !== 1) throw exactlyOnce;
+
+  // Read as OWN properties. An inherited value is not something this file
+  // declared, and a capability check must not accept one.
+  const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : null);
+  const [block] = bindings;
+  const binding = own(block, 'binding');
+  const service = own(block, 'service');
+  const entrypoint = own(block, 'entrypoint');
   if (binding !== 'REGISTRY' || service !== REGISTRY_SERVICE || entrypoint !== REQUIRED_ENTRYPOINT) {
     throw new Error(`${subject} must bind explicitly to ${REQUIRED_ENTRYPOINT}`);
   }

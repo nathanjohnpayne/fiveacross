@@ -79,6 +79,7 @@
     "firebase-tools": "^15.28.2",
     "google-auth-library": "^11.0.2",
     "jsdom": "^25.0.1",
+    "smol-toml": "1.8.0",
     "typescript": "^5.6.2",
     "vite": "^6.4.3",
     "vite-plugin-pwa": "^0.21.2",

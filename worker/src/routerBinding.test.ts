@@ -163,21 +163,28 @@ describe('what the router sources no longer reach for', () => {
   });
 });
 
+
 /**
- * The validator reads TOML, not lines that look like TOML.
+ * The validator PARSES TOML. It does not scan text that looks like TOML.
  *
  * Every case below is a spelling Wrangler honours, and the ones that must be
  * REFUSED are refused because the guard's claim is "exactly one lookup-only
- * binding" — a claim it can only make about headers it actually saw. A
- * line-shaped counter that matched `[[services]]` as a whole line missed the
- * commented and spaced forms entirely, which meant a second block written that
- * way bound the registry's default control-plane export while the deploy gate
- * reported a clean single binding.
+ * binding in this file" — a claim it can only make about bindings it actually
+ * saw. The predecessor of this validator hand-read the configuration line by
+ * line, and a hand reader is only as strong as the spellings its author
+ * pictured: `[env.staging]` with a quoted `"services"` key, a dotted
+ * `env.staging.services = […]`, and an inline `env = { staging = { … } }` each
+ * declared a second, control-plane binding it never counted. None of the three
+ * needs a CLI flag to reach a deploy — `scripts/worker-deploy.sh` refuses
+ * Wrangler arguments, but Wrangler also selects an environment from
+ * `CLOUDFLARE_ENV`, which the wrapper forwards like any other variable.
  *
- * The ACCEPTED cases matter just as much and in the other direction: a
- * `[[services]]` written inside a multi-line string or a comment is text, and a
- * validator that counted those would refuse a configuration that is in fact
- * correct — which is how a capability gate ends up switched off.
+ * The ACCEPTED cases matter just as much and in the other direction. A
+ * `[[services]]` written inside a multi-line string or a comment is text; a
+ * `[vars]` entry named `services` is an ordinary Worker var; an environment
+ * that declares no binding of its own is an ordinary environment. A validator
+ * that refused those would refuse configurations that are in fact correct —
+ * which is how a capability gate ends up switched off.
  */
 describe('the shared binding validator, read as TOML', () => {
   const ONLY_BINDING = [
@@ -186,6 +193,15 @@ describe('the shared binding validator, read as TOML', () => {
     'service = "five-across-event-registry"',
     'entrypoint = "RegistryLookupEntrypoint"',
   ].join('\n');
+  // A control-plane binding: same service, NO entrypoint, so Wrangler binds the
+  // registry's default export. This is the payload every bypass below smuggles
+  // in, and the reason each one has to be counted rather than skipped.
+  const CONTROL_PLANE = '{ binding = "CONTROL", service = "five-across-event-registry" }';
+  // A dotted or inline root key must be written BEFORE the `[[services]]`
+  // header, because everything after a table header belongs to that table. Get
+  // it wrong and the smuggled `env` lands inside the services entry, where
+  // Wrangler would never read it — a fixture that proves nothing.
+  const beforeTheBinding = (root: string) => `${root}\n\n${ONLY_BINDING}\n`;
 
   it.each([
     [
@@ -206,11 +222,27 @@ describe('the shared binding validator, read as TOML', () => {
       `${ONLY_BINDING}\n\n[[env.staging.services]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
     ],
     [
-      // The inline spelling is a shape this validator does not read. Refused
-      // rather than skipped: "unrecognised" and "absent" must not be the same
-      // answer in a capability check.
-      'the inline array spelling beside the block one',
-      `services = [{ binding = "CONTROL", service = "five-across-event-registry" }]\n\n${ONLY_BINDING}\n`,
+      // Reproduced bypass 1. A quoted key is the same key; a reader comparing
+      // raw key text saw `"services"` and `services` as two different names.
+      'an environment whose services key is written quoted',
+      `${ONLY_BINDING}\n\n[env.staging]\n"services" = [${CONTROL_PLANE}]\n`,
+    ],
+    [
+      // Reproduced bypass 2. A dotted key names a nested table; a reader that
+      // only understood table HEADERS saw an ordinary root assignment.
+      'an environment declared with a dotted key',
+      beforeTheBinding(`env.staging.services = [${CONTROL_PLANE}]`),
+    ],
+    [
+      // Reproduced bypass 3. An inline table is a table.
+      'an environment declared as an inline table',
+      beforeTheBinding(`env = { staging = { services = [${CONTROL_PLANE}] } }`),
+    ],
+    [
+      // The spellings compose: a quoted environment name inside a dotted
+      // array-of-tables header is still `env.staging.services`.
+      'an environment named by a quoted segment of a table header',
+      `${ONLY_BINDING}\n\n[["env"."staging".services]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
     ],
     [
       // TOML decodes a quoted key's escapes, so `[["services"]]` NAMES the
@@ -221,10 +253,46 @@ describe('the shared binding validator, read as TOML', () => {
       `${ONLY_BINDING}\n\n[["serv\\u0069ces"]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
     ],
     [
-      // An escape TOML does not define is a name this reader cannot resolve,
-      // and an unresolvable header must not degrade into "not a header" — that
-      // would leave its table uncounted and attribute its keys to the block
-      // above it.
+      // Repeating the IDENTICAL lookup-only binding under an environment is
+      // refused too, and deliberately. The claim this gate makes is that one
+      // binding exists in this file; a second copy is a second thing to keep
+      // correct, selectable through `CLOUDFLARE_ENV`, that no reviewer of the
+      // top-level block would see. Wanting a routed environment changes the
+      // claim, and that belongs in specs/event-router-registry.md first.
+      'an environment that repeats the same lookup-only binding',
+      `${ONLY_BINDING}\n\n[env.staging]\nservices = [{ binding = "REGISTRY", service = "five-across-event-registry", entrypoint = "RegistryLookupEntrypoint" }]\n`,
+    ],
+    [
+      // A named environment does not inherit top-level bindings, so this is
+      // not "the same binding, elsewhere" — it is a plain `wrangler deploy`
+      // with no registry binding at all.
+      'a lookup binding declared only under an environment',
+      '[[env.staging.services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
+    ],
+    [
+      // An `env` this validator cannot enumerate is an unknown number of
+      // unexamined bindings, and unknown must not count as zero.
+      'an env that is not a table',
+      beforeTheBinding('env = "staging"'),
+    ],
+    ['an environment that is not a table', `${ONLY_BINDING}\n\n[env]\nstaging = "x"\n`],
+    [
+      // Wrangler has no nested environments, so a document that declares one
+      // is expressing something this validator has no reading of.
+      'an environment carrying a nested env',
+      `${ONLY_BINDING}\n\n[env.staging.env.production]\nname = "five-across-event-router"\n`,
+    ],
+    ['a services value that is not an array', 'services = "five-across-event-registry"\n'],
+    ['a services array whose entry is not a table', 'services = ["five-across-event-registry"]\n'],
+    ['a configuration that declares no service binding at all', '[vars]\nROUTER_VERSION = "v1"\n'],
+    [
+      // Defining `services` twice is a TOML error, and a parse error refuses:
+      // "unreadable" and "absent" must not be the same answer here.
+      'the inline array spelling beside the block one',
+      `services = [${CONTROL_PLANE}]\n\n${ONLY_BINDING}\n`,
+    ],
+    [
+      // An escape TOML does not define makes the whole document unreadable.
       'a table header carrying an undefined escape',
       `${ONLY_BINDING}\n\n["va\\qrs"]\nx = "1"\n`,
     ],
@@ -250,10 +318,9 @@ describe('the shared binding validator, read as TOML', () => {
       '[[ services ]] # the router’s only dependency\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
     ],
     [
-      // The inline-spelling refusal above is scoped to the tables where such a
-      // key would actually BE a binding. A Worker var that happens to be named
-      // `services` is not one, and refusing it would be the false positive that
-      // gets a capability gate switched off.
+      // `services` under `[vars]` is an ordinary Worker var, in a scope
+      // Wrangler reads no binding from. Refusing it would be the false
+      // positive that gets a capability gate switched off.
       'a [vars] entry that happens to be named services',
       `${ONLY_BINDING}\n\n[vars]\nservices = "human-readable note"\n`,
     ],
@@ -266,6 +333,33 @@ describe('the shared binding validator, read as TOML', () => {
     [
       'an entrypoint value written with an escape',
       '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoin\\u0074"\n',
+    ],
+    [
+      // The inline array is now READ rather than refused for being inline. It
+      // is one lookup-only binding written a second way, and judging it on its
+      // contents is the whole difference between parsing and pattern-matching.
+      'the one real binding written as an inline array',
+      'services = [{ binding = "REGISTRY", service = "five-across-event-registry", entrypoint = "RegistryLookupEntrypoint" }]\n',
+    ],
+    // The four environment spellings again, each declaring no binding of its
+    // own. These are the positive controls for the refusals above: without
+    // them, a validator that simply refused any document containing `env`
+    // would pass every one of those cases for the wrong reason.
+    [
+      'an environment table that declares no service binding',
+      `${ONLY_BINDING}\n\n[env.staging]\n[env.staging.vars]\nROUTER_VERSION = "staging"\n`,
+    ],
+    [
+      'an environment declared with a dotted key that adds no service binding',
+      beforeTheBinding('env.staging.vars.ROUTER_VERSION = "staging"'),
+    ],
+    [
+      'an environment declared as an inline table that adds no service binding',
+      beforeTheBinding('env = { staging = { vars = { ROUTER_VERSION = "staging" } } }'),
+    ],
+    [
+      'an environment named by a quoted segment that adds no service binding',
+      `${ONLY_BINDING}\n\n[env."staging".vars]\nROUTER_VERSION = "staging"\n`,
     ],
   ])('accepts %s', (_label, config) => {
     expect(validateRouterServiceBinding(config)).toEqual({
@@ -289,7 +383,7 @@ describe('the shared binding validator, read as TOML', () => {
   it('refuses a services block that names the key twice', () => {
     // Two answers is not an answer a capability check may pick between, and
     // Wrangler's own resolution of a duplicate key is not this guard's to
-    // guess at.
+    // guess at. TOML calls it an error, and an error refuses.
     expect(() =>
       validateRouterServiceBinding(
         '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\nentrypoint = "default"\n',
