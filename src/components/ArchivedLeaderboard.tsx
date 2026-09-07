@@ -9,6 +9,7 @@ import {
   type LeaderboardShareRow,
 } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
+import { isBanned } from '../data/moderation';
 import Avatar from './Avatar';
 import { EmojiText } from './EmojiText';
 import type { ArchivedStandingRow, EventArchive, EventDoc } from '../types';
@@ -54,13 +55,13 @@ function toShareRow(
  * `EventDoc.archive` alone.
  *
  * READ-ONLY IN THE STRONGEST SENSE AVAILABLE TO A COMPONENT — it renders one
- * stored object and subscribes to nothing. There is no `useLeaderboard`
+ * stored object and SUBSCRIBES TO NOTHING. There is no `useLeaderboard`
  * subscription here, no `sortPlayers`, no `cruiseFirstBingoUid`, and no
  * per-Day-meta read: every number, name and honour was decided once, at the
  * archive, by `buildEventArchive`. That is the whole point of the freeze (ADR
  * 0001 — a social record, not a ledger to re-derive), and it is also what makes
  * "opened later, the standings persist unchanged" true rather than merely
- * likely: there is no live input that could move them.
+ * likely: nothing here recomputes a stat, a rank or an honour.
  *
  * The enforcement half is NOT here. Hiding controls is a rendering decision a
  * direct client write bypasses; `firestore.rules` and `storage.rules` deny
@@ -70,15 +71,42 @@ function toShareRow(
  * The Share Card stays (issue #36's on-device rasteriser, ADR 0005 — no
  * crawler pages): a frozen leaderboard is the most shareable thing the Event
  * ever produces, and it prints from the same frozen rows the page shows.
+ *
+ * MODERATION IS THE ONE LIVE INPUT, and it is not a re-derivation. The freeze
+ * deliberately leaves `bannedUids` editable (`firestore.rules`'s write-once
+ * clause protects `status`/`archivedAt`/`archive` and nothing else) precisely so
+ * a permanent record still has a takedown path (#808). The repository's ban
+ * contract is that EVERY public Leaderboard view hides a banned Player
+ * (`specs/w2-ban-console.md` § Leaderboard) — the live Leaderboard, the Share
+ * Card, and now this — so the CURRENT roster is applied to the STORED rows here.
+ *
+ * Hidden, never reassigned: a banned Player's row disappears and their honours
+ * go blank, and NOTHING is promoted into the vacancy. The record is not
+ * recomputed — rank numbers, `playerCount` and every remaining row keep exactly
+ * the values the archive stamped — because a ban is a moderation decision about
+ * who is shown, never a re-ruling of who won.
  */
 export default function ArchivedLeaderboard({
   event,
   archive,
 }: {
-  event: Pick<EventDoc, 'name' | 'days' | 'archivedAt'> | null | undefined;
+  // `bannedUids` is the CURRENT roster off the live Event subscription, not a
+  // frozen copy: a Player banned after the archive must disappear from here on
+  // the next snapshot, and an unban must bring them back.
+  event: Pick<EventDoc, 'name' | 'days' | 'archivedAt' | 'bannedUids'> | null | undefined;
   archive: EventArchive;
 }) {
-  const firstBingoUid = archive.firstBingo?.uid;
+  const bannedUids = event?.bannedUids ?? [];
+  // The headline honour VACATES when its holder is banned — the hall of fame
+  // shows "No one got there." rather than the next-earliest Player, matching
+  // `buildEventArchive`'s own ban rule at freeze time.
+  const headline =
+    archive.firstBingo && !isBanned(archive.firstBingo.uid, bannedUids)
+      ? archive.firstBingo
+      : null;
+  const firstBingoUid = headline?.uid;
+  const standings = archive.standings.filter((row) => !isBanned(row.uid, bannedUids));
+  const dailyHonors = archive.dailyHonors.filter((h) => !isBanned(h.uid, bannedUids));
   const dayChipLabel = (dayIndex: number): string => {
     const d = event?.days?.find((day) => day.index === dayIndex);
     const emoji = d ? (THEMES.find((t) => t.id === d.theme)?.emoji ?? '') : '';
@@ -87,7 +115,9 @@ export default function ArchivedLeaderboard({
 
   const shareLeaderboard = async () => {
     const actedEventId = EVENT_ID;
-    const ranked = archive.standings.map((row, i) => toShareRow(row, i + 1, firstBingoUid));
+    // The Share Card prints the VISIBLE rows, so a banned Player never appears
+    // on a shared card (#108's rule, same as the live Leaderboard's).
+    const ranked = standings.map((row, i) => toShareRow(row, i + 1, firstBingoUid));
     const rows = ranked.slice(0, MAX_SHARE_ROWS);
     if (firstBingoUid && !rows.some((r) => r.uid === firstBingoUid)) {
       const pinned = ranked.find((r) => r.uid === firstBingoUid);
@@ -135,15 +165,15 @@ export default function ArchivedLeaderboard({
               {`⭐ ${editionLexicon().occasionWide} First to BINGO`}
             </div>
             <div className="sub">
-              {archive.firstBingo
-                ? `${archive.firstBingo.displayName} · ${when(archive.firstBingo.at)}`
+              {headline
+                ? `${headline.displayName} · ${when(headline.at)}`
                 : 'No one got there.'}
             </div>
           </div>
         </div>
-        {archive.dailyHonors.length > 0 && (
+        {dailyHonors.length > 0 && (
           <ul className="lb-honors-strip">
-            {archive.dailyHonors.map((h) => (
+            {dailyHonors.map((h) => (
               <li key={h.dayIndex} className="lb-honor">
                 <span className="lb-honor-day">
                   <EmojiText text={dayChipLabel(h.dayIndex)} />
@@ -155,11 +185,11 @@ export default function ArchivedLeaderboard({
         )}
       </div>
 
-      {archive.standings.length === 0 ? (
+      {standings.length === 0 ? (
         <div className="lb-empty muted">No players were on the board.</div>
       ) : (
         <div className="list">
-          {archive.standings.map((row, i) => {
+          {standings.map((row, i) => {
             const isFirst = row.uid === firstBingoUid;
             return (
               <div key={row.uid} className={'row' + (isFirst ? ' leader' : '')}>
@@ -184,8 +214,12 @@ export default function ArchivedLeaderboard({
       )}
 
       <p className="muted lb-footnote">
+        {/* The TRUNCATION note keys on the STORED pair — whether the record
+            retained a prefix — never on how many rows a ban currently hides, so
+            moderating one Player does not make an un-truncated archive claim it
+            was cut short. */}
         {archive.playerCount > archive.standings.length
-          ? `Showing the top ${archive.standings.length} of ${archive.playerCount} players. `
+          ? `Showing the top ${standings.length} of ${archive.playerCount} players. `
           : ''}
         Frozen when the {editionLexicon().occasion} was archived—nothing here changes again.
       </p>

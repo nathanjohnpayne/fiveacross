@@ -10,30 +10,40 @@ import type { EventArchive, EventDoc, PlayerDoc } from '../types';
 //      fixtures deliberately make the live roster DISAGREE with the archive, so
 //      "reads from the snapshot" is proved rather than assumed — a component
 //      that quietly kept deriving from `useLeaderboard` would show the live
-//      numbers and fail here.
+//      numbers and fail here. The live hooks are `vi.fn()`s so the archived
+//      render can assert it never CALLED them, not merely that it ignored what
+//      they returned: "it subscribes to nothing" is a claim about listeners.
 //   2. The Admin archive control is two taps, reports what happened, and
 //      retires itself once the Event is frozen.
 //
 // The read hooks are stubbed (the `w2-leaderboard.test.tsx` precedent for
 // isolating a presentational surface), and `../analytics` / `../firebase` are
 // stubbed because both surfaces import them for Event-scoped share tracking.
+// `../data/moderation` is deliberately NOT stubbed: `isBanned` is the ban
+// contract under test here, and a stubbed predicate would prove nothing.
 
-const H = vi.hoisted(() => ({
-  players: [] as PlayerDoc[],
-  loading: false,
-  event: null as EventDoc | null,
-  archiveEvent: vi.fn(async (_params: { players: readonly PlayerDoc[] }) => 'archived' as const),
-}));
+const H = vi.hoisted(() => {
+  const state = {
+    players: [] as PlayerDoc[],
+    loading: false,
+    event: null as EventDoc | null,
+    archiveEvent: vi.fn(async (_params: { players: readonly PlayerDoc[] }) => 'archived' as const),
+    useLeaderboard: vi.fn(() => ({ players: state.players, loading: state.loading })),
+    useDayMetasStatus: vi.fn(() => ({ metas: new Map(), loaded: true })),
+    useProofKindsByUid: vi.fn(() => ({ kindsByUid: {}, loading: false })),
+  };
+  return state;
+});
 
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
 vi.mock('../hooks/useData', () => ({
   useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),
   useDayMetas: () => new Map(),
-  useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
-  useLeaderboard: () => ({ players: H.players, loading: H.loading }),
+  useDayMetasStatus: H.useDayMetasStatus,
+  useLeaderboard: H.useLeaderboard,
   useEventDoc: () => ({ data: H.event, loading: false }),
-  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
+  useProofKindsByUid: H.useProofKindsByUid,
   isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
     !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),
 }));
@@ -128,6 +138,9 @@ beforeEach(() => {
   H.loading = false;
   H.event = archivedEvent();
   H.archiveEvent.mockClear();
+  H.useLeaderboard.mockClear();
+  H.useDayMetasStatus.mockClear();
+  H.useProofKindsByUid.mockClear();
 });
 
 describe('the archived Leaderboard renders the frozen record', () => {
@@ -192,6 +205,89 @@ describe('the archived Leaderboard renders the frozen record', () => {
     renderLeaderboard();
     expect(screen.getByText('Late Riser')).toBeInTheDocument();
     expect(screen.queryByText('Steady Eddie')).not.toBeInTheDocument();
+  });
+});
+
+describe('the archived Leaderboard opens no live subscription', () => {
+  // specs/post-sailing-archive.md: "It subscribes to NOTHING." Asserting on the
+  // rendered output cannot prove that — a component can ignore a hook's value
+  // and still have opened its listener. These assert the hooks were never
+  // CALLED, which is the only place the listener could come from.
+  it('never calls useLeaderboard, useDayMetasStatus or useProofKindsByUid', () => {
+    renderLeaderboard();
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('opens all three for a live Event, so the assertion above is not vacuous', () => {
+    H.event = archivedEvent({ status: 'active' });
+    renderLeaderboard();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+    expect(H.useDayMetasStatus).toHaveBeenCalled();
+    expect(H.useProofKindsByUid).toHaveBeenCalled();
+  });
+
+  it('tears the live subscriptions down when the Event flips to archived', () => {
+    H.event = archivedEvent({ status: 'active' });
+    const { rerender } = renderLeaderboard();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+    H.useLeaderboard.mockClear();
+    H.useDayMetasStatus.mockClear();
+    H.useProofKindsByUid.mockClear();
+    H.event = archivedEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    // The live child unmounts, taking its listeners with it — no further call.
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+});
+
+describe('a ban still hides a Player after the freeze', () => {
+  // specs/w2-ban-console.md § Leaderboard, made permanent: every public
+  // Leaderboard view hides a banned Player, and moderation deliberately stays
+  // available after the freeze (`bannedUids` is outside the write-once clause).
+  it('drops the banned row from the standings without promoting anyone', () => {
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    const { container } = renderLeaderboard();
+    const rows = [...container.querySelectorAll('.list .row')];
+    const names = rows.map((r) => r.querySelector('.name')?.textContent);
+    expect(names).toEqual(['Steady Eddie']);
+    // The list closes the gap exactly as the LIVE Leaderboard does when it
+    // hides a banned row (`visible.map((p, i) => rank i + 1)`) — leaving a hole
+    // at #1 would advertise that a row was removed, which is the opposite of
+    // what hiding is for. What must NOT move is the HONOUR: the runner-up is
+    // renumbered, never promoted into the star.
+    expect(rows[0]?.querySelector('.rank')?.textContent).toBe('1');
+    expect(rows[0]?.classList.contains('leader')).toBe(false);
+    expect(screen.queryByText('⭐ First BINGO')).not.toBeInTheDocument();
+    // And the stored record is untouched underneath: an unban restores the row
+    // with its own numbers intact.
+    expect(FROZEN.standings.map((r) => r.uid)).toEqual(['early-bird', 'steady']);
+  });
+
+  it('vacates the headline honour and the banned Player’s daily chip', () => {
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    // Vacated, never reassigned — Steady Eddie does not inherit the star.
+    expect(hall).toHaveTextContent('No one got there.');
+    expect(hall).not.toHaveTextContent('Early Bird');
+    expect(hall).toHaveTextContent('D2');
+    expect(hall).not.toHaveTextContent('D1');
+  });
+
+  it('keeps the whole record when nobody is banned', () => {
+    H.event = archivedEvent({ bannedUids: ['someone-else'] });
+    const { container } = renderLeaderboard();
+    const names = [...container.querySelectorAll('.list .row .name')].map((n) => n.textContent);
+    expect(names).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(screen.getByLabelText('Hall of fame')).toHaveTextContent('Early Bird');
   });
 });
 

@@ -139,9 +139,44 @@ function buildShareStandings(
   return top;
 }
 
+/**
+ * The Leaderboard's routing half, and the ONLY hook it owns is the Event doc
+ * every Player already subscribes to.
+ *
+ * #134: once the Event is archived, the FROZEN record supersedes the live
+ * roster entirely — `ArchivedLeaderboard` renders `EventDoc.archive`, so the
+ * standings a returning Player sees are the ones the archive stamped, not a
+ * re-derivation over rows that may since have been moderated.
+ *
+ * THE SPLIT IS WHAT MAKES THAT TRUE, not just what it renders (Codex P2). The
+ * live view's three subscriptions — the whole `players` roster, every Day's
+ * meta document, and up to 60 live Proofs — belong to `LiveLeaderboard` below,
+ * so an archived visit never opens them. When the branch sat inside one
+ * component the hooks had already run by the time it was reached: the archived
+ * page rendered from the snapshot while a listener fan stayed open behind it,
+ * which is the opposite of the spec's "it subscribes to NOTHING".
+ *
+ * A component boundary is also the only way to do this without breaking the
+ * #280 hook-order rule. Conditioning the hooks in place is illegal in React;
+ * returning a DIFFERENT component unmounts the live one and its listeners with
+ * it, and each component's own hook sequence stays fixed.
+ *
+ * An Event marked archived with NO record is not a state this app produces —
+ * `archiveEvent` writes status, stamp and record in one update — so the live
+ * view is left as the fallback for a hand-edited document. It is still
+ * read-only in the only place that counts: `firestore.rules` deny its gameplay
+ * writes on the `status` field alone.
+ */
 export default function Leaderboard() {
-  const { players, loading } = useLeaderboard();
   const { data: event } = useEventDoc();
+  if (isEventArchived(event) && event?.archive) {
+    return <ArchivedLeaderboard event={event} archive={event.archive} />;
+  }
+  return <LiveLeaderboard event={event} />;
+}
+
+function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
+  const { players, loading } = useLeaderboard();
   // #264: the pinned day-meta honors. Called HERE, with the other hooks —
   // never below the loading/empty early returns, where a later non-empty
   // render would change the hook order and crash (Codex P1 on #280).
@@ -159,23 +194,6 @@ export default function Leaderboard() {
     bannedKey: string;
     promise: Promise<Blob | null>;
   } | null>(null);
-
-  // #134: once the Event is archived, the FROZEN record supersedes the live
-  // roster entirely — `ArchivedLeaderboard` renders `EventDoc.archive` and
-  // subscribes to nothing, so the standings a returning Player sees are the
-  // ones the archive stamped, not a re-derivation over rows that may since have
-  // been moderated. Placed after every hook call and before the loading/empty
-  // early returns (the #280 hook-order rule): the branch changes what renders,
-  // never how many hooks ran.
-  //
-  // An Event marked archived with NO record is not a state this app produces —
-  // `archiveEvent` writes status, stamp and record in one update — so the live
-  // rendering below is left as the fallback for a hand-edited document. It is
-  // still read-only in the only place that counts: `firestore.rules` deny its
-  // gameplay writes on the `status` field alone.
-  if (isEventArchived(event) && event?.archive) {
-    return <ArchivedLeaderboard event={event} archive={event.archive} />;
-  }
 
   if (loading) return <LoadingState label="Tallying the leaderboard…" />;
   if (!players.length) return <div className="center muted">No players yet. Be the first.</div>;
