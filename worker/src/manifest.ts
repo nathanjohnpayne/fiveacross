@@ -1,6 +1,7 @@
 // The per-hostname PWA manifest response (#546, epic #529).
 //
-// The router's ONE constructed body besides the fail-closed page. Everything
+// One of the TWO bodies the router constructs besides the fail-closed page —
+// the other is the path-capability projection in `router.ts` (#972). Everything
 // else it answers is either the origin's bytes relayed untouched or the
 // dependency-free not-found state; this is the one address whose correct answer
 // depends on WHICH hostname asked, and cannot be recovered any other way.
