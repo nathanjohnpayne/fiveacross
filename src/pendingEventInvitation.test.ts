@@ -236,6 +236,29 @@ describe('capture and recovery', () => {
     expect(localStorage.getItem(pendingKeys(localStorage)[0]!)).toContain(CODE);
   });
 
+  it('prefers a newer capture from another tab over this tab\u2019s memory copy', async () => {
+    // Tab A captures first and keeps its memory copy; tab B (a fresh module
+    // instance sharing jsdom\u2019s localStorage) captures a newer Invitation for
+    // the same origin. Tab A\u2019s next read must answer B\u2019s record, so a Retry
+    // in A redeems the capture that supersedes the one that just failed.
+    const origin = window.location.origin;
+    const older = capturePendingEventInvitation({ hash: `#fa_invite=${'A'.repeat(43)}`, origin, now: 1_000 });
+    expect(older?.record.code).toBe('A'.repeat(43));
+
+    vi.resetModules();
+    const tabB = await import('./pendingEventInvitation');
+    const newer = tabB.capturePendingEventInvitation({
+      hash: `#fa_invite=${'B'.repeat(43)}`,
+      origin,
+      now: 2_000,
+    });
+    expect(newer?.record.code).toBe('B'.repeat(43));
+
+    const seenByA = readPendingEventInvitation({ origin, now: 3_000 });
+    expect(seenByA?.record.code).toBe('B'.repeat(43));
+    expect(seenByA?.durable).toBe(true);
+  });
+
   it('falls back to localStorage when the session copy is lost across authentication', () => {
     capturePendingEventInvitation({
       hash: `#${EVENT_INVITATION_FRAGMENT_KEY}=${CODE}`,

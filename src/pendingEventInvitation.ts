@@ -522,8 +522,22 @@ export function readPendingEventInvitation(
 
   const sessionRecord = newestUsableRecord(storedSessionRecords, input.origin, now);
   const localRecord = newestUsableRecord(storedLocalRecords, input.origin, now);
-  const currentRecord =
-    usableRecord(memoryRecord, input.origin, now) ?? sessionRecord ?? localRecord;
+  // The NEWEST usable capture wins, wherever it lives. Memory is this tab's
+  // own copy and a fallback for a page whose stores refused the write — it is
+  // not a priority: localStorage is the one cross-tab store, so a newer
+  // Invitation captured in another tab lands there with a later capture order,
+  // and a reader that preferred its own memory would hand a Retry the bearer
+  // that just failed instead of the capture the spec says supersedes it
+  // (specs/event-invitations.md § ordering; Codex P2 on #1131). Ties in
+  // capture order cannot occur across stores for distinct captures because
+  // `captureId` is part of the order.
+  const currentRecord = [usableRecord(memoryRecord, input.origin, now), sessionRecord, localRecord]
+    .filter((candidate): candidate is PendingEventInvitationRecord => candidate !== null)
+    .reduce<PendingEventInvitationRecord | null>(
+      (newest, candidate) =>
+        newest === null || compareCaptureOrder(candidate, newest) > 0 ? candidate : newest,
+      null,
+    );
   if (currentRecord === null) return null;
 
   return {
