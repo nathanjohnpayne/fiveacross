@@ -132,6 +132,22 @@ export function isRegistryRootHost(host: string): boolean {
   return ROOT_HOSTS.has(host) || isSyntheticRootHostClass(host);
 }
 
+/**
+ * The ONE `pathNamespace` a projection for this host may carry.
+ *
+ * `pathNamespace` is non-null only on a mapped Namespace apex or brand mirror,
+ * and explicitly null everywhere else — an Event subdomain, a GCB host, or
+ * either synthetic rehearsal class. Expressed as the expected VALUE rather than
+ * as a predicate so both consumers compare against the same single answer:
+ * `parseDesired` when a payload arrives, and `worker/src/resolve.ts` when a
+ * committed projection comes back across the service binding. A router that
+ * accepted a non-null namespace on an Event subdomain would publish a path
+ * capability that the accepted path-addressing contract forbids.
+ */
+export function registryHostPathNamespace(host: string): PathNamespace {
+  return ROOT_HOSTS.get(host)?.pathNamespace ?? null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -172,6 +188,15 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     const slug = requireString(value.slug, 'slug');
     if (!isReplicaRouteStatus(value.status)) {
       throw new Error('invalid route status');
+    }
+    // The root-test class is ROOT-shaped and disjoint by construction, so a
+    // route may never be committed on it. Stated explicitly rather than left to
+    // the host classifier: `classifyHost` now ADDRESSES `r2-root-*` (#972), so
+    // without this line the branch below would read it as an ordinary labelled
+    // Event address and admit a route whose slug happened to match — letting
+    // the one host reserved to prove root behaviour serve an Event instead.
+    if (isSyntheticRootHostClass(host)) {
+      throw new Error('the root-test rehearsal class accepts no route projection');
     }
     const classified = classifyHost(host);
     const syntheticSlug = isSyntheticEventHostClass(host) ? host.split('.')[0] : null;

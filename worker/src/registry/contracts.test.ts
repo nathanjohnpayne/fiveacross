@@ -87,6 +87,29 @@ describe('registry sync request contract', () => {
     expect(() => parseSyncRequest(JSON.stringify(ordinaryRoot), 'application/json')).toThrow('root shape');
   });
 
+  it('refuses a ROUTE projection on the root-test class, whose slug would otherwise match', () => {
+    // The class is root-shaped and disjoint by construction: it exists to prove
+    // root behaviour on a real Namespace, and an Event route committed there
+    // would invalidate the only evidence it can produce. The refusal is stated
+    // explicitly because the router's guard now ADDRESSES `r2-root-*` (#972),
+    // so the host classifier no longer refuses it on this path's behalf.
+    const host = 'r2-root-abcdefghijklmnopqrst.fiveacross.app';
+    const routeOnRootTest = route({
+      host,
+      desired: {
+        kind: 'route',
+        eventId: 'synthetic-event',
+        status: 'active',
+        slug: 'r2-root-abcdefghijklmnopqrst',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+    });
+    expect(() => parseSyncRequest(JSON.stringify(routeOnRootTest), 'application/json')).toThrow(
+      'root-test rehearsal class accepts no route projection',
+    );
+  });
+
   it('pins Namespace apex and brand-mirror root capability to the host class', () => {
     const mirror = route({
       host: 'fiveacross.vercel.app',

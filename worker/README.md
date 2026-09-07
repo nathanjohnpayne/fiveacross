@@ -67,6 +67,13 @@ curl -sI http://localhost:8787/ -H 'Host: bodega-bay.fiveacross.app'
 curl -sI http://localhost:8787/ -H 'Host: admin.fiveacross.app'      # expect 404, reason reserved-label
 ```
 
+**It starts BOTH Workers** — `wrangler dev -c wrangler.toml -c wrangler.registry.toml` — because a service binding connects to another Wrangler dev process rather than to a config file. Started with the router's config alone, Wrangler reports `env.REGISTRY … local [not connected]` and every otherwise-valid address answers `lookup-unavailable`: the guard, the auth pass-through and the fail-closed paths still work, but the one thing local dev exists to exercise does not.
+
+Two caveats worth knowing before you debug the wrong thing:
+
+- The pinned Wrangler's bundled `workerd` can be older than `wrangler.registry.toml`'s `compatibility_date`. It surfaces as `service core:user:five-across-event-registry: This Worker requires compatibility date "…", but the newest date supported by this server binary is "…"`, and the binding stays unconnected. The fix is a Wrangler bump in `worker/package.json`, not a change to the registry's compatibility date, which is a property of the deployed service rather than of your laptop.
+- Local dev gives the registry an empty Durable Object, so every host resolves as `unknown-host` until something publishes a projection into it. Use `wrangler dev --remote` (below) when you need the real committed state.
+
 ## Deploying and attaching
 
 **The deliverable of #545 ends at "deployable, tested, documented". Attaching the routes is the cutover, and the cutover is a human step** — it depends on the DNS work in [#539](https://github.com/nathanjohnpayne/fiveacross/issues/539) and on the PRD's Gate ladder. `wrangler.toml` therefore ships with `routes` commented out, so no deploy command can perform a cutover by accident.
@@ -121,8 +128,16 @@ There is no `worker/.dev.vars` step: the router has no secret to supply. Its one
 | An unknown Event | `-H 'Host: no-such-event.fiveacross.app'` | `404`, `x-event-router-reason: unknown-host`, `cache-control: no-store` |
 | A foreign hostname | `-H 'Host: example.com'` | `404`, `x-event-router-reason: out-of-namespace` |
 | The auth helper | `-H 'Host: bodega-bay.fiveacross.app' http://localhost:8787/__/auth/handler` | `200` or the origin's own status — never a router `404` |
-| The path capability | `-H 'Host: bodega-bay.fiveacross.app' http://localhost:8787/.well-known/fiveacross-path-capability` | `200`, `application/json`, `cache-control: no-store`, body `{"schemaVersion":1,…}` |
 | An unbound registry | with the `[[services]]` block removed | `404`, `x-event-router-reason: lookup-unavailable` on **every** address |
+
+The path capability needs its own command, because every row above uses `curl -sI` and `-I` sends a **`HEAD`**. The router answers this endpoint on an exact `GET` only and proxies anything else on that path to the origin, so a `HEAD` here would test the proxy rather than the capability — and would report a plausible-looking `404` from Hosting:
+
+```bash
+curl -si http://localhost:8787/.well-known/fiveacross-path-capability \
+  -H 'Host: bodega-bay.fiveacross.app'
+# expect 200, content-type: application/json, cache-control: no-store,
+# x-event-router-revision: <decimal>, body {"schemaVersion":1,"pathNamespace":…,"revision":"…"}
+```
 
 The `wrangler deploy` from step 1 is still worth doing first: it proves the bundle builds and uploads, and its workers.dev address gives you a liveness check (expect `404` / `out-of-namespace` — that *is* the pass condition there).
 

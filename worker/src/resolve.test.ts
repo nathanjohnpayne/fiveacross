@@ -74,11 +74,16 @@ describe('a servable committed projection', () => {
         kind: 'route',
         eventId: 'bodega-bay-2026',
         status: 'active',
-        // The apex document's slug names the Event's WILDCARD address, not this
-        // one, so cross-checking it here would refuse a host that is correct.
+        // The apex projection's slug names the Event's WILDCARD address, not
+        // this one, so cross-checking it here would refuse a host that is
+        // correct. It must still be PRESENT — the schema requires a non-empty
+        // slug on every route, and the apex exemption removes the comparison
+        // rather than the requirement.
         slug: 'bodega-bay',
         edition: 'fiveacross',
-        pathNamespace: null,
+        // The apex is a path-addressed host class, so its projection carries
+        // the matching namespace rather than null.
+        pathNamespace: 'fiveacross.app',
       }),
     );
     await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
@@ -180,6 +185,26 @@ describe('the fail-closed decision table', () => {
       ),
     ).resolves.toBe('slug-missing');
   });
+
+  it('requires a slug on an APEX route too, where there is no first label to compare it with', async () => {
+    // The apex exemption removes the COMPARISON, not the requirement. A route
+    // that has lost its slug is half-written whatever host it was reached at,
+    // and `expectedSlug === null` must not turn that into a serve.
+    const { deps } = harness(
+      committed({
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'active',
+        slug: '' as string,
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    );
+    await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'slug-missing' satisfies NotFoundReason,
+    });
+  });
 });
 
 describe('re-validating the projection at the service boundary', () => {
@@ -248,14 +273,60 @@ describe('re-validating the projection at the service boundary', () => {
     await expect(reasonFor(lookup)).resolves.toBe('replica-malformed');
   });
 
+  // Closed-set membership is not the whole rule: `fiveacross.app` is a valid
+  // path namespace AND an invalid value for an Event subdomain, and a root
+  // shape is valid on an apex and a defect on a wildcard address. A boundary
+  // check that ignored the host would accept exactly the combinations that
+  // publish a false path capability.
+  it.each([
+    [
+      'a root shape returned for an ordinary Event subdomain',
+      HOST,
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null }),
+    ],
+    [
+      'a non-null path namespace on an Event subdomain',
+      HOST,
+      committed({
+        kind: 'route',
+        eventId: 'e',
+        status: 'active',
+        slug: SLUG,
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      }),
+    ],
+    [
+      'the WRONG Namespace on the apex that has one',
+      'fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
+    ],
+    [
+      'a null path namespace on the apex that requires one',
+      'vacaybingo.com',
+      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+    ],
+    [
+      'a non-null path namespace on the synthetic root-test class',
+      'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+    ],
+  ])('refuses %s', async (_label, host, lookup) => {
+    const { deps } = harness(lookup);
+    await expect(resolveHost(host, null, CONFIG, deps)).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+    });
+  });
+
   it('classifies an absent envelope rather than throwing on its discriminant', () => {
     // A registry mid-rollout, or an entrypoint that returned nothing at all,
     // hands back `null`. Reading `.kind` off that throws, and the rejection
     // escapes `resolveHost` — which does not catch it, because `decide` runs
     // outside the bounded call — into an unversioned Cloudflare error page
     // instead of the rendered fail-closed response.
-    expect(() => decide(null as unknown as RegistryLookup, SLUG)).not.toThrow();
-    expect(decide(undefined as unknown as RegistryLookup, SLUG)).toEqual({
+    expect(() => decide(HOST, null as unknown as RegistryLookup, SLUG)).not.toThrow();
+    expect(decide(HOST, undefined as unknown as RegistryLookup, SLUG)).toEqual({
       kind: 'not-found',
       reason: 'replica-malformed' satisfies NotFoundReason,
     });
@@ -265,6 +336,7 @@ describe('re-validating the projection at the service boundary', () => {
     // An unknown status is a projection this Worker cannot judge, not an
     // inferred disabled — and certainly not an inferred active.
     const resolution = decide(
+      HOST,
       committed({
         kind: 'route',
         eventId: 'e',

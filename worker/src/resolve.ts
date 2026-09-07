@@ -26,10 +26,11 @@
 
 import {
   isCanonicalRevision,
-  isPathNamespace,
   isRegistryEdition,
+  isRegistryRootHost,
   isReplicaRootMarker,
   isReplicaRouteStatus,
+  registryHostPathNamespace,
   type PathNamespace,
   type RegistryEdition,
 } from './registry/contracts';
@@ -103,6 +104,20 @@ function notFound(reason: NotFoundReason): Resolution {
 }
 
 /**
+ * Whether the projection's `pathNamespace` is the one this host may carry.
+ *
+ * Compared against a single expected VALUE rather than against membership of
+ * the closed set, because membership is not the rule: `fiveacross.app` is a
+ * valid namespace and a valid value for the apex, and simultaneously an invalid
+ * value for `bodega-bay.fiveacross.app`. A set test would accept the second and
+ * publish a path capability claiming an Event subdomain is path-addressed,
+ * which is precisely what the accepted path-addressing contract forbids.
+ */
+function hostPathNamespace(host: string, pathNamespace: PathNamespace): boolean {
+  return pathNamespace === registryHostPathNamespace(host);
+}
+
+/**
  * Bound the ENTIRE service call, not a request inside it.
  *
  * The Firestore reader could hand `AbortSignal.timeout` to `fetch` and be done;
@@ -164,7 +179,7 @@ export async function resolveHost(
     return notFound('lookup-unavailable');
   }
 
-  return decide(lookup, expectedSlug);
+  return decide(host, lookup, expectedSlug);
 }
 
 /**
@@ -172,15 +187,20 @@ export async function resolveHost(
  * well-formed, active, address-matching projection is a not-found — never an
  * inferred active.
  *
- * It re-validates the projection it was handed, and that is not belt-and-braces
- * over the Durable Object's own parse. The service binding is a boundary
- * between two separately deployed Workers: what arrives is a contract this
- * module did not write, one field of it is reflected into a response header,
- * and a Worker built against an older projection shape must fail closed rather
- * than dereference a field that has since changed meaning. Anything that does
- * not conform is `replica-malformed`, never coerced data.
+ * It re-validates the projection it was handed AGAINST THE HOST it was fetched
+ * for, and that is not belt-and-braces over the Durable Object's own parse. The
+ * service binding is a boundary between two separately deployed Workers: what
+ * arrives is a contract this module did not write, one field of it is reflected
+ * into a response header and another into a public capability projection, and a
+ * Worker built against an older projection shape must fail closed rather than
+ * dereference a field that has since changed meaning. Checking the closed sets
+ * without checking the host class would leave the combinations that matter
+ * most — a root shape on an Event subdomain, a non-null `pathNamespace` on a
+ * host that has none — accepted at exactly the boundary the revalidation exists
+ * to survive. Anything that does not conform is `replica-malformed`, never
+ * coerced data.
  */
-export function decide(lookup: RegistryLookup, expectedSlug: string | null): Resolution {
+export function decide(host: string, lookup: RegistryLookup, expectedSlug: string | null): Resolution {
   // The ENVELOPE is checked before its discriminant is read, and the order is
   // the point. A registry mid-rollout, or one whose entrypoint returned nothing
   // at all, hands back `null` or `undefined`; reading `.kind` off that throws
@@ -227,8 +247,14 @@ export function decide(lookup: RegistryLookup, expectedSlug: string | null): Res
       // no Slug cross-check because a root projection carries no slug — the
       // apex has no first label, and the guarded `r2-root-*` rehearsal class
       // deliberately reuses the same shape on a labelled host.
+      //
+      // The root SHAPE is nonetheless bound to a host class: only a Namespace
+      // apex, a brand mirror, or the root-test rehearsal class may carry one.
+      // A root projection returned for an ordinary Event subdomain is a
+      // registry defect, not a doorway.
+      if (!isRegistryRootHost(host)) return notFound('replica-malformed');
       if (!isReplicaRootMarker(desired.root)) return notFound('replica-malformed');
-      if (!isRegistryEdition(desired.edition) || !isPathNamespace(desired.pathNamespace)) {
+      if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
         return notFound('replica-malformed');
       }
       return {
@@ -244,7 +270,7 @@ export function decide(lookup: RegistryLookup, expectedSlug: string | null): Res
     }
 
     case 'route': {
-      if (!isRegistryEdition(desired.edition) || !isPathNamespace(desired.pathNamespace)) {
+      if (!isRegistryEdition(desired.edition) || !hostPathNamespace(host, desired.pathNamespace)) {
         return notFound('replica-malformed');
       }
       // `status` must be EXPLICIT and known. An unrecognised value is a
@@ -256,12 +282,15 @@ export function decide(lookup: RegistryLookup, expectedSlug: string | null): Res
         return notFound('replica-malformed');
       }
 
-      // The apex has no first label, so there is nothing to cross-check.
-      if (expectedSlug !== null) {
-        if (typeof desired.slug !== 'string' || desired.slug.length === 0) {
-          return notFound('slug-missing');
-        }
-        if (desired.slug !== expectedSlug) return notFound('slug-mismatch');
+      // EVERY route projection carries a slug — the schema requires a non-empty
+      // one, and a route that has lost it is half-written whatever host it was
+      // reached at. The apex exemption removes only the COMPARISON to a first
+      // label, because the apex has none; it does not remove the requirement.
+      if (typeof desired.slug !== 'string' || desired.slug.length === 0) {
+        return notFound('slug-missing');
+      }
+      if (expectedSlug !== null && desired.slug !== expectedSlug) {
+        return notFound('slug-mismatch');
       }
 
       return {
