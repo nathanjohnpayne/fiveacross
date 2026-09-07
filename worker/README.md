@@ -118,7 +118,7 @@ Invoke wrangler through the local binary rather than a bare `npx wrangler`: `npx
 There is **no `wrangler secret put` step any more.** The Firestore REST reader is gone, so the Worker carries no Firebase api key, project id, or other credential ([#972](https://github.com/nathanjohnpayne/fiveacross/issues/972), [ADR 0014](../docs/adr/0014-app-check-compatible-edge-routing-registry.md)). If a previous deployment still holds `FIREBASE_API_KEY`, remove it — the guarded deploy refuses to finish while it is bound:
 
 ```bash
-npm --prefix worker exec -- wrangler secret delete FIREBASE_API_KEY
+npm --prefix worker exec -- wrangler secret delete FIREBASE_API_KEY --config worker/wrangler.toml --env-file /dev/null
 ```
 
 This uploads the Worker and publishes it on its `*.workers.dev` address only. Nothing about what the public sees changes.
@@ -181,7 +181,7 @@ Then confirm the registry holds a committed projection for **every serving host*
 npm --prefix worker exec -- wrangler secret list        # names and types only — never values
 ```
 
-It should list nothing. If any `FIREBASE_`-prefixed name appears, delete each one with `wrangler secret delete <name>` and redeploy before going near a route; the guard refuses the deploy and names every such secret until they are all gone.
+It should list nothing. If any `FIREBASE_`-prefixed name appears, delete each one with `npm --prefix worker exec -- wrangler secret delete <name> --config worker/wrangler.toml --env-file /dev/null` (the explicit `--config` matters: `npm exec` keeps the repository-root working directory, where Wrangler would not find the router configuration on its own) and redeploy before going near a route; the guard refuses the deploy and names every such secret until they are all gone.
 
 ### 4. Prerequisites the cutover depends on and this Worker's code cannot satisfy
 

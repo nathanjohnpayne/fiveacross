@@ -341,7 +341,7 @@ The router no longer reads any of them — ADR 0014 removed the Firestore REST
 reader — but an edge Firebase credential must not outlive the code that used
 it. Remove every ${FORBIDDEN_SECRET_PREFIX}* secret before attaching any route:
 
-    npm --prefix worker exec -- wrangler secret delete <name>
+    npm --prefix worker exec -- wrangler secret delete <name> --config "$REPO_ROOT/worker/wrangler.toml" --env-file /dev/null
 
 MSG
     exit 1

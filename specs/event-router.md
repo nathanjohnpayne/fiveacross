@@ -91,7 +91,7 @@ Implements the edge half of [ADR 0009](../docs/adr/0009-event-resolved-from-host
 - **Given** a request to that path with any method other than `GET` or `HEAD`, **when** the router handles it, **then** it is proxied as before rather than newly refused.
 - **Given** a build, **when** the service worker is emitted, **then** `manifest.webmanifest` is absent from its precache list, verified by PARSING the emitted worker; and **given** an emitted worker with no precache entries at all, **then** that is a build failure rather than a silent pass.
 - **Given** the built `manifest.webmanifest` and the Worker's response for the same Edition, **when** both are produced, **then** they are byte-identical.
-- **Given** any outcome whatsoever, **when** the response is produced, **then** its status is never in the 3xx range unless the origin's own response was, and no request leaves the Worker except the origin proxy.
+- **Given** any outcome whatsoever, **when** the response is produced, **then** its status is never in the 3xx range unless the origin's own response was, and no HTTP request leaves the Worker except the origin proxy — the one call the router makes besides it is the single service-binding RPC to the registry lookup entrypoint, which is not an HTTP fetch and is what `resolveHost` exists to make.
 
 ## Test coverage
 
