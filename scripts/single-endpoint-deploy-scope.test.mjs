@@ -2262,6 +2262,42 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it.each([
+    ["the copied Functions source", "functions/src/index.ts"],
+    ["a copied project-root file", "firebase.json"],
+  ])("ABORTS when a hook writes to %s through an absolute live path", async (_label, target) => {
+    // Codex P1, round 15: the overlay COPIES the Functions source and the
+    // project-root files, so no relative path from the scratch project reaches
+    // their live originals — but a hook launched through npm inherits
+    // `INIT_CWD` pointing at the live repository, and any absolute path lands
+    // on the checkout the deploy will build from. The copied inputs' live
+    // originals are fingerprinted too, so the write is drift.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, `printf x >> "$INIT_CWD/${target}"`],
+        },
+      },
+      async (configPath) => {
+        const { dirname: dir } = await import("node:path");
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = dir(configPath);
+        try {
+          const failure = await classify(["--only", "functions:daily"], configPath).then(
+            () => null,
+            (error) => error,
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain(target.split("/").pop());
+          expect(failure.message).toContain("Nothing has been restored");
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the

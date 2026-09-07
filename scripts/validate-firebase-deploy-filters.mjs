@@ -607,6 +607,7 @@ async function stageProjectOverlay({
   sourceRels,
   links,
   liveDirs,
+  liveFiles,
   metadataDirs,
 }) {
   const linkTo = async (from, to) => {
@@ -721,10 +722,19 @@ async function stageProjectOverlay({
       // every deployment input at once.
       if ((await lstat(from)).isDirectory()) {
         await linkTo(from, to);
-        // The one remaining route from a hook into the live checkout, and so
-        // exactly what the mutation guard has to watch.
+        // A route from a hook into the live checkout, and so exactly what the
+        // mutation guard has to watch.
         liveDirs.push(from);
-      } else await cp(from, to, { dereference: true });
+      } else {
+        await cp(from, to, { dereference: true });
+        // Copied, not linked — and STILL watched (Codex P1, round 15 on
+        // #1107). The overlay closes the relative route to this file, but a
+        // hook launched through npm inherits `INIT_CWD` pointing at the live
+        // repository, and any absolute path reaches the original the copy was
+        // taken from. What the deploy will read is the live file, so the live
+        // file is fingerprinted.
+        liveFiles.push(from);
+      }
     }
     for (const segment of claimed) {
       const nextReal = join(realDir, segment);
@@ -736,6 +746,11 @@ async function stageProjectOverlay({
       // which places the nested one too.
       if (deeper.some((segments) => segments.length === 0)) {
         await copySourceDir(nextReal, nextScratch);
+        // The copied source directory's live original is watched for the same
+        // reason the copied root files are: a hook can write through an
+        // absolute path into `functions/lib` of the checkout the deploy will
+        // actually build from (Codex P1, round 15 on #1107).
+        liveDirs.push(nextReal);
       } else {
         await overlay(nextReal, nextScratch, deeper);
       }
@@ -775,7 +790,7 @@ async function stageProjectOverlay({
  * writes that very tree, and walking it would cost more than everything else
  * combined. Nothing else is excluded.
  */
-async function liveTreeFingerprint(liveDirs, projectDir) {
+async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   /** @type {Map<string, string>} */
   const fingerprint = new Map();
   /** Real paths already walked, so a link cannot make the guard traverse a tree twice or loop. */
@@ -872,6 +887,19 @@ async function liveTreeFingerprint(liveDirs, projectDir) {
   for (const dir of liveDirs) {
     if (basename(dir) === "node_modules") continue;
     await walk(dir);
+  }
+  // The copied root files, by their live paths: the overlay's copy is what a
+  // relative write reaches, but the live original is what the deploy reads.
+  for (const file of liveFiles) {
+    try {
+      const stats = await lstat(file, { bigint: true });
+      fingerprint.set(
+        file,
+        `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
+      );
+    } catch (error) {
+      fingerprint.set(file, `absent ${error?.code ?? "?"}`);
+    }
   }
   return fingerprint;
 }
@@ -1356,6 +1384,8 @@ async function buildAndInventoryProject({
   const links = [];
   /** The live directories those symlinks point at — the mutation guard's beat. */
   const liveDirs = [];
+  /** The live files the overlay COPIED: reachable by absolute path, so watched too. */
+  const liveFiles = [];
   /** The repository metadata the overlay exposed, watched on its own terms. */
   const metadataDirs = [];
   try {
@@ -1366,6 +1396,7 @@ async function buildAndInventoryProject({
         sourceRels: staged.map((config) => config.sourceRel),
         links,
         liveDirs,
+        liveFiles,
         metadataDirs,
       });
     } catch (error) {
@@ -1389,7 +1420,7 @@ async function buildAndInventoryProject({
     let liveBaseline;
     let metadataBaseline;
     try {
-      liveBaseline = await liveTreeFingerprint(liveDirs, projectDir);
+      liveBaseline = await liveTreeFingerprint(liveDirs, projectDir, liveFiles);
       metadataBaseline = metadataDirs.length > 0 ? await gitAnswerFingerprint(projectDir) : "";
     } catch (error) {
       return refuseAll(
@@ -1403,7 +1434,7 @@ async function buildAndInventoryProject({
      */
     const liveDrift = async () => {
       try {
-        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs, projectDir));
+        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs, projectDir, liveFiles));
       } catch (error) {
         return `the live checkout could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
       }
