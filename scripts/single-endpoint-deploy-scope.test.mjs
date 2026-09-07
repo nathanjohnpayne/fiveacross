@@ -587,6 +587,8 @@ describe("the config must be simple enough to analyse before any proof counts", 
     ["a tsc --noEmit build script", { pkg: { main: "lib/index.js", scripts: { build: "tsc --noEmit" }, engines: { node: "22" } } }],
     ["a build script that redirects the emit", { pkg: { main: "lib/index.js", scripts: { build: "tsc --outDir dist" }, engines: { node: "22" } } }],
     ["a project-mode build script", { pkg: { main: "lib/index.js", scripts: { build: "tsc -p tsconfig.build.json" }, engines: { node: "22" } } }],
+    ["a build script compiling explicit input files", { pkg: { main: "lib/index.js", scripts: { build: "tsc src/other.ts" }, engines: { node: "22" } } }],
+    ["a build script whose tsc is only echoed", { pkg: { main: "lib/index.js", scripts: { build: "echo tsc" }, engines: { node: "22" } } }],
     ["noEmit in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", noEmit: true } } }],
     ["emitDeclarationOnly in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", emitDeclarationOnly: true } } }],
     ["outFile in tsconfig", { tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src", outFile: "lib/index.js" } } }],
@@ -606,6 +608,8 @@ describe("the config must be simple enough to analyse before any proof counts", 
     ["a bare npm run build, which builds the project root", { predeploy: ["npm run build"] }],
     ["a bare tsc, which runs in the project root", { predeploy: ["tsc"] }],
     ["a --prefix pointing somewhere else", { predeploy: ['npm --prefix "$RESOURCE_DIR/../other" run build'] }],
+    ["a hook that merely echoes the build command", { predeploy: ['echo npm --prefix "$RESOURCE_DIR" run build'] }],
+    ["a hook that wraps the build in another command", { predeploy: ['sh -c \'npm --prefix "$RESOURCE_DIR" run build\''] }],
   ])("refuses %s", async (_label, functionsConfig) => {
     // Hooks run with the project directory as cwd and see the Functions
     // directory only through $RESOURCE_DIR (lifecycleHooks.js:74-76).
@@ -663,6 +667,16 @@ describe("the config must be simple enough to analyse before any proof counts", 
   it("accepts include: [\"src\"], the conventional whole-directory program", async () => {
     await withManifests(
       { ...CONVENTIONAL, tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" }, include: ["src"] } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
+  });
+
+  it("accepts a bare tsc followed by a copy step, as this repository builds", async () => {
+    await withManifests(
+      { ...CONVENTIONAL, pkg: { main: "lib/index.js", scripts: { build: "tsc && cp src/contract.cjs lib/contract.cjs" }, engines: { node: "22" } } },
       async (configPath) => {
         const result = await classify(["--only", "functions:daily"], configPath);
         expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });

@@ -507,11 +507,14 @@ function predeployBuildsSource(predeploy, source) {
   // targets `$RESOURCE_DIR` (or the configured source path itself) counts.
   const escaped = String(source).replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
   const target = `(?:"?\\$RESOURCE_DIR"?|'?\\$RESOURCE_DIR'?|"?\\.?\\/?${escaped}\\/?"?)`;
+  // Anchored to the start of the (sub)command: `echo npm --prefix … run build`
+  // mentions the build without running it, and the CLI executes the whole
+  // value as one shell command.
   const prefixed = new RegExp(
-    `\\bnpm\\s+--prefix\\s+${target}\\s+run\\s+build\\b`,
+    `(?:^|&&|;)\\s*npm\\s+--prefix\\s+${target}\\s+run\\s+build\\s*$`,
   );
   const entered = new RegExp(
-    `\\bcd\\s+${target}\\s*&&\\s*(?:npm\\s+run\\s+build\\b|tsc\\b)`,
+    `(?:^|&&|;)\\s*cd\\s+${target}\\s*&&\\s*(?:npm\\s+run\\s+build|tsc)\\s*$`,
   );
   // The CLI runs every element in order (lifecycleHooks.js:67-82), so a
   // later step could overwrite what the build just emitted. The trusted
@@ -521,11 +524,9 @@ function predeployBuildsSource(predeploy, source) {
   const last = steps[steps.length - 1];
   const builds = prefixed.test(last) || entered.test(last);
   if (!builds) return false;
-  const afterBuild = last.split(/\s*(?:&&|\|\||;)\s*/);
-  const buildIndex = afterBuild.findIndex(
-    (part) => /\brun\s+build\b/.test(part) || /\btsc\b/.test(part),
-  );
-  return buildIndex === afterBuild.length - 1;
+  // Both anchored forms already require the build to be the final command of
+  // the last step, so nothing can run after it.
+  return true;
 }
 
 async function entrypointIsConventionalTypeScript(sourceDir) {
@@ -542,10 +543,15 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
   // compiler, and it must EMIT: `tsc --noEmit` (or `noEmit: true` below)
   // exits 0 while leaving a stale `lib/index.js` exactly as it was.
   const build = pkg.scripts && typeof pkg.scripts.build === "string" ? pkg.scripts.build : "";
-  if (!/\btsc\b/.test(build)) return false;
-  if (/--noEmit\b|--emitDeclarationOnly\b|--outDir\b|--outFile\b|(^|\s)-p\s|--project\b|--build\b|(^|\s)-b(\s|$)/.test(build)) {
-    // Any flag that redirects, suppresses, or re-scopes the emit makes the
-    // tsconfig below no longer describe what lands at `main`.
+  // The tsc invocation must be a bare `tsc`: any flag redirects, suppresses or
+  // re-scopes the emit, and any positional input file makes tsc IGNORE
+  // tsconfig.json and compile just that file with default options, so the
+  // tsconfig below would no longer describe what lands at `main`. Other
+  // commands may follow (`tsc && cp …`); the tsc segment itself is exact.
+  const segments = build.split(/\s*(?:&&|\|\||;)\s*/);
+  const tscSegments = segments.filter((segment) => /\btsc\b/.test(segment));
+  if (tscSegments.length === 0) return false;
+  if (!tscSegments.every((segment) => /^(?:npx\s+)?tsc$/.test(segment.trim()))) {
     return false;
   }
   const main = typeof pkg.main === "string" ? pkg.main : "index.js";
