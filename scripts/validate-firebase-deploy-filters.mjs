@@ -241,11 +241,38 @@ function singleEndpointExportsFromSource(source) {
   // rather than enumerate them, ANY reference to the `exports` or `module`
   // identifier anywhere in the AST forfeits authority. A Functions entrypoint
   // written as an ES module never needs either name.
-  const referencesCommonJsModuleObject = (node) =>
+  // Only VALUE references count. `{ module: "engagement" }` and
+  // `metadata.module` name a property, not Node's module object, and must not
+  // cost an unrelated codebase its authority.
+  const isPropertyNamePosition = (node, parent) => {
+    if (!parent) return false;
+    if (ts.isPropertyAccessExpression(parent)) return parent.name === node;
+    if (
+      ts.isPropertyAssignment(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isEnumMember(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent)
+    ) {
+      return parent.name === node;
+    }
+    if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) {
+      return parent.propertyName === node;
+    }
+    if (ts.isQualifiedName(parent)) return parent.right === node;
+    return false;
+  };
+  const referencesCommonJsModuleObject = (node, parent) =>
     (ts.isIdentifier(node) &&
-      (node.text === "exports" || node.text === "module")) ||
-    ts.forEachChild(node, referencesCommonJsModuleObject) === true;
-  if (referencesCommonJsModuleObject(sourceFile)) {
+      (node.text === "exports" || node.text === "module") &&
+      !isPropertyNamePosition(node, parent)) ||
+    ts.forEachChild(node, (child) =>
+      referencesCommonJsModuleObject(child, node),
+    ) === true;
+  if (referencesCommonJsModuleObject(sourceFile, undefined)) {
     authoritative = false;
   }
 
@@ -398,9 +425,18 @@ async function singleEndpointInventory(configSource, configPath) {
     }
 
     // The CLI loads `package.json.main || "index.js"` — the BUILT artifact, not
-    // the TypeScript this parser reads. Only the conventional Firebase TS
-    // layout lets one stand in for the other, so anything else forfeits
-    // authority instead of assuming the mapping holds.
+    // the TypeScript this parser reads — and the pinned Node delegate's own
+    // `build()` is empty, so only the config's `predeploy` hook refreshes that
+    // artifact from `src/index.ts`. Without a build step there, a stale
+    // `lib/index.js` can export a group the source never mentions.
+    if (!predeployBuildsSource(functionsConfig.predeploy)) {
+      entry.authoritative = false;
+      continue;
+    }
+
+    // Only the conventional Firebase TS layout lets the source stand in for
+    // the artifact, so anything else forfeits authority instead of assuming
+    // the mapping holds.
     if (
       !(await entrypointIsConventionalTypeScript(
         resolve(dirname(configPath), functionsConfig.source),
@@ -442,6 +478,25 @@ async function singleEndpointInventory(configSource, configPath) {
  * Everything else — a custom main, a non-Node runtime, an unreadable or
  * unparsable manifest — returns false and costs only the exemption.
  */
+/**
+ * Whether a functions config's `predeploy` hook rebuilds the artifact the CLI
+ * loads. Firebase runs each entry with `$RESOURCE_DIR` set to the source dir;
+ * the conventional hook is `npm --prefix "$RESOURCE_DIR" run build`, and a
+ * direct `tsc` invocation is the only other shape accepted. Anything else
+ * (absent, lint-only, an unfamiliar tool) cannot prove the artifact is fresh.
+ */
+function predeployBuildsSource(predeploy) {
+  const steps =
+    typeof predeploy === "string"
+      ? [predeploy]
+      : Array.isArray(predeploy)
+        ? predeploy.filter((step) => typeof step === "string")
+        : [];
+  return steps.some(
+    (step) => /\bnpm\b[^&|;]*\brun\s+build\b/.test(step) || /\btsc\b/.test(step),
+  );
+}
+
 async function entrypointIsConventionalTypeScript(sourceDir) {
   let pkg;
   try {
@@ -452,6 +507,10 @@ async function entrypointIsConventionalTypeScript(sourceDir) {
   // With no configured runtime the CLI detects one; only a declared Node
   // engine makes "this TypeScript is the entry point" a safe reading.
   if (!pkg.engines || typeof pkg.engines.node === "undefined") return false;
+  // The predeploy hook runs `npm run build`; that script must be the TS
+  // compiler for `src/index.ts` to be what lands at `main`.
+  const build = pkg.scripts && typeof pkg.scripts.build === "string" ? pkg.scripts.build : "";
+  if (!/\btsc\b/.test(build)) return false;
   const main = typeof pkg.main === "string" ? pkg.main : "index.js";
   let tsconfig;
   try {

@@ -8,6 +8,9 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/** The conventional Firebase predeploy hook that rebuilds the loaded artifact. */
+const PREDEPLOY = ['npm --prefix "$RESOURCE_DIR" run build'];
+
 /**
  * The conventional Firebase TypeScript layout the inventory requires before it
  * will trust a parsed `src/index.ts`: `main` is the compiled `outDir/index.js`
@@ -17,7 +20,12 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 async function writeConventionalManifests(dir) {
   await writeFile(
     resolve(dir, "package.json"),
-    JSON.stringify({ name: "fixture", main: "lib/index.js", engines: { node: "22" } }),
+    JSON.stringify({
+      name: "fixture",
+      main: "lib/index.js",
+      scripts: { build: "tsc" },
+      engines: { node: "22" },
+    }),
   );
   await writeFile(
     resolve(dir, "tsconfig.json"),
@@ -38,7 +46,7 @@ async function withFunctionsSource(source, run) {
     await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
     await writeFile(
       resolve(fixture, "firebase.json"),
-      JSON.stringify({ functions: { source: "functions" } }),
+      JSON.stringify({ functions: { source: "functions", predeploy: PREDEPLOY } }),
     );
     await writeConventionalManifests(resolve(fixture, "functions"));
     await writeFile(
@@ -204,7 +212,7 @@ describe("fail-closed: shapes that must NOT be read as a single endpoint", () =>
       await mkdir(resolve(fixture, "functions"), { recursive: true });
       await writeFile(
         resolve(fixture, "firebase.json"),
-        JSON.stringify({ functions: { source: "functions" } }),
+        JSON.stringify({ functions: { source: "functions", predeploy: PREDEPLOY } }),
       );
       // No src/index.ts: "unreadable" must not degrade to "exports nothing".
       const result = await classify(
@@ -264,7 +272,9 @@ async function withCodebases(sources, run) {
       await writeConventionalManifests(resolve(fixture, dir));
       await writeFile(resolve(fixture, dir, "src", "index.ts"), source, "utf8");
       functions.push(
-        codebase === "default" ? { source: dir } : { source: dir, codebase },
+        codebase === "default"
+          ? { source: dir, predeploy: PREDEPLOY }
+          : { source: dir, codebase, predeploy: PREDEPLOY },
       );
     }
     await writeFile(
@@ -424,7 +434,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
         resolve(fixture, "firebase.json"),
         JSON.stringify({
           functions: [
-            { source: "functions-default" },
+            { source: "functions-default", predeploy: PREDEPLOY },
             { codebase: "api", remoteSource: { repository: "r", ref: "main" } },
           ],
         }),
@@ -470,8 +480,8 @@ describe("selector resolution mirrors the pinned firebase-tools parser", () => {
         resolve(fixture, "firebase.json"),
         JSON.stringify({
           functions: [
-            { source: "functions-alpha", codebase: "alpha" },
-            { source: "functions-beta", codebase: "beta" },
+            { source: "functions-alpha", codebase: "alpha", predeploy: PREDEPLOY },
+            { source: "functions-beta", codebase: "beta", predeploy: PREDEPLOY },
           ],
         }),
       );
@@ -516,7 +526,9 @@ describe("the config must be simple enough to analyse before any proof counts", 
       );
       await writeFile(
         resolve(fixture, "firebase.json"),
-        JSON.stringify({ functions: { source: "functions", ...functionsConfig } }),
+        JSON.stringify({
+          functions: { source: "functions", predeploy: PREDEPLOY, ...functionsConfig },
+        }),
       );
       await run(resolve(fixture, "firebase.json"));
     } finally {
@@ -525,7 +537,7 @@ describe("the config must be simple enough to analyse before any proof counts", 
   }
 
   const CONVENTIONAL = {
-    pkg: { main: "lib/index.js", engines: { node: "22" } },
+    pkg: { main: "lib/index.js", scripts: { build: "tsc" }, engines: { node: "22" } },
     tsconfig: { compilerOptions: { outDir: "lib", rootDir: "src" } },
   };
 
@@ -557,6 +569,28 @@ describe("the config must be simple enough to analyse before any proof counts", 
       const result = await classify(["--only", "functions:daily"], configPath);
       expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
     });
+  });
+
+  it.each([
+    ["no predeploy at all", { predeploy: [] }],
+    ["a predeploy that does not build", { predeploy: ['npm --prefix "$RESOURCE_DIR" run lint'] }],
+  ])("refuses when the config has %s, so the loaded artifact may be stale", async (_label, functionsConfig) => {
+    // The CLI loads `main` (the built artifact) and its Node delegate's own
+    // build() is empty; only the predeploy hook refreshes it from src/index.ts.
+    await withManifests({ ...CONVENTIONAL, functionsConfig }, async (configPath) => {
+      const result = await classify(["--only", "functions:daily"], configPath);
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    });
+  });
+
+  it("refuses when package.json has no tsc build script for the predeploy hook to run", async () => {
+    await withManifests(
+      { ...CONVENTIONAL, pkg: { main: "lib/index.js", engines: { node: "22" } } },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
+    );
   });
 
   it("refuses a codebase configured with a prefix", async () => {
@@ -615,6 +649,24 @@ describe("the config must be simple enough to analyse before any proof counts", 
     );
   });
 
+  it("keeps authority when module or exports appear only as property names", async () => {
+    // A property key or member name is not a reference to Node's module
+    // object; refusing it would re-block the unrelated endpoint this change
+    // exists to exempt.
+    await withFunctionsSource(
+      [
+        BUILDER_IMPORT,
+        'const metadata = { module: "engagement", exports: 3 };',
+        "console.log(metadata.module, metadata.exports);",
+        "export const daily = onSchedule('every day 00:00', () => {});",
+      ].join("\n"),
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ ...NO_INVOKER_SELECTED, functionsAttempted: true });
+      },
+    );
+  });
+
   it("refuses when a CommonJS assignment can overwrite a proven export", async () => {
     // TypeScript preserves the reassignment in its emit, and the runtime loader
     // recursively deploys the final object as a group.
@@ -641,7 +693,9 @@ describe("narrowing that removes whole classes rather than modelling them", () =
       await writeFile(resolve(fixture, "functions", "src", "index.ts"), source, "utf8");
       await writeFile(
         resolve(fixture, "firebase.json"),
-        JSON.stringify({ functions: { source: "functions", ...extraConfig } }),
+        JSON.stringify({
+          functions: { source: "functions", predeploy: PREDEPLOY, ...extraConfig },
+        }),
       );
       await run(resolve(fixture, "firebase.json"));
     } finally {
@@ -683,7 +737,7 @@ describe("narrowing that removes whole classes rather than modelling them", () =
       );
       await writeFile(
         resolve(fixture, "firebase.json"),
-        JSON.stringify({ functions: { source: "functions" } }),
+        JSON.stringify({ functions: { source: "functions", predeploy: PREDEPLOY } }),
       );
       const result = await classify(
         ["--only", "functions:daily"],
