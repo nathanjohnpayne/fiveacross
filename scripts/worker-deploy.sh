@@ -51,6 +51,9 @@ done
 guard_deploy_main_checkout "scripts/worker-deploy.sh" "$FORCE"
 
 FORBIDDEN_SECRET="FIREBASE_API_KEY"
+# Every deployed secret under this prefix is a Firebase credential the router
+# must not carry (same policy as the [vars] check in the binding validator).
+FORBIDDEN_SECRET_PREFIX="FIREBASE_"
 
 # Is this a ROUTE-BEARING deploy? The cutover procedure uncomments the routes
 # block in worker/wrangler.toml and redeploys through this same script, so
@@ -177,7 +180,7 @@ verify_registry_lookup_binding() {
 # `wrangler secret list` returns names and types only, never values.
 verify_no_firebase_secret() {
   local when="$1" secrets
-  echo "🔎 Verifying the deployed Worker carries no ${FORBIDDEN_SECRET} binding (${when})…" >&2
+  echo "🔎 Verifying the deployed Worker carries no ${FORBIDDEN_SECRET_PREFIX}* binding (${when})…" >&2
 
   if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json 2>/dev/null)"; then
     # Inability to inspect is NOT a pass. The README presents this as
@@ -196,38 +199,50 @@ MSG
     exit 75
   fi
 
-  # EXACT name comparison, for the same reason the presence check needed one:
-  # an unanchored match would report a leftover `OLD_FIREBASE_API_KEY` as the
-  # live binding, or miss the live one behind a near-miss neighbour.
+  # The WHOLE prefix, not the one name the reader used to consume. The claim
+  # this readback backs (R0: the public router carries no Firebase credential
+  # of any kind) is about every `FIREBASE_*` secret — a `FIREBASE_SERVICE_ACCOUNT`
+  # or `FIREBASE_PROJECT_ID` left bound is the same contradiction as the api
+  # key — and it is the same prefix policy the binding validator applies to
+  # plain-text `[vars]`, so the two readbacks cannot disagree about what a
+  # Firebase credential is. Anchored at the START of the name, so a leftover
+  # `OLD_FIREBASE_API_KEY` is still not mistaken for a live binding.
   #
-  # `present` is compared against the literal `false` rather than tested for
-  # truthiness, so ONLY a parsed array that demonstrably lacks the name passes.
-  # Inverting a check inverts its failure mode too: with the old presence test,
-  # unparseable output made `jq` exit non-zero and the deploy failed closed by
-  # accident; here the same accident would read as proof of absence. A listing
-  # that is not an array, or not JSON at all, is evidence of nothing.
-  local present
-  if ! present="$(printf '%s' "$secrets" | jq -r --arg name "$FORBIDDEN_SECRET" \
-      'if type=="array" then (any(.[]; .name == $name) | tostring) else "true" end' 2>/dev/null)"; then
-    present="true"
+  # `found` is compared against the literal empty string rather than tested for
+  # truthiness, so ONLY a parsed array that demonstrably carries no such name
+  # passes. Inverting a check inverts its failure mode too: with the old
+  # presence test, unparseable output made `jq` exit non-zero and the deploy
+  # failed closed by accident; here the same accident would read as proof of
+  # absence. A listing that is not an array, or not JSON at all, is evidence
+  # of nothing, and is reported as such.
+  local found
+  # Two steps on purpose: the shape check first (`-e` fails on a non-array, a
+  # parse error AND empty output, which a single filter would read as "no
+  # names found"), and only then the prefix scan over a listing proven to be
+  # an array.
+  if ! printf '%s' "$secrets" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    found="<unreadable listing>"
+  elif ! found="$(printf '%s' "$secrets" | jq -r --arg prefix "$FORBIDDEN_SECRET_PREFIX" \
+      '[.[] | .name | select(type=="string" and startswith($prefix))] | join(", ")' 2>/dev/null)"; then
+    found="<unreadable listing>"
   fi
 
-  if [[ "$present" != "false" ]]; then
+  if [[ -n "$found" ]]; then
     cat >&2 <<MSG
 
-❌ ${FORBIDDEN_SECRET} is STILL bound on the deployed Worker.
+❌ A Firebase credential is STILL bound on the deployed Worker: ${found}
 
-The router no longer reads it — ADR 0014 removed the Firestore REST reader — but
-an edge Firebase credential must not outlive the code that used it. Remove it
-before attaching any route:
+The router no longer reads any of them — ADR 0014 removed the Firestore REST
+reader — but an edge Firebase credential must not outlive the code that used
+it. Remove every ${FORBIDDEN_SECRET_PREFIX}* secret before attaching any route:
 
-    npm --prefix worker exec -- wrangler secret delete ${FORBIDDEN_SECRET}
+    npm --prefix worker exec -- wrangler secret delete <name>
 
 MSG
     exit 1
   fi
 
-  echo "✅ No ${FORBIDDEN_SECRET} binding on the deployed Worker." >&2
+  echo "✅ No ${FORBIDDEN_SECRET_PREFIX}* binding on the deployed Worker." >&2
 }
 
 verify_registry_lookup_binding

@@ -199,7 +199,7 @@ describe('worker deploy guard — no surviving Firebase credential', () => {
     // absence of the binding is the expected steady state (#972).
     const result = runWithStubbedNpm({ secretListJson: '[]' });
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain('No FIREBASE_API_KEY binding on the deployed Worker');
+    expect(result.stderr).toContain('No FIREBASE_* binding on the deployed Worker');
   });
 
   it('refuses a deploy that leaves the old edge credential bound', () => {
@@ -207,17 +207,32 @@ describe('worker deploy guard — no surviving Firebase credential', () => {
       secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
     });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('is STILL bound');
-    expect(result.stderr).toContain('wrangler secret delete FIREBASE_API_KEY');
+    expect(result.stderr).toContain('is STILL bound on the deployed Worker: FIREBASE_API_KEY');
+    expect(result.stderr).toContain('wrangler secret delete');
   });
 
-  it('compares the name exactly rather than by substring', () => {
-    // The exactness requirement survived the inversion: an unanchored match
-    // would refuse a deploy over an unrelated leftover, or — worse, in the
-    // other direction — read a near-miss as the live binding.
+  it.each([
+    ['a service account', 'FIREBASE_SERVICE_ACCOUNT'],
+    ['the project id', 'FIREBASE_PROJECT_ID'],
+    ['a near-miss of the api key name', 'FIREBASE_API_KEY_BACKUP'],
+  ])('refuses every other Firebase-prefixed secret too (%s)', (_label, name) => {
+    // R0 claims the public router carries no Firebase credential of ANY kind,
+    // and this readback is the same prefix policy the binding validator
+    // applies to plain-text [vars] — the two cannot disagree about what a
+    // Firebase credential is.
+    const result = runWithStubbedNpm({
+      secretListJson: `[{"name":"${name}","type":"secret_text"}]`,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`is STILL bound on the deployed Worker: ${name}`);
+  });
+
+  it('anchors the prefix at the start of the name rather than matching a substring', () => {
+    // An unanchored match would refuse a deploy over an unrelated leftover
+    // that merely CONTAINS the prefix.
     const result = runWithStubbedNpm({
       secretListJson:
-        '[{"name":"OLD_FIREBASE_API_KEY","type":"secret_text"},{"name":"FIREBASE_API_KEY_BACKUP","type":"secret_text"}]',
+        '[{"name":"OLD_FIREBASE_API_KEY","type":"secret_text"},{"name":"NOT_A_FIREBASE_THING","type":"secret_text"}]',
     });
     expect(result.status).toBe(0);
   });

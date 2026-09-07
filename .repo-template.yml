@@ -82,6 +82,11 @@ spec_test_map:
   # #1079's fail-closed Mark/Echo preview, and #804 deploy 1's switch freeze.
   # The full deployed Firestore admission inventory remains #804 deploy 2's and
   # Storage remains #806's, so map these prerequisite layers explicitly.
+  # path-addressing-and-root is design-first; the one shipped seam is the
+  # router's path-capability projection (#972), tested with the router.
+  path-addressing-and-root:
+    - worker/src/router.test.ts
+    - worker/src/registry/routerRegistry.integration.test.ts
   event-membership:
     - src/data/eventMembership.test.ts
     - tests/rules/membership-mark-batch-budget.test.ts

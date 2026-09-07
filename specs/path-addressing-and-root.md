@@ -1,15 +1,14 @@
 ---
 spec_id: path-addressing-and-root
 status: accepted
-tested: false
-reason: Design-only — decides the three addressing regimes, the root's shape per host class, and the archive interlock on paper; no runtime surface ships from this spec, and each seam's tests land with the implementation ticket that builds it (see § Test coverage).
+tested: true
 ---
 
 # Path addressing and the root—historical Events, brand-mirror slugs, and what serves `/` (`path-addressing-and-root`)
 
 Three accepted decisions have to compose here, and each was correct inside the scope it was written for. [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md) rejected addressing Events by path on one shared origin. [#625](https://github.com/nathanjohnpayne/fiveacross/issues/625), as generalised by [#599](https://github.com/nathanjohnpayne/fiveacross/issues/599), made every registered domain a first-class serving host that never bounces a visitor off itself. And the platform PRD makes self-service Event creation a Phase 5 goal, which gives the canonical root a job it did not have when ADR 0009 was written. This spec decides how the three fit together, because the answer is not one policy: **path addressing is rejected for one class of Event and required for another**, and getting that boundary wrong in two separate designs is the drift [#799](https://github.com/nathanjohnpayne/fiveacross/issues/799) exists to prevent.
 
-Nothing ships from this spec. It answers the nine questions #799 enumerates as decisions, states the reserved-path list, the installed-context refusal requirement and the #134 archive interlock as requirements rather than open questions, and names the seams the implementation tickets get filed from. It supersedes, in part, `specs/x-multi-event-schema.md` § "Recommended migration seam (deferred)", which still recommends the opposite; ADR 0009 carries a matching scope note.
+Only one seam ships from this spec so far — the same-origin path-capability projection the Event router answers from its registry lookup (#972; tests in `worker/src/router.test.ts` and `worker/src/registry/routerRegistry.integration.test.ts`). Otherwise it answers the nine questions #799 enumerates as decisions, states the reserved-path list, the installed-context refusal requirement and the #134 archive interlock as requirements rather than open questions, and names the seams the implementation tickets get filed from. It supersedes, in part, `specs/x-multi-event-schema.md` § "Recommended migration seam (deferred)", which still recommends the opposite; ADR 0009 carries a matching scope note.
 
 ## Glossary
 
