@@ -2230,7 +2230,17 @@ function functionsCodebaseNames(configSource) {
     : [configSource?.functions];
   const names = new Set();
   for (const config of configs) {
-    if (config && typeof config === "object") names.add(config.codebase ?? "default");
+    if (!config || typeof config !== "object") continue;
+    // A kit config carries no `codebase` of its own: the pinned CLI expands
+    // its `instances` keys as codebases (`functionsDeployHelper`), so they are
+    // counted here too (Codex P1, round 21 on #1107) — a Hosting pin that
+    // belongs to a kit instance must make ownership unknown, not collapse the
+    // kit into `default` and leave the default codebase looking alone.
+    if ("kit" in config) {
+      for (const instance of Object.keys(config.instances ?? {})) names.add(instance);
+      continue;
+    }
+    names.add(config.codebase ?? "default");
   }
   return names.size === 0 ? ["default"] : [...names];
 }

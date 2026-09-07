@@ -2695,6 +2695,23 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     expect(scope).toMatchObject({ functionsAttempted: true, hostingAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
   });
 
+  it("counts kit instances as codebases when judging pinned-function ownership", () => {
+    // Codex P1, round 21: a kit config has no `codebase`, and collapsing it
+    // into `default` left an implicit default codebase looking like the only
+    // one — so a Hosting pin owned by a kit instance was rehearsed against the
+    // default codebase alone. Kit instance keys are codebases, as the pinned
+    // CLI expands them.
+    const kitBeside = {
+      functions: [{ source: "functions" }, { kit: "@firebase/example-kit", instances: { kitone: {} } }],
+      hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport", pinTag: true } }] },
+    };
+    const widened = pinnedRewriteWidening({ only: "functions:daily,hosting", exceptTargets: "", configSource: kitBeside, project: "" });
+    expect(widened.ownershipUnknown).toBe(true);
+    expect(widened.only.split(",")).toEqual(
+      expect.arrayContaining(["functions:default:submitBugReport", "functions:kitone:submitBugReport"]),
+    );
+  });
+
   it("widens BEFORE planning, so every codebase's hooks and discovery see the pinned id", () => {
     // Codex P1, round 14: the widening has to reach hook planning and
     // discovery, not just the classification loop. Firebase resolves the
