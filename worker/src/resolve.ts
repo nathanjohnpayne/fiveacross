@@ -12,10 +12,9 @@
 // decision table below is exercised by `resolve.test.ts` with no workerd, no
 // Firestore and no Cloudflare cache.
 
-/** The subset of `hostnames/{host}` this router reads. It reads no more than
- *  this on purpose: the router routes, so it has no business carrying the
- *  Edition, the preview slice, or the 18+ posture — the app resolves those for
- *  itself from the same document. */
+/** The subset of `hostnames/{host}` this router reads. Still a subset on
+ *  purpose — the preview slice and the 18+ posture stay with the app, which
+ *  resolves them for itself from the same document. */
 export interface HostnameRecord {
   eventId: string;
   status: string;
@@ -24,7 +23,32 @@ export interface HostnameRecord {
    *  router, and cross-checking it is what makes a repointed or half-written
    *  document fail closed instead of serving. */
   slug: string | null;
+  /** Which Edition dresses this address (specs/hostnames-lookup.md § Data
+   *  model), read for the per-hostname PWA manifest (#546) and for NOTHING
+   *  else.
+   *
+   *  It is a widening of the EXISTING field mask rather than a second lookup,
+   *  and that is the point: two reads of one document are two answers that can
+   *  disagree, which is the failure mode this module's whole cache posture
+   *  exists to prevent. Whether the address serves at all is decided without
+   *  it — see {@link RoutingFields}, whose narrowed type is what makes routing
+   *  on the Edition a compile error rather than something review has to
+   *  catch. */
+  edition: string | null;
 }
+
+/**
+ * The fields the fail-closed decision may see — deliberately NOT the whole
+ * record.
+ *
+ * `edition` is data the router CARRIES, never data it routes on. Stating that
+ * as a type rather than as a convention means a later edit that tries to make
+ * an Edition decide whether an address serves does not compile, which is
+ * strictly better than a rule a reviewer has to remember. A `Pick` rather than
+ * an `Omit` so a future non-routing field is excluded by DEFAULT: `Omit` would
+ * quietly admit it.
+ */
+export type RoutingFields = Pick<HostnameRecord, 'eventId' | 'status' | 'slug'>;
 
 export type NotFoundReason =
   /** No `hostnames/{host}` document. The ordinary unknown-address case. */
@@ -55,8 +79,17 @@ export type NotFoundReason =
    *  resolved — not that Firestore is down. */
   | 'lookup-forbidden';
 
-export type Resolution =
+/** What {@link decide} answers, from the routing fields alone. */
+type RoutingDecision =
   | { kind: 'serve'; eventId: string; stale: boolean }
+  | { kind: 'not-found'; reason: NotFoundReason };
+
+export type Resolution =
+  /** `edition` rides along on a SERVING resolution only. A fail-closed answer
+   *  has no Edition by construction — the router does not know which Event, and
+   *  therefore which Edition, the address belongs to, which is the same reason
+   *  the not-found page is brand-neutral. */
+  | { kind: 'serve'; eventId: string; stale: boolean; edition: string | null }
   | { kind: 'not-found'; reason: NotFoundReason };
 
 /** Firestore answered, and the answer was "no". Its own class so the resolver
@@ -67,7 +100,7 @@ export class LookupRefusedError extends Error {}
 /** Bumped whenever `CacheEnvelope`'s shape changes, so an envelope written by
  *  an older Worker version reads as a MISS rather than being coerced —
  *  the same rule the client cache follows (specs/event-resolution.md). */
-export const CACHE_VERSION = 1;
+export const CACHE_VERSION = 2;
 
 export interface CacheEnvelope {
   version: number;
@@ -99,7 +132,14 @@ export function isCacheEnvelope(value: unknown): value is CacheEnvelope {
   return (
     typeof record.eventId === 'string' &&
     typeof record.status === 'string' &&
-    (record.slug === null || typeof record.slug === 'string')
+    (record.slug === null || typeof record.slug === 'string') &&
+    // Checked like every other dereferenced field, and NOT waved through as
+    // "only branding": an envelope missing it would hand `undefined` to the
+    // manifest builder, which resolves that to the default Edition — a wrong
+    // installed name is precisely the defect #546 exists to remove, and it
+    // would arrive silently. Version 2 exists so envelopes written before the
+    // field read as a MISS rather than reaching this check at all.
+    (record.edition === null || typeof record.edition === 'string')
   );
 }
 
@@ -191,7 +231,7 @@ export async function resolveHost(
     // shared cache into a negative cache and strand a corrected Firestore
     // record until the TTL elapsed. Fresh cache may serve, never refuse.
     const decision = decide(cached.record, expectedSlug, false);
-    if (decision.kind === 'serve') return decision;
+    if (decision.kind === 'serve') return withEdition(decision, cached.record);
     await swallow(() => deps.cache.drop(host), undefined);
   }
 
@@ -216,7 +256,7 @@ export async function resolveHost(
     // good (specs/event-resolution.md). With no entry at all there is nothing
     // to fall back to, so this fails closed like every other unknown.
     if (eligibleForStaleServe && cached !== null) {
-      return decide(cached.record, expectedSlug, true);
+      return withEdition(decide(cached.record, expectedSlug, true), cached.record);
     }
     return {
       kind: 'not-found',
@@ -248,7 +288,19 @@ export async function resolveHost(
     // servable envelope behind for the stale-serve path to resurrect.
     await swallow(() => deps.cache.drop(host), undefined);
   }
-  return decision;
+  return withEdition(decision, record);
+}
+
+/**
+ * Re-attach the non-routing Edition to a decision made without it.
+ *
+ * The join happens HERE rather than inside `decide` because `decide` is not
+ * allowed to see the field at all ({@link RoutingFields}). A refusal carries no
+ * Edition: the router does not know which Event the address belongs to, so it
+ * has none to carry.
+ */
+function withEdition(decision: RoutingDecision, record: HostnameRecord): Resolution {
+  return decision.kind === 'serve' ? { ...decision, edition: record.edition } : decision;
 }
 
 /** Run a cache operation, treating any failure as absence. */
@@ -266,10 +318,10 @@ async function swallow<T>(operation: () => Promise<T>, fallback: T): Promise<T> 
  * inferred active.
  */
 function decide(
-  record: HostnameRecord,
+  record: RoutingFields,
   expectedSlug: string | null,
   stale: boolean,
-): Resolution {
+): RoutingDecision {
   // `status` must be EXPLICIT. Defaulting a missing or unrecognised value to
   // active would let a half-written routing document publish an Event before
   // the record opts in (ADR 0009).
@@ -319,8 +371,12 @@ export async function fetchHostnameRecord(
   );
   url.searchParams.set('key', config.apiKey);
   // A field mask, so a document that grows a large `preview` slice does not
-  // grow this request. The router reads routing fields and nothing else.
-  for (const field of ['eventId', 'status', 'slug']) {
+  // grow this request. Four fields, not three, since #546: `edition` is read
+  // for the per-hostname manifest. WIDENING the existing mask rather than
+  // adding a second point-get is the whole design — one document, one read, one
+  // answer, so the Edition served at the edge cannot describe a different
+  // revision of the mapping than the Event routed to.
+  for (const field of ['eventId', 'status', 'slug', 'edition']) {
     url.searchParams.append('mask.fieldPaths', field);
   }
 
@@ -365,5 +421,12 @@ export function parseHostnameDocument(body: unknown): HostnameRecord {
     // rather than a default that is.
     status: stringField(fields, 'status') ?? '',
     slug: stringField(fields, 'slug'),
+    // Absent or non-string reads as `null`, which the manifest builder resolves
+    // to the default Edition — the SAME rule the client applies
+    // (`src/data/hostnames.ts` coerces a non-string `edition` to `''`, and
+    // `setActiveEdition('')` resets to the default). Edge and client must not
+    // disagree even about the fallback, or a player's home-screen icon ends up
+    // named differently from the app it opens.
+    edition: stringField(fields, 'edition'),
   };
 }
