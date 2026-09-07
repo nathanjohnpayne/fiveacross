@@ -1557,12 +1557,15 @@ service cloud.firestore {
         //
         // #133 adds a SECOND admin-SDK writer of the same field with no rules
         // change: `hideProofOnVisionFlag` takes a Proof left `status: 'flagged'`
-        // with an extreme/illegal `visionFlag` to `'hidden'`. Both moderation
-        // fields stay server-set for every non-admin — `visionFlag` cannot be
-        // written at create (`visionFlag == null` above) and cannot be added,
-        // changed, or CLEARED on update, because `hasOnly(['reportCount'])` bounds
-        // a non-admin to the counter alone. So a client can neither self-hide,
-        // un-hide, forge an AI verdict, nor scrub the one an admin's Restore
+        // with an extreme/illegal `visionFlag` to `'hidden'`, stamping the
+        // `safetyHide` marker in the same update. All THREE moderation fields stay
+        // server-set for every non-admin — `visionFlag` cannot be written at create
+        // (`visionFlag == null` above), `safetyHide` is not in the create
+        // `hasOnly` list at all so a create carrying it is denied, and neither can
+        // be added, changed, or CLEARED on update because `hasOnly(['reportCount'])`
+        // bounds a non-admin to the counter alone. So a client can neither
+        // self-hide, un-hide, forge an AI verdict, forge or scrub the safety
+        // marker `confirmClaim` gates on, nor erase the verdict an admin's Restore
         // deliberately leaves behind; and the read rule keeps `flagged` and
         // `hidden` Proofs admin-only either way. Pinned by
         // tests/rules/cloud-vision-moderation.test.ts.

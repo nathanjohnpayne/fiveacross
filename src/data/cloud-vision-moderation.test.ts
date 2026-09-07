@@ -15,9 +15,12 @@ import type { Cell, ClaimDoc, ProofDoc } from '../types';
 // verdict). These cases pin the split: the CLAIM still resolves and the Mark is
 // still confirmed; only the media stays hidden.
 //
-// The gate is `visionHideStands` (./moderation), the client mirror of
-// `functions/src/visionHide.ts`'s allowlist — pinned against the functions
-// original by the parity block in tests/functions/cloud-vision-moderation.test.ts.
+// The gate is `safetyHideStands` (./moderation), and it reads ONLY facts the
+// server writes: `hideProofOnVisionFlag`'s `safetyHide` marker, and the
+// `'flagged'` status no client may set. It holds no allowlist of its own (Codex
+// P1 round 2) — Functions and this bundle deploy separately, so a client that
+// re-derived the verdict would publish a Proof hidden for a verdict its cached
+// copy of the list had never heard of.
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown; exists: () => boolean };
@@ -62,7 +65,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
 });
 
 import { confirmClaim, rejectClaim } from './admin';
-import { visionHideStands, isAutoHideVisionFlag, AUTO_HIDE_VISION_FLAGS } from './moderation';
+import { safetyHideStands } from './moderation';
 
 /** A dealt board whose Square 4 is the pending claim backed by proof `P`. */
 function boardWithPendingClaim(): Cell[] {
@@ -134,36 +137,44 @@ beforeEach(() => {
   });
 });
 
-describe('visionHideStands — the client mirror of the auto-hide allowlist (#133)', () => {
-  it('stands on a hidden or flagged Proof carrying an extreme/illegal verdict', () => {
-    expect(visionHideStands('hidden', 'violence')).toBe(true);
-    expect(visionHideStands('flagged', 'violence')).toBe(true);
-    expect(visionHideStands('hidden', 'extreme')).toBe(true);
-    expect(visionHideStands('flagged', 'extreme')).toBe(true);
+describe('safetyHideStands — the SERVER-OWNED confirm-time gate (#133)', () => {
+  it('stands on the marker the hide trigger stamps, and on a still-flagged Proof', () => {
+    expect(safetyHideStands({ status: 'hidden', safetyHide: true })).toBe(true);
+    expect(safetyHideStands({ status: 'flagged' })).toBe(true);
+  });
+
+  it('reads NO verdict: an unknown future verdict holds, a known one without the marker does not', () => {
+    // The staggered-deploy case the mirror could not survive. A widened Functions
+    // allowlist hides a Proof for a verdict this bundle has never heard of and
+    // stamps the marker — and the gate holds, because the verdict is not an input.
+    expect(safetyHideStands({ status: 'hidden', safetyHide: true, visionFlag: 'gore' } as never)).toBe(true);
+    // The converse is the same fact: `violence` alone is not a safety hide. Only
+    // the server's own record is.
+    expect(safetyHideStands({ status: 'hidden', visionFlag: 'violence' } as never)).toBe(false);
   });
 
   it('never stands on a Proof the trigger does not own — pending, active, or missing', () => {
     // 'pending'/'active' are outside qualifiesForVisionHide, so there is no
     // server-authoritative hide to preserve; an absent doc has no state at all.
-    expect(visionHideStands('pending', 'violence')).toBe(false);
-    expect(visionHideStands('active', 'violence')).toBe(false);
-    expect(visionHideStands(undefined, 'violence')).toBe(false);
+    expect(safetyHideStands({ status: 'pending' })).toBe(false);
+    expect(safetyHideStands({ status: 'active' })).toBe(false);
+    expect(safetyHideStands(undefined)).toBe(false);
   });
 
-  it('never stands on a verdict outside the allowlist — nothing holds back for raciness', () => {
-    // ADR 0004: the app is intentionally racy. An unrecognized or mis-cased
-    // verdict fails closed to "not a safety hide", exactly like the producer.
-    for (const flag of ['racy', 'adult', 'spoof', 'Violence', '', undefined, null, 7, {}]) {
-      expect(visionHideStands('hidden', flag as string | null | undefined)).toBe(false);
-      expect(isAutoHideVisionFlag(flag)).toBe(false);
+  it('never stands once an admin Restored — the explicit lift clears the marker', () => {
+    expect(safetyHideStands({ status: 'active', safetyHide: false })).toBe(false);
+  });
+
+  it('is not fooled by a non-boolean marker value — only a literal `true` holds', () => {
+    for (const marker of [1, 'true', {}, [], null, undefined]) {
+      expect(safetyHideStands({ status: 'hidden', safetyHide: marker as never })).toBe(false);
     }
-    expect([...AUTO_HIDE_VISION_FLAGS]).toEqual(['violence', 'extreme']);
   });
 });
 
 describe('confirmClaim — a Vision safety hide survives the claim confirm (specs/cloud-vision-moderation.md)', () => {
-  it('leaves a HIDDEN Vision-flagged Proof hidden: no proof write at all, while the Mark is confirmed', async () => {
-    liveProof = { status: 'hidden', visionFlag: 'violence' };
+  it('leaves a MARKED Proof hidden: no proof write at all, while the Mark is confirmed', async () => {
+    liveProof = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
@@ -199,7 +210,8 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 
   it('publishes a Proof whose verdict is outside the allowlist — nothing withholds for raciness', async () => {
     // ADR 0004 in the confirm path: a racy verdict is a reason on the queue row,
-    // never a hide, so the claim's photo publishes exactly as it always did.
+    // never a hide, so nothing marks it and the claim's photo publishes exactly
+    // as it always did.
     liveProof = { status: 'pending', visionFlag: 'racy' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
@@ -207,10 +219,33 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
   });
 
+  it('holds an UNKNOWN future verdict the server hid — the gate never reads the verdict', async () => {
+    // The whole reason the client mirror is gone (Codex P1 round 2). A widened
+    // Functions allowlist hides a Proof for a verdict this bundle has never heard
+    // of; the marker is what this code reads, so the hold survives the skew.
+    liveProof = { status: 'hidden', safetyHide: true, visionFlag: 'gore' };
+
+    await confirmClaim(pendingClaim(), 'admin-1');
+
+    expect(setPayload('/proofs/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
+  });
+
+  it('publishes a plain hidden Proof carrying NO marker — a report or manual hide is confirm\'s to lift', async () => {
+    // The counterpart fact: an extreme verdict alone is not a safety hide. This
+    // doc was hidden by the #43 threshold or an admin's own Hide, each with its
+    // own console lift, and confirm's behaviour toward them is unchanged.
+    liveProof = { status: 'hidden', visionFlag: 'violence' };
+
+    await confirmClaim(pendingClaim(), 'admin-1');
+
+    expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
+  });
+
   it('publishes a Proof an admin already Restored, so the override is not re-applied', async () => {
-    // restoreProof leaves `visionFlag` set as the audit record of the override.
-    // The status is what says the hide was lifted, so the confirm publishes.
-    liveProof = { status: 'active', visionFlag: 'violence' };
+    // restoreProof clears the marker and leaves `visionFlag` set as the audit
+    // record of the override, so the confirm publishes.
+    liveProof = { status: 'active', safetyHide: false, visionFlag: 'violence' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
@@ -221,7 +256,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     // The admin's queue may have opened before moderateProof ran. The gate reads
     // the doc inside the transaction, and Firestore requires every read to
     // precede every write, so the read must sit ahead of the first tx.set.
-    liveProof = { status: 'hidden', visionFlag: 'violence' };
+    liveProof = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
@@ -242,7 +277,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
   });
 
   it('never reads the Proof on a REJECT — a rejected claim publishes nothing either way', async () => {
-    liveProof = { status: 'hidden', visionFlag: 'violence' };
+    liveProof = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
 
     await rejectClaim(pendingClaim(), 'admin-1');
 

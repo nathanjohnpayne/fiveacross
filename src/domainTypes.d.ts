@@ -732,6 +732,14 @@ export interface ProofDoc {
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.
   status: 'active' | 'pending' | 'hidden' | 'flagged';
   visionFlag?: string | null; // set by the moderation function for illegal/extreme content
+  // The SERVER-OWNED record that a safety hide stands on this Proof (#133).
+  // `hideProofOnVisionFlag` stamps `true` in the same transactional update that
+  // writes `status: 'hidden'`; the warned console Restore writes `false` when an
+  // admin lifts it; absent means no safety hide has ever stood. `confirmClaim`
+  // reads THIS, never the verdict string, so the confirm-time decision is the
+  // server's own record rather than a client re-derivation of an allowlist a
+  // stale bundle may no longer share with the Functions deployment.
+  safetyHide?: boolean;
   // Whether the photo came from the live camera or the photo library — stamps
   // the 🖼️ Feed badge on library picks (daily-cards-spec § "Square tap"; #190).
   // Optional: absent on Proofs written before the two-affordance photo body.

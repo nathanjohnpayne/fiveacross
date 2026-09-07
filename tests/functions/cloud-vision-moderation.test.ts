@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   AUTO_HIDE_VISION_FLAGS,
+  SAFETY_HIDE_MARKER,
   isAutoHideVisionFlag,
   qualifiesForVisionHide,
   hideVisionFlaggedIfQualifies,
@@ -13,11 +14,7 @@ import {
   type AdminFirestore,
   type ReportableDoc,
 } from '../../functions/src/autohide';
-import {
-  AUTO_HIDE_VISION_FLAGS as clientAutoHideFlags,
-  isAutoHideVisionFlag as clientIsAutoHideVisionFlag,
-  visionHideStands,
-} from '../../src/data/moderation';
+import { safetyHideStands } from '../../src/data/moderation';
 
 // specs/cloud-vision-moderation.md — the CONSUMER half of Cloud Vision (#133,
 // ADR 0004). Proves the Vision-flag → hide path: an extreme/illegal `visionFlag`
@@ -115,16 +112,21 @@ function fakeDb(store: Record<string, Record<string, unknown> | undefined>) {
 describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () => {
   const PROOF = 'events/e/proofs/p1';
 
-  it('flips a flagged extreme Proof to hidden and returns true', async () => {
+  it('flips a flagged extreme Proof to hidden, STAMPING the safety marker, and returns true', async () => {
+    // One update, both fields: the marker is what the client's confirm-time gate
+    // reads (src/data/moderation.ts safetyHideStands), so there must be no window
+    // in which the Proof is hidden without the server's record of why, and no
+    // second write for a client to observe half of.
     const { db, updates } = fakeDb({ [PROOF]: { status: 'flagged', visionFlag: 'violence', reportCount: 0 } });
     expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
-    expect(updates).toEqual([{ path: PROOF, data: { status: 'hidden' } }]);
+    expect(updates).toEqual([{ path: PROOF, data: { status: 'hidden', safetyHide: true } }]);
+    expect(SAFETY_HIDE_MARKER).toBe('safetyHide'); // the field name the client and the rules both name
   });
 
-  it('writes status and NOTHING else — visionFlag survives, so the hide stays legible as a Vision hide', async () => {
+  it('writes status + the marker and NOTHING else — visionFlag survives, so the hide stays legible', async () => {
     const { db, store } = fakeDb({ [PROOF]: { status: 'flagged', visionFlag: 'extreme', reportCount: 2 } });
     await hideVisionFlaggedIfQualifies(db, 'e', 'p1');
-    expect(store[PROOF]).toEqual({ status: 'hidden', visionFlag: 'extreme', reportCount: 2 });
+    expect(store[PROOF]).toEqual({ status: 'hidden', safetyHide: true, visionFlag: 'extreme', reportCount: 2 });
   });
 
   it('re-confirms LIVE state: an admin who Restored since the trigger fired is not reverted', async () => {
@@ -145,9 +147,21 @@ describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () =
     expect(await hideVisionFlaggedIfQualifies(racy.db, 'e', 'p1')).toBe(false);
     expect(racy.updates).toEqual([]);
 
-    const already = fakeDb({ [PROOF]: { status: 'hidden', visionFlag: 'violence' } });
+    const already = fakeDb({ [PROOF]: { status: 'hidden', safetyHide: true, visionFlag: 'violence' } });
     expect(await hideVisionFlaggedIfQualifies(already.db, 'e', 'p1')).toBe(false);
     expect(already.updates).toEqual([]);
+  });
+
+  it('never re-stamps a Proof an admin Restored — the lift is not overwritten by a retry', async () => {
+    // restoreProof writes { status: 'active', safetyHide: false }. A late or
+    // duplicate trigger delivery re-reads the LIVE doc and stands down, so the
+    // admin's `false` (and the media) survive.
+    const { db, updates, store } = fakeDb({
+      [PROOF]: { status: 'active', safetyHide: false, visionFlag: 'violence' },
+    });
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(false);
+    expect(updates).toEqual([]);
+    expect(store[PROOF]).toMatchObject({ status: 'active', safetyHide: false });
   });
 });
 
@@ -251,63 +265,81 @@ describe('composition with the #43 report-count auto-hide — the two paths neve
   });
 });
 
-// --- client/functions parity: the confirm-time gate --------------------------
+// --- the server-owned marker is the client's ONLY input ----------------------
 //
 // The Vision hide is server-authoritative, but ONE client write can undo it.
 // `confirmClaim` (src/data/admin.ts) publishes an admin_confirmed claim's
 // 'pending' Proof by writing `status: 'active'`, and active Proofs sit OUTSIDE
 // `qualifiesForVisionHide` — so confirming a Mark whose photo had already been
 // safety-hidden would re-expose extreme/illegal media and this trigger would
-// never hide it again. The client gates that publish on `visionHideStands`
-// (src/data/moderation.ts), which MIRRORS this module's allowlist because the
-// app and the Functions package are deliberately decoupled (the same shape as
-// the last-call-copy mirror in tests/functions/lastcall-copy-parity.test.ts).
+// never hide it again.
 //
-// A mirror without a parity test is how two predicates drift apart. These cases
-// feed ONE verdict set to both sides and are intended to FAIL if either side
-// changes alone.
+// That gate used to MIRROR the allowlist above on the client and lean on a parity
+// test to keep the two copies honest. It does not any more (Codex P1 round 2): a
+// parity test compares two files in ONE revision, and the risk is two revisions
+// running at once — Functions and the PWA deploy separately, so a cached bundle
+// holding yesterday's list reads a newly hide-worthy verdict as safe and
+// publishes a Proof the server had deliberately hidden. The client now reads only
+// what THIS module writes. These cases pin the seam from both ends: the verdict
+// list stays here alone, and the marker this module stamps is what the client acts
+// on.
 
-describe('client/functions parity — the auto-hide allowlist (#133)', () => {
-  it('exports the SAME verdict list on both sides', () => {
-    expect([...clientAutoHideFlags]).toEqual([...AUTO_HIDE_VISION_FLAGS]);
-  });
-
-  it('agrees verdict-for-verdict on what counts as an auto-hide flag', () => {
-    const verdicts: unknown[] = [
-      'violence',
-      'extreme',
-      'racy',
-      'adult',
-      'spoof',
-      'medical',
-      'Violence',
-      'EXTREME',
-      ' violence',
-      '',
-      null,
-      undefined,
-      7,
-      {},
-      ['violence'],
-    ];
-    for (const verdict of verdicts) {
-      expect(clientIsAutoHideVisionFlag(verdict)).toBe(isAutoHideVisionFlag(verdict));
+describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)', () => {
+  it('holds on the marker for ANY verdict — including one this build has never heard of', () => {
+    // The staggered-deploy case in full. A future Functions release widens
+    // AUTO_HIDE_VISION_FLAGS, hides a Proof for 'gore' and stamps the marker; a
+    // client built before that release still holds, because it never reads the
+    // verdict at all.
+    for (const verdict of ['violence', 'extreme', 'gore', 'weapons', 'Violence', '', null]) {
+      expect(isAutoHideVisionFlag(verdict)).toBe(['violence', 'extreme'].includes(verdict as string));
+      expect(safetyHideStands({ status: 'hidden', safetyHide: true })).toBe(true);
     }
   });
 
-  it('holds the client gate closed on exactly the states the trigger owns', () => {
-    for (const verdict of ['violence', 'extreme', 'racy', 'adult', null]) {
-      // 'flagged': the doc the trigger owns — the two predicates must agree.
-      const flaggedDoc: VisionFlaggedDoc = { status: 'flagged', visionFlag: verdict };
-      expect(visionHideStands('flagged', verdict)).toBe(qualifiesForVisionHide(flaggedDoc));
-      // 'hidden': the doc the trigger already produced and now stands down on
-      // (its loop guard) — precisely the one a confirm would re-expose, so the
-      // client gate holds where the trigger cannot.
-      expect(qualifiesForVisionHide({ status: 'hidden', visionFlag: verdict })).toBe(false);
-      expect(visionHideStands('hidden', verdict)).toBe(isAutoHideVisionFlag(verdict));
-      // Everything the trigger never owned publishes exactly as it always did.
-      expect(visionHideStands('pending', verdict)).toBe(false);
-      expect(visionHideStands('active', verdict)).toBe(false);
-    }
+  it('holds on a still-flagged Proof, the one state the marker has not landed on yet', () => {
+    // The window between moderateProof's flag write and this trigger's hide (or a
+    // swallowed best-effort failure it will retry on the next write). Publishing
+    // there would move the doc out of the state `qualifiesForVisionHide` looks
+    // for, so the retry could never fire.
+    expect(safetyHideStands({ status: 'flagged' })).toBe(true);
+    expect(safetyHideStands({ status: 'flagged', safetyHide: false })).toBe(true);
+  });
+
+  it('stands down wherever this trigger never wrote a marker — including a plain hide', () => {
+    // A 'hidden' Proof with no marker was hidden by an admin's own Hide or by the
+    // #43 report threshold; each has its own console lift and confirm has never
+    // withheld for either. A restored Proof carries the admin's explicit `false`.
+    expect(safetyHideStands({ status: 'hidden' })).toBe(false);
+    expect(safetyHideStands({ status: 'hidden', safetyHide: false })).toBe(false);
+    expect(safetyHideStands({ status: 'active', safetyHide: false })).toBe(false);
+    expect(safetyHideStands({ status: 'pending' })).toBe(false);
+    expect(safetyHideStands({ status: 'active' })).toBe(false);
+    expect(safetyHideStands(undefined)).toBe(false);
+  });
+
+  it('agrees with the trigger on the doc the trigger owns, and covers the one it cannot', () => {
+    const flagged: VisionFlaggedDoc = { status: 'flagged', visionFlag: 'violence' };
+    // 'flagged' + extreme: the trigger is about to hide it, and the client holds.
+    expect(qualifiesForVisionHide(flagged)).toBe(true);
+    expect(safetyHideStands(flagged)).toBe(true);
+    // 'hidden' + the marker: the doc the trigger already produced and now stands
+    // down on (its loop guard) — precisely the one a confirm would re-expose, so
+    // the client gate holds exactly where the trigger cannot.
+    const hidden = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
+    expect(qualifiesForVisionHide(hidden)).toBe(false);
+    expect(safetyHideStands(hidden)).toBe(true);
+  });
+
+  it('names the marker field identically on both sides of the seam', async () => {
+    const { db, updates } = fakeDb({
+      'events/e/proofs/p1': { status: 'flagged', visionFlag: 'violence' },
+    });
+    await hideVisionFlaggedIfQualifies(db, 'e', 'p1');
+    const written = updates[0].data as { status?: string; safetyHide?: boolean };
+    expect(Object.keys(updates[0].data)).toContain(SAFETY_HIDE_MARKER);
+    // The client reads that written doc back through the same key, with no
+    // translation layer between them to drift.
+    expect(safetyHideStands(written)).toBe(true);
   });
 });
+

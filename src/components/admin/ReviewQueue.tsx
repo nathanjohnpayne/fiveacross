@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
-import { visionHideStands } from '../../data/moderation';
+import { safetyHideStands } from '../../data/moderation';
 import {
   confirmClaim,
   rejectClaim,
@@ -384,7 +384,7 @@ export default function ReviewQueue({
   const admins = event?.admins ?? [];
   const claimsVisible = event?.claimMode === 'admin_confirmed';
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
-  // #133: the AI verdict standing on a pending claim's Proof, keyed by proof id.
+  // #133: the safety hold standing on a pending claim's Proof, keyed by proof id.
   // Cloud Vision scans the uploaded object, so a claim's photo can be flagged and
   // safety-hidden BEFORE the claim is reviewed — and `confirmClaim` deliberately
   // does NOT publish such a Proof (src/data/admin.ts), because Confirm shows only
@@ -393,10 +393,14 @@ export default function ReviewQueue({
   // confirmed, the photo stays hidden. Derived from the Reports group's own rows,
   // which `useReportedProofs` already queues on its `visionFlag` arm — no second
   // subscription, no per-claim read.
-  const visionHeldClaimProofs = new Map<string, string>();
+  //
+  // Membership is the SAME server-owned predicate `confirmClaim` gates on, so the
+  // row can never promise one thing and the write do another. The verdict rides
+  // along only as COPY for the pill; it is never what decides (Codex P1 round 2).
+  const heldClaimProofs = new Map<string, string | null>();
   for (const row of reports) {
-    if (row.kind === 'proof' && visionHideStands(row.proof.status, row.proof.visionFlag)) {
-      visionHeldClaimProofs.set(row.proof.id, String(row.proof.visionFlag));
+    if (row.kind === 'proof' && safetyHideStands(row.proof)) {
+      heldClaimProofs.set(row.proof.id, row.proof.visionFlag ?? null);
     }
   }
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
@@ -684,16 +688,21 @@ export default function ReviewQueue({
           {!claims.length && <p className="muted" style={{ fontSize: 12 }}>Nothing to confirm.</p>}
           <div className="list">
             {claims.map((c) => {
-              const visionFlag = c.proofId ? visionHeldClaimProofs.get(c.proofId) : undefined;
+              const held = c.proofId ? heldClaimProofs.has(c.proofId) : false;
+              const verdict = c.proofId ? heldClaimProofs.get(c.proofId) : null;
               return (
                 <div key={c.id} className="row">
                   <div className="grow">
                     <div className="name">
                       {c.displayName}
-                      {visionFlag && <span className="pill pill-hidden">{`hidden · AI screen: ${visionFlag}`}</span>}
+                      {held && (
+                        <span className="pill pill-hidden">
+                          {verdict ? `hidden · AI screen: ${verdict}` : 'hidden · safety hold'}
+                        </span>
+                      )}
                     </div>
                     <div className="sub">{c.itemText}</div>
-                    {visionFlag && (
+                    {held && (
                       <div className="sub">
                         Confirming credits the mark; the photo stays hidden for moderation.
                       </div>

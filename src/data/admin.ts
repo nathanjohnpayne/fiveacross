@@ -7,7 +7,7 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor, visionHideStands } from './moderation';
+import { isSystemAuthor, safetyHideStands } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
@@ -398,7 +398,25 @@ export function bulkApproveItems(
   return approveItems(items, adminUid, eventId);
 }
 export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
-export const restoreProof = (id: string) => updateDoc(proof(id), { status: 'active' });
+
+/**
+ * The console's Restore — the ONE place an admin may override an AI verdict, and
+ * the only lift for a Vision safety hide (there is no counter to clear).
+ *
+ * It clears the server's `safetyHide` marker in the same write that publishes the
+ * Proof (#133, Codex P1 round 2). The marker, not the verdict string, is what
+ * `confirmClaim` reads, so leaving it set would keep the Proof held after the
+ * admin had explicitly lifted the hide. Writing `false` rather than deleting the
+ * key records the override as a fact, the same reason `visionFlag` itself is left
+ * in place: the row keeps its `AI screen: …` pill, and the queue keeps the Proof
+ * (`useReportedProofs` queues on the verdict), so the decision stays visible and
+ * re-hideable instead of vanishing.
+ *
+ * A fresh scan that re-flags the Proof takes it back to `'flagged'`, which the
+ * trigger owns again — the override is a lift, not immunity.
+ */
+export const restoreProof = (id: string) =>
+  updateDoc(proof(id), { status: 'active', safetyHide: false });
 
 // Lift the ADR 0004 Phase 0 community auto-hide by resetting reportCount to 0 —
 // the explicit admin action the console lacked (Codex P2, PR #107 finding 3).
@@ -1033,9 +1051,9 @@ async function resolve(
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
     //
-    // UNLESS a Vision safety hide stands on it (#133, Codex P1). Cloud Vision
-    // scans the uploaded object, so an admin_confirmed claim's Proof can be
-    // flagged and hidden BEFORE its claim is ever reviewed. Publishing it
+    // UNLESS a server-authoritative safety hide stands on it (#133, Codex P1).
+    // Cloud Vision scans the uploaded object, so an admin_confirmed claim's Proof
+    // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
     // unconditionally would write `status: 'active'`, and active Proofs are
     // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
     // in front of every Player and the trigger would never hide it again, lifted
@@ -1045,16 +1063,24 @@ async function resolve(
     // lifting. So the claim still resolves and the Mark is still confirmed —
     // only the media stays hidden, and the queue row says so on the claim.
     //
+    // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s
+    // `safetyHide` marker, and the `'flagged'` status only `moderateProof` writes
+    // — never the verdict string (Codex P1 round 2). The verdict's MEANING lives
+    // in the Functions allowlist, and Functions and this bundle deploy
+    // separately, so a client that re-derived it would publish a Proof hidden for
+    // a verdict its cached copy of the list had never heard of.
+    //
     // The gate reads the LIVE snapshot, not the stale event that opened the
     // admin's console, and only a genuinely publishable Proof is moved: a
-    // 'pending' one, an already-active one (a no-op re-write), or one whose
-    // verdict is outside the auto-hide allowlist — nothing auto-hides for
-    // raciness (ADR 0004). A missing snapshot keeps the pre-#133 write.
+    // 'pending' one, an already-active one (a no-op re-write), or a plain
+    // report-count / manual hide, whose lift is `Clear reports` / `Restore` and
+    // whose confirm behaviour is unchanged. A missing snapshot keeps the pre-#133
+    // write.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
         : undefined;
-      if (!visionHideStands(liveProof?.status, liveProof?.visionFlag)) {
+      if (!safetyHideStands(liveProof)) {
         tx.set(claimProofRef, { status: 'active' }, { merge: true });
       }
     }

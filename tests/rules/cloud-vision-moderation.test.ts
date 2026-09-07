@@ -17,10 +17,16 @@ import { collection, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, 
 //      AI screen has flagged or already hidden.
 //   2. A non-admin cannot forge, change, or CLEAR `visionFlag` — the audit record
 //      an admin's Restore deliberately leaves behind is not client-erasable.
-//   3. `flagged` and Vision-`hidden` Proofs stay admin-only reads, so the hide is
+//   3. Nor the `safetyHide` marker the trigger stamps beside the status, which is
+//      the ONE fact `confirmClaim` gates the claim-confirm publish on: a client
+//      that could forge or scrub it could hold or release any Proof it liked.
+//   4. `flagged` and Vision-`hidden` Proofs stay admin-only reads, so the hide is
 //      authoritative for the Feed rather than presentational.
-//   4. The admin console's Restore, and the community report path, both still work
+//   5. The admin console's Restore, and the community report path, both still work
 //      on an AI-flagged Proof.
+// Both moderation fields ride the SAME `hasOnly(['reportCount'])` bound the #43
+// `status` guard already imposed, so the marker needed no rules change — these
+// cases are the pin that says so, not a new grant.
 // The PERMISSION_DENIED lines the SDK logs are the expected assertFails denials.
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
@@ -66,7 +72,12 @@ beforeEach(async () => {
     // admin SDK writes them (rules disabled — exactly the Function's own bypass).
     await setDoc(doc(s, at('proofs/pActive')), photoProof('pActive'));
     await setDoc(doc(s, at('proofs/pFlagged')), photoProof('pFlagged', { status: 'flagged', visionFlag: 'violence' }));
-    await setDoc(doc(s, at('proofs/pVisionHidden')), photoProof('pVisionHidden', { status: 'hidden', visionFlag: 'violence' }));
+    await setDoc(
+      doc(s, at('proofs/pVisionHidden')),
+      // Exactly what `hideVisionFlaggedIfQualifies` writes: the status AND the
+      // server-owned marker, in one update.
+      photoProof('pVisionHidden', { status: 'hidden', safetyHide: true, visionFlag: 'violence' }),
+    );
   });
 });
 
@@ -90,10 +101,26 @@ describe('firestore.rules — the Vision hide needs no client write surface (spe
     await assertFails(updateDoc(doc(db(ALICE), at('proofs/pVisionHidden')), { reportCount: increment(1), visionFlag: null }));
   });
 
-  it('a non-admin cannot create a Proof that arrives pre-flagged or pre-hidden', async () => {
+  it('a non-admin cannot forge, flip, or SCRUB the safetyHide marker the confirm gate reads', async () => {
+    // `confirmClaim` publishes a claim's Proof unless this marker stands, so a
+    // client able to write it could release any Proof the AI screen hid — or hold
+    // any Proof it liked. `hasOnly(['reportCount'])` is what forbids all four.
+    await assertFails(updateDoc(doc(db(ALICE), at('proofs/pVisionHidden')), { safetyHide: false })); // scrub the hold
+    await assertFails(updateDoc(doc(db(BOB), at('proofs/pVisionHidden')), { safetyHide: false }));
+    await assertFails(updateDoc(doc(db(ALICE), at('proofs/pActive')), { safetyHide: true })); // forge a hold
+    await assertFails(
+      updateDoc(doc(db(ALICE), at('proofs/pVisionHidden')), { reportCount: increment(1), safetyHide: false }),
+    ); // smuggled onto the one update a non-admin IS allowed
+  });
+
+  it('a non-admin cannot create a Proof that arrives pre-flagged, pre-hidden, or pre-marked', async () => {
     await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew1')), photoProof('pNew1', { visionFlag: 'violence' })));
     await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew2')), photoProof('pNew2', { status: 'flagged' })));
     await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew3')), photoProof('pNew3', { status: 'hidden' })));
+    // `safetyHide` is not in the create `hasOnly` list at all, so carrying it —
+    // in EITHER direction — fails closed with no extra clause.
+    await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew5')), photoProof('pNew5', { safetyHide: true })));
+    await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew6')), photoProof('pNew6', { safetyHide: false })));
     await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/pNew4')), photoProof('pNew4'))); // the ordinary active create still works
   });
 });
@@ -123,8 +150,12 @@ describe('firestore.rules — a Vision-hidden Proof is authoritatively gone from
 });
 
 describe('firestore.rules — the admin Restore and the community report path still work on a flagged Proof', () => {
-  it('an admin restores a Vision-hidden Proof with a status-only write, leaving visionFlag intact', async () => {
-    await assertSucceeds(updateDoc(doc(db(ADMIN), at('proofs/pVisionHidden')), { status: 'active' }));
+  it('an admin restores a Vision-hidden Proof, clearing the marker and leaving visionFlag intact', async () => {
+    // The exact `restoreProof` write (src/data/admin.ts): the status and the
+    // marker together, so the hold the confirm gate reads is lifted in one go.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), at('proofs/pVisionHidden')), { status: 'active', safetyHide: false }),
+    );
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('proofs/pFlagged')), { status: 'hidden' })); // and can hide by hand
   });
 

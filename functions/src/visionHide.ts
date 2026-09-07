@@ -77,6 +77,28 @@ export interface VisionFlaggedDoc {
 }
 
 /**
+ * The SERVER-OWNED marker this module stamps beside `status: 'hidden'`, and the
+ * one fact the client's confirm-time gate reads (`safetyHideStands`,
+ * src/data/moderation.ts).
+ *
+ * It exists because a client must never re-derive the verdict. `visionFlag` is a
+ * string whose MEANING lives in `AUTO_HIDE_VISION_FLAGS` above, and Functions and
+ * the PWA deploy separately: widen the allowlist here and, until every cached
+ * bundle catches up, a client holding the older list reads a newly hide-worthy
+ * verdict as safe and publishes a Proof this module deliberately hid. A boolean
+ * the server writes carries no such interpretation — a client that has never
+ * heard of the verdict still sees the hide.
+ *
+ * Tri-state by design, and the third state is the point: `true` = a safety hide
+ * stands; `false` = an admin lifted it through the warned console Restore, which
+ * is the one place an AI verdict may be overridden (`restoreProof`,
+ * src/data/admin.ts, writes the `false` alongside the status); absent = no safety
+ * hide has ever stood on this Proof. `visionFlag` stays put through all three, so
+ * the audit record of WHAT was screened survives the lift exactly as before.
+ */
+export const SAFETY_HIDE_MARKER = 'safetyHide' as const;
+
+/**
  * The whole decision, as a pure predicate over the doc's RESULTING state: it is
  * currently `'flagged'` AND carries an extreme/illegal `visionFlag`.
  *
@@ -89,13 +111,13 @@ export interface VisionFlaggedDoc {
  *
  *   - Loop guard. Our own write makes the doc `'hidden'`, not `'flagged'`, so
  *     the re-fired `onDocumentWritten` no-ops. No infinite loop.
- *   - Admin Restore is preserved. `restoreProof` (src/data/admin.ts) writes
- *     `status: 'active'` and deliberately LEAVES `visionFlag` in place as the
- *     audit record of what the admin overrode. That doc is no longer `'flagged'`,
- *     so this path never re-hides it and the restore sticks — the same shape as
- *     the report path's restore, which survives because it leaves `reportCount`
- *     un-raised. A restored Proof is re-hidden only by a fresh scan (a re-upload
- *     re-flags it) or by an admin.
+ *   - Admin Restore is preserved. `restoreProof` (src/data/admin.ts) clears the
+ *     `safetyHide` marker and leaves `visionFlag` in place as the audit record of
+ *     what the admin overrode. That doc is no longer `'flagged'`, so this path
+ *     never re-hides it and the restore sticks — the same shape as the report
+ *     path's restore, which survives because it leaves `reportCount` un-raised. A
+ *     restored Proof is re-hidden only by a fresh scan (a re-upload re-flags it)
+ *     or by an admin.
  *   - Retry-safe. Because it reads state rather than a transition, ANY later
  *     write that leaves the doc `'flagged'` with an extreme flag (a report bump,
  *     an admin Clear reports) re-attempts a hide that an earlier swallowed
@@ -115,16 +137,22 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  * never act on a stale event snapshot:
  *
  *   - an admin who Restored (`'active'`) or Hid the Proof by hand since the
- *     trigger fired → no-op, so the admin's decision is not silently reverted;
+ *     trigger fired → no-op, so the admin's decision is not silently reverted
+ *     and no marker is stamped on a hide the admin owns;
  *   - a Proof DELETED since the snapshot → no-op via `tx.update` on a missing
  *     doc, never a re-creating `set`;
  *   - a `visionFlag` no longer in the allowlist → no-op.
  *
- * It writes `status` and NOTHING else. Leaving `visionFlag` intact is the point
- * of the whole ticket: the resulting doc is `hidden` WITH its reason attached,
- * which is what lets the console tell a Vision hide from a report-count one and
- * what `notify.ts` `deriveReason` already labels with the flag rather than
- * `(reports >= threshold)`.
+ * It writes `status` and the `safetyHide` marker, and NOTHING else. Leaving
+ * `visionFlag` intact is the point of the whole ticket: the resulting doc is
+ * `hidden` WITH its reason attached, which is what lets the console tell a Vision
+ * hide from a report-count one and what `notify.ts` `deriveReason` already labels
+ * with the flag rather than `(reports >= threshold)`.
+ *
+ * The marker rides the SAME update, so there is no window in which a Proof is
+ * hidden without the server's record of why, and no second write for a client to
+ * observe half of. See `SAFETY_HIDE_MARKER` for why the client reads that boolean
+ * rather than re-deciding the verdict for itself.
  *
  * `db` is a parameter so the read-then-conditional-write is unit-testable with a
  * fake transaction. Returns whether it wrote.
@@ -139,7 +167,7 @@ export async function hideVisionFlaggedIfQualifies(
     const snap = await tx.get(docRef);
     if (!snap.exists) return false; // deleted since the snapshot — never re-create
     if (!qualifiesForVisionHide(snap.data() as VisionFlaggedDoc | undefined)) return false;
-    tx.update(docRef, { status: 'hidden' });
+    tx.update(docRef, { status: 'hidden', [SAFETY_HIDE_MARKER]: true });
     return true;
   });
 }

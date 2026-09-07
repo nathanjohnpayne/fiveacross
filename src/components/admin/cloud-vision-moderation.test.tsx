@@ -243,8 +243,13 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
     // `confirmClaim` (src/data/admin.ts) deliberately does NOT publish this
     // Proof, so the row must say so: the Confirm control shows only the
     // submitter and the Prompt, and is not the warned moderation Restore.
+    // Membership is the SAME server-owned predicate the write gates on — the
+    // `safetyHide` marker — so the row cannot promise one thing and the write do
+    // another. The verdict is copy for the pill, never the decision.
     adminConfirmedEvent();
-    H.flagged = [proof('P', 0, { displayName: 'Held Photo', status: 'hidden', visionFlag: 'violence' })];
+    H.flagged = [
+      proof('P', 0, { displayName: 'Held Photo', status: 'hidden', safetyHide: true, visionFlag: 'violence' }),
+    ];
     H.claims = [claim()];
     renderQueue();
 
@@ -253,6 +258,33 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
     expect(
       row.getByText('Confirming credits the mark; the photo stays hidden for moderation.'),
     ).toBeInTheDocument();
+  });
+
+  it('annotates a hold the server marked for a verdict this build has never heard of', () => {
+    // The staggered-deploy case on the console side: a widened Functions
+    // allowlist hides for `gore`, and the row still reads truthfully because it
+    // keys on the marker and merely PRINTS whatever verdict came with it.
+    adminConfirmedEvent();
+    H.flagged = [
+      proof('P', 0, { displayName: 'Held Photo', status: 'hidden', safetyHide: true, visionFlag: 'gore' }),
+    ];
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Deck Daddy');
+    expect(row.getByText('hidden · AI screen: gore')).toBeInTheDocument();
+    expect(row.getByText(/the photo stays hidden for moderation/)).toBeInTheDocument();
+  });
+
+  it('leaves a plain hidden Proof with NO marker unannotated — confirm still publishes it', () => {
+    // A report-count or manual hide. Each has its own console lift and confirm's
+    // behaviour toward them is unchanged, so the claim row says nothing.
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 0, { displayName: 'Report Hidden', status: 'hidden', visionFlag: 'violence' })];
+    H.claims = [claim()];
+    renderQueue();
+
+    expect(rowFor('Deck Daddy').queryByText(/stays hidden for moderation/)).toBeNull();
   });
 
   it('says the same while the Proof is still FLAGGED and the hide has not landed yet', () => {
@@ -279,19 +311,21 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
   });
 
   it('leaves a merely-racy verdict unannotated — nothing withholds the photo for raciness', () => {
-    // ADR 0004 again, on the claim side: a racy verdict is not a safety hide, so
-    // the confirm publishes exactly as it always did and the row says nothing.
+    // ADR 0004 again, on the claim side: raciness never earns the marker, so the
+    // confirm publishes exactly as it always did and the row says nothing.
     adminConfirmedEvent();
-    H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'hidden', visionFlag: 'racy' })];
+    H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'active', visionFlag: 'racy' })];
     H.claims = [claim()];
     renderQueue();
 
     expect(rowFor('Deck Daddy').queryByText(/stays hidden for moderation/)).toBeNull();
   });
 
-  it('annotates only the claim whose OWN proofId carries the verdict', () => {
+  it('annotates only the claim whose OWN proofId carries the hold', () => {
     adminConfirmedEvent();
-    H.flagged = [proof('P', 0, { displayName: 'Held Photo', status: 'hidden', visionFlag: 'violence' })];
+    H.flagged = [
+      proof('P', 0, { displayName: 'Held Photo', status: 'hidden', safetyHide: true, visionFlag: 'violence' }),
+    ];
     H.claims = [claim(), claim({ id: 'claim-2', displayName: 'Pool Boy', proofId: 'Q' })];
     renderQueue();
 

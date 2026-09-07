@@ -112,49 +112,49 @@ export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: bo
 }
 
 /**
- * The `visionFlag` verdicts that carry a server-authoritative safety hide — the
- * CLIENT MIRROR of `AUTO_HIDE_VISION_FLAGS` in `functions/src/visionHide.ts`
- * (#133). Restated rather than imported because the app and the Functions package
- * are deliberately decoupled (the same posture `autohide.ts` takes toward this
- * module), and pinned against the functions original by the client/functions
- * parity block in `tests/functions/cloud-vision-moderation.test.ts`, which is
- * intended to FAIL if either side changes alone.
- *
- * An ALLOWLIST, not a denylist, for the same ADR 0004 reason the producer gives:
- * the app is intentionally racy, so an unrecognized verdict must fail closed to
- * "not a safety hide" rather than silently acquiring one.
+ * The subset of a Proof the confirm-time safety gate reads. Both fields are
+ * SERVER-OWNED: `firestore.rules` bounds a non-admin's Proof update to
+ * `reportCount` alone and admits neither key at create, so nothing a Player can
+ * write ever appears here.
  */
-export const AUTO_HIDE_VISION_FLAGS: readonly string[] = ['violence', 'extreme'];
-
-/** Is this `visionFlag` one of the extreme/illegal verdicts that auto-hides? */
-export function isAutoHideVisionFlag(flag: unknown): boolean {
-  return typeof flag === 'string' && AUTO_HIDE_VISION_FLAGS.includes(flag);
+export interface SafetyHideState {
+  status?: string;
+  /** `hideProofOnVisionFlag`'s marker (functions/src/visionHide.ts § SAFETY_HIDE_MARKER). */
+  safetyHide?: boolean | null;
 }
 
 /**
- * Does a server-authoritative Vision safety hide currently STAND on this Proof?
- * True iff it is `'hidden'` or `'flagged'` AND carries an extreme/illegal
- * `visionFlag` — the two states `hideProofOnVisionFlag` owns: `'flagged'` is the
- * Proof the trigger is about to hide (or failed to hide, and will retry on the
- * next write), `'hidden'` is the one it already hid.
+ * Does a server-authoritative safety hide currently STAND on this Proof? True iff
+ * the server RECORDED one (`safetyHide === true`), or the Proof is still
+ * `'flagged'` — the state `moderateProof` writes and `hideProofOnVisionFlag` is
+ * about to act on, or failed to act on and will retry on the next write.
  *
- * The one client caller is `confirmClaim` (./admin), which publishes an
- * admin_confirmed claim's `'pending'` Proof by writing `status: 'active'`. Active
- * Proofs sit OUTSIDE `qualifiesForVisionHide`, so without this gate confirming
- * the Mark would put extreme/illegal media back in front of every Player and the
- * trigger would never hide it again — from a control whose row shows only the
- * submitter and the Prompt, and which is emphatically NOT the warned, explicit
- * moderation Restore. The claim still resolves and the Mark is still confirmed;
- * only the media stays hidden, and the queue row says so.
+ * It reads no verdict and holds no allowlist, and that is the whole point (Codex
+ * P1 on #133). The verdict strings live in `AUTO_HIDE_VISION_FLAGS`
+ * (functions/src/visionHide.ts), and Functions and the PWA deploy separately: a
+ * client mirroring that list would, between a widening deploy and every cached
+ * bundle catching up, read a newly hide-worthy verdict as safe and publish a
+ * Proof the server had deliberately hidden. A parity test catches that drift only
+ * WITHIN one revision — it cannot catch two revisions running at once. So the
+ * decision moved onto facts the server itself writes: a boolean a client that has
+ * never heard of the verdict still understands, and a `'flagged'` status no
+ * client may set.
  *
- * Deliberately keyed on the Vision verdict alone rather than on "is this Proof
- * hidden at all": lifting an admin's manual hide or a report-count auto-hide is
- * confirm's pre-existing behaviour and has its own console affordances (`Restore`,
- * `Clear reports`). This closes the SAFETY hole ADR 0004 exists for.
+ * The one caller is `confirmClaim` (./admin), which publishes an admin_confirmed
+ * claim's `'pending'` Proof by writing `status: 'active'`. Active Proofs sit
+ * OUTSIDE `qualifiesForVisionHide`, so without this gate confirming the Mark
+ * would put extreme/illegal media back in front of every Player and the trigger
+ * would never hide it again — from a control whose row shows only the submitter
+ * and the Prompt, and which is emphatically NOT the warned, explicit moderation
+ * Restore. The claim still resolves and the Mark is still confirmed; only the
+ * media stays hidden, and the queue row says so.
+ *
+ * A `'hidden'` Proof carrying NO marker is deliberately publishable: it was
+ * hidden by an admin's own Hide or by the report-count threshold, each of which
+ * has its own console lift (`Restore`, `Clear reports`) and neither of which
+ * confirm's behaviour has ever withheld. This closes the SAFETY hole ADR 0004
+ * exists for, and nothing else.
  */
-export function visionHideStands(
-  status: string | undefined,
-  visionFlag: string | null | undefined,
-): boolean {
-  return (status === 'hidden' || status === 'flagged') && isAutoHideVisionFlag(visionFlag);
+export function safetyHideStands(proof: SafetyHideState | undefined): boolean {
+  return proof?.safetyHide === true || proof?.status === 'flagged';
 }
