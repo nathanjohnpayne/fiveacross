@@ -6,6 +6,7 @@ import {
   capturePendingEventInvitation,
   forgetPendingEventInvitationIf,
   hasEventInvitationFragment,
+  persistPendingEventInvitation,
   readPendingEventInvitation,
   readEventInvitationCode,
 } from './pendingEventInvitation';
@@ -234,6 +235,87 @@ describe('capture and recovery', () => {
     expect(sessionStorage.getItem(sessionKey)).toContain(CODE);
     expect(pendingKeys(localStorage)).toHaveLength(1);
     expect(localStorage.getItem(pendingKeys(localStorage)[0]!)).toContain(CODE);
+  });
+
+  it('prefers a newer capture from another tab over this tab\u2019s memory copy', async () => {
+    // Tab A captures first and keeps its memory copy; tab B (a fresh module
+    // instance sharing jsdom\u2019s localStorage) captures a newer Invitation for
+    // the same origin. Tab A\u2019s next read must answer B\u2019s record, so a Retry
+    // in A redeems the capture that supersedes the one that just failed.
+    const origin = window.location.origin;
+    const older = capturePendingEventInvitation({ hash: `#fa_invite=${'A'.repeat(43)}`, origin, now: 1_000 });
+    expect(older?.record.code).toBe('A'.repeat(43));
+
+    vi.resetModules();
+    const tabB = await import('./pendingEventInvitation');
+    const newer = tabB.capturePendingEventInvitation({
+      hash: `#fa_invite=${'B'.repeat(43)}`,
+      origin,
+      now: 2_000,
+    });
+    expect(newer?.record.code).toBe('B'.repeat(43));
+
+    const seenByA = readPendingEventInvitation({ origin, now: 3_000 });
+    expect(seenByA?.record.code).toBe('B'.repeat(43));
+    expect(seenByA?.durable).toBe(true);
+  });
+
+  it('retires the captures a read out-ordered, so consuming the winner leaves no older bearer behind', async () => {
+    const origin = window.location.origin;
+    capturePendingEventInvitation({ hash: `#fa_invite=${'A'.repeat(43)}`, origin, now: 1_000 });
+    vi.resetModules();
+    const tabB = await import('./pendingEventInvitation');
+    tabB.capturePendingEventInvitation({ hash: `#fa_invite=${'B'.repeat(43)}`, origin, now: 2_000 });
+
+    // Tab A reads: B wins, and A's older memory/session copies are retired.
+    const winner = readPendingEventInvitation({ origin, now: 3_000 });
+    expect(winner?.record.code).toBe('B'.repeat(43));
+
+    // Tab A consumes the winner (as a redemption would); nothing resurrects.
+    expect(forgetPendingEventInvitationIf(winner!.record)).toBe(true);
+    expect(readPendingEventInvitation({ origin, now: 4_000 })).toBeNull();
+  });
+
+  it('re-persists a memory-only record once the stores accept writes again', () => {
+    const origin = window.location.origin;
+    const blocked = () => {
+      throw new Error('QuotaExceededError');
+    };
+    const sessionSet = vi.spyOn(sessionStorage, 'setItem').mockImplementation(blocked);
+    const localSet = vi.spyOn(localStorage, 'setItem').mockImplementation(blocked);
+    const captured = capturePendingEventInvitation({ hash: `#fa_invite=${'M'.repeat(43)}`, origin, now: 1_000 });
+    sessionSet.mockRestore();
+    localSet.mockRestore();
+    expect(captured?.durable).toBe(false);
+    expect(readPendingEventInvitation({ origin, now: 1_500 })?.durable).toBe(false);
+
+    const persisted = persistPendingEventInvitation({ origin, now: 2_000 });
+    expect(persisted?.durable).toBe(true);
+    expect(persisted?.record.code).toBe('M'.repeat(43));
+    const again = readPendingEventInvitation({ origin, now: 2_500 });
+    expect(again?.durable).toBe(true);
+    expect(again?.record.captureId).toBe(persisted?.record.captureId);
+    // The consumer holds the persisted identity, so a compare-delete names it.
+    expect(forgetPendingEventInvitationIf(persisted!.record)).toBe(true);
+    expect(readPendingEventInvitation({ origin, now: 3_000 })).toBeNull();
+  });
+
+  it('reports the record still memory-only when the stores keep refusing', () => {
+    const origin = window.location.origin;
+    const blocked = () => {
+      throw new Error('QuotaExceededError');
+    };
+    const sessionSet = vi.spyOn(sessionStorage, 'setItem').mockImplementation(blocked);
+    const localSet = vi.spyOn(localStorage, 'setItem').mockImplementation(blocked);
+    try {
+      capturePendingEventInvitation({ hash: `#fa_invite=${'N'.repeat(43)}`, origin, now: 1_000 });
+      const persisted = persistPendingEventInvitation({ origin, now: 2_000 });
+      expect(persisted?.durable).toBe(false);
+      expect(persisted?.record.code).toBe('N'.repeat(43));
+    } finally {
+      sessionSet.mockRestore();
+      localSet.mockRestore();
+    }
   });
 
   it('falls back to localStorage when the session copy is lost across authentication', () => {

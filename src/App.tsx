@@ -29,8 +29,30 @@ export default function App() {
   return <EventApp key={EVENT_ID} />;
 }
 
+/**
+ * The terminal invitation state (#804): the one message the ordering contract
+ * specifies, rendered where the Board would be, with no Retry because nothing
+ * the Player can do from here makes that Invitation valid again.
+ */
+function AdmissionBlocked({ message }: { message: string }) {
+  return (
+    <div className="signin" role="alert">
+      <p className="muted">{message}</p>
+    </div>
+  );
+}
+
 function EventApp() {
-  const { user, loading, dealError, dealErrorReason, dealing, retryDeal, canRenderEventContent } = useAuth();
+  const {
+    user,
+    loading,
+    dealError,
+    dealErrorReason,
+    dealing,
+    retryDeal,
+    canRenderEventContent,
+    admission,
+  } = useAuth();
   // The tab-switch transition's key (specs/motion-polish.md): the TOP-LEVEL
   // route segment only, so `.route-view` replays its entrance when the tab
   // changes but sub-navigation inside a tab (More → admin → section) never
@@ -55,6 +77,42 @@ function EventApp() {
     ) : (
       <LoadingState label={editionBrand().passCheckLabel} />
     );
+  }
+
+  // Invitation admission (#804) stands between authority and the dealt Board,
+  // and it gates the WHOLE shell rather than only the Card: a visit whose
+  // Invitation is still being redeemed, or has turned out invalid, is not a
+  // member and does not get the Feed or More either. `blocked` is terminal for
+  // this visit — the one message, no Retry — while `retryable` keeps the
+  // bounded record and offers the same Retry surface a failed deal does.
+  // `held` is an invitation the visit has not been able to check yet (not
+  // authoritative, or offline): still not a member, still no shell.
+  if (admission.kind === 'held' || admission.kind === 'pending') {
+    // A bootstrap that FAILED while admission is held must keep its recovery
+    // surface (Phase 4b P1 on #1131): `ensureUserProfile` failing on a
+    // non-adult Event sets `dealError` with `canRenderEventContent` true, and
+    // an unconditional loading state here would hide that error and its Retry
+    // for as long as the Invitation stays unchecked. Event content stays
+    // withheld either way; only the retry surface is allowed through.
+    return dealError ? (
+      <DealError message={dealError} onRetry={retryDeal} retrying={dealing} />
+    ) : (
+      <LoadingState label={editionBrand().passCheckLabel} />
+    );
+  }
+  if (admission.kind === 'retryable') {
+    // Retry goes through `retryDeal`, which re-establishes authority and
+    // connectivity before it lets the coordinator redeem again.
+    return (
+      <DealError
+        message="We couldn't check your invitation. Try again."
+        onRetry={retryDeal}
+        retrying={dealing}
+      />
+    );
+  }
+  if (admission.kind === 'blocked') {
+    return <AdmissionBlocked message={admission.message} />;
   }
 
   // Frozen route -> page-component mapping, one entry per stable mount

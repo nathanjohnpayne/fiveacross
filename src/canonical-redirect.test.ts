@@ -14,6 +14,21 @@ describe('firebaseAuthOriginRedirectUrl', () => {
     ).toBe('https://gaycruisebingo.firebaseapp.com/card?e=med-2026#top');
   });
 
+  it('carries a pending Invitation in the fragment, replacing whatever hash the page had', () => {
+    expect(
+      firebaseAuthOriginRedirectUrl(
+        { hostname: 'gaycruisebingo.web.app', pathname: '/card', search: '?e=med-2026', hash: '#top' },
+        { invitationCode: 'Q'.repeat(43) },
+      ),
+    ).toBe(`https://gaycruisebingo.firebaseapp.com/card?e=med-2026#fa_invite=${'Q'.repeat(43)}`);
+    expect(
+      firebaseAuthOriginRedirectUrl(
+        { hostname: 'gaycruisebingo.web.app', pathname: '/', search: '', hash: '' },
+        { invitationCode: null },
+      ),
+    ).toBe('https://gaycruisebingo.firebaseapp.com/');
+  });
+
   it('does not redirect firebaseapp.com, which is the stable Firebase auth origin', () => {
     expect(
       firebaseAuthOriginRedirectUrl({
