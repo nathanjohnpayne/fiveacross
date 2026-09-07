@@ -86,6 +86,20 @@ export function BanControl({
 }
 
 /**
+ * What Restore is about to do, in the two dimensions the admin cannot see from the
+ * label: where the Proof lands, and what verdict is being overridden to send it
+ * there. Absent when there is nothing extra to say, so the ordinary report-count
+ * Restore carries no tooltip at all — exactly as before #133.
+ */
+function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boolean): string | undefined {
+  const destination = claimUndecided
+    ? 'Put this proof back for claim review; it stays out of the Feed until the claim is confirmed.'
+    : 'Put this proof back in the Feed.';
+  if (!visionFlag) return claimUndecided ? destination : undefined;
+  return `${destination} The AI screen flagged it: ${visionFlag}.`;
+}
+
+/**
  * One reported-Proof row in the Reports group. `Clear reports` lifts the ADR
  * 0004 Phase 0 community auto-hide by zeroing reportCount — rendered ONLY when the
  * row is actually auto-hidden (the only state with a hide to lift; Codex P2, PR
@@ -101,10 +115,16 @@ export function BanControl({
  * verdict from `visionFlag` — so a Proof an admin restored after a Vision hide,
  * and one the community later re-reported over the threshold, each read
  * truthfully rather than being labelled with whichever hide came first.
+ *
+ * `claimUndecided` is the other thing Restore has to say. In admin_confirmed mode
+ * a hidden Proof may still be backing a claim nobody has judged, and `restoreProof`
+ * returns THAT Proof to `'pending'` rather than publishing it — so the row says so
+ * before the click, not after (#133, Codex P1 round 2).
  */
 function ProofQueueRow({
   proof: p,
   threshold,
+  claimUndecided,
   bannedUids,
   admins,
   days,
@@ -113,6 +133,8 @@ function ProofQueueRow({
 }: {
   proof: ProofDoc;
   threshold: number | undefined;
+  /** Is a still-pending claim backing this Proof? Restore returns it for review, not to the Feed. */
+  claimUndecided: boolean;
   bannedUids: string[];
   admins: string[];
   // The Event's Day schedule (#246): present ⇒ daily-cards mode, so a proof
@@ -147,6 +169,11 @@ function ProofQueueRow({
         <div className="sub">
           proof · {p.type} · {p.itemText}
         </div>
+        {p.status === 'hidden' && claimUndecided && (
+          <div className="sub">
+            A claim on this proof is still pending. Restore returns it for review, not to the Feed.
+          </div>
+        )}
       </div>
       {autoHidden && (
         <AsyncButton onAction={() => clearProofReports(p.id)}>
@@ -160,12 +187,14 @@ function ProofQueueRow({
         // of Players. `visionFlag` survives the write (src/data/admin.ts), so the
         // row keeps its `AI screen: …` pill afterwards and the override stays
         // visible and re-hideable rather than disappearing from the queue.
+        //
+        // It also says WHERE the Proof is going. `restoreProof` restores a Proof
+        // whose claim is still pending to `'pending'`, not `'active'`, so the
+        // photo goes back to the claim queue rather than into the Feed ahead of
+        // the decision — the title and the line above it name that, so the two
+        // Restores are never confused for one another.
         <AsyncButton
-          title={
-            p.visionFlag
-              ? `Put this proof back in the Feed. The AI screen flagged it: ${p.visionFlag}.`
-              : undefined
-          }
+          title={restoreTitle(p.visionFlag, claimUndecided)}
           onAction={() => restoreProof(p.id)}
         >
           Restore
@@ -403,6 +432,18 @@ export default function ReviewQueue({
       heldClaimProofs.set(row.proof.id, row.proof.visionFlag ?? null);
     }
   }
+  // #133: the Proofs whose claim nobody has judged yet, so the Reports group's
+  // Restore can say where the photo is going. `restoreProof` returns such a Proof
+  // to `'pending'` rather than publishing it `'active'` — an unconditional publish
+  // would put it in the Feed ahead of the decision, and a later reject would leave
+  // it there (rejectClaim deliberately writes nothing to the Proof). Derived from
+  // `usePendingClaims`, which the console already subscribes to for the group
+  // below, and read whatever the claim mode is: a Proof left pending by a mode
+  // switch is still a Proof no confirm has published.
+  const undecidedClaimProofs = new Set<string>();
+  for (const c of claims) {
+    if (c.proofId) undecidedClaimProofs.add(c.proofId);
+  }
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
   // paths go through it, and the bulk one is the easy miss: a batch containing
   // one explicit Prompt flips the Event just as surely as approving that Prompt
@@ -631,6 +672,7 @@ export default function ReviewQueue({
                 key={`proof-${entry.proof.id}`}
                 proof={entry.proof}
                 threshold={threshold}
+                claimUndecided={undecidedClaimProofs.has(entry.proof.id)}
                 bannedUids={bannedUids}
                 admins={admins}
                 days={event?.days}

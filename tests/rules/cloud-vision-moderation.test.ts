@@ -163,4 +163,29 @@ describe('firestore.rules — the admin Restore and the community report path st
     await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/pFlagged')), { reportCount: increment(1) }));
     await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/pVisionHidden')), { reportCount: increment(1) }));
   });
+
+  it('an admin restores a claim-backed Proof to PENDING, and reads the claims that decide it', async () => {
+    // The other half of `restoreProof`: a Proof whose claim nobody has judged goes
+    // back to 'pending' (admin-only readable) rather than into the Feed, and the
+    // lookup that decides which — a single-equality `proofId` query over the
+    // claims collection — is a read the admin arm already allows. A non-admin is
+    // denied both, so neither the decision nor its inputs are client-reachable.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at('claims/c1')), {
+        uid: ALICE, displayName: 'Alice', cellIndex: 5, itemText: 'Saw a drag show',
+        proofId: 'pVisionHidden', status: 'pending', createdAt: NOW(), resolvedBy: null,
+      });
+    });
+    const byProof = (uid: string) =>
+      query(collection(db(uid), at('claims')), where('proofId', '==', 'pVisionHidden'));
+
+    await assertSucceeds(getDocs(byProof(ADMIN)));
+    await assertFails(getDocs(byProof(BOB)));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), at('proofs/pVisionHidden')), { status: 'pending', safetyHide: false }),
+    );
+    // And the Proof it lands on is admin-only again, which is the point of
+    // sending it back rather than publishing it.
+    await assertFails(getDoc(doc(db(BOB), at('proofs/pVisionHidden'))));
+  });
 });

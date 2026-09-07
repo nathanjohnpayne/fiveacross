@@ -150,6 +150,62 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
     expect(rowFor('Report Hidden').getByRole('button', { name: 'Restore' })).not.toHaveAttribute('title');
   });
 
+  it('says Restore returns the photo for CLAIM REVIEW while its claim is still pending', () => {
+    // `restoreProof` sends such a Proof back to 'pending', not 'active'
+    // (src/data/admin.ts), so the row must say where the photo is going before
+    // the click — publishing ahead of the decision is the failure this prevents,
+    // and a later reject would leave it public.
+    adminConfirmedEvent();
+    H.flagged = [
+      proof('P', 0, { displayName: 'Held Photo', status: 'hidden', safetyHide: true, visionFlag: 'violence' }),
+    ];
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Held Photo');
+    expect(
+      row.getByText('A claim on this proof is still pending. Restore returns it for review, not to the Feed.'),
+    ).toBeInTheDocument();
+    expect(row.getByRole('button', { name: 'Restore' })).toHaveAttribute(
+      'title',
+      'Put this proof back for claim review; it stays out of the Feed until the claim is confirmed. The AI screen flagged it: violence.',
+    );
+  });
+
+  it('says the same on a claim-backed Proof with no AI verdict at all', () => {
+    // The destination is a fact about the claim, not about the AI screen, so a
+    // report-count hide over a pending claim gets the line and a title too —
+    // where before #133 it carried neither.
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 6, { displayName: 'Report Hidden', status: 'hidden' })];
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Report Hidden');
+    expect(row.getByText(/Restore returns it for review, not to the Feed/)).toBeInTheDocument();
+    expect(row.getByRole('button', { name: 'Restore' })).toHaveAttribute(
+      'title',
+      'Put this proof back for claim review; it stays out of the Feed until the claim is confirmed.',
+    );
+  });
+
+  it('says nothing about claims when none references the Proof, or when it is not hidden', () => {
+    adminConfirmedEvent();
+    H.flagged = [
+      proof('P', 0, { displayName: 'No Claim', status: 'hidden', visionFlag: 'violence' }),
+      proof('Q', 0, { displayName: 'Not Hidden', status: 'active', visionFlag: 'violence' }),
+    ];
+    H.claims = [claim({ proofId: 'Q' })]; // the claim is on the Proof that is NOT hidden
+    renderQueue();
+
+    expect(rowFor('No Claim').queryByText(/Restore returns it for review/)).toBeNull();
+    expect(rowFor('No Claim').getByRole('button', { name: 'Restore' })).toHaveAttribute(
+      'title',
+      'Put this proof back in the Feed. The AI screen flagged it: violence.',
+    );
+    expect(rowFor('Not Hidden').queryByText(/Restore returns it for review/)).toBeNull();
+  });
+
   it('shows the reason WITHOUT the hidden marker while a flagged Proof is still awaiting its hide', () => {
     // The window between moderateProof's flag write and hideProofOnVisionFlag's
     // hide — and the state a merely-racy verdict would never leave (nothing racy

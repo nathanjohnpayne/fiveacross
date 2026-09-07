@@ -25,14 +25,16 @@ import type { Cell, ClaimDoc, ProofDoc } from '../types';
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown; exists: () => boolean };
 
-const { txGet, txSet, txDelete, runTx, ops } = vi.hoisted(() => ({
+const { txGet, txSet, txUpdate, txDelete, runTx, getDocsMock, ops } = vi.hoisted(() => ({
   txGet: vi.fn(),
   txSet: vi.fn(),
+  txUpdate: vi.fn(),
   txDelete: vi.fn(),
   runTx: vi.fn(),
+  getDocsMock: vi.fn(),
   // Every transaction operation in call order, so the Firestore
   // reads-before-writes contract is assertable rather than assumed.
-  ops: [] as Array<{ op: 'get' | 'set' | 'delete'; path: string }>,
+  ops: [] as Array<{ op: 'get' | 'set' | 'update' | 'delete'; path: string }>,
 }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
@@ -54,6 +56,11 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       path: rest.join('/'),
     }),
     runTransaction: (_db: unknown, fn: (tx: unknown) => unknown) => runTx(_db, fn),
+    // The claims-by-proofId lookup restoreProof runs BEFORE its transaction (the
+    // web SDK's Transaction.get takes a DocumentReference, never a query).
+    query: (ref: Ref, ...constraints: unknown[]) => ({ __kind: 'query', ref, constraints }),
+    where: (field: string, op: string, value: unknown) => ({ field, op, value }),
+    getDocs: (...a: unknown[]) => getDocsMock(...a),
     getDoc: vi.fn(() => Promise.resolve({ data: () => ({}) })),
     getDocFromCache: vi.fn(() => Promise.reject(new Error('no cache in this test double'))),
     writeBatch: () => ({ set: vi.fn(), commit: () => Promise.resolve() }),
@@ -64,7 +71,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { confirmClaim, rejectClaim } from './admin';
+import { confirmClaim, rejectClaim, restoreProof } from './admin';
 import { safetyHideStands } from './moderation';
 
 /** A dealt board whose Square 4 is the pending claim backed by proof `P`. */
@@ -97,8 +104,21 @@ const pendingClaim = (over: Partial<ClaimDoc> = {}): ClaimDoc => ({
 /** The live Proof `tx.get` will return for `events/med-2026/proofs/P`. */
 let liveProof: Partial<ProofDoc> | undefined;
 
+/**
+ * The claims the `where('proofId','==',…)` lookup finds, and the LIVE state each
+ * one has by the time the transaction re-reads it. Two separate things on
+ * purpose: `restoreProof` discovers candidates outside the transaction and
+ * decides inside it, so a claim resolved in that gap must read as resolved.
+ */
+let claimsForProof: Array<{ id: string; live: Partial<ClaimDoc> | undefined }> = [];
+
 function setPayload(frag: string): Record<string, unknown> | undefined {
   const call = txSet.mock.calls.find((c) => (c[0] as Ref).path.includes(frag));
+  return call ? (call[1] as Record<string, unknown>) : undefined;
+}
+
+function updatePayload(frag: string): Record<string, unknown> | undefined {
+  const call = txUpdate.mock.calls.find((c) => (c[0] as Ref).path.includes(frag));
   return call ? (call[1] as Record<string, unknown>) : undefined;
 }
 
@@ -107,6 +127,10 @@ beforeEach(() => {
   ops.length = 0;
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   liveProof = undefined;
+  claimsForProof = [];
+  getDocsMock.mockImplementation(() =>
+    Promise.resolve({ docs: claimsForProof.map(({ id }) => ({ id })) }),
+  );
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({
       get: (ref: Ref) => {
@@ -116,6 +140,10 @@ beforeEach(() => {
       set: (ref: Ref, ...rest: unknown[]) => {
         ops.push({ op: 'set', path: ref.path });
         return txSet(ref, ...rest);
+      },
+      update: (ref: Ref, ...rest: unknown[]) => {
+        ops.push({ op: 'update', path: ref.path });
+        return txUpdate(ref, ...rest);
       },
       delete: (ref: Ref) => {
         ops.push({ op: 'delete', path: ref.path });
@@ -132,6 +160,10 @@ beforeEach(() => {
     }
     if (ref.path === 'events/med-2026/proofs/P') {
       return Promise.resolve({ exists: () => !!liveProof, data: () => liveProof });
+    }
+    if (ref.path.includes('/claims/')) {
+      const match = claimsForProof.find((c) => ref.path.endsWith(`/claims/${c.id}`));
+      return Promise.resolve({ exists: () => !!match?.live, data: () => match?.live });
     }
     return Promise.resolve({ exists: () => false, data: () => undefined });
   });
@@ -290,5 +322,93 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     await confirmClaim(pendingClaim({ proofId: null }), 'admin-1');
 
     expect(ops.some((o) => o.path.includes('/proofs/'))).toBe(false);
+  });
+});
+
+// --- Restore returns the Proof to the state it came from ---------------------
+//
+// Restore is the one control that may override an AI verdict, and #133 gave it a
+// warning that says so. It also has to say WHERE the photo goes. In
+// admin_confirmed mode a Proof is created 'pending' and stays admin-only readable
+// until its claim is confirmed, and Cloud Vision scans the uploaded object — so a
+// photo whose claim nobody has judged can be flagged, hidden, and then Restored.
+// Publishing it 'active' there would put it in every Player's Feed BEFORE the
+// decision, and rejecting the claim afterwards would leave it public: rejectClaim
+// deliberately writes nothing to the Proof, so nothing would take it back down.
+
+describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () => {
+  it('restores to PENDING while a claim on the Proof is still undecided', async () => {
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+  });
+
+  it('restores to ACTIVE when no claim references the Proof at all', async () => {
+    // The honor / proof_required modes, and every Proof that never had a claim.
+    claimsForProof = [];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it('restores to ACTIVE once the claim is decided — confirmed or rejected', async () => {
+    for (const status of ['confirmed', 'rejected'] as const) {
+      vi.clearAllMocks();
+      claimsForProof = [{ id: 'claim-1', live: { status, proofId: 'P' } }];
+
+      await restoreProof('P');
+
+      expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    }
+  });
+
+  it('decides on the LIVE claim, so one resolved since the lookup is not treated as pending', async () => {
+    // The candidate ids come from a query outside the transaction (the web SDK's
+    // Transaction.get takes a DocumentReference, never a query), so the claim is
+    // re-read inside it. Here the lookup found it and another admin confirmed it
+    // in the gap: the restore publishes rather than sending it back for a
+    // decision that has already been made.
+    claimsForProof = [{ id: 'claim-1', live: { status: 'confirmed', proofId: 'P' } }];
+
+    await restoreProof('P');
+
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toContain('events/med-2026/claims/claim-1');
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it('reads every claim BEFORE it writes, per the reads-before-writes contract', async () => {
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+
+    await restoreProof('P');
+
+    const lastRead = ops.map((o) => o.op).lastIndexOf('get');
+    const firstWrite = ops.findIndex((o) => o.op !== 'get');
+    expect(lastRead).toBeLessThan(firstWrite);
+  });
+
+  it('clears the safety marker in the SAME write, so the admin lift actually lifts', async () => {
+    // The marker is what confirmClaim gates on. Leaving it set would hold the
+    // Proof after the admin had explicitly overridden the verdict, and the
+    // console would offer no second control that could clear it.
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+
+    await restoreProof('P');
+
+    const written = updatePayload('/proofs/')!;
+    expect(safetyHideStands({ status: written.status as string, safetyHide: written.safetyHide as boolean })).toBe(
+      false,
+    );
+    expect(txUpdate).toHaveBeenCalledTimes(1); // one write, not a publish followed by a clear
+  });
+
+  it('never touches the claim itself — Restore moves the photo, not the decision', async () => {
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P' } }];
+
+    await restoreProof('P');
+
+    expect(ops.filter((o) => o.op !== 'get')).toEqual([{ op: 'update', path: 'events/med-2026/proofs/P' }]);
   });
 });

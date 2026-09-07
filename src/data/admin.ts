@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocs, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -17,6 +17,7 @@ const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'ite
 const itemsRaw = () => collection(db, 'events', EVENT_ID, 'items');
 const proof = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'proofs', id);
 const claim = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'claims', id);
+const claimsRaw = (eventId = EVENT_ID) => collection(db, 'events', eventId, 'claims');
 const board = (uid: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'boards', uid);
 // The day-scoped board a daily-mode claim resolves against (#246).
 const dayBoard = (dayIndex: number, uid: string, eventId = EVENT_ID) =>
@@ -403,20 +404,51 @@ export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden'
  * The console's Restore — the ONE place an admin may override an AI verdict, and
  * the only lift for a Vision safety hide (there is no counter to clear).
  *
- * It clears the server's `safetyHide` marker in the same write that publishes the
- * Proof (#133, Codex P1 round 2). The marker, not the verdict string, is what
- * `confirmClaim` reads, so leaving it set would keep the Proof held after the
- * admin had explicitly lifted the hide. Writing `false` rather than deleting the
- * key records the override as a fact, the same reason `visionFlag` itself is left
- * in place: the row keeps its `AI screen: …` pill, and the queue keeps the Proof
- * (`useReportedProofs` queues on the verdict), so the decision stays visible and
- * re-hideable instead of vanishing.
+ * It clears the server's `safetyHide` marker in the same write (#133, Codex P1
+ * round 2). The marker, not the verdict string, is what `confirmClaim` reads, so
+ * leaving it set would keep the Proof held after the admin had explicitly lifted
+ * the hide. Writing `false` rather than deleting the key records the override as a
+ * fact, the same reason `visionFlag` itself is left in place: the row keeps its
+ * `AI screen: …` pill, and the queue keeps the Proof (`useReportedProofs` queues
+ * on the verdict), so the decision stays visible and re-hideable instead of
+ * vanishing. A fresh scan that re-flags the Proof takes it back to `'flagged'`,
+ * which the trigger owns again — the override is a lift, not immunity.
  *
- * A fresh scan that re-flags the Proof takes it back to `'flagged'`, which the
- * trigger owns again — the override is a lift, not immunity.
+ * It restores to the state the Proof came FROM, not unconditionally to `'active'`
+ * (#133, Codex P1 round 2). In admin_confirmed claim mode a Proof is created
+ * `'pending'` and stays admin-only readable until the admin confirms its claim,
+ * and Cloud Vision scans the uploaded object — so a photo whose claim is still
+ * undecided can be flagged, hidden, and then Restored. Publishing it `'active'`
+ * there would put it in every Player's Feed BEFORE the claim was judged, and
+ * rejecting the claim afterwards leaves it public: `rejectClaim` deliberately
+ * writes nothing to the Proof (it leaves a rejected Proof `'pending'` rather than
+ * exposed), so nothing would ever take it back down. Restoring to `'pending'`
+ * hands the Proof back to the claim queue instead, where Confirm publishes it and
+ * Reject leaves it unpublished — the decision the console is actually asking for.
+ *
+ * Which claims reference the Proof is discovered OUTSIDE the transaction because
+ * claims carry auto-ids and the web SDK's `Transaction.get` takes a
+ * DocumentReference, never a query. The DECISION is still transactional: each
+ * candidate is re-read live inside the transaction, so a claim resolved between
+ * the query and the write is seen as resolved. Nothing can appear in the gap —
+ * a Proof's claim is created in `attachProof`'s own transaction, alongside the
+ * Proof itself, so an existing Proof never gains a new one.
  */
-export const restoreProof = (id: string) =>
-  updateDoc(proof(id), { status: 'active', safetyHide: false });
+export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+  const candidates = await getDocs(query(claimsRaw(eventId), where('proofId', '==', id)));
+  const claimRefs = candidates.docs.map((d) => claim(d.id, eventId));
+  await runTransaction(db, async (tx) => {
+    let claimUndecided = false;
+    for (const ref of claimRefs) {
+      const snap = await tx.get(ref);
+      if (snap.exists() && (snap.data() as Partial<ClaimDoc>).status === 'pending') claimUndecided = true;
+    }
+    tx.update(proof(id, eventId), {
+      status: claimUndecided ? 'pending' : 'active',
+      safetyHide: false,
+    });
+  });
+}
 
 // Lift the ADR 0004 Phase 0 community auto-hide by resetting reportCount to 0 —
 // the explicit admin action the console lacked (Codex P2, PR #107 finding 3).
