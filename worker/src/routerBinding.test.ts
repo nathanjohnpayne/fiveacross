@@ -162,3 +162,104 @@ describe('what the router sources no longer reach for', () => {
     expect([...source.matchAll(/registry\.\w+\(/g)].map((match) => match[0])).toEqual(['registry.lookup(']);
   });
 });
+
+/**
+ * The validator reads TOML, not lines that look like TOML.
+ *
+ * Every case below is a spelling Wrangler honours, and the ones that must be
+ * REFUSED are refused because the guard's claim is "exactly one lookup-only
+ * binding" — a claim it can only make about headers it actually saw. A
+ * line-shaped counter that matched `[[services]]` as a whole line missed the
+ * commented and spaced forms entirely, which meant a second block written that
+ * way bound the registry's default control-plane export while the deploy gate
+ * reported a clean single binding.
+ *
+ * The ACCEPTED cases matter just as much and in the other direction: a
+ * `[[services]]` written inside a multi-line string or a comment is text, and a
+ * validator that counted those would refuse a configuration that is in fact
+ * correct — which is how a capability gate ends up switched off.
+ */
+describe('the shared binding validator, read as TOML', () => {
+  const ONLY_BINDING = [
+    '[[services]]',
+    'binding = "REGISTRY"',
+    'service = "five-across-event-registry"',
+    'entrypoint = "RegistryLookupEntrypoint"',
+  ].join('\n');
+
+  it.each([
+    [
+      // The exact bypass: `[[services]] # …` is a valid header, so Wrangler
+      // uploads a SECOND binding — to the default control-plane export, with
+      // no `entrypoint` — while a whole-line match sees only the first.
+      'a second services header carrying a trailing comment',
+      `${ONLY_BINDING}\n\n[[services]] # control plane\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
+    ],
+    [
+      'a second services header written with interior whitespace',
+      `${ONLY_BINDING}\n\n[[ services ]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
+    ],
+    [
+      // Wrangler resolves an environment's own services array for that
+      // environment's upload, so it is a binding this guard has to have seen.
+      'a services array under an environment',
+      `${ONLY_BINDING}\n\n[[env.staging.services]]\nbinding = "CONTROL"\nservice = "five-across-event-registry"\n`,
+    ],
+    [
+      // The inline spelling is a shape this validator does not read. Refused
+      // rather than skipped: "unrecognised" and "absent" must not be the same
+      // answer in a capability check.
+      'the inline array spelling beside the block one',
+      `services = [{ binding = "CONTROL", service = "five-across-event-registry" }]\n\n${ONLY_BINDING}\n`,
+    ],
+  ])('refuses %s', (_label, config) => {
+    expect(() => validateRouterServiceBinding(config)).toThrow('RegistryLookupEntrypoint');
+  });
+
+  it.each([
+    [
+      'a services header inside a multi-line basic string',
+      `${ONLY_BINDING}\n\n[vars]\nNOTE = """\n[[services]]\nbinding = "CONTROL"\n"""\n`,
+    ],
+    [
+      'a services header inside a multi-line literal string',
+      `${ONLY_BINDING}\n\n[vars]\nNOTE = '''\n[[services]]\nbinding = "CONTROL"\n'''\n`,
+    ],
+    [
+      'a services header inside a comment',
+      `${ONLY_BINDING}\n\n# [[services]]\n# binding = "CONTROL"\n# service = "five-across-event-registry"\n`,
+    ],
+    [
+      'the one real header written with interior whitespace and a trailing comment',
+      '[[ services ]] # the router’s only dependency\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\n',
+    ],
+  ])('accepts %s', (_label, config) => {
+    expect(validateRouterServiceBinding(config)).toEqual({
+      binding: 'REGISTRY',
+      service: 'five-across-event-registry',
+      entrypoint: 'RegistryLookupEntrypoint',
+    });
+  });
+
+  it('attributes keys to the table they were written under, not to the file', () => {
+    // The #628-round-4 finding, kept: `entrypoint` in a LATER table is that
+    // table's key, and reading it as the service's would wave through a
+    // control-plane binding.
+    expect(() =>
+      validateRouterServiceBinding(
+        '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\n\n[vars]\nentrypoint = "RegistryLookupEntrypoint"\n',
+      ),
+    ).toThrow('RegistryLookupEntrypoint');
+  });
+
+  it('refuses a services block that names the key twice', () => {
+    // Two answers is not an answer a capability check may pick between, and
+    // Wrangler's own resolution of a duplicate key is not this guard's to
+    // guess at.
+    expect(() =>
+      validateRouterServiceBinding(
+        '[[services]]\nbinding = "REGISTRY"\nservice = "five-across-event-registry"\nentrypoint = "RegistryLookupEntrypoint"\nentrypoint = "default"\n',
+      ),
+    ).toThrow('RegistryLookupEntrypoint');
+  });
+});
