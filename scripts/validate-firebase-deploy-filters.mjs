@@ -307,14 +307,22 @@ const POSIX = process.platform !== "win32";
  * therefore its own process group and the deadline kills the group, with a
  * grace timer so that even an unkillable descendant cannot hold this open.
  */
-function runCapturedProcess(command, args, { timeout, settleOn = "close", ...options }) {
+function runCapturedProcess(
+  command,
+  args,
+  { timeout, settleOn = "close", inheritStdin = false, ...options },
+) {
   return new Promise((resolve) => {
     let child;
     try {
       child = spawn(command, args, {
         ...options,
         detached: POSIX,
-        stdio: ["ignore", "pipe", "pipe"],
+        // stdout and stderr must be pipes — this process's own stdout carries
+        // the classification `deploy.sh` parses, and a hook writing to it would
+        // corrupt that. stdin is inherited, as `lifecycleHooks` inherits all
+        // three, so a hook that tests whether it has one behaves the same here.
+        stdio: [inheritStdin ? "inherit" : "ignore", "pipe", "pipe"],
       });
     } catch (error) {
       resolve({ ok: false, output: error instanceof Error ? error.message : String(error) });
@@ -390,6 +398,7 @@ function runPredeployHook(command, { projectDir, resourceDir, project, timeoutMs
   return runCapturedProcess(translated, [], {
     cwd: projectDir,
     shell: true,
+    inheritStdin: true,
     // `runCommand` settles on `exit`, so Firebase moves on as soon as the
     // immediate shell is done and never waits for a background descendant.
     // Waiting for `close` here would let this classifier observe a LATER tree
@@ -466,7 +475,16 @@ async function stageProjectOverlay({ projectDir, scratchProject, sourceRels, lin
     const claimed = new Set(remaining.map((segments) => segments[0]));
     for (const entry of await readdir(realDir)) {
       if (claimed.has(entry) || entry === ".git") continue;
-      await linkTo(join(realDir, entry), join(scratchDir, entry));
+      const from = join(realDir, entry);
+      const to = join(scratchDir, entry);
+      // FILES are copied, directories symlinked. A symlinked `firebase.json`
+      // is a hook's route into the live checkout — `cp evil.json firebase.json`
+      // would rewrite the very config the deploy is about to read, after the
+      // dirty-tree guard has already passed (Codex P2, round 15). Project-root
+      // files are small; copying them costs nothing and closes that route for
+      // every deployment input at once.
+      if ((await lstat(from)).isDirectory()) await linkTo(from, to);
+      else await cp(from, to, { dereference: true });
     }
     for (const segment of claimed) {
       const nextReal = join(realDir, segment);
@@ -566,6 +584,9 @@ function discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe
     HOME: process.env.HOME,
     PATH: process.env.PATH,
     NODE_ENV: process.env.NODE_ENV,
+    // `spawnFunctionsProcess` sets this from the AMBIENT environment, which
+    // overwrites any dotenv value of the same name.
+    __FIREBASE_FRAMEWORKS_ENTRY__: process.env.__FIREBASE_FRAMEWORKS_ENTRY__,
   };
   for (const [key, value] of Object.entries(environment)) {
     if (value === undefined) delete environment[key];
@@ -696,6 +717,16 @@ async function buildAndInventoryProject({
     for (const config of configs) inventories.set(config.codebase, answer);
     return inventories;
   };
+
+  // `discoverBuild` switches to a one-shot manifest process when this is set,
+  // which is a different program with a different environment; the pinned SDK
+  // binary does not even implement it. Refuse rather than discover the other
+  // way round (Codex P2, round 15).
+  if (process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH) {
+    return refuseAll(
+      "FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH selects a discovery mode this classifier cannot mirror",
+    );
+  }
 
   const relevant = relevantFunctionsConfigs(only, configs);
   const unstageable = relevant.find((config) => !config.sourceRel);
@@ -1136,7 +1167,9 @@ async function singleEndpointInventory(
       sourceRel,
       // `resolveConfigDir` is `configDir || source`: a codebase that sets one
       // keeps its dotenv files there, not in its source dir.
-      configDirRel: normalizedSourcePath(functionsConfig.configDir) ?? sourceRel,
+      configDirRel: functionsConfig.configDir
+        ? normalizedSourcePath(functionsConfig.configDir)
+        : sourceRel,
       steps: predeploySteps(functionsConfig.predeploy),
     });
 
@@ -1144,6 +1177,14 @@ async function singleEndpointInventory(
       // A remoteSource codebase (or any shape without a mirrorable local
       // source) exists and can be deployed; it simply cannot be built here.
       entry.blocked = "no mirrorable local source";
+      continue;
+    }
+
+    // `Config.path` preserves an ABSOLUTE `configDir`, so the deploy would read
+    // dotenv files from a directory the overlay cannot place. Silently falling
+    // back to the source dir would read the wrong ones (Codex P2, round 15).
+    if (functionsConfig.configDir && !normalizedSourcePath(functionsConfig.configDir)) {
+      entry.blocked = "configDir is not a mirrorable project-relative path";
       continue;
     }
 

@@ -30,6 +30,13 @@ const path = require("node:path");
 const writeFileSync = fs.writeFileSync;
 const marker = process.env.FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER;
 
+// This module is loaded with `--require`, which node consumes rather than
+// placing in `process.argv` — but it DOES leave it in `process.execArgv`, and
+// the real discovery process has none. Remove the trace before any codebase
+// code can read it, so the host this classifier presents is the host the deploy
+// presents (Codex P2, round 15).
+process.execArgv.length = 0;
+
 /**
  * The codebase's own compiled files, as the SDK binary was pointed at them.
  *
@@ -80,8 +87,12 @@ if (marker) {
     try {
       writeFileSync(marker, "consulted");
     } catch {
-      // The classifier treats an unreadable marker as "not consulted"; it also
-      // cannot have been written, so there is nothing to report.
+      // The classifier reads the ABSENCE of this file as "not consulted", so a
+      // swallowed write failure would be a false negative in the fail-OPEN
+      // direction. There is no other channel out of this process that the
+      // codebase cannot also reach, so the honest report is to die: discovery
+      // then never answers and the classifier refuses (Codex P2, round 15).
+      process.abort();
     }
   };
   Object.defineProperty(process, "env", {

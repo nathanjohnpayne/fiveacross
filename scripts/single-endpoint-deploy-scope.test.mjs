@@ -1492,6 +1492,93 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
+  it("leaves the live firebase.json alone when a hook overwrites it", async () => {
+    // The overlay symlinks project directories but COPIES project files, so a
+    // hook that rewrites a deployment input rewrites the scratch copy. A
+    // symlinked `firebase.json` would be a route into the live checkout, after
+    // the dirty-tree guard has already passed (Codex P2, round 15).
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, "cp swapped.json firebase.json"],
+        },
+        files: {
+          "swapped.json": JSON.stringify({ functions: { source: "elsewhere" } }),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        // The config the deploy is about to read is untouched.
+        const live = JSON.parse(await readFile(configPath, "utf8"));
+        expect(live.functions.source).toBe("functions");
+      },
+    );
+  });
+
+  it("refuses when the environment selects a discovery mode it cannot mirror", async () => {
+    // `discoverBuild` switches to a one-shot manifest process when this is set,
+    // which the pinned SDK binary does not even implement.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        // A perfectly exemptible codebase, so the env var is the ONLY reason
+        // this can refuse.
+        files: { "functions/lib/index.js": artifact("exports.daily = endpoint();") },
+      },
+      async (configPath) => {
+      const previous = process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH;
+      process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH = "true";
+      try {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      } finally {
+        if (previous === undefined) delete process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH;
+        else process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH = previous;
+      }
+    },
+    );
+  });
+
+  it("refuses an absolute configDir, which the overlay cannot place", async () => {
+    // `Config.path` preserves an absolute `configDir`, so the deploy would read
+    // dotenv files from a directory the scratch project does not contain.
+    // Falling back to the source dir would read the wrong ones.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [], configDir: "/tmp/somewhere-else" },
+        // Exemptible but for the configDir, so that is the only thing under
+        // test here.
+        files: { "functions/lib/index.js": artifact("exports.daily = endpoint();") },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("hides its own preload from the codebase", async () => {
+    // The preload is loaded with `--require`, which node keeps out of
+    // `process.argv` but leaves in `process.execArgv`. The real discovery
+    // process has none, so the trace is removed before any codebase code runs
+    // (Codex P2, round 15).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            "exports.daily = process.execArgv.length ? { submitBugReport: endpoint() } : endpoint();",
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
   it("refuses a predeploy hook containing a backslash", async () => {
     // firebase-tools wraps a hook by escaping only `"`, which a backslash can
     // defeat. Rather than quote it some other way — and so run a command the
