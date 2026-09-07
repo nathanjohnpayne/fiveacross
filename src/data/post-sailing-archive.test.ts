@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildEventArchive, isEventArchived, MAX_ARCHIVED_STANDING_ROWS } from './eventArchive';
+import {
+  buildEventArchive,
+  isEventArchived,
+  isEventArchiving,
+  MAX_ARCHIVED_STANDING_ROWS,
+} from './eventArchive';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
 // specs/post-sailing-archive.md, unit layer (#134). `buildEventArchive` is the
@@ -48,6 +53,32 @@ describe('isEventArchived', () => {
     expect(isEventArchived({} as EventDoc)).toBe(false);
     expect(isEventArchived(null)).toBe(false);
     expect(isEventArchived(undefined)).toBe(false);
+  });
+});
+
+describe('isEventArchiving', () => {
+  it('is true only for the literal closing flag', () => {
+    expect(isEventArchiving({ archiving: true } as EventDoc)).toBe(true);
+    expect(isEventArchiving({ archiving: false } as EventDoc)).toBe(false);
+    // Absent means OPEN, exactly as an absent `status` does.
+    expect(isEventArchiving({} as EventDoc)).toBe(false);
+    expect(isEventArchiving(null)).toBe(false);
+    expect(isEventArchiving(undefined)).toBe(false);
+  });
+
+  it('is independent of `isEventArchived` in both directions', () => {
+    // The two states are separate on purpose. A CLOSING Event has no record to
+    // render, so the Leaderboard stays live — correctly, because the archive
+    // does not exist yet — while the archive write CLEARS the flag as it lands.
+    // A surface that treated either as implying the other would render an empty
+    // archive during the quiesce, or a live Leaderboard after the freeze.
+    const closing = { status: 'active', archiving: true } as EventDoc;
+    expect(isEventArchived(closing)).toBe(false);
+    expect(isEventArchiving(closing)).toBe(true);
+
+    const archived = { status: 'archived', archiving: false } as EventDoc;
+    expect(isEventArchived(archived)).toBe(true);
+    expect(isEventArchiving(archived)).toBe(false);
   });
 });
 

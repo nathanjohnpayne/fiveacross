@@ -38,14 +38,32 @@ service cloud.firestore {
     function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
     }
-    // The post-Event freeze (#134, specs/post-sailing-archive.md). An Event
-    // whose `EventDoc.status` is 'archived' accepts NO GAMEPLAY WRITE from
-    // anyone — Boards, Player rows, per-Day honours, Prompts, Proofs, Claims,
-    // Doubts, Hearts, Moments, retractions and Tally markers alike, and Admins
-    // are bound by it too: an "archive" whose own organiser can still mark a
-    // square is not a frozen record. `specs/path-addressing-and-root.md` § D8
-    // states the same requirement from the addressing side and is explicit that
-    // hiding the controls client-side would not satisfy it.
+    // The post-Event freeze (#134, specs/post-sailing-archive.md). An Event that
+    // is CLOSING (`archiving: true`) or ARCHIVED (`status: 'archived'`) accepts
+    // NO GAMEPLAY WRITE from anyone — Boards, Player rows, per-Day honours,
+    // Prompts, Proofs, Claims, Doubts, Hearts, Moments, retractions and Tally
+    // markers alike, and Admins are bound by it too: an "archive" whose own
+    // organiser can still mark a square is not a frozen record.
+    // `specs/path-addressing-and-root.md` § D8 states the same requirement from
+    // the addressing side and is explicit that hiding the controls client-side
+    // would not satisfy it.
+    //
+    // TWO STATES, ONE PREDICATE, and the first one is why the record can be
+    // trusted at all. `archiving` is the QUIESCING phase: the Admin's first
+    // write shuts gameplay, and only once the inputs have been re-read against
+    // that shut Event is the snapshot taken and `status` flipped. Without it the
+    // archive is one document read and one document write, which can never
+    // serialize against a Board write or a Claim create in another collection —
+    // so a Mark that committed alongside it would be missing from a record the
+    // rules then make permanent, and a Claim could go pending one instant
+    // before the freeze that makes it unresolvable (Codex P1, PR #1139). Both
+    // halves deny identically here, because a quiescing phase a Player could
+    // still write through would quiesce nothing.
+    //
+    // `archiving` is REVERSIBLE and `status` is not. An abandoned archive must
+    // not leave an Event shut forever, so the Event arm below lets an Admin
+    // clear the flag right up until the archive commits; afterwards it is inert,
+    // because `status: 'archived'` is write-once and denies here on its own.
     //
     // MODERATION IS NOT A GAMEPLAY WRITE, and is deliberately left open. Every
     // `isAdmin(eventId)` arm below — hide/restore, delete, ban, resolve a
@@ -58,18 +76,50 @@ service cloud.firestore {
     // archived Event, and for how long, is #808's question; this ticket
     // deliberately answers only the write half.
     //
-    // The `exists()` guard, and the `'active'` default, both preserve today's
-    // behaviour rather than extending the freeze by accident: an Event document
-    // that carries no `status` (every doc written before the field was
+    // The `exists()` guard, and the `'active'` / `false` defaults, all preserve
+    // today's behaviour rather than extending the freeze by accident: an Event
+    // document that carries neither key (every doc written before they were
     // consumed) reads as OPEN, and a write under an Event id with no document
     // at all is decided by the arm's own rules exactly as it is today, rather
     // than newly erroring on a missing `get()`.
-    function eventArchived(eventId) {
+    function eventClosedToPlay(eventId) {
       return exists(/databases/$(database)/documents/events/$(eventId))
-        && eventData(eventId).get('status', 'active') == 'archived';
+        && (eventData(eventId).get('status', 'active') == 'archived'
+            || eventData(eventId).get('archiving', false) == true);
     }
     function eventOpenForPlay(eventId) {
-      return !eventArchived(eventId);
+      return !eventClosedToPlay(eventId);
+    }
+    // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed. The
+    // two NULLABLE keys are checked as type-or-null, because `null` is a
+    // legitimate stored value for both — `firstBingo: null` means nobody got
+    // there, `freezeAt: null` means the Event had no Standings Freeze. An
+    // ABSENT key needs no clause of its own: reading a missing key errors the
+    // expression, which denies, and denying is what a record the archived
+    // Leaderboard would throw on deserves. `archivedAt` must equal the
+    // document's own stamp, which both type-checks it and holds the invariant
+    // `EventArchive.archivedAt` states — the two are written from one value in
+    // one update, and a record disagreeing with the stamp beside it would put
+    // two answers on screen.
+    //
+    // The record is passed in ALREADY DEREFERENCED, rather than the whole
+    // document: this rule's arm lives one clause away from Firestore's
+    // 1000-expression cap (#850/#934), and re-walking `request.resource.data
+    // .archive` per clause is the kind of cost that pushed it over.
+    //
+    // Rules cannot iterate a list, so the standings ROWS remain the stated
+    // residual (the same one `bannedUids` carries); what this closes is the
+    // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
+    // at all, or an empty map — which is irreversible and leaves the Leaderboard
+    // on its live fallback while play is frozen (Codex P2, PR #1139).
+    function completeArchiveRecord(archive, stamp) {
+      return archive is map
+        && archive.standings is list
+        && archive.playerCount is number
+        && archive.dailyHonors is list
+        && (archive.firstBingo == null || archive.firstBingo is map)
+        && (archive.freezeAt == null || archive.freezeAt is number)
+        && archive.archivedAt == stamp;
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
@@ -1085,18 +1135,31 @@ service cloud.firestore {
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
       //
-      // `status` / `archivedAt` / `archive` (#134, specs/post-sailing-archive.md)
-      // are the post-Event freeze, and they ride this same admin gate rather
-      // than opening any new write path: a Player cannot write this document at
-      // all, so "admin-only archive toggle" is inherited, not invented. What the
-      // clauses below add is the part the gate cannot express on its own —
+      // `status` / `archiving` / `archivedAt` / `archive` (#134,
+      // specs/post-sailing-archive.md) are the post-Event freeze, and they ride
+      // this same admin gate rather than opening any new write path: a Player
+      // cannot write this document at all, so "admin-only archive toggle" is
+      // inherited, not invented. What the clauses below add is the part the gate
+      // cannot express on its own —
       //   - `status`, now that something finally reads it, must be one of the
       //     two contract values. A typo'd status would read as OPEN through
       //     `eventOpenForPlay`'s `'active'` default, so an Event an organiser
       //     believed was frozen would silently still accept Marks.
-      //   - an archived Event must carry a numeric `archivedAt`, which is what
-      //     makes "no reader ever sees an archived Event with no stamp" an
-      //     enforced invariant rather than a property of one client's writer.
+      //   - `archiving` is an admin-only BOOLEAN, and deliberately NOT
+      //     write-once: an abandoned archive must be reversible, or a failed
+      //     freeze would shut an Event's gameplay forever with no way back
+      //     (spec § "The quiesce protocol"). Once `status` is 'archived' the
+      //     flag is inert — the freeze is carried by `status`, which is locked.
+      //   - THE FLIP ITSELF IS NOT ALLOWED HERE. This arm may only produce
+      //     `status: 'archived'` on a document that was ALREADY archived, which
+      //     is what keeps moderation and configuration working after the freeze.
+      //     Minting the archive is the dedicated arm ABOVE, which is where the
+      //     quiesce precondition and the complete-record check live. Two arms
+      //     rather than three more clauses here for a mechanical reason as well
+      //     as a legible one: this arm already sits one clause from Firestore's
+      //     1000-expression cap (#850/#934), and `allow` statements
+      //     short-circuit — the archive write is decided by the small arm and
+      //     never pays for the schedule and freeze-boundary checks below.
       //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`,
       //     `archivedAt` and `archive` are all locked to their stored values.
       //     That is what "the final Leaderboard and hall of fame persist
@@ -1104,12 +1167,55 @@ service cloud.firestore {
       //     overwrite the record with a later roster, and un-archiving is not a
       //     client operation. Every OTHER field stays editable, so moderation
       //     (`bannedUids`) and configuration survive the freeze.
-      // The `archive` payload itself is shape-checked only as a map: Rules
-      // cannot iterate a list, so per-row validation of the standings is not
-      // expressible here — the same stated residual `bannedUids` carries.
+      //
+      // THE ARCHIVE FLIP, on its own arm and in its own transaction-shaped
+      // write (#134, Codex P1+P2 on PR #1139). Everything the freeze needs to be
+      // trustworthy is stated here, in one place:
+      //
+      //   - it may only be taken from the QUIESCED state, so a direct SDK write
+      //     cannot skip the window in which gameplay was already shut and the
+      //     roster had stopped moving;
+      //   - it must carry a numeric, bounded `archivedAt`, which is what makes
+      //     "no reader ever sees an archived Event with no stamp" an enforced
+      //     invariant rather than a property of one client's writer;
+      //   - it must carry the COMPLETE record. Type-checking `archive` only
+      //     when present accepted `{status: 'archived', archivedAt}` on its own,
+      //     and that state is both irreversible and useless: the freeze denies
+      //     every gameplay write while the Leaderboard falls back to the LIVE
+      //     view the archive exists to replace;
+      //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
+      //     this arm skip the configuration validation below without opening a
+      //     hole through it: a write that also moved `days`, `bannedUids` or
+      //     `standingsFreezeAt` is not an archive flip and falls through to the
+      //     arm that checks those fields (where it is denied, because the stored
+      //     document is not archived yet).
+      //
+      // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: an
+      // ordinary admin write on a live Event fails this arm in two comparisons
+      // and moves on, rather than paying for the arm's own evaluation.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && isAdmin(eventId)
+        && request.resource.data.status == 'archived'
+        && request.resource.data.archivedAt is number
+        && request.resource.data.archivedAt > 0
+        && request.resource.data.archivedAt < 4102444800000
+        && completeArchiveRecord(request.resource.data.archive, request.resource.data.archivedAt)
+        // The quiesce ends with the freeze. Leaving the flag set would be
+        // harmless (`status` denies on its own from here) but it would also be
+        // a second, clearable spelling of a state that must not be clearable.
+        && request.resource.data.get('archiving', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'archivedAt', 'archive', 'archiving']);
+      // The standings ROWS inside `archive` stay shape-unchecked: Rules cannot
+      // iterate a list, so per-row validation is not expressible here — the same
+      // stated residual `bannedUids` carries.
       allow create, update: if isAdmin(eventId)
         && (!('status' in request.resource.data)
             || request.resource.data.status in ['active', 'archived'])
+        && (!('archiving' in request.resource.data)
+            || request.resource.data.archiving is bool)
         && (!('archivedAt' in request.resource.data)
             || (request.resource.data.archivedAt is number
                 && request.resource.data.archivedAt > 0
@@ -1117,7 +1223,8 @@ service cloud.firestore {
         && (!('archive' in request.resource.data)
             || request.resource.data.archive is map)
         && (request.resource.data.get('status', 'active') != 'archived'
-            || request.resource.data.archivedAt is number)
+            || (resource != null
+                && resource.data.get('status', 'active') == 'archived'))
         && (resource == null
             || resource.data.get('status', 'active') != 'archived'
             || (request.resource.data.get('status', 'active') == 'archived'

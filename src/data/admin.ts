@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocFromServer, getDocsFromServer, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -11,6 +11,7 @@ import { isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
 import { buildEventArchive } from './eventArchive';
+import { dayMetaRef, playersCol } from './paths';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
@@ -547,8 +548,17 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
   });
 };
 
-/** What `unlockDayNow` reports back — mirrors `SnapshotResult` in `functions/src/unlockDay.ts`. */
-export type UnlockDayNowResult = 'stamped' | 'already-stamped' | 'not-due' | 'no-event' | 'no-day';
+/** What `unlockDayNow` reports back — mirrors `SnapshotResult` in `functions/src/unlockDay.ts`.
+ *  `archived` is the post-Event freeze refusing the unlock server-side (#134):
+ *  the Admin SDK bypasses `firestore.rules`, so the callable carries its own
+ *  copy of the gate the rules apply to everyone else. */
+export type UnlockDayNowResult =
+  | 'stamped'
+  | 'already-stamped'
+  | 'not-due'
+  | 'no-event'
+  | 'no-day'
+  | 'archived';
 
 /** What the guarded re-snapshot reports back — mirrors `ResnapshotResult` in
  *  `functions/src/unlockDay.ts` (specs/easy-mix.md § "Deploy race"). */
@@ -558,7 +568,8 @@ export type ResnapshotDayResult =
   | 'not-recoverable'
   | 'not-due'
   | 'no-event'
-  | 'no-day';
+  | 'no-day'
+  | 'archived';
 
 /**
  * The Admin console's manual "unlock now" fallback (daily-cards-spec §
@@ -630,16 +641,81 @@ export const banUser = (uid: string): Promise<void> =>
   isSystemAuthor(uid) ? Promise.resolve() : updateDoc(evt(), { bannedUids: arrayUnion(uid) });
 export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRemove(uid) });
 
+/** What the archive's FIRST write reports back — shutting the Event to gameplay
+ *  so the snapshot has something still to photograph. */
+export type BeginArchiveResult = 'closing' | 'already-archived' | 'no-event';
+
+/** What abandoning a started-but-uncommitted archive reports back. */
+export type AbandonArchiveResult = 'reopened' | 'already-archived' | 'no-event';
+
 /** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
  *  the Admin surface can say what happened instead of inferring it from a
- *  resolved promise. */
-export type ArchiveEventResult = 'archived' | 'already-archived' | 'no-event';
+ *  resolved promise. `not-closing` means the quiesce was never taken (or was
+ *  abandoned under this call), which the rules refuse to archive from. */
+export type ArchiveEventResult = 'archived' | 'already-archived' | 'no-event' | 'not-closing';
+
+/**
+ * THE QUIESCE (#134, specs/post-sailing-archive.md § "The quiesce protocol") —
+ * the archive's first write, and the reason the record can be trusted.
+ *
+ * It sets `archiving: true` and nothing else. `firestore.rules`' and
+ * `storage.rules`' `eventClosedToPlay` then treat the Event exactly as if it
+ * were already archived for EVERY gameplay write, so from the moment this
+ * commits the roster, the Day honours and the Claim queue cannot move again.
+ *
+ * Why it has to exist: the freeze itself is one document read and one document
+ * write, and a Firestore transaction serializes only against the documents it
+ * READS. A Player's Board write, a stat write, or a Claim create lands in
+ * another collection entirely, so a snapshot built beside the flip could omit a
+ * Mark that committed alongside it — permanently, since the rules then lock the
+ * record — or leave a Claim pending one instant before the freeze that makes it
+ * unresolvable. No client-side latch can close that: the UI's server-data
+ * latches say the server has spoken, never that it has stopped speaking. Only a
+ * server-enforced closed state can (Codex P1, PR #1139).
+ *
+ * IDEMPOTENT and REVERSIBLE. Calling it on an Event that is already closing is
+ * a no-op that still reports `'closing'`; `abandonArchive` is the way back out,
+ * because a freeze that failed halfway must not shut an Event forever.
+ */
+export async function beginArchive(): Promise<BeginArchiveResult> {
+  const eventRef = evt();
+  return runTransaction(db, async (tx): Promise<BeginArchiveResult> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return 'no-event';
+    if ((snap.data() as Partial<EventDoc>).status === 'archived') return 'already-archived';
+    tx.update(eventRef, { archiving: true });
+    return 'closing';
+  });
+}
+
+/**
+ * Reopen an Event whose archive was started and not committed — the escape
+ * hatch that makes the quiesce safe to take at all.
+ *
+ * `archiving` is deliberately NOT write-once (unlike `status`/`archivedAt`/
+ * `archive`): the first write shuts gameplay for everyone, so a tab closed
+ * mid-flight, a failed second write, or an Admin who simply changed their mind
+ * would otherwise leave a live Event permanently unplayable with no client-side
+ * way back. Once `status` is `'archived'` this reports `already-archived` and
+ * writes nothing — the freeze is carried by `status` from there, and that IS
+ * write-once (spec § Recovery).
+ */
+export async function abandonArchive(): Promise<AbandonArchiveResult> {
+  const eventRef = evt();
+  return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return 'no-event';
+    if ((snap.data() as Partial<EventDoc>).status === 'archived') return 'already-archived';
+    tx.update(eventRef, { archiving: false });
+    return 'reopened';
+  });
+}
 
 /**
  * Freeze this Event after the occasion (#134, specs/post-sailing-archive.md):
- * ONE update that flips `status` to `'archived'`, stamps `archivedAt`, and
- * persists the frozen final record `buildEventArchive` snapshots from the
- * roster the caller is watching.
+ * the archive's SECOND write — ONE update that flips `status` to `'archived'`,
+ * stamps `archivedAt`, persists the frozen final record, and clears the
+ * `archiving` flag the first write set.
  *
  * ONE update on ONE document is the whole atomicity requirement here, and it is
  * load-bearing: the rules deny gameplay writes on an archived Event and the
@@ -650,47 +726,93 @@ export type ArchiveEventResult = 'archived' | 'already-archived' | 'no-event';
  * ROUTING documents to move in that same transaction; that half waits on path
  * addressing, which ships nothing today (see the spec's § Out of scope).
  *
+ * IT MUST FOLLOW `beginArchive`, and the rules enforce that too: `status` may
+ * only become `'archived'` from a stored document already carrying
+ * `archiving: true`. This call re-checks it before reading anything and again
+ * inside the transaction, reporting `not-closing` rather than freezing an Event
+ * whose gameplay was never shut — a record taken over live play is exactly the
+ * record that can be missing a Mark.
+ *
+ * THE INPUTS ARE RE-READ FROM THE SERVER, after the quiesce, and that is the
+ * whole point of the ordering. A passive listener re-delivers only when its
+ * documents CHANGE, so "wait until the roster subscription is server-confirmed
+ * again" would deadlock in precisely the case the quiesce creates — nothing
+ * moving. An explicit server read is issued after the closing write is
+ * acknowledged, so its result is the state of a collection that can no longer
+ * change: the strongest form of "confirmed after the close" available to a
+ * client, rather than the weakest.
+ *
+ * That is a READ, not a recompute (ADR 0001). Every number still comes verbatim
+ * off the Player-written `PlayerDoc`, through the same converters the live
+ * Leaderboard reads; only the freshness differs. The Event doc is re-read RAW
+ * inside the transaction — the `setDayTheme`/`confirmClaim` discipline — so the
+ * ban roster and schedule the record freezes against are the stored ones.
+ *
  * Archiving is ONE-WAY from the client. The transaction re-reads the Event
  * inside itself and reports `already-archived` rather than re-freezing, so a
  * double tap (or a second Admin's tap) can never overwrite the record with a
  * later roster — and the rules refuse the rewrite besides. Un-archiving is
  * deliberately not a client operation at all; see the spec's § Recovery.
- *
- * The roster comes from the CALLER (`useLeaderboard`'s live subscription)
- * rather than being re-read here: this is a snapshot of the standings the
- * Admin is looking at, not a server-side recompute of them (ADR 0001). The
- * Event doc, by contrast, is re-read RAW inside the transaction — the same
- * discipline `setDayTheme`/`confirmClaim` use — so the ban roster and schedule
- * the record freezes against are the stored ones.
  */
-export async function archiveEvent(params: {
-  players: readonly PlayerDoc[];
-  dayMetas?: ReadonlyMap<number, DayMetaDoc>;
-  dayMetasLoaded?: boolean;
-  now?: number;
-}): Promise<ArchiveEventResult> {
+export async function archiveEvent(params: { now?: number } = {}): Promise<ArchiveEventResult> {
   const eventRef = evt();
+  // The pre-read is FROM THE SERVER: a cache-sourced Event could still report
+  // the pre-quiesce state, and the Day count read off it decides which honour
+  // pins are fetched below.
+  const pre = await getDocFromServer(eventRef);
+  if (!pre.exists()) return 'no-event';
+  const preData = pre.data() as Partial<EventDoc>;
+  if (preData.status === 'archived') return 'already-archived';
+  if (preData.archiving !== true) return 'not-closing';
+
+  // Everything the record freezes, read after the close. `playersCol()` /
+  // `dayMetaRef()` are the same converter-attached references the live
+  // subscriptions use, so the rows are the identical shape — this is the live
+  // Leaderboard's own data, read once more at the one moment it is guaranteed
+  // to have stopped moving.
+  const dayIndexes = (Array.isArray(preData.days) ? preData.days : []).map((d) => d.index);
+  const [rosterSnap, metaSnaps] = await Promise.all([
+    getDocsFromServer(playersCol()),
+    Promise.all(dayIndexes.map((index) => getDocFromServer(dayMetaRef(index)))),
+  ]);
+  const players = rosterSnap.docs.map((d) => d.data());
+  const dayMetas = new Map<number, DayMetaDoc>();
+  metaSnaps.forEach((snap, i) => {
+    if (snap.exists()) dayMetas.set(dayIndexes[i], snap.data());
+  });
+
   return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
     const snap = await tx.get(eventRef);
     if (!snap.exists()) return 'no-event';
     const data = snap.data() as Partial<EventDoc>;
     if (data.status === 'archived') return 'already-archived';
+    // Re-checked HERE as well: an Admin (or another console) can abandon the
+    // archive between the reads above and this commit, and an Event whose
+    // gameplay reopened in that window is one whose roster may have moved
+    // again. Refuse rather than freeze what may already be stale.
+    if (data.archiving !== true) return 'not-closing';
     const archivedAt = params.now ?? Date.now();
     tx.update(eventRef, {
       status: 'archived',
       archivedAt,
       archive: buildEventArchive({
-        players: params.players,
+        players,
         event: {
           days: Array.isArray(data.days) ? data.days : [],
           bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
           frozenAt: data.frozenAt,
           standingsFreezeAt: data.standingsFreezeAt,
         },
-        dayMetas: params.dayMetas,
-        dayMetasLoaded: params.dayMetasLoaded,
+        dayMetas,
+        // Every Day's pin was read from the server above, so an absent pin is
+        // the server's answer rather than an unfilled cache — which is the one
+        // thing `dayMetasLoaded` exists to tell apart.
+        dayMetasLoaded: true,
         archivedAt,
       }),
+      // The quiesce is over. `status` carries the freeze from here, and unlike
+      // this flag it cannot be cleared.
+      archiving: false,
     });
     return 'archived';
   });

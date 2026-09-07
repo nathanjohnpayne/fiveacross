@@ -62,6 +62,25 @@ export function isEventArchived(
   return event?.status === 'archived';
 }
 
+/**
+ * Whether this Event is in the archive's QUIESCING phase (#134, spec § "The
+ * quiesce protocol"): shut to gameplay by the Admin's first archive write, but
+ * not yet frozen. The rules deny every gameplay write in this state exactly as
+ * they do for an archived Event, so the roster the second write snapshots
+ * cannot move underneath it.
+ *
+ * Deliberately SEPARATE from `isEventArchived`, and neither implies the other.
+ * A closing Event has no `archive` to render — the Leaderboard stays live, and
+ * correctly so, because the record does not exist yet — while an archived one
+ * clears the flag. The one surface that cares about the difference is the Admin
+ * console, which offers a closing Event both a way to finish and a way back.
+ */
+export function isEventArchiving(
+  event: Pick<EventDoc, 'archiving'> | null | undefined,
+): boolean {
+  return event?.archiving === true;
+}
+
 /** Copy one Player's own written stats into a frozen standings row. No
  *  arithmetic: whatever the Player's row said is what the record says. */
 function toStandingRow(p: PlayerDoc): ArchivedStandingRow {

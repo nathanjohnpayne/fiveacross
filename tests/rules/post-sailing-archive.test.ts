@@ -213,22 +213,37 @@ async function freeze(): Promise<void> {
       status: 'archived',
       archivedAt: FROZEN_RECORD.archivedAt,
       archive: FROZEN_RECORD,
+      archiving: false,
     });
+  });
+}
+
+/** Shut the Event out-of-band into the archive's QUIESCING phase — gameplay
+ *  denied, no record taken — so the paired gameplay cases can prove the closing
+ *  half of the freeze denies exactly what the archived half does. */
+async function quiesce(): Promise<void> {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true });
   });
 }
 
 describe('post-sailing-archive — the archive toggle is admin-only and write-once', () => {
   it('ALLOWS an admin to flip status, stamp archivedAt and persist the frozen record', async () => {
+    await quiesce();
     await assertSucceeds(
       updateDoc(doc(db(ADMIN), eventPath()), {
+        // The document stamp and the record's own stamp are ONE value written
+        // in one update, and the rules hold them equal.
         status: 'archived',
-        archivedAt: NOW(),
+        archivedAt: FROZEN_RECORD.archivedAt,
         archive: FROZEN_RECORD,
+        archiving: false,
       }),
     );
   });
 
   it('DENIES a Player archiving the Event', async () => {
+    await quiesce();
     await assertFails(
       updateDoc(doc(db(ALICE), eventPath()), {
         status: 'archived',
@@ -239,6 +254,7 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
   });
 
   it('DENIES an unauthenticated archive', async () => {
+    await quiesce();
     await assertFails(
       updateDoc(doc(unauthDb(), eventPath()), { status: 'archived', archivedAt: NOW() }),
     );
@@ -254,6 +270,7 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
   });
 
   it('DENIES archiving without a numeric archivedAt stamp', async () => {
+    await quiesce();
     await assertFails(
       updateDoc(doc(db(ADMIN), eventPath()), { status: 'archived', archive: FROZEN_RECORD }),
     );
@@ -286,6 +303,225 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
         archivedAt: FROZEN_RECORD.archivedAt,
         archive: FROZEN_RECORD,
       }),
+    );
+  });
+});
+
+// Codex P1, PR #1139. The archive transaction reads ONE document and writes ONE
+// document, so it serializes against nothing in `players`, `boards`, `claims` or
+// `tally`. The quiesce is what closes that hole: gameplay is shut by a first
+// admin write, and only from THAT state may the record be taken — which is a
+// property the rules must hold, because a client-side ordering convention is
+// exactly what a direct SDK write ignores.
+describe('post-sailing-archive — the quiesce shuts gameplay before the record is taken', () => {
+  it('ALLOWS an admin to shut the Event, and to reopen it while the archive is uncommitted', async () => {
+    // REVERSIBLE on purpose: the first write shuts gameplay for everyone, so a
+    // freeze that failed halfway (or an Admin who changed their mind) must not
+    // leave a live Event permanently unplayable.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+  });
+
+  it('DENIES a Player shutting the Event, or reopening one', async () => {
+    await assertFails(updateDoc(doc(db(ALICE), eventPath()), { archiving: true }));
+    await assertFails(updateDoc(doc(unauthDb(), eventPath()), { archiving: true }));
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ALICE), eventPath()), { archiving: false }));
+  });
+
+  it('DENIES a non-boolean closing flag, even from an admin', async () => {
+    // A truthy string would read as CLOSED through one reader and open through
+    // another; the flag decides whether every gameplay write is denied, so it
+    // gets the same shape check `forceAdult` carries.
+    for (const bad of ['true', 1, 'yes', null]) {
+      await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: bad }));
+    }
+  });
+
+  it('DENIES a Mark, a Claim and a proof-media upload once the Event is closing', async () => {
+    // The SAME paired shape the archived half uses: each write succeeds while
+    // the Event is open and fails once shut, with nothing else changed. This is
+    // the whole point of the closing state — a quiescing phase a Player could
+    // still write through would quiesce nothing.
+    const markBoard = () =>
+      setDoc(
+        doc(db(ALICE), `${eventPath()}/days/0/boards/${ALICE}`),
+        { cells: cells([3]), markSeed: 7 },
+        { merge: true },
+      );
+    const makeClaim = (id: string) =>
+      setDoc(doc(db(ALICE), `${eventPath()}/claims/${id}`), {
+        uid: ALICE,
+        itemId: ITEM,
+        cellIndex: 3,
+        createdAt: NOW(),
+      });
+    await assertSucceeds(markBoard());
+    await assertSucceeds(makeClaim('claim-open'));
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), photoPath), TINY, IMAGE));
+
+    await quiesce();
+
+    await assertFails(markBoard());
+    await assertFails(makeClaim('claim-closed'));
+    await assertFails(
+      uploadBytes(ref(storageOf(ALICE), `proofs/${EVENT}/${ALICE}/proof-closing.jpg`), TINY, IMAGE),
+    );
+    // Admins are bound by the closing state too, exactly as they are by the
+    // freeze: a quiesce its own organiser can mark through freezes nothing.
+    await assertFails(
+      setDoc(
+        doc(db(ADMIN), `${eventPath()}/days/0/boards/${ALICE}`),
+        { cells: cells([4]), markSeed: 7 },
+        { merge: true },
+      ),
+    );
+  });
+
+  it('keeps Admin moderation and reads open while the Event is closing', async () => {
+    // The closing state stops GAMEPLAY, not administration — otherwise an Admin
+    // could not drain a report, and could not reopen the Event either.
+    await quiesce();
+    await assertSucceeds(getDoc(doc(db(BOB), eventPath())));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `${eventPath()}/proofs/${PROOF}`), { status: 'hidden' }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { bannedUids: [BOB] }));
+  });
+
+  it('DENIES archiving an Event that was never shut, and ALLOWS it from the closing state', async () => {
+    const archive = () =>
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: false,
+      });
+    // Straight off a live Event: refused. There is no window in which the
+    // roster had stopped moving, so the record cannot be trusted to be whole.
+    await assertFails(archive());
+    await quiesce();
+    await assertSucceeds(archive());
+  });
+
+  it('DENIES an archive write that smuggles a configuration change with it', async () => {
+    // The flip rides its own arm, which skips the schedule and freeze-boundary
+    // validation the ordinary admin arm performs. `affectedKeys().hasOnly` is
+    // what keeps that a short-circuit rather than a hole: anything beyond the
+    // four archive fields is not an archive write and falls through to the arm
+    // that does check those fields — where a not-yet-archived document is
+    // refused.
+    await quiesce();
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: false,
+        standingsFreezeAt: PAST(),
+      }),
+    );
+  });
+
+  it('DENIES an archive write that leaves the closing flag set', async () => {
+    // The quiesce ends with the freeze. A document carrying both would hold a
+    // CLEARABLE second spelling of a state that must not be clearable.
+    await quiesce();
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archive: FROZEN_RECORD,
+        archiving: true,
+      }),
+    );
+  });
+
+  it('leaves the closing flag inert once archived — clearing it cannot reopen play', async () => {
+    // `archiving` is deliberately outside the write-once clause, so it stays
+    // clearable. That is safe precisely because `status` is not: the freeze is
+    // carried by the half that cannot be moved.
+    await freeze();
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    await assertFails(
+      setDoc(
+        doc(db(ALICE), `${eventPath()}/days/0/boards/${ALICE}`),
+        { cells: cells([3]), markSeed: 7 },
+        { merge: true },
+      ),
+    );
+  });
+});
+
+// Codex P2, PR #1139. Type-checking `archive` only when present accepted
+// `{status: 'archived', archivedAt}` on its own — a state that is both
+// irreversible and useless: the freeze denies every gameplay write while the
+// Leaderboard falls back to the LIVE view the archive exists to replace, and a
+// half-built map throws in `ArchivedLeaderboard`.
+describe('post-sailing-archive — the archive write must carry the whole record', () => {
+  const archiveWith = (record: unknown) =>
+    updateDoc(doc(db(ADMIN), eventPath()), {
+      status: 'archived',
+      archivedAt: FROZEN_RECORD.archivedAt,
+      archive: record,
+      archiving: false,
+    });
+
+  beforeEach(async () => {
+    await quiesce();
+  });
+
+  it('DENIES the flip with no record at all, or an empty one', async () => {
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: FROZEN_RECORD.archivedAt,
+        archiving: false,
+      }),
+    );
+    await assertFails(archiveWith({}));
+  });
+
+  it('DENIES a record missing any top-level key', async () => {
+    for (const key of [
+      'standings',
+      'playerCount',
+      'firstBingo',
+      'dailyHonors',
+      'freezeAt',
+      'archivedAt',
+    ] as const) {
+      const partial: Record<string, unknown> = { ...FROZEN_RECORD };
+      delete partial[key];
+      await assertFails(archiveWith(partial));
+    }
+  });
+
+  it('DENIES a record whose keys carry the wrong types', async () => {
+    for (const wrong of [
+      { standings: 'none' },
+      { playerCount: '1' },
+      { firstBingo: 'Alice' },
+      { dailyHonors: {} },
+      { freezeAt: 'never' },
+      { archivedAt: 'then' },
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, ...wrong }));
+    }
+  });
+
+  it('DENIES a record whose stamp disagrees with the document stamp', async () => {
+    // Two answers to one question is exactly what the archived surfaces would
+    // then show; both are written from one value in one update.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, archivedAt: FROZEN_RECORD.archivedAt + 1 }));
+  });
+
+  it('ALLOWS the complete record, including the legitimately null pair', async () => {
+    // `firstBingo: null` means nobody got there and `freezeAt: null` means the
+    // Event had no Standings Freeze — both are real records, so the check is
+    // presence-then-type-or-null rather than a bare `is map`/`is number`.
+    await assertSucceeds(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: null, freezeAt: null, dailyHonors: [] }),
     );
   });
 });

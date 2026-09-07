@@ -420,6 +420,25 @@ export interface EventDoc {
    */
   archivedAt?: number;
   /**
+   * The QUIESCING phase of the archive (#134, specs/post-sailing-archive.md §
+   * "The quiesce protocol"). The Admin's FIRST archive write sets this; the
+   * rules then treat the Event exactly as if it were archived for every
+   * gameplay write, so the roster, the Day honours and the Claim queue stop
+   * moving. Only then are those inputs re-read from the server and frozen into
+   * `archive` by the second write, which flips `status` and clears this flag.
+   *
+   * Without it the archive is one document read and one document write, and
+   * neither can serialize against a Board write or a Claim create in another
+   * collection — so a Mark committed alongside the snapshot would be missing
+   * from a record the rules immediately make permanent.
+   *
+   * REVERSIBLE until the archive commits, deliberately: an abandoned or failed
+   * archive must not leave an Event shut forever, so an Admin may clear it. It
+   * is inert afterwards — the freeze is carried by `status`, which is
+   * write-once. Absent on every Event that is not mid-archive.
+   */
+  archiving?: boolean;
+  /**
    * The frozen final record (#134): the Leaderboard standings and the
    * First-to-BINGO hall of fame as they stood at `archivedAt`. Write-once — the
    * rules refuse to change it once present — so the record persists unchanged
