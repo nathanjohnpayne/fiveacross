@@ -13,7 +13,7 @@ Implements the edge half of [ADR 0009](../docs/adr/0009-event-resolved-from-host
 
 **Namespace guard**—the decision, made from the hostname alone and before any data is read, about whether an address may reach the router at all. Distinct from Resolution, which asks whether the Event at a permitted address is servable. *Avoid:* routing rule, hostname check.
 
-**Reserved label**—an infrastructure first label that is never dealt to an Event on any Namespace: `www`, `auth`, `api`, `admin`, `play`, `status`, `d`. *Avoid:* blocked slug (they are not refused because they are bad, but because they belong to something else).
+**Reserved label**—an infrastructure first label that is never dealt to an Event on any Namespace: `www`, `auth`, `api`, `admin`, `play`, `send`, `status`, `d`. (`send` was added by [#1102](https://github.com/nathanjohnpayne/fiveacross/issues/1102): it carries the Resend return-path MX and SPF for `fiveacross.app`, and because a wildcard does not apply to a name that already exists with any record type (RFC 4592), those explicit records occlude the wildcard for that label.) *Avoid:* blocked slug (they are not refused because they are bad, but because they belong to something else).
 
 **Fail closed**—answering an Event-not-found *rendered state* for every address that is not an explicit, active, well-formed, address-matching record. Never an exception, and never an inferred active. *Avoid:* 404, error (both understate that the state is drawn).
 

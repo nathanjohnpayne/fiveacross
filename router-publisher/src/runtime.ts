@@ -22,12 +22,21 @@ const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
   ['gaycruisebingo.vercel.app', ['gcb', null]],
 ]);
+// MIRROR of `RESERVED_LABELS` in `src/slug.ts`, not an independent policy.
+// It cannot import that module: this service's `tsconfig.json` pins
+// `rootDir: "src"`, so reaching outside it would change the emitted artifact
+// shape of a separately deployed Cloud Function. The copy is instead pinned by
+// the parity test in `src/slug.test.ts`, which reads this file — the same
+// device `dailyEmailTheme.ts` uses for its Theme-token mirror, and for the
+// same reason: a mirror without a parity test is how mirrors drift. `send`
+// carries the Resend return-path MX for `fiveacross.app` (#1102).
 const RESERVED_EVENT_SLUGS = new Set([
   'admin',
   'api',
   'auth',
   'd',
   'play',
+  'send',
   'status',
   'www',
 ]);
