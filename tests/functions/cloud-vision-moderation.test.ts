@@ -13,6 +13,11 @@ import {
   type AdminFirestore,
   type ReportableDoc,
 } from '../../functions/src/autohide';
+import {
+  AUTO_HIDE_VISION_FLAGS as clientAutoHideFlags,
+  isAutoHideVisionFlag as clientIsAutoHideVisionFlag,
+  visionHideStands,
+} from '../../src/data/moderation';
 
 // specs/cloud-vision-moderation.md — the CONSUMER half of Cloud Vision (#133,
 // ADR 0004). Proves the Vision-flag → hide path: an extreme/illegal `visionFlag`
@@ -243,5 +248,66 @@ describe('composition with the #43 report-count auto-hide — the two paths neve
       }),
     ).toBe(false);
     expect(visionHide).not.toHaveBeenCalled();
+  });
+});
+
+// --- client/functions parity: the confirm-time gate --------------------------
+//
+// The Vision hide is server-authoritative, but ONE client write can undo it.
+// `confirmClaim` (src/data/admin.ts) publishes an admin_confirmed claim's
+// 'pending' Proof by writing `status: 'active'`, and active Proofs sit OUTSIDE
+// `qualifiesForVisionHide` — so confirming a Mark whose photo had already been
+// safety-hidden would re-expose extreme/illegal media and this trigger would
+// never hide it again. The client gates that publish on `visionHideStands`
+// (src/data/moderation.ts), which MIRRORS this module's allowlist because the
+// app and the Functions package are deliberately decoupled (the same shape as
+// the last-call-copy mirror in tests/functions/lastcall-copy-parity.test.ts).
+//
+// A mirror without a parity test is how two predicates drift apart. These cases
+// feed ONE verdict set to both sides and are intended to FAIL if either side
+// changes alone.
+
+describe('client/functions parity — the auto-hide allowlist (#133)', () => {
+  it('exports the SAME verdict list on both sides', () => {
+    expect([...clientAutoHideFlags]).toEqual([...AUTO_HIDE_VISION_FLAGS]);
+  });
+
+  it('agrees verdict-for-verdict on what counts as an auto-hide flag', () => {
+    const verdicts: unknown[] = [
+      'violence',
+      'extreme',
+      'racy',
+      'adult',
+      'spoof',
+      'medical',
+      'Violence',
+      'EXTREME',
+      ' violence',
+      '',
+      null,
+      undefined,
+      7,
+      {},
+      ['violence'],
+    ];
+    for (const verdict of verdicts) {
+      expect(clientIsAutoHideVisionFlag(verdict)).toBe(isAutoHideVisionFlag(verdict));
+    }
+  });
+
+  it('holds the client gate closed on exactly the states the trigger owns', () => {
+    for (const verdict of ['violence', 'extreme', 'racy', 'adult', null]) {
+      // 'flagged': the doc the trigger owns — the two predicates must agree.
+      const flaggedDoc: VisionFlaggedDoc = { status: 'flagged', visionFlag: verdict };
+      expect(visionHideStands('flagged', verdict)).toBe(qualifiesForVisionHide(flaggedDoc));
+      // 'hidden': the doc the trigger already produced and now stands down on
+      // (its loop guard) — precisely the one a confirm would re-expose, so the
+      // client gate holds where the trigger cannot.
+      expect(qualifiesForVisionHide({ status: 'hidden', visionFlag: verdict })).toBe(false);
+      expect(visionHideStands('hidden', verdict)).toBe(isAutoHideVisionFlag(verdict));
+      // Everything the trigger never owned publishes exactly as it always did.
+      expect(visionHideStands('pending', verdict)).toBe(false);
+      expect(visionHideStands('active', verdict)).toBe(false);
+    }
   });
 });

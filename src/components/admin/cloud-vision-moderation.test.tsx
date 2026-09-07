@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import type { EventDoc, ProofDoc } from '../../types';
+import type { ClaimDoc, EventDoc, ProofDoc } from '../../types';
 
 // specs/cloud-vision-moderation.md, component layer (RTL-jsdom). Drives the REAL
 // admin Review queue with the data boundary stubbed, and pins the Vision
@@ -21,9 +21,11 @@ const H = vi.hoisted(() => ({
     defaultTheme: 'neon-playground',
   } as unknown as EventDoc,
   flagged: [] as ProofDoc[],
+  claims: [] as ClaimDoc[],
   hideProof: vi.fn(),
   restoreProof: vi.fn(),
   clearProofReports: vi.fn(),
+  confirmClaim: vi.fn(),
 }));
 
 vi.mock('../../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
@@ -47,14 +49,14 @@ vi.mock('../../hooks/useData', async (importOriginal) => {
   return {
     ...actual,
     useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
-    usePendingClaims: () => ({ claims: [] }),
+    usePendingClaims: () => ({ claims: H.claims }),
     usePendingItems: () => ({ items: [] }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: [], loading: false }),
   };
 });
 vi.mock('../../data/admin', () => ({
-  confirmClaim: vi.fn(),
+  confirmClaim: (...a: unknown[]) => H.confirmClaim(...a),
   rejectClaim: vi.fn(),
   hideProof: (...a: unknown[]) => H.hideProof(...a),
   restoreProof: (...a: unknown[]) => H.restoreProof(...a),
@@ -109,6 +111,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   H.user = { uid: 'admin-uid' };
   H.flagged = [];
+  H.claims = [];
+  H.event = {
+    admins: ['admin-uid'],
+    settings: { reportHideThreshold: 4 },
+    claimMode: 'honor',
+    defaultTheme: 'neon-playground',
+  } as unknown as EventDoc;
 });
 
 describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.md)', () => {
@@ -200,5 +209,93 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
     expect(row.getByText('AI screen: racy')).toBeInTheDocument();
     expect(row.queryByText(/hidden/)).toBeNull();
     expect(row.getByRole('button', { name: 'Hide' })).toBeInTheDocument();
+  });
+});
+
+// --- Pending claims: the Confirm that no longer un-hides ---------------------
+
+const claim = (over: Partial<ClaimDoc> = {}): ClaimDoc =>
+  ({
+    id: 'claim-1',
+    uid: 'u-1',
+    displayName: 'Deck Daddy',
+    cellIndex: 4,
+    itemText: 'Saw a sailor in Speedos',
+    proofId: 'P',
+    status: 'pending',
+    createdAt: 1,
+    resolvedBy: null,
+    ...over,
+  }) as ClaimDoc;
+
+/** The admin_confirmed Event whose console shows the Pending claims group. */
+const adminConfirmedEvent = () => {
+  H.event = {
+    admins: ['admin-uid'],
+    settings: { reportHideThreshold: 4 },
+    claimMode: 'admin_confirmed',
+    defaultTheme: 'neon-playground',
+  } as unknown as EventDoc;
+};
+
+describe('Pending claims — a Vision-held photo is named on the row (specs/cloud-vision-moderation.md)', () => {
+  it('says the photo stays hidden, and names the verdict, when a Vision hide stands on it', () => {
+    // `confirmClaim` (src/data/admin.ts) deliberately does NOT publish this
+    // Proof, so the row must say so: the Confirm control shows only the
+    // submitter and the Prompt, and is not the warned moderation Restore.
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 0, { displayName: 'Held Photo', status: 'hidden', visionFlag: 'violence' })];
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Deck Daddy');
+    expect(row.getByText('hidden · AI screen: violence')).toBeInTheDocument();
+    expect(
+      row.getByText('Confirming credits the mark; the photo stays hidden for moderation.'),
+    ).toBeInTheDocument();
+  });
+
+  it('says the same while the Proof is still FLAGGED and the hide has not landed yet', () => {
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 0, { displayName: 'Held Photo', status: 'flagged', visionFlag: 'extreme' })];
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Deck Daddy');
+    expect(row.getByText('hidden · AI screen: extreme')).toBeInTheDocument();
+    expect(row.getByText(/the photo stays hidden for moderation/)).toBeInTheDocument();
+  });
+
+  it('leaves an ordinary claim unannotated — Confirm still publishes its pending Proof', () => {
+    adminConfirmedEvent();
+    H.claims = [claim()];
+    renderQueue();
+
+    const row = rowFor('Deck Daddy');
+    expect(row.queryByText(/AI screen/)).toBeNull();
+    expect(row.queryByText(/stays hidden for moderation/)).toBeNull();
+    fireEvent.click(row.getByRole('button', { name: 'Confirm' }));
+    expect(H.confirmClaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'claim-1' }), 'admin-uid');
+  });
+
+  it('leaves a merely-racy verdict unannotated — nothing withholds the photo for raciness', () => {
+    // ADR 0004 again, on the claim side: a racy verdict is not a safety hide, so
+    // the confirm publishes exactly as it always did and the row says nothing.
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'hidden', visionFlag: 'racy' })];
+    H.claims = [claim()];
+    renderQueue();
+
+    expect(rowFor('Deck Daddy').queryByText(/stays hidden for moderation/)).toBeNull();
+  });
+
+  it('annotates only the claim whose OWN proofId carries the verdict', () => {
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 0, { displayName: 'Held Photo', status: 'hidden', visionFlag: 'violence' })];
+    H.claims = [claim(), claim({ id: 'claim-2', displayName: 'Pool Boy', proofId: 'Q' })];
+    renderQueue();
+
+    expect(rowFor('Deck Daddy').getByText(/stays hidden for moderation/)).toBeInTheDocument();
+    expect(rowFor('Pool Boy').queryByText(/stays hidden for moderation/)).toBeNull();
   });
 });

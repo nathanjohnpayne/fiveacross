@@ -110,3 +110,51 @@ export function isSystemAuthor(uid: string | null | undefined): boolean {
 export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: boolean): boolean {
   return spicy === true && !adultRequired;
 }
+
+/**
+ * The `visionFlag` verdicts that carry a server-authoritative safety hide — the
+ * CLIENT MIRROR of `AUTO_HIDE_VISION_FLAGS` in `functions/src/visionHide.ts`
+ * (#133). Restated rather than imported because the app and the Functions package
+ * are deliberately decoupled (the same posture `autohide.ts` takes toward this
+ * module), and pinned against the functions original by the client/functions
+ * parity block in `tests/functions/cloud-vision-moderation.test.ts`, which is
+ * intended to FAIL if either side changes alone.
+ *
+ * An ALLOWLIST, not a denylist, for the same ADR 0004 reason the producer gives:
+ * the app is intentionally racy, so an unrecognized verdict must fail closed to
+ * "not a safety hide" rather than silently acquiring one.
+ */
+export const AUTO_HIDE_VISION_FLAGS: readonly string[] = ['violence', 'extreme'];
+
+/** Is this `visionFlag` one of the extreme/illegal verdicts that auto-hides? */
+export function isAutoHideVisionFlag(flag: unknown): boolean {
+  return typeof flag === 'string' && AUTO_HIDE_VISION_FLAGS.includes(flag);
+}
+
+/**
+ * Does a server-authoritative Vision safety hide currently STAND on this Proof?
+ * True iff it is `'hidden'` or `'flagged'` AND carries an extreme/illegal
+ * `visionFlag` — the two states `hideProofOnVisionFlag` owns: `'flagged'` is the
+ * Proof the trigger is about to hide (or failed to hide, and will retry on the
+ * next write), `'hidden'` is the one it already hid.
+ *
+ * The one client caller is `confirmClaim` (./admin), which publishes an
+ * admin_confirmed claim's `'pending'` Proof by writing `status: 'active'`. Active
+ * Proofs sit OUTSIDE `qualifiesForVisionHide`, so without this gate confirming
+ * the Mark would put extreme/illegal media back in front of every Player and the
+ * trigger would never hide it again — from a control whose row shows only the
+ * submitter and the Prompt, and which is emphatically NOT the warned, explicit
+ * moderation Restore. The claim still resolves and the Mark is still confirmed;
+ * only the media stays hidden, and the queue row says so.
+ *
+ * Deliberately keyed on the Vision verdict alone rather than on "is this Proof
+ * hidden at all": lifting an admin's manual hide or a report-count auto-hide is
+ * confirm's pre-existing behaviour and has its own console affordances (`Restore`,
+ * `Clear reports`). This closes the SAFETY hole ADR 0004 exists for.
+ */
+export function visionHideStands(
+  status: string | undefined,
+  visionFlag: string | null | undefined,
+): boolean {
+  return (status === 'hidden' || status === 'flagged') && isAutoHideVisionFlag(visionFlag);
+}

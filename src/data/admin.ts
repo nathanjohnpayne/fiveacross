@@ -7,10 +7,10 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor } from './moderation';
+import { isSystemAuthor, visionHideStands } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
+import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
@@ -910,6 +910,13 @@ async function resolve(
       const snap = await tx.get(dayMeta(d, eventId));
       echoMetaSnaps.push({ dayIndex: d, exists: snap.exists() });
     }
+    // The claim's Proof, read LIVE and BEFORE any write (Firestore's
+    // reads-before-writes contract), so the publish below can be conditional on
+    // the state Cloud Vision may have moved it to since the Player submitted it
+    // (#133). `null` whenever there is nothing to publish — a reject, or a
+    // legacy claim carrying no proofId — so no other resolve pays for the read.
+    const claimProofRef = status === 'confirmed' && c.proofId ? proof(c.proofId, eventId) : null;
+    const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
 
     tx.set(
       boardRef,
@@ -1025,8 +1032,31 @@ async function resolve(
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
-    if (status === 'confirmed' && c.proofId) {
-      tx.set(proof(c.proofId, eventId), { status: 'active' }, { merge: true });
+    //
+    // UNLESS a Vision safety hide stands on it (#133, Codex P1). Cloud Vision
+    // scans the uploaded object, so an admin_confirmed claim's Proof can be
+    // flagged and hidden BEFORE its claim is ever reviewed. Publishing it
+    // unconditionally would write `status: 'active'`, and active Proofs are
+    // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
+    // in front of every Player and the trigger would never hide it again, lifted
+    // by a control that shows only the submitter and the Prompt. This is NOT the
+    // warned, explicit moderation Restore (ReviewQueue), which is the one place
+    // an admin may override an AI verdict, having been told what they are
+    // lifting. So the claim still resolves and the Mark is still confirmed —
+    // only the media stays hidden, and the queue row says so on the claim.
+    //
+    // The gate reads the LIVE snapshot, not the stale event that opened the
+    // admin's console, and only a genuinely publishable Proof is moved: a
+    // 'pending' one, an already-active one (a no-op re-write), or one whose
+    // verdict is outside the auto-hide allowlist — nothing auto-hides for
+    // raciness (ADR 0004). A missing snapshot keeps the pre-#133 write.
+    if (claimProofRef) {
+      const liveProof = claimProofSnap?.exists()
+        ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
+        : undefined;
+      if (!visionHideStands(liveProof?.status, liveProof?.visionFlag)) {
+        tx.set(claimProofRef, { status: 'active' }, { merge: true });
+      }
     }
     return { transitioned: transitionedToConfirmed };
   });

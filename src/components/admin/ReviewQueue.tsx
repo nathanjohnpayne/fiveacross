@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
+import { visionHideStands } from '../../data/moderation';
 import {
   confirmClaim,
   rejectClaim,
@@ -383,6 +384,21 @@ export default function ReviewQueue({
   const admins = event?.admins ?? [];
   const claimsVisible = event?.claimMode === 'admin_confirmed';
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
+  // #133: the AI verdict standing on a pending claim's Proof, keyed by proof id.
+  // Cloud Vision scans the uploaded object, so a claim's photo can be flagged and
+  // safety-hidden BEFORE the claim is reviewed — and `confirmClaim` deliberately
+  // does NOT publish such a Proof (src/data/admin.ts), because Confirm shows only
+  // the submitter and the Prompt and is not the warned moderation Restore. The
+  // row says so rather than leaving the admin to discover it: the Mark is
+  // confirmed, the photo stays hidden. Derived from the Reports group's own rows,
+  // which `useReportedProofs` already queues on its `visionFlag` arm — no second
+  // subscription, no per-claim read.
+  const visionHeldClaimProofs = new Map<string, string>();
+  for (const row of reports) {
+    if (row.kind === 'proof' && visionHideStands(row.proof.status, row.proof.visionFlag)) {
+      visionHeldClaimProofs.set(row.proof.id, String(row.proof.visionFlag));
+    }
+  }
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
   // paths go through it, and the bulk one is the easy miss: a batch containing
   // one explicit Prompt flips the Event just as surely as approving that Prompt
@@ -667,20 +683,31 @@ export default function ReviewQueue({
           <h3>Pending claims{claims.length ? ` (${claims.length})` : ''}</h3>
           {!claims.length && <p className="muted" style={{ fontSize: 12 }}>Nothing to confirm.</p>}
           <div className="list">
-            {claims.map((c) => (
-              <div key={c.id} className="row">
-                <div className="grow">
-                  <div className="name">{c.displayName}</div>
-                  <div className="sub">{c.itemText}</div>
+            {claims.map((c) => {
+              const visionFlag = c.proofId ? visionHeldClaimProofs.get(c.proofId) : undefined;
+              return (
+                <div key={c.id} className="row">
+                  <div className="grow">
+                    <div className="name">
+                      {c.displayName}
+                      {visionFlag && <span className="pill pill-hidden">{`hidden · AI screen: ${visionFlag}`}</span>}
+                    </div>
+                    <div className="sub">{c.itemText}</div>
+                    {visionFlag && (
+                      <div className="sub">
+                        Confirming credits the mark; the photo stays hidden for moderation.
+                      </div>
+                    )}
+                  </div>
+                  <AsyncButton onAction={() => confirmClaim(c, adminUid)}>
+                    Confirm
+                  </AsyncButton>
+                  <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectClaim(c, adminUid)}>
+                    ✕
+                  </AsyncButton>
                 </div>
-                <AsyncButton onAction={() => confirmClaim(c, adminUid)}>
-                  Confirm
-                </AsyncButton>
-                <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectClaim(c, adminUid)}>
-                  ✕
-                </AsyncButton>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
