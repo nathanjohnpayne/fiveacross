@@ -241,8 +241,24 @@ describe('re-validating the projection at the service boundary', () => {
     ['an unrecognised desired kind', committed({ kind: 'redirect' } as never)],
     ['a null projection', { kind: 'committed', revision: '7', desired: null } as unknown as RegistryLookup],
     ['a lookup arm this Worker does not know', { kind: 'quarantined' } as unknown as RegistryLookup],
+    ['a null envelope', null as unknown as RegistryLookup],
+    ['an undefined envelope', undefined as unknown as RegistryLookup],
+    ['a non-object envelope', 'unknown-host' as unknown as RegistryLookup],
   ])('refuses %s as replica-malformed rather than coercing it', async (_label, lookup) => {
     await expect(reasonFor(lookup)).resolves.toBe('replica-malformed');
+  });
+
+  it('classifies an absent envelope rather than throwing on its discriminant', () => {
+    // A registry mid-rollout, or an entrypoint that returned nothing at all,
+    // hands back `null`. Reading `.kind` off that throws, and the rejection
+    // escapes `resolveHost` — which does not catch it, because `decide` runs
+    // outside the bounded call — into an unversioned Cloudflare error page
+    // instead of the rendered fail-closed response.
+    expect(() => decide(null as unknown as RegistryLookup, SLUG)).not.toThrow();
+    expect(decide(undefined as unknown as RegistryLookup, SLUG)).toEqual({
+      kind: 'not-found',
+      reason: 'replica-malformed' satisfies NotFoundReason,
+    });
   });
 
   it('refuses an unrecognised status BEFORE reading it as inactive', () => {

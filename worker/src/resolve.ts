@@ -181,6 +181,16 @@ export async function resolveHost(
  * not conform is `replica-malformed`, never coerced data.
  */
 export function decide(lookup: RegistryLookup, expectedSlug: string | null): Resolution {
+  // The ENVELOPE is checked before its discriminant is read, and the order is
+  // the point. A registry mid-rollout, or one whose entrypoint returned nothing
+  // at all, hands back `null` or `undefined`; reading `.kind` off that throws
+  // before any arm below can classify it, and the rejection escapes
+  // `resolveHost` — which does not catch it, because `decide` runs outside the
+  // bounded call — into an unversioned Cloudflare error page. That is the same
+  // crash-instead-of-fail-closed failure an unbound binding used to cause, and
+  // it is exactly the response this module exists to never produce.
+  if (typeof lookup !== 'object' || lookup === null) return notFound('replica-malformed');
+
   switch (lookup.kind) {
     case 'unknown-host':
       return notFound('unknown-host');
