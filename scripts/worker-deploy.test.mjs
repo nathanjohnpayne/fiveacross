@@ -269,8 +269,10 @@ describe('worker deploy guard — dotenv files Wrangler would load', () => {
     // `/dev/null` is what closes that half.
     const result = runWithStubbedNpm({ routeBearing: true, secretListJson: '[]' });
     expect(result.status).toBe(0);
-    expect(result.npmCalls).toContain(
-      '--prefix worker exec -- wrangler secret list --format json --env-file /dev/null',
+    expect(result.npmCalls).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^--prefix worker exec -- wrangler secret list --format json --config \S+\/worker\/wrangler\.toml --env-file \/dev\/null$/),
+      ]),
     );
     expect(result.npmCalls).toContain('--prefix worker run deploy -- --env-file /dev/null');
   });
@@ -346,6 +348,18 @@ describe('worker deploy guard — registry lookup binding', () => {
 });
 
 describe('worker deploy guard — no surviving Firebase credential', () => {
+  it('names worker/wrangler.toml explicitly on the secret readback', () => {
+    // `npm exec` keeps the repository-root cwd, so without `--config` Wrangler
+    // finds no configuration here (exit 75 on every deploy) or, given an
+    // ancestor wrangler.toml, inspects the wrong Worker (Phase 4b P1, #1120).
+    const result = runWithStubbedNpm({ secretListJson: '[]' });
+    expect(result.status).toBe(0);
+    const readback = result.npmCalls.find((call) => call.includes('secret list'));
+    expect(readback).toBeDefined();
+    expect(readback).toMatch(/--config \S*worker\/wrangler\.toml/);
+    expect(readback).toContain('--env-file /dev/null');
+  });
+
   it('passes when the deployed Worker carries no secrets at all', () => {
     // The App Check-compatible router reads no Firebase resource, so the
     // absence of the binding is the expected steady state (#972).
@@ -433,7 +447,7 @@ describe('worker deploy guard — route-bearing deploys', () => {
     expect(result.status).toBe(0);
     expect(result.npmCalls.slice(0, 2)).toEqual([
       '--prefix worker ci --include=dev',
-      '--prefix worker exec -- wrangler secret list --format json --env-file /dev/null',
+      expect.stringMatching(/^--prefix worker exec -- wrangler secret list --format json --config \S+\/worker\/wrangler\.toml --env-file \/dev\/null$/),
     ]);
   });
 

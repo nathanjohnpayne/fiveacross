@@ -196,9 +196,9 @@ Cold/warm evidence is executable rather than inferred from a 30-second wait. For
 |---|---|---|
 | uninitialized DO | rendered not-found, `unknown-host` | none; no negative cache |
 | valid inactive/tombstone | rendered not-found, `inactive` / `unknown-host` | none |
-| malformed/unsupported committed state | rendered not-found, `replica-malformed` | alert; no Firestore |
+| malformed/unsupported committed state | rendered not-found, `replica-malformed`; the registry emits `outcome: malformed` and the router emits `event-router.diagnostic` with `replica-malformed` (host only, never the stored bytes) | alert; no Firestore |
 | Slug mismatch/missing | existing `slug-mismatch` / `slug-missing` | none |
-| registry binding absent, or service/DO lookup rejects/times out | rendered not-found, `lookup-unavailable` | alert; no stale/Firestore fallback |
+| registry binding absent, or service/DO lookup rejects/times out | rendered not-found, `lookup-unavailable`; the router emits `event-router.diagnostic` with `lookup-unavailable` | alert; no stale/Firestore fallback |
 | `/__/auth/*` on configured router | preserve existing lookup bypass/origin pass-through | missing required bindings still fail closed first |
 | publisher token/body signature/epoch rejected | sync `401` | Function throws; no state change |
 | JWKS unavailable for unknown key | sync `503` | Function throws; platform retry |
@@ -214,7 +214,7 @@ Every public response keeps `x-event-router`; fail-closed responses keep a close
 
 ## Observability, rollout, and rollback
 
-Structured logs use closed outcomes and include router/registry version, host, revision when known, lookup/sync latency, KMS key-version identifier, and `applied|replay|ignored-stale|gap|conflict|recovery-locked|recovered`; they exclude tokens, signatures, request bodies, Firebase keys, and Event data. Page on any conflict, recovery, retry/gap older than five minutes, three consecutive serving-host probe failures, `lookup-unavailable` over 1% for five minutes, cold maximum or warm p95/maximum over its budget, unexpected empty-object cardinality, or spend threshold. Audit reports missing/mismatch/locked/ahead/behind counts; cutover requires zero.
+Structured logs use closed outcomes and include router/registry version, host, revision when known, lookup/sync latency, KMS key-version identifier, and `applied|replay|ignored-stale|gap|conflict|recovery-locked|recovered|empty-object|malformed`, and the router's own `event-router.diagnostic` line for `replica-malformed` and `lookup-unavailable`; they exclude tokens, signatures, request bodies, Firebase keys, and Event data. Page on any conflict, recovery, retry/gap older than five minutes, three consecutive serving-host probe failures, `lookup-unavailable` over 1% for five minutes, cold maximum or warm p95/maximum over its budget, unexpected empty-object cardinality, or spend threshold. Audit reports missing/mismatch/locked/ahead/behind counts; cutover requires zero.
 
 These gates insert a registry rung before the PRD's existing Gate 1–3 ladder. Evidence records deployed versions/source commit, expected revisions, timestamps, probe locations, cold/warm latency, and App Check state.
 

@@ -153,6 +153,49 @@ describe('a servable committed projection', () => {
 });
 
 describe('the fail-closed decision table', () => {
+  it('reports the two refusals the spec pages on, and only those, through the diagnostic seam', async () => {
+    const events: unknown[] = [];
+    const withDiagnostics = (lookup: RegistryLookup | (() => Promise<RegistryLookup>)) => {
+      const { deps } = harness(lookup);
+      return { ...deps, diagnostics: (event: unknown) => events.push(event) };
+    };
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'malformed' }));
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'unavailable' }));
+    await resolveHost(HOST, SLUG, CONFIG, { ...withDiagnostics({ kind: 'unknown-host' }), registry: null });
+    expect(events).toEqual([
+      { event: 'event-router.diagnostic', outcome: 'replica-malformed', host: HOST },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: HOST },
+      { event: 'event-router.diagnostic', outcome: 'lookup-unavailable', host: HOST },
+    ]);
+
+    // Ordinary refusals and serves are silent: an unknown host is expected traffic,
+    // and a slug mismatch is about the address, not the router.
+    events.length = 0;
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics({ kind: 'unknown-host' }));
+    const route: ReplicaDesired = {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: SLUG,
+      edition: 'fiveacross',
+      pathNamespace: null,
+    };
+    await resolveHost(HOST, 'someone-else', CONFIG, withDiagnostics(committed(route)));
+    await resolveHost(HOST, SLUG, CONFIG, withDiagnostics(committed(route)));
+    expect(events).toEqual([]);
+
+    // A listener that throws never turns a closed refusal into an escaping error.
+    const { deps } = harness({ kind: 'malformed' });
+    await expect(
+      resolveHost(HOST, SLUG, CONFIG, {
+        ...deps,
+        diagnostics: () => {
+          throw new Error('sink down');
+        },
+      }),
+    ).resolves.toMatchObject({ kind: 'not-found', reason: 'replica-malformed' });
+  });
+
   it('answers an uninitialized object as an unknown address', async () => {
     await expect(reasonFor({ kind: 'unknown-host' })).resolves.toBe('unknown-host');
   });

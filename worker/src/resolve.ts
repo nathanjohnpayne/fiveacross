@@ -130,6 +130,39 @@ export interface ResolveDeps {
    *  crash in — the same reason `config.ts` normalises an unbound string
    *  binding to `''` instead of leaving it `undefined`. */
   registry: RegistryLookupService | null;
+  /**
+   * Where the two refusals the registry spec pages on are reported
+   * (§ Failure semantics: `replica-malformed` and `lookup-unavailable` both say
+   * "alert"). A closed, bounded event — the reason and the host, never the
+   * lookup's contents — so a permanently broken projection is distinguishable
+   * from an ordinary unknown host in monitoring (Phase 4b P2, #1120).
+   * Optional: the decision table is unchanged whether or not anyone listens.
+   */
+  diagnostics?: (event: RouterDiagnosticEvent) => void;
+}
+
+/** The closed shape every router-side alert carries. */
+export interface RouterDiagnosticEvent {
+  event: 'event-router.diagnostic';
+  outcome: 'replica-malformed' | 'lookup-unavailable';
+  host: string;
+}
+
+const ALERTED_REASONS: ReadonlySet<NotFoundReason> = new Set(['replica-malformed', 'lookup-unavailable']);
+
+function reportRefusal(deps: ResolveDeps, host: string, resolution: Resolution): Resolution {
+  if (deps.diagnostics && resolution.kind === 'not-found' && ALERTED_REASONS.has(resolution.reason)) {
+    try {
+      deps.diagnostics({
+        event: 'event-router.diagnostic',
+        outcome: resolution.reason as RouterDiagnosticEvent['outcome'],
+        host,
+      });
+    } catch {
+      // A diagnostic must never turn a closed refusal into an escaping error.
+    }
+  }
+  return resolution;
 }
 
 /** `revision` defaults to `null`, so a refusal only carries one where the arm
@@ -275,7 +308,7 @@ export async function resolveHost(
   config: ResolveConfig,
   deps: ResolveDeps,
 ): Promise<Resolution> {
-  if (deps.registry === null) return notFound('lookup-unavailable');
+  if (deps.registry === null) return reportRefusal(deps, host, notFound('lookup-unavailable'));
 
   let lookup: RegistryLookup;
   try {
@@ -287,10 +320,10 @@ export async function resolveHost(
     // inside the router's contract: an escaping rejection would hand the
     // response to Cloudflare and lose the version stamp an operator uses to
     // prove this Worker handled the host.
-    return notFound('lookup-unavailable');
+    return reportRefusal(deps, host, notFound('lookup-unavailable'));
   }
 
-  return decide(host, lookup, expectedSlug);
+  return reportRefusal(deps, host, decide(host, lookup, expectedSlug));
 }
 
 /**

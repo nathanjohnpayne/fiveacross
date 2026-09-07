@@ -46,6 +46,7 @@ import {
 import { parseStoredRegistryState } from './storedState';
 import {
   createCardinalitySemanticEvent,
+  createMalformedSemanticEvent,
   createRecoverySemanticEvent,
   emitRegistrySemanticEvent,
   isRegistryTelemetryVersion,
@@ -204,7 +205,20 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       // Reached only when stored state EXISTS and does not parse — the storage
       // read above is outside this try, so an unavailable object rejects out of
       // `lookup` instead. That makes this arm precisely the failure table's
-      // "malformed/unsupported committed state" row rather than a catch-all.
+      // "malformed/unsupported committed state" row rather than a catch-all —
+      // and that row promises an ALERT, which a silent catch cannot raise
+      // (Phase 4b P2). The event carries the host and the latency, never the
+      // stored bytes the parser refused.
+      if (telemetryHost !== undefined) {
+        emitSemanticSafely(this.env.REGISTRY_VERSION, (registryVersion) =>
+          createMalformedSemanticEvent({
+            registryVersion,
+            host: telemetryHost,
+            startedAt,
+            finishedAt: Date.now(),
+          }),
+        );
+      }
       return { kind: 'malformed' };
     }
   }

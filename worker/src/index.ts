@@ -32,6 +32,10 @@ export default {
       // `undefined` normalised to `null` at the seam, so an unbound binding is
       // a fail-closed answer rather than a method call on `undefined`.
       registry: registryFromEnv(env),
+      // The two refusals the registry spec pages on, as one structured line
+      // per refusal. `console.warn` is what Workers observability ingests; the
+      // event is closed and bounded (reason + host), never the lookup body.
+      diagnostics: (event) => console.warn(JSON.stringify(event)),
     };
 
     return handleRequest(request, routerConfigFromEnv(env), deps);

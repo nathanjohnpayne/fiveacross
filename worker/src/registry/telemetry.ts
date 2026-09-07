@@ -13,7 +13,8 @@ export type RegistrySemanticOutcome =
   | 'publisher-epoch-rejected'
   | 'tombstone-final'
   | 'recovered'
-  | 'empty-object';
+  | 'empty-object'
+  | 'malformed';
 
 export type RegistrySemanticEvent = Readonly<{
   schemaVersion: 1;
@@ -155,6 +156,34 @@ export function createCardinalitySemanticEvent(args: {
     event: 'event-router-registry.semantic',
     operation: 'lookup',
     outcome: 'empty-object',
+    registryVersion: args.registryVersion,
+    host: args.host,
+    revision: null,
+    latencyMs,
+    gapAgeMs: null,
+    keyVersion: null,
+    recoveryAction: null,
+  });
+}
+
+/**
+ * A committed replica the registry could not parse — the failure table's
+ * "malformed/unsupported committed state" row, whose promised alert cannot
+ * fire from a silent catch (Phase 4b P2, #1120). Same closed shape as the
+ * cardinality event: host and latency, never the stored bytes.
+ */
+export function createMalformedSemanticEvent(args: {
+  registryVersion: string;
+  host: string;
+  startedAt: number;
+  finishedAt: number;
+}): RegistrySemanticEvent {
+  const { latencyMs } = requireCommon({ ...args, revision: null, keyVersion: null });
+  return Object.freeze({
+    schemaVersion: 1,
+    event: 'event-router-registry.semantic',
+    operation: 'lookup',
+    outcome: 'malformed',
     registryVersion: args.registryVersion,
     host: args.host,
     revision: null,

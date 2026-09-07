@@ -268,6 +268,13 @@ verify_registry_lookup_binding() {
 # consulted, so neither can report what the deployed Worker holds.
 #
 # `wrangler secret list` returns names and types only, never values.
+#
+# `--config` names the configuration EXPLICITLY. `npm --prefix worker exec`
+# keeps this script's working directory (the repository root), so Wrangler's
+# automatic lookup would not find `worker/wrangler.toml` at all — an ordinary
+# deploy then failed verification with exit 75 — and, worse, an ancestor
+# `wrangler.toml` would make the readback inspect an unrelated Worker and
+# certify the router's secret absence on its behalf (Phase 4b P1, #1120).
 verify_no_firebase_secret() {
   local when="$1" secrets
   echo "🔎 Verifying the deployed Worker carries no ${FORBIDDEN_SECRET_PREFIX}* binding (${when})…" >&2
@@ -277,7 +284,7 @@ verify_no_firebase_secret() {
   # load the repository root's `.env` and `.env.local` — the app build's own,
   # which this guard deliberately does not refuse — and could read the target
   # of this readback out of one of them.
-  if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json --env-file /dev/null 2>/dev/null)"; then
+  if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json --config "$REPO_ROOT/worker/wrangler.toml" --env-file /dev/null 2>/dev/null)"; then
     # Inability to inspect is NOT a pass. The README presents this as
     # verification of the deployed artifact, so exiting 0 here would let
     # automation record an unverified deploy as a verified one.
