@@ -52,7 +52,6 @@ function EventApp() {
     retryDeal,
     canRenderEventContent,
     admission,
-    retryAdmission,
   } = useAuth();
   // The tab-switch transition's key (specs/motion-polish.md): the TOP-LEVEL
   // route segment only, so `.route-view` replays its entrance when the tab
@@ -86,15 +85,19 @@ function EventApp() {
   // member and does not get the Feed or More either. `blocked` is terminal for
   // this visit — the one message, no Retry — while `retryable` keeps the
   // bounded record and offers the same Retry surface a failed deal does.
-  if (admission.kind === 'pending') {
+  // `held` is an invitation the visit has not been able to check yet (not
+  // authoritative, or offline): still not a member, still no shell.
+  if (admission.kind === 'held' || admission.kind === 'pending') {
     return <LoadingState label={editionBrand().passCheckLabel} />;
   }
   if (admission.kind === 'retryable') {
+    // Retry goes through `retryDeal`, which re-establishes authority and
+    // connectivity before it lets the coordinator redeem again.
     return (
       <DealError
         message="We couldn't check your invitation. Try again."
-        onRetry={retryAdmission}
-        retrying={false}
+        onRetry={retryDeal}
+        retrying={dealing}
       />
     );
   }

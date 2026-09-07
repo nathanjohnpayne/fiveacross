@@ -18,7 +18,6 @@ vi.mock('./auth/AuthContext', () => ({
     user: { uid: 'sailor-1' },
     loading: false,
     admission: { kind: 'clear' },
-    retryAdmission: () => {},
     ...authState.value,
   }),
   AuthProvider: ({ children }: { children: ReactNode }) => children,

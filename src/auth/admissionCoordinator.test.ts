@@ -122,6 +122,47 @@ describe('structural equality for a React mirror', () => {
   });
 });
 
+describe('classifying a visit before redemption may start', () => {
+  it('answers clear with no record and held with one, without touching the callable', () => {
+    const none = coordinatorOver(harness(null));
+    expect(none.classify(VISIT)).toEqual({ kind: 'clear' });
+
+    const h = harness();
+    const coordinator = coordinatorOver(h);
+    const state = coordinator.classify(VISIT);
+    expect(state).toEqual({ kind: 'held', captureId: 'capture-1' });
+    expect(mayDealUnderAdmission(state)).toBe(false);
+    expect(h.redeem).not.toHaveBeenCalled();
+    expect(h.forgetIf).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.states)).not.toContain('A'.repeat(43));
+  });
+
+  it('proceeds from held to pending when begin follows, and supersedes an older attempt', async () => {
+    const h = harness();
+    const coordinator = coordinatorOver(h);
+    coordinator.begin(VISIT);
+    // A new account arrives while the first redemption is in flight: classify
+    // for it retires the old attempt like begin does.
+    expect(coordinator.classify({ ...VISIT, uid: 'user-b' })).toEqual({ kind: 'held', captureId: 'capture-1' });
+    await h.resolve(0, { ok: true, eventId: 'summer-camp-2026', outcome: 'membership-created' });
+    expect(coordinator.state()).toEqual({ kind: 'held', captureId: 'capture-1' });
+    expect(h.forgetIf).not.toHaveBeenCalled();
+
+    expect(coordinator.begin({ ...VISIT, uid: 'user-b' })).toEqual({ kind: 'pending', captureId: 'capture-1' });
+    await h.resolve(1, { ok: true, eventId: 'summer-camp-2026', outcome: 'already-member' });
+    expect(coordinator.state()).toEqual({ kind: 'admitted', outcome: 'already-member' });
+  });
+
+  it('treats held as its own state in the equality check', () => {
+    expect(
+      sameAdmissionState({ kind: 'held', captureId: 'c' }, { kind: 'held', captureId: 'c' }),
+    ).toBe(true);
+    expect(sameAdmissionState({ kind: 'held', captureId: 'c' }, { kind: 'pending', captureId: 'c' })).toBe(
+      false,
+    );
+  });
+});
+
 describe('a visit with no invitation', () => {
   it('is clear at once and never reaches the callable', () => {
     const h = harness(null);

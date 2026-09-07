@@ -37,6 +37,13 @@ export type AdmissionRetryableReason = Exclude<
 export type AdmissionState =
   /** No usable invitation for this origin: the deal proceeds exactly as today. */
   | { kind: 'clear' }
+  /**
+   * A usable invitation exists for this origin but redemption has not started,
+   * because the visit is not yet authoritative or not online. The shell stays
+   * gated: an unchecked invitation is not `clear`, and a cached render
+   * permission must not release Event content past it.
+   */
+  | { kind: 'held'; captureId: string }
   /** A redemption is in flight for the current visit. */
   | { kind: 'pending'; captureId: string }
   /** The callable failed transiently; the record is retained and Retry is offered. */
@@ -71,6 +78,14 @@ export interface AdmissionCoordinator {
   /** The current state; `clear` until the first `begin`. */
   state(): AdmissionState;
   /**
+   * Classify a visit WITHOUT redeeming: `clear` when the origin holds no
+   * usable invitation, `held` when it does. Synchronous and network-free, so
+   * it can run the moment an account is known — before authority, before
+   * connectivity — and the first render already carries the right gate.
+   * Supersedes any earlier visit like `begin` does.
+   */
+  classify(visit: AdmissionVisit): AdmissionState;
+  /**
    * Start (or restart) admission for a visit. Supersedes any earlier visit:
    * results still in flight for an older visit are dropped without touching
    * storage or state. Returns the state reached synchronously.
@@ -99,6 +114,7 @@ export function sameAdmissionState(a: AdmissionState, b: AdmissionState): boolea
   switch (a.kind) {
     case 'clear':
       return true;
+    case 'held':
     case 'pending':
       return a.captureId === (b as typeof a).captureId;
     case 'retryable':
@@ -183,6 +199,14 @@ export function createAdmissionCoordinator(
 
   return {
     state: () => state,
+
+    classify(visit) {
+      generation += 1;
+      current = null;
+      const pending = deps.readPending({ origin: visit.origin, now: deps.now() });
+      if (pending === null) return publish({ kind: 'clear' });
+      return publish({ kind: 'held', captureId: pending.record.captureId });
+    },
 
     begin(visit) {
       generation += 1;

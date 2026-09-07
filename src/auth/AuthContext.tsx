@@ -532,8 +532,9 @@ interface AuthContextValue {
   // or `admitted`; `pending`, `retryable` and `blocked` hold it at zero calls.
   // Carries the capture's opaque id at most — never the bearer.
   admission: AdmissionState;
-  // Re-attempt a `retryable` redemption in place. A no-op in every other state.
-  retryAdmission: () => void;
+  // A `retryable` redemption is retried through `retryDeal`, which applies the
+  // same authority and connectivity gates as the deal itself before restarting
+  // it; there is deliberately no separate retry that could skip them.
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -551,7 +552,6 @@ const AuthContext = createContext<AuthContextValue>({
   attest: async () => {},
   retryDeal: () => {},
   admission: { kind: 'clear' },
-  retryAdmission: () => {},
 });
 
 // A pool-shortfall deal failure (the ADR 0003/0004 below-floor guard) vs any other
@@ -709,6 +709,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // re-begins (and re-redeems) the same signed-in visit, while a new account
   // or a new Event does begin afresh. `null` between visits.
   const admissionVisitRef = useRef<string | null>(null);
+  // Classify the moment an account is known for an Event — synchronously, in
+  // the same batch as the identity change, so the FIRST render of the shell
+  // already carries `held` when the origin holds an invitation. Classification
+  // needs no authority and no network; only redemption does. Without it a
+  // cached render permission (an offline cold boot with a cached 18+ stamp)
+  // would release Board, Nav and their subscriptions to a visit whose
+  // invitation had never been checked at all.
+  const classifyAdmission = useCallback((uid: string, ownedEventId: string) => {
+    admissionVisitRef.current = null;
+    admissionRef.current!.classify({ eventId: ownedEventId, uid, origin: window.location.origin });
+  }, []);
+  // The gate inputs the deal effect last fired under, so a re-run whose only
+  // change is the admission mirror catching up with a state the coordinator
+  // already answered from — `admitted` retired to `clear` by an Event switch,
+  // then that `clear` arriving through React state — does not deal twice.
+  const lastDealGateRef = useRef<string | null>(null);
   // Tri-state 18+ attestation for the current User (#23): `undefined` = UNKNOWN
   // (bootstrap unsettled, or an indeterminate read); `true` = attested; `false` =
   // a SETTLED profile with no stamp → re-prompt. A missing stamp during load is
@@ -848,8 +864,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     pendingEventBootstrapRef.current = eventId;
     setStoredDealState(neutralDealState(eventId));
     admissionVisitRef.current = null;
+    lastDealGateRef.current = null;
     admissionRef.current?.reset();
-  }, [eventId]);
+    const uid = authUidRef.current;
+    if (uid !== null) classifyAdmission(uid, eventId);
+  }, [eventId, classifyAdmission]);
   // TWO-TIER same-session attestation (Codex #117 round 7): keep the OPTIMISTIC-UI
   // tier and the DURABLE-AUTHORITY tier strictly separate — optimistic-for-UI is
   // NOT authoritative-for-writes.
@@ -1391,7 +1410,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // a record the incoming account may redeem itself. `reset` deletes
       // nothing, and the next authoritative render begins the new visit.
       admissionVisitRef.current = null;
+      lastDealGateRef.current = null;
       admissionRef.current!.reset();
+      if (u) classifyAdmission(u.uid, ownedEventId);
       clearDealError(ownedEventId);
       setDealingFor(ownedEventId, false);
       // The incoming User's profile bootstrap has not settled yet (#77), so the
@@ -1756,8 +1777,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
   useEffect(() => {
-    if (!(user && mayDeal && online)) return;
-    if (!mayDealUnderAdmission(beginAdmissionIfNeeded(user, eventId))) return;
+    if (!(user && mayDeal && online)) {
+      // The gate closed (offline, authority retired, signed out). Forget the
+      // last deal's inputs so the re-open deals again exactly as it always
+      // has — a reconnect re-runs joinAndDeal, whose board-exists early-return
+      // makes it a no-op for a boarded Player and a real join for a first
+      // timer. The dedupe below is only for two runs under ONE open gate.
+      lastDealGateRef.current = null;
+      return;
+    }
+    const state = beginAdmissionIfNeeded(user, eventId);
+    if (!mayDealUnderAdmission(state)) return;
+    // Deal once per (visit, admission answer, gate inputs). The coordinator
+    // answers synchronously, so the run triggered by an Event or account
+    // change already dealt from its answer; the run the admission mirror then
+    // triggers is the same answer arriving through state, not a new one.
+    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}`;
+    if (lastDealGateRef.current === gate) return;
+    lastDealGateRef.current = gate;
     void runDeal(user, eventId);
   }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded]);
 
@@ -2417,10 +2454,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const canRenderEventContent =
     user != null && (attestationRequired ? attested === true : profileReady);
 
-  const retryAdmission = useCallback(() => {
-    admissionRef.current!.retry();
-  }, []);
-
   return (
     <AuthContext.Provider
       value={{
@@ -2438,7 +2471,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         attest,
         retryDeal,
         admission,
-        retryAdmission,
       }}
     >
       {/* The confirm-path Moment emitter (#41) mounts for ANY signed-in user,
