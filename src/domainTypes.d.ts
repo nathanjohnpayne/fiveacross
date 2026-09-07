@@ -115,7 +115,8 @@ export interface EditionBrand {
   /** `og:url` — the canonical origin an unfurl attributes the link to (#587).
    *  Strictly this is a per-EVENT fact (the Event's canonical hostname), but a
    *  build can only bake per-Edition data, so each Edition carries its flagship
-   *  origin here until the edge Worker (#546) rewrites the tag per hostname. */
+   *  origin here until the edge Worker rewrites the tag per hostname (#1118,
+   *  the follow-up #546 split the HTML head into). */
   ogUrl: string;
   /** `og:image` / `twitter:image` — an ABSOLUTE URL (#587, artwork #609).
    *  Absolute because crawlers resolve unfurl images poorly against relative
