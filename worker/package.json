@@ -7,6 +7,7 @@
   "scripts": {
     "check:registry-harness-types": "wrangler types registry-harness-configuration.d.ts --config wrangler.registry-harness.toml --config wrangler.registry.toml --env-interface RegistryHarnessEnv --include-runtime=false --check",
     "check:router-types": "wrangler types router-configuration.d.ts --config wrangler.toml --config wrangler.registry.toml --env-interface RouterBindings --include-runtime=false --check",
+    "types:router": "wrangler types router-configuration.d.ts --config wrangler.toml --config wrangler.registry.toml --env-interface RouterBindings --include-runtime=false",
     "dev": "wrangler dev -c wrangler.toml -c wrangler.registry.toml",
     "deploy": "wrangler deploy",
     "versions:upload": "wrangler versions upload"

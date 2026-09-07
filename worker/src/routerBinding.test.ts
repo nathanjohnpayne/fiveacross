@@ -156,6 +156,23 @@ describe('what the router’s configuration no longer declares', () => {
     expect(manifest.scripts.postdeploy).toBeUndefined();
   });
 
+  it('regenerates its binding types with the same command that checks them', async () => {
+    // `npm exec` keeps the CALLER's working directory even with `--prefix
+    // worker`, so the documented regeneration command used to look for a
+    // root-level `wrangler.toml` when run from the repository root and could
+    // not regenerate the file it names (Codex P2 on #1120). `npm run` is the
+    // form that sets the working directory to the package, so the command
+    // lives in this manifest — which also makes the pairing checkable: the
+    // regenerate and check scripts must differ ONLY by `--check`, or the
+    // committed evidence file is regenerated under one set of flags and
+    // verified under another.
+    const manifest = JSON.parse(await readFile(resolve(HERE, '../package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(manifest.scripts['types:router']).toBeDefined();
+    expect(manifest.scripts['check:router-types']).toBe(`${manifest.scripts['types:router']} --check`);
+  });
+
   it('is the configuration Wrangler would actually read', async () => {
     // Wrangler resolves `wrangler.json`, then `wrangler.jsonc`, then
     // `wrangler.toml`. A committed `worker/wrangler.json` would pass the
