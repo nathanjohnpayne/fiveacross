@@ -210,7 +210,10 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
       // spread untouched: ABSENT means "not yet computed" (the scheduler beat's
       // idempotence key) while present-with-empty-`winners` is the explicit
       // no-award record — inventing a default here would erase the distinction
-      // the write-once guard depends on.
+      // the write-once guard depends on. `archivedAt` / `archive` (#134) ride
+      // the same reasoning a third time: both are ABSENT until the Event is
+      // archived, and both are written in one update with `status`, so a
+      // default here could only ever invent an archive that was never taken.
     };
   },
 };

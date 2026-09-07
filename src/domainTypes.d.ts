@@ -293,6 +293,67 @@ export interface MostLovedPhotoAward {
   computedAt: number;              // scheduler run clock, diagnostics only
 }
 
+/** One row of the frozen final standings (#134, specs/post-sailing-archive.md).
+ *  Every field is COPIED from the Player-written `PlayerDoc` at the archive — the
+ *  archive snapshots the client-authoritative standings, it never recomputes or
+ *  re-verifies them (ADR 0001). */
+export interface ArchivedStandingRow {
+  uid: string;
+  displayName: string;
+  bingoCount: number;
+  squaresMarked: number;
+  blackout: boolean;
+  firstBingoAt: number | null;
+}
+
+/** The hall of fame's headline honour: the Event-wide First to BINGO at the
+ *  archive, selected by the SAME `eventFirstBingoWinner` the live Leaderboard
+ *  pin and the frozen podium read, so the archive cannot name a fourth
+ *  answer to a question three surfaces already agree on. */
+export interface ArchivedFirstBingo {
+  uid: string;
+  displayName: string;
+  at: number;
+}
+
+/** One Day's frozen First to BINGO honour — the same `{dayIndex, uid,
+ *  displayName, firstBingoAt}` shape `DayHonor` carries live, resolved
+ *  pinned-day-meta-first exactly as the Leaderboard's honours strip resolves it. */
+export interface ArchivedDayHonor {
+  dayIndex: number;
+  uid: string;
+  displayName: string;
+  firstBingoAt: number;
+}
+
+/**
+ * The frozen post-Event record (#134, specs/post-sailing-archive.md): the final
+ * Leaderboard standings plus the First-to-BINGO hall of fame, written ONCE by
+ * the admin archive action and never rewritten. Present means archived and
+ * frozen; ABSENT on every Event that has not been archived.
+ *
+ * `standings` retains a bounded prefix in Leaderboard rank order and
+ * `playerCount` records the complete roster cardinality, mirroring
+ * `MostLovedPhotoAward`'s `winners`/`winnerCount` pair: the Event document has
+ * one 1 MiB budget and `days`/`bannedUids`/`mostLovedPhoto` already spend part
+ * of it, so an unbounded roster copy is the one field that could make the
+ * document unwritable.
+ */
+export interface EventArchive {
+  /** The final Leaderboard rows, already ranked, ban-filtered, bounded prefix. */
+  standings: ArchivedStandingRow[];
+  /** Complete ban-filtered roster size; `standings.length` when nothing was dropped. */
+  playerCount: number;
+  /** Event-wide First to BINGO; `null` when nobody held a qualifying bingo. */
+  firstBingo: ArchivedFirstBingo | null;
+  /** Each Day's own First to BINGO, ordered by Day index; `[]` on a pre-Day-Cards roster. */
+  dailyHonors: ArchivedDayHonor[];
+  /** The Standings Freeze the snapshot was taken as of (`resolvedStandingsFreezeAt`), or `null`. */
+  freezeAt: number | null;
+  /** The archive stamp — always equal to `EventDoc.archivedAt`. */
+  archivedAt: number;
+}
+
 export interface EventDoc {
   name: string;
   // The Event's date window. Docs written before the #566 rename persist
@@ -343,6 +404,30 @@ export interface EventDoc {
   // with `winners: []` = computed, no eligible winner (the explicit no-award
   // record the write-once guard needs). Never recomputed after it exists.
   mostLovedPhoto?: MostLovedPhotoAward;
+  /**
+   * The post-Event archive stamp (ms epoch, #134,
+   * specs/post-sailing-archive.md): when an Admin froze this Event. Written in
+   * the SAME update that flips `status` to `'archived'` and persists `archive`,
+   * so no reader ever sees an archived Event with no stamp or a stamp on a live
+   * one. Absent until the Event is archived.
+   *
+   * Named at arm's length from `frozenAt` for the reason `standingsFreezeAt` is
+   * (ADR 0011): `frozenAt` stamps the FINALE — competitive scoring stops, the
+   * podium computes, the closing Day opens, and the Event keeps running. This
+   * stamps the END — gameplay writes are denied at the rules boundary and the
+   * frozen record below is what the Leaderboard renders from. Two different
+   * events, hours or weeks apart.
+   */
+  archivedAt?: number;
+  /**
+   * The frozen final record (#134): the Leaderboard standings and the
+   * First-to-BINGO hall of fame as they stood at `archivedAt`. Write-once — the
+   * rules refuse to change it once present — so the record persists unchanged
+   * however the live Player rows are later touched. Absent on every non-archived
+   * Event; `status === 'archived'` without it is not a state this app can
+   * produce (the archive write is one update carrying all three fields).
+   */
+  archive?: EventArchive;
   // Presentational, event-scoped hide/mute of a Player's content (ADR 0004
   // Phase 0) — NOT hard access revocation. An admin-maintained roster of banned
   // uids kept on the (already admin-writable) event doc; a follow-up (#108) will
