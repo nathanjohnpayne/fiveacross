@@ -535,6 +535,34 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
   );
 
   /**
+   * The canonical positives padded with whitespace and control characters, at
+   * the front, at the back, and at the separator.
+   *
+   * `^\s*r2-` is an anchor widening that neither anchor fixture above can see.
+   * The prefixed near-miss uses a letter and the multiline ones put text before
+   * a newline, so `\s*` matches neither — but it matches a bare leading space,
+   * and a host arrives here as an externally supplied string: a reservation
+   * host, a Firestore document id, a CloudEvent payload field. A mirror that
+   * tolerated padding would admit a host the canonical predicate rejects and
+   * that nothing else in the system produces.
+   *
+   * `\u00a0`, `\u200b` and `\0` ride along because a trimmer written against
+   * ASCII whitespace, or an anchor widened to a hand-rolled class, tends to
+   * disagree with `\s` about exactly these.
+   */
+  const PADDING = [' ', '\t', '\n', '\r', '\f', '\v', '\u00a0', '\u200b', '\0'];
+
+  const PADDED_NEAR_MISSES = PADDING.flatMap((pad) =>
+    [EVENT_POSITIVE, ROOT_POSITIVE].flatMap((label) =>
+      NAMESPACES.flatMap((namespace) => [
+        `${pad}${label}.${namespace}`,
+        `${label}.${namespace}${pad}`,
+        `${label}${pad}.${namespace}`,
+      ]),
+    ),
+  );
+
+  /**
    * Canonical positives with one dot spoiled: first the separator before the
    * Namespace, then the dot INSIDE it. Both classes, both Namespaces.
    *
@@ -575,6 +603,7 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     ...MARKER_NEAR_MISSES.flatMap((label) =>
       NAMESPACES.map((namespace) => `${label}.${namespace}`),
     ),
+    ...PADDED_NEAR_MISSES,
   ];
 
   /** What the canonical predicates say about a host, for a given class. */
