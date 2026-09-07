@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ReactElement } from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { User } from 'firebase/auth';
@@ -1072,5 +1073,110 @@ describe('ConfirmWinMoments — daily-cards events adjudicate against the Claim�
     await flushAsync();
     expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT); // celebrates, day chip intact
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // the headline honor is settled
+  });
+
+  // --- #1050: the confirm path reads the shared headline eligibility ----------
+  //
+  // Day 2 STATES `scoring: 'ceremonial'` with `tutorial: false` (ADR 0011): its
+  // bucket records a bingo while the standings root stays null, because the
+  // ranked fold drops ceremonial Days. Day 0 is TUTORIAL — excluded from the
+  // headline honour outright. The pre-#1050 gate read only the root, so the
+  // ceremonial rival was invisible (a false singleton) while the tutorial rival
+  // could not be distinguished at all.
+  describe('the ceremonial-vs-tutorial headline gate (#1050)', () => {
+    const ADR11_DAYS = [
+      { index: 0, tutorial: true },
+      { index: 1 },
+      { index: 2, scoring: 'ceremonial', tutorial: false },
+    ] as unknown as EventDoc['days'];
+    const SELF = { uid: 'u1', firstBingoAt: null } as unknown as PlayerDoc;
+    /** A rival whose ONLY bingo is on `dayIndex`, with the root the ranked fold
+     *  actually derives for an excluded Day: null. */
+    const rivalOn = (dayIndex: number, at: number) =>
+      ({
+        uid: 'rival',
+        displayName: 'Rival',
+        photoURL: null,
+        bingoCount: 1,
+        squaresMarked: 5,
+        firstBingoAt: null,
+        dayStats: { [dayIndex]: { bingoCount: 1, squaresMarked: 5, firstBingoAt: at } },
+      }) as unknown as PlayerDoc;
+
+    beforeEach(() => {
+      H.event = { days: ADR11_DAYS } as Partial<EventDoc>;
+    });
+
+    /** Drive one Day-1 claim from pending to confirmed-and-reflected. */
+    const confirmDay1Win = async (rerender: (ui: ReactElement) => void) => {
+      H.claims = [claim({ status: 'confirmed', dayIndex: 1 })];
+      H.dayBoards = new Map([[1, boardDoc(cellsWith(ROW0))]]);
+      rerender(<ConfirmWinMoments />);
+      await flushAsync();
+    };
+
+    it('an IMMEDIATE confirm loses the singleton to an earlier ceremonial, non-tutorial rival', async () => {
+      H.players = [SELF, rivalOn(2, 1_000)];
+      H.dayBoards = new Map([[1, boardDoc(cellsWith([0, 1, 2, 3], [4]))]]);
+      H.claims = [claim({ status: 'pending', resolvedBy: null, dayIndex: 1 })];
+      const { rerender } = render(<ConfirmWinMoments />);
+      await flushAsync();
+
+      await confirmDay1Win(rerender);
+      expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT); // the win still posts
+      expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // the rival holds the headline
+    });
+
+    it('an earlier TUTORIAL-Day rival does not block the immediate confirm', async () => {
+      H.players = [SELF, rivalOn(0, 1)]; // embark card, numerically earliest
+      H.dayBoards = new Map([[1, boardDoc(cellsWith([0, 1, 2, 3], [4]))]]);
+      H.claims = [claim({ status: 'pending', resolvedBy: null, dayIndex: 1 })];
+      const { rerender } = render(<ConfirmWinMoments />);
+      await flushAsync();
+
+      await confirmDay1Win(rerender);
+      expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
+    });
+
+    it('a HELD confirm released against a roster carrying the ceremonial rival never fires', async () => {
+      H.rosterConfirmed = false;
+      H.players = [];
+      H.dayBoards = new Map([[1, boardDoc(cellsWith([0, 1, 2, 3], [4]))]]);
+      H.claims = [claim({ status: 'pending', resolvedBy: null, dayIndex: 1 })];
+      const { rerender } = render(<ConfirmWinMoments />);
+      await flushAsync();
+
+      await confirmDay1Win(rerender);
+      expect(H.broadcastBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
+      expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // parked at the roster gate
+
+      // The roster confirms carrying the earlier ceremonial winner. The release
+      // re-reads the roster through the SAME shared decision the planner used.
+      H.rosterConfirmed = true;
+      H.players = [SELF, rivalOn(2, 1_000)];
+      rerender(<ConfirmWinMoments />);
+      await flushAsync();
+      expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+    });
+
+    it('a HELD confirm released against a TUTORIAL-only rival still fires', async () => {
+      H.rosterConfirmed = false;
+      H.players = [];
+      H.dayBoards = new Map([[1, boardDoc(cellsWith([0, 1, 2, 3], [4]))]]);
+      H.claims = [claim({ status: 'pending', resolvedBy: null, dayIndex: 1 })];
+      const { rerender } = render(<ConfirmWinMoments />);
+      await flushAsync();
+
+      await confirmDay1Win(rerender);
+      expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // held
+
+      H.rosterConfirmed = true;
+      H.players = [SELF, rivalOn(0, 1)];
+      rerender(<ConfirmWinMoments />);
+      await flushAsync();
+      expect(H.broadcastFirstBingo).toHaveBeenCalledTimes(1);
+      expect(H.broadcastFirstBingo).toHaveBeenCalledWith(ACTOR, 1, TEST_EVENT);
+    });
+
   });
 });

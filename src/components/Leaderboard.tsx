@@ -6,7 +6,7 @@ import {
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
   perDayHonors,
-  standingsFreezeAtFor,
+  resolvedStandingsFreezeAt,
   tutorialDayIndexSet,
 } from '../game/logic';
 import { THEMES } from '../theme/themes';
@@ -174,15 +174,13 @@ export default function Leaderboard() {
   // banned: a ban never rewrites who was first to BINGO (specs/w2-ban-console.md
   // § Leaderboard). Only whether that Player's row is currently VISIBLE changes.
   const tutorialDays = tutorialDayIndexSet(event?.days);
-  // The SAME cutoff the frozen podium applies (Phase 4b P1). A ceremonial Day
-  // deliberately keeps recording per-Day stats after the freeze, so without
-  // this the live Leaderboard could name a post-freeze winner while the card
-  // and the immutable podium Moment name nobody, or someone else — two screens
-  // answering one question differently. `standingsFreezeAtFor` resolves to the
-  // ceremonial Day's unlock when nothing is configured, so both live Events are
-  // unchanged; `frozenAt` is stamped to the scheduled instant, so the two agree
-  // once the scheduler has run.
-  const freezeAt = event?.frozenAt ?? standingsFreezeAtFor(event ?? null);
+  // The SAME cutoff the frozen podium and the ceremonial `first_bingo` Moment
+  // gate apply, through the SAME resolver (#1050). A ceremonial Day deliberately
+  // keeps recording per-Day stats after the freeze, so without this the live
+  // Leaderboard could name a post-freeze winner while the card and the immutable
+  // podium Moment name nobody, or someone else — two screens answering one
+  // question differently.
+  const freezeAt = resolvedStandingsFreezeAt(event ?? null);
   const firstBingoUid = cruiseFirstBingoUid(players, (i) => tutorialDays.has(i), freezeAt);
   // The footnote's standings caveat, derived from the resolved Scoring Policy
   // rather than naming the exception by pool (ADR 0011, Codex P2 on PR #841).

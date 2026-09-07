@@ -35,7 +35,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -1358,6 +1358,12 @@ function EventBoard({ eventId }: { eventId: string }) {
     // the per-card blackout drain (#267, Codex P2 on #275) adjudicates only the
     // queued Day that IS this board, never sibling Days it cannot see.
     boardDayIndex: number | undefined;
+    // The Event's tutorial Days and its resolved Standings Freeze — the two
+    // inputs the shared headline-eligibility decision needs at PUBLISH time
+    // (#1050). They ride feedCtx for the same reason the roster does: the drain
+    // is synchronous against the freshest committed view, never a stale closure.
+    tutorialDays: ReadonlySet<number>;
+    freezeAt: number | null;
   }>({
     eventId,
     uid: undefined,
@@ -1368,6 +1374,8 @@ function EventBoard({ eventId }: { eventId: string }) {
     rosterConfirmed: false,
     cells: [],
     boardDayIndex: undefined,
+    tutorialDays: new Set(),
+    freezeAt: null,
   });
   feedCtx.current = {
     eventId,
@@ -1387,6 +1395,11 @@ function EventBoard({ eventId }: { eventId: string }) {
     rosterConfirmed,
     cells: cellsAttributable ? cells : [],
     boardDayIndex: hasDays && cellsAttributable ? board?.dayIndex : undefined,
+    tutorialDays: tutorialDayIndexSet(event?.days),
+    // `frozenAt` once the scheduler beat has landed, else the scheduled freeze —
+    // the SAME resolver the Leaderboard pin and the frozen podium cut on, so the
+    // Feed's headline can never disagree with theirs.
+    freezeAt: resolvedStandingsFreezeAt(event),
   };
 
   // Write-time twin of `tallySourceLive` for the Doubt raise (Codex P2, PR #106
@@ -1452,6 +1465,8 @@ function EventBoard({ eventId }: { eventId: string }) {
       rosterConfirmed: rosterOk,
       cells: cellsRendered,
       boardDayIndex,
+      tutorialDays,
+      freezeAt,
     } = feedCtx.current;
     if (!cUid || !idKnown) return; // identity gate: hold every kind
     const pending = peekPendingMoments(cUid, cEventId);
@@ -1542,14 +1557,26 @@ function EventBoard({ eventId }: { eventId: string }) {
       } else {
         // Ceremonial + self-reported (ADR 0001): claim First-to-BINGO only when,
         // as far as this client's CONFIRMED known-players view shows AT PUBLISH
-        // TIME, no OTHER Player has bingoed yet — and only while the underlying
-        // bingo still STANDS. The race (two clients briefly both believing they
-        // are first) resolves to one Moment per Event via the singleton doc id.
+        // TIME, no OTHER Player holds an ELIGIBLE headline bingo yet — and only
+        // while the underlying bingo still STANDS. The race (two clients briefly
+        // both believing they are first) resolves to one Moment per Event via the
+        // singleton doc id.
+        // The eligibility is the SHARED decision (#1050), not a local read of the
+        // rival's root `firstBingoAt`: that root is the standings tie-break and
+        // drops ceremonial Days as well as tutorial ones, so an earlier rival win
+        // on a `scoring: ceremonial, tutorial: false` Day was invisible here — and
+        // the singleton it let this client claim is immutable, so the Feed stayed
+        // permanently at odds with the Leaderboard and the podium.
         // CONSUME-ON-DECISION: fired and decided-and-lost both clear here, in the
         // same synchronous block as the decision — no async gap can strand a
         // consumed-but-unpublished candidate, and HOLD paths (identity, roster,
         // board, standing-ness) never consume.
-        const othersBingoed = roster.some((p) => p.uid !== cUid && p.firstBingoAt != null);
+        const othersBingoed = earlierEligibleHeadlineBingoExists({
+          roster,
+          candidateUid: cUid,
+          isTutorialDay: (i) => tutorialDays.has(i),
+          freezeAt,
+        });
         if (!othersBingoed) {
           if (firstBingoDay === undefined) broadcastFirstBingo(actor, undefined, cEventId);
           else broadcastFirstBingo(actor, firstBingoDay, cEventId);

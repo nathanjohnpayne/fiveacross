@@ -300,6 +300,95 @@ describe('Board — broadcasts Moments on the ACTION path (specs/w2-feed-moments
     expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // but not the ceremonial first
   });
 
+  // --- #1050: an EARLIER eligible ceremonial winner must be visible here -------
+  //
+  // The rival rows below are the shape an ADR 0011 Day produces — `scoring:
+  // ceremonial`, `tutorial: false`: the per-Day bucket records the bingo, while
+  // the ROOT `firstBingoAt` is null because the ranked fold drops ceremonial Days
+  // from the standings. The pre-#1050 gate read that root, so this rival was
+  // invisible and this client claimed the immutable singleton the Leaderboard and
+  // podium award to the rival. Board resolves no tutorial Days on these legacy
+  // fixtures, so the rival's Day is non-tutorial by construction — exactly the
+  // eligibility the headline selector applies.
+  const CEREMONIAL_RIVAL = {
+    uid: 'ceremonial-rival',
+    displayName: 'Rival',
+    photoURL: null,
+    bingoCount: 1,
+    squaresMarked: 5,
+    firstBingoAt: null, // the standings root: a ceremonial Day never enters it
+    dayStats: { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 1_000 } },
+  } as unknown as PlayerDoc;
+
+  it('does NOT claim First-to-BINGO when another Player already won on a CEREMONIAL, non-tutorial Day (#1050)', async () => {
+    H.players = [{ uid: 'u1', firstBingoAt: null } as unknown as PlayerDoc, CEREMONIAL_RIVAL];
+    H.board = boardWith([0, 1, 2, 3]);
+    render(<Board />);
+    await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
+    expect(H.broadcastBingo).toHaveBeenCalledTimes(1); // their own first BINGO still posts
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // the singleton belongs to the rival
+  });
+
+  it('the PROOF-backed win applies the same ceremonial-rival gate (#1050)', async () => {
+    H.claimMode = 'proof_required';
+    H.players = [{ uid: 'u1', firstBingoAt: null } as unknown as PlayerDoc, CEREMONIAL_RIVAL];
+    H.board = boardWith([0, 1, 2, 3]);
+    render(<Board />);
+    await act(async () => {
+      fireEvent.click(screen.getByText('p4'));
+    });
+    H.proofAttachResult = attachVerdict(dealtWith(ROW0), { bingo: true, bingoTransition: true });
+    await act(async () => {
+      fireEvent.click(screen.getByText('submit-proof'));
+    });
+    await flushAsync();
+    expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+  });
+
+  it('a ROSTER-HELD ceremony is dropped when the confirmed roster reveals the ceremonial rival (#1050)', async () => {
+    H.rosterConfirmed = false;
+    H.players = [];
+    H.board = boardWith([0, 1, 2, 3]);
+    const { rerender } = render(<Board />);
+    await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
+    expect(H.broadcastBingo).toHaveBeenCalledTimes(1); // own BINGO posts
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled(); // held, not guessed
+
+    H.board = boardWith(ROW0); // the listener echoes the standing win
+    rerender(<Board />);
+
+    // The roster confirms carrying the earlier ceremonial winner: decided-and-lost.
+    H.rosterConfirmed = true;
+    H.players = [{ uid: 'u1', firstBingoAt: null } as unknown as PlayerDoc, CEREMONIAL_RIVAL];
+    rerender(<Board />);
+    await flushAsync();
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+  });
+
+  it('a RECONNECT that delivers the ceremonial rival with the identity gate drops the ceremony (#1050)', async () => {
+    // The cold-cache/offline shape: the win completes while the player row is
+    // still loading, so every Moment is held. The reconnect snapshot resolves
+    // identity AND delivers the rival's row in the same pass — the plain bingo
+    // fires with the saved name, the singleton does not.
+    H.playerLoading = true;
+    H.player = null;
+    H.board = boardWith([0, 1, 2, 3]);
+    const { rerender } = render(<Board />);
+    await clickMark('p4', { bingo: true, bingoTransition: true }, dealtWith(ROW0));
+    expect(H.broadcastBingo).not.toHaveBeenCalled(); // held on identity
+
+    H.board = boardWith(ROW0);
+    H.playerLoading = false;
+    H.playerConfirmed = true;
+    H.player = { displayName: 'Deck Daddy', photoURL: null, firstBingoAt: null } as unknown as PlayerDoc;
+    H.players = [{ uid: 'u1', firstBingoAt: null } as unknown as PlayerDoc, CEREMONIAL_RIVAL];
+    rerender(<Board />);
+    await flushAsync();
+    expect(H.broadcastBingo).toHaveBeenCalledTimes(1);
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+  });
+
   it('broadcasts a Blackout on the full-card MARK, without re-firing the BINGO', async () => {
     H.board = boardWith([0, 1, 2, 3]);
     const { rerender } = render(<Board />);
