@@ -193,9 +193,10 @@ spec_test_map:
   # (module-named, not spec-basename-named, and outside both test_globs
   # patterns below), so map every layer explicitly.
   # event-router's coverage is module-named (the shared Slug contract, the
-  # namespace guard, the lookup's decision table, and the request pipeline) and
-  # spans two top-level directories, so none of the four share the spec
-  # basename — map them all explicitly.
+  # namespace guard, the lookup's decision table, the request pipeline, the
+  # capability contract of its registry binding, and the guarded deploy) and
+  # spans two top-level directories, so none of them share the spec basename —
+  # map them all explicitly.
   event-router:
     - src/slug.test.ts
     - worker/src/host.test.ts
@@ -203,7 +204,34 @@ spec_test_map:
     - worker/src/router.test.ts
     - worker/src/config.test.ts
     - worker/src/index.test.ts
+    - worker/src/routerBinding.test.ts
     - scripts/worker-deploy.test.mjs
+  # event-router-registry spans the control plane, the per-host Durable Object,
+  # the signing/verification chain, the recovery and probe surfaces, and the
+  # router's consumption of the named lookup entrypoint. Every file is
+  # module-named and several are Miniflare integration suites, so none can be
+  # discovered by the spec basename.
+  event-router-registry:
+    - worker/src/registry/contracts.test.ts
+    - worker/src/registry/state.test.ts
+    - worker/src/registry/storedState.test.ts
+    - worker/src/registry/audit.test.ts
+    - worker/src/registry/recovery.test.ts
+    - worker/src/registry/recoveryHistory.test.ts
+    - worker/src/registry/probe.test.ts
+    - worker/src/registry/service.test.ts
+    - worker/src/registry/controlService.test.ts
+    - worker/src/registry/controlAuth.test.ts
+    - worker/src/registry/oidc.test.ts
+    - worker/src/registry/keys.test.ts
+    - worker/src/registry/telemetry.test.ts
+    - worker/src/registry/registryHarness.test.ts
+    - worker/src/registry/registryWorker.contract.test.ts
+    - worker/src/registry/registryWorkerSweep.test.ts
+    - worker/src/registry/registryWorker.integration.test.ts
+    - worker/src/registry/routerRegistry.integration.test.ts
+    - worker/src/registry/privateTracer.integration.test.ts
+    - worker/src/routerBinding.test.ts
   og-renderer-commit-safety:
     - scripts/og/og-size-guard.test.mjs
     - scripts/og/og-scratch-path.test.mjs

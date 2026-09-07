@@ -1,13 +1,14 @@
 ---
 spec_id: event-router-registry
 status: accepted
-tested: false
-reason: Design-only — selects and pins the App Check-compatible control plane, Durable Object registry, and cutover gates; runtime tests land in the implementation tickets in § Implementation split, #973 owns the reusable Gate 3 verifier and baseline operational evidence, and #529 runs that verifier before attaching wildcard routes.
+tested: true
 ---
 
 # App Check-compatible Event-router registry (`event-router-registry`)
 
-This is the implementation contract for [ADR 0014](../docs/adr/0014-app-check-compatible-edge-routing-registry.md) and issue #888. It replaces only the edge lookup seam in `specs/event-router.md`; `specs/hostnames-lookup.md` remains the browser-facing source contract, and `specs/event-resolution.md` remains the independent client resolution contract. Until the implementation tickets land, the deployed-but-unrouted Worker still carries its Firestore REST reader and **must remain unrouted**.
+This is the implementation contract for [ADR 0014](../docs/adr/0014-app-check-compatible-edge-routing-registry.md) and issue #888. It replaces only the edge lookup seam in `specs/event-router.md`; `specs/hostnames-lookup.md` remains the browser-facing source contract, and `specs/event-resolution.md` remains the independent client resolution contract.
+
+**Implementation status.** Tickets A (#970) and C (#972) have landed: the registry service, its per-host Durable Object, the named lookup-only entrypoint, the guarded rehearsal controller, and the router's consumption of that entrypoint all exist and are tested. The Worker's Firestore REST reader, its Firebase api-key/project bindings, its `caches.default` envelope, and the deploy check that required an edge Firebase credential are removed. B (#971, real hostname lifecycle convergence) and D (#973, R0–R3 evidence and the Gate 3 verifier) remain open, and no evidence run has been performed. The Worker therefore **remains unrouted**: the only routes any ticket may attach are the bounded synthetic exact routes below, created and removed by the operator-run rehearsal controller, and #529 retains exclusive authority over wildcard, apex, or real-Event attachment.
 
 ## Invariants and threat model
 
@@ -245,11 +246,11 @@ Acceptance for #888's implementation is all tests above, R0–R3 evidence, verif
 
 ## Implementation split
 
-| Ticket | Size | Delivers | Depends on |
-|---|---|---|---|
-| **A — one synthetic hostname end to end** | L | baseline deny-all rules; keyless publisher; contiguous per-host DO transaction; default public control-plane fetch plus named lookup-only entrypoint; private synthetic-only adapter/harness; source/provider-attested recovery; and a guarded rehearsal controller that is built/tested but attaches no public route | this spec |
-| **B — real hostname lifecycle convergence** | M | atomic mutation/claim helper building on A's rules, revision ledger, lifecycle barriers, backfill, source-list/point-audit reconciler, recovery-ledger advance, and helper-specific emulator/integration tests | A |
-| **C — non-production-routed router consumes registry** | M | router binds explicitly to A's named lookup-only entrypoint, removes Firestore/Cache/Firebase bindings, preserves route/root/auth/header/path-capability contracts, and first proves public behavior through guarded synthetic exact routes including the root-test class | A; public lifecycle rehearsal also needs B |
-| **D — App Check-on cutover readiness** | S human/ops + tests | provision/verify IAM/resources, run backfill/audit/recovery and final synchronous multi-colo R0–R2 evidence, consume #44's completed App Check enforcement, rerun R2 as R3, verify synthetic state/route/DNS cleanup, deliver and validate the Gate 3 verifier plus baseline provider/tuning/effectiveness evidence for the wildcard/WAF unique-host-flood control, and prove the artifact without wildcard/real-host attachment | B, C, #44 |
+| Ticket | Size | Delivers | Depends on | Status |
+|---|---|---|---|---|
+| **A — one synthetic hostname end to end** | L | baseline deny-all rules; keyless publisher; contiguous per-host DO transaction; default public control-plane fetch plus named lookup-only entrypoint; private synthetic-only adapter/harness; source/provider-attested recovery; and a guarded rehearsal controller that is built/tested but attaches no public route | this spec | landed (#970) |
+| **B — real hostname lifecycle convergence** | M | atomic mutation/claim helper building on A's rules, revision ledger, lifecycle barriers, backfill, source-list/point-audit reconciler, recovery-ledger advance, and helper-specific emulator/integration tests | A | open (#971) |
+| **C — non-production-routed router consumes registry** | M | router binds explicitly to A's named lookup-only entrypoint, removes Firestore/Cache/Firebase bindings, preserves route/root/auth/header/path-capability contracts, and first proves public behavior through guarded synthetic exact routes including the root-test class | A; public lifecycle rehearsal also needs B | landed (#972); its code half, including the local Miniflare proof of the synthetic exact-route behaviour. The signed public rehearsal run itself is an operator step and belongs to B/D |
+| **D — App Check-on cutover readiness** | S human/ops + tests | provision/verify IAM/resources, run backfill/audit/recovery and final synchronous multi-colo R0–R2 evidence, consume #44's completed App Check enforcement, rerun R2 as R3, verify synthetic state/route/DNS cleanup, deliver and validate the Gate 3 verifier plus baseline provider/tuning/effectiveness evidence for the wildcard/WAF unique-host-flood control, and prove the artifact without wildcard/real-host attachment | B, C, #44 | open (#973) |
 
 A–C are tracer bullets sized for one implementation context and share this contract. D is operational and may manage only the bounded synthetic exact-route manifest; it cannot attach a wildcard, apex, or real Event host. #888 remains the blocker of #529 until A–D and R0–R3 complete; #529 owns Gate 3 and remains blocked by #888 plus #539, #546, #852, #960, #961, and #973.
