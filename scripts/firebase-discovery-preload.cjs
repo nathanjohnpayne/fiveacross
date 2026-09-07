@@ -28,6 +28,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const url = require("node:url");
 
 // Captured before any codebase code runs, for the same reason the marker is
 // written with a captured `writeFileSync`: this module shares its process with
@@ -119,9 +120,19 @@ function calledFromCodebase() {
   if (!root) return false;
   const stack = new Error().stack ?? "";
   for (const line of stack.split("\n").slice(1)) {
-    const match = /\(?((?:\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line);
+    // An ESM frame is reported as a `file://` URL rather than a path (Phase 4b
+    // P2, run 4); it is converted before the root test so an ESM artifact's
+    // own frames count as the codebase reading the value.
+    const match = /\(?((?:file:\/\/\/|\/|[A-Za-z]:\\)[^()]*?):\d+:\d+\)?\s*$/.exec(line);
     if (!match) continue;
-    const file = match[1];
+    let file = match[1];
+    if (file.startsWith("file://")) {
+      try {
+        file = url.fileURLToPath(file);
+      } catch {
+        continue;
+      }
+    }
     if (file === __filename) continue;
     if (file.split(path.sep).includes("node_modules")) continue;
     if (file.startsWith(root)) return true;

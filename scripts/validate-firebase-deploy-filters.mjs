@@ -620,6 +620,7 @@ async function stageProjectOverlay({
   links,
   liveDirs,
   liveFiles,
+  liveEntryDirs,
   metadataDirs,
 }) {
   const linkTo = async (from, to) => {
@@ -722,6 +723,11 @@ async function stageProjectOverlay({
 
   const overlay = async (realDir, scratchDir, remaining) => {
     await mkdir(scratchDir, { recursive: true });
+    // Every directory the overlay traverses to place a nested source
+    // (`packages` for `packages/functions`) has its ENTRY SET watched, not just
+    // its existing children (Phase 4b P1, run 4): a hook creating
+    // `$INIT_CWD/packages/generated.ts` is otherwise in neither snapshot.
+    liveEntryDirs.push(realDir);
     const claimed = new Set(remaining.map((segments) => segments[0]));
     for (const entry of await readdir(realDir)) {
       if (claimed.has(entry)) continue;
@@ -824,7 +830,7 @@ async function stageProjectOverlay({
  * written to fool the guard is a change to this repository's own hooks, which
  * review catches where classification cannot.
  */
-async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
+async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEntryDirs = []) {
   /** @type {Map<string, string>} */
   const fingerprint = new Map();
   /** Real paths already walked, so a link cannot make the guard traverse a tree twice or loop. */
@@ -933,11 +939,14 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = []) {
   // would otherwise be absent from both snapshots — present for Firebase's
   // second run and never for this one. Names only: the entries themselves
   // are fingerprinted by the walks and the file list.
-  try {
-    const names = await readdir(projectDir);
-    fingerprint.set(`${projectDir} (root entries)`, names.sort().join("\n"));
-  } catch (error) {
-    fingerprint.set(`${projectDir} (root entries)`, `unreadable ${error?.code ?? "?"}`);
+  for (const dir of new Set([projectDir, ...liveEntryDirs])) {
+    const label = dir === projectDir ? "root entries" : "entries";
+    try {
+      const names = await readdir(dir);
+      fingerprint.set(`${dir} (${label})`, names.sort().join("\n"));
+    } catch (error) {
+      fingerprint.set(`${dir} (${label})`, `unreadable ${error?.code ?? "?"}`);
+    }
   }
   for (const dir of liveDirs) {
     if (basename(dir) === "node_modules") continue;
@@ -1450,6 +1459,8 @@ async function buildAndInventoryProject({
   const liveDirs = [];
   /** The live files the overlay COPIED: reachable by absolute path, so watched too. */
   const liveFiles = [];
+  /** Every directory the overlay traversed, whose entry set is watched for creations. */
+  const liveEntryDirs = [];
   /** The repository metadata the overlay exposed, watched on its own terms. */
   const metadataDirs = [];
   try {
@@ -1461,6 +1472,7 @@ async function buildAndInventoryProject({
         links,
         liveDirs,
         liveFiles,
+        liveEntryDirs,
         metadataDirs,
       });
     } catch (error) {
@@ -1484,7 +1496,7 @@ async function buildAndInventoryProject({
     let liveBaseline;
     let metadataBaseline;
     try {
-      liveBaseline = await liveTreeFingerprint(liveDirs, projectDir, liveFiles);
+      liveBaseline = await liveTreeFingerprint(liveDirs, projectDir, liveFiles, liveEntryDirs);
       metadataBaseline = metadataDirs.length > 0 ? await gitAnswerFingerprint(projectDir) : "";
     } catch (error) {
       return refuseAll(
@@ -1498,7 +1510,7 @@ async function buildAndInventoryProject({
      */
     const liveDrift = async () => {
       try {
-        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs, projectDir, liveFiles));
+        return firstLiveTreeDrift(liveBaseline, await liveTreeFingerprint(liveDirs, projectDir, liveFiles, liveEntryDirs));
       } catch (error) {
         return `the live checkout could not be re-read — ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -1613,6 +1625,17 @@ async function buildAndInventoryProject({
         }
         perProbe.push({ probe, results });
       } catch (error) {
+        // Codebase code has already run by the time a LATER probe fails to set
+        // up (Phase 4b P1, run 4): the first discovery may have written through
+        // the overlay, and returning conservatively here would let deploy.sh
+        // carry on into BUILD_CMD with a mutated checkout. Every exit after
+        // executing codebase code enforces the fatal checks first.
+        const wroteBeforeProbeFailure = await liveDrift();
+        if (wroteBeforeProbeFailure) throw new LiveCheckoutDriftError(wroteBeforeProbeFailure, "discovery probe");
+        const movedBeforeProbeFailure = await metadataDrift();
+        if (movedBeforeProbeFailure) {
+          throw new RepositoryMetadataDriftError(movedBeforeProbeFailure, "discovery probe");
+        }
         return refuseAll(
           `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -2232,7 +2255,7 @@ function functionsCodebaseNames(configSource) {
  * request excluded or never named it.
  */
 export function pinnedRewriteWidening({ only, exceptTargets, configSource, project }) {
-  const none = { only, ids: [], functionsReAdded: false };
+  const none = { only, ids: [], functionsReAdded: false, ownershipUnknown: false };
   let hostingConfigs;
   try {
     hostingConfigs = filterExcept(
@@ -2251,15 +2274,24 @@ export function pinnedRewriteWidening({ only, exceptTargets, configSource, proje
     ? selectors.some((selector) => selector === "hosting" || selector.startsWith("hosting:"))
     : !(exceptTargets ? exceptTargets.split(",") : []).includes("hosting");
   if (!hostingDeployed) return none;
-  if (!only) return { only, ids, functionsReAdded: true };
+  // Which codebase owns a pinned function is something Firebase reads from
+  // the live backend and this classifier cannot. With ONE configured codebase
+  // the answer is forced; with more, widening discovery to all of them is not
+  // conservative either — a codebase Firebase would not discover can, at
+  // module initialisation, rewrite the artifact of the one it would (Phase 4b
+  // P2, run 4) — so ownership is reported unknown and the caller refuses the
+  // exemption rather than rehearse a discovery set Firebase never runs.
+  const codebases = functionsCodebaseNames(configSource);
+  const ownershipUnknown = codebases.length > 1;
+  if (!only) return { only, ids, functionsReAdded: true, ownershipUnknown };
   const widened = [...selectors];
   for (const id of ids) {
-    for (const codebase of functionsCodebaseNames(configSource)) {
+    for (const codebase of codebases) {
       const selector = `functions:${codebase}:${id}`;
       if (!widened.includes(selector)) widened.push(selector);
     }
   }
-  return { only: widened.join(","), ids, functionsReAdded: true };
+  return { only: widened.join(","), ids, functionsReAdded: true, ownershipUnknown };
 }
 
 function pinnedHostingFunctionIds(hostingConfigs) {
@@ -2275,12 +2307,13 @@ function pinnedHostingFunctionIds(hostingConfigs) {
   return ids;
 }
 
-async function classifyInvokerScope(
+export async function classifyInvokerScope(
   only,
   exceptTargets,
   exportedEventInvitationServices,
   singleEndpointExports = { byCodebase: new Map(), codebaseNames: new Set() },
   pinnedFunctionIds = [],
+  pinnedOwnershipUnknown = false,
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
@@ -2403,6 +2436,10 @@ async function classifyInvokerScope(
         selectEveryInvokerConservatively();
       }
     }
+
+    // A pinned Hosting function whose codebase cannot be known offline may
+    // release anything (Phase 4b P2, run 4): every invoker turns conservative.
+    if (pinnedOwnershipUnknown && pinnedFunctionIds.length > 0) selectEveryInvokerConservatively();
 
     if (authHandoffInvokerSelected) {
       if (mintNamed && exchangeNamed) {
@@ -2581,6 +2618,7 @@ export async function classifyFirebaseDeployRequest(
     exportedEventInvitationServices,
     singleEndpointExports,
     pinned.ids,
+    pinned.ownershipUnknown,
   );
 
   return {

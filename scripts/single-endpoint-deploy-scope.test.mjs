@@ -12,6 +12,7 @@ import {
   classifyFirebaseDeployRequest,
   pinnedRewriteWidening,
   targetCodebases,
+  classifyInvokerScope,
 } from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -2489,6 +2490,46 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a hook creates an entry in an intermediate overlay directory", async () => {
+    // Phase 4b P1, run 4: with the source at `packages/functions`, the overlay
+    // traverses `packages` to place it and registered only its existing
+    // children, so `$INIT_CWD/packages/generated.ts` was in neither snapshot.
+    // Every traversed directory's entry set is watched now.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          source: "packages/functions",
+          predeploy: [...PREDEPLOY, 'printf x > "$INIT_CWD/packages/generated.ts"'],
+        },
+        files: { "packages/functions/.keep": "" },
+      },
+      async (configPath) => {
+        const { dirname: dir, join: under } = await import("node:path");
+        const { cp: copy, rm: remove } = await import("node:fs/promises");
+        // The fixture installs its toolchain under `functions/`; move it.
+        await copy(under(dir(configPath), "functions"), under(dir(configPath), "packages", "functions"), {
+          recursive: true,
+          verbatimSymlinks: true,
+        });
+        await remove(under(dir(configPath), "functions"), { recursive: true, force: true });
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = dir(configPath);
+        try {
+          const failure = await classify(["--only", "functions:daily"], configPath).then(
+            () => null,
+            (error) => error,
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("packages");
+          expect(failure.message).toContain("entries");
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
@@ -2629,6 +2670,31 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
+  it("reports ownership unknown with more than one codebase, and turns every invoker conservative", async () => {
+    // Phase 4b P2, run 4: widening discovery to every codebase is not
+    // conservative when module initialisation has side effects, so a pinned
+    // function whose codebase cannot be known offline refuses the exemption.
+    const two = {
+      functions: [
+        { source: "alpha", codebase: "alpha" },
+        { source: "beta", codebase: "beta" },
+      ],
+      hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport", pinTag: true } }] },
+    };
+    const one = { ...two, functions: [two.functions[0]] };
+    expect(pinnedRewriteWidening({ only: "functions:alpha:daily,hosting", exceptTargets: "", configSource: two, project: "" }).ownershipUnknown).toBe(true);
+    expect(pinnedRewriteWidening({ only: "functions:alpha:daily,hosting", exceptTargets: "", configSource: one, project: "" }).ownershipUnknown).toBe(false);
+    const scope = await classifyInvokerScope(
+      "functions:alpha:daily,hosting,functions:alpha:submitBugReport,functions:beta:submitBugReport",
+      "",
+      [],
+      undefined,
+      ["submitBugReport"],
+      true,
+    );
+    expect(scope).toMatchObject({ functionsAttempted: true, hostingAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+  });
+
   it("widens BEFORE planning, so every codebase's hooks and discovery see the pinned id", () => {
     // Codex P1, round 14: the widening has to reach hook planning and
     // discovery, not just the classification loop. Firebase resolves the
@@ -2654,6 +2720,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
       only: "functions:alpha:daily,hosting,functions:alpha:submitBugReport,functions:beta:submitBugReport",
       ids: ["submitBugReport"],
       functionsReAdded: true,
+      ownershipUnknown: true,
     });
     const configs = configSource.functions;
     const names = new Set(["alpha", "beta"]);
@@ -2670,12 +2737,14 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
       only: "",
       ids: ["submitBugReport"],
       functionsReAdded: true,
+      ownershipUnknown: true,
     });
     // No Hosting in the deploy, or no pinned rewrite: the request is untouched.
     expect(pinnedRewriteWidening({ only: "functions:alpha:daily", exceptTargets: "", configSource, project: "" })).toEqual({
       only: "functions:alpha:daily",
       ids: [],
       functionsReAdded: false,
+      ownershipUnknown: false,
     });
     expect(pinnedRewriteWidening({ only: "", exceptTargets: "hosting", configSource, project: "" })).toMatchObject({ functionsReAdded: false });
     const unpinned = { ...configSource, hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport" } }] } };
