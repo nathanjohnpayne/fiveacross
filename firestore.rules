@@ -1554,6 +1554,18 @@ service cloud.firestore {
         // crosses `settings.reportHideThreshold`; admins keep manual hide/restore
         // and confirm-claim (`status: 'active'`) via the `isAdmin(eventId)` branch.
         // Pinned by tests/rules/w4-server-authoritative-hide.test.ts.
+        //
+        // #133 adds a SECOND admin-SDK writer of the same field with no rules
+        // change: `hideProofOnVisionFlag` takes a Proof left `status: 'flagged'`
+        // with an extreme/illegal `visionFlag` to `'hidden'`. Both moderation
+        // fields stay server-set for every non-admin — `visionFlag` cannot be
+        // written at create (`visionFlag == null` above) and cannot be added,
+        // changed, or CLEARED on update, because `hasOnly(['reportCount'])` bounds
+        // a non-admin to the counter alone. So a client can neither self-hide,
+        // un-hide, forge an AI verdict, nor scrub the one an admin's Restore
+        // deliberately leaves behind; and the read rule keeps `flagged` and
+        // `hidden` Proofs admin-only either way. Pinned by
+        // tests/rules/cloud-vision-moderation.test.ts.
         allow update: if isAdmin(eventId)
           || (signedIn()
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
