@@ -310,7 +310,7 @@ const POSIX = process.platform !== "win32";
 function runCapturedProcess(
   command,
   args,
-  { timeout, settleOn = "close", inheritStdin = false, ...options },
+  { timeout, settleOn = "close", inheritStdin = false, extraChannel = false, ...options },
 ) {
   return new Promise((resolve) => {
     let child;
@@ -322,7 +322,12 @@ function runCapturedProcess(
         // the classification `deploy.sh` parses, and a hook writing to it would
         // corrupt that. stdin is inherited, as `lifecycleHooks` inherits all
         // three, so a hook that tests whether it has one behaves the same here.
-        stdio: [inheritStdin ? "inherit" : "ignore", "pipe", "pipe"],
+        stdio: [
+          inheritStdin ? "inherit" : "ignore",
+          "pipe",
+          "pipe",
+          ...(extraChannel ? ["pipe"] : []),
+        ],
       });
     } catch (error) {
       resolve({ ok: false, output: error instanceof Error ? error.message : String(error) });
@@ -332,6 +337,9 @@ function runCapturedProcess(
     // Captured, never inherited: this classifier's own stdout is the
     // machine-readable classification `deploy.sh` parses.
     let output = "";
+    // Anything the child wrote on the extra descriptor. A channel the child
+    // cannot unlink and the parent alone holds.
+    let channel = "";
     let settled = false;
     let deadline;
     let grace;
@@ -347,7 +355,10 @@ function runCapturedProcess(
     };
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
-    child.on("error", (error) => settle({ ok: false, output: `${output}${error.message}` }));
+    child.stdio[3]?.on("data", (chunk) => {
+      if (channel.length < 1024) channel += chunk.toString("utf8");
+    });
+    child.on("error", (error) => settle({ ok: false, output: `${output}${error.message}`, channel }));
     child.on(settleOn, (code, signal) => {
       // On `exit` the pipes may still be open (a background descendant holds
       // them). Nothing more will be read, so drop them rather than let them
@@ -356,8 +367,8 @@ function runCapturedProcess(
         child.stdout?.destroy();
         child.stderr?.destroy();
       }
-      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}` });
-      else settle({ ok: code === 0, output, code });
+      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}`, channel });
+      else settle({ ok: code === 0, output, code, channel });
     });
 
     deadline = setTimeout(() => {
@@ -372,7 +383,7 @@ function runCapturedProcess(
         }
       }
       grace = setTimeout(
-        () => settle({ ok: false, output: `${output}timed out after ${timeout}ms` }),
+        () => settle({ ok: false, output: `${output}timed out after ${timeout}ms`, channel }),
         KILL_GRACE_MS,
       );
     }, timeout);
@@ -560,11 +571,12 @@ const CONFIG_PROBES = Object.freeze([
  * `resolveConfigDir` is `configDir || source`, and a codebase that sets one
  * keeps its `.env` files there (Codex P2, round 12).
  */
-function discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe }) {
+function discoveryEnvironment({ scratchProject, scratchConfigDir, project, projectAlias, probe }) {
   const userEnvs = functionsEnv.loadUserEnvs({
     functionsSource: scratchConfigDir,
     configDir: scratchConfigDir,
     projectId: project,
+    ...(projectAlias ? { projectAlias } : {}),
     projectDir: scratchProject,
   });
   const firebaseConfig = { projectId: project, ...probe.extraFirebaseConfig };
@@ -706,6 +718,7 @@ async function buildAndInventoryProject({
   projectDir,
   only,
   project,
+  projectAlias,
   predeployTimeoutMs,
   configs,
   codebaseNames,
@@ -818,6 +831,7 @@ async function buildAndInventoryProject({
           sourceRel: config.sourceRel,
           scratch,
           project,
+          projectAlias,
         }),
       );
     }
@@ -887,13 +901,7 @@ function findFunctionsBinary(sourceDir, projectDir) {
  * `process.argv`, which records whether anything consulted the one environment
  * value the classifier cannot reproduce.
  */
-async function discoverEndpointsFromSdk({
-  sourceDir,
-  projectDir,
-  environment,
-  markerFile,
-  timeout,
-}) {
+async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, timeout }) {
   const binary = findFunctionsBinary(sourceDir, projectDir);
   if (!binary) return { ok: false, reason: "no firebase-functions binary for this codebase" };
 
@@ -913,21 +921,33 @@ async function discoverEndpointsFromSdk({
     {
       cwd: sourceDir,
       timeout,
+      extraChannel: true,
       env: {
         ...environment,
         PORT: String(port),
-        FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER: markerFile,
+        // The preload deletes this before the artifact can see it; its verdict
+        // comes back over the descriptor, not through anything on disk.
+        FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG: "1",
       },
     },
   );
 
   let manifest;
+  let finished;
   try {
     manifest = await pollDiscoveryManifest(port, deadline, server);
   } finally {
     // `serveAdmin`'s teardown: ask it to stop, then make sure of it.
     await fetch(`http://127.0.0.1:${port}/__/quitquitquit`).catch(() => {});
-    await server;
+    finished = await server;
+  }
+  if (manifest.ok && finished.channel.includes("consulted")) {
+    return {
+      ok: false,
+      reason:
+        "the codebase consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
+        "namespaces only the deploy's authenticated fetch can supply",
+    };
   }
   return manifest;
 }
@@ -988,6 +1008,7 @@ async function inventoryCodebaseArtifact({
   sourceRel,
   scratch,
   project,
+  projectAlias,
 }) {
   // The Node delegate tries `functions.yaml` BEFORE running the SDK's
   // discovery, so a manifest — committed, or written by a hook — decides the
@@ -1007,13 +1028,17 @@ async function inventoryCodebaseArtifact({
     return refused(`${manifests[0]} supplies discovery instead of the artifact`);
   }
 
-  const slug = Buffer.from(sourceRel).toString("hex");
   let environments;
   try {
     environments = CONFIG_PROBES.map((probe) => ({
       probe,
-      environment: discoveryEnvironment({ scratchProject, scratchConfigDir, project, probe }),
-      markerFile: join(scratch, `runtime-config-${slug}-${probe.label}.marker`),
+      environment: discoveryEnvironment({
+        scratchProject,
+        scratchConfigDir,
+        project,
+        projectAlias,
+        probe,
+      }),
     }));
   } catch (error) {
     return refused(
@@ -1027,26 +1052,19 @@ async function inventoryCodebaseArtifact({
   // meant to refuse — so the parallelism cannot turn a refusal into an
   // exemption. Sequential runs doubled the wall time of the slowest step.
   const results = await Promise.all(
-    environments.map(async ({ probe, environment, markerFile }) => {
+    environments.map(async ({ probe, environment }) => {
       const discovered = await discoverEndpointsFromSdk({
         sourceDir: scratchSource,
         projectDir: scratchProject,
         environment,
-        markerFile,
         timeout: DISCOVERY_TIMEOUT_MS,
       });
-      return { probe, markerFile, discovered };
+      return { probe, discovered };
     }),
   );
 
-  for (const { markerFile, discovered } of results) {
+  for (const { discovered } of results) {
     if (!discovered.ok) return refused(discovered.reason);
-    if (existsSync(markerFile)) {
-      return refused(
-        "the codebase consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
-          "namespaces only the deploy's authenticated fetch can supply",
-      );
-    }
   }
 
   const [first, ...rest] = results.map(({ probe, discovered }) => ({
@@ -1111,7 +1129,7 @@ async function artifactEndpointInventory(inventory, codebase) {
 async function singleEndpointInventory(
   configSource,
   configPath,
-  project,
+  { project, projectAlias },
   only,
   predeployTimeoutMs,
 ) {
@@ -1233,6 +1251,7 @@ async function singleEndpointInventory(
       projectDir,
       only,
       project: project || "",
+      projectAlias: projectAlias || "",
       predeployTimeoutMs,
       codebaseNames,
       configs,
@@ -1564,14 +1583,22 @@ export async function classifyFirebaseDeployRequest(
 
   const positionalProject = operands[0] ?? "";
   let project = options.project || defaultProject || positionalProject;
-  if (!project) {
-    try {
-      const rc = JSON.parse(await readFile(resolve(".firebaserc"), "utf8"));
-      project = rc.projects?.default ?? "";
-    } catch {
-      // firebase-tools reports the missing project later. Classification stays
-      // useful for repos whose local-only deploy checks do not need one.
+  // `--project <alias_or_project_id>`: an ALIAS resolves through `.firebaserc`,
+  // and `prepare.js` then hands `loadUserEnvs` BOTH the real id and the alias,
+  // so `.env.<projectId>` and `.env.<alias>` are each considered. Reading the
+  // alias as an id would look for the wrong dotenv file (Codex P2, round 16).
+  let projectAlias = "";
+  try {
+    const rc = JSON.parse(await readFile(resolve(dirname(resolve(options.config ?? defaultConfigPath)), ".firebaserc"), "utf8"));
+    const projects = rc.projects ?? {};
+    if (!project) project = projects.default ?? "";
+    if (project && typeof projects[project] === "string") {
+      projectAlias = project;
+      project = projects[project];
     }
+  } catch {
+    // firebase-tools reports a missing project later. Classification stays
+    // useful for repos whose local-only deploy checks do not need one.
   }
   const configPath = resolve(options.config ?? defaultConfigPath);
   const only = normalizedFilter(options.only);
@@ -1582,7 +1609,7 @@ export async function classifyFirebaseDeployRequest(
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
-    project,
+    { project, projectAlias },
     only,
     predeployTimeoutMs,
   );

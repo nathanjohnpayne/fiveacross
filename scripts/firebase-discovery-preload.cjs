@@ -17,11 +17,13 @@
  * `functions.config()` API. Every access form is trapped, not just `get`: a
  * membership test or a descriptor read hands the value over just as well.
  *
- * The verdict reaches the classifier as a MARKER FILE rather than a return
- * value, because this module has no channel to the HTTP response the SDK
- * serves. `FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER` names it. Writing is
- * done with a captured `fs.writeFileSync` for the same reason the rest of this
- * design does not trust the loaded artifact: it shares this process.
+ * The verdict reaches the classifier over FILE DESCRIPTOR 3, which the parent
+ * opened and holds. This module has no channel to the HTTP response the SDK
+ * serves, and a marker FILE was the wrong substitute: its path had to be in the
+ * environment for this module to find it, which put it within reach of the very
+ * code being watched — an artifact could consult the runtime config and then
+ * unlink the evidence (Codex P2, round 16). A descriptor cannot be unlinked, and
+ * closing it only makes the write throw, which fails closed.
  */
 
 const fs = require("node:fs");
@@ -30,9 +32,15 @@ const path = require("node:path");
 // Captured before any codebase code runs, for the same reason the marker is
 // written with a captured `writeFileSync`: this module shares its process with
 // the artifact, so anything it needs later must be held now.
-const writeFileSync = fs.writeFileSync;
+const writeSync = fs.writeSync;
 const abortProcess = process.abort;
-const marker = process.env.FIREBASE_DEPLOY_SCOPE_RUNTIME_CONFIG_MARKER;
+
+/** The descriptor the parent passes as the fourth stdio slot. */
+const VERDICT_FD = 3;
+const watching = process.env.FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG === "1";
+// Out of the environment before the artifact can read it: nothing downstream
+// needs to know this process is being watched.
+delete process.env.FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG;
 
 // This module is loaded with `--require`, which node consumes rather than
 // placing in `process.argv` — but it DOES leave it in `process.execArgv`, and
@@ -81,7 +89,7 @@ function calledFromCodebase() {
   return false;
 }
 
-if (marker) {
+if (watching) {
   const env = process.env;
   let recorded = false;
   const noticed = (property) => {
@@ -89,13 +97,12 @@ if (marker) {
     if (!calledFromCodebase()) return;
     recorded = true;
     try {
-      writeFileSync(marker, "consulted");
+      writeSync(VERDICT_FD, "consulted");
     } catch {
-      // The classifier reads the ABSENCE of this file as "not consulted", so a
-      // swallowed write failure would be a false negative in the fail-OPEN
-      // direction. There is no other channel out of this process that the
-      // codebase cannot also reach, so the honest report is to die: discovery
-      // then never answers and the classifier refuses (Codex P2, round 15).
+      // The classifier reads SILENCE as "not consulted", so a swallowed write
+      // failure would be a false negative in the fail-OPEN direction. If the
+      // descriptor is gone there is no honest way to report, so die: discovery
+      // then never answers and the classifier refuses (Codex P2, rounds 15-16).
       abortProcess.call(process);
     }
   };

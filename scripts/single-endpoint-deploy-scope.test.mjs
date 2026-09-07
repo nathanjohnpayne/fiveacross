@@ -812,6 +812,31 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("refuses even when the artifact tries to erase the evidence", async () => {
+    // The verdict used to be a marker FILE whose path had to be in the
+    // environment for the preload to find it — which put it within reach of the
+    // code being watched. It now travels over a descriptor the parent holds, so
+    // there is nothing on disk to unlink and no env var naming one
+    // (Codex P2, round 16).
+    await withPrewrittenArtifact(
+      [
+        'const fs = require("node:fs");',
+        "for (const [name, value] of Object.entries(process.env)) {",
+        '  if (!/MARKER|WATCH/.test(name)) continue;',
+        "  try { fs.unlinkSync(value); } catch {}",
+        "  delete process.env[name];",
+        "}",
+        'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
+        "exports.daily = runtime.someLegacyNamespace ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it("refuses an artifact that reads the runtime config through its descriptor", async () => {
     // A descriptor read hands the value over as well as a plain `get` does
     // (Codex P2, round 13), so the env watcher traps that form too.
@@ -1537,6 +1562,33 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
         else process.env.FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH = previous;
       }
     },
+    );
+  });
+
+  it("resolves a project alias before choosing dotenv files", async () => {
+    // `--project <alias_or_project_id>`: an alias resolves through
+    // `.firebaserc`, and `prepare.js` then hands `loadUserEnvs` both the real id
+    // and the alias, so `.env.<projectId>` counts. Reading the alias as an id
+    // would look for the wrong file and miss a flag that decides the surface
+    // (Codex P2, round 16).
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          ".firebaserc": JSON.stringify({ projects: { prod: "actual-project" } }),
+          "functions/.env.actual-project": "GROUP_THE_ENDPOINT=1\n",
+          "functions/lib/index.js": artifact(
+            "exports.daily = process.env.GROUP_THE_ENDPOINT ? { submitBugReport: endpoint() } : endpoint();",
+          ),
+        },
+      },
+      async (configPath) => {
+        const result = await classifyFirebaseDeployRequest(
+          ["--project", "prod", "--only", "functions:daily"],
+          { defaultConfigPath: configPath },
+        );
+        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      },
     );
   });
 
