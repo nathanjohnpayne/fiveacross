@@ -64,7 +64,9 @@ export default function Admin() {
 }
 
 function AdminConsole({ userUid, event }: { userUid: string; event: ReturnType<typeof useEventDoc>['data'] }) {
-  const { claims } = usePendingClaims();
+  // `hasServerData` rides along for #1151's drain gate: a not-yet-arrived queue
+  // reads as zero pending Claims, and a gate that passes vacuously is no gate.
+  const { claims, hasServerData: claimsLoaded } = usePendingClaims();
   const { flagged } = useReportedProofs();
   const { items } = useAllItems();
   const { items: pendingItems } = usePendingItems();
@@ -163,7 +165,13 @@ function AdminConsole({ userUid, event }: { userUid: string; event: ReturnType<t
           adminUid={userUid}
         />
       )}
-      {section === 'settings' && <GameSettings event={event} />}
+      {section === 'settings' && (
+        <GameSettings
+          event={event}
+          pendingClaims={claims}
+          pendingClaimsLoaded={claimsLoaded}
+        />
+      )}
       {section === 'schedule' && <SchedulePanel days={event?.days ?? []} />}
       {section === 'pool' && (
         <PromptPool
