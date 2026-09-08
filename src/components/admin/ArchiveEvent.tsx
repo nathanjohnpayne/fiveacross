@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   abandonArchive,
   beginArchive,
@@ -105,7 +105,24 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
       return null;
     });
   }, [phase]);
-  const report = (outcome: ArchiveOutcome) => setResult({ outcome, from: phase });
+  // The LATEST observed state, for an action that resolves after the prop moved
+  // (Codex P2 on PR #1157, round 7): `report` runs after an awaited write, and
+  // by then another Admin may have moved the Event, with the `[phase]` effect
+  // above having already run against a `result` that did not exist yet. So the
+  // record is made against the state observed NOW rather than the render the
+  // click happened in: if the Event is already where the outcome describes, or
+  // still where the action started, the message is true and shown; anywhere
+  // else it would be stale before it appeared, so nothing is shown at all.
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const report = (outcome: ArchiveOutcome, startedIn: Phase) => {
+    const observed = phaseRef.current;
+    setResult(
+      observed === RESULT_PHASE[outcome] || observed === startedIn
+        ? { outcome, from: observed }
+        : null,
+    );
+  };
 
   return (
     <div className="admin-section">
@@ -137,7 +154,8 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
             // failed — the token binding exists to stop a STALE handler
             // reopening a newer quiesce, and there is no stale handler here.
             onAction={async () => {
-              report(await abandonArchive());
+              const startedIn = phase;
+              report(await abandonArchive(), startedIn);
             }}
           >
             Reopen play
@@ -156,7 +174,8 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
             ariaLabel="Close play"
             failureLabel="Closing play failed—try again."
             onAction={async () => {
-              report((await beginArchive()).result);
+              const startedIn = phase;
+              report((await beginArchive()).result, startedIn);
             }}
           >
             Close play

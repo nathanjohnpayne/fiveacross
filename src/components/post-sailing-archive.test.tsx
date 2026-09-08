@@ -120,6 +120,41 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
+  it('records the state observed when the action RESOLVES, not the render it started in', async () => {
+    // Codex P2, PR #1157 round 7. Another Admin closes the Event while this
+    // Close play is still pending: the prop reaches `closing` and the phase
+    // effect runs before any result exists. Reporting against the render the
+    // click happened in would leave `from: 'open'`, and a later reopen would
+    // then match it and keep "Play is closed" beside the open controls.
+    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settle = resolve; }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    settle({ result: 'closing', token: 'quiesce-1', created: false });
+    expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing when the Event has moved somewhere the outcome does not describe', async () => {
+    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settle = resolve; }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    // Another Admin archives it outright while the close is in flight.
+    view.rerender(
+      <ArchiveEvent event={mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 })} />,
+    );
+    settle({ result: 'closing', token: 'quiesce-1', created: true });
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('clears the closed message when someone else REOPENS the Event underneath it', async () => {
     const view = renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
