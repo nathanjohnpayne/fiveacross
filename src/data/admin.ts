@@ -11,6 +11,7 @@ import { claimsAwaitingAdmin, isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
 import { archiveSnapshotFingerprint, draftEventArchive } from './eventArchive';
+import { migrateClaimMode } from './converters';
 import { claimsCol, dayMetaRef, playersCol } from './paths';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
@@ -940,8 +941,24 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
   // of a collection that can no longer change. Refused rather than fixed —
   // resolving a claim from here would be the gameplay write the freeze just
   // denied — and `ArchiveEvent` reopens play when it was this call that shut it.
+  //
+  // The gate reads a NORMALIZED Claim Mode (Codex P2, PR #1139). This pre-read
+  // is deliberately converter-free — the freeze reads the STORED document, the
+  // `setDayTheme`/`confirmClaim` discipline — but `claimsQueueOpen` compares
+  // against the CURRENT contract, and an Event seeded or written before the
+  // rename persists `'verified'` for what is now `'admin_confirmed'`. The
+  // console gates on the converted document (`eventConverter` runs
+  // `migrateClaimMode`), so on such an Event the two halves of one gate read the
+  // same queue and disagreed: the console counted the pending Claims and refused
+  // to arm, while this take saw a mode that is not `admin_confirmed`, passed
+  // vacuously, and would have frozen the Event over exactly the Claims the gate
+  // exists to drain. Same coercion here, so the two halves cannot disagree about
+  // which Events have a queue at all.
+  const preClaimMode = migrateClaimMode(preData.claimMode);
   const claimsSnap = await getDocsFromServer(claimsCol());
-  if (claimsAwaitingAdmin(preData, claimsSnap.docs.map((d) => d.data())).length > 0) {
+  if (
+    claimsAwaitingAdmin({ claimMode: preClaimMode }, claimsSnap.docs.map((d) => d.data())).length > 0
+  ) {
     return 'claims-pending';
   }
 

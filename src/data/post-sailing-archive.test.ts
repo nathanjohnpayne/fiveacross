@@ -1048,6 +1048,28 @@ describe('archiveEvent — the drain gate is re-taken from the server after the 
     expect(await archiveEvent({ now: 5 })).toBe('archived');
   });
 
+  it('counts a pending Claim on an Event whose stored Claim Mode is the LEGACY spelling', async () => {
+    // Codex P2, PR #1139. This pre-read is deliberately converter-free, but
+    // `claimsQueueOpen` compares against the CURRENT contract — and an Event
+    // seeded or written before the rename persists `'verified'` for what is now
+    // `'admin_confirmed'`. The console gates on the CONVERTED document, so the
+    // two halves of one gate read the same queue and disagreed: the console
+    // refused to arm while this take passed vacuously and would have frozen the
+    // Event over exactly the Claims the gate exists to drain.
+    A.event = closingEvent({ claimMode: 'verified' });
+    A.claims = [{ status: 'pending' }];
+    expect(await archiveEvent({ now: 5 })).toBe('claims-pending');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('still freezes a legacy-spelled Event whose queue is genuinely drained', async () => {
+    // The control: the coercion decides which Events HAVE a queue, never that a
+    // legacy spelling blocks archival on its own.
+    A.event = closingEvent({ claimMode: 'verified' });
+    A.claims = [{ status: 'confirmed' }];
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+  });
+
   it('refuses when the stored Event has no room left for an ordinary record', async () => {
     // Codex P2, PR #1139 round 4. The record is not written to an empty
     // document: the check that matters is on the one the update PRODUCES. The
