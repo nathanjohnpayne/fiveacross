@@ -346,14 +346,33 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
 }
 
 /**
- * `loaded` vs `serverLoaded` vs `failed`. `loaded` means every Day's
- * subscription has RESOLVED — delivered a snapshot, or died — which is what the
- * honours strip wants (it paints the pins it has and repaints when better ones
- * land). `serverLoaded` is the stricter latch: every Day has been answered by
- * the SERVER at least once. A surface that PERSISTS what it read needs the
- * strict one, because a cache-only "no pin here" is indistinguishable from "the
- * server says there is no pin" and freezing the wrong one is permanent (#1151,
- * Codex P1: `ArchiveEvent`'s preview is what an Admin decides to freeze from).
+ * `loaded` vs `serverLoaded` vs `serverConfirmed` vs `failed`. `loaded` means
+ * every Day's subscription has RESOLVED — delivered a snapshot, or died — which
+ * is what the honours strip wants (it paints the pins it has and repaints when
+ * better ones land). `serverLoaded` is the stricter LATCH: every Day has been
+ * answered by the SERVER at least once. A surface that PERSISTS what it read
+ * needs a strict one, because a cache-only "no pin here" is indistinguishable
+ * from "the server says there is no pin" and freezing the wrong one is permanent
+ * (#1151, Codex P1: `ArchiveEvent`'s preview is what an Admin decides to freeze
+ * from).
+ *
+ * AND A LATCH IS NOT ENOUGH FOR THAT SURFACE (Codex P2 on PR #1162).
+ * `serverLoaded` says the server HAS spoken; it cannot say the honours on screen
+ * right now are what the server said. It never clears, so a console that
+ * confirmed every Day and then went offline keeps reporting `true` while the fan
+ * re-delivers each Day from the ADR 0006 persistent cache — and the archive
+ * would arm over exactly the cached preview the latch exists to refuse. A local
+ * write pending on a Day meta is the same hole from the other side: emitted
+ * server-backed but undecided, and rolled back if it is refused.
+ *
+ * `serverConfirmed` is therefore the per-render test, not a latch: every Day's
+ * LATEST snapshot is fully server-committed (`!fromCache && !hasPendingWrites`),
+ * exactly the three-flag test `src/App.tsx` applies before it moves a Player off
+ * their Card and `Admin.tsx` applies to the Event document. It can go false
+ * again, which is the point. It implies `serverLoaded` by construction — a
+ * server-committed snapshot is a server snapshot — so the archive gate needs
+ * only this one, while the latch stays for the "seen once" question other
+ * surfaces ask.
  *
  * The fan subscribes with `{ includeMetadataChanges: true }` for the same reason
  * `useDocSub`/`useColSub` do: without metadata events Firestore never re-notifies
@@ -378,13 +397,27 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
  * now never complete has to say WHY — otherwise the archive control sits
  * disabled behind a "loading" message that will never resolve, which is the
  * deadlock the old behaviour was avoiding by the wrong means.
+ *
+ * `failed` is NOT the complement of either confirmation, and its consumers have
+ * to treat it as such (CodeRabbit, PR #1162). A Day the server answered before
+ * its listener died is already latched and still current, so `failed` can be
+ * true beside a true `serverLoaded` AND a true `serverConfirmed` — which is why
+ * the archive console reports unreadable honours only when the confirmation is
+ * actually missing, rather than showing a terminal message beside an armed
+ * control.
  */
 export function useDayMetasStatus(dayCount: number): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
   serverLoaded: boolean;
-  /** At least one Day's subscription DIED (terminal `onSnapshot` error), so
-   *  `serverLoaded` can never complete for this key. */
+  /** Every Day's LATEST snapshot is fully server-committed — not a latch, so it
+   *  falls false again when the fan re-delivers a Day from the persistent cache
+   *  or a local write is pending on one (Codex P2 on PR #1162). */
+  serverConfirmed: boolean;
+  /** At least one Day's subscription DIED (terminal `onSnapshot` error). It does
+   *  NOT imply either confirmation is false: a Day answered by the server before
+   *  its listener died stays latched and stays current. What it means is that a
+   *  Day still MISSING one can never acquire it for this key. */
   failed: boolean;
 } {
   const eventId = EVENT_ID;
@@ -394,9 +427,16 @@ export function useDayMetasStatus(dayCount: number): {
     metas: ReadonlyMap<number, DayMetaDoc>;
     seen: ReadonlySet<number>;
     serverSeen: ReadonlySet<number>;
-    /** Days whose subscription DIED. Disjoint from `serverSeen` by construction
-     *  — a dead listener confirmed nothing — and the reason `serverLoaded` can
-     *  be permanently unreachable for this key. */
+    /** Days whose LATEST snapshot was fully server-committed. Unlike `serverSeen`
+     *  this is not a latch: a Day leaves it again the moment the fan re-delivers
+     *  it from the persistent cache, or with a local write pending (Codex P2 on
+     *  PR #1162). */
+    serverCurrent: ReadonlySet<number>;
+    /** Days whose subscription DIED. NOT disjoint from `serverSeen` or
+     *  `serverCurrent` (CodeRabbit, PR #1162): a Day the server answered before
+     *  its listener died is in both, and nothing here removes it — the error
+     *  callback only records the failure. What the set means is that any Day
+     *  still absent from those two can never join them for this key. */
     errored: ReadonlySet<number>;
   };
   const empty = (): State => ({
@@ -404,6 +444,7 @@ export function useDayMetasStatus(dayCount: number): {
     metas: new Map(),
     seen: new Set(),
     serverSeen: new Set(),
+    serverCurrent: new Set(),
     errored: new Set(),
   });
   const [state, setState] = useState<State>(empty);
@@ -432,17 +473,30 @@ export function useDayMetasStatus(dayCount: number): {
             // Day it has spoken, whatever a later cache-sourced snapshot says.
             const serverSeen = new Set(current.serverSeen);
             if (!snap.metadata.fromCache) serverSeen.add(dayIndex);
-            return { ...current, key, metas, seen, serverSeen };
+            // …and the CURRENT answer beside it, which is not a latch: this
+            // snapshot is server-committed, or this Day is no longer confirmed
+            // (Codex P2 on PR #1162). `hasPendingWrites` joins `fromCache` for
+            // the reason it does everywhere else — an optimistic local write is
+            // emitted server-backed but undecided, and rolls back if refused.
+            const serverCurrent = new Set(current.serverCurrent);
+            if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
+              serverCurrent.add(dayIndex);
+            } else {
+              serverCurrent.delete(dayIndex);
+            }
+            return { ...current, key, metas, seen, serverSeen, serverCurrent };
           });
         },
         () => {
           if (!active) return;
           /* permission-denied (signed out mid-flight) — leave the day absent.
              RESOLVED for `loaded`, because the listener is dead and the live
-             strip must not hang on it; NOT server-seen, because a dead listener
-             confirmed nothing; and RECORDED as a failure, so a caller that
-             needs the strict latch can say why it will never arrive (Codex P2
-             on PR #1162). */
+             strip must not hang on it; NOT server-seen and NOT server-current,
+             because a dead listener confirmed nothing; and RECORDED as a
+             failure, so a caller that needs a strict answer can say why it will
+             never arrive (Codex P2 on PR #1162). A Day already in either set
+             is deliberately left there — the server did answer it, and this
+             callback removes nothing. */
           setState((previous) => {
             const current = previous.key === key ? previous : empty();
             const seen = new Set(current.seen);
@@ -466,6 +520,7 @@ export function useDayMetasStatus(dayCount: number): {
     metas: current.metas,
     loaded: dayCount <= 0 || current.seen.size >= dayCount,
     serverLoaded: dayCount <= 0 || current.serverSeen.size >= dayCount,
+    serverConfirmed: dayCount <= 0 || current.serverCurrent.size >= dayCount,
     failed: current.errored.size > 0,
   };
 }
@@ -635,11 +690,23 @@ export function useLeaderboard() {
   // is a PRESENTATIONAL filter applied by the Leaderboard COMPONENT for display only
   // (src/components/Leaderboard.tsx, via `isBanned`), while this hook stays raw so
   // Board's ceremony reads the true roster. See specs/w2-ban-console.md § Leaderboard.
-  const { data, loading, hasServerData } = useColSub<PlayerDoc>(
+  //
+  // `fromCache` and `hasPendingWrites` are the CURRENT snapshot's own metadata,
+  // passed through beside the latch (Codex P2 on PR #1162). `useColSub` already
+  // carries them; this hook used to discard them, which left every consumer with
+  // "the server has spoken at least once" and no way to ask whether the rows on
+  // screen right now are what it said. The archive gate is the caller that needs
+  // the stricter question — it PERSISTS the roster it was shown, permanently —
+  // so a confirmed Admin who then goes offline, or who has an optimistic local
+  // write in flight, must not arm it over cached or undecided rows. Board and
+  // ConfirmWinMoments keep reading the latch alone and are unchanged: their
+  // ceremonial First-to-BINGO edge is a claim about a moment that has already
+  // happened, not a record it freezes.
+  const { data, loading, hasServerData, fromCache, hasPendingWrites } = useColSub<PlayerDoc>(
     playersCol(),
     eventSubscriptionKey('players'),
   );
-  return { players: sortPlayers(data), loading, hasServerData };
+  return { players: sortPlayers(data), loading, hasServerData, fromCache, hasPendingWrites };
 }
 
 /** A caller-owned, already-loaded moderation snapshot. Supplying this avoids a

@@ -250,21 +250,36 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
  * THE PRECONDITIONS ahead of the first tap, because the write is permanent
  * behind write-once rules and there is no second attempt to correct it:
  *
- *  1. **Every preview input server-confirmed, THE EVENT INCLUDED.**
+ *  1. **Every preview input CURRENTLY server-committed, THE EVENT INCLUDED.**
+ *     Until the server has spoken, an empty roster and an unpinned Day are
+ *     indistinguishable from a roster the ADR 0006 persistent cache has not
+ *     filled in yet — so the confirm row would understate what is about to be
+ *     frozen. The Event document is the third input and it is gated the same way
+ *     (`eventConfirmed`, Codex P2 on PR #1162): a non-null `event` is what the
+ *     cache delivers, not what the server said, and the other two inputs resolve
+ *     INDEPENDENTLY of it — so truthiness armed Archive over a stale schedule,
+ *     name or ban list, and `dayCount` is derived from it besides, which makes an
+ *     unanswered Day fan vacuously satisfied while it is absent.
+ *
+ *     AND ALL THREE ARE HELD TO THE SAME THREE FLAGS (Codex P2 on PR #1162).
  *     `useLeaderboard`'s `hasServerData` and `useDayMetasStatus`'s `serverLoaded`
- *     are LATCHES on "the server has spoken", and until they hold, an empty
- *     roster and an unpinned Day are indistinguishable from a roster the ADR 0006
- *     persistent cache has not filled in yet — so the confirm row would understate
- *     what is about to be frozen. The Event document is the third input and it is
- *     gated the same way (`eventConfirmed`, Codex P2 on PR #1162): a non-null
- *     `event` is what the cache delivers, not what the server said, and the other
- *     two latches can hold while it is still the cached copy — so truthiness
- *     armed Archive over a stale schedule, name or ban list, and `dayCount` is
- *     derived from it besides, which makes `serverLoaded` vacuously true while it
- *     is absent. (The RECORD does not depend on these subscriptions at all —
- *     `archiveEvent` re-reads its inputs after the quiesce — but a console that
- *     has not loaded is still not a console to end an Event from, and the record
- *     the freeze takes is the one the Admin was shown.)
+ *     are LATCHES on "the server has spoken", which is a different claim from
+ *     "this is what the server says". They never clear, so a console that
+ *     confirmed every input and then went offline kept both true while the
+ *     persistent cache re-served the roster and every honour — and Archive armed
+ *     over precisely the cached preview the latches exist to refuse. A pending
+ *     local write (a roster row, an honour pin) is the same hole from the other
+ *     side: emitted server-backed but undecided, and rolled back if refused. So
+ *     the roster is gated on `hasServerData && !fromCache && !hasPendingWrites`
+ *     and the Day fan on `serverConfirmed`, which asks that of every Day's LATEST
+ *     snapshot — the same test `eventConfirmed` carries for the Event document
+ *     and `src/App.tsx` applies before it moves a Player off their Card. Each can
+ *     fall false again, which is the point: the confirmation has to describe the
+ *     preview on screen at the tap, not a moment that has passed. (The RECORD
+ *     does not depend on these subscriptions at all — `archiveEvent` re-reads its
+ *     inputs after the quiesce — but a console that is not looking at the server
+ *     is still not a console to end an Event from, and the record the freeze
+ *     takes is the one the Admin was shown.)
  *  2. **The claim queue drained.** Resolving a Claim writes the claimant's Board
  *     and Player row, and the freeze denies both — so a Claim still pending at
  *     the moment of the flip is pending forever, with a Confirm/Reject pair in
@@ -332,11 +347,28 @@ export default function ArchiveEvent({
   const archived = isEventArchived(event);
   const closing = !archived && isEventArchiving(event);
   const phase: Phase = archived ? 'archived' : closing ? 'closing' : 'open';
-  const { players, hasServerData: rosterConfirmed } = useLeaderboard();
+  // EVERY preview input is gated on its CURRENT committed snapshot, not on a
+  // lifetime latch (Codex P2 on PR #1162). `hasServerData` and `serverLoaded`
+  // say the server HAS spoken; neither says the rows and honours on screen right
+  // now are what it said. Both are for life, so a console that confirmed its
+  // inputs and then went offline kept reporting them confirmed while the ADR
+  // 0006 persistent cache re-served every one — and the archive armed over
+  // exactly the cached preview those latches exist to refuse. A pending local
+  // write is the same hole from the other side: emitted server-backed but
+  // undecided, and rolled back if it is refused. So the roster and the Day metas
+  // are held to the three-flag test `eventConfirmed` already applies to the
+  // Event document, and `src/App.tsx` to the redirect off a Player's Card.
+  const {
+    players,
+    hasServerData: rosterSeen,
+    fromCache: rosterFromCache,
+    hasPendingWrites: rosterPending,
+  } = useLeaderboard();
+  const rosterConfirmed = rosterSeen && !rosterFromCache && !rosterPending;
   const {
     metas: dayMetas,
     loaded: dayMetasLoaded,
-    serverLoaded: dayMetasConfirmed,
+    serverConfirmed: dayMetasConfirmed,
     failed: dayMetasFailed,
   } = useDayMetasStatus(event?.days?.length ?? 0);
   const [arming, setArming] = useState(false);
@@ -457,14 +489,23 @@ export default function ArchiveEvent({
   // about a loading roster but wait, whereas a pending claim names its own fix.
   //
   // A DEAD honours listener comes FIRST, ahead of the loading sentence (Codex P2
-  // on PR #1162). `serverLoaded` can never complete once a Day's subscription
-  // has died, so "loading" would be a message that never resolves — and the
-  // Admin would be left waiting on a control that is not going to open. It is
-  // stated as what it is: the honours could not be read, and the preview beside
-  // it is showing whatever the roster derives rather than the pins the freeze
-  // would find.
+  // on PR #1162). A Day whose subscription died before any server snapshot can
+  // never be confirmed, so "loading" would be a message that never resolves —
+  // and the Admin would be left waiting on a control that is not going to open.
+  // It is stated as what it is: the honours could not be read, and the preview
+  // beside it is showing whatever the roster derives rather than the pins the
+  // freeze would find.
+  //
+  // BUT ONLY WHILE THE CONFIRMATION IS ACTUALLY MISSING (CodeRabbit, PR #1162).
+  // `failed` is not the complement of `dayMetasConfirmed`: a Day the server
+  // answered before its listener died stays confirmed, and nothing clears it. So
+  // `failed` alone printed this terminal sentence — "reload the console and try
+  // again" — beside an ENABLED Archive control, telling an Admin to fix
+  // something that was not blocking them. The two now agree by construction:
+  // this is the reason the door is shut, so it is stated only when the door is
+  // shut on it.
   const blockedReason =
-    dayMetasFailed
+    dayMetasFailed && !dayMetasConfirmed
       ? `${HONORS_UNREADABLE_COPY}${closing ? ' Play is already closed—nothing has been frozen.' : ' Nothing has been closed.'}`
       : !previewConfirmed || !pendingClaimsLoaded
       ? 'Loading the final standings—the archive stays closed until every one of them is confirmed by the server.'
