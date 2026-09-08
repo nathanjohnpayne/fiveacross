@@ -1857,6 +1857,27 @@ service cloud.firestore {
           // the same denial is in `storage.rules` — a Proof document and its
           // media must refuse together, or the archive still grows a blob.
           && eventOpenForPlay(eventId)
+          // NOT WHILE THIS PROOF ID STILL OWES A MEDIA REVOCATION (#1153, Phase
+          // 4b P1). The tombstone arm below admits a row ONLY as part of the
+          // request that removes its Proof (`!existsAfter`), so a standing row
+          // is supposed to mean a Proof that is already gone. Nothing enforced
+          // that from THIS side: an owner could legally delete Proof P together
+          // with its tombstone and then re-create P — same id, same
+          // `storagePath` — while the Event was still open, which reassembles
+          // exactly the live-Proof/standing-row pair `existsAfter` exists to
+          // forbid. The consequences are the #1147 pair over again: the admin
+          // takedown's `set` becomes an UPDATE against the standing row and is
+          // denied, taking the whole transaction with it, and the delayed
+          // sweeper meanwhile revokes media the re-created Feed entry still
+          // points at.
+          //
+          // One `exists()` closes it: while the revocation is outstanding the id
+          // cannot come back, and the moment the row is retired — by the
+          // deleting client, or by the sweeper once the object is provably gone
+          // — the id is free again. It costs the app nothing, because
+          // `attachProof` mints a fresh auto-id per capture and never re-posts
+          // under an id it has already used.
+          && !exists(/databases/$(database)/documents/events/$(eventId)/proofStorageDeletes/$(proofId))
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.keys().hasOnly([
                'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
@@ -2040,11 +2061,29 @@ service cloud.firestore {
           // the projected state of a named document, which is exactly the
           // accompanying delete this needs to require.
           && !existsAfter(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId))
-          // Exactly these three keys, no more and no fewer.
-          && request.resource.data.keys().hasOnly(['storagePath', 'uid', 'requestedAt'])
+          // Exactly these three required keys, no more and no fewer, plus the
+          // OPTIONAL `generation` below.
+          && request.resource.data.keys().hasOnly(['storagePath', 'uid', 'requestedAt', 'generation'])
           && request.resource.data.keys().hasAll(['storagePath', 'uid', 'requestedAt'])
           && request.resource.data.uid is string
           && request.resource.data.storagePath is string
+          // THE OBJECT THE ROW TARGETED, not merely the name it had (#1153,
+          // Phase 4b P1). A path identifies a name; a name can be re-uploaded.
+          // `generation` is the Storage generation `deleteProof` read off the
+          // object immediately before the commit, and it is what lets the
+          // sweeper delete THAT object rather than whatever currently answers to
+          // its path — so a delayed sweep can never revoke media that was put
+          // there afterwards. Type-checked only: a wrong value cannot redirect
+          // the delete, it can only fail the precondition and leave the object
+          // alone, which is the safe direction.
+          //
+          // OPTIONAL because the client may not have it: the read is one extra
+          // Storage round trip taken before the transaction, best-effort by
+          // construction, and a takedown must not fail because a HEAD request
+          // did. A row without it is revoked by path, exactly as before — the
+          // Proof-absence check the sweeper runs is the guard that still applies.
+          && (!('generation' in request.resource.data)
+              || request.resource.data.generation is string)
           // `requestedAt` is operational only (how long has this been pending).
           // Type-checked, deliberately NOT bounded to `request.time`: a skewed
           // clock would then deny the write, and a denial here fails the whole

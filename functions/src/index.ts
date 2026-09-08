@@ -368,8 +368,18 @@ export const revokeDeletedProofMedia = onDocumentCreated(
     const { eventId, proofId } = event.params;
     await revokeProofMedia(
       {
-        deleteObject: async (storagePath) => {
-          await getStorage().bucket().file(storagePath).delete();
+        // Strongly consistent, and read at SWEEP time rather than trusted from
+        // the row: the tombstone says a Proof was deleted, this says whether one
+        // is there now (#1153, Phase 4b P1).
+        proofExists: async () =>
+          (await db.doc(`events/${eventId}/proofs/${proofId}`).get()).exists,
+        deleteObject: async (storagePath, generation) => {
+          const file = getStorage().bucket().file(storagePath);
+          // `ifGenerationMatch` makes the delete a compare-and-swap on the
+          // object's identity, so a name re-occupied since the tombstone was
+          // written answers 412 and keeps its bytes. Omitted when the row
+          // carried no generation — then the path is all there is to go on.
+          await file.delete(generation === null ? {} : { ifGenerationMatch: generation });
         },
         deleteTombstone: async () => {
           await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).delete();

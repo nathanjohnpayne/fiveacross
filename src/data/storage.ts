@@ -1,4 +1,4 @@
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL, deleteObject, getMetadata } from 'firebase/storage';
 import { storage, EVENT_ID } from '../firebase';
 import { PROOF_MEDIA_CACHE_CONTROL } from './proofMediaCache';
 import { canonicalizeProofMediaUrl } from './proofMediaUrl';
@@ -92,6 +92,32 @@ export async function uploadAvatar(uid: string, blob: Blob): Promise<string> {
   const r = ref(storage, `avatars/${uid}.jpg`);
   await uploadBytes(r, small, { contentType: 'image/jpeg' });
   return await getDownloadURL(r);
+}
+
+/**
+ * The Storage GENERATION of an object, or `null` when it cannot be read (#1153).
+ *
+ * A path names a slot, not a blob: delete the object and upload another one
+ * under the same name and the path still resolves, now to different bytes. The
+ * media-revocation tombstone `deleteProof` writes therefore records the
+ * generation of the object it actually targeted, so the server-side sweeper can
+ * delete THAT object rather than whatever currently answers to its path — see
+ * `functions/src/proofStorageDeletes.ts`.
+ *
+ * BEST EFFORT ON PURPOSE, and that is why it swallows everything. The value is a
+ * refinement of a revocation that is already correct without it, while the read
+ * is one more network round trip on a takedown path whose whole design goal is
+ * that it cannot be made to fail: a tombstone denied — or never written — because
+ * a HEAD request timed out would cost exactly the durability the row exists for.
+ * A row with no generation is revoked by path, as it was before this existed.
+ */
+export async function proofMediaGeneration(path: string): Promise<string | null> {
+  try {
+    const generation = (await getMetadata(ref(storage, path))).generation;
+    return typeof generation === 'string' && generation.length > 0 ? generation : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function deleteStoragePath(path: string): Promise<void> {

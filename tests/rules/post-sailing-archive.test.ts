@@ -1281,6 +1281,27 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     });
   }
 
+  /** A Proof create in the shape `attachProof` posts one, under any id. */
+  const createProof = (id: string, uid = ALICE, eventId = EVENT) =>
+    setDoc(doc(db(uid), `events/${eventId}/proofs/${id}`), {
+      uid,
+      displayName: 'Alice',
+      photoURL: null,
+      type: 'text',
+      cellIndex: 4,
+      itemText: 'Something happens',
+      storagePath: null,
+      mediaURL: null,
+      thumbURL: null,
+      text: 'again',
+      createdAt: NOW(),
+      reportCount: 0,
+      status: 'active',
+      visionFlag: null,
+      source: null,
+      dayIndex: 0,
+    });
+
   it('ALLOWS the admin to delete the Proof and record its media IN ONE COMMIT on an ARCHIVED Event', async () => {
     // The Event where it matters most: a permanent record still needs a takedown
     // path (#808), and a denial anywhere in this arm would close it.
@@ -1370,6 +1391,20 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await assertFails(takedown(ADMIN, TOMBSTONE({ requestedAt: 'now' })));
   });
 
+  it('ACCEPTS the OPTIONAL generation as a string, and refuses any other shape of it (#1153)', async () => {
+    // The object the row targeted, not merely the name it had. Optional because
+    // the client reads it from Storage before the commit and that read is best
+    // effort: a takedown must not fail because a metadata request did, so a row
+    // without the key is still admitted and is revoked by path.
+    //
+    // The denials run FIRST on purpose: a denied batch writes nothing, so the
+    // Proof this arm binds against is still there for the acceptance below —
+    // which would otherwise pass for the wrong reason (a missing Proof).
+    await assertFails(takedown(ADMIN, TOMBSTONE({ generation: 1700000000000001 })));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ generation: null })));
+    await assertSucceeds(takedown(ADMIN, TOMBSTONE({ generation: '1700000000000001' })));
+  });
+
   it('DENIES a path naming another Player, another Proof, another Event or another prefix', async () => {
     // The whole point of the durable row is that it authorizes a delete later,
     // so the object it names is pinned by equality to THIS Event, THIS
@@ -1412,6 +1447,133 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await seedTombstone();
     await freeze();
     await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+  });
+
+  it('REFUSES bringing the Proof id back while its revocation stands, and FREES it the moment the row is retired (#1153)', async () => {
+    // The other half of #1147, closed from the Proof's own side. `existsAfter`
+    // stops a row being minted over a LIVE Proof; nothing stopped a live Proof
+    // being minted over a STANDING row. An owner could legally delete Proof P
+    // together with its tombstone and then re-create P — same id, same
+    // `storagePath` — while the Event was open, reassembling exactly the pair the
+    // clause forbids: the next admin takedown's `set` becomes an UPDATE against
+    // the standing row and is denied, taking the whole transaction with it, and
+    // the delayed sweeper meanwhile revokes media the re-created Feed entry
+    // still points at, archived Event or not.
+    await assertSucceeds(takedown(ALICE));
+    await assertFails(createProof(PROOF));
+    // The admin is bound by it too — this is not a permission check, it is a
+    // statement about an id that still owes a revocation.
+    await assertFails(createProof(PROOF, ADMIN));
+    // …and the refusal is about THAT id, not about the Event: every other id is
+    // untouched, so a Player who just had a Proof taken down can post again.
+    await assertSucceeds(createProof('unheld-proof'));
+    // Retiring the row releases the id. The deleting client does this once its
+    // own Storage delete resolves; the sweeper does the same server-side once
+    // the object is provably gone.
+    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertSucceeds(createProof(PROOF));
+  });
+
+  it('pins the Proof create arm’s access budget: 6 distinct-Event creates pass and 7 deny', async () => {
+    // The measurement the added `exists()` has to answer for. Firestore allows
+    // 20 document access calls per multi-document request, and the create arm
+    // now spends THREE per Event: `eventOpenForPlay` is `exists()` + `get()` on
+    // the Event document, and the revocation check is one more `exists()`. Six
+    // distinct Events therefore cost 18 and pass; seven cost 21 and deny — which
+    // is what fixes the per-arm cost at three rather than leaving it inferred.
+    //
+    // Distinct EVENTS, because the rules engine caches an access per document:
+    // repeating the same Event would measure the cache, not the arm. A real
+    // request only ever creates one Proof in one Event, which is why the arm's
+    // real neighbour is the `attachProof` transaction pinned below.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(6, 'budget-pass');
+    const deny = events(7, 'budget-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+      }
+    });
+
+    const create = (ids: string[]) => {
+      const fs = db(ALICE);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          photoURL: null,
+          type: 'text',
+          cellIndex: 4,
+          itemText: 'Something happens',
+          storagePath: null,
+          mediaURL: null,
+          thumbURL: null,
+          text: 'again',
+          createdAt: NOW(),
+          reportCount: 0,
+          status: 'active',
+          visionFlag: null,
+          source: null,
+          dayIndex: 0,
+        });
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(create(pass));
+    await assertFails(create(deny));
+  });
+
+  it('ALLOWS the WHOLE attachProof transaction in ONE commit — Proof, Board, stats and Tally marker', async () => {
+    // The production shape the create arm's new `exists()` had to stay inside.
+    // A capture writes four documents in one transaction, and every arm in it
+    // reads the same Event document, so the added access is one more on a
+    // request whose Event reads are already cached — not one more per write.
+    const fs = db(ALICE);
+    const batch = writeBatch(fs);
+    batch.set(doc(fs, `${eventPath()}/proofs/fresh-capture`), {
+      uid: ALICE,
+      displayName: 'Alice',
+      photoURL: null,
+      type: 'text',
+      cellIndex: 6,
+      itemText: 'Something happens',
+      storagePath: null,
+      mediaURL: null,
+      thumbURL: null,
+      text: 'it happened',
+      createdAt: NOW(),
+      reportCount: 0,
+      status: 'active',
+      visionFlag: null,
+      source: null,
+      dayIndex: 0,
+    });
+    batch.set(
+      doc(fs, `${eventPath()}/days/0/boards/${ALICE}`),
+      { cells: cells([6]), markSeed: 7 },
+      { merge: true },
+    );
+    batch.set(doc(fs, `${eventPath()}/players/${ALICE}`), { squaresMarked: 1 }, { merge: true });
+    batch.set(doc(fs, `${eventPath()}/tally/${ITEM}/markers/${ALICE}`), {
+      eventId: EVENT,
+      uid: ALICE,
+      displayName: 'Alice',
+      markedAt: NOW(),
+      itemText: 'Something happens',
+      dayIndex: 0,
+    });
+    await assertSucceeds(batch.commit());
   });
 
   it('ALLOWS the WHOLE live-Event takedown in ONE commit — Board, stats, Tally marker, Proof and tombstone', async () => {

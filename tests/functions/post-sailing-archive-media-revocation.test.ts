@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   confinedProofMediaPath,
+  isGenerationMismatch,
   isObjectAlreadyGone,
   revokeProofMedia,
   type RevokeProofMediaDeps,
@@ -22,19 +23,24 @@ import {
 
 function makeDeps(
   deleteObject: (storagePath: string) => Promise<void>,
+  // Whether a Proof document holds this id at sweep time. Default FALSE, which
+  // is what a standing tombstone is supposed to mean; the cases that matter set
+  // it true, or reject, on purpose.
+  proofExists: () => Promise<boolean> = async () => false,
 ): RevokeProofMediaDeps & {
-  objectDeletes: string[];
+  objectDeletes: Array<{ storagePath: string; generation: string | null }>;
   tombstoneDeletes: number;
   warnings: Array<{ message: string; context: Record<string, unknown> }>;
 } {
-  const objectDeletes: string[] = [];
+  const objectDeletes: Array<{ storagePath: string; generation: string | null }> = [];
   const warnings: Array<{ message: string; context: Record<string, unknown> }> = [];
   const deps = {
     objectDeletes,
     tombstoneDeletes: 0,
     warnings,
-    deleteObject: async (storagePath: string) => {
-      objectDeletes.push(storagePath);
+    proofExists,
+    deleteObject: async (storagePath: string, generation: string | null) => {
+      objectDeletes.push({ storagePath, generation });
       await deleteObject(storagePath);
     },
     deleteTombstone: async () => {
@@ -47,10 +53,19 @@ function makeDeps(
   return deps;
 }
 
+/** The paths a successful sweep touched, without the generation column. */
+const paths = (deleted: Array<{ storagePath: string }>) => deleted.map((d) => d.storagePath);
+
 const TARGET = {
   eventId: 'med-2026',
   proofId: 'proof-1',
   tombstone: { storagePath: 'proofs/med-2026/alice/proof-1.jpg', uid: 'alice', requestedAt: 1000 },
+};
+
+/** The same row, carrying the generation `deleteProof` read off the object. */
+const BOUND = {
+  ...TARGET,
+  tombstone: { ...TARGET.tombstone, generation: '1700000000000001' },
 };
 
 describe('revokeProofMedia — the server finishes a revocation the client could not (#134)', () => {
@@ -69,7 +84,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
 
     await revokeProofMedia(wrapped, TARGET);
 
-    expect(deps.objectDeletes).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
+    expect(paths(deps.objectDeletes)).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
     expect(deps.tombstoneDeletes).toBe(1);
     expect(order).toEqual(['object', 'tombstone']);
   });
@@ -136,11 +151,94 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.tombstoneDeletes).toBe(1);
   });
 
+  it('SKIPS the bucket entirely when a Proof document holds this id again', async () => {
+    // The reuse hazard (#1153, Phase 4b P1). A standing tombstone is supposed to
+    // mean a Proof that is already gone — `firestore.rules` admits the row only
+    // alongside its own Proof's deletion, and the Proof create arm now refuses
+    // to bring the id back while the row stands. But the Admin SDK bypasses both
+    // and this handler holds a bucket-wide delete, so the sweeper ASKS rather
+    // than assuming: media a live Feed entry points at is never revoked on the
+    // strength of a row written about an earlier Proof. The row still goes,
+    // because redelivery cannot make a live Proof absent.
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket must not be reached');
+      },
+      async () => true,
+    );
+
+    await revokeProofMedia(deps, BOUND);
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(1);
+    expect(deps.warnings).toHaveLength(1);
+  });
+
+  it('REDELIVERS rather than deleting when it cannot tell whether the Proof is back', async () => {
+    // "I could not read the Proof" must never resolve to "delete the media", so
+    // the read failure propagates with the row intact and `retry: true` brings
+    // the sweep back.
+    const deps = makeDeps(
+      async () => {},
+      async () => {
+        throw new Error('firestore unavailable');
+      },
+    );
+
+    await expect(revokeProofMedia(deps, TARGET)).rejects.toThrow('firestore unavailable');
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(0);
+  });
+
+  it('binds the delete to the generation the row recorded, and to nothing when it recorded none', async () => {
+    const bound = makeDeps(async () => {});
+    await revokeProofMedia(bound, BOUND);
+    expect(bound.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: '1700000000000001' },
+    ]);
+
+    // A row written before this existed, or by a client whose metadata read
+    // failed, still revokes by path — the pre-generation behaviour, unchanged.
+    const unbound = makeDeps(async () => {});
+    await revokeProofMedia(unbound, TARGET);
+    expect(unbound.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: null },
+    ]);
+
+    // A non-string generation is no generation: the row is client-written and
+    // this handler holds a bucket-wide delete, so a value it cannot use is
+    // ignored rather than passed through to the precondition.
+    const junk = makeDeps(async () => {});
+    await revokeProofMedia(junk, {
+      ...TARGET,
+      tombstone: { ...TARGET.tombstone, generation: 17 },
+    });
+    expect(junk.objectDeletes[0].generation).toBeNull();
+  });
+
+  it('LEAVES a re-uploaded object alone when the generation no longer matches', async () => {
+    // 412 is Cloud Storage answering "that is not the object you asked about".
+    // The only way to reach it is that the name was re-occupied after the row
+    // was written, so the bytes there now belong to a write this revocation says
+    // nothing about. Retiring rather than retrying, because redelivery cannot
+    // turn the old generation back up.
+    const deps = makeDeps(async () => {
+      throw Object.assign(new Error('Precondition Failed'), { code: 412 });
+    });
+
+    await expect(revokeProofMedia(deps, BOUND)).resolves.toBeUndefined();
+
+    expect(deps.tombstoneDeletes).toBe(1);
+    expect(deps.warnings).toHaveLength(1);
+  });
+
   it('logs through console.warn when no sink is injected', async () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       await revokeProofMedia(
         {
+          proofExists: async () => false,
           deleteObject: async () => {
             throw new Error('the bucket must not be reached');
           },
@@ -208,5 +306,20 @@ describe('isObjectAlreadyGone', () => {
     expect(isObjectAlreadyGone(new Error('network'))).toBe(false);
     expect(isObjectAlreadyGone(undefined)).toBe(false);
     expect(isObjectAlreadyGone(null)).toBe(false);
+  });
+});
+
+describe('isGenerationMismatch', () => {
+  it('recognizes the precondition failure and nothing else — a 404 is a different answer', () => {
+    // The two both end in retirement but describe different worlds: 404 means
+    // the debt was discharged, 412 means it can no longer be discharged against
+    // this path. Conflating them would log the wrong thing about the wrong case.
+    expect(isGenerationMismatch({ code: 412 })).toBe(true);
+    expect(isGenerationMismatch({ code: '412' })).toBe(true);
+    expect(isGenerationMismatch({ code: 404 })).toBe(false);
+    expect(isGenerationMismatch({ code: 503 })).toBe(false);
+    expect(isGenerationMismatch(new Error('network'))).toBe(false);
+    expect(isGenerationMismatch(undefined)).toBe(false);
+    expect(isGenerationMismatch(null)).toBe(false);
   });
 });

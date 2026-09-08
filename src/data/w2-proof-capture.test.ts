@@ -30,6 +30,10 @@ const {
   runTx,
   uploadSpy,
   deleteStorageSpy,
+  // The pre-transaction metadata read that binds the tombstone to the OBJECT it
+  // targeted rather than to its name (#1153) — spied so the cases below can
+  // assert the generation reaches the row, and that a failed read is absorbed.
+  generationSpy,
   purgeCacheSpy,
   // The out-of-transaction `deleteDoc` that RETIRES a discharged media
   // revocation tombstone (#1153) — spied so the cases below can assert it fires
@@ -43,6 +47,7 @@ const {
   runTx: vi.fn(),
   uploadSpy: vi.fn(),
   deleteStorageSpy: vi.fn(),
+  generationSpy: vi.fn(),
   purgeCacheSpy: vi.fn(),
   deleteDocSpy: vi.fn(),
 }));
@@ -57,7 +62,11 @@ vi.mock('../firebase', () => ({
 // storage.ts talks to Cloud Storage; stub the two functions proofs.ts uses so we
 // never touch a real bucket (uploadProofMedia is exercised for real against the
 // emulator by tests/rules/w0-storage-rules.test.ts).
-vi.mock('./storage', () => ({ uploadProofMedia: uploadSpy, deleteStoragePath: deleteStorageSpy }));
+vi.mock('./storage', () => ({
+  uploadProofMedia: uploadSpy,
+  deleteStoragePath: deleteStorageSpy,
+  proofMediaGeneration: generationSpy,
+}));
 // #373: deleteProof's post-commit local-cache purge — spied so the wiring
 // tests below can assert WHEN/WITH-WHAT it's called without touching a real
 // `caches` bucket (the purge helper itself is unit-tested for real against a
@@ -144,6 +153,7 @@ beforeEach(() => {
   });
   purgeCacheSpy.mockResolvedValue(undefined);
   deleteStorageSpy.mockResolvedValue(undefined);
+  generationSpy.mockResolvedValue('1700000000000001');
   deleteDocSpy.mockResolvedValue(undefined);
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({ get: txGet, set: txSet, delete: txDelete }),
@@ -1248,6 +1258,9 @@ describe('deleteProof — the media revocation outlives the commit that removes 
       storagePath: `proofs/${EVENT_ID}/u1/P.jpg`,
       uid: 'u1',
       requestedAt: 1000,
+      // The object's own generation, read before the transaction opened, so the
+      // row targets THAT blob and not whatever later answers to its name.
+      generation: '1700000000000001',
     });
     // Ahead of the delete, so the durable record exists before the only
     // reference to the object goes.
@@ -1352,6 +1365,7 @@ describe('deleteProof — the media revocation outlives the commit that removes 
         fn({ get: txGet, set: txSet, delete: txDelete }),
       );
       deleteStorageSpy.mockResolvedValue(undefined);
+      generationSpy.mockResolvedValue('1700000000000001');
       txGet.mockImplementation((ref: Ref): Promise<Snap> => {
         if (ref.path.includes('/boards/')) return Promise.resolve({ data: () => boardState });
         if (ref.path.includes('/players/')) return Promise.resolve({ data: () => playerState });
@@ -1388,6 +1402,69 @@ describe('deleteProof — the media revocation outlives the commit that removes 
 
     expect(tombstoneSet()).toBe(-1);
     expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+  });
+
+  it('OMITS the generation rather than failing when the object’s metadata cannot be read', async () => {
+    // Best effort by construction. The read is one extra Storage round trip on a
+    // takedown path whose whole design goal is that it cannot be made to fail,
+    // so a metadata failure must not become a missing — or denied — tombstone.
+    // The rules arm accepts the key as optional for exactly this reason, and a
+    // row without one is revoked by path, still guarded by the sweeper's own
+    // Proof-absence check.
+    generationSpy.mockResolvedValueOnce(null);
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(setPayload('/proofStorageDeletes/')).toEqual({
+      storagePath: `proofs/${EVENT_ID}/u1/P.jpg`,
+      uid: 'u1',
+      requestedAt: 1000,
+    });
+  });
+
+  it('spends no metadata round trip when no tombstone can be written', async () => {
+    // A text Proof has no object, and a path this layer cannot parse writes no
+    // row — asking Storage about either buys nothing on a path that already
+    // behaves exactly as it did before the tombstone existed.
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: null };
+    await deleteProof('P');
+    await deleteProof('P', 'legacy/not-a-proof-path.png');
+
+    expect(generationSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves the row standing and RE-POSTS under a new Proof id, which is what makes the recreate refusal free (#1153)', async () => {
+    // The reuse hazard the rules now refuse from the Proof's own side: while a
+    // revocation is outstanding, that Proof id cannot be created again. Without
+    // it an owner could delete Proof P with its tombstone, re-create P — same
+    // id, same object path — and reassemble the live-Proof/standing-row pair
+    // `existsAfter` exists to forbid, after which the next takedown's `set` is a
+    // denied UPDATE and the delayed sweeper strips media a live Feed entry
+    // points at.
+    //
+    // The clause costs the app nothing, and this is why: a re-post is a fresh
+    // `doc(collection)` auto-id, so it never asks for an id a tombstone is
+    // holding, and its media lands under a different object name besides.
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow();
+    expect(tombstoneSet()).toBeGreaterThanOrEqual(0);
+    // Still owed: the row was never retired, so the id stays held until the
+    // sweeper discharges it.
+    expect(deleteDocSpy).not.toHaveBeenCalled();
+
+    txSet.mockClear();
+    await attachProof({
+      ...baseArgs,
+      claimMode: 'proof_required',
+      proof: { type: 'photo', blob: new Blob(['x'], { type: 'image/jpeg' }) },
+    });
+
+    const rePostId = uploadSpy.mock.calls[0][1] as string;
+    expect(rePostId).not.toBe('P');
+    const proofWrite = txSet.mock.calls.find((c) =>
+      (c[0] as Ref).path.startsWith(`events/${EVENT_ID}/proofs/`),
+    );
+    expect((proofWrite?.[0] as Ref).path).toBe(`events/${EVENT_ID}/proofs/${rePostId}`);
   });
 
   it('touches no localStorage at all — the device-local queue is RETIRED (#1153)', async () => {

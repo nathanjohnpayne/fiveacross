@@ -1,6 +1,6 @@
 import { collection, deleteDoc, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
-import { uploadProofMedia, deleteStoragePath } from './storage';
+import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
 import { resolveProofMediaUrl } from './proofMediaUrl';
 import { markerDisplayName } from './attribution';
@@ -593,6 +593,30 @@ export async function deleteProof(
   // post-commit half.
   let tombstoned = false;
 
+  // THE GENERATION OF THE OBJECT THIS TAKEDOWN IS ABOUT (#1153, Phase 4b P1).
+  // `storagePath` names a slot rather than a blob, and the sweeper below may run
+  // long after this delete: something else can legitimately occupy that name by
+  // then, and a revocation that only knows the path would take it. So the
+  // tombstone records the generation the object has RIGHT NOW and the sweeper
+  // deletes that generation alone.
+  //
+  // Read before the transaction opens, because a Firestore transaction callback
+  // must not be doing unrelated network I/O on every retry, and because the
+  // value has to be in hand by the time the tombstone is written inside it. Read
+  // only when a tombstone is actually possible — a text Proof and a path this
+  // layer cannot parse both write none, so a round trip for either would be
+  // spent on nothing.
+  //
+  // BEST EFFORT: `proofMediaGeneration` swallows its own failures and answers
+  // `null`, and a null is simply omitted from the row. A takedown must never
+  // fail because a metadata read did, and a row without a generation is exactly
+  // the row this ticket shipped originally — still guarded by the sweeper's
+  // Proof-absence check.
+  let generation: string | null = null;
+  if (storagePath && proofMediaOwnerUid(storagePath, eventId, id)) {
+    generation = await proofMediaGeneration(storagePath);
+  }
+
   await runTransaction(db, async (tx) => {
     const proofRef = rawProof(id, eventId);
     // THE EVENT, READ INSIDE THE TRANSACTION THAT WRITES (#134, Codex P2 on PR
@@ -817,6 +841,11 @@ export async function deleteProof(
           // clock could then deny the write, and a denial here fails the whole
           // takedown, while a lie about the stamp cannot redirect the delete.
           requestedAt: Date.now(),
+          // Present only when it could be read. The rules arm accepts the key as
+          // optional for exactly this reason, and OMITTING it is what keeps a
+          // metadata failure from turning into a denied write inside the
+          // takedown's own transaction.
+          ...(generation === null ? {} : { generation }),
         });
         tombstoned = true;
       }

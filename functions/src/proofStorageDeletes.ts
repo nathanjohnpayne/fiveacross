@@ -30,11 +30,28 @@ export interface ProofStorageDeleteDoc {
   storagePath?: unknown;
   uid?: unknown;
   requestedAt?: unknown;
+  /**
+   * The Storage generation of the object the row was written about, when the
+   * deleting client could read it (#1153). Optional: a takedown must not fail
+   * because a metadata read did, so `deleteProof` omits the key rather than
+   * writing a placeholder.
+   */
+  generation?: unknown;
 }
 
 export interface RevokeProofMediaDeps {
-  /** Deletes the named Storage object. Rejects with a 404-shaped error if it is already gone. */
-  deleteObject(storagePath: string): Promise<void>;
+  /**
+   * Whether `events/{eventId}/proofs/{proofId}` still exists, read with the
+   * Admin SDK. A standing tombstone is supposed to mean a Proof that is gone;
+   * this is the sweeper asking rather than assuming.
+   */
+  proofExists(): Promise<boolean>;
+  /**
+   * Deletes the named Storage object, bound to `generation` when the row carried
+   * one. Rejects with a 404-shaped error if it is already gone, and with a
+   * 412-shaped one if the generation no longer matches.
+   */
+  deleteObject(storagePath: string, generation: string | null): Promise<void>;
   /** Retires the tombstone once the object is provably gone. */
   deleteTombstone(): Promise<void>;
   /** Structured log sink; defaults to `console.warn`. */
@@ -100,6 +117,27 @@ export function isObjectAlreadyGone(err: unknown): boolean {
 }
 
 /**
+ * "That is not the object this row was written about" — the generation
+ * precondition failed (#1153, Phase 4b P1).
+ *
+ * `ifGenerationMatch` turns the delete into a compare-and-swap on the object's
+ * identity, and Cloud Storage answers a mismatch with `412 Precondition Failed`.
+ * The only way to reach it is that the name was re-occupied after the tombstone
+ * was written, so the correct response is to leave the bytes alone: the object
+ * the revocation was owed for is already gone, and whatever is there now was put
+ * there by somebody else's write that this row says nothing about.
+ *
+ * Distinct from `isObjectAlreadyGone` because the two describe different worlds
+ * even though both end in retirement — one means the debt was discharged, the
+ * other means it can no longer be discharged against this path — and because a
+ * mismatch is worth a log line while the 404 is the ordinary case.
+ */
+export function isGenerationMismatch(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return code === 412 || code === '412';
+}
+
+/**
  * Revoke one Proof's media and retire its tombstone.
  *
  * Ordering is the whole contract: the tombstone is removed ONLY after the object
@@ -111,6 +149,20 @@ export function isObjectAlreadyGone(err: unknown): boolean {
  * redelivery cannot make an unconfinable path confinable, so retrying it only
  * buys an immortal poison row. It is logged, because the only way one exists is
  * a write that did not come through `firestore.rules`.
+ *
+ * TWO CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a promise
+ * about the past and this runs in the future (#1153, Phase 4b P1). A tombstone
+ * is admitted only alongside its own Proof's deletion and the Proof create arm
+ * now refuses to bring that id back while the row stands, so a live Proof under
+ * a pending revocation should be unreachable — but the Admin SDK bypasses those
+ * rules entirely and this handler holds a bucket-wide delete, so "should be
+ * unreachable" is not a safe premise for revoking media. The Proof is therefore
+ * read: if it is THERE, the revocation is abandoned rather than performed,
+ * because whatever the row was owed for, it is not this Feed entry's media.
+ * And the object is deleted by GENERATION when the row recorded one, so even a
+ * name re-occupied by a blob with no document pointing at it is left alone
+ * instead of swept. Both retire the row: neither condition can improve on
+ * redelivery, and a row that cannot be discharged is a poison row.
  */
 export async function revokeProofMedia(
   deps: RevokeProofMediaDeps,
@@ -128,9 +180,37 @@ export async function revokeProofMedia(
     return;
   }
 
+  // THE PROOF MUST BE ABSENT. A read failure is NOT swallowed: it propagates and
+  // the platform redelivers, because "I could not tell whether a Feed entry
+  // still points at this media" must never resolve to "delete it".
+  if (await deps.proofExists()) {
+    warn('proof media revocation skipped: a Proof document holds this id again', {
+      eventId,
+      proofId,
+      storagePath,
+    });
+    await deps.deleteTombstone();
+    return;
+  }
+
+  const generation =
+    typeof tombstone.generation === 'string' && tombstone.generation.length > 0
+      ? tombstone.generation
+      : null;
+
   try {
-    await deps.deleteObject(storagePath);
+    await deps.deleteObject(storagePath, generation);
   } catch (err) {
+    if (isGenerationMismatch(err)) {
+      warn('proof media revocation skipped: the object was replaced after the tombstone', {
+        eventId,
+        proofId,
+        storagePath,
+        generation,
+      });
+      await deps.deleteTombstone();
+      return;
+    }
     if (!isObjectAlreadyGone(err)) throw err;
   }
   await deps.deleteTombstone();
