@@ -554,6 +554,89 @@ describe('draftEventArchive — the inputs are validated before the Event is shu
     expect(draft.archive.firstBingoRow?.uid).toBe('real');
   });
 
+  it('survives a null per-Day bucket rather than throwing out of the draft', () => {
+    // Codex P2, PR #1139. `players/{uid}` validates NOTHING, so `dayStats` is a
+    // Player-written map that can hold a `null` — and every honour selector
+    // dereferences the bucket (`stat.firstBingoAt`). One such row threw out of
+    // the builder before any coercion ran, and because `ArchiveEvent` builds
+    // this draft during RENDER, the exception took Game settings and its Reopen
+    // play control with it — on an Event that may already be shut.
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'broken', displayName: 'Broken', bingoCount: 1, squaresMarked: 3 }),
+          dayStats: { 1: null },
+        } as unknown as PlayerDoc,
+        mkPlayer({
+          uid: 'real',
+          displayName: 'Real',
+          bingoCount: 1,
+          squaresMarked: 5,
+          firstBingoAt: 900,
+          dayStats: { 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+        }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    // The unreadable bucket is dropped, so the Day's honour is decided by the
+    // row that actually carries evidence for it — and the broken row's own ROOT
+    // totals are still copied verbatim (ADR 0001).
+    expect(draft.archive.firstBingo?.uid).toBe('real');
+    expect(draft.archive.dailyHonors.map((h) => h.uid)).toEqual(['real']);
+    expect(draft.archive.standings.find((r) => r.uid === 'broken')).toMatchObject({
+      bingoCount: 1,
+      squaresMarked: 3,
+    });
+    expect(draft.refusal).toBeNull();
+  });
+
+  it('drops a NON-OBJECT bucket the same way — a string is not a Day of evidence', () => {
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'junk', displayName: 'Junk' }),
+          dayStats: { 1: 'nonsense', 2: 7 },
+        } as unknown as PlayerDoc,
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.firstBingo).toBeNull();
+    expect(draft.archive.dailyHonors).toEqual([]);
+    expect(draft.archive.standings.map((r) => r.uid)).toEqual(['junk']);
+  });
+
+  it('coerces a bucket whose fields are MISSING or non-finite rather than ranking them', () => {
+    // The bucket is a real object, so it is kept — and every field inside it
+    // gets the same coercion the standings rows get. A non-finite instant is the
+    // load-bearing half: `NaN` is not `null`, so an uncoerced bucket ENTERS the
+    // per-Day comparison and every `<` against it is false, which pins the Day's
+    // honour on the row carrying no evidence at all and stores its instant as 0.
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'sparse', displayName: 'Sparse' }),
+          dayStats: { 1: { firstBingoAt: Number.NaN }, 2: {} },
+        } as unknown as PlayerDoc,
+        mkPlayer({
+          uid: 'real',
+          displayName: 'Real',
+          bingoCount: 1,
+          firstBingoAt: 900,
+          dayStats: { 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+        }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.firstBingo?.uid).toBe('real');
+    expect(draft.archive.dailyHonors).toEqual([
+      expect.objectContaining({ dayIndex: 1, uid: 'real', firstBingoAt: 900 }),
+    ]);
+    expect(draft.refusal).toBeNull();
+  });
+
   it('coerces a missing name and missing counts to safe defaults', () => {
     const draft = draftEventArchive({
       players: [

@@ -284,6 +284,55 @@ function archiveInstant(value: unknown): number | null {
 }
 
 /**
+ * One Player's row with its per-Day buckets made READABLE (#134, Codex P2 on PR
+ * #1139).
+ *
+ * `usableUid` is about the one malformation a row cannot survive; this is about
+ * the one the SELECTORS cannot survive. `players/{uid}` validates nothing in its
+ * rules arm, so `dayStats` is a Player-written map that can hold `null`, a
+ * string, or a bucket missing every field — and `eventFirstBingoAt`,
+ * `sumDayStats` and `perDayHonors` all dereference the bucket directly
+ * (`stat.firstBingoAt`, `stat.bingoCount`). A single `dayStats: { '1': null }`
+ * therefore THREW out of the builder, and because `ArchiveEvent` builds the
+ * draft during RENDER, that exception took Game settings and the Reopen play
+ * control down with it — on an Event that may already be shut, where reopening
+ * is the one way back. The coercions further down never ran, because the throw
+ * happened first.
+ *
+ * So a bucket that is not an object is DROPPED (there is nothing to default a
+ * Day's evidence to) and every field inside one that is gets the same coercion
+ * the standings rows get: a non-finite count reads `0`, a bad instant reads
+ * `null`. Nothing else moves — the KEY is preserved verbatim, junk included, so
+ * the selectors see exactly the Days they saw before and the record's own
+ * `Number.isInteger` filter still decides which honours survive.
+ *
+ * A well-formed row is unchanged by construction, and no ROOT total is touched:
+ * `toStandingRow` copies those off the Player's own row as it always did (ADR
+ * 0001). This decides nothing about who won — it only makes the row readable by
+ * the selectors that were already reading it.
+ */
+function withReadableDayStats(p: PlayerDoc): PlayerDoc {
+  const raw = p.dayStats;
+  if (!raw || typeof raw !== 'object') return p;
+  const readable = Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([, bucket]) => !!bucket && typeof bucket === 'object')
+      .map(([key, bucket]) => {
+        const stat = bucket as Record<string, unknown>;
+        return [
+          key,
+          {
+            bingoCount: archiveCount(stat.bingoCount),
+            squaresMarked: archiveCount(stat.squaresMarked),
+            firstBingoAt: archiveInstant(stat.firstBingoAt),
+          },
+        ];
+      }),
+  ) as NonNullable<PlayerDoc['dayStats']>;
+  return { ...p, dayStats: readable };
+}
+
+/**
  * Copy one Player's own written stats into a frozen standings row. No arithmetic
  * — whatever the Player's row said is what the record says (ADR 0001) — but the
  * values are COERCED to the shape the record's own contract declares.
@@ -478,7 +527,14 @@ export function draftEventArchive(params: {
   // Dropped FIRST, before any selection: an unidentifiable row must not be able
   // to win the headline honour or hold a daily one either, and every downstream
   // step here reads `uid`.
-  const identified = players.filter((p) => usableUid(p.uid));
+  //
+  // …and every surviving row's per-Day buckets are made readable in the SAME
+  // pass, before any selector dereferences one (`withReadableDayStats`). The
+  // honour selectors read `stat.firstBingoAt` off a Player-written map with no
+  // rules validation at all, so one malformed bucket threw out of the builder —
+  // and this draft is built during `ArchiveEvent`'s RENDER, so the throw took
+  // Game settings and its Reopen play control with it.
+  const identified = players.filter((p) => usableUid(p.uid)).map(withReadableDayStats);
   const skippedRows = players.length - identified.length;
 
   const roster = identified.filter((p) => !isBanned(p.uid, bannedUids));

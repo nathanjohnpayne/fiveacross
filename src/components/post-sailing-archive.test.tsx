@@ -975,6 +975,39 @@ describe('the archive control drains the claim queue first', () => {
 // the record cannot carry. The builder coerces and skips what it can; what it
 // cannot absorb has to be refused BEFORE the closing write, or every attempt
 // shuts the Event and then fails on the second one.
+// Codex P2, PR #1139. `ArchiveEvent` builds the draft during RENDER, so a
+// builder that throws does not merely refuse the archive — it takes Game
+// settings down with it, including the Reopen play control that is the only way
+// back out of a closing Event. `players/{uid}` validates nothing, so the row
+// that throws is one a Player can actually write.
+describe('the archive control survives a Player row the selectors could not read', () => {
+  /** A row whose per-Day bucket is `null` — the shape the honour selectors used
+   *  to dereference straight into a TypeError. */
+  const brokenBuckets = (): PlayerDoc =>
+    ({
+      ...mkPlayer({ uid: 'broken', displayName: 'Broken', bingoCount: 1, squaresMarked: 3 }),
+      dayStats: { 1: null },
+    }) as unknown as PlayerDoc;
+
+  it('still renders Game settings, and still offers the archive, on a live Event', () => {
+    H.event = liveEvent();
+    H.players = [...liveRoster, brokenBuckets()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
+    // The row is counted, not skipped: its `uid` is perfectly usable, only its
+    // buckets were unreadable.
+    expect(screen.queryByText(/rows had no usable id/)).not.toBeInTheDocument();
+  });
+
+  it('still offers Reopen play on a CLOSING Event, which is the only way back', () => {
+    H.event = closingEvent();
+    H.players = [brokenBuckets()];
+    renderArchiveControl();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
+  });
+});
+
 describe('the archive control refuses a record it could not store', () => {
   /** A Player whose own row would blow the Event document's budget. `dayStats`
    *  is a Player-written map with no rules validation and one derived daily
