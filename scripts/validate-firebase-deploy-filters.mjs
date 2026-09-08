@@ -2502,6 +2502,15 @@ async function buildAndInventoryProject({
           await copyStagedProject(scratchProject, probeProject, probeLinks);
           const results = new Map();
           for (const config of selected) {
+            // A codebase this classifier has already refused is never LOADED.
+            // Discovering it would run its module-scope code — which can
+            // rewrite another selected codebase's artifact before that one is
+            // read — for an inventory that could not be authoritative anyway,
+            // and under an environment that had to be substituted: a codebase
+            // whose `configDir` is absolute has its dotenv files read from its
+            // SOURCE dir instead, which is a different configuration from the
+            // one the deploy will load. Its inventory is set below, refused.
+            if (config.blocked) continue;
             results.set(
               config.codebase,
               await discoverCodebaseInProbe({
@@ -2540,10 +2549,12 @@ async function buildAndInventoryProject({
       for (const config of selected) {
         inventories.set(
           config.codebase,
-          reconcileProbeResults(
-            config.sourceRel,
-            perProbe.map(({ probe, results }) => ({ probe, discovered: results.get(config.codebase) })),
-          ),
+          config.blocked
+            ? refused(`codebase ${config.codebase} cannot be inventoried here — ${config.blocked}`)
+            : reconcileProbeResults(
+                config.sourceRel,
+                perProbe.map(({ probe, results }) => ({ probe, discovered: results.get(config.codebase) })),
+              ),
         );
       }
       for (const config of configs) {
@@ -2573,10 +2584,12 @@ async function buildAndInventoryProject({
       // Last, and over the whole selected set: one codebase this run could not
       // vouch for makes every other selected codebase's inventory unusable too.
       // See `firstUnprovableCodebase` for why the answer cannot be per-codebase.
-      const unprovable = firstUnprovableCodebase(
-        selected.map((config) => config.codebase),
-        inventories,
-      );
+      // Over the SELECTED SET as `targetCodebases` computed it, not over the
+      // stageable subset: a selected codebase with no mirrorable source, and a
+      // selected codebase this classifier refused to build, are both codebases
+      // whose real behaviour is unknown, and both are loaded in the same
+      // sequence as the rest.
+      const unprovable = firstUnprovableCodebase([...targets], inventories);
       if (unprovable) {
         return new RehearsalExit(
           "the rehearsal",
@@ -2896,6 +2909,14 @@ async function discoverCodebaseInProbe({
  * Only SELECTED codebases count. A codebase this deploy does not load runs no
  * code and can rewrite nothing, which is why `endpointMatchesFilter`'s
  * per-codebase keying stays correct for it.
+ *
+ * EVERY selected codebase, though, not just the ones that got as far as a
+ * discovery. A codebase this classifier refused to build — an unsupported
+ * runtime, an unmirrorable `configDir`, a kit, no local source at all — is
+ * exactly a codebase whose real behaviour is unknown, and Firebase loads it in
+ * the same sequence as the rest. The caller therefore passes the selected set as
+ * `targetCodebases` computed it, and the inventories map carries a refusal for
+ * each of those (Phase 4b P1 on #1107).
  */
 export function firstUnprovableCodebase(selectedCodebases, inventories) {
   for (const codebase of selectedCodebases) {
@@ -2972,9 +2993,18 @@ async function artifactEndpointInventory(inventory, codebase) {
  * and omitting its name would let `functions:<name>` be read as a same-named
  * local endpoint while Firebase deploys that codebase's whole surface.
  *
- * `blocked` is tracked PER CODEBASE. `endpointMatchesFilter` rejects an endpoint
- * whose codebase differs from the filter's, so uncertainty in `beta` cannot
- * widen an explicitly qualified `alpha` deployment.
+ * `blocked` is tracked PER CODEBASE and then carried onto that codebase's
+ * CONFIGS, because two different readers need it. `endpointMatchesFilter`
+ * rejects an endpoint whose codebase differs from the filter's, so a selector
+ * pointed at a blocked codebase is refused from the entry alone. But
+ * `buildAndInventoryProject` works from `configs`, where the restriction used to
+ * be invisible: it discovered a blocked codebase anyway — under a substituted
+ * environment, since a codebase whose `configDir` is absolute has its dotenv
+ * files read from its source dir instead — reported an authoritative inventory
+ * for it, and let a PEER's selector be proved exact beside it. With the reason
+ * on the config, such a codebase is never loaded, its inventory is never
+ * authoritative, and `firstUnprovableCodebase` refuses the whole project when
+ * this deploy selects it (Phase 4b P1 on #1107).
  */
 async function singleEndpointInventory(
   configSource,
@@ -3109,6 +3139,18 @@ async function singleEndpointInventory(
   }
   if (kitHooks) {
     for (const entry of byCodebase.values()) entry.blocked ??= "kit predeploy hooks";
+  }
+  // A blocked codebase's reason has to travel with its CONFIGS, not only with
+  // the selector entry above. `selectorIsProvableSingleEndpoint` reads the
+  // entry, so an unsupported runtime or an unmirrorable `configDir` already
+  // refuses a selector pointed AT that codebase — but `buildAndInventoryProject`
+  // works from `configs`, where the restriction was invisible, so it discovered
+  // the codebase anyway and let a peer's selector be proved exact beside it
+  // (Phase 4b P1 on #1107). Applied after the kit sweep above, so a kit's
+  // project-wide block reaches every config too.
+  for (const config of configs) {
+    const blocked = byCodebase.get(config.codebase)?.blocked;
+    if (blocked) config.blocked = blocked;
   }
 
   return {

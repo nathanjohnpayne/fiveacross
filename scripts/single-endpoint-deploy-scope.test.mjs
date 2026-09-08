@@ -246,14 +246,17 @@ async function initFixtureRepository(dir, branch) {
 
 /**
  * A temp project with several configured codebases. `sources` maps a codebase
- * name to its `src/index.ts`; the key "default" writes a config with no
- * explicit `codebase` key, which is how Firebase spells the default.
+ * name to its `src/index.ts`, or to `{ source, config }` when the case is about
+ * a setting on that codebase's own Firebase config; the key "default" writes a
+ * config with no explicit `codebase` key, which is how Firebase spells the
+ * default.
  */
 async function withCodebases(sources, run) {
   const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-codebases-"));
   try {
     const functions = [];
-    for (const [codebase, source] of Object.entries(sources)) {
+    for (const [codebase, spec] of Object.entries(sources)) {
+      const { source, config = {} } = typeof spec === "string" ? { source: spec } : spec;
       const dir = `functions-${codebase}`;
       await mkdir(resolve(fixture, dir, "src"), { recursive: true });
       await installToolchain(resolve(fixture, dir));
@@ -262,8 +265,8 @@ async function withCodebases(sources, run) {
       await writeUnder(resolve(fixture, dir), "src/index.ts", source);
       functions.push(
         codebase === "default"
-          ? { source: dir, predeploy: PREDEPLOY }
-          : { source: dir, codebase, predeploy: PREDEPLOY },
+          ? { source: dir, predeploy: PREDEPLOY, ...config }
+          : { source: dir, codebase, predeploy: PREDEPLOY, ...config },
       );
     }
     await writeUnder(fixture, "firebase.json", JSON.stringify({ functions }));
@@ -3301,6 +3304,72 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
           if (previous === undefined) delete process.env.INIT_CWD;
           else process.env.INIT_CWD = previous;
         }
+      },
+    );
+  });
+});
+
+describe("a codebase this classifier refused to build is never discovered", RUNS_A_BUILD, () => {
+  // Phase 4b P1 on #1107. `singleEndpointInventory` records an unsupported
+  // runtime or an unmirrorable `configDir` against the codebase's SELECTOR
+  // entry, which is enough to refuse a selector pointed at that codebase — and
+  // `functions:beta:submitBugReport` is never pointed at one: it takes the
+  // explicit protected-callable branch, which answers from the selector and
+  // reads no inventory at all. `buildAndInventoryProject` meanwhile worked from
+  // the configs, where the restriction was invisible: beta was discovered like
+  // any other codebase, under an environment that had to be substituted (an
+  // absolute `configDir` falls back to the SOURCE dir, so the dotenv files are
+  // the wrong ones), and reported an authoritative inventory. Nothing was left
+  // for `firstUnprovableCodebase` to find, so alpha's selector was proved exact
+  // beside a codebase whose real initialisation was never reproduced — and one
+  // of the things an unknown codebase does at module load is rewrite alpha's
+  // artifact before alpha is discovered.
+  const selector = ["--only", "functions:alpha:daily,functions:beta:submitBugReport"];
+
+  it.each([
+    ["an absolute configDir", { configDir: "/etc/firebase-deploy-scope" }],
+    ["a non-Node runtime", { runtime: "python311" }],
+  ])("refuses the whole project when the SELECTED beta is blocked by %s", async (_label, config) => {
+    await withCodebases(
+      {
+        alpha: endpoint("daily"),
+        beta: { source: endpoint("submitBugReport"), config },
+      },
+      async (configPath) => {
+        const result = await classify(selector, configPath);
+        // `submitBugReport` still binds its own invoker from the selector — that
+        // is a fact about the request, not about an inventory — while alpha's
+        // exemption is gone and every invoker it did not name turns
+        // conservative.
+        expect(result).toMatchObject({
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          emailUnsubscribeInvokerSelected: true,
+          emailUnsubscribeInvokerConservative: true,
+          authHandoffInvokerSelected: true,
+          authHandoffInvokerConservative: true,
+        });
+      },
+    );
+  });
+
+  it("proves the same selector when neither codebase is blocked", async () => {
+    // The control. Without it the case above would pass for a fixture that was
+    // never provable to begin with: the two codebases, the two selectors and
+    // the two hooks are identical, and only beta's own config differs.
+    await withCodebases(
+      { alpha: endpoint("daily"), beta: endpoint("submitBugReport") },
+      async (configPath) => {
+        const result = await classify(selector, configPath);
+        expect(result).toMatchObject({
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          emailUnsubscribeInvokerSelected: false,
+          authHandoffInvokerSelected: false,
+          eventInvitationsInvokerSelected: false,
+        });
       },
     );
   });

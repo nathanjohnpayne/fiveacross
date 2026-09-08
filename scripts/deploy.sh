@@ -222,9 +222,13 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
 # codebase this request loads cannot be vouched for — it consulted a value the
 # preflight cannot supply, it left work running outside its process group, it
-# would not load — then no codebase in the request is judged exact, because the
-# codebases are loaded in one sequence and any of them can rewrite another's
-# artifact before that one is read.
+# would not load, or the adapter declined to build it at all (a non-Node
+# runtime, a `configDir` outside the project, a kit) — then no codebase in the
+# request is judged exact, because the codebases are loaded in one sequence and
+# any of them can rewrite another's artifact before that one is read. A codebase
+# the adapter declined to build is also never LOADED here: rehearsing it would
+# run its module-scope code under a configuration the adapter had to substitute,
+# for an inventory that could not be authoritative anyway.
 # Nothing runs uncontained. Before the first hook, the adapter puts every
 # program it is about to run under a platform write-containment mechanism —
 # `sandbox-exec` on macOS, `bwrap` or an unprivileged user+mount namespace on
