@@ -1272,8 +1272,24 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
 // beats; `status: 'archived'` is irreversible, so an Event flipped before its
 // Standings Freeze never receives them and nothing else warns the Admin.
 describe('finaleHasRun — the finale gate’s own predicate', () => {
-  it('is satisfied once the scheduler has stamped frozenAt', () => {
-    expect(finaleHasRun({ frozenAt: 8000, days: DAYS })).toBe(true);
+  it('is satisfied once the scheduler has stamped the completion marker', () => {
+    expect(finaleHasRun({ finaleCompletedAt: 8100, days: DAYS })).toBe(true);
+  });
+
+  it('is NOT satisfied by a freeze stamp on its own', () => {
+    // #1151, Codex P1 on PR #1162. `runFinaleBeats` writes `frozenAt` in the
+    // freeze transaction and posts the podium Moment AFTERWARDS, under its own
+    // try/catch and its own retry guard — so an Event carries the stamp and no
+    // podium for as long as that beat keeps failing. Archiving there is
+    // irreversible and a closed Event's finale is never retried, so the podium
+    // would be lost for good. The stamp alone therefore keeps the
+    // acknowledgement on screen.
+    // Cast, because the predicate's own parameter no longer ADMITS `frozenAt` —
+    // which is the type-level half of the same statement.
+    expect(finaleHasRun({ frozenAt: 8000, days: DAYS } as Partial<EventDoc>)).toBe(false);
+    expect(
+      finaleHasRun({ frozenAt: 8000, finaleCompletedAt: 8100, days: DAYS } as Partial<EventDoc>),
+    ).toBe(true);
   });
 
   it('is NOT satisfied while a scheduled freeze is still pending', () => {
@@ -1311,6 +1327,11 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
     days: [mkDay(0), mkDay(1)],
     bannedUids: [],
     frozenAt: 50_000,
+    // The finale-complete MARKER, not the freeze stamp, is what satisfies the
+    // gate (#1151, Codex P1 on PR #1162) — every case in this block is about
+    // something other than the finale, so it reads as an ordinary post-finale
+    // archive.
+    finaleCompletedAt: 50_100,
     ...over,
   });
 
@@ -1386,9 +1407,12 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
   });
 
   it('ABORTS when the finale lands mid-snapshot', async () => {
-    // `frozenAt` is in the fingerprint because it resolves the honour cutoff AND
-    // answers the finale gate: a freeze stamped between the pre-read and the
-    // commit would leave the record cut on one answer and gated on another.
+    // `frozenAt` is in the fingerprint because it resolves the honour cutoff: a
+    // freeze stamped between the pre-read and the commit would leave the record
+    // cut on one answer and built against another. (The finale GATE reads
+    // `finaleCompletedAt`, which is deliberately outside the fingerprint — it
+    // only ever moves from absent to stamped, so it can make the archive more
+    // permitted and never less.)
     A.event = closingEvent({ frozenAt: undefined, standingsFreezeAt: 8000 });
     A.beforeTx = () => {
       A.event = closingEvent({ frozenAt: 8000, standingsFreezeAt: 8000 });
@@ -1451,6 +1475,11 @@ describe('archiveEvent — the frozen Day label is the one the live strip shows'
     days: [rawDay(theme)],
     bannedUids: [],
     frozenAt: 50_000,
+    // The finale-complete MARKER, not the freeze stamp, is what satisfies the
+    // gate (#1151, Codex P1 on PR #1162) — every case in this block is about
+    // something other than the finale, so it reads as an ordinary post-finale
+    // archive.
+    finaleCompletedAt: 50_100,
   });
   /** The label the LIVE honours strip renders, which reads the CONVERTED Days. */
   const liveLabel = (theme: string) => dayHonorChipLabel(0, [migrateDayFields(rawDay(theme))]);
@@ -1514,6 +1543,11 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     days: [mkDay(0), mkDay(1)],
     bannedUids: [],
     frozenAt: 50_000,
+    // The finale-complete MARKER, not the freeze stamp, is what satisfies the
+    // gate (#1151, Codex P1 on PR #1162) — every case in this block is about
+    // something other than the finale, so it reads as an ordinary post-finale
+    // archive.
+    finaleCompletedAt: 50_100,
     ...over,
   });
 
@@ -1724,9 +1758,21 @@ describe('archiveEvent — the finale gate', () => {
   });
 
   it('freezes once the finale has run — the control', async () => {
-    A.event = closingEvent({ frozenAt: 8000 });
+    A.event = closingEvent({ frozenAt: 8000, finaleCompletedAt: 8100 });
     expect(await archiveEvent(1, { now: 5 })).toBe('archived');
     expect(A.updates).toHaveLength(1);
+  });
+
+  it('REFUSES on a freeze stamp with no completion marker beside it', async () => {
+    // #1151, Codex P1 on PR #1162. The freeze transaction and the podium Moment
+    // are separate writes, so this is the real state of an Event whose podium
+    // beat has not landed yet — and the flip would forgo it permanently.
+    A.event = closingEvent({ frozenAt: 8000 });
+    expect(await archiveEvent(1, { now: 5 })).toBe('finale-pending');
+    expect(A.updates).toEqual([]);
+    // …and the same Event archives once the Admin says so explicitly, which is
+    // the whole point of a warning rather than a bar.
+    expect(await archiveEvent(1, { now: 5, beforeFinale: true })).toBe('archived');
   });
 
   it('freezes an Event that has no scheduled finale at all', async () => {

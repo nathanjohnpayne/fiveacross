@@ -393,6 +393,50 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     // The same admin still edits everything else in both states.
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
   });
+
+  it('DENIES an admin writing the finale-completion marker, in every state', async () => {
+    // #1151, Codex P1 on PR #1162. `finaleCompletedAt` is the composite marker
+    // the scheduler stamps once the freeze stamp AND the podium Moment have both
+    // landed, and it is what the console's pre-flip acknowledgement is decided
+    // on. An admin who could write it could clear the one warning standing
+    // between a podium that has not posted yet and an irreversible archive that
+    // forgoes it — so it is server-written only. The Admin SDK bypasses these
+    // rules; no client arm may name it.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // …nor while the Event is closing, where the flip is one tap away.
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // The flip itself may not smuggle it either — the arm's `hasOnly` guard
+    // names five keys and this is not one of them.
+    await assertFails(flip(ADMIN, { finaleCompletedAt: NOW() }));
+    // …and it is still refused once archived, where nothing about the finale
+    // can be true any more.
+    await freeze();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // The same admin still edits everything else in every one of those states.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+
+  it('leaves the SERVER’s own marker alone on an ordinary admin write', async () => {
+    // Restating an unchanged value is not a change, so a whole-document admin
+    // write still passes on an Event the scheduler has already marked — the
+    // field is unwritable, not a tripwire on every write beside it.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), {
+        frozenAt: 1_700_000_000_000,
+        finaleCompletedAt: 1_700_000_060_000,
+      });
+    });
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: 1_700_000_060_000 }),
+    );
+    // Moving it by one millisecond, or clearing it, is refused.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: 1_700_000_060_001 }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: deleteField() }));
+  });
 });
 
 // #1151. The flip is irreversible and the record is what the rules then lock, so

@@ -1308,16 +1308,35 @@ service cloud.firestore {
       // stored state still passes. A create has no stored document to diff
       // against, so it is held to the one shape a new Event may be born in:
       // open, not closing, no stamp, no record.
+      //
+      // `finaleCompletedAt` IS IN THE SET TOO, and it is the one entry that is
+      // not a lifecycle field (#1151, Codex P1 on PR #1162). It is the composite
+      // marker `runFinaleBeats` stamps once every required finale beat has
+      // landed — the freeze stamp AND the podium Moment — and it is what the
+      // console's pre-flip acknowledgement is decided on, so an admin able to
+      // write it could clear the one warning standing between a slow podium and
+      // an irreversible archive that forgoes it. The Admin SDK bypasses these
+      // rules, so the scheduler still writes it; NO client arm may, and none of
+      // the four dedicated arms below names it in its `hasOnly` guard either.
+      // It carries no shape check on purpose: a field no client may write needs
+      // no type validation, and an unwritable field is cheaper to enforce than a
+      // validated one on an arm at the expression cap. `frozenAt` beside it
+      // stays admin-writable exactly as it always was, which is precisely why
+      // the gate's evidence moved off it. The CREATE half names it for symmetry
+      // with the four fields beside it rather than for reach: no client create
+      // of an Event document can succeed at all, because `isAdmin(eventId)`
+      // reads the very document being created and a missing `get()` denies.
       allow create, update: if isAdmin(eventId)
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
                 && request.resource.data.get('archiving', false) == false
                 && !('archivedAt' in request.resource.data)
                 && !('archivedUnder' in request.resource.data)
-                && !('archive' in request.resource.data))
+                && !('archive' in request.resource.data)
+                && !('finaleCompletedAt' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
                  .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken',
-                          'archivedUnder', 'archive']))
+                          'archivedUnder', 'archive', 'finaleCompletedAt']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
