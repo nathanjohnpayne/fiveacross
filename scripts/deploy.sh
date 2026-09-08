@@ -255,6 +255,17 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # while every later comparison matched the post-edit baseline, so the exemption
 # could be granted for a checkout that is no longer the one the clean-tree guard
 # above approved.
+# What the REPOSITORY answers is bracketed the same way and from earlier still:
+# the adapter reads `git`'s answers before it establishes write containment and
+# before the copy starts, not beside the tree baseline afterwards. A background
+# fetch that advanced `origin/main` during that setup used to become the
+# baseline, so every later metadata check passed while the `HEAD == origin/main`
+# guard above no longer held. The other half of that fix is here rather than in
+# the adapter: the guard is RE-RUN once classification returns and before
+# BUILD_CMD, because the adapter can only watch a window it is inside, and a
+# fetch that lands while it refuses early — before it fingerprints anything — is
+# invisible to it and fatal to the premise that this deploy ships the reviewed,
+# merged commit.
 # A Hosting config that names a `source` rather than a `public` directory is
 # refused outright, project-wide. `deploy/index.js` runs the app's own framework
 # build BEFORE it chains a single predeploy hook, and that build replaces
@@ -369,6 +380,26 @@ if [[ "$CLASSIFICATION_FIELDS" -ne 14 ]]; then
   echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
+
+# The approved-checkout guard AGAIN, over the interval the classification just
+# spent.
+#
+# The guard above answered before the classifier ran a build, a hook and two
+# discovery probes — seconds to tens of seconds during which a background fetch
+# can advance `origin/main`, a scheduled job can move the branch, or an agent in
+# another window can write into the tree. The classifier's own fingerprints
+# cover only the window it is inside, and it does not always have one: every
+# refusal that lands before the staging (a scope with nothing to prove, an
+# unbuildable codebase, a web-framework Hosting config, no established deploy
+# credential) returns success having fingerprinted nothing at all. Asking again
+# here costs one fetch and closes the gap between the checkout this deploy was
+# approved for and the checkout BUILD_CMD is about to package.
+#
+# Deliberately BEFORE the build and before every mutating step below, and it
+# honours --force and DEPLOY_ALLOW_DIRTY exactly as the first call does, so a
+# break-glass deploy is not stopped here by a rule it already opted out of.
+echo ">> Re-checking the approved-checkout guards after classification"
+guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 
 # Reconciliation coordinates and readiness-only identity controls are PINNED
 # to the selected deploy target, never inherited (#768 r4 Codex P2; #852).

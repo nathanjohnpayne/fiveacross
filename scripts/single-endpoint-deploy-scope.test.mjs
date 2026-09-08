@@ -266,19 +266,23 @@ const withFunctionsSource = (source, run) => withFunctionsProject({ source }, ru
  * would cost more than everything else the fixture does.
  */
 async function initFixtureRepository(dir, branch) {
-  const git = (args) =>
-    new Promise((settle, fail) => {
-      const child = spawn("git", args, { cwd: dir, stdio: "ignore" });
-      child.on("error", fail);
-      child.on("exit", (code) =>
-        code === 0 ? settle() : fail(new Error(`git ${args.join(" ")} exited ${code}`)),
-      );
-    });
+  const git = (args) => gitIn(dir, args);
   await git(["init", "--quiet", "-b", branch]);
   await git(["config", "user.email", "fixture@example.com"]);
   await git(["config", "user.name", "Fixture"]);
   await git(["config", "commit.gpgsign", "false"]);
   await git(["commit", "--quiet", "--allow-empty", "-m", "fixture"]);
+}
+
+/** One `git` command in a fixture repository. */
+function gitIn(dir, args) {
+  return new Promise((settle, fail) => {
+    const child = spawn("git", args, { cwd: dir, stdio: "ignore" });
+    child.on("error", fail);
+    child.on("exit", (code) =>
+      code === 0 ? settle() : fail(new Error(`git ${args.join(" ")} exited ${code}`)),
+    );
+  });
 }
 
 /**
@@ -3299,6 +3303,44 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     await withFunctionsProject({}, async (configPath) => {
       expect(
         await classify(["--only", "functions:daily"], configPath, { onStaged: () => {} }),
+      ).toMatchObject(EXEMPT);
+    });
+  });
+
+  it("ABORTS when a remote-tracking ref moves before the staging even starts", async () => {
+    // Codex P1, round 26 on #1107. The first Git-answer baseline used to be
+    // taken after the write containment had been proved and after the whole
+    // staging copy — seconds of this classifier's own setup during which a
+    // background fetch can advance `origin/main`. That fetch BECAME the
+    // baseline, every later metadata check compared against it and passed, and
+    // the exemption was granted although `deploy.sh`'s `HEAD == origin/main`
+    // guard no longer held. The answers are read first now, and compared once
+    // the staging is done.
+    //
+    // `afterContainment` is that window, reached the way `onStaged` reaches the
+    // staging one: an argument `main()` never passes, so no shell can be the
+    // writer here, and everything it can do is something a guard is there to
+    // catch.
+    await withFunctionsProject({ branch: "release" }, async (configPath) => {
+      const failure = await classify(["--only", "functions:daily"], configPath, {
+        afterContainment: () =>
+          gitIn(dirname(configPath), ["update-ref", "refs/remotes/origin/main", "HEAD"]),
+      }).then(
+        () => null,
+        (error) => error,
+      );
+      expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
+      expect(failure.message).toContain("refs/remotes/origin/main");
+    });
+  });
+
+  it("proves the same scope when nothing moves in that window", async () => {
+    // The control for the bracket above and for the seam itself: a repository
+    // that holds still must still be provable, or the refusal would pass for a
+    // bracket that refused every deploy.
+    await withFunctionsProject({ branch: "release" }, async (configPath) => {
+      expect(
+        await classify(["--only", "functions:daily"], configPath, { afterContainment: () => {} }),
       ).toMatchObject(EXEMPT);
     });
   });

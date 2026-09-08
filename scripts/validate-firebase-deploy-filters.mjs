@@ -2338,6 +2338,15 @@ class RehearsalExit {
  * for a checkout that is no longer the tree `deploy.sh`'s clean-tree guard
  * approved (Codex P1, round 25 on #1107).
  *
+ * THE REPOSITORY'S ANSWERS ARE BRACKETED THE SAME WAY, and from even earlier:
+ * they are read at the very top of this function, before the write containment
+ * is established and before the copy starts, rather than beside the tree
+ * baseline afterwards. A background fetch advancing `origin/main` during that
+ * setup used to BECOME the baseline, every later metadata check then passed,
+ * and the exemption was granted although `deploy.sh`'s own `HEAD ==
+ * origin/main` guard no longer held (Codex P1, round 26 on #1107). The wrapper
+ * re-runs that guard after this returns for the same reason.
+ *
  * WHAT THE DEPLOY DOES BEFORE THE FIRST HOOK IS PART OF THE REQUEST. A selected
  * Hosting config with a `source` makes the pinned CLI run the app's own
  * framework build ahead of every lifecycle hook, replacing `hosting.public` and
@@ -2395,6 +2404,7 @@ async function buildAndInventoryProject({
   discoveryTimeoutMs,
   writeContainment,
   onStaged,
+  afterContainment,
   establishedCredentialPath,
   frameworkPreparation,
   configs,
@@ -2538,16 +2548,51 @@ async function buildAndInventoryProject({
   /** The repository metadata the overlay exposed, watched on its own terms. */
   const metadataDirs = [];
   try {
-    // FIRST, and before the staging: the hooks and the probes are other
-    // people's programs, and this is the only guard that acts on them rather
-    // than reporting on them afterwards. A machine that cannot prove it refuses
-    // here, having started nothing.
+    // WHAT THE REPOSITORY ANSWERS, BEFORE ANY OF THIS CLASSIFIER'S OWN SETUP.
+    //
+    // The Git baseline used to be taken after the containment was proved and
+    // after the whole staging copy — seconds during which this classifier is
+    // doing its own work and something else on the machine can move a ref. A
+    // background `git fetch` landing in that window became the BASELINE, every
+    // later metadata check compared against it and passed, and the exemption
+    // was granted for a checkout whose `HEAD == origin/main` no longer held —
+    // the very guard `deploy.sh` ran before calling this (Codex P1, round 26 on
+    // #1107). Taken first, that window closes: the answers are read before the
+    // containment is established and before the first byte is copied, compared
+    // once the staging is done, and compared again on every later exit.
+    //
+    // Read only when the project carries its own `.git`, which is the same
+    // condition under which `stageProjectOverlay` registers `metadataDirs` —
+    // a config below a repository root is refused above, so there is no third
+    // case.
+    let preSetupMetadata = null;
+    if (existsSync(join(projectDir, ".git"))) {
+      try {
+        preSetupMetadata = await gitAnswerFingerprint(projectDir);
+      } catch (error) {
+        return refuseAll(
+          `could not read what the repository answers before staging — ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // Before the staging: the hooks and the probes are other people's programs,
+    // and this is the only guard that acts on them rather than reporting on
+    // them afterwards. A machine that cannot prove it refuses here, having
+    // started nothing.
     const containment = await establishWriteContainment({
       scratchRoot: scratch,
       projectDir,
       mode: writeContainment,
     });
     if (!containment.ok) return refuseAll(containment.reason);
+
+    // A test's window into the interval the Git baseline above now spans, and
+    // nothing else: an ARGUMENT, like `onStaged`, `writeContainment` and the two
+    // timeouts, so that `main()` never passes it and no shell can reach it. It
+    // can only make this classifier answer more conservatively, because
+    // everything it can do is something a guard below is there to catch.
+    if (afterContainment) await afterContainment({ projectDir, scratch });
 
     // The watched set as the staging will compute it, without staging anything,
     // so the tree can be fingerprinted BEFORE the copy starts. `plan: true`
@@ -2617,7 +2662,9 @@ async function buildAndInventoryProject({
 
     // Taken AFTER staging and before the first child process, so the window it
     // covers is exactly the window in which this classifier runs other people's
-    // programs.
+    // programs. Both are also the far end of a bracket: the live tree's against
+    // `preStagingBaseline` just below, and the repository's against the
+    // pre-setup answers read at the top of this function.
     let liveBaseline;
     let metadataBaseline;
     try {
@@ -2646,6 +2693,30 @@ async function buildAndInventoryProject({
     // classification would leave `deploy.sh` to publish it anyway.
     const duringStaging = firstLiveTreeDrift(preStagingBaseline, liveBaseline);
     if (duringStaging) throw new LiveCheckoutDriftError(duringStaging, "concurrent writer");
+    // AND THE SAME BRACKET AROUND WHAT GIT ANSWERS. The tree fingerprint above
+    // says nothing about a moved ref — `.git` is exposed as metadata, never
+    // walked — so the pre-setup answers taken at the top of this function are
+    // compared with the post-staging ones here. A background fetch that
+    // advanced `origin/main` while the containment was being proved or the copy
+    // was running is drift, not a new baseline, and it is FATAL for the reason
+    // `RepositoryMetadataDriftError` states: `deploy.sh` asked whether HEAD
+    // equalled origin/main before calling this, the build stamps the bundle
+    // from `git` answers, and a conservative classification would leave the
+    // wrapper to build and publish from a checkout that guard no longer covers.
+    //
+    // Gated on `metadataDirs` exactly as `metadataDrift` below is, so a layout
+    // whose `.git` the staging could not expose is treated the same way at both
+    // ends rather than reading as drift for having no answer to compare.
+    if (
+      preSetupMetadata !== null &&
+      metadataDirs.length > 0 &&
+      metadataBaseline !== preSetupMetadata
+    ) {
+      throw new RepositoryMetadataDriftError(
+        `\n${preSetupMetadata}\nbecame\n${metadataBaseline}`,
+        "concurrent writer",
+      );
+    }
     /**
      * Whether anything reached the WORKING TREE through the overlay's symlinks
      * since the baseline. Fatal: the deploy is about to build and publish from
@@ -3365,6 +3436,7 @@ async function singleEndpointInventory(
     discoveryTimeoutMs,
     writeContainment,
     onStaged,
+    afterContainment,
     establishedCredentialPath,
   },
 ) {
@@ -3518,6 +3590,7 @@ async function singleEndpointInventory(
       discoveryTimeoutMs,
       writeContainment,
       onStaged,
+      afterContainment,
       establishedCredentialPath,
       codebaseNames,
       configs,
@@ -3985,6 +4058,12 @@ export async function classifyFirebaseDeployRequest(
     // this classifier can otherwise only lose a race in. A test uses it to be
     // the concurrent writer the bracket around the staging refuses.
     onStaged = null,
+    // The same seam one step earlier: awaited after the write containment is
+    // established and before the overlay is planned or copied. That interval is
+    // the one the Git baseline used to be taken AFTER, so a test uses this to
+    // be the background fetch the bracket around the repository's answers now
+    // refuses. `main()` never passes it either.
+    afterContainment = null,
     // The ADC document `GOOGLE_APPLICATION_CREDENTIALS` will point at when
     // `firebase deploy` runs, named by whatever wrapper established it. UNLIKE
     // the arguments above, `main()` DOES pass this one, from
@@ -4045,6 +4124,7 @@ export async function classifyFirebaseDeployRequest(
       discoveryTimeoutMs,
       writeContainment,
       onStaged,
+      afterContainment,
       establishedCredentialPath,
     },
   );

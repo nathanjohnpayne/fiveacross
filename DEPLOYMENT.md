@@ -504,6 +504,8 @@ The guards (see [mergepath#77](https://github.com/nathanjohnpayne/mergepath/issu
 2. **Local `main` must exactly equal `origin/main`.** After `git fetch`, the two commit IDs must be equal. This rejects both a stale local checkout and an unpushed local commit, so the deploy is exactly the reviewed, merged state.
 3. **Working tree must be clean.** `git status --porcelain` must return empty — no modified, staged, or untracked paths. A dirty tree means the deploy would ship whatever the in-progress edits compile to, which diverges from the merged-on-main state reviewers signed off on (same failure class as #77).
 
+All three are checked twice: once at the top of `scripts/deploy.sh`, and again after the local deploy-scope classification and before `BUILD_CMD`. That classification builds a Functions codebase, runs the config's own predeploy hooks and probes discovery twice — seconds to tens of seconds in which a background fetch can advance `origin/main`, a scheduled job can move the branch, or another window can write into the tree. The classifier's own fingerprints cover only the interval it is inside, and it does not always have one: every refusal it takes before staging returns without having fingerprinted anything. The second call costs one more `git fetch` and honours `--force` and `DEPLOY_ALLOW_DIRTY=1` exactly as the first does.
+
 Guards 1 and 2 are bypassed with `--force`. Guard 3 is bypassed by the dedicated env var `DEPLOY_ALLOW_DIRTY=1` — kept separate from `--force` so the override is deliberate, audit-greppable, and `--force` doesn't accidentally subsume the dirty-tree check:
 
 ```bash

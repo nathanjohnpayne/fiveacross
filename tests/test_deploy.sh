@@ -3194,6 +3194,128 @@ elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-32.log"; then
 else
   pass "no-established-credential: a standalone deploy classifies conservatively rather than rehearsing against a synthetic credential (rc=$RC32)."
 fi
+
+# ---------------------------------------------------------------------------
+# Cases 33a-33b (#547 — Codex P1, round 26): the approved-checkout guard is
+# re-run AFTER classification and before BUILD_CMD.
+#
+# The guard at the top of deploy.sh answers before the classifier runs a build,
+# a hook and two discovery probes. A background fetch advancing `origin/main` in
+# that interval leaves the wrapper about to build and publish a checkout the
+# guard no longer covers — and the classifier cannot always see it: every
+# refusal that lands before its staging returns success having fingerprinted
+# nothing at all. Asking again after classification closes that.
+#
+# What is under test here is deploy.sh's own sequencing, so `node` is shimmed to
+# stand in for the classifier: 33a's shim advances the remote first, exactly as a
+# background fetch's source would have, and then prints an ordinary
+# classification. The classifier's own half of this fix is proven by
+# scripts/single-endpoint-deploy-scope.test.mjs. 33b is the control — the same
+# shim without the push — which must reach BUILD_CMD and publish.
+# ---------------------------------------------------------------------------
+CLASSIFICATION_STUB_OUTPUT='DEPLOY_PROJECT=fiveacross
+FUNCTIONS_ATTEMPTED=false
+HOSTING_ATTEMPTED=true
+FIREBASE_DRY_RUN=false
+BUG_REPORT_INVOKER_SELECTED=false
+EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+AUTH_HANDOFF_INVOKER_SELECTED=false
+EVENT_INVITATIONS_INVOKER_SELECTED=false
+BUG_REPORT_INVOKER_CONSERVATIVE=false
+EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+AUTH_HANDOFF_STRICT_HALF=
+EVENT_INVITATIONS_INVOKER_CONSERVATIVE=false
+EVENT_INVITATIONS_STRICT_SERVICES='
+
+run_post_classification_guard_case() {
+  local case_id="$1"
+  local advance="$2"
+  local repo="$WORKDIR/case${case_id}-postclassify-guard"
+  local remote="$WORKDIR/case${case_id}-remote.git"
+  local other="$WORKDIR/case${case_id}-other"
+  local stub_dir="$WORKDIR/stub-bin-${case_id}"
+  # Resolved here rather than borrowed from case 26, so this helper does not
+  # depend on the order the cases above happen to run in.
+  local real_node
+  real_node="$(command -v node)"
+  init_main_fixture_with_origin "$repo" "$remote"
+  (
+    cd "$repo"
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"}}' > firebase.json
+    git add firebase.json
+    git commit --quiet -m "firebase config"
+    git push --quiet origin main
+  )
+  # A second checkout with a commit ready to land, so the shim below can advance
+  # the REMOTE the way a background fetch's source would have.
+  git clone --quiet "$remote" "$other"
+  (
+    cd "$other"
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    echo "later" > LATER.md
+    git add LATER.md
+    git commit --quiet -m "landed while the classifier ran"
+  )
+  mkdir -p "$stub_dir"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'for a in "$@"; do'
+    printf '%s\n' '  case "$a" in'
+    printf '%s\n' '    *validate-firebase-deploy-filters.mjs)'
+    if [[ "$advance" == "advance" ]]; then
+      printf '      git -C %s push --quiet origin main >/dev/null 2>&1 || true\n' "$other"
+    fi
+    printf '      cat %s\n' "$WORKDIR/classification-${case_id}.txt"
+    printf '%s\n' '      exit 0'
+    printf '%s\n' '      ;;'
+    printf '%s\n' '  esac'
+    printf '%s\n' 'done'
+    printf 'exec %s "$@"\n' "$real_node"
+  } > "$stub_dir/node"
+  chmod +x "$stub_dir/node"
+  printf '%s\n' "$CLASSIFICATION_STUB_OUTPUT" > "$WORKDIR/classification-${case_id}.txt"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+  : >"$WORKDIR/npm-calls-${case_id}.log"
+  set +e
+  PATH="$stub_dir:$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  NPM_LOG="$WORKDIR/npm-calls-${case_id}.log" \
+    bash -c "cd '$repo' && bash '$SCRIPT' --skip-cf-purge --skip-synthetic --skip-env-check" \
+    >"$WORKDIR/case${case_id}.out" 2>"$WORKDIR/case${case_id}.err"
+  local rc=$?
+  set -e
+  if [[ "$advance" == "advance" ]]; then
+    if [[ $rc -eq 0 ]]; then
+      fail "postclassify-guard ($case_id): deploy returned 0 though origin/main moved while the classifier ran."
+    elif [[ -s "$WORKDIR/npm-calls-${case_id}.log" ]]; then
+      fail "postclassify-guard ($case_id): BUILD_CMD ran on a checkout the freshness guard no longer covers. npm log was:"
+      cat "$WORKDIR/npm-calls-${case_id}.log" >&2
+    elif [[ -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+      fail "postclassify-guard ($case_id): the deploy published a checkout the freshness guard no longer covers."
+    elif ! grep -q 'local main does not exactly match origin/main' "$WORKDIR/case${case_id}.err"; then
+      fail "postclassify-guard ($case_id): the deploy stopped for some reason other than the freshness guard. stderr was:"
+      cat "$WORKDIR/case${case_id}.err" >&2
+    else
+      pass "postclassify-guard ($case_id): a remote that moved during classification stops the deploy before the build (rc=$rc)."
+    fi
+  else
+    if [[ $rc -ne 0 ]]; then
+      fail "postclassify-guard ($case_id): the same run with an unmoved remote returned $rc. stderr was:"
+      cat "$WORKDIR/case${case_id}.err" >&2
+    elif [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+      fail "postclassify-guard ($case_id): the deploy never published, so 33a's stop is not attributable to the moved remote."
+    else
+      pass "postclassify-guard ($case_id): re-running the guard passes an unchanged checkout straight through to the build and publish (rc=$rc)."
+    fi
+  fi
+}
+
+run_post_classification_guard_case 33a advance
+run_post_classification_guard_case 33b hold
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
