@@ -57,6 +57,17 @@ export const MAX_ARCHIVED_STANDING_ROWS = 200;
 export const MAX_ARCHIVED_DISPLAY_NAME = 100;
 
 /**
+ * How long an EVENT name the frozen record keeps (#134, Codex P2 on PR #1139).
+ *
+ * The same bound, because the reason is the same one: `EventDoc.name` is
+ * admin-written and `firestore.rules` validates neither its presence nor its
+ * length either, so it can arrive at the record as an arbitrarily long string
+ * sharing the document's one 1 MiB budget. A hundred characters is already far
+ * past anything the Share Card's single title line can render.
+ */
+export const MAX_ARCHIVED_EVENT_NAME = MAX_ARCHIVED_DISPLAY_NAME;
+
+/**
  * The size ceiling the frozen record must fit under, in bytes of serialized JSON.
  *
  * A quarter of the Event document's 1 MiB budget, leaving three quarters for the
@@ -95,11 +106,17 @@ export const MAX_ARCHIVE_BYTES = 256 * 1024;
  */
 export const MAX_ARCHIVED_EVENT_BYTES = 900 * 1024;
 
-/** The Event fields the archive builder and its callers read. */
+/** The Event fields the archive builder and its callers read. `name` is COPIED
+ *  into the record rather than read live — see `archiveEventName`. */
 export type ArchivableEvent = Pick<
   EventDoc,
   'days' | 'bannedUids' | 'frozenAt' | 'standingsFreezeAt'
->;
+> &
+  // OPTIONAL, unlike the rest: an Event document with no name is a shape the
+  // record has to survive (the rules validate neither the field's presence nor
+  // its type), and `archiveEventName` resolves it to `null` rather than
+  // inventing one.
+  Partial<Pick<EventDoc, 'name'>>;
 
 /**
  * Whether this Event is frozen (#134). The ONE place the client asks the
@@ -227,6 +244,27 @@ function usableUid(uid: unknown): uid is string {
 function archiveName(value: unknown): string {
   const text = typeof value === 'string' ? value.trim() : '';
   return (text || 'Anonymous').slice(0, MAX_ARCHIVED_DISPLAY_NAME);
+}
+
+/**
+ * The EVENT's own name, frozen into the record (#134, Codex P2 on PR #1139).
+ *
+ * The archived Share Card built its title and its context line from the LIVE
+ * `EventDoc.name`, and that field is deliberately outside the write-once clause
+ * — which protects `status`, `archivedAt` and `archive` and nothing else — so an
+ * Admin renaming the Event afterwards silently re-titled a frozen card. Two
+ * people sharing "the archive" a week apart got two different images of the same
+ * standings, which is the one thing a permanent record promises it cannot do. It
+ * is the identical argument `ArchivedDayHonor.dayLabel` already won.
+ *
+ * `null` rather than a stand-in when the Event has no usable name: the Share
+ * Card already falls back to the app's own name for an unnamed Event, and
+ * inventing one here would freeze a name nobody chose. Trimmed and bounded for
+ * the reason every other name in the record is.
+ */
+function archiveEventName(value: unknown): string | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text ? text.slice(0, MAX_ARCHIVED_EVENT_NAME) : null;
 }
 
 /** A count the record can carry. A non-finite or non-numeric stat reads as 0 —
@@ -456,6 +494,10 @@ export function draftEventArchive(params: {
     holderAt >= 0 ? { ...toStandingRow(ranked[holderAt]), rank: holderAt + 1 } : null;
 
   const archive: EventArchive = {
+    // The Event's own copy, frozen with the standings it titles. `days` came off
+    // the archived surface for this reason and `name` follows it: the freeze
+    // leaves both editable, and a card rebuilt from either drifts.
+    eventName: archiveEventName(event?.name),
     standings: ranked.slice(0, Math.max(0, maxRows)).map(toStandingRow),
     playerCount: ranked.length,
     firstBingo,

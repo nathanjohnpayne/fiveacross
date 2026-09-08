@@ -143,6 +143,10 @@ const liveRoster: PlayerDoc[] = [
 ];
 
 const FROZEN: EventArchive = {
+  // The frozen Event name (#1139). The live Event fixture below is renamed
+  // underneath it in the drift case, so "the card reads the record" is proved
+  // rather than assumed.
+  eventName: 'Med 2026',
   standings: [
     {
       uid: 'early-bird',

@@ -363,6 +363,18 @@ export interface ArchivedDayHonor {
  * document unwritable.
  */
 export interface EventArchive {
+  /**
+   * The Event's own name at the freeze, or `null` when it had none (#134, Codex
+   * P2 on PR #1139).
+   *
+   * Stored rather than read live for the reason `ArchivedDayHonor.dayLabel` is:
+   * `EventDoc.name` sits OUTSIDE the write-once clause — which protects
+   * `status`, `archivedAt` and `archive` and deliberately nothing else — so an
+   * Admin renaming the Event afterwards re-titled the archived Share Card, and
+   * two people sharing the same frozen standings a week apart got two different
+   * images of them. It is the only Event copy the archived surface consumes.
+   */
+  eventName: string | null;
   /** The final Leaderboard rows, already ranked, ban-filtered, bounded prefix. */
   standings: ArchivedStandingRow[];
   /** Complete ban-filtered roster size; `standings.length` when nothing was dropped. */

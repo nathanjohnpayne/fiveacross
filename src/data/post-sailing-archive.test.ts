@@ -6,6 +6,7 @@ import {
   isEventArchived,
   isEventArchiving,
   MAX_ARCHIVED_DISPLAY_NAME,
+  MAX_ARCHIVED_EVENT_NAME,
   MAX_ARCHIVE_BYTES,
   MAX_ARCHIVED_EVENT_BYTES,
   MAX_ARCHIVED_STANDING_ROWS,
@@ -213,6 +214,43 @@ describe('buildEventArchive — the standings are COPIED, not recomputed', () =>
     // The shipped cap is far above any real roster, so nothing is dropped in
     // practice — the bound exists to keep the Event document writable.
     expect(MAX_ARCHIVED_STANDING_ROWS).toBeGreaterThan(100);
+  });
+
+  // Codex P2, PR #1139. `EventDoc.name` is outside the write-once clause, so the
+  // archived Share Card rebuilt its title from a field an Admin can still edit —
+  // the same drift the honour chip labels were frozen to stop.
+  it('freezes the Event name the archived card is titled with', () => {
+    const archive = buildEventArchive({
+      players: [mkPlayer({ uid: 'a', displayName: 'A' })],
+      event: { name: '  Med 2026  ', days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    // Trimmed, like every other name the record carries.
+    expect(archive.eventName).toBe('Med 2026');
+  });
+
+  it('bounds the frozen Event name, and stores null when there is none', () => {
+    // `EventDoc.name` is admin-written and unvalidated at the rules boundary,
+    // so it lands in the same 1 MiB budget as everything else in the record.
+    const long = buildEventArchive({
+      players: [],
+      event: { name: 'N'.repeat(MAX_ARCHIVED_EVENT_NAME + 40), days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(long.eventName).toHaveLength(MAX_ARCHIVED_EVENT_NAME);
+
+    // No name, or a blank one: `null` rather than a stand-in. The Share Card
+    // already falls back to the app's own name for an unnamed Event, and
+    // inventing one here would freeze a name nobody chose.
+    for (const name of [undefined, '', '   ', 7 as unknown as string]) {
+      expect(
+        buildEventArchive({
+          players: [],
+          event: { name, days: DAYS, bannedUids: [] },
+          archivedAt: 1,
+        }).eventName,
+      ).toBeNull();
+    }
   });
 });
 
@@ -856,6 +894,21 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
   it('freezes when the configuration held (the control)', async () => {
     expect(await archiveEvent({ now: 5 })).toBe('archived');
     expect(A.updates).toHaveLength(1);
+  });
+
+  it('freezes the Event name off the TRANSACTIONAL read', async () => {
+    // Deliberately not in the fingerprint: `name` decides nothing about which
+    // rows were read, so a rename mid-snapshot must not cost an archive. Taking
+    // it from the transaction's own read is what keeps the record
+    // self-consistent anyway — it is the document the write lands on.
+    A.event = closingEvent({ name: 'Med 2026' });
+    A.betweenReadsAndTx = () => {
+      A.event = closingEvent({ name: 'Med 2026 — renamed' });
+    };
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    expect((A.updates[0].archive as { eventName: string | null }).eventName).toBe(
+      'Med 2026 — renamed',
+    );
   });
 
   it('ABORTS when Claim Mode flips mid-snapshot, and writes nothing', async () => {

@@ -76,6 +76,10 @@ function cells(marked: number[] = []): Record<string, Record<string, unknown>> {
 }
 
 const FROZEN_RECORD = {
+  // The Event's own name, frozen with the standings it titles (#1139) —
+  // `EventDoc.name` is outside the write-once clause, so a card that rebuilt its
+  // title from the live field drifted the moment an Admin renamed the Event.
+  eventName: 'Archive fixture',
   standings: [
     {
       uid: ALICE,
@@ -597,6 +601,7 @@ describe('post-sailing-archive — the archive write must carry the whole record
 
   it('DENIES a record missing any top-level key', async () => {
     for (const key of [
+      'eventName',
       'standings',
       'playerCount',
       'firstBingo',
@@ -616,6 +621,7 @@ describe('post-sailing-archive — the archive write must carry the whole record
 
   it('DENIES a record whose keys carry the wrong types', async () => {
     for (const wrong of [
+      { eventName: 7 },
       { standings: 'none' },
       { playerCount: '1' },
       { firstBingo: 'Alice' },
@@ -676,6 +682,7 @@ describe('post-sailing-archive — the archive write must carry the whole record
     await assertSucceeds(
       archiveWith({
         ...FROZEN_RECORD,
+        eventName: null,
         firstBingo: null,
         firstBingoRow: null,
         freezeAt: null,

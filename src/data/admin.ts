@@ -996,6 +996,11 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
     const draft = draftEventArchive({
       players,
       event: {
+        // Frozen INTO the record, from the transactional read, so the archived
+        // Share Card is titled by the Event as it stood at the freeze rather
+        // than by a name an Admin can still edit afterwards (Codex P2, PR
+        // #1139).
+        name: data.name,
         days: Array.isArray(data.days) ? data.days : [],
         bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
         frozenAt: data.frozenAt,

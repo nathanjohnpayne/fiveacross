@@ -114,8 +114,9 @@ export default function ArchivedLeaderboard({
   // frozen copy: a Player banned after the archive must disappear from here on
   // the next snapshot, and an unban must bring them back. It is the ONLY live
   // Event field this surface reads — `days` came off the Pick when the honour
-  // chips started rendering their own frozen label (#1139).
-  event: Pick<EventDoc, 'name' | 'archivedAt' | 'bannedUids'> | null | undefined;
+  // chips started rendering their own frozen label, and `name` followed it when
+  // the Share Card started reading its title out of the record (#1139).
+  event: Pick<EventDoc, 'archivedAt' | 'bannedUids'> | null | undefined;
   archive: EventArchive;
 }) {
   const bannedUids = event?.bannedUids ?? [];
@@ -169,8 +170,20 @@ export default function ArchivedLeaderboard({
     }
     return rows;
   })();
-  const shareEventName = event?.name ?? shareCardAppName();
-  const shareContextLine = event?.name ? `${event.name} · Final standings` : undefined;
+  // THE EVENT NAME COMES OUT OF THE RECORD (Codex P2, PR #1139), for the reason
+  // the honour chip labels do. It used to be read off the LIVE `EventDoc.name`,
+  // which the freeze deliberately leaves editable — the write-once clause
+  // protects `status`, `archivedAt` and `archive` and nothing else — so an Admin
+  // renaming the Event afterwards re-titled a frozen card, and two people
+  // sharing the same standings a week apart got two different images of them.
+  //
+  // The app's own name is still the fallback, exactly as it was for an Event
+  // with no name: a record that carries none is one written by hand, and the
+  // fallback stays frozen-safe rather than reaching back into the live document.
+  const shareEventName = archive.eventName ?? shareCardAppName();
+  const shareContextLine = archive.eventName
+    ? `${archive.eventName} · Final standings`
+    : undefined;
 
   const warmedCard = useRef<WarmedCard | null>(null);
   const eagerRenderStarted = useRef(false);

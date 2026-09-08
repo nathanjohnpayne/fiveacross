@@ -2471,6 +2471,10 @@ describe('ArchivedLeaderboard — share affordance', () => {
   // archived surface instead of the live one — the same path a returning
   // Player takes, so the frozen card is rendered by the real component tree.
   const FROZEN_ARCHIVE = {
+    // The Event's own name, frozen with the standings it titles (#1139). The
+    // live Event is renamed underneath it below, so the card's title is proved
+    // to come out of the record rather than off the editable document.
+    eventName: 'Allure of the Seas',
     standings: [
       {
         uid: 'early-bird',
@@ -2582,6 +2586,33 @@ describe('ArchivedLeaderboard — share affordance', () => {
     await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
     expect(latestToBlobNode().textContent).not.toContain('Early Bird');
     expect(latestToBlobNode().textContent).toContain('Top Dog');
+  });
+
+  // Codex P2, PR #1139. `EventDoc.name` sits OUTSIDE the write-once clause —
+  // which protects `status`, `archivedAt` and `archive` and nothing else — so an
+  // Admin renaming the Event after the freeze silently re-titled the archived
+  // card, and two people sharing the same frozen standings a week apart got two
+  // different images of them. The name is frozen into the record for the same
+  // reason each honour chip's label is.
+  it('keeps the frozen Event name on the card when the live Event is renamed afterwards', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(latestToBlobNode().textContent).toContain('Allure of the Seas');
+
+    // The Admin renames the Event. The record is untouched — it is write-once —
+    // and so is the card.
+    H.event = { ...(H.event as EventDoc), name: 'Renamed After The Fact' } as EventDoc;
+    rerender(<Leaderboard />);
+    // A ban is the one input that re-renders the card, so use it to force a
+    // fresh rasterization and prove the NEW one still reads the record.
+    H.event = { ...(H.event as EventDoc), bannedUids: ['top-dog'] } as EventDoc;
+    rerender(<Leaderboard />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+
+    expect(latestToBlobNode().textContent).toContain('Allure of the Seas');
+    expect(latestToBlobNode().textContent).not.toContain('Renamed After The Fact');
   });
 
   // Codex P2, PR #1139. The record's two bounds are independent: `standings`
