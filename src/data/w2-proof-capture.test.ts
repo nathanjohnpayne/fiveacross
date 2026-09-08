@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Cell } from '../types';
 
 // w2-proof-capture, data layer. Drives the REAL attachProof / deleteProof write
@@ -1115,41 +1115,176 @@ describe('deleteProof — the moderation delete survives the freeze (#134)', () 
     expect(txGet.mock.calls.some(([ref]) => (ref as Ref).path === `events/${EVENT_ID}`)).toBe(true);
   });
 
-  it('keeps the Proof document when the media revocation throws — Storage runs FIRST', async () => {
-    // The ordering half, and it is main's ordering (Phase 4b P1 on PR #1157).
-    // #1149 put the Storage delete after the commit so a rejected transaction
-    // could not leave a surviving Proof pointing at media that was already
-    // gone; that inversion is only safe once the retry it depends on is
-    // DURABLE. Without a tombstone, a blob delete that throws AFTER the commit
-    // leaves the media reachable with nothing recording it — the Proof, its
-    // `storagePath` and the retry control all left with the commit, and a
-    // non-admin owner cannot retry because `storage.rules` no longer has a
-    // document to resolve them from. So the revocation runs first again, and
-    // the reordering rides with the tombstone and its sweeper in #1153.
+  it('COMMITS BEFORE it revokes the media, on the OWNER’s live-Event path', async () => {
+    // Codex P1, PR #1157. Storage first is what main shipped, and the freeze is
+    // what makes it wrong: an owner's delete that starts while the Event is
+    // open can revoke the media and then lose its transaction to an Admin's
+    // quiesce, leaving a surviving Proof pointing at media that is gone — on
+    // the one Event where nothing can be re-posted, and with no way back,
+    // because the owner's document delete is now denied and the object it named
+    // is already deleted. Committing first makes a lost race a no-op.
     withBackingCell();
     eventReads({ status: 'active' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+    expect(Math.max(...runTx.mock.invocationCallOrder)).toBeLessThan(
+      Math.min(...deleteStorageSpy.mock.invocationCallOrder),
+    );
+  });
+
+  it('commits before revoking on the ADMIN takedown path too', async () => {
+    // The closed-Event skip lives INSIDE the transaction, so the ordering and
+    // the freeze behaviour are independent — this pins both at once.
+    withBackingCell();
+    eventReads({ status: 'archived' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(Math.max(...runTx.mock.invocationCallOrder)).toBeLessThan(
+      Math.min(...deleteStorageSpy.mock.invocationCallOrder),
+    );
+  });
+
+  it('leaves the Proof document standing when the TRANSACTION is the half that fails', async () => {
+    // The point of the inversion: a delete that loses the race to the quiesce
+    // changes nothing at all, rather than revoking the media first and then
+    // being denied the document.
+    withBackingCell();
+    eventReads({ status: 'active' });
+    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
+      'permission-denied',
+    );
+
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)', () => {
+  // Round 1 of the #1157 review rejected commit-first because the commit takes
+  // the Proof, its `storagePath` and the surface that offered the delete all at
+  // once, so a post-commit Storage failure had nothing left to retry from.
+  // `proofMediaRevocations.ts` is that record, and these cases are what make
+  // the ordering above safe to ship ahead of #1153's server-side tombstone.
+  //
+  // jsdom leaves `localStorage` unset here (see cardCache.test.ts), so the
+  // module under test gets a real in-memory Storage to read and write.
+  class MemoryStorage implements Storage {
+    private m = new Map<string, string>();
+    get length() {
+      return this.m.size;
+    }
+    clear() {
+      this.m.clear();
+    }
+    getItem(k: string) {
+      return this.m.has(k) ? this.m.get(k)! : null;
+    }
+    key(i: number) {
+      return [...this.m.keys()][i] ?? null;
+    }
+    removeItem(k: string) {
+      this.m.delete(k);
+    }
+    setItem(k: string, v: string) {
+      this.m.set(k, String(v));
+    }
+  }
+  const QUEUE_KEY = `five-across:pending-proof-media-revocations:${EVENT_ID}`;
+  const queued = () => JSON.parse(localStorage.getItem(QUEUE_KEY) ?? '[]') as string[];
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
+    boardState = { cells: dealt() };
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('queues the path when the post-commit revocation rejects, and still surfaces the error', async () => {
     deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
 
     await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
       'storage/retry-limit-exceeded',
     );
 
-    // The document survives, so the delete is re-runnable from the same
-    // surface that offered it: the transaction never opened at all.
-    expect(runTx).not.toHaveBeenCalled();
-    expect(txDelete).not.toHaveBeenCalled();
+    expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/P.jpg`]);
   });
 
-  it('orders the revocation ahead of the commit on the freeze path too', async () => {
-    // The skip lives INSIDE the transaction, so restoring the ordering leaves
-    // the closed-Event behaviour above untouched — this pins both at once.
-    withBackingCell();
-    eventReads({ status: 'archived' });
+  it('still purges this device’s cache when the revocation rejects', async () => {
+    // The commit is what the purge follows, not the blob delete: the Proof is
+    // gone from the Feed either way, so this device must stop serving the photo
+    // out of its own cache whichever half failed (#373).
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg`, mediaURL: 'https://firebasestorage.googleapis.com/x' };
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow();
+
+    expect(purgeCacheSpy).toHaveBeenCalledWith('https://firebasestorage.googleapis.com/x');
+  });
+
+  it('DRAINS the queue before the next delete, and drops what it clears', async () => {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/OLD.jpg`]));
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
-    expect(Math.max(...deleteStorageSpy.mock.invocationCallOrder)).toBeLessThan(
+    // The queued path was retried, and it was retried FIRST — the drain runs at
+    // the top of the delete, before the transaction this call opens.
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/OLD.jpg`);
+    expect(deleteStorageSpy.mock.invocationCallOrder[0]).toBeLessThan(
       Math.min(...runTx.mock.invocationCallOrder),
+    );
+    expect(queued()).toEqual([]);
+  });
+
+  it('drops a queued path whose object is ALREADY GONE', async () => {
+    // `deleteStoragePath` resolves on `storage/object-not-found`, so a blob
+    // somebody else removed drops too: this queue exists to stop pointing at
+    // media, not to prove it was the caller that removed it.
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/GONE.jpg`]));
+    deleteStorageSpy.mockResolvedValueOnce(undefined); // the real helper swallows not-found
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(queued()).toEqual([]);
+  });
+
+  it('KEEPS a queued path whose retry fails again', async () => {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/OLD.jpg`]));
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/unauthorized')); // the drain
+    deleteStorageSpy.mockResolvedValueOnce(undefined); // this delete's own revocation
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/OLD.jpg`]);
+  });
+
+  it('completes the delete when localStorage is CORRUPTED or unavailable', async () => {
+    // Private mode, blocked site data and a quota failure all throw, and a
+    // hand-edited value parses to nothing. None of them may break a takedown.
+    localStorage.setItem(QUEUE_KEY, '{not json');
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
+
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+      setItem: () => {
+        throw new Error('SecurityError');
+      },
+      removeItem: () => {
+        throw new Error('SecurityError');
+      },
+    });
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
+
+    // The queue cannot be written, so the retry is lost — but the delete still
+    // reports its own outcome rather than a storage-access error.
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
+      'storage/retry-limit-exceeded',
     );
   });
 });

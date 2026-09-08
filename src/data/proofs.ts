@@ -2,6 +2,7 @@ import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
+import { drainProofMediaRevocations, queueProofMediaRevocation } from './proofMediaRevocations';
 import { resolveProofMediaUrl } from './proofMediaUrl';
 import { markerDisplayName } from './attribution';
 import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
@@ -459,33 +460,41 @@ export async function deleteProof(
   },
 ): Promise<void> {
   const eventId = EVENT_ID;
-  // STORAGE FIRST (ordering preserved): if the blob delete throws we keep the
-  // doc so the media isn't orphaned.
+  // COMMIT FIRST, THEN REVOKE THE MEDIA — for the owner and the Admin alike
+  // (Codex P1, PR #1157).
   //
-  // #1149 moved this AFTER the transaction, so that a rejected commit could no
-  // longer leave a surviving Proof pointing at media that was already gone. It
-  // is back where main has it (Phase 4b P1, PR #1157), because "commit first"
-  // is only safe once the retry it depends on is DURABLE. Without a tombstone,
-  // a Storage delete that throws after the commit — or a tab closed in the same
-  // window — leaves the blob reachable with nothing recording it: the commit has
-  // already removed the Proof, its `storagePath` and the only control that could
-  // re-run the delete, and a non-admin owner cannot retry at all, because
-  // `storage.rules` resolves the owner arm from the path's `{uid}` while the
-  // Firestore document that named the media is gone. That regresses live-Event
-  // takedowns, not only archived ones. The reordering ships with the durable
-  // media-revocation tombstone and its server-side sweeper in
-  // [#1153](https://github.com/nathanjohnpayne/fiveacross/issues/1153), which is
-  // what makes the failure it inverts recoverable.
+  // Storage first is what main shipped, and the freeze is what makes it wrong.
+  // An owner's delete that starts while the Event is open can revoke the media
+  // and then lose its Firestore transaction to an Admin's quiesce: the Proof
+  // survives, pointing at media that is gone, on the one Event where nothing
+  // can be re-posted — and there is no way back, because the owner's document
+  // delete is now denied and the object it named is already deleted. Committing
+  // first inverts that into the recoverable direction: a delete that loses the
+  // race changes nothing at all, and a delete that wins leaves at worst an
+  // ORPHANED blob, which `storage.rules` lets its owner clear in every state
+  // precisely because no Proof document points at it any more.
   //
-  // The closed-Event skip below is unaffected: it is inside the transaction,
-  // where the freeze has to be read anyway.
-  if (storagePath) await deleteStoragePath(storagePath);
+  // THE RETRY THAT MAKES IT SAFE. Round 1 of this review rejected the same
+  // inversion because the commit takes the Proof, its `storagePath` and the
+  // surface that offered the delete all at once, so a post-commit Storage
+  // failure had nothing left to retry from. `proofMediaRevocations.ts` is that
+  // record: a failed revocation is queued to `localStorage` before the error
+  // reaches the caller, and drained on the next app start and at the top of the
+  // next delete. It is durable on THIS DEVICE only — the server-side tombstone
+  // and sweeper in
+  // [#1153](https://github.com/nathanjohnpayne/fiveacross/issues/1153) are what
+  // close the never-returns and cross-device cases.
+  //
+  // Drain first, so a delete taken on this device is also the moment a previous
+  // one gets its retry. Never throws, so it cannot become a new way for a
+  // takedown to fail.
+  await drainProofMediaRevocations(eventId);
 
   // Captured from the proof doc the transaction reads, so the post-commit
-  // purge below (#373) targets the SAME media the Storage delete above just
-  // revoked. Declared outside the callback because a Firestore transaction
-  // can retry: each attempt reassigns it, so only the committed attempt's
-  // value survives to the purge call.
+  // purge below (#373) targets the SAME media the Storage delete revokes.
+  // Declared outside the callback because a Firestore transaction can retry:
+  // each attempt reassigns it, so only the committed attempt's value survives
+  // to the purge call.
   let mediaURL: string | null | undefined;
 
   await runTransaction(db, async (tx) => {
@@ -648,15 +657,29 @@ export async function deleteProof(
     tx.delete(proofRef);
   });
 
-  // Fire-and-forget, AFTER commit (never inside the retryable transaction
-  // callback above — a callback re-run on conflict would fire this on every
-  // attempt, not just the committed one). purgeProofMediaFromCaches already
-  // swallows every failure internally, so this is never awaited in a way
-  // that could let a purge rejection propagate to deleteProof's caller — the
-  // Storage delete above is the authoritative revocation regardless of
-  // whether this device's own cache purge succeeds (#373).
-  // `resolveProofMediaUrl` keeps the purge key equal to the URL the browser
-  // actually fetched (#335): identity in every real build, and under the e2e
-  // emulator build the emulator-origin twin of the canonicalized stored value.
-  void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+  try {
+    if (storagePath) await deleteStoragePath(storagePath);
+  } catch (err) {
+    // The commit already stood down the Proof, so this object is now an orphan
+    // — which is exactly what `storage.rules` lets its owner delete in any
+    // state. Record it before the error leaves, so the next drain can finish
+    // the job the caller is about to be told did not finish here.
+    if (storagePath) queueProofMediaRevocation(storagePath, eventId);
+    throw err;
+  } finally {
+    // Fire-and-forget, AFTER commit (never inside the retryable transaction
+    // callback above — a callback re-run on conflict would fire this on every
+    // attempt, not just the committed one). purgeProofMediaFromCaches already
+    // swallows every failure internally, so this is never awaited in a way
+    // that could let a purge rejection propagate to deleteProof's caller.
+    // `resolveProofMediaUrl` keeps the purge key equal to the URL the browser
+    // actually fetched (#335): identity in every real build, and under the e2e
+    // emulator build the emulator-origin twin of the canonicalized stored value.
+    //
+    // In a `finally` because the commit is what the purge follows, not the
+    // Storage delete: once the Proof document is gone this device must stop
+    // serving the deleted photo out of its own cache whether or not the blob
+    // itself could be revoked on this attempt (#373).
+    void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+  }
 }
