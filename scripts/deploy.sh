@@ -217,6 +217,12 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # would not load — then no codebase in the request is judged exact, because the
 # codebases are loaded in one sequence and any of them can rewrite another's
 # artifact before that one is read.
+# No conservative answer is returned until the rehearsal has ENDED whatever it
+# started. A hook can detach a writer into a session of its own and then fail
+# for a reason of the rehearsal's own, so the classifier sweeps its own escaped
+# processes and re-checks the tree on every exit, not only on the exits a
+# process caused; otherwise the conservative classification accepted here would
+# be followed minutes later by that writer changing a deployment input.
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
 #

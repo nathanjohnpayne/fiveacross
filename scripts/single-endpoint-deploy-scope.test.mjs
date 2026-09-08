@@ -2518,6 +2518,64 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ends a detached writer left by a hook that then FAILS", async () => {
+    // Codex P1, round 20 on #1107. The sweep ran at the END of a clean
+    // rehearsal step, and a hook that FAILS returns before it: the failure
+    // branch answered conservatively and left the escapee alive. The failure
+    // does not have to be about the escapee at all — a hook that authenticates
+    // against the synthetic ADC fails for a reason the real deploy will not
+    // have — so `deploy.sh` accepts the conservative classification and carries
+    // on, while the detached writer alters a deployment input two and a half
+    // seconds later, after the clean-tree guard and after the last fingerprint
+    // that was watching.
+    //
+    // The hook below detaches the writer into its own session and THEN exits
+    // nonzero. The file is the proof: unwritten, the escapee was ended rather
+    // than merely noticed.
+    //
+    // The writer resolves its target to the LIVE absolute path before it is
+    // detached, which is the shape the finding describes and the only shape
+    // that proves anything here: a path spelled through the scratch project's
+    // own symlink dies with the scratch directory, so a deferred write through
+    // one fails whether or not the escapee was ended.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "node escapee-then-fail.js"] },
+        files: {
+          "shared/toggle": "",
+          "escapee-then-fail.js": [
+            'const { spawn } = require("node:child_process");',
+            'const { join } = require("node:path");',
+            // The overlay's `shared` symlink points into the live checkout, so
+            // one `realpath` buys an absolute path that outlives the rehearsal
+            // — as an inherited `$INIT_CWD` does for a hook launched by npm.
+            'const live = require("node:fs").realpathSync(join(__dirname, "shared"));',
+            'const marker = join(live, "toggle");',
+            "spawn(",
+            "  process.execPath,",
+            "  [",
+            '    "-e",',
+            "    \"setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'x'), 2500)\",",
+            "    marker,",
+            "  ],",
+            '  { detached: true, stdio: "ignore" },',
+            ").unref();",
+            // The hook's own failure, unrelated to what it just detached.
+            "process.exit(1);",
+          ].join("\n"),
+        },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+        await new Promise((settle) => setTimeout(settle, 4_000));
+        await expect(
+          readFile(join(dirname(configPath), "shared", "toggle"), "utf8"),
+        ).resolves.toBe("");
+      },
+    );
+  });
+
   it("refuses a backgrounded artifact rewrite that a later hook would let finish", async () => {
     // Codex P1, round 17, verbatim: Firebase would let the copy finish before
     // discovery and deploy the group; awaiting or killing it here are both

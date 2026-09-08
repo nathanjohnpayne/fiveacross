@@ -1671,6 +1671,38 @@ export function targetCodebases(only, configs, codebaseNames) {
 }
 
 /**
+ * What a rehearsal WANTS to answer, before anything has been swept.
+ *
+ * WHY A PLAN AND NOT AN ANSWER. Every exit from the rehearsal has to end the
+ * processes it started before its verdict can be believed, and sweeping at each
+ * `return` was the shape that failed: some of them did it, the failing-hook
+ * exit did not, and nothing made the omission visible. A hook that detaches a
+ * sleeper-then-writer into its own session and THEN exits nonzero — for a
+ * reason of the rehearsal's own, such as authenticating against the synthetic
+ * ADC — returned a conservative classification, `deploy.sh` accepted it and
+ * carried on, and the detached writer altered a deployment input minutes later
+ * through an inherited absolute path such as `INIT_CWD` (Codex P1, round 20 on
+ * #1107).
+ *
+ * So the rehearsal cannot produce an answer at all. It returns one of these,
+ * and `settleRehearsal` — its only reader, and the only thing that can turn one
+ * into an inventory — sweeps first and converts second, so a `return` added
+ * inside the rehearsal later inherits the sweep instead of having to remember
+ * it. Anything else coming back from the rehearsal is a programming error and
+ * is thrown rather than read as a clean run.
+ *
+ * `what` names the step for the fatal drift messages; `reason` is the
+ * conservative refusal, or null when the rehearsal finished with nothing to
+ * complain about.
+ */
+class RehearsalExit {
+  constructor(what, reason = null) {
+    this.what = what;
+    this.reason = reason;
+  }
+}
+
+/**
  * Build the project the way the deploy will, then inventory the endpoint ids
  * the runtime loader would discover in each codebase's artifact.
  *
@@ -1704,6 +1736,12 @@ export function targetCodebases(only, configs, codebaseNames) {
  * refusal at all: it THROWS `LiveCheckoutDriftError`, which aborts the deploy.
  * See that class for why continuing with a conservative classification was
  * wrong.
+ *
+ * EVERY refusal leaves through one exit. The hooks and the probes run inside
+ * `rehearse`, which can only return a `RehearsalExit`; `settleRehearsal` then
+ * sweeps this run's escaped processes, repeats the fatal live-tree and metadata
+ * checks over whatever they did, and only then turns that exit into an answer.
+ * See `RehearsalExit` for the failure that shape exists to make impossible.
  */
 async function buildAndInventoryProject({
   projectDir,
@@ -1911,18 +1949,18 @@ async function buildAndInventoryProject({
      * Whatever this rehearsal started and its process group could not hold,
      * ended and described — or null when there was nothing.
      *
-     * A process outside the group can already have written by the time it is
-     * found, so the FATAL checks run first, exactly as they do for a hook that
-     * left work inside its own group. A platform that cannot be scanned is
-     * itself a refusal: silence there is not an all-clear.
+     * A platform that cannot be scanned is itself a refusal: silence there is
+     * not an all-clear.
+     *
+     * The FATAL live-tree and metadata checks are NOT made here. They belong to
+     * `settleRehearsal`, which repeats them after the sweep on every exit — so
+     * a refusal that had nothing to do with a process (a hook that simply
+     * exited nonzero) gets them too, rather than only the exits a sweep
+     * happened to find something on.
      */
     const sweepEscapees = async (what) => {
       const escaped = await sweepEscapedProcesses(rehearsalMarker);
       if (escaped.scanned && escaped.pids.length === 0) return null;
-      const wrote = await liveDrift();
-      if (wrote) throw new LiveCheckoutDriftError(wrote, what);
-      const moved = await metadataDrift();
-      if (moved) throw new RepositoryMetadataDriftError(moved, what);
       if (!escaped.scanned) {
         return `this platform cannot prove that ${what} left nothing running outside its process group — ${escaped.reason}`;
       }
@@ -1933,187 +1971,249 @@ async function buildAndInventoryProject({
       );
     };
 
-    for (const hook of hookPlan) {
-      const result = await runPredeployHook(hook.command, {
-        projectDir: scratchProject,
-        resourceDir: hook.resourceRel ? resolve(scratchProject, hook.resourceRel) : scratchProject,
-        project,
-        timeoutMs: predeployTimeoutMs,
-        deployEnv,
-        rehearsalMarker,
-      });
-      if (!result.ok) {
-        // A hook can write through the overlay and THEN fail. Its failure is a
-        // conservative refusal, but the write is the fatal condition, and the
-        // order here is what keeps it fatal: a refusal returned first would let
-        // `deploy.sh` carry on into BUILD_CMD with a mutated checkout (Phase 4b
-        // P1, round 19).
-        const wroteBeforeFailing = await liveDrift();
-        if (wroteBeforeFailing) throw new LiveCheckoutDriftError(wroteBeforeFailing, "failing predeploy hook");
-        const metadataBeforeFailing = await metadataDrift();
-        if (metadataBeforeFailing) {
-          throw new RepositoryMetadataDriftError(metadataBeforeFailing, "failing predeploy hook");
-        }
-        return refuseAll(
-          `predeploy hook failed: ${hook.command} — ${result.output.trim().slice(-400)}`,
+    /**
+     * The rehearsal's ONE exit: sweep first, repeat the fatal checks second,
+     * answer third.
+     *
+     * SWEEP FIRST, ALWAYS. A process this rehearsal started can outlive the
+     * step that started it (see `REHEARSAL_MARKER_VAR`), and it does not have
+     * to be the reason that step failed: a hook can detach a sleeper-then-
+     * writer into its own session and THEN exit nonzero for a reason that is
+     * the rehearsal's own — authenticating against the synthetic ADC, say. That
+     * failure is a conservative classification, `deploy.sh` accepts it and
+     * carries on, and the detached writer reaches a deployment input minutes
+     * later through an inherited absolute path such as `INIT_CWD` — after the
+     * clean-tree guard, and after the last fingerprint that was watching (Codex
+     * P1, round 20 on #1107). So the sweep runs before the checks below rather
+     * than only where an escapee was the complaint, and it runs before them so
+     * that nothing is still writing while the tree is read.
+     *
+     * CHECKS SECOND. Whatever the sweep just ended may already have written, so
+     * the fatal live-tree and metadata checks are repeated over the tree as it
+     * stands, exactly as they are for a hook that left work inside its group.
+     * Both remain fatal: a conservative classification is not enough once the
+     * tree the clean-tree guard approved has moved.
+     */
+    const settleRehearsal = async (exit) => {
+      if (!(exit instanceof RehearsalExit)) {
+        throw new Error(
+          "the rehearsal returned an answer instead of a RehearsalExit, which would skip the sweep",
         );
       }
-      if (result.descendantsLeft) {
-        // A hook that returned with work still running in the background has
-        // an outcome this rehearsal cannot reproduce: Firebase lets that work
-        // finish on its own clock, so the artifact it discovers may differ
-        // from the one here whether the descendant is ended or awaited
-        // (Codex P1, round 17). The live tree AND the repository metadata are
-        // still checked — the descendant may already have written into the
-        // tree or moved a ref (Codex P1, round 19) — and only then does the
-        // request fall to the conservative arm rather than to a guess.
-        const wroteInBackground = await liveDrift();
-        if (wroteInBackground) throw new LiveCheckoutDriftError(wroteInBackground, "predeploy hook");
-        const movedInBackground = await metadataDrift();
-        if (movedInBackground) throw new RepositoryMetadataDriftError(movedInBackground, "predeploy hook");
-        return refuseAll(
-          `predeploy hook left work running in the background, whose effect on the artifact cannot be rehearsed: ${hook.command}`,
-        );
-      }
-      const escapedHook = await sweepEscapees("a predeploy hook");
-      if (escapedHook) return refuseAll(escapedHook);
-    }
-
-    const afterHooks = await liveDrift();
-    if (afterHooks) throw new LiveCheckoutDriftError(afterHooks, "predeploy hook");
-    const metadataAfterHooks = await metadataDrift();
-    if (metadataAfterHooks) throw new RepositoryMetadataDriftError(metadataAfterHooks, "predeploy hook");
-
-    const targets = targetCodebases(only, configs, codebaseNames);
-    const selected = staged.filter((config) => targets.has(config.codebase));
+      const escaped = await sweepEscapees(exit.what);
+      if (escaped === null && exit.reason === null) return null;
+      const wrote = await liveDrift();
+      if (wrote) throw new LiveCheckoutDriftError(wrote, exit.what);
+      const moved = await metadataDrift();
+      if (moved) throw new RepositoryMetadataDriftError(moved, exit.what);
+      if (exit.reason === null) return refuseAll(escaped);
+      if (escaped === null) return refuseAll(exit.reason);
+      // Both: the step failed AND left something running. Neither half is the
+      // whole story, so the refusal names both.
+      return refuseAll(`${exit.reason}; ${escaped}`);
+    };
 
     /**
-     * One private copy of the whole project per config probe, with EVERY
-     * selected codebase discovered inside it, in Firebase's own order.
+     * Everything this classifier runs of other people's programs: every
+     * predeploy hook in Firebase's order, then every discovery probe.
      *
-     * The probes still run one at a time from a private copy: two live peers
-     * can agree deliberately, and an artifact that appends a marker at load and
-     * waits for a second one would answer "one endpoint" to both while the
-     * deploy's single discovery sees a group (Codex P2, round 17).
-     *
-     * What changed in round 18 is the GRAIN. A fresh copy per codebase threw
-     * away the effects Firebase preserves between codebase discoveries:
-     * `loadCodebases` walks the selected codebases sequentially against ONE
-     * project, so the first codebase's module initialization can generate or
-     * replace the second's artifact — and with a copy each, that write landed
-     * in a directory deleted before the second inventory began, so both probes
-     * approved single endpoints while the real second discovery found a group.
-     * The probe is therefore project-level: one copy, every codebase in
-     * sequence, exactly the shape the deploy will run.
-     *
-     * The residual is unchanged: state that outlives the process and lives
-     * outside both the project and the scratch dir — `$HOME`, `/tmp`, a lock
-     * server. The cost is one project copy per probe rather than one per
-     * codebase per probe, which for a single-codebase repository is the same
-     * two copies it already paid.
+     * It answers with a `RehearsalExit` and never with an inventory, so that
+     * the sweep in `settleRehearsal` cannot be skipped by an exit added here
+     * later. Fatal drift still THROWS from where it is found, and the caller
+     * sweeps on that path too.
      */
-    const perProbe = [];
-    for (const probe of CONFIG_PROBES) {
-      /** @type {string[]} */
-      const probeLinks = [];
-      let probeRoot;
-      try {
-        probeRoot = await mkdtemp(join(scratch, "probe-"));
-        const probeProject = join(probeRoot, "project");
-        await copyStagedProject(scratchProject, probeProject, probeLinks);
-        // The probe copies the PROJECT, so an ancestor repository has to be
-        // exposed above it as well, or a codebase whose module load calls `git`
-        // answers one way in the hooks and another in discovery. Its metadata
-        // dir is already registered by the staging above.
-        if (ancestorGit) {
-          await exposeGitMetadata(ancestorGit, join(probeRoot, ".git"), probeLinks, []);
-        }
-        const results = new Map();
-        for (const config of selected) {
-          results.set(
-            config.codebase,
-            await discoverCodebaseInProbe({
-              probeProject,
-              config,
-              project,
-              projectAlias,
-              probe,
-              discoveryTimeoutMs,
-              rehearsalMarker,
-            }),
+    const rehearse = async () => {
+      for (const hook of hookPlan) {
+        const result = await runPredeployHook(hook.command, {
+          projectDir: scratchProject,
+          resourceDir: hook.resourceRel ? resolve(scratchProject, hook.resourceRel) : scratchProject,
+          project,
+          timeoutMs: predeployTimeoutMs,
+          deployEnv,
+          rehearsalMarker,
+        });
+        if (!result.ok) {
+          // A hook can write through the overlay and THEN fail — and it can
+          // detach a writer into its own session and then fail for a reason of
+          // the rehearsal's own. Its failure is a conservative refusal, but the
+          // write is the fatal condition and the escapee is the pending one, so
+          // this exit hands both to `settleRehearsal` rather than answering
+          // here: sweep, then the fatal checks, and only then the refusal that
+          // would otherwise let `deploy.sh` carry on into BUILD_CMD with a
+          // mutated checkout (Phase 4b P1, round 19; Codex P1, round 20).
+          return new RehearsalExit(
+            "failing predeploy hook",
+            `predeploy hook failed: ${hook.command} — ${result.output.trim().slice(-400)}`,
           );
         }
-        perProbe.push({ probe, results });
-      } catch (error) {
-        // Codebase code has already run by the time a LATER probe fails to set
-        // up (Phase 4b P1, run 4): the first discovery may have written through
-        // the overlay, and returning conservatively here would let deploy.sh
-        // carry on into BUILD_CMD with a mutated checkout. Every exit after
-        // executing codebase code enforces the fatal checks first.
-        const wroteBeforeProbeFailure = await liveDrift();
-        if (wroteBeforeProbeFailure) throw new LiveCheckoutDriftError(wroteBeforeProbeFailure, "discovery probe");
-        const movedBeforeProbeFailure = await metadataDrift();
-        if (movedBeforeProbeFailure) {
-          throw new RepositoryMetadataDriftError(movedBeforeProbeFailure, "discovery probe");
+        if (result.descendantsLeft) {
+          // A hook that returned with work still running in the background has
+          // an outcome this rehearsal cannot reproduce: Firebase lets that work
+          // finish on its own clock, so the artifact it discovers may differ
+          // from the one here whether the descendant is ended or awaited
+          // (Codex P1, round 17). The live tree AND the repository metadata are
+          // still checked — the descendant may already have written into the
+          // tree or moved a ref (Codex P1, round 19) — and only then does the
+          // request fall to the conservative arm rather than to a guess.
+          // `settleRehearsal` makes those checks, after its sweep.
+          return new RehearsalExit(
+            "predeploy hook",
+            `predeploy hook left work running in the background, whose effect on the artifact cannot be rehearsed: ${hook.command}`,
+          );
         }
-        return refuseAll(
-          `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
-        );
-      } finally {
-        for (const link of probeLinks) await unlink(link).catch(() => {});
-        if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
+        // Swept between hooks as well as at the exit, so an escapee is
+        // attributed to the hook that started it rather than to a later one.
+        const escapedHook = await sweepEscapees("a predeploy hook");
+        if (escapedHook) return new RehearsalExit("a predeploy hook", escapedHook);
       }
-      const escapedProbe = await sweepEscapees("a discovery probe");
-      if (escapedProbe) return refuseAll(escapedProbe);
-    }
 
-    for (const config of selected) {
-      inventories.set(
-        config.codebase,
-        reconcileProbeResults(
-          config.sourceRel,
-          perProbe.map(({ probe, results }) => ({ probe, discovered: results.get(config.codebase) })),
-        ),
-      );
-    }
-    for (const config of configs) {
-      if (!inventories.has(config.codebase)) {
+      const afterHooks = await liveDrift();
+      if (afterHooks) throw new LiveCheckoutDriftError(afterHooks, "predeploy hook");
+      const metadataAfterHooks = await metadataDrift();
+      if (metadataAfterHooks) throw new RepositoryMetadataDriftError(metadataAfterHooks, "predeploy hook");
+
+      const targets = targetCodebases(only, configs, codebaseNames);
+      const selected = staged.filter((config) => targets.has(config.codebase));
+
+      /**
+       * One private copy of the whole project per config probe, with EVERY
+       * selected codebase discovered inside it, in Firebase's own order.
+       *
+       * The probes still run one at a time from a private copy: two live peers
+       * can agree deliberately, and an artifact that appends a marker at load and
+       * waits for a second one would answer "one endpoint" to both while the
+       * deploy's single discovery sees a group (Codex P2, round 17).
+       *
+       * What changed in round 18 is the GRAIN. A fresh copy per codebase threw
+       * away the effects Firebase preserves between codebase discoveries:
+       * `loadCodebases` walks the selected codebases sequentially against ONE
+       * project, so the first codebase's module initialization can generate or
+       * replace the second's artifact — and with a copy each, that write landed
+       * in a directory deleted before the second inventory began, so both probes
+       * approved single endpoints while the real second discovery found a group.
+       * The probe is therefore project-level: one copy, every codebase in
+       * sequence, exactly the shape the deploy will run.
+       *
+       * The residual is unchanged: state that outlives the process and lives
+       * outside both the project and the scratch dir — `$HOME`, `/tmp`, a lock
+       * server. The cost is one project copy per probe rather than one per
+       * codebase per probe, which for a single-codebase repository is the same
+       * two copies it already paid.
+       */
+      const perProbe = [];
+      for (const probe of CONFIG_PROBES) {
+        /** @type {string[]} */
+        const probeLinks = [];
+        let probeRoot;
+        try {
+          probeRoot = await mkdtemp(join(scratch, "probe-"));
+          const probeProject = join(probeRoot, "project");
+          await copyStagedProject(scratchProject, probeProject, probeLinks);
+          // The probe copies the PROJECT, so an ancestor repository has to be
+          // exposed above it as well, or a codebase whose module load calls `git`
+          // answers one way in the hooks and another in discovery. Its metadata
+          // dir is already registered by the staging above.
+          if (ancestorGit) {
+            await exposeGitMetadata(ancestorGit, join(probeRoot, ".git"), probeLinks, []);
+          }
+          const results = new Map();
+          for (const config of selected) {
+            results.set(
+              config.codebase,
+              await discoverCodebaseInProbe({
+                probeProject,
+                config,
+                project,
+                projectAlias,
+                probe,
+                discoveryTimeoutMs,
+                rehearsalMarker,
+              }),
+            );
+          }
+          perProbe.push({ probe, results });
+        } catch (error) {
+          // Codebase code has already run by the time a LATER probe fails to set
+          // up (Phase 4b P1, run 4): the first discovery may have written through
+          // the overlay, or left a process of its own running, and returning
+          // conservatively here would let deploy.sh carry on into BUILD_CMD with
+          // a mutated checkout. Every exit after executing codebase code sweeps
+          // and enforces the fatal checks first — which is what returning an
+          // exit rather than an answer guarantees.
+          return new RehearsalExit(
+            "discovery probe",
+            `could not isolate the ${probe.label} discovery probe — ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          for (const link of probeLinks) await unlink(link).catch(() => {});
+          if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
+        }
+        const escapedProbe = await sweepEscapees("a discovery probe");
+        if (escapedProbe) return new RehearsalExit("a discovery probe", escapedProbe);
+      }
+
+      for (const config of selected) {
         inventories.set(
           config.codebase,
-          refused(
-            targets.has(config.codebase)
-              ? "codebase has no mirrorable local source"
-              : "this deploy does not load that codebase",
+          reconcileProbeResults(
+            config.sourceRel,
+            perProbe.map(({ probe, results }) => ({ probe, discovered: results.get(config.codebase) })),
           ),
         );
       }
-    }
+      for (const config of configs) {
+        if (!inventories.has(config.codebase)) {
+          inventories.set(
+            config.codebase,
+            refused(
+              targets.has(config.codebase)
+                ? "codebase has no mirrorable local source"
+                : "this deploy does not load that codebase",
+            ),
+          );
+        }
+      }
 
-    // Loading an artifact runs its module-scope code, which reaches the same
-    // symlinks a hook does. Checked a second time rather than once at the end,
-    // so a hook that writes into the live checkout is caught before this
-    // classifier spends a discovery on it.
-    const afterDiscovery = await liveDrift();
-    if (afterDiscovery) throw new LiveCheckoutDriftError(afterDiscovery, "loaded codebase");
-    const metadataAfterDiscovery = await metadataDrift();
-    if (metadataAfterDiscovery) {
-      throw new RepositoryMetadataDriftError(metadataAfterDiscovery, "loaded codebase");
-    }
+      // Loading an artifact runs its module-scope code, which reaches the same
+      // symlinks a hook does. Checked a second time rather than once at the end,
+      // so a hook that writes into the live checkout is caught before this
+      // classifier spends a discovery on it.
+      const afterDiscovery = await liveDrift();
+      if (afterDiscovery) throw new LiveCheckoutDriftError(afterDiscovery, "loaded codebase");
+      const metadataAfterDiscovery = await metadataDrift();
+      if (metadataAfterDiscovery) {
+        throw new RepositoryMetadataDriftError(metadataAfterDiscovery, "loaded codebase");
+      }
 
-    // Last, and over the whole selected set: one codebase this run could not
-    // vouch for makes every other selected codebase's inventory unusable too.
-    // See `firstUnprovableCodebase` for why the answer cannot be per-codebase.
-    const unprovable = firstUnprovableCodebase(
-      selected.map((config) => config.codebase),
-      inventories,
-    );
-    if (unprovable) {
-      return refuseAll(
-        `codebase ${unprovable.codebase} could not be inventoried, and this deploy loads it in the ` +
-          `same sequence as the rest — ${unprovable.reason}`,
+      // Last, and over the whole selected set: one codebase this run could not
+      // vouch for makes every other selected codebase's inventory unusable too.
+      // See `firstUnprovableCodebase` for why the answer cannot be per-codebase.
+      const unprovable = firstUnprovableCodebase(
+        selected.map((config) => config.codebase),
+        inventories,
       );
+      if (unprovable) {
+        return new RehearsalExit(
+          "the rehearsal",
+          `codebase ${unprovable.codebase} could not be inventoried, and this deploy loads it in the ` +
+            `same sequence as the rest — ${unprovable.reason}`,
+        );
+      }
+      return new RehearsalExit("the rehearsal");
+    };
+
+    let exit;
+    try {
+      exit = await rehearse();
+    } catch (error) {
+      // The rehearsal threw: a fatal drift, or a defect. Nothing it started may
+      // outlive it either way, so the sweep runs here too — silently, because
+      // the error the caller has to see is the one already on its way up.
+      await sweepEscapedProcesses(rehearsalMarker).catch(() => {});
+      throw error;
     }
-    return inventories;
+    const refusal = await settleRehearsal(exit);
+    return refusal ?? inventories;
   } finally {
     // Unlink the borrowed `node_modules` explicitly before the recursive
     // remove. `fs.rm` already unlinks symlinks rather than descending them,
