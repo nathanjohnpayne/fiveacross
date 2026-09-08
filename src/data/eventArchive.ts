@@ -268,7 +268,24 @@ export function finaleHasRun(
 }
 
 /**
- * Is this a `uid` the record can carry? (#1151, Codex P2 on PR #1139.)
+ * How long a `uid` the frozen record keeps, per row (#1151, Codex P1 on PR
+ * #1162).
+ *
+ * 128 is the maximum length of a Firebase Auth uid, so no id the platform can
+ * ever mint is touched by this. It is a DEFENCE IN DEPTH rather than the fix:
+ * the fix is that every uid in the record is a DOCUMENT ID (`playerConverter`
+ * pins `PlayerDoc.uid` to `snap.id`), and a document id under `players/` is the
+ * `request.auth.uid` the rules arm's `isOwner(uid)` bound the write to. What the
+ * bound covers is everything that is not a client write through that arm — an
+ * Admin-SDK repair, a seed script, a hand edit in the console — none of which
+ * the rules constrain at all, and any of which could leave a path segment up to
+ * Firestore's own 1500-byte limit sitting in a record with a 256 KiB ceiling.
+ */
+export const MAX_ARCHIVED_UID = 128;
+
+/**
+ * Is this a `uid` the record can carry? (#1151, Codex P2 on PR #1139; Codex P1
+ * on PR #1162.)
  *
  * A row with no usable id is unusable in every direction the archive needs: it
  * cannot be ban-filtered, it cannot be matched against the headline honour, the
@@ -277,9 +294,30 @@ export function finaleHasRun(
  * after the closing write has already shut the Event. `players/{uid}` validates
  * no field in its rules arm (it is self-written under ADR 0001), so this is a
  * shape a Player can actually produce by deleting a field from their own row.
+ *
+ * IT IS ASKED OF THE DOCUMENT ID, not of the stored field. The rules arm binds
+ * the PATH (`isOwner(uid)`) and validates nothing inside the document, so a
+ * Player can store a 300 KB string at `uid` on their own row — and a record that
+ * copied it would exceed `MAX_ARCHIVE_BYTES` on every attempt, permanently, on
+ * an Event the first write has already shut. `playerConverter` is where the two
+ * are separated: it pins `PlayerDoc.uid` to `snap.id` for every reader, so both
+ * the console's preview and the freeze's own server re-read hand this predicate
+ * the row's real identity. The LENGTH bound below is the backstop for the ids no
+ * rules arm ever saw (`MAX_ARCHIVED_UID`).
+ *
+ * An id that fails either half is SKIPPED and counted in
+ * `EventArchiveDraft.skippedRows`, exactly as a missing one is, rather than
+ * refusing the whole archive: it is the same field failing the same question, so
+ * it takes the same route — dropped before any selection (an unidentifiable row
+ * must not be able to take an honour either), stated on the confirm row, and
+ * outside `playerCount`, which records the cardinality of the rows the record
+ * COULD carry. Refusing instead would strand an Event on a row no Admin can edit
+ * — a Player row's id cannot be renamed, only deleted — for a row the record can
+ * simply leave out, which is the trade every other malformation here already
+ * makes.
  */
 function usableUid(uid: unknown): uid is string {
-  return typeof uid === 'string' && uid.trim().length > 0;
+  return typeof uid === 'string' && uid.trim().length > 0 && uid.length <= MAX_ARCHIVED_UID;
 }
 
 /**
@@ -401,6 +439,11 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
  * That is not adjudication: it decides nothing about who won. It is what makes
  * the row writable at all, on a document whose rules arm validates none of these
  * fields. See `usableUid` for the one malformation a row cannot survive.
+ *
+ * `uid` is the row's DOCUMENT ID rather than its stored `uid` field, which is
+ * unvalidated Player input like everything else here — `playerConverter` pins
+ * the two together on read, and `usableUid` has already bounded it (#1151, Codex
+ * P1 on PR #1162).
  */
 function toStandingRow(p: PlayerDoc): ArchivedStandingRow {
   return {
@@ -543,7 +586,10 @@ export interface EventArchiveDraft {
  *
  *  - a row with no usable `uid` is SKIPPED and counted
  *    (`EventArchiveDraft.skippedRows`) — it is unmatchable and unrenderable, so
- *    there is nothing to default it to;
+ *    there is nothing to default it to. The id asked about is the DOCUMENT ID,
+ *    which `playerConverter` pins onto every row it reads, because the stored
+ *    field is Player input the rules bound nothing about — including its length
+ *    (#1151, Codex P1 on PR #1162);
  *  - every other malformation is COERCED to a safe default: a missing name reads
  *    `'Anonymous'`, a missing or non-finite count reads `0`, a bad instant reads
  *    `null`, and every name is bounded at `MAX_ARCHIVED_DISPLAY_NAME`;
@@ -599,7 +645,8 @@ export function draftEventArchive(params: {
 
   // Dropped FIRST, before any selection: an unidentifiable row must not be able
   // to win the headline honour or hold a daily one either, and every downstream
-  // step here reads `uid`.
+  // step here reads `uid` — which is the row's DOCUMENT ID by the time it
+  // arrives here (`playerConverter`), not the unvalidated field beside it.
   //
   // …and every surviving row's instants are made readable in the SAME pass,
   // before any selector reads one (`withReadableDayStats`). The honour selectors

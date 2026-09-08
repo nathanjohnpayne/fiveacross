@@ -13,9 +13,10 @@ import {
   MAX_ARCHIVE_BYTES,
   MAX_ARCHIVED_EVENT_BYTES,
   MAX_ARCHIVED_STANDING_ROWS,
+  MAX_ARCHIVED_UID,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
-import { migrateDayFields } from './converters';
+import { migrateDayFields, playerConverter } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
 // specs/post-sailing-archive.md, unit layer (#1149 and #1151, epic #134). The
@@ -33,7 +34,12 @@ import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 const A = vi.hoisted(() => ({
   event: undefined as Record<string, unknown> | undefined,
   claims: [] as Record<string, unknown>[],
-  players: [] as Record<string, unknown>[],
+  /** Seeded roster rows. `id` is this fake's DOCUMENT-ID channel (#1151, Codex
+   *  P1 on PR #1162) — it is not a `PlayerDoc` field, and it defaults to the
+   *  row's own stored `uid`, which is what every honest row carries. A row that
+   *  sets the two apart is the hostile shape the rules permit: `players/{uid}`
+   *  binds the PATH and validates nothing inside the document. */
+  players: [] as Array<Record<string, unknown> & { id?: string }>,
   dayMetas: new Map<number, Record<string, unknown>>(),
   /** Field maps handed to `tx.update` — empty means the call wrote nothing. */
   updates: [] as Record<string, unknown>[],
@@ -47,6 +53,12 @@ const A = vi.hoisted(() => ({
 vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'test-event' }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
+  // The roster read is the ONE read below that production takes through a
+  // CONVERTER-attached reference (`playersCol()`), and that converter is what
+  // pins `PlayerDoc.uid` to the document id (#1151, Codex P1 on PR #1162). The
+  // fake applies it for the same reason it re-reads the Event raw: otherwise
+  // this suite would prove the freeze reads a field the real one never sees.
+  const { playerConverter } = await import('./converters');
   type Ref = { path: string; withConverter: () => Ref };
   const ref = (path: string): Ref => {
     const r: Ref = { path, withConverter: () => r };
@@ -72,11 +84,19 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     },
     getDocsFromServer: async (r: Ref) => {
       A.serverReads.push(r.path);
-      const rows = r.path.endsWith('/claims')
-        ? A.claims
-        : r.path.endsWith('/players')
-          ? A.players
-          : [];
+      if (r.path.endsWith('/players')) {
+        return {
+          docs: A.players.map(({ id, ...stored }) => {
+            const snap = {
+              exists: () => true,
+              id: (id ?? stored.uid) as string,
+              data: () => stored,
+            };
+            return { ...snap, data: () => playerConverter.fromFirestore(snap as never) };
+          }),
+        };
+      }
+      const rows = r.path.endsWith('/claims') ? A.claims : [];
       return { docs: rows.map((row) => ({ exists: () => true, data: () => row })) };
     },
     runTransaction: async (_db: unknown, fn: (tx: unknown) => unknown) => {
@@ -837,6 +857,42 @@ describe('buildEventArchive — a ban hides, it never reassigns', () => {
 // Before this, each of them made the archive write throw or the Event document
 // overflow AFTER the closing write had already shut the Event: every attempt
 // closed play and then failed, permanently.
+// #1151, Codex P1 on PR #1162. The record's uids come from the roster, and the
+// roster is read through `playerConverter` — which is the ONE place the row's
+// real identity (its path) is separated from the `uid` FIELD beside it, an
+// unvalidated Player-written string the archive would otherwise copy verbatim.
+describe('playerConverter — a Player row is identified by its PATH', () => {
+  const snapOf = (id: string, data: Record<string, unknown>) =>
+    ({ id, data: () => data }) as never;
+
+  it('pins uid to the document id over a 300 KB stored field', () => {
+    const row = playerConverter.fromFirestore(
+      snapOf('alice', { uid: 'X'.repeat(300 * 1024), displayName: 'Alice', bingoCount: 1 }),
+    );
+    expect(row.uid).toBe('alice');
+  });
+
+  it('pins uid to the document id over another Player’s uid, and over a missing one', () => {
+    // The same field is what `isBanned` and every honour match read, so a stored
+    // uid naming somebody else is not only an archive hazard.
+    expect(
+      playerConverter.fromFirestore(snapOf('alice', { uid: 'bob', displayName: 'Alice' })).uid,
+    ).toBe('alice');
+    expect(playerConverter.fromFirestore(snapOf('alice', { displayName: 'Alice' })).uid).toBe(
+      'alice',
+    );
+  });
+
+  it('leaves an honest row identical, and still defaults the reshuffle counter', () => {
+    const row = playerConverter.fromFirestore(
+      snapOf('alice', { uid: 'alice', displayName: 'Alice', bingoCount: 2 }),
+    );
+    expect(row.uid).toBe('alice');
+    expect(row.displayName).toBe('Alice');
+    expect(row.reshufflesUsed).toBe(0);
+  });
+});
+
 describe('draftEventArchive — the inputs are validated BEFORE the Event is shut', () => {
   it('skips a row with no usable uid, and counts it', () => {
     const draft = draftEventArchive({
@@ -854,6 +910,32 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(draft.archive.standings.map((r) => r.uid)).toEqual(['real']);
     expect(draft.archive.playerCount).toBe(1);
     expect(draft.skippedRows).toBe(2);
+    expect(draft.refusal).toBeNull();
+  });
+
+  it('skips a row whose DOCUMENT ID is longer than a Firebase Auth uid, and counts it', () => {
+    // #1151, Codex P1 on PR #1162. The uid every row here carries is its
+    // document id (`playerConverter`), and a client write can only ever put
+    // `request.auth.uid` there — but an Admin-SDK repair, a seed script or a
+    // console hand-edit is bound by nothing, and a path segment may run to
+    // Firestore's own 1500-byte limit. Bounded at the longest uid the platform
+    // mints, and an id past it takes the SAME route a missing one does: skipped,
+    // counted on the confirm row, outside `playerCount`.
+    const draft = draftEventArchive({
+      players: [
+        mkPlayer({ uid: 'real', displayName: 'Real', squaresMarked: 5 }),
+        mkPlayer({ uid: 'a'.repeat(MAX_ARCHIVED_UID), displayName: 'Exactly at the bound' }),
+        mkPlayer({ uid: 'b'.repeat(MAX_ARCHIVED_UID + 1), displayName: 'One over' }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.standings.map((r) => r.uid)).toEqual([
+      'real',
+      'a'.repeat(MAX_ARCHIVED_UID),
+    ]);
+    expect(draft.archive.playerCount).toBe(2);
+    expect(draft.skippedRows).toBe(1);
     expect(draft.refusal).toBeNull();
   });
 
@@ -1580,6 +1662,33 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     A.event = closingEvent({ days: [] });
     expect(await archiveEvent(1, { now: 5 })).toBe('too-large');
     expect(A.updates).toEqual([]);
+  });
+
+  it('freezes a row whose STORED uid is 300 KB, carrying the document id instead', async () => {
+    // #1151, Codex P1 on PR #1162. `players/{uid}`'s rules arm binds the PATH
+    // (`isOwner(uid)`) and validates NOTHING inside the document — not the
+    // presence of `uid`, not its type, and not its length. So a Player can put
+    // 300 KB at `uid` on their own row, and a record that copied it would blow
+    // the 256 KiB ceiling on every attempt, permanently, on an Event the closing
+    // write has already shut. The freeze reads the roster through
+    // `playersCol()`, whose converter pins `uid` to the document id, so the
+    // stored field never reaches the record at all.
+    A.players = [
+      {
+        id: 'alice',
+        uid: 'X'.repeat(300 * 1024),
+        displayName: 'Alice',
+        bingoCount: 1,
+        squaresMarked: 9,
+      },
+    ];
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const archive = A.updates[0].archive as {
+      standings: { uid: string }[];
+      playerCount: number;
+    };
+    expect(archive.standings.map((r) => r.uid)).toEqual(['alice']);
+    expect(archive.playerCount).toBe(1);
   });
 });
 
