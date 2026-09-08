@@ -2316,83 +2316,59 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("answers a git lookup when firebase.json sits below the checkout root", async () => {
-    // Barrier round on #1107: `-c deploy/firebase.json` runs the hooks from
-    // `deploy/`, where `git` walks UP to the checkout root and answers. The
-    // overlay only exposed `.git` when it was an ENTRY of the configured
-    // project directory, so a nested config produced a scratch project with no
-    // repository above it: every lookup failed here and succeeded during the
-    // deploy. Written the way its checkout-rooted twin above is — the
-    // git-visible branch is the EXEMPT one — so a run that cannot see the
-    // branch fails this rather than passing it for the wrong reason.
-    await withFunctionsProject(
-      {
-        projectSubdir: "deploy",
-        branch: "release",
-        functionsConfig: {
-          predeploy: [
-            'test "$(git rev-parse --abbrev-ref HEAD)" = "release" ' +
-              "&& cp functions/single.js functions/lib/index.js " +
-              "|| cp functions/group.js functions/lib/index.js",
-          ],
-        },
-        files: {
-          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
-          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
-          "functions/single.js": artifact("exports.daily = endpoint();"),
-        },
-      },
-      async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
-      },
-    );
-  });
-
-  it("places a nested project where the repository says it is", async () => {
-    // Codex P1, round 20 on #1107. Exposing the ancestor `.git` one level above
-    // a scratch directory named `project` made `git` ANSWER, but from the wrong
-    // place: `git rev-parse --show-prefix` was `project/` in the rehearsal and
-    // `deploy/` during the deploy, with `--show-toplevel` one directory off to
-    // match. Nothing MOVED between the runs, so the git-answer fingerprint has
-    // nothing to report — the two runs simply asked from different places — and
-    // a hook doing ordinary repository-root discovery could rehearse a direct
-    // endpoint while the deploy builds a protected group, wrongly disabling
-    // invoker reconciliation.
+  it("refuses a firebase.json below the checkout root before its first hook runs", async () => {
+    // Phase 4b P1 on #1107. Every guard here starts from the CONFIGURED project
+    // directory: `stageProjectOverlay` stages that directory, and
+    // `liveTreeFingerprint` watches exactly what the staging exposed. With `-c
+    // deploy/firebase.json` the deploy's inputs are the whole checkout while the
+    // watched set is only `deploy/`, so a hook that reaches the checkout root
+    // through an inherited `$INIT_CWD` rewrites application source outside every
+    // watched directory and outside everything `git` answers — no fingerprint
+    // moves, classification succeeds, and `deploy.sh` carries on into a build
+    // that packages a file written after its clean-tree guard passed.
     //
-    // The hook below branches on BOTH answers: the prefix literally, and the
-    // toplevel by resolving a deployment input through it. The git-visible
-    // branch is the EXEMPT one, so a run that sees `project/` fails this rather
-    // than passing it for the wrong reason.
+    // So the LAYOUT is the refusal, and it has to be reached before anything
+    // runs: a conservative answer produced after the hook is an answer produced
+    // after the write. The hook below writes a sentinel into the checkout root,
+    // which must never appear, and the refusal reason must name the layout
+    // rather than anything the hook did.
     await withFunctionsProject(
       {
         projectSubdir: "deploy",
         branch: "release",
         functionsConfig: {
-          predeploy: [
-            'test "$(git rev-parse --show-prefix)" = "deploy/" ' +
-              '&& test -f "$(git rev-parse --show-toplevel)/$(git rev-parse --show-prefix)firebase.json" ' +
-              "&& cp functions/single.js functions/lib/index.js " +
-              "|| cp functions/group.js functions/lib/index.js",
-          ],
+          predeploy: [...PREDEPLOY, 'printf ran > "$INIT_CWD/hook-ran"'],
         },
-        files: {
-          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
-          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
-          "functions/single.js": artifact("exports.daily = endpoint();"),
-        },
+        files: { "functions/lib/index.js": artifact("exports.placeholder = 1;") },
       },
       async (configPath) => {
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        const checkout = resolve(dirname(configPath), "..");
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = checkout;
+        try {
+          const { result, reasons } = await withRefusalReasons(() =>
+            classify(["--only", "functions:daily"], configPath),
+          );
+          expect(result).toMatchObject({
+            functionsAttempted: true,
+            ...ALL_INVOKERS_CONSERVATIVE,
+          });
+          expect(reasons).toContain("sits below the repository root");
+          expect(existsSync(join(checkout, "hook-ran"))).toBe(false);
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
       },
     );
   });
 
   it("leaves a checkout-ROOTED project at the repository root it already had", async () => {
-    // The control for the case above: a `firebase.json` at the checkout root
-    // has `.git` as an entry of its own project directory, so `--show-prefix`
-    // is empty on both sides and there is nothing to reproduce. The layout is
-    // deliberately unchanged, and this fails if reproducing the nested
-    // placement moved the rooted one.
+    // The control for the case above: a `firebase.json` AT the checkout root
+    // has `.git` as an entry of its own project directory, the staged set is
+    // the whole repository, and the exemption stands. Written through both
+    // `--show-prefix` and `--show-toplevel` so that refusing the nested layout
+    // cannot be mistaken for refusing every repository.
     await withFunctionsProject(
       {
         branch: "release",
@@ -2412,35 +2388,6 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
       },
       async (configPath) => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
-      },
-    );
-  });
-
-  it("refuses a project reached through a symlinked directory above it", async () => {
-    // The refusal arm of the placement above. `git` answers from the PHYSICAL
-    // directory, so when a segment between the checkout root and the project is
-    // a symlink, the prefix the deploy sees is not the one the configured path
-    // spells and a scratch mirror of that path would trade one divergence for
-    // another. The exemption is refused instead.
-    //
-    // The same fixture classified through its REAL path is the control: without
-    // it this would pass for a fixture that was never exact to begin with.
-    await withFunctionsProject(
-      {
-        projectSubdir: "real/deploy",
-        branch: "release",
-        files: { "functions/lib/index.js": artifact("exports.placeholder = 1;") },
-      },
-      async (configPath) => {
-        const fixture = resolve(dirname(configPath), "..", "..");
-        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
-        await symlink(join(fixture, "real"), join(fixture, "link"), "dir");
-        expect(
-          await classify(
-            ["--only", "functions:daily"],
-            join(fixture, "link", "deploy", "firebase.json"),
-          ),
-        ).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
       },
     );
   });

@@ -195,9 +195,7 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # For an exact `--only functions:<name>` scope the adapter also BUILDS that
 # codebase — it runs EVERY selected target's own `predeploy` hooks, in the order
 # Firebase runs them and under the environment `op-firebase-deploy` establishes,
-# in a scratch project whose Functions source dirs are copies and which sits at
-# the configured project directory's own repository-relative path, so a hook
-# that asks `git` where in the checkout it is gets the deploy's answer, then asks that
+# in a scratch project whose Functions source dirs are copies, then asks that
 # codebase's OWN Firebase Functions SDK what it would deploy, exactly as the
 # deploy does: it starts the SDK's discovery server and reads
 # `/__/functions.yaml`. That is what decides whether the selector releases
@@ -213,6 +211,14 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # in sequence inside each), and only for that selector shape: `--only hosting`,
 # a whole-codebase `--only functions`, and every protected callable classify
 # without building anything (about 1s).
+# The exemption requires `firebase.json` at the CHECKOUT ROOT. Everything the
+# adapter stages and everything it watches for mutation starts from the
+# configured project directory, so a config in a subdirectory (`-c
+# deploy/firebase.json`) leaves the rest of the checkout as a deployment input
+# that no guard is watching: a hook reaching it through an inherited absolute
+# path such as `$INIT_CWD` would change what this deploy publishes without
+# moving a single fingerprint. That layout is refused outright, before any hook
+# or discovery probe runs, rather than watched at unbounded cost.
 # Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
 # codebase this request loads cannot be vouched for — it consulted a value the
 # preflight cannot supply, it left work running outside its process group, it

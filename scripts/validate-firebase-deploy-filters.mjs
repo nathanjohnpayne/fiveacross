@@ -20,7 +20,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -768,13 +768,11 @@ function runPredeployHook(
 }
 
 /**
- * The nearest `.git` ABOVE `projectDir`, or null when there is none.
+ * The nearest `.git` ABOVE `projectDir`, or null when there is none — which is
+ * to say: whether the configured Firebase project sits BELOW a repository root.
  *
- * A `firebase.json` in a subdirectory of a checkout (`-c deploy/firebase.json`)
- * leaves `.git` above the configured project directory, where the overlay never
- * walks. `git` itself walks UP until it finds one, so a hook run from `deploy/`
- * during the real deploy gets the repository's answers — see
- * `stageProjectOverlay` for what is done about that.
+ * That layout is refused outright (see `nestedProjectRefusal`), so this is a
+ * detector rather than something the staging then has to reproduce.
  */
 function nearestAncestorGit(projectDir) {
   let dir = dirname(projectDir);
@@ -787,72 +785,51 @@ function nearestAncestorGit(projectDir) {
   }
 }
 
-/** Where a checkout-rooted config's staged project sits inside its scratch root. */
+/** Where the staged project sits inside its scratch root. */
 const STAGED_PROJECT_DIRNAME = "project";
 
 /**
- * WHERE inside a scratch root the staged project has to sit, so that a hook
- * asking `git` where it is gets the answer the real deploy gives it.
+ * Why a `firebase.json` BELOW a repository root can never be proved exact, or
+ * null when the configured project directory is the root of its own checkout.
  *
- * Exposing the ancestor repository was not enough on its own. `git` answers
- * more than "a repository is reachable": `git rev-parse --show-prefix` is
- * `deploy/` when the deploy runs a hook from `deploy/`, and a scratch project
- * parked at `<scratch>/project` answered `project/` — with `--show-toplevel`
- * one directory off to match. Nothing MOVED between the two runs, so the
- * git-answer fingerprint has nothing to report; the two runs simply asked from
- * different places. Ordinary repository-root discovery (`cd "$(git rev-parse
- * --show-toplevel)"`, or a prefix-keyed lookup) can therefore select a direct
- * endpoint in the rehearsal and a protected group in the real deploy, and the
- * exemption wrongly disables invoker reconciliation (Codex P1, round 20 on
- * #1107). The project is staged at its own repository-relative path instead —
- * `<scratch>/deploy` — with the ancestor `.git` exposed at the scratch ROOT.
+ * WHAT THE GUARDS WATCH. Everything this rehearsal knows about is reached from
+ * the configured project directory: `stageProjectOverlay` stages that directory,
+ * and `liveTreeFingerprint` watches exactly what the staging exposed — the
+ * project's own entries, the directories it symlinked, the files it copied. A
+ * checkout-rooted config makes that set the whole repository, which is the
+ * property the fingerprint's guarantee rests on.
  *
- * A checkout-rooted config keeps the layout it already had. Its `.git` is an
- * ENTRY of the project directory, so `--show-prefix` is empty on both sides and
- * there is nothing to reproduce.
+ * WHAT A NESTED CONFIG BREAKS. With `-c deploy/firebase.json` the deploy's
+ * inputs are the whole checkout while the watched set is only `deploy/`. A hook
+ * launched through npm inherits `INIT_CWD` pointing at the checkout root, so
+ * `printf x > "$INIT_CWD/src/App.tsx"` changes application source the deploy is
+ * about to build and publish — outside every watched directory, so no
+ * fingerprint moves; outside `.git`'s answers, so the metadata fingerprint has
+ * nothing to report either. Classification succeeds, `deploy.sh` carries on, and
+ * the build packages a file written after the clean-tree guard approved the tree
+ * (Phase 4b P1 on #1107).
  *
- * REFUSES rather than approximates when the placement cannot be reproduced: a
- * relative path that climbs out of the scratch root, or one whose segments are
- * not plain directories in the live tree. `git` answers from the PHYSICAL
- * directory, so a symlinked segment means the prefix the deploy sees is not the
- * one this relative path spells — mirroring it would trade one divergence for
- * another rather than close it.
+ * WHY REFUSING RATHER THAN WATCHING MORE. Widening the watch to the whole
+ * ancestor checkout would mean fingerprinting a tree this classifier never
+ * staged and cannot bound — on this repository that is build output, coverage,
+ * and agent worktrees which are themselves full checkouts. The exemption is
+ * worth about ten seconds of invoker reconciliation; it is not worth a guard
+ * whose cost is unbounded. So the layout itself is the refusal, and the
+ * exemption requires `firebase.json` at the checkout root.
+ *
+ * BEFORE ANYTHING RUNS. The check is made before the scratch directory exists
+ * and before the first predeploy hook or discovery probe is started, because a
+ * conservative answer reached after running the hook is an answer reached after
+ * the hook already wrote.
  */
-async function stagedProjectPlacement(projectDir, ancestorGit) {
-  if (!ancestorGit) return { rel: STAGED_PROJECT_DIRNAME, reason: null };
-  const repoRoot = dirname(ancestorGit);
-  const rel = relative(repoRoot, projectDir);
-  if (rel === "" || isAbsolute(rel) || rel.split(sep).includes("..")) {
-    return {
-      rel: null,
-      reason:
-        `the project directory's placement below the checkout root ${repoRoot} cannot be reproduced ` +
-        "in a scratch root, so a hook's view of where in the repository it is cannot be rehearsed",
-    };
-  }
-  let at = repoRoot;
-  for (const segment of rel.split(sep)) {
-    at = join(at, segment);
-    let entry;
-    try {
-      entry = await lstat(at);
-    } catch (error) {
-      return {
-        rel: null,
-        reason: `${at} could not be read, so the project's placement below the checkout root cannot be reproduced (${error?.code ?? "?"})`,
-      };
-    }
-    // `lstat` reports a symlink as a symlink, so this rejects a symlinked
-    // segment as well as a non-directory one — both mean `git` will answer from
-    // a path this relative one does not spell.
-    if (!entry.isDirectory()) {
-      return {
-        rel: null,
-        reason: `${at} is not a plain directory, so the project's placement below the checkout root cannot be mirrored`,
-      };
-    }
-  }
-  return { rel, reason: null };
+function nestedProjectRefusal(projectDir, ancestorGit) {
+  if (!ancestorGit) return null;
+  return (
+    `the Firebase config directory ${projectDir} sits below the repository root ${dirname(ancestorGit)}, ` +
+    "so this deploy's inputs include a checkout this rehearsal neither stages nor watches — a hook " +
+    "reaching it through an inherited absolute path such as $INIT_CWD would change what the deploy " +
+    "publishes without moving any fingerprint. No selector in this project can be proved exact"
+  );
 }
 
 /**
@@ -897,7 +874,11 @@ async function exposeGitMetadata(from, to, links, metadataDirs) {
  * Firebase may run another codebase's hook in the same deploy and that hook can
  * write anywhere (`getReleventConfigs`; see `relevantFunctionsConfigs`).
  *
- * `.git` IS exposed, read-only in effect. Omitting it did not withhold
+ * `.git` IS exposed, read-only in effect — as an ENTRY of the project directory,
+ * which is the only layout that reaches here: a `firebase.json` BELOW a
+ * repository root is refused before any of this runs (see
+ * `nestedProjectRefusal`), so there is never an ancestor repository to stand in
+ * for. Omitting it did not withhold
  * authority, it changed valid behaviour: a build that selects its exports with
  * `git rev-parse --abbrev-ref HEAD` sees `main` during the deploy and a failed
  * lookup here, and if its fallback happens to be the single endpoint both
@@ -922,14 +903,12 @@ async function exposeGitMetadata(from, to, links, metadataDirs) {
 async function stageProjectOverlay({
   projectDir,
   scratchProject,
-  scratchRoot,
   sourceRels,
   links,
   liveDirs,
   liveFiles,
   liveEntryDirs,
   metadataDirs,
-  ancestorGit,
 }) {
   const linkTo = async (from, to) => {
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
@@ -1072,27 +1051,6 @@ async function stageProjectOverlay({
     scratchProject,
     sourceRels.map((relative) => relative.split("/")),
   );
-
-  // A `firebase.json` BELOW the checkout root (`-c deploy/firebase.json`) puts
-  // `.git` above the configured project directory, where the walk above never
-  // goes — so the scratch project, a directory under the system temp dir, had
-  // no repository anywhere above it: every `git` call a hook made failed here
-  // and succeeded during the deploy, and if the failing branch happened to
-  // produce a single endpoint the group was wrongly exempted (barrier round on
-  // #1107). The ancestor's `.git` is exposed at the scratch ROOT instead, which
-  // stands in for the repository root: the caller has already staged this
-  // project at its own repository-relative path below that root (see
-  // `stagedProjectPlacement`), so `git rev-parse --show-prefix` answers
-  // `deploy/` here exactly as it will during the deploy, rather than naming
-  // whatever the scratch project happened to be called (Codex P1, round 20).
-  // The root is passed in rather than taken as `dirname(scratchProject)` for
-  // that reason: with the project nested, its parent is no longer the root.
-  // Registering the metadata in `metadataDirs` is what turns the git-answer
-  // fingerprint on, so a hook that moves a ref through this view forfeits
-  // exactly as it does for a checkout-rooted config.
-  if (ancestorGit) {
-    await exposeGitMetadata(ancestorGit, join(scratchRoot, ".git"), links, metadataDirs);
-  }
 }
 
 /**
@@ -1796,13 +1754,17 @@ class RehearsalExit {
  * WHY A SCRATCH PROJECT. Building in place would leave the classifier's own
  * artifacts in the developer's tree. `stageProjectOverlay` builds a temporary
  * project in which every Functions source dir is a copy and everything else is
- * a symlink to the original. It is staged at the project's OWN
- * repository-relative path below the scratch root — see
- * `stagedProjectPlacement` — so a hook that asks `git` where in the checkout it
- * is gets the answer the deploy will give it.
+ * a symlink to the original.
  *
- * FAILS CLOSED on every uncertainty: an unmirrorable source path, a placement
- * below the checkout root that cannot be reproduced, a staging failure, a
+ * WHAT THE EXEMPTION REQUIRES OF THE LAYOUT. `firebase.json` at the CHECKOUT
+ * ROOT. The staging and the fingerprint both start from the configured project
+ * directory, so with the config below a repository root the deploy's inputs are
+ * larger than the watched set and a hook can change one without moving a single
+ * fingerprint. That layout is refused before anything is staged or started —
+ * see `nestedProjectRefusal`.
+ *
+ * FAILS CLOSED on every uncertainty: a config directory below a repository root,
+ * an unmirrorable source path, a staging failure, a
  * symlink out of the staged tree, a non-zero or timed-out hook, a write into
  * the repository metadata, a discovery manifest, an artifact that will not
  * load, or a walk that throws — each of which refuses only what it makes
@@ -1849,6 +1811,17 @@ async function buildAndInventoryProject({
       "FIREBASE_FUNCTIONS_DISCOVERY_OUTPUT_PATH selects a discovery mode this classifier cannot mirror",
     );
   }
+
+  // A `firebase.json` below a repository root makes the deploy's inputs larger
+  // than anything this rehearsal stages or watches, and no hook or probe may run
+  // before that is settled — see `nestedProjectRefusal`. First, therefore: ahead
+  // of the staging, ahead of the scratch directory, and ahead of every child
+  // process.
+  const nested = nestedProjectRefusal(
+    projectDir,
+    existsSync(join(projectDir, ".git")) ? null : nearestAncestorGit(projectDir),
+  );
+  if (nested) return refuseAll(nested);
 
   const relevant = relevantFunctionsConfigs(only, configs);
   const unstageable = relevant.find((config) => !config.sourceRel);
@@ -1932,26 +1905,8 @@ async function buildAndInventoryProject({
    */
   const rehearsalMarker = randomUUID();
 
-  /**
-   * `.git` sitting ABOVE the project directory, which is where a nested
-   * `firebase.json` leaves it. Only consulted when the project directory has
-   * none of its own: that case the overlay already handles, as an entry.
-   */
-  const ancestorGit = existsSync(join(projectDir, ".git"))
-    ? null
-    : nearestAncestorGit(projectDir);
-
-  /**
-   * Where below the scratch root the staged project goes, so that a hook's
-   * `git rev-parse --show-prefix` and `--show-toplevel` answer as they will
-   * during the deploy. Resolved BEFORE the scratch dir exists, so a placement
-   * this classifier cannot reproduce refuses without leaving one behind.
-   */
-  const placement = await stagedProjectPlacement(projectDir, ancestorGit);
-  if (placement.reason) return refuseAll(placement.reason);
-
   const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
-  const scratchProject = join(scratch, placement.rel);
+  const scratchProject = join(scratch, STAGED_PROJECT_DIRNAME);
   /** Every symlink this staging created, so cleanup can unlink them by name. */
   const links = [];
   /** The live directories those symlinks point at — the mutation guard's beat. */
@@ -1967,14 +1922,12 @@ async function buildAndInventoryProject({
       await stageProjectOverlay({
         projectDir,
         scratchProject,
-        scratchRoot: scratch,
         sourceRels: staged.map((config) => config.sourceRel),
         links,
         liveDirs,
         liveFiles,
         liveEntryDirs,
         metadataDirs,
-        ancestorGit,
       });
     } catch (error) {
       return refuseAll(
@@ -2194,20 +2147,13 @@ async function buildAndInventoryProject({
         let probeRoot;
         try {
           probeRoot = await mkdtemp(join(scratch, "probe-"));
-          // At the SAME repository-relative path the staging used, with the
-          // ancestor `.git` at the probe root: a probe that reproduced the
-          // repository but not the placement would answer a different
-          // `--show-prefix` from the hooks that ran before it (Codex P1, round
-          // 20). `copyStagedProject` creates the intermediate directories.
-          const probeProject = join(probeRoot, placement.rel);
+          // At the same place inside its own root the staging used, so a
+          // codebase whose module load asks `git` where it is gets the same
+          // answer the hooks did. The project directory carries its own `.git`
+          // (a nested config never reaches here — `nestedProjectRefusal`), so
+          // `copyStagedProject` brings the whole repository view with it.
+          const probeProject = join(probeRoot, STAGED_PROJECT_DIRNAME);
           await copyStagedProject(scratchProject, probeProject, probeLinks);
-          // The probe copies the PROJECT, so an ancestor repository has to be
-          // exposed above it as well, or a codebase whose module load calls `git`
-          // answers one way in the hooks and another in discovery. Its metadata
-          // dir is already registered by the staging above.
-          if (ancestorGit) {
-            await exposeGitMetadata(ancestorGit, join(probeRoot, ".git"), probeLinks, []);
-          }
           const results = new Map();
           for (const config of selected) {
             results.set(
