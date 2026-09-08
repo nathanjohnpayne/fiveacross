@@ -218,21 +218,61 @@ service cloud.firestore {
     // value the writer clamps in JS UTF-16 units: an emoji-heavy name inside
     // the writer's clamp could fail it, and this arm is reached only after the
     // Event has already been shut.
+    // AND `is number` IS NOT ENOUGH FOR A NUMBER (CodeRabbit, PR #1162). It
+    // admits `NaN` and both infinities, which are Firestore doubles like any
+    // other — so the irreversible flip could persist a headline instant of
+    // `NaN` or a count of `Infinity`, and the archived Leaderboard and Share
+    // Card the record exists to feed would render exactly that, forever.
+    //
+    // Rules have no `isFinite()`, so the estate's own idiom stands in for it: a
+    // magnitude bound, 4102444800000 (2100-01-01T00:00:00Z), already used that
+    // way for `standingsFreezeAt` and for the flip's own `archivedAt`. Every
+    // comparison against `NaN` is false and each infinity fails one side, so a
+    // two-sided bound is the whole check. The magnitude is doing ONE job here —
+    // rejecting the three values `is number` should never have admitted — and is
+    // not a semantic ceiling on either a count or an instant. The record's real
+    // ceiling is bytes, measured twice before the quiesce and again inside the
+    // transaction.
+    //
+    // IT IS TWO-SIDED, not the `> 0` those two fields carry, and that is
+    // deliberate. This arm may only require what the WRITER guarantees, or it
+    // denies after the Event has already been shut — the same trade the string
+    // bound above declines. `players/{uid}` validates no field at all (ADR 0001,
+    // honour system), so a Player can self-write `bingoCount: -1` or
+    // `firstBingoAt: -5` on their own row, and `archiveCount`/`archiveInstant`
+    // COPY those through: the builder coerces what is unreadable, it does not
+    // adjudicate what is merely odd. A non-negative bound would therefore refuse
+    // a legitimate record on a Player row no Admin can edit, on the one write
+    // that cannot be retried. Finiteness is exactly what the writer's own
+    // coercions do promise, so it is exactly what is required here.
+    function finiteArchiveNumber(value) {
+      return value is number && value > -4102444800000 && value < 4102444800000;
+    }
     function firstBingoHonorComplete(honor) {
       return honor.uid is string
         && honor.displayName is string
-        && honor.at is number;
+        && finiteArchiveNumber(honor.at);
     }
     // The holder's own kept row: `ArchivedStandingRow` plus the `rank` that is
     // the whole reason it is carried outside the bounded `standings` prefix.
+    //
+    // `rank` is the one field held to more than finiteness, because it is the
+    // one the writer computes rather than copies: `holderAt + 1` over a
+    // non-negative index, so a POSITIVE INTEGER by construction. The JS SDK
+    // stores an integral number as a Firestore integer, which is what lets `is
+    // int` be asked of it at all — the same footing `usableArchiveToken` already
+    // stands on. A rank of 0, a negative one or a fractional one names a place
+    // in the standings that does not exist, and the pinned row is carried
+    // outside the bounded prefix precisely so that place can be printed.
     function firstBingoRowComplete(row) {
       return row.uid is string
         && row.displayName is string
-        && row.bingoCount is number
-        && row.squaresMarked is number
+        && finiteArchiveNumber(row.bingoCount)
+        && finiteArchiveNumber(row.squaresMarked)
         && row.blackout is bool
-        && (row.firstBingoAt == null || row.firstBingoAt is number)
-        && row.rank is number;
+        && (row.firstBingoAt == null || finiteArchiveNumber(row.firstBingoAt))
+        && row.rank is int
+        && row.rank > 0;
     }
     function firstBingoPairComplete(archive) {
       return (archive.firstBingo == null && archive.firstBingoRow == null)

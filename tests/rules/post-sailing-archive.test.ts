@@ -595,6 +595,68 @@ describe('post-sailing-archive — the archive write must carry the whole record
     }
   });
 
+  // CodeRabbit, PR #1162. `is number` admits `NaN` and both infinities — they
+  // are Firestore doubles like any other — so the irreversible flip could
+  // persist them, and the archived Leaderboard and Share Card the record exists
+  // to feed would render exactly that, forever. Rules have no `isFinite()`, so
+  // the estate's own magnitude idiom stands in for it.
+  it('DENIES a non-finite number anywhere in the First-BINGO pair', async () => {
+    // Firestore's wire format carries these as doubles, so they reach the rules
+    // as numbers — which is the whole point of the finding.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingo: { ...FROZEN_RECORD.firstBingo, at: bad },
+        }),
+      );
+      for (const field of ['bingoCount', 'squaresMarked', 'firstBingoAt'] as const) {
+        await assertFails(
+          archiveWith({
+            ...FROZEN_RECORD,
+            firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, [field]: bad },
+          }),
+        );
+      }
+    }
+  });
+
+  it('DENIES a rank that names no place in the standings', async () => {
+    // The one field the writer COMPUTES rather than copies (`holderAt + 1` over
+    // a non-negative index), so it can be held to more than finiteness: a
+    // positive integer. A fractional rank is stored as a double and fails
+    // `is int`; 0 and a negative one name a place that does not exist.
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, rank: bad },
+        }),
+      );
+    }
+  });
+
+  it('ALLOWS the counts and instants the WRITER can actually produce', async () => {
+    // The bound is TWO-SIDED rather than the `> 0` the Event's own instants
+    // carry, because this arm may only require what the writer guarantees — it
+    // is reached after the Event is already shut. `players/{uid}` validates no
+    // field (ADR 0001), and `archiveCount`/`archiveInstant` COPY a Player's own
+    // odd-but-readable numbers through, so 0 and negatives are legitimate
+    // records and a non-negative bound would refuse one permanently.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingo: { ...FROZEN_RECORD.firstBingo, at: 0 },
+        firstBingoRow: {
+          ...FROZEN_RECORD.firstBingoRow,
+          bingoCount: 0,
+          squaresMarked: -3,
+          firstBingoAt: -5,
+        },
+      }),
+    );
+  });
+
   it('ALLOWS a kept row whose holder never bingoed on a scored Day', async () => {
     // `firstBingoAt` is the one nullable scalar on the row (`archiveInstant`
     // yields `number | null`), so the check is type-or-null there and a bare
