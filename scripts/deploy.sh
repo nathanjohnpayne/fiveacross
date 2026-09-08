@@ -195,7 +195,9 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # For an exact `--only functions:<name>` scope the adapter also BUILDS that
 # codebase — it runs EVERY selected target's own `predeploy` hooks, in the order
 # Firebase runs them and under the environment `op-firebase-deploy` establishes,
-# in a scratch project whose Functions source dirs are copies, then asks that
+# in a scratch project whose Functions source dirs are copies and which sits at
+# the configured project directory's own repository-relative path, so a hook
+# that asks `git` where in the checkout it is gets the deploy's answer, then asks that
 # codebase's OWN Firebase Functions SDK what it would deploy, exactly as the
 # deploy does: it starts the SDK's discovery server and reads
 # `/__/functions.yaml`. That is what decides whether the selector releases

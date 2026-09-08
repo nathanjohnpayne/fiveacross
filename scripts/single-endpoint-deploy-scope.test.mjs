@@ -2348,6 +2348,103 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("places a nested project where the repository says it is", async () => {
+    // Codex P1, round 20 on #1107. Exposing the ancestor `.git` one level above
+    // a scratch directory named `project` made `git` ANSWER, but from the wrong
+    // place: `git rev-parse --show-prefix` was `project/` in the rehearsal and
+    // `deploy/` during the deploy, with `--show-toplevel` one directory off to
+    // match. Nothing MOVED between the runs, so the git-answer fingerprint has
+    // nothing to report — the two runs simply asked from different places — and
+    // a hook doing ordinary repository-root discovery could rehearse a direct
+    // endpoint while the deploy builds a protected group, wrongly disabling
+    // invoker reconciliation.
+    //
+    // The hook below branches on BOTH answers: the prefix literally, and the
+    // toplevel by resolving a deployment input through it. The git-visible
+    // branch is the EXEMPT one, so a run that sees `project/` fails this rather
+    // than passing it for the wrong reason.
+    await withFunctionsProject(
+      {
+        projectSubdir: "deploy",
+        branch: "release",
+        functionsConfig: {
+          predeploy: [
+            'test "$(git rev-parse --show-prefix)" = "deploy/" ' +
+              '&& test -f "$(git rev-parse --show-toplevel)/$(git rev-parse --show-prefix)firebase.json" ' +
+              "&& cp functions/single.js functions/lib/index.js " +
+              "|| cp functions/group.js functions/lib/index.js",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("leaves a checkout-ROOTED project at the repository root it already had", async () => {
+    // The control for the case above: a `firebase.json` at the checkout root
+    // has `.git` as an entry of its own project directory, so `--show-prefix`
+    // is empty on both sides and there is nothing to reproduce. The layout is
+    // deliberately unchanged, and this fails if reproducing the nested
+    // placement moved the rooted one.
+    await withFunctionsProject(
+      {
+        branch: "release",
+        functionsConfig: {
+          predeploy: [
+            'test "$(git rev-parse --show-prefix)" = "" ' +
+              '&& test -f "$(git rev-parse --show-toplevel)/firebase.json" ' +
+              "&& cp functions/single.js functions/lib/index.js " +
+              "|| cp functions/group.js functions/lib/index.js",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("refuses a project reached through a symlinked directory above it", async () => {
+    // The refusal arm of the placement above. `git` answers from the PHYSICAL
+    // directory, so when a segment between the checkout root and the project is
+    // a symlink, the prefix the deploy sees is not the one the configured path
+    // spells and a scratch mirror of that path would trade one divergence for
+    // another. The exemption is refused instead.
+    //
+    // The same fixture classified through its REAL path is the control: without
+    // it this would pass for a fixture that was never exact to begin with.
+    await withFunctionsProject(
+      {
+        projectSubdir: "real/deploy",
+        branch: "release",
+        files: { "functions/lib/index.js": artifact("exports.placeholder = 1;") },
+      },
+      async (configPath) => {
+        const fixture = resolve(dirname(configPath), "..", "..");
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        await symlink(join(fixture, "real"), join(fixture, "link"), "dir");
+        expect(
+          await classify(
+            ["--only", "functions:daily"],
+            join(fixture, "link", "deploy", "firebase.json"),
+          ),
+        ).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
   it("ABORTS when a hook changes what the repository answers", async () => {
     // The other half of exposing `.git`: the view is live, so a hook can write
     // through it. The guard is on what `git` ANSWERS rather than on the files

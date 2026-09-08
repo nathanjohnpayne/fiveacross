@@ -20,7 +20,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -787,6 +787,74 @@ function nearestAncestorGit(projectDir) {
   }
 }
 
+/** Where a checkout-rooted config's staged project sits inside its scratch root. */
+const STAGED_PROJECT_DIRNAME = "project";
+
+/**
+ * WHERE inside a scratch root the staged project has to sit, so that a hook
+ * asking `git` where it is gets the answer the real deploy gives it.
+ *
+ * Exposing the ancestor repository was not enough on its own. `git` answers
+ * more than "a repository is reachable": `git rev-parse --show-prefix` is
+ * `deploy/` when the deploy runs a hook from `deploy/`, and a scratch project
+ * parked at `<scratch>/project` answered `project/` — with `--show-toplevel`
+ * one directory off to match. Nothing MOVED between the two runs, so the
+ * git-answer fingerprint has nothing to report; the two runs simply asked from
+ * different places. Ordinary repository-root discovery (`cd "$(git rev-parse
+ * --show-toplevel)"`, or a prefix-keyed lookup) can therefore select a direct
+ * endpoint in the rehearsal and a protected group in the real deploy, and the
+ * exemption wrongly disables invoker reconciliation (Codex P1, round 20 on
+ * #1107). The project is staged at its own repository-relative path instead —
+ * `<scratch>/deploy` — with the ancestor `.git` exposed at the scratch ROOT.
+ *
+ * A checkout-rooted config keeps the layout it already had. Its `.git` is an
+ * ENTRY of the project directory, so `--show-prefix` is empty on both sides and
+ * there is nothing to reproduce.
+ *
+ * REFUSES rather than approximates when the placement cannot be reproduced: a
+ * relative path that climbs out of the scratch root, or one whose segments are
+ * not plain directories in the live tree. `git` answers from the PHYSICAL
+ * directory, so a symlinked segment means the prefix the deploy sees is not the
+ * one this relative path spells — mirroring it would trade one divergence for
+ * another rather than close it.
+ */
+async function stagedProjectPlacement(projectDir, ancestorGit) {
+  if (!ancestorGit) return { rel: STAGED_PROJECT_DIRNAME, reason: null };
+  const repoRoot = dirname(ancestorGit);
+  const rel = relative(repoRoot, projectDir);
+  if (rel === "" || isAbsolute(rel) || rel.split(sep).includes("..")) {
+    return {
+      rel: null,
+      reason:
+        `the project directory's placement below the checkout root ${repoRoot} cannot be reproduced ` +
+        "in a scratch root, so a hook's view of where in the repository it is cannot be rehearsed",
+    };
+  }
+  let at = repoRoot;
+  for (const segment of rel.split(sep)) {
+    at = join(at, segment);
+    let entry;
+    try {
+      entry = await lstat(at);
+    } catch (error) {
+      return {
+        rel: null,
+        reason: `${at} could not be read, so the project's placement below the checkout root cannot be reproduced (${error?.code ?? "?"})`,
+      };
+    }
+    // `lstat` reports a symlink as a symlink, so this rejects a symlinked
+    // segment as well as a non-directory one — both mean `git` will answer from
+    // a path this relative one does not spell.
+    if (!entry.isDirectory()) {
+      return {
+        rel: null,
+        reason: `${at} is not a plain directory, so the project's placement below the checkout root cannot be mirrored`,
+      };
+    }
+  }
+  return { rel, reason: null };
+}
+
 /**
  * The repository's own metadata, exposed at `to` so a `git` call from a build
  * answers as it does during the deploy, and registered so that a change in what
@@ -854,6 +922,7 @@ async function exposeGitMetadata(from, to, links, metadataDirs) {
 async function stageProjectOverlay({
   projectDir,
   scratchProject,
+  scratchRoot,
   sourceRels,
   links,
   liveDirs,
@@ -1010,15 +1079,19 @@ async function stageProjectOverlay({
   // no repository anywhere above it: every `git` call a hook made failed here
   // and succeeded during the deploy, and if the failing branch happened to
   // produce a single endpoint the group was wrongly exempted (barrier round on
-  // #1107). The ancestor's `.git` is exposed one level above the scratch
-  // project instead. Depth is not load-bearing: the commit, the branch, the
-  // nearest tag and the remote-tracking refs are properties of the REPOSITORY
-  // rather than of where in it the call is made, and `git` walks up until it
-  // finds one either way. Registering it in `metadataDirs` is what turns the
-  // git-answer fingerprint on, so a hook that moves a ref through this view
-  // forfeits exactly as it does for a checkout-rooted config.
+  // #1107). The ancestor's `.git` is exposed at the scratch ROOT instead, which
+  // stands in for the repository root: the caller has already staged this
+  // project at its own repository-relative path below that root (see
+  // `stagedProjectPlacement`), so `git rev-parse --show-prefix` answers
+  // `deploy/` here exactly as it will during the deploy, rather than naming
+  // whatever the scratch project happened to be called (Codex P1, round 20).
+  // The root is passed in rather than taken as `dirname(scratchProject)` for
+  // that reason: with the project nested, its parent is no longer the root.
+  // Registering the metadata in `metadataDirs` is what turns the git-answer
+  // fingerprint on, so a hook that moves a ref through this view forfeits
+  // exactly as it does for a checkout-rooted config.
   if (ancestorGit) {
-    await exposeGitMetadata(ancestorGit, join(dirname(scratchProject), ".git"), links, metadataDirs);
+    await exposeGitMetadata(ancestorGit, join(scratchRoot, ".git"), links, metadataDirs);
   }
 }
 
@@ -1723,14 +1796,18 @@ class RehearsalExit {
  * WHY A SCRATCH PROJECT. Building in place would leave the classifier's own
  * artifacts in the developer's tree. `stageProjectOverlay` builds a temporary
  * project in which every Functions source dir is a copy and everything else is
- * a symlink to the original.
+ * a symlink to the original. It is staged at the project's OWN
+ * repository-relative path below the scratch root — see
+ * `stagedProjectPlacement` — so a hook that asks `git` where in the checkout it
+ * is gets the answer the deploy will give it.
  *
- * FAILS CLOSED on every uncertainty: an unmirrorable source path, a staging
- * failure, a symlink out of the staged tree, a non-zero or timed-out hook, a
- * write into the repository metadata, a discovery manifest, an artifact that
- * will not load, or a walk that throws — each of which refuses only what it
- * makes unprovable, except a hook failure, which refuses the whole project
- * because the tree left behind is not the one the deploy will produce.
+ * FAILS CLOSED on every uncertainty: an unmirrorable source path, a placement
+ * below the checkout root that cannot be reproduced, a staging failure, a
+ * symlink out of the staged tree, a non-zero or timed-out hook, a write into
+ * the repository metadata, a discovery manifest, an artifact that will not
+ * load, or a walk that throws — each of which refuses only what it makes
+ * unprovable, except a hook failure, which refuses the whole project because
+ * the tree left behind is not the one the deploy will produce.
  *
  * A write that reached the WORKING TREE is the one outcome that is not a
  * refusal at all: it THROWS `LiveCheckoutDriftError`, which aborts the deploy.
@@ -1864,8 +1941,17 @@ async function buildAndInventoryProject({
     ? null
     : nearestAncestorGit(projectDir);
 
+  /**
+   * Where below the scratch root the staged project goes, so that a hook's
+   * `git rev-parse --show-prefix` and `--show-toplevel` answer as they will
+   * during the deploy. Resolved BEFORE the scratch dir exists, so a placement
+   * this classifier cannot reproduce refuses without leaving one behind.
+   */
+  const placement = await stagedProjectPlacement(projectDir, ancestorGit);
+  if (placement.reason) return refuseAll(placement.reason);
+
   const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
-  const scratchProject = join(scratch, "project");
+  const scratchProject = join(scratch, placement.rel);
   /** Every symlink this staging created, so cleanup can unlink them by name. */
   const links = [];
   /** The live directories those symlinks point at — the mutation guard's beat. */
@@ -1881,6 +1967,7 @@ async function buildAndInventoryProject({
       await stageProjectOverlay({
         projectDir,
         scratchProject,
+        scratchRoot: scratch,
         sourceRels: staged.map((config) => config.sourceRel),
         links,
         liveDirs,
@@ -2107,7 +2194,12 @@ async function buildAndInventoryProject({
         let probeRoot;
         try {
           probeRoot = await mkdtemp(join(scratch, "probe-"));
-          const probeProject = join(probeRoot, "project");
+          // At the SAME repository-relative path the staging used, with the
+          // ancestor `.git` at the probe root: a probe that reproduced the
+          // repository but not the placement would answer a different
+          // `--show-prefix` from the hooks that ran before it (Codex P1, round
+          // 20). `copyStagedProject` creates the intermediate directories.
+          const probeProject = join(probeRoot, placement.rel);
           await copyStagedProject(scratchProject, probeProject, probeLinks);
           // The probe copies the PROJECT, so an ancestor repository has to be
           // exposed above it as well, or a codebase whose module load calls `git`
