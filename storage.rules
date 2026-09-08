@@ -68,8 +68,12 @@ service firebase.storage {
     // client paths recoverable across the quiesce. An `attachProof` upload whose
     // Proof/Board transaction is then denied by the freeze leaves exactly such a
     // blob, and `deleteProof` (which now commits BEFORE revoking the media)
-    // retries exactly such a blob from its durable queue. Without the carve-out
-    // both are permanent litter in the one Event nothing can be re-posted to.
+    // revokes exactly such a blob — inline, and again from the durable tombstone
+    // its commit wrote (`events/{eventId}/proofStorageDeletes/{proofId}`, #1153)
+    // when the inline attempt fails. Without the carve-out both are permanent
+    // litter in the one Event nothing can be re-posted to. The tombstone's own
+    // sweeper does not need it: `revokeDeletedProofMedia` runs on the Admin SDK,
+    // which bypasses these rules entirely.
     //
     // `{file}` is `<proofId>.<ext>` — `uploadProofMedia` writes that shape and
     // only that shape (`src/data/storage.ts`), and `firestore.rules` pins the

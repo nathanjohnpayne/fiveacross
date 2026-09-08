@@ -1977,6 +1977,98 @@ service cloud.firestore {
           || (isOwner(resource.data.uid) && eventOpenForPlay(eventId));
       }
 
+      // Pending Storage revocations for deleted Proof media (#134 child 5,
+      // #1153). `deleteProof` commits the Proof document's removal and the
+      // media's revocation as two separate operations against two services, and
+      // the Firestore half goes first so a failed blob delete cannot orphan a
+      // surviving Proof row. That commit also destroys the only record of what
+      // was supposed to be deleted, so a Storage failure afterwards used to
+      // leave media reachable through its download URL with nothing anywhere
+      // saying otherwise. This collection IS that record: written in the same
+      // transaction as the Proof delete, removed once the object is provably
+      // gone, and swept server-side (`revokeDeletedProofMedia`) so a client that
+      // never comes back does not strand the media.
+      //
+      // The document id IS the Proof's own id — one pending revocation per
+      // Proof — which is what lets the object path be pinned by string
+      // EQUALITY below rather than by a regex interpolating path variables.
+      //
+      // WHO MAY WRITE ONE is the Proof delete arm's own predicate, restated
+      // verbatim: exactly the callers who could delete the Proof this
+      // accompanies, and no others. The admin branch is deliberately NOT gated
+      // on `eventOpenForPlay` — moderation is not a gameplay write and the
+      // takedown must reach an archived Event (#808), and a denial HERE would
+      // fail the whole transaction, which is the exact failure this ticket
+      // already fixed once on the Board unmark.
+      //
+      // It grants no capability that did not already exist: `storage.rules`
+      // lets an Event Admin, and the media's own owner, delete that object
+      // directly today. What it adds is durability, so the tightest shape the
+      // rule can state is the whole point — the path is pinned to the object
+      // named after THIS document's Proof id, under the uid the row itself
+      // declares, inside THIS Event.
+      match /proofStorageDeletes/{proofId} {
+        // Clients never read the queue and never mutate a row. Update is denied
+        // outright rather than shape-checked, so a pending revocation can never
+        // be re-pointed at another object after the fact; the create arm below
+        // admits a row only alongside its own Proof's deletion, so a legitimate
+        // `set` is always a create and never meets this arm.
+        allow read, update: if false;
+        allow create: if (isAdmin(eventId)
+                          || (isOwner(request.resource.data.uid) && eventOpenForPlay(eventId)))
+          // BOUND TO A REAL PROOF, OWNED BY THE UID THE ROW DECLARES, so the
+          // row names the object THAT Proof named rather than merely a
+          // well-formed path. The Proof still exists at this evaluation —
+          // rules see the state before the transaction's own delete applies —
+          // so the check costs one document. `exists()` first, so a missing
+          // Proof is a clean false rather than an evaluation error (the
+          // `isEventMember` idiom above).
+          && exists(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId))
+          && get(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId)).data.uid == request.resource.data.uid
+          // AND THE PROOF MUST BE GONE WHEN THIS REQUEST FINISHES (#1147).
+          // Binding the row to a LIVE Proof was not enough on its own: an owner
+          // could mint their own Proof's tombstone WITHOUT deleting it, and
+          // then `deleteProof`'s `set` — an update against that standing row —
+          // hit the `update: if false` above and took the whole admin takedown
+          // down with it. One Player could make every media Proof in the Event
+          // permanently un-deletable, and the sweeper would meanwhile revoke
+          // media a surviving Feed entry still points at. `existsAfter` closes
+          // both at once by admitting the row only as part of the very
+          // transaction that removes its Proof, so a standing row always means
+          // a Proof that is already gone and a `set` is always a create.
+          // Rules cannot see the OTHER writes in a request, but they can see
+          // the projected state of a named document, which is exactly the
+          // accompanying delete this needs to require.
+          && !existsAfter(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId))
+          // Exactly these three keys, no more and no fewer.
+          && request.resource.data.keys().hasOnly(['storagePath', 'uid', 'requestedAt'])
+          && request.resource.data.keys().hasAll(['storagePath', 'uid', 'requestedAt'])
+          && request.resource.data.uid is string
+          && request.resource.data.storagePath is string
+          // `requestedAt` is operational only (how long has this been pending).
+          // Type-checked, deliberately NOT bounded to `request.time`: a skewed
+          // clock would then deny the write, and a denial here fails the whole
+          // takedown, while a wrong stamp cannot redirect the delete.
+          && request.resource.data.requestedAt is number
+          // The EXACT object `uploadProofMedia` names for this Proof — the same
+          // three shapes the Proof create arm above pins `storagePath` to. A row
+          // naming another Player's object, another Proof's object, or anything
+          // outside this Event's prefix is refused here rather than left for the
+          // sweeper to notice.
+          && (request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.jpg'
+              || request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.webm'
+              || request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.m4a');
+        // Retiring a discharged revocation. The Admin SDK sweeper bypasses these
+        // rules; this arm is for the client that just watched its own Storage
+        // delete succeed. Ungated by the freeze on purpose — a tombstone that
+        // could not be cleared after the media was revoked would be swept
+        // forever, and clearing one can only ever leave an object in place that
+        // its own deleter is already entitled to remove (and which, since the
+        // create arm requires the Proof's deletion, is an ORPHAN the owner may
+        // clear directly under `storage.rules` in every state).
+        allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
+      }
+
       // The Vision scanner's hand-off record (#1143, specs/cloud-vision-moderation.md
       // § "The scanner never creates the Proof"). moderateProof is a STORAGE trigger
       // and attachProof uploads the media BEFORE the transaction that writes the
