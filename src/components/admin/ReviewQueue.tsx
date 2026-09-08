@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
+import { safetyHideStands } from '../../data/moderation';
 import {
   confirmClaim,
   rejectClaim,
@@ -85,16 +86,45 @@ export function BanControl({
 }
 
 /**
+ * What Restore is about to do, in the two dimensions the admin cannot see from the
+ * label: where the Proof lands, and what verdict is being overridden to send it
+ * there. Absent when there is nothing extra to say, so the ordinary report-count
+ * Restore carries no tooltip at all — exactly as before #133.
+ */
+function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boolean): string | undefined {
+  const destination = claimUndecided
+    ? 'Put this proof back for claim review; it stays out of the Feed until the claim is confirmed.'
+    : 'Put this proof back in the Feed.';
+  if (!visionFlag) return claimUndecided ? destination : undefined;
+  return `${destination} The AI screen flagged it: ${visionFlag}.`;
+}
+
+/**
  * One reported-Proof row in the Reports group. `Clear reports` lifts the ADR
  * 0004 Phase 0 community auto-hide by zeroing reportCount — rendered ONLY when the
  * row is actually auto-hidden (the only state with a hide to lift; Codex P2, PR
  * #107 finding 3). It is distinct from Restore, which lifts the `status` hard-hide,
  * so a doubly-hidden row (status hidden AND over threshold) shows both. `Ban author`
  * mutes the Proof's owner across the event (#108); the row stays reachable after.
+ *
+ * The Vision treatment (#133) is deliberately a SEPARATE pill from `auto-hidden`,
+ * because the two hides are separate mechanisms an admin resolves differently: a
+ * report-count hide is lifted with `Clear reports` (zero the counter), a Vision
+ * hide with `Restore` (there is no counter to clear). The pill states two facts
+ * the row already carries and never infers a cause — `hidden` from `status`, the
+ * verdict from `visionFlag` — so a Proof an admin restored after a Vision hide,
+ * and one the community later re-reported over the threshold, each read
+ * truthfully rather than being labelled with whichever hide came first.
+ *
+ * `claimUndecided` is the other thing Restore has to say. In admin_confirmed mode
+ * a hidden Proof may still be backing a claim nobody has judged, and `restoreProof`
+ * returns THAT Proof to `'pending'` rather than publishing it — so the row says so
+ * before the click, not after (#133, Codex P1 round 2).
  */
 function ProofQueueRow({
   proof: p,
   threshold,
+  claimUndecided,
   bannedUids,
   admins,
   days,
@@ -103,6 +133,8 @@ function ProofQueueRow({
 }: {
   proof: ProofDoc;
   threshold: number | undefined;
+  /** Is a still-pending claim backing this Proof? Restore returns it for review, not to the Feed. */
+  claimUndecided: boolean;
   bannedUids: string[];
   admins: string[];
   // The Event's Day schedule (#246): present ⇒ daily-cards mode, so a proof
@@ -117,18 +149,31 @@ function ProofQueueRow({
   standingsFreezeAt?: number;
 }) {
   const autoHidden = isReportHidden(p.reportCount, threshold);
+  // #133: the AI screen's verdict, and whether the Proof is currently hidden —
+  // two independent facts, so the pill never claims the AI screen caused a hide
+  // that the report threshold or an admin actually made.
+  const visionHidden = p.status === 'hidden' && !!p.visionFlag;
   return (
     <div className="row">
       <div className="grow">
         <div className="name">
           {p.displayName}
           <span className="pill">{p.reportCount} ⚑</span>
-          {p.visionFlag && <span className="pill">{p.visionFlag}</span>}
+          {p.visionFlag && (
+            <span className={visionHidden ? 'pill pill-hidden' : 'pill'}>
+              {visionHidden ? `hidden · AI screen: ${p.visionFlag}` : `AI screen: ${p.visionFlag}`}
+            </span>
+          )}
           {autoHidden && <span className="pill pill-hidden">auto-hidden</span>}
         </div>
         <div className="sub">
           proof · {p.type} · {p.itemText}
         </div>
+        {p.status === 'hidden' && claimUndecided && (
+          <div className="sub">
+            A claim on this proof is still pending. Restore returns it for review, not to the Feed.
+          </div>
+        )}
       </div>
       {autoHidden && (
         <AsyncButton onAction={() => clearProofReports(p.id)}>
@@ -136,10 +181,30 @@ function ProofQueueRow({
         </AsyncButton>
       )}
       {p.status === 'hidden' ? (
-        <AsyncButton onAction={() => restoreProof(p.id)}>
+        // Restore keeps its exact label in every state — it is the same write —
+        // but says what it is about to undo when an AI verdict stands, because
+        // that is the one Restore that puts extreme/illegal media back in front
+        // of Players. `visionFlag` survives the write (src/data/admin.ts), so the
+        // row keeps its `AI screen: …` pill afterwards and the override stays
+        // visible and re-hideable rather than disappearing from the queue.
+        //
+        // It also says WHERE the Proof is going. `restoreProof` restores a Proof
+        // whose claim is still pending to `'pending'`, not `'active'`, so the
+        // photo goes back to the claim queue rather than into the Feed ahead of
+        // the decision — the title and the line above it name that, so the two
+        // Restores are never confused for one another.
+        <AsyncButton
+          title={restoreTitle(p.visionFlag, claimUndecided)}
+          onAction={() => restoreProof(p.id)}
+        >
           Restore
         </AsyncButton>
       ) : (
+        // Offered on a 'flagged' row too — the row renders the moment the verdict
+        // lands, and the trigger's hide is not instantaneous. Clicking there is
+        // agreement with the AI screen, not an override, so `hideProof` carries
+        // the standing safety hold onto the hidden doc rather than demoting it to
+        // a plain hide a later Confirm would publish (src/data/admin.ts).
         <AsyncButton onAction={() => hideProof(p.id)}>
           Hide
         </AsyncButton>
@@ -353,6 +418,37 @@ export default function ReviewQueue({
   const admins = event?.admins ?? [];
   const claimsVisible = event?.claimMode === 'admin_confirmed';
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
+  // #133: the safety hold standing on a pending claim's Proof, keyed by proof id.
+  // Cloud Vision scans the uploaded object, so a claim's photo can be flagged and
+  // safety-hidden BEFORE the claim is reviewed — and `confirmClaim` deliberately
+  // does NOT publish such a Proof (src/data/admin.ts), because Confirm shows only
+  // the submitter and the Prompt and is not the warned moderation Restore. The
+  // row says so rather than leaving the admin to discover it: the Mark is
+  // confirmed, the photo stays hidden. Derived from the Reports group's own rows,
+  // which `useReportedProofs` already queues on its `visionFlag` arm — no second
+  // subscription, no per-claim read.
+  //
+  // Membership is the SAME server-owned predicate `confirmClaim` gates on, so the
+  // row can never promise one thing and the write do another. The verdict rides
+  // along only as COPY for the pill; it is never what decides (Codex P1 round 2).
+  const heldClaimProofs = new Map<string, string | null>();
+  for (const row of reports) {
+    if (row.kind === 'proof' && safetyHideStands(row.proof)) {
+      heldClaimProofs.set(row.proof.id, row.proof.visionFlag ?? null);
+    }
+  }
+  // #133: the Proofs whose claim nobody has judged yet, so the Reports group's
+  // Restore can say where the photo is going. `restoreProof` returns such a Proof
+  // to `'pending'` rather than publishing it `'active'` — an unconditional publish
+  // would put it in the Feed ahead of the decision, and a later reject would leave
+  // it there (rejectClaim deliberately writes nothing to the Proof). Derived from
+  // `usePendingClaims`, which the console already subscribes to for the group
+  // below, and read whatever the claim mode is: a Proof left pending by a mode
+  // switch is still a Proof no confirm has published.
+  const undecidedClaimProofs = new Set<string>();
+  for (const c of claims) {
+    if (c.proofId) undecidedClaimProofs.add(c.proofId);
+  }
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
   // paths go through it, and the bulk one is the easy miss: a batch containing
   // one explicit Prompt flips the Event just as surely as approving that Prompt
@@ -581,6 +677,7 @@ export default function ReviewQueue({
                 key={`proof-${entry.proof.id}`}
                 proof={entry.proof}
                 threshold={threshold}
+                claimUndecided={undecidedClaimProofs.has(entry.proof.id)}
                 bannedUids={bannedUids}
                 admins={admins}
                 days={event?.days}
@@ -637,20 +734,36 @@ export default function ReviewQueue({
           <h3>Pending claims{claims.length ? ` (${claims.length})` : ''}</h3>
           {!claims.length && <p className="muted" style={{ fontSize: 12 }}>Nothing to confirm.</p>}
           <div className="list">
-            {claims.map((c) => (
-              <div key={c.id} className="row">
-                <div className="grow">
-                  <div className="name">{c.displayName}</div>
-                  <div className="sub">{c.itemText}</div>
+            {claims.map((c) => {
+              const held = c.proofId ? heldClaimProofs.has(c.proofId) : false;
+              const verdict = c.proofId ? heldClaimProofs.get(c.proofId) : null;
+              return (
+                <div key={c.id} className="row">
+                  <div className="grow">
+                    <div className="name">
+                      {c.displayName}
+                      {held && (
+                        <span className="pill pill-hidden">
+                          {verdict ? `hidden · AI screen: ${verdict}` : 'hidden · safety hold'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="sub">{c.itemText}</div>
+                    {held && (
+                      <div className="sub">
+                        Confirming credits the mark; the photo stays hidden for moderation.
+                      </div>
+                    )}
+                  </div>
+                  <AsyncButton onAction={() => confirmClaim(c, adminUid)}>
+                    Confirm
+                  </AsyncButton>
+                  <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectClaim(c, adminUid)}>
+                    ✕
+                  </AsyncButton>
                 </div>
-                <AsyncButton onAction={() => confirmClaim(c, adminUid)}>
-                  Confirm
-                </AsyncButton>
-                <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectClaim(c, adminUid)}>
-                  ✕
-                </AsyncButton>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
