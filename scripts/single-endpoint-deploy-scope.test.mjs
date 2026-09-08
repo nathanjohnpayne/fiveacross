@@ -933,6 +933,83 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("refuses a dependency that reads the legacy runtime config as it loads", async () => {
+    // Barrier round on #1107: the loader-frame exemption waved through EVERY
+    // read reached through a module load, on the reasoning that only the SDK's
+    // own v1 `config.js` reads the value that way. Any dependency can do the
+    // same — read it as it initialises and export what it found — and the
+    // entrypoint then branches on a value this classifier cannot reproduce,
+    // with a `require` frame standing between them. The exemption is the SDK's
+    // alone; this read counts as a consultation.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/node_modules/config-reading-package/package.json": JSON.stringify({
+            name: "config-reading-package",
+            version: "0.0.0",
+            main: "index.js",
+          }),
+          "functions/node_modules/config-reading-package/index.js":
+            'exports.runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");\n',
+          "functions/lib/index.js": artifact(
+            [
+              'const dep = require("config-reading-package");',
+              "exports.daily = dep.runtime.someLegacyNamespace",
+              "  ? { submitBugReport: endpoint() }",
+              "  : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts the SDK's own load-time read of the legacy runtime config", async () => {
+    // The control for the rule above, and the reason it is not simply "every
+    // load-time read is a consultation": `firebase-functions` reads
+    // `CLOUD_RUNTIME_CONFIG` as it initialises, beneath the codebase's
+    // top-level `require`, and refusing that would refuse every codebase that
+    // imports the SDK.
+    //
+    // The reading package is installed at `functions/lib/node_modules`, which
+    // Node resolves before `functions/node_modules`, so the read comes from a
+    // file inside a `node_modules/firebase-functions` directory — the property
+    // the exemption is keyed on — while the real SDK the discovery binary runs
+    // from is left exactly where it is. (The pinned SDK no longer reads the
+    // variable at all, so its own initialisation cannot stand in for itself.)
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/node_modules/firebase-functions/package.json": JSON.stringify({
+            name: "firebase-functions",
+            version: "0.0.0",
+            main: "index.js",
+          }),
+          "functions/lib/node_modules/firebase-functions/index.js":
+            'exports.runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");\n',
+          "functions/lib/index.js": artifact(
+            [
+              'const sdk = require("firebase-functions");',
+              "exports.daily = sdk.runtime.someLegacyNamespace",
+              "  ? { submitBugReport: endpoint() }",
+              "  : endpoint();",
+            ].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
   it("refuses even when the artifact tries to erase the evidence", async () => {
     // The verdict used to be a marker FILE whose path had to be in the
     // environment for the preload to find it — which put it within reach of the

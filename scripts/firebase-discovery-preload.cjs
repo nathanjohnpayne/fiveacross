@@ -17,6 +17,13 @@
  * `functions.config()` API. Every access form is trapped, not just `get`: a
  * membership test or a descriptor read hands the value over just as well.
  *
+ * The one read that is NOT a consultation is `firebase-functions` initialising
+ * itself: its v1 `config.js` reads the variable while the codebase's top-level
+ * `require` is still running. That exemption belongs to the SDK alone — see
+ * `calledFromCodebase` — because any other dependency can read the value as it
+ * loads and export what it found for the entrypoint to branch on, which is the
+ * codebase consulting it with a `require` frame in the way.
+ *
  * The verdict reaches the classifier over FILE DESCRIPTOR 3, which the parent
  * opened and holds. This module has no channel to the HTTP response the SDK
  * serves, and a marker FILE was the wrong substitute: its path had to be in the
@@ -105,6 +112,24 @@ function sourceRoot() {
 }
 
 /**
+ * Whether a stack frame's file sits inside an installed `firebase-functions`.
+ *
+ * The SDK is the ONE dependency whose load-time read of `CLOUD_RUNTIME_CONFIG`
+ * is initialisation rather than consultation, so it is the one whose frames
+ * that read earns an exemption. Matched on the package DIRECTORY
+ * (`node_modules/firebase-functions/...`), so a nested or pnpm-style install
+ * answers the same while a package whose name merely starts with it does not.
+ */
+function insideFunctionsSdk(file) {
+  if (!file) return false;
+  const segments = file.split(path.sep);
+  for (let at = 0; at + 1 < segments.length; at += 1) {
+    if (segments[at] === "node_modules" && segments[at + 1] === "firebase-functions") return true;
+  }
+  return false;
+}
+
+/**
  * Whether the codebase is anywhere in the call that is reading the environment.
  *
  * The WHOLE stack, not just its first frame. Stopping at the first non-preload
@@ -145,14 +170,21 @@ function calledFromCodebase() {
     Error.prepareStackTrace = previousPrepare;
   }
   // A module-loader frame between the reader and the codebase means the read
-  // happened while a dependency was being LOADED — `firebase-functions`'s own
-  // v1 `config.js` reads the variable at module load, beneath the codebase's
-  // top-level `require` — which is the dependency initialising itself, not the
-  // codebase consulting the value. A codebase that does consult it calls into
-  // the SDK directly, with no loader frame in between; and a dependency that
-  // reads it through a long chain of helper frames (Phase 4b P2, run 5) has no
-  // loader frame in between either, so the full stack above finds the caller.
+  // happened while a dependency was being LOADED, beneath the codebase's own
+  // top-level `require`. That is the SDK initialising itself — and ONLY the
+  // SDK (barrier round on #1107). Exempting every load-time read let any
+  // dependency read the value as it loaded and export what it found for the
+  // entrypoint to branch on, which is the codebase consulting a value this
+  // classifier cannot reproduce with one `require` frame standing in the way.
+  // So a load-time read is settled by the READER — the frame that actually
+  // touched `process.env` — rather than by the mere presence of a loader
+  // frame. A codebase that consults the value itself calls in directly, with
+  // no loader frame in between; and a dependency that reads it through a long
+  // chain of helper frames (Phase 4b P2, run 5) has no loader frame in between
+  // either, so the full stack above finds the caller.
   let loaderBetween = false;
+  /** The frame that read the value: the first frame that is not this preload. */
+  let reader = null;
   for (const line of stack.split("\n").slice(1)) {
     if (/\bModule\.(?:_load|_compile|require|load)\b|node:internal\/modules\//.test(line)) {
       loaderBetween = true;
@@ -172,8 +204,12 @@ function calledFromCodebase() {
       }
     }
     if (file === __filename) continue;
+    if (reader === null) reader = file;
     if (file.split(path.sep).includes("node_modules")) continue;
-    if (file.startsWith(root)) return !loaderBetween;
+    if (file.startsWith(root)) {
+      if (!loaderBetween) return true;
+      return !insideFunctionsSdk(reader);
+    }
   }
   return false;
 }
