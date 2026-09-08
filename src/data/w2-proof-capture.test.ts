@@ -739,6 +739,57 @@ describe('attachProof — ONLINE-only: it rejects offline rather than queuing (A
   });
 });
 
+describe('attachProof — rolls the upload back when the transaction is refused (#134, #1157)', () => {
+  // Codex P1, PR #1157. The media has to be uploaded BEFORE the transaction —
+  // `firestore.rules` pins the Proof document's `storagePath`/`mediaURL` to the
+  // exact object — so every rejection leaves a blob no document points at. The
+  // freeze made one of those rejections routine: an Admin committing
+  // `archiving: true` between the upload resolving and the transaction reading
+  // denies the write, and the archive keeps the blob forever. `storage.rules`
+  // authorises this cleanup in every state through its ORPHAN carve-out.
+  const photoProof = () => ({
+    ...baseArgs,
+    claimMode: 'proof_required' as const,
+    proof: { type: 'photo' as const, blob: new Blob(['x'], { type: 'image/jpeg' }) },
+  });
+
+  it('deletes the object it just uploaded when the transaction is denied', async () => {
+    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+
+    await expect(attachProof(photoProof())).rejects.toThrow('permission-denied');
+
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/UPLOADED.jpg`);
+  });
+
+  it('deletes NOTHING when the transaction commits', async () => {
+    await attachProof(photoProof());
+
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('deletes nothing for a TEXT proof, which uploaded no object to roll back', async () => {
+    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+
+    await expect(
+      attachProof({ ...baseArgs, claimMode: 'proof_required', proof: { type: 'text', text: 'hi' } }),
+    ).rejects.toThrow('permission-denied');
+
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT let a failing cleanup mask the original error', async () => {
+    // The cleanup is a courtesy on a path that has already failed. Replacing
+    // "your proof did not post" with a Storage error would tell the Player
+    // about the wrong failure, and about one they can do nothing with.
+    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/unauthorized'));
+
+    await expect(attachProof(photoProof())).rejects.toThrow('permission-denied');
+
+    expect(deleteStorageSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002, specs/w2-tally.md)', () => {
   // #31 AC 3 + ADR 0002: a Mark is private on the Board but PUBLIC as an attributed
   // per-Prompt Tally; EVERY Mark — proofed or not — publishes a marker. setMark does

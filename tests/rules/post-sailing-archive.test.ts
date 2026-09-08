@@ -52,6 +52,10 @@ const BOB = 'bob';
 const ADMIN = 'admin-uid';
 const ITEM = 'prompt-1';
 const PROOF = 'proof-1';
+/** A SECOND seeded Proof document, so the Storage cases have two distinct media
+ *  objects a live Proof still points at — the shape the freeze protects, as
+ *  opposed to the ORPHANED blob the delete arm's carve-out releases (#1157). */
+const PROOF_MEDIA = 'proof-media';
 const NOW = () => Date.now();
 const PAST = () => NOW() - 3_600_000;
 
@@ -65,7 +69,11 @@ const unauthDb = () => testEnv.unauthenticatedContext().firestore();
 const storageOf = (uid: string) => testEnv.authenticatedContext(uid).storage();
 
 const eventPath = (eventId = EVENT) => `events/${eventId}`;
+// `uploadProofMedia` writes `proofs/{eventId}/{uid}/{proofId}.{ext}`, so the
+// object's basename IS the Proof id — which is how the delete arm tells media a
+// Proof document still points at from an orphaned blob (#1157).
 const photoPath = `proofs/${EVENT}/${ALICE}/${PROOF}.jpg`;
+const mediaProofPath = `proofs/${EVENT}/${ALICE}/${PROOF_MEDIA}.jpg`;
 const TINY = new Uint8Array(64);
 const IMAGE = { contentType: 'image/jpeg' };
 
@@ -167,12 +175,12 @@ beforeEach(async () => {
       reportCount: 0,
       spicy: false,
     });
-    await setDoc(doc(fs, `${eventPath()}/proofs/${PROOF}`), {
+    const seededProof = (cellIndex: number) => ({
       uid: ALICE,
       displayName: 'Alice',
       photoURL: null,
       type: 'text',
-      cellIndex: 3,
+      cellIndex,
       itemText: 'Something happens',
       storagePath: null,
       mediaURL: null,
@@ -185,6 +193,8 @@ beforeEach(async () => {
       source: null,
       dayIndex: 0,
     });
+    await setDoc(doc(fs, `${eventPath()}/proofs/${PROOF}`), seededProof(3));
+    await setDoc(doc(fs, `${eventPath()}/proofs/${PROOF_MEDIA}`), seededProof(4));
     // Alice's standing Mark on the shared Prompt — the precondition a Doubt
     // against her needs, and the marker whose own writes freeze below.
     await setDoc(doc(fs, `${eventPath()}/tally/${ITEM}/markers/${ALICE}`), {
@@ -729,8 +739,12 @@ describe.each([
     // leaving a Feed entry whose image can never load, on the one Event where
     // nothing can be re-posted. The ADMIN takedown is deliberately untouched:
     // a frozen record that locks out its own Admin is #808's incident again.
-    const ownerBlob = `proofs/${EVENT}/${ALICE}/owner-delete.jpg`;
-    const adminBlob = `proofs/${EVENT}/${ALICE}/admin-takedown.jpg`;
+    //
+    // BOTH blobs are backed by a seeded Proof DOCUMENT, which is what puts them
+    // inside the freeze at all: the carve-out below releases only media nothing
+    // points at, so a case built on orphans would prove the opposite of this one.
+    const ownerBlob = photoPath;
+    const adminBlob = mediaProofPath;
     // Live controls: BOTH deletes work while the Event is open to play, so the
     // denial below is a claim about the freeze rather than about the arm.
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
@@ -747,6 +761,20 @@ describe.each([
     // down — which is also the proof that the admin arm did not simply run out
     // of Firestore accesses and fail closed.
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), ownerBlob)));
+  });
+
+  it('RELEASES an ORPHANED blob to its owner even while closed — nothing points at it', async () => {
+    // Codex P1, PR #1157. The freeze protects a Proof DOCUMENT's media; media
+    // no document points at has no Feed entry to strand, so the owner may clear
+    // it in every state. Without this, the two client paths that can produce an
+    // orphan across the quiesce — an `attachProof` upload whose transaction the
+    // freeze then denies, and a `deleteProof` whose commit landed before its
+    // Storage delete could — leave permanent litter in the one Event nothing
+    // can be re-posted to.
+    const orphan = `proofs/${EVENT}/${ALICE}/no-such-proof.jpg`;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), orphan), TINY, IMAGE));
+    await close();
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), orphan)));
   });
 
   it('DENIES deleting the Event document itself', async () => {
@@ -916,13 +944,43 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     // obligation the upload arm already carries — and failing closed here would
     // be worse than the hole it fixes: an owner could not clear their own media
     // from a legacy Event, or from a path whose Event document does not exist at
-    // all (where `exists()` is false and no `get()` is spent).
+    // all. Neither blob is backed by a Proof document, so the ORPHAN clause is
+    // what answers both, and the Event is never fetched at all.
     const legacyBlob = `proofs/${LEGACY_EVENT}/${BOB}/legacy.jpg`;
     const orphanBlob = `proofs/no-such-event/${BOB}/orphan.jpg`;
     await assertSucceeds(uploadBytes(ref(storageOf(BOB), legacyBlob), TINY, IMAGE));
     await assertSucceeds(uploadBytes(ref(storageOf(BOB), orphanBlob), TINY, IMAGE));
     await assertSucceeds(deleteObject(ref(storageOf(BOB), legacyBlob)));
     await assertSucceeds(deleteObject(ref(storageOf(BOB), orphanBlob)));
+  });
+
+  it('keeps an ORPHANED blob the owner’s to clear on a LIVE Event too (#1157)', async () => {
+    // The live half of the carve-out, so the closed-Event case above is not the
+    // only thing holding it up: an owner may always clear media no Proof
+    // document points at, and the Event here plainly exists and is open.
+    const orphan = `proofs/${EVENT}/${ALICE}/never-attached.jpg`;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), orphan), TINY, IMAGE));
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), orphan)));
+  });
+
+  it('DENIES media whose Proof exists under an Event document that does not (#1157)', async () => {
+    // The cost of spending the arm's `exists()` on the Proof rather than the
+    // Event: the existing-Proof branch's `firestore.get()` on a missing Event
+    // errors, and an errored access denies. Reachable only for a Proof document
+    // living under an Event document that was never written (or was deleted out
+    // from under it), and denying is the conservative direction — the blob stays
+    // and an Admin-SDK cleanup takes it, rather than the arm falling open on a
+    // shape it cannot read.
+    const strayEvent = 'no-event-document';
+    const strayBlob = `proofs/${strayEvent}/${BOB}/stray.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${strayEvent}/proofs/stray`), {
+        uid: BOB,
+        cellIndex: 1,
+      });
+    });
+    await assertSucceeds(uploadBytes(ref(storageOf(BOB), strayBlob), TINY, IMAGE));
+    await assertFails(deleteObject(ref(storageOf(BOB), strayBlob)));
   });
 
   it('never lets a STRANGER delete somebody else\u2019s media, live or frozen', async () => {

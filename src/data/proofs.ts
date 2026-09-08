@@ -218,6 +218,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   // return-shape only; the write set is untouched): on a retry the callback
   // re-runs against fresh reads, so the verdict always describes the COMMITTED
   // attempt's fold. runTransaction resolves with the callback's return value.
+  //
+  // A REJECTED transaction ROLLS THE UPLOAD BACK (see the `.catch` below).
   return await runTransaction(db, async (tx): Promise<AttachProofResult> => {
     // Daily mode (#246): the Mark lives on the DAY-SCOPED board and its stats fold
     // into that Day's bucket — the SAME routing the honor Mark (`setMark`) uses, so
@@ -409,6 +411,31 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       blackoutTransition: blackout && !isBlackout(liveCells),
       markTransition,
     };
+  }).catch(async (err: unknown) => {
+    // ROLL THE UPLOAD BACK WHEN THE TRANSACTION LOSES (Codex P1, PR #1157).
+    // The media is uploaded BEFORE the transaction and has to be — the Proof
+    // document's `storagePath`/`mediaURL` are pinned to the exact object by
+    // `firestore.rules`, so there is nothing to write until the object exists.
+    // Every rejection therefore leaves a blob no document points at, and the
+    // freeze made one of those rejections routine: an Admin committing
+    // `archiving: true` in the window between `uploadProofMedia` resolving and
+    // this transaction reading denies the write, and the archive keeps the blob
+    // forever — the one Event where nothing can be re-posted acquiring litter
+    // is exactly what the document/media freeze exists to prevent.
+    //
+    // So the object is deleted here. `storage.rules` authorises it in every
+    // state, including after the close, because its ORPHAN carve-out asks
+    // whether a Proof document points at the media rather than whether the
+    // Event is open — and after a rejected transaction none does.
+    //
+    // BEST EFFORT, and the ORIGINAL error is what the caller sees. The cleanup
+    // is a courtesy on a path that has already failed; a cleanup that fails too
+    // (offline, a Storage hiccup) must not replace "your proof did not post"
+    // with a Storage error the Player can do nothing with. `ProofSheet` keeps
+    // the captured blob either way, so a retry re-uploads under a NEW proof id
+    // and never depends on this object surviving.
+    if (storagePath) await deleteStoragePath(storagePath).catch(() => undefined);
+    throw err;
   });
 }
 

@@ -59,22 +59,54 @@ service firebase.storage {
     // `get('admins', [])` rather than `.admins` so an Event document missing the
     // field denies cleanly instead of erroring the evaluation.
     //
-    // A MISSING Event document reads as OPEN, matching the upload arm and the
-    // `firestore.rules` default: `exists()` is false, no `get()` is spent, and
-    // the owner keeps the unconditional delete they have today. (#806 will thread
-    // its membership check through this same fetch; it must drop the `exists()`
-    // when it does, the way its own membership `get()` already relies on
-    // error-to-deny — see `specs/event-membership.md` § "Storage has zero
-    // headroom".)
+    // THE ORPHAN CARVE-OUT (Codex P1, PR #1157). The freeze exists to protect a
+    // Proof DOCUMENT's media: a Feed entry whose image can never load is the
+    // harm, and it needs an entry to be the harm at all. Media whose Proof
+    // document does NOT exist has no entry to strand — it is a blob nothing
+    // points at — so the owner may always clear it, in every state. That is not
+    // a loosening for its own sake: it is the only thing that makes the two
+    // client paths recoverable across the quiesce. An `attachProof` upload whose
+    // Proof/Board transaction is then denied by the freeze leaves exactly such a
+    // blob, and `deleteProof` (which now commits BEFORE revoking the media)
+    // retries exactly such a blob from its durable queue. Without the carve-out
+    // both are permanent litter in the one Event nothing can be re-posted to.
+    //
+    // `{file}` is `<proofId>.<ext>` — `uploadProofMedia` writes that shape and
+    // only that shape (`src/data/storage.ts`), and `firestore.rules` pins the
+    // Proof document's `storagePath` to it — so the Proof id is the basename.
+    // `split('[.]')` is an RE2 split on a LITERAL dot (the class escapes it);
+    // a Firestore auto-id carries none, so `[0]` is the id.
+    //
+    // THE BUDGET, SPENT PRECISELY. Storage Rules allow two Firestore accesses
+    // per evaluation. The orphan clause is FIRST and short-circuiting, so the
+    // common paths cost one access each: an orphan delete spends the
+    // `exists()` and stops; an admin takedown is not `isOwner`, skips the
+    // `exists()` entirely, and spends the `get()`. Only an OWNER deleting media
+    // a live Proof document still points at spends both — which is the cap, not
+    // past it.
+    //
+    // A MISSING Event document now DENIES the existing-Proof branch, because
+    // the `exists()` that used to guard the `get()` is spent on the Proof
+    // instead and the `get()` errors closed. That is reachable only for media
+    // whose Proof document exists under an Event document that does not, and
+    // denying is the conservative direction; the absence-means-open default the
+    // upload arm carries is preserved for every path that has no Proof document,
+    // which is what a legacy or orphaned path actually is. (#806 will thread its
+    // membership check through the same fetch — see `specs/event-membership.md`
+    // § "Storage has zero headroom".)
     function proofMediaDeleteOk(event, uid) {
       return (signedIn() && request.auth.uid in event.get('admins', []))
         || (isOwner(uid) && !closedToPlay(event));
     }
-    function mayDeleteProofMedia(eventId, uid) {
-      return firestore.exists(/databases/(default)/documents/events/$(eventId))
-        ? proofMediaDeleteOk(
-            firestore.get(/databases/(default)/documents/events/$(eventId)).data, uid)
-        : isOwner(uid);
+    function proofDocMissing(eventId, file) {
+      return !firestore.exists(
+        /databases/(default)/documents/events/$(eventId)/proofs/$(file.split('[.]')[0]));
+    }
+    function mayDeleteProofMedia(eventId, uid, file) {
+      return signedIn()
+        && ((isOwner(uid) && proofDocMissing(eventId, file))
+          || proofMediaDeleteOk(
+               firestore.get(/databases/(default)/documents/events/$(eventId)).data, uid));
     }
     function okImage() {
       return request.resource.contentType.matches('image/.*')
@@ -100,11 +132,13 @@ service firebase.storage {
       // request.resource, so okImage()/okAudio() would reject it and leave the
       // blob orphaned when deleteProof() removes the doc. Owners delete their own
       // media while the Event is open to play; admins delete reported/flagged
-      // media during moderation, in every state including the frozen one.
+      // media during moderation, in every state including the frozen one. An
+      // ORPHANED object — one no Proof document points at — is the owner's to
+      // clear in every state; see `mayDeleteProofMedia`.
       allow create, update: if isOwner(uid)
         && !eventClosedToPlay(eventId)
         && (okImage() || okAudio());
-      allow delete: if mayDeleteProofMedia(eventId, uid);
+      allow delete: if mayDeleteProofMedia(eventId, uid, file);
     }
 
     // Private server-written bug-report evidence. The submitBugReport callable
