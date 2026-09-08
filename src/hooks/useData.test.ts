@@ -662,3 +662,77 @@ describe('serverResolved — the server has answered, or never can', () => {
     expect(result.current.data).toBeNull();
   });
 });
+
+// #1145 / #1142 item 10, routed to #1152. `players/{uid}` validates none of its
+// fields, and `comparePlayers` SUBTRACTS two of them — so one Player's row could
+// throw a TypeError out of `sortPlayers` and take down every consumer of this
+// roster, the Admin console's Game settings and its Reopen play control included.
+describe('useLeaderboard makes the roster READABLE before it ranks it', () => {
+  const rosterSnap = (rows: unknown[]) => ({
+    docs: rows.map((row) => ({ data: () => row })),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+  const row = (over: Record<string, unknown>) => ({
+    uid: 'p',
+    displayName: 'P',
+    photoURL: null,
+    joinedAt: 0,
+    bingoCount: 0,
+    squaresMarked: 0,
+    firstBingoAt: null,
+    reshufflesUsed: 0,
+    ...over,
+  });
+
+  it('sorts a row whose bingoCount cannot be converted to a number, instead of throwing', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    // The exact shape #1145 names: an object with a nulled `toString`, which the
+    // comparator's subtraction cannot coerce.
+    sub.fire(
+      rosterSnap([
+        row({ uid: 'broken', displayName: 'Broken', bingoCount: { toString: null } }),
+        row({ uid: 'ok', displayName: 'Ok', bingoCount: 2, squaresMarked: 9 }),
+      ]),
+    );
+
+    expect(result.current.players.map((p) => p.uid)).toEqual(['ok', 'broken']);
+    // The unreadable count reads as the 0 the row already displayed for it —
+    // nothing is invented, and nothing else on the row moves.
+    const broken = result.current.players.find((p) => p.uid === 'broken');
+    expect(broken?.bingoCount).toBe(0);
+    expect(broken?.displayName).toBe('Broken');
+  });
+
+  it('reads a NaN stat as 0 and a NaN instant as null, so the comparator stays total', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    // Every comparison against NaN is false, so a NaN row leaves the sort order
+    // formally unspecified — the #93 hazard, one layer earlier.
+    sub.fire(
+      rosterSnap([
+        row({ uid: 'nan', displayName: 'Nan', squaresMarked: Number.NaN, firstBingoAt: Number.NaN }),
+        row({ uid: 'real', displayName: 'Real', squaresMarked: 4, firstBingoAt: 1_000 }),
+      ]),
+    );
+
+    expect(result.current.players.map((p) => p.uid)).toEqual(['real', 'nan']);
+    const nan = result.current.players.find((p) => p.uid === 'nan');
+    expect(nan?.squaresMarked).toBe(0);
+    expect(nan?.firstBingoAt).toBeNull();
+  });
+
+  it('returns a well-formed row by IDENTITY, so a healthy roster is untouched', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    const healthy = row({ uid: 'ok', displayName: 'Ok', bingoCount: 2, squaresMarked: 9 });
+    sub.fire(rosterSnap([healthy]));
+
+    // Not merely equal — the SAME object. The coercion is a repair, not a copy
+    // pass over every snapshot.
+    expect(result.current.players[0]).toBe(healthy);
+  });
+});

@@ -8,7 +8,7 @@ import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/boar
 import { eventScopeKey } from '../data/eventScope';
 import { usableDayIndexes } from '../data/eventArchive';
 import { supportedDayIndex } from '../data/eventLimits';
-import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
+import { sortPlayers, withReadableRanking, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
 // Both subs subscribe with includeMetadataChanges so the cache→server
@@ -820,7 +820,22 @@ export function useLeaderboard() {
     playersCol(),
     eventSubscriptionKey('players'),
   );
-  return { players: sortPlayers(data), loading, hasServerData, fromCache, hasPendingWrites };
+  // READABLE BEFORE RANKED (#1145, #1142 item 10). `comparePlayers` subtracts two
+  // Player-written fields the rules arm validates in no way, so a row carrying
+  // (say) `bingoCount: { toString: null }` threw a TypeError out of `sortPlayers`
+  // — taking down every consumer of this roster, the Admin console's Game settings
+  // and its Reopen play control with them, on an Event that may already be shut.
+  // `withReadableRanking` returns a well-formed row by IDENTITY, so this costs one
+  // array and changes nothing for the rosters that were always fine; it decides
+  // nothing about who won, and the frozen record is unaffected because
+  // `toStandingRow` applies the identical coercion on the server re-read.
+  return {
+    players: sortPlayers(data.map((p) => withReadableRanking(p))),
+    loading,
+    hasServerData,
+    fromCache,
+    hasPendingWrites,
+  };
 }
 
 /** A caller-owned, already-loaded moderation snapshot. Supplying this avoids a

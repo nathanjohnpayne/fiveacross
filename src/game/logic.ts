@@ -909,16 +909,95 @@ export function foldEchoStats(params: {
 
 export type Rankable = Pick<PlayerDoc, 'bingoCount' | 'squaresMarked' | 'firstBingoAt'>;
 
-/** Leaderboard order: bingos desc, then squares desc, then earliest first-bingo; two no-bingo Players tie at exactly 0. */
+/** A ranking count the comparator can SUBTRACT. A non-numeric or non-finite stat
+ *  reads as `0` — the same number the row already displays for it. */
+function readableRankingCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/** A ranking instant, or `null` — which `comparePlayers` already means by "never
+ *  bingoed", and which sorts last. */
+function readableRankingInstant(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * One row with its RANKING fields made readable (#1145, #1142 item 10).
+ *
+ * `players/{uid}` validates none of its fields in its rules arm, so a Player can
+ * leave a row holding anything at all where a stat belongs — and `comparePlayers`
+ * SUBTRACTS two of them. A `bingoCount` of `{ toString: null }` therefore threw a
+ * TypeError out of `sortPlayers`, which is not a bad row rendering badly: it is
+ * every consumer of the roster crashing, the Admin console's **Game settings**
+ * included, and with it the **Reopen play** control that is the one way back from
+ * a closing Event. `NaN` is the quieter half of the same problem — every
+ * comparison against it is false, so `Array.prototype.sort` is formally free to
+ * order that pair however it likes (the #93 hazard, one layer earlier).
+ *
+ * The coercions are the ones the surfaces already agree on: a count reads `0`, an
+ * unreadable instant reads `null`. This decides NOTHING about who won — a
+ * well-formed row is returned unchanged, by identity — and it writes nothing: the
+ * frozen record still copies each row's own stats through `toStandingRow`'s
+ * identical coercion, so the archive is byte-for-byte what it was (ADR 0001).
+ *
+ * `comparePlayers` below carries the same guard, and the two are not redundant: it
+ * can only decide ORDER, and the row still has to be RENDERABLE. `Leaderboard`
+ * prints `{p.bingoCount}` straight into the DOM, where React throws on an object
+ * child — so a sort that no longer crashes would simply move the crash one line
+ * down. This is what hands the surfaces a row they can display.
+ *
+ * The sibling coercion is `withReadableDayStats` in `src/data/eventArchive.ts`,
+ * which makes a row's per-Day BUCKETS readable to the honour selectors. The two
+ * are deliberately separate: that one belongs to what a stored record can carry
+ * and runs on the server re-read the freeze takes, this one belongs to what the
+ * comparator can subtract and runs on every roster snapshot the client sorts. A
+ * pure game module cannot import the data layer, and the archive path needs its
+ * own coercion regardless because it never passes through this hook.
+ */
+export function withReadableRanking<T extends Rankable>(row: T): T {
+  const bingoCount = readableRankingCount(row.bingoCount);
+  const squaresMarked = readableRankingCount(row.squaresMarked);
+  const firstBingoAt = readableRankingInstant(row.firstBingoAt);
+  if (
+    bingoCount === row.bingoCount &&
+    squaresMarked === row.squaresMarked &&
+    firstBingoAt === row.firstBingoAt
+  ) {
+    return row;
+  }
+  return { ...row, bingoCount, squaresMarked, firstBingoAt };
+}
+
+/**
+ * Leaderboard order: bingos desc, then squares desc, then earliest first-bingo;
+ * two no-bingo Players tie at exactly 0.
+ *
+ * TOTAL over any row `players/{uid}` will accept (#1145, #1142 item 10). It reads
+ * each field through the coercions above rather than subtracting it raw, because
+ * the rules arm validates none of them and this function's two subtractions were
+ * where an unreadable stat became a thrown TypeError — inside `sortPlayers`,
+ * which every roster consumer and the archive builder both go through. Guarding
+ * HERE rather than at each call site is the point: the arithmetic is what fails,
+ * there is exactly one of it, and a future caller inherits the guard for free.
+ * Well-formed input is ordered exactly as before, so the tie-break table is
+ * unchanged; a stat that cannot be read simply ranks as the `0` its own row
+ * displays, and an unreadable instant as the `null` that already sorts last.
+ */
 export function comparePlayers(a: Rankable, b: Rankable): number {
-  if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
-  if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;
+  const aBingos = readableRankingCount(a.bingoCount);
+  const bBingos = readableRankingCount(b.bingoCount);
+  if (bBingos !== aBingos) return bBingos - aBingos;
+  const aSquares = readableRankingCount(a.squaresMarked);
+  const bSquares = readableRankingCount(b.squaresMarked);
+  if (bSquares !== aSquares) return bSquares - aSquares;
+  const aFirst = readableRankingInstant(a.firstBingoAt);
+  const bFirst = readableRankingInstant(b.firstBingoAt);
   // Both no-bingo: an explicit stable 0. Without this guard the `?? Infinity`
   // fallback below computes Infinity - Infinity = NaN, and a NaN comparator
   // result gives Array.prototype.sort unspecified order for the pair (#93).
-  if (a.firstBingoAt == null && b.firstBingoAt == null) return 0;
-  const af = a.firstBingoAt ?? Number.POSITIVE_INFINITY;
-  const bf = b.firstBingoAt ?? Number.POSITIVE_INFINITY;
+  if (aFirst == null && bFirst == null) return 0;
+  const af = aFirst ?? Number.POSITIVE_INFINITY;
+  const bf = bFirst ?? Number.POSITIVE_INFINITY;
   return af - bf;
 }
 

@@ -1165,16 +1165,22 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
   });
 
   it('still renders Game settings when a Player row is unreadable to the selectors', () => {
-    // #1142 item 10's neighbour: the draft is built during RENDER, so a row that
+    // #1142 item 10 and #1145: the draft is built during RENDER, so a row that
     // threw out of the builder took the whole surface — and the Reopen play
-    // control with it — down on an Event that may already be shut.
+    // control with it — down on an Event that may already be shut. The ROOT stat
+    // is the other half of the same row, and it is pinned at the crash site in
+    // `src/hooks/useData.test.ts` § "useLeaderboard makes the roster READABLE
+    // before it ranks it", because the throw was inside the hook's own sort,
+    // upstream of everything this console does.
     H.players = [
       { ...mkPlayer('broken'), dayStats: { 1: null } } as unknown as PlayerDoc,
       { ...mkPlayer('nameless'), uid: undefined } as unknown as PlayerDoc,
+      { ...mkPlayer('unreadable'), bingoCount: { toString: null } } as unknown as PlayerDoc,
     ];
     H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
   });
 });
 

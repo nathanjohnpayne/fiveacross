@@ -169,3 +169,55 @@ describe('sortPlayers — the full PRD tie-break table end to end (bingos desc, 
     ]);
   });
 });
+
+// #1145 / #1142 item 10, routed to #1152. `players/{uid}` validates none of its
+// fields, so `comparePlayers`' two subtractions were the one place an unreadable
+// Player stat became a thrown TypeError — inside `sortPlayers`, which the whole
+// roster and the archive builder both go through, taking the Admin console's Game
+// settings (and its Reopen play control) down with them.
+describe('comparePlayers — total over any row the rules will accept', () => {
+  const unreadable = (over: Record<string, unknown>): Rankable =>
+    ({ bingoCount: 0, squaresMarked: 0, firstBingoAt: null, ...over }) as unknown as Rankable;
+
+  it('does not throw on a bingoCount that cannot be converted to a number', () => {
+    // The exact shape #1145 names: an object whose `toString` is nulled, which
+    // the subtraction cannot coerce.
+    const broken = unreadable({ bingoCount: { toString: null } });
+    const ok = player({ bingoCount: 2 });
+    expect(() => comparePlayers(broken, ok)).not.toThrow();
+    // Unreadable ranks as the 0 the row itself displays, so the real row wins.
+    expect(comparePlayers(broken, ok)).toBeGreaterThan(0);
+    expect(comparePlayers(ok, broken)).toBeLessThan(0);
+  });
+
+  it('does not throw on an unreadable squaresMarked either', () => {
+    const broken = unreadable({ bingoCount: 1, squaresMarked: { toString: null } });
+    const ok = player({ bingoCount: 1, squaresMarked: 5 });
+    expect(() => comparePlayers(broken, ok)).not.toThrow();
+    expect(comparePlayers(ok, broken)).toBeLessThan(0);
+  });
+
+  it('never returns NaN, so the sort order is never left unspecified', () => {
+    // Every comparison against NaN is false, which leaves
+    // `Array.prototype.sort` formally free to order the pair however it likes —
+    // the #93 hazard, reached through a malformed stat rather than a double null.
+    const nan = unreadable({ bingoCount: Number.NaN, firstBingoAt: Number.NaN });
+    const ok = player({ bingoCount: 0, firstBingoAt: 1_000 });
+    expect(comparePlayers(nan, ok)).not.toBeNaN();
+    expect(comparePlayers(ok, nan)).not.toBeNaN();
+    // A NaN instant is no instant: it sorts last, exactly as `null` does.
+    expect(comparePlayers(nan, ok)).toBeGreaterThan(0);
+  });
+
+  it('sortPlayers orders a roster containing one unreadable row instead of throwing', () => {
+    const roster = [
+      unreadable({ bingoCount: { toString: null }, squaresMarked: 99 }),
+      player({ bingoCount: 2, squaresMarked: 3 }),
+      player({ bingoCount: 1, squaresMarked: 3 }),
+    ];
+    expect(() => sortPlayers(roster)).not.toThrow();
+    // The unreadable row ranks last on its coerced 0, and — the point of the
+    // guard — the two well-formed rows keep the order they always had.
+    expect(sortPlayers(roster).map((r) => r.bingoCount)).toEqual([2, 1, roster[0].bingoCount]);
+  });
+});
