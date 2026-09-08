@@ -29,7 +29,7 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
-import { revokeProofMedia, type ProofStorageDeleteDoc } from './proofStorageDeletes';
+import { revokeProofMedia, type ProofStorageDeleteInput } from './proofStorageDeletes';
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -383,7 +383,7 @@ export const revokeDeletedProofMedia = onDocumentCreated(
         // different revocation's row at the very same path.
         currentTombstone: async () => {
           const snap = await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get();
-          return snap.exists ? ((snap.data() ?? {}) as ProofStorageDeleteDoc) : null;
+          return snap.exists ? ((snap.data() ?? {}) as ProofStorageDeleteInput) : null;
         },
         // Strongly consistent, and read at SWEEP time rather than trusted from
         // the row: the tombstone says a Proof was deleted, this says whether one

@@ -9,7 +9,14 @@ import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { isEventArchived, isEventArchiving } from './eventArchive';
-import type { Cell, ClaimMode, EventDoc, ProofDoc, ProofType } from '../types';
+import type {
+  Cell,
+  ClaimMode,
+  EventDoc,
+  ProofDoc,
+  ProofStorageDeleteDoc,
+  ProofType,
+} from '../types';
 
 const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 const rawProofs = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'proofs');
@@ -870,7 +877,16 @@ export async function deleteProof(
       // finishes (#1147) — needs no mirror, because it is `tx.delete(proofRef)`
       // below and this write is never made without it.
       if (ownerUid && ownerUid === proof.uid) {
-        tx.set(rawProofStorageDelete(id, eventId), {
+        // THE SHARED SHAPE, NAMED (#1153, Codex round 4 P1). The row is written
+        // here and consumed by the separately-rooted Functions project, so it is
+        // declared once in `src/domainTypes.d.ts` and annotated here rather than
+        // constructed implicitly: an excess key, a missing one or a wrong type
+        // is now a compile error on THIS side, and the sweeper's own module
+        // pins its untrusted input shape to the same declaration. A row whose
+        // writer and reader could drift is the failure the single shared domain
+        // contract exists to prevent — and the rules would answer the drift with
+        // a denial inside the takedown's own transaction.
+        const tombstone: ProofStorageDeleteDoc = {
           storagePath: revokePath,
           uid: ownerUid,
           // Operational only — how long a revocation has been pending. It is
@@ -889,7 +905,8 @@ export async function deleteProof(
           // argument — from turning into a denied write inside the takedown's
           // own transaction.
           ...(generation === null || storagePath !== revokePath ? {} : { generation }),
-        });
+        };
+        tx.set(rawProofStorageDelete(id, eventId), tombstone);
       }
     }
 

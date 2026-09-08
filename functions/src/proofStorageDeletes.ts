@@ -33,8 +33,29 @@
  * runtime or an emulator (the `autohide.ts` / `notify.ts` precedent).
  */
 
-/** The tombstone body, as read off the created snapshot (untrusted — it is client-written). */
-export interface ProofStorageDeleteDoc {
+// The canonical persisted shape, declared ONCE for both compiler roots
+// (`src/domainTypes.d.ts`, the `dailyEmailContent.ts` / `finaleContent.ts`
+// precedent). The browser writes this row and this module consumes it, so the
+// contract cannot live locally in either half without letting the writer and
+// the sweeper drift — Codex round 4 P1 on PR #1163.
+import type { ProofStorageDeleteDoc } from '../../src/domainTypes';
+
+/**
+ * The tombstone body AS READ, which is not the same thing as the contract.
+ *
+ * `ProofStorageDeleteDoc` says what a well-formed row IS; this says what the
+ * sweeper is holding before it has checked. Every field is `unknown` because
+ * the Admin SDK bypasses `firestore.rules` entirely and this handler holds a
+ * bucket-wide delete: a hand-written document could carry anything at all under
+ * these names, so the reading side must not be able to assume a `string` it has
+ * not proved. `confinedProofMediaPath` and `isSameRevocation` are where the
+ * unknowns are discharged.
+ *
+ * PINNED TO THE CONTRACT BELOW, so this cannot quietly fall behind it: a field
+ * added to `ProofStorageDeleteDoc` and not mirrored here — or mirrored here and
+ * not declared there — fails `cd functions && npm run build`.
+ */
+export interface ProofStorageDeleteInput {
   storagePath?: unknown;
   uid?: unknown;
   requestedAt?: unknown;
@@ -46,6 +67,21 @@ export interface ProofStorageDeleteDoc {
    */
   generation?: unknown;
 }
+
+/** `T` must be assignable to `U`, checked at compile time and erased at run time. */
+type MustExtend<T extends U, U> = T;
+
+/**
+ * THE DRIFT GUARD (#1153, Codex round 4 P1). Both directions on purpose: a key
+ * this module reads that the contract does not declare is a sweeper inventing a
+ * field, and a key the contract declares that this module does not read is a
+ * field `isSameRevocation` would silently stop comparing — the identity check
+ * that keeps a delayed delivery from retiring somebody else's revocation.
+ * Either way the build stops until both halves are updated together.
+ */
+type _TombstoneShapeIsPinned =
+  | MustExtend<keyof ProofStorageDeleteInput, keyof ProofStorageDeleteDoc>
+  | MustExtend<keyof ProofStorageDeleteDoc, keyof ProofStorageDeleteInput>;
 
 export interface RevokeProofMediaDeps {
   /**
@@ -64,7 +100,7 @@ export interface RevokeProofMediaDeps {
    * row, so this hands back the row itself and `isSameRevocation` decides
    * whether it is the one this delivery was created for.
    */
-  currentTombstone(): Promise<ProofStorageDeleteDoc | null>;
+  currentTombstone(): Promise<ProofStorageDeleteInput | null>;
   /**
    * Whether `events/{eventId}/proofs/{proofId}` still exists, read with the
    * Admin SDK. A standing tombstone is supposed to mean a Proof that is gone;
@@ -86,7 +122,7 @@ export interface RevokeProofMediaDeps {
 export interface RevokeProofMediaTarget {
   eventId: string;
   proofId: string;
-  tombstone: ProofStorageDeleteDoc;
+  tombstone: ProofStorageDeleteInput;
 }
 
 /**
@@ -118,8 +154,8 @@ export interface RevokeProofMediaTarget {
  * handler cannot answer.
  */
 export function isSameRevocation(
-  current: ProofStorageDeleteDoc,
-  fromEvent: ProofStorageDeleteDoc,
+  current: ProofStorageDeleteInput,
+  fromEvent: ProofStorageDeleteInput,
 ): boolean {
   return (
     current.requestedAt === fromEvent.requestedAt &&

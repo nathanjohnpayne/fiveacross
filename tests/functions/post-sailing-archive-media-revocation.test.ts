@@ -5,7 +5,7 @@ import {
   isObjectAlreadyGone,
   isSameRevocation,
   revokeProofMedia,
-  type ProofStorageDeleteDoc,
+  type ProofStorageDeleteInput,
   type RevokeProofMediaDeps,
 } from '../../functions/src/proofStorageDeletes';
 
@@ -33,8 +33,8 @@ function makeDeps(
   // which the harness resolves to the target's OWN row — the ordinary delivery,
   // arriving while its own revocation is still owed. Cases pass `null` for a
   // retired row, a different row for the reuse hazard, or a rejecting reader.
-  currentTombstone?: () => Promise<ProofStorageDeleteDoc | null>,
-  ownRow: ProofStorageDeleteDoc = TARGET.tombstone,
+  currentTombstone?: () => Promise<ProofStorageDeleteInput | null>,
+  ownRow: ProofStorageDeleteInput = TARGET.tombstone,
 ): RevokeProofMediaDeps & {
   objectDeletes: Array<{ storagePath: string; generation: string | null }>;
   tombstoneDeletes: number;
@@ -208,7 +208,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // So the standing row is compared against the event snapshot's own operation
     // identity, and a mismatch abandons: the bucket is never touched, and B's row
     // is left exactly where it is, because B's own delivery still owes it.
-    const rowB: ProofStorageDeleteDoc = {
+    const rowB: ProofStorageDeleteInput = {
       ...TARGET.tombstone,
       requestedAt: 9000,
       generation: '1700000000000002',
@@ -237,7 +237,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // records one and a row that does not are two different revocations even
     // when everything else matches, and the absent-generation row is precisely
     // the one that would sweep by PATH and take whatever now answers to it.
-    const differing: ProofStorageDeleteDoc[] = [
+    const differing: ProofStorageDeleteInput[] = [
       { ...BOUND.tombstone, requestedAt: 2000 },
       { ...BOUND.tombstone, uid: 'bob' },
       { ...BOUND.tombstone, storagePath: 'proofs/med-2026/alice/proof-1.webm' },
@@ -422,7 +422,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
 });
 
 describe('isSameRevocation — is the standing row the one THIS delivery was created for', () => {
-  const ROW: ProofStorageDeleteDoc = {
+  const ROW: ProofStorageDeleteInput = {
     storagePath: 'proofs/med-2026/alice/proof-1.jpg',
     uid: 'alice',
     requestedAt: 1000,
@@ -449,7 +449,7 @@ describe('isSameRevocation — is the standing row the one THIS delivery was cre
     // revocations even when the other three agree — and the absent-generation
     // one is exactly the row that would sweep by PATH and take whatever now
     // answers to it.
-    const withoutGeneration: ProofStorageDeleteDoc = {
+    const withoutGeneration: ProofStorageDeleteInput = {
       storagePath: ROW.storagePath,
       uid: ROW.uid,
       requestedAt: ROW.requestedAt,
