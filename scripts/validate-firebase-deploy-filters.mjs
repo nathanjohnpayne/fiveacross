@@ -2764,8 +2764,9 @@ async function discoverEndpointsFromSdk({
     return {
       ok: false,
       reason:
-        "the codebase consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
-        "namespaces only the deploy's authenticated fetch can supply",
+        "the codebase consulted project configuration only the deploy's authenticated fetch can " +
+        "supply — the legacy functions.config() namespaces, the FIREBASE_CONFIG this classifier " +
+        "has to invent, or a firebase-admin app option built from one of them",
     };
   }
   if (!manifest.ok) return manifest;

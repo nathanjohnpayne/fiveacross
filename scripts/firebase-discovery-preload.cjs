@@ -3,26 +3,56 @@
 
 /**
  * Preloaded into the Firebase Functions SDK's own discovery process, ahead of
- * the artifact, to record whether anything consulted `CLOUD_RUNTIME_CONFIG`.
+ * the artifact, to record whether the codebase consulted any part of the
+ * project configuration this classifier cannot obtain.
  *
- * Everything else about that environment the classifier can reproduce, and the
- * fields of `FIREBASE_CONFIG` it cannot are covered by running discovery twice
- * under two different values (see `CONFIG_PROBES`). That technique does not
- * work for the legacy runtime config: its `functions.config()` namespaces are
- * user-chosen, so a branch on an unknown one reads `undefined` under both
- * probes while the real value could be anything.
+ * WHY AGREEMENT BETWEEN THE PROBES IS NOT INDEPENDENCE. `CONFIG_PROBES` runs
+ * discovery twice, once with the unreproducible `FIREBASE_CONFIG` fields absent
+ * and once with them present under obviously synthetic values, and trusts the
+ * surface when both runs report the same endpoint ids. That catches an artifact
+ * whose branch the two probes happen to separate. It does NOT catch an artifact
+ * whose branch is false in both and true for the real project:
+ * `config.storageBucket?.startsWith(config.projectId + ".")` is false with no
+ * bucket and false for `firebase-deploy-scope-probe.appspot.com`, and true for
+ * every real project, whose bucket IS named after it. Both probes agree, one
+ * endpoint is reported, and the deploy exports a group.
  *
- * So that variable is all-or-nothing. Any read forfeits the inventory — which
- * costs nothing in practice, because its only consumer is the deprecated v1
- * `functions.config()` API. Every access form is trapped, not just `get`: a
- * membership test or a descriptor read hands the value over just as well.
+ * So dependence on configuration this classifier cannot supply is treated as
+ * unprovable in its own right, whatever the probes then agree on. Two paths
+ * carry it and both are watched:
  *
- * The one read that is NOT a consultation is `firebase-functions` initialising
- * itself: its v1 `config.js` reads the variable while the codebase's top-level
- * `require` is still running. That exemption belongs to the SDK alone — see
- * `calledFromCodebase` — because any other dependency can read the value as it
- * loads and export what it found for the entrypoint to branch on, which is the
- * codebase consulting it with a `require` frame in the way.
+ *  - the ENVIRONMENT — `CLOUD_RUNTIME_CONFIG`, whose `functions.config()`
+ *    namespaces are user-chosen so that a branch on an unknown one reads
+ *    `undefined` under both probes, and `FIREBASE_CONFIG`, which is the
+ *    project's `adminSdkConfig` and comes from an authenticated lookup;
+ *  - the firebase-admin APP OPTIONS, which are the same values read back
+ *    through the SDK: `initializeApp()` loads `FIREBASE_CONFIG` itself, so a
+ *    codebase reading `admin.app().options.storageBucket` never touches
+ *    `process.env` at all.
+ *
+ * The line in both cases is whether this classifier can REPRODUCE the value, not
+ * whether the value came from the project. The pinned project id can be and is
+ * reproduced, so a branch on it is rehearsed rather than guessed at and neither
+ * `GCLOUD_PROJECT` nor `options.projectId` is watched — see
+ * `PROJECT_CONFIG_VARS`, which states what that costs and why the alternative
+ * costs more.
+ *
+ * Each watched value is all-or-nothing, and every access form is trapped rather
+ * than just `get`: a membership test or a descriptor read hands the value over
+ * just as well.
+ *
+ * The reads that are NOT consultations are the Firebase SDKs initialising
+ * themselves. `firebase-functions`'s v1 `config.js` reads the legacy runtime
+ * config while the codebase's top-level `require` is still running, and
+ * `firebase-admin`'s `initializeApp()` reads `FIREBASE_CONFIG` to build the very
+ * options object the proxy below then watches. Both exemptions are settled by
+ * the READER — the frame that actually touched the value — so they belong to
+ * those two packages and to nothing else: any other dependency can read a value
+ * as it loads and export what it found for the entrypoint to branch on, which is
+ * the codebase consulting it with a `require` frame in the way. A codebase that
+ * reads the admin options for itself is on the other side of that line, which is
+ * exactly what makes the round trip through `initializeApp()` provable rather
+ * than a way around the watch.
  *
  * The verdict reaches the classifier over FILE DESCRIPTOR 3, which the parent
  * opened and holds. This module has no channel to the HTTP response the SDK
@@ -36,9 +66,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const url = require("node:url");
+const Module = require("node:module");
 /**
  * `Error.prepareStackTrace` as it was when this preload loaded — before any
- * artifact code could replace it. `calledFromCodebase` restores it for the one
+ * artifact code could replace it. `readingFrames` restores it for the one
  * capture it makes (Codex P2, round 24 on #1107).
  */
 const PRISTINE_PREPARE_STACK_TRACE = Error.prepareStackTrace;
@@ -112,25 +143,40 @@ function sourceRoot() {
 }
 
 /**
- * Whether a stack frame's file sits inside an installed `firebase-functions`.
+ * Whether a stack frame's file sits inside an installed copy of `pkg`.
  *
- * The SDK is the ONE dependency whose load-time read of `CLOUD_RUNTIME_CONFIG`
- * is initialisation rather than consultation, so it is the one whose frames
- * that read earns an exemption. Matched on the package DIRECTORY
- * (`node_modules/firebase-functions/...`), so a nested or pnpm-style install
- * answers the same while a package whose name merely starts with it does not.
+ * Matched on the package DIRECTORY (`node_modules/<pkg>/...`), so a nested or
+ * pnpm-style install answers the same while a package whose name merely starts
+ * with it does not.
  */
-function insideFunctionsSdk(file) {
+function insidePackage(file, pkg) {
   if (!file) return false;
   const segments = file.split(path.sep);
   for (let at = 0; at + 1 < segments.length; at += 1) {
-    if (segments[at] === "node_modules" && segments[at + 1] === "firebase-functions") return true;
+    if (segments[at] === "node_modules" && segments[at + 1] === pkg) return true;
   }
   return false;
 }
 
 /**
- * Whether the codebase is anywhere in the call that is reading the environment.
+ * The two packages whose own reads of the project configuration are the SDK
+ * initialising itself rather than the codebase consulting a value.
+ *
+ * `firebase-functions` reads the legacy runtime config in its v1 `config.js`
+ * and the project id wherever an endpoint needs one; `firebase-admin` reads
+ * `FIREBASE_CONFIG` in `initializeApp()`, which is the documented way to
+ * configure it and the source of the options object this module then watches.
+ * Exempting them is what makes the watch land on the codebase's own reads
+ * instead of refusing every codebase there is — and it costs nothing, because
+ * what `firebase-admin` read on the codebase's behalf is readable back only
+ * through those options.
+ */
+function insideFirebaseSdk(file) {
+  return insidePackage(file, "firebase-functions") || insidePackage(file, "firebase-admin");
+}
+
+/**
+ * Who is reading, and whether the codebase is anywhere in the call.
  *
  * The WHOLE stack, not just its first frame. Stopping at the first non-preload
  * frame missed the very API this watch exists for: `functions.config()` reads
@@ -146,9 +192,8 @@ function insideFunctionsSdk(file) {
  * dependency reading it for reasons of its own is not — what settles it either
  * way is whether a file the codebase itself supplied is still on the stack.
  */
-function calledFromCodebase() {
+function readingFrames() {
   const root = sourceRoot();
-  if (!root) return false;
   // The WHOLE stack, not Node's default ten frames (Phase 4b P2, run 5): a
   // dependency reading the value through enough helper frames would otherwise
   // push the codebase frame past the limit, and every remaining frame is a
@@ -206,20 +251,113 @@ function calledFromCodebase() {
     if (file === __filename) continue;
     if (reader === null) reader = file;
     if (file.split(path.sep).includes("node_modules")) continue;
-    if (file.startsWith(root)) {
-      if (!loaderBetween) return true;
-      return !insideFunctionsSdk(reader);
-    }
+    if (root && file.startsWith(root)) return { codebase: true, reader, loaderBetween };
   }
-  return false;
+  return { codebase: false, reader, loaderBetween };
 }
 
+/**
+ * Whether a `CLOUD_RUNTIME_CONFIG` read is the codebase consulting the legacy
+ * `functions.config()` namespaces.
+ *
+ * Unchanged: the codebase on the stack settles it, except for a read reached
+ * through a module loader, which is exempt only when `firebase-functions`
+ * itself is the frame that made it.
+ */
+function consultedRuntimeConfig() {
+  const { codebase, reader, loaderBetween } = readingFrames();
+  if (!codebase) return false;
+  if (!loaderBetween) return true;
+  return !insidePackage(reader, "firebase-functions");
+}
+
+/**
+ * Whether a read of the project's identity or its `adminSdkConfig` is the
+ * codebase consulting a value this classifier cannot reproduce.
+ *
+ * The same shape as the rule above and the same load-time discrimination — the
+ * READER settles it — with the exempt set being the two Firebase SDKs rather
+ * than one, because `firebase-admin` reads `FIREBASE_CONFIG` to build the app
+ * options and the codebase's own read of THOSE is watched separately.
+ */
+function consultedProjectConfig() {
+  const { codebase, reader } = readingFrames();
+  if (!codebase) return false;
+  return !insideFirebaseSdk(reader);
+}
+
+/**
+ * Whether a read of a firebase-admin app option is one this classifier cannot
+ * vouch for.
+ *
+ * No codebase frame is required here, unlike the environment rules above: the
+ * options object is handed out by `initializeApp`, so anything holding it that
+ * is neither `firebase-admin` nor `firebase-functions` is reading a project
+ * value on its own account, and what it does with the answer is exactly what
+ * this classifier cannot rehearse.
+ */
+function consultedAdminOption(property) {
+  if (typeof property !== "string" || !ADMIN_OPTION_KEYS.has(property)) return false;
+  return !insideFirebaseSdk(readingFrames().reader);
+}
+
+/**
+ * The environment variable that carries values this classifier cannot obtain.
+ *
+ * `prepare.js` fills `FIREBASE_CONFIG` from the project's `adminSdkConfig`, an
+ * authenticated lookup, and `CONFIG_PROBES` can only guess at what it holds — so
+ * a branch on it is a branch this rehearsal cannot reproduce, however the two
+ * probes then agree on the endpoint ids.
+ *
+ * THE PROJECT ID IS ON THE OTHER SIDE OF THAT LINE, deliberately, and it is the
+ * one place this watch is narrower than the finding that prompted it.
+ * `discoveryEnvironment` sets `GCLOUD_PROJECT` — and `FIREBASE_CONFIG.projectId`
+ * — to the pinned project, which is the real id and the same one the deploy will
+ * pass, in both probes. A branch on it is therefore REPRODUCED rather than
+ * guessed at, and recording it would refuse an inventory this classifier can in
+ * fact vouch for. `GCP_PROJECT`, `GOOGLE_CLOUD_PROJECT` and `FIREBASE_PROJECT`
+ * are reproduced the same way, by being absent from `spawnFunctionsProcess`'s
+ * environment and from this one alike, unless a `.env` file this classifier also
+ * loads supplies them.
+ *
+ * That distinction is load-bearing for this repository: `functions/src/index.ts`
+ * builds `ADMIN_SDK_SERVICE_ACCOUNT` from `resolveProjectId()`, which reads
+ * `process.env.GCLOUD_PROJECT` in its own file at module scope. Watching the
+ * project id would make this repository's own Functions index unprovable for
+ * every `--only functions:<endpoint>` deploy, while proving nothing: the value it
+ * reads here is the value it will read then.
+ */
+const PROJECT_CONFIG_VARS = new Set(["FIREBASE_CONFIG"]);
+
+/**
+ * The firebase-admin app options this classifier cannot supply.
+ *
+ * The same line as above, drawn through the object `initializeApp()` builds:
+ * `storageBucket` and `databaseURL` are exactly the `FIREBASE_CONFIG` fields
+ * `CONFIG_PROBES` has to invent, and `credential` is the ADC document, which an
+ * offline preflight can only shape rather than mint. `projectId` is left out for
+ * the reason its environment spelling is: it is the pinned project, correct in
+ * both probes.
+ */
+const ADMIN_OPTION_KEYS = new Set(["storageBucket", "databaseURL", "credential"]);
+
+/** The module requests whose exports hand out a firebase-admin app. */
+const ADMIN_ENTRYPOINTS = new Set(["firebase-admin", "firebase-admin/app"]);
+
+/**
+ * The exported names that answer with an app (or a list of them).
+ *
+ * `initializeApp`, `getApp` and `getApps` are the modular API; `app` and `apps`
+ * are the same two under the older namespaced export, which is what
+ * `admin.app().options` reaches. Wrapping both spellings costs nothing and
+ * missing either would leave the options unwatched.
+ */
+const APP_FACTORIES = ["initializeApp", "getApp", "getApps", "app", "apps"];
+
 if (watching) {
-  const env = process.env;
   let recorded = false;
-  const noticed = (property) => {
-    if (property !== "CLOUD_RUNTIME_CONFIG" || recorded) return;
-    if (!calledFromCodebase()) return;
+  const record = () => {
+    if (recorded) return;
     recorded = true;
     try {
       writeSync(VERDICT_FD, "consulted");
@@ -229,6 +367,18 @@ if (watching) {
       // descriptor is gone there is no honest way to report, so die: discovery
       // then never answers and the classifier refuses (Codex P2, rounds 15-16).
       abortProcess.call(process);
+    }
+  };
+
+  const env = process.env;
+  const noticed = (property) => {
+    if (recorded) return;
+    if (property === "CLOUD_RUNTIME_CONFIG") {
+      if (consultedRuntimeConfig()) record();
+      return;
+    }
+    if (typeof property === "string" && PROJECT_CONFIG_VARS.has(property)) {
+      if (consultedProjectConfig()) record();
     }
   };
   Object.defineProperty(process, "env", {
@@ -250,4 +400,124 @@ if (watching) {
       },
     }),
   });
+
+  /** Apps already given a recording `options`, so a second lookup adds nothing. */
+  const watchedApps = new WeakSet();
+  /** Module exports already wrapped, so a cached `require` does not re-wrap them. */
+  const watchedExports = new WeakSet();
+
+  /**
+   * One app, with its `options` replaced by a recording view of the same values.
+   *
+   * Defined as an OWN property, which shadows the class getter and leaves the
+   * app's identity alone: `instanceof` still answers, and every firebase-admin
+   * service that takes an app takes this one. The getter itself returns a fresh
+   * deep copy on each read, so pinning one snapshot behind the proxy changes
+   * nothing a caller can rely on.
+   */
+  const watchApp = (app) => {
+    if (!app || typeof app !== "object" || watchedApps.has(app)) return app;
+    let options;
+    try {
+      options = app.options;
+    } catch {
+      return app;
+    }
+    if (!options || typeof options !== "object") return app;
+    watchedApps.add(app);
+    const seen = (property) => {
+      if (!recorded && consultedAdminOption(property)) record();
+    };
+    const view = new Proxy(options, {
+      get(target, property) {
+        seen(property);
+        return target[property];
+      },
+      has(target, property) {
+        seen(property);
+        return property in target;
+      },
+      getOwnPropertyDescriptor(target, property) {
+        seen(property);
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    try {
+      Object.defineProperty(app, "options", {
+        configurable: true,
+        enumerable: true,
+        get: () => view,
+      });
+    } catch {
+      // A frozen app cannot be watched this way. The environment watch above
+      // still covers the `FIREBASE_CONFIG` such an app was built from, so this
+      // loses a path rather than the whole signal.
+    }
+    return app;
+  };
+
+  const watchAdminExports = (exported) => {
+    if (!exported || (typeof exported !== "object" && typeof exported !== "function")) {
+      return exported;
+    }
+    if (watchedExports.has(exported)) return exported;
+    watchedExports.add(exported);
+    for (const name of APP_FACTORIES) {
+      let factory;
+      try {
+        factory = exported[name];
+      } catch {
+        continue;
+      }
+      if (typeof factory !== "function") continue;
+      const wrapped = function (...args) {
+        const answer = factory.apply(this, args);
+        return Array.isArray(answer) ? answer.map(watchApp) : watchApp(answer);
+      };
+      try {
+        Object.defineProperty(exported, name, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: wrapped,
+        });
+      } catch {
+        // Non-configurable: that spelling goes unwatched, and the others still
+        // answer. Nothing here may throw into the codebase's own `require`.
+      }
+    }
+    return exported;
+  };
+
+  /**
+   * The one place every `require("firebase-admin")` passes through.
+   *
+   * The alternative — waiting for the codebase to hand an app over — does not
+   * exist: `initializeApp()` returns before this module could be told, and the
+   * options are read from the value it returned. So the module loader is
+   * intercepted instead, which leaves a `Module._load` that is not node's own.
+   * That is one more way to tell this process from the deploy's, in the same
+   * class as the `process.env` Proxy installed above and answered the same way:
+   * a program written to detect the rehearsal can already do so from
+   * `$PROJECT_DIR` alone, while withholding this leaves the whole
+   * `admin.app().options` path unwatched.
+   *
+   * An ESM artifact that imports `firebase-admin` reaches the CommonJS module
+   * through this loader too. One that imports an ESM build of it would not, and
+   * that is the stated residual — no such build is published today.
+   */
+  const loadModule = Module._load;
+  try {
+    Object.defineProperty(Module, "_load", {
+      configurable: true,
+      writable: true,
+      value: function (request, parent, isMain) {
+        const exported = loadModule.call(this, request, parent, isMain);
+        return ADMIN_ENTRYPOINTS.has(request) ? watchAdminExports(exported) : exported;
+      },
+    });
+  } catch {
+    // Nothing to do: the environment watch above still covers the
+    // `FIREBASE_CONFIG` an app would have been built from.
+  }
 }

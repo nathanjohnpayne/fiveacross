@@ -883,11 +883,12 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     "refuses an artifact that branches on FIREBASE_CONFIG by %s",
     async (_label, branch) => {
       // `prepare.js` hands discovery the project's adminSdkConfig, which needs
-      // an authenticated lookup a local preflight must not make. Reading
-      // `projectId` is fine — it is known — but any way of asking about a field
-      // this classifier could not supply means the real value might have
-      // selected a different surface. Membership, descriptor and enumeration
-      // discriminate just as well as a read (Codex P2, round 11).
+      // an authenticated lookup a local preflight must not make, so any way of
+      // asking about a field this classifier could not supply means the real
+      // value might have selected a different surface. Membership, descriptor
+      // and enumeration discriminate just as well as a read (Codex P2, round
+      // 11). Each of these branches also separates the two probes, which is what
+      // caught them before the preload watched the variable at all.
       await withPrewrittenArtifact(
         ['const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");', branch].join("\n"),
         async (configPath) => {
@@ -899,14 +900,44 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     },
   );
 
-  it("exempts an artifact that reads only the project id from FIREBASE_CONFIG", async () => {
-    // Discriminates the rule above from "any FIREBASE_CONFIG access forfeits",
-    // which would refuse this repository's own Functions index.
+  it("refuses an artifact that parses FIREBASE_CONFIG even for the project id", async () => {
+    // Phase 4b P1 on #1107. This used to be the exempt case, on the ground that
+    // `projectId` is a field this classifier CAN supply — but the preload sees
+    // the variable, not what the artifact then took out of the object it parsed.
+    // A branch that reads `projectId` and `storageBucket` from the same parse is
+    // indistinguishable here from one that reads only the first, and the
+    // differential probe does not close the gap: a branch can depend on a field
+    // neither probe supplies and still be FALSE in both of them
+    // (`storageBucket?.startsWith(projectId + ".")` is true only for the real
+    // project, whose bucket is named after it). So the variable is
+    // all-or-nothing, like the legacy runtime config beside it.
     await withPrewrittenArtifact(
       [
         'const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");',
         "exports.daily = endpoint();",
         "exports.daily.__endpoint.project = config.projectId;",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts an artifact that reads the project id from GCLOUD_PROJECT", async () => {
+    // The discrimination the case above used to carry, drawn where it belongs:
+    // on whether this classifier can REPRODUCE the value. `discoveryEnvironment`
+    // sets `GCLOUD_PROJECT` to the pinned project in both probes, which is the
+    // id the deploy will pass, so a branch on it is rehearsed rather than
+    // guessed at. This repository's own Functions index does exactly this, in
+    // `visionGate.ts`'s `resolveProjectId`, to build its runtime service
+    // account — watching the project id would make every `--only
+    // functions:<endpoint>` deploy of this repo conservative and prove nothing.
+    await withPrewrittenArtifact(
+      [
+        "exports.daily = endpoint();",
+        "exports.daily.__endpoint.project = process.env.GCLOUD_PROJECT;",
       ].join("\n"),
       async (configPath) => {
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
@@ -1080,6 +1111,73 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
         expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
           ALL_INVOKERS_CONSERVATIVE,
         );
+      },
+    );
+  });
+
+  it("refuses a branch on FIREBASE_CONFIG that is false under BOTH probes", async () => {
+    // Phase 4b P1 on #1107, and the case that motivates watching the variable
+    // rather than trusting the differential probe with it. Agreement between the
+    // probes is not independence from the configuration: the real bucket is
+    // named after the project, so `storageBucket.startsWith(projectId + ".")` is
+    // TRUE for every real project and FALSE both with no bucket at all and with
+    // `firebase-deploy-scope-probe.appspot.com`. Both probes therefore report
+    // the single endpoint, agree, and exempt a group.
+    await withPrewrittenArtifact(
+      [
+        'const config = JSON.parse(process.env.FIREBASE_CONFIG || "{}");',
+        "const grouped = Boolean(",
+        '  config.storageBucket && config.storageBucket.indexOf(config.projectId + ".") === 0,',
+        ");",
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses the same branch taken through a firebase-admin app's options", async () => {
+    // The same dependence, reached without touching `process.env` at all:
+    // `initializeApp()` reads `FIREBASE_CONFIG` itself and hands the values back
+    // as `app.options`, so the environment watch sees only firebase-admin's own
+    // frame and waves it through. The options object is therefore wrapped in a
+    // recording view of its own, and a read of one of the fields this classifier
+    // could not supply is the same consultation as reading the variable.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "const options = admin.app().options;",
+        "const grouped = Boolean(",
+        '  options.storageBucket && options.storageBucket.indexOf(options.projectId + ".") === 0,',
+        ");",
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("exempts an artifact that only initialises firebase-admin", async () => {
+    // The control for both cases above, and the reason the admin watch is on the
+    // OPTIONS rather than on `initializeApp` itself: this repository's own
+    // Functions index calls it and reads nothing back, and `initializeApp`'s own
+    // read of `FIREBASE_CONFIG` is the SDK configuring itself. Without this, the
+    // refusals above would pass for a fixture that could never have been exempt.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "exports.daily = endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
       },
     );
   });

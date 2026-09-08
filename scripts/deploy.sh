@@ -211,6 +211,16 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # in sequence inside each), and only for that selector shape: `--only hosting`,
 # a whole-codebase `--only functions`, and every protected callable classify
 # without building anything (about 1s).
+# Running discovery twice does not by itself prove the surface is independent of
+# the project's configuration: the two synthetic probes can AGREE on a branch
+# that is false in both and true for the real project — a bucket named after its
+# project satisfies `storageBucket.startsWith(projectId + ".")` and neither probe
+# can. So a codebase that READS a value this preflight cannot reproduce forfeits
+# the inventory outright: the legacy `functions.config()` namespaces, the
+# `FIREBASE_CONFIG` adminSdkConfig, and the `storageBucket` / `databaseURL` /
+# `credential` a firebase-admin app hands back from it. The project id is not on
+# that list, deliberately — the preflight passes the real, pinned id in both
+# probes, so a branch on it is rehearsed rather than guessed at.
 # The exemption requires `firebase.json` at the CHECKOUT ROOT. Everything the
 # adapter stages and everything it watches for mutation starts from the
 # configured project directory, so a config in a subdirectory (`-c
