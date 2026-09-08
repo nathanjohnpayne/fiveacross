@@ -2290,8 +2290,16 @@ run_readiness_scope_case 23o skipped --only functions:default:submitBugReport
 run_readiness_scope_case 23p skipped --except hosting,functions
 run_readiness_scope_case 24e required --only ""
 run_readiness_scope_case 24f required --except ""
-run_readiness_scope_case 24s required --except "functions hosting"
-run_readiness_scope_case 24t required --except $'functions\thosting'
+# 24s/24t: the pinned CLI's option parser splits a filter list on whitespace as
+# well as commas (`command.js`: `.split(/[\s,]+/)`), so these are
+# `--except functions,hosting` — the same request as 23p, and the classifier
+# normalises them the same way (Codex P1, rounds 22 and 24 on #1107).
+run_readiness_scope_case 24s skipped --except "functions hosting"
+run_readiness_scope_case 24t skipped --except $'functions\thosting'
+# 24u/24v: likewise `--only hosting,functions`, a valid request that deploys
+# every function and therefore requires readiness.
+run_readiness_scope_case 24u required --only "hosting functions"
+run_readiness_scope_case 24v required --only $'hosting\tfunctions'
 
 # Firebase validates filters before filterTargets applies its only-over-except
 # precedence. Invalid combinations must therefore fail locally before exact-SA
@@ -2348,8 +2356,6 @@ run_invalid_filter_case 24b --except
 run_invalid_filter_case 24c -m
 run_invalid_filter_case 24d -p
 run_invalid_filter_case 24r --only --dry-run
-run_invalid_filter_case 24u --only "hosting functions"
-run_invalid_filter_case 24v --only $'hosting\tfunctions'
 run_invalid_filter_case 24j -P other-project
 run_invalid_filter_case 24k -Pother-project
 run_invalid_filter_case 24l --project other-project

@@ -29,6 +29,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const url = require("node:url");
+/**
+ * `Error.prepareStackTrace` as it was when this preload loaded — before any
+ * artifact code could replace it. `calledFromCodebase` restores it for the one
+ * capture it makes (Codex P2, round 24 on #1107).
+ */
+const PRISTINE_PREPARE_STACK_TRACE = Error.prepareStackTrace;
 
 // Captured before any codebase code runs, for the same reason the marker is
 // written with a captured `writeFileSync`: this module shares its process with
@@ -122,13 +128,21 @@ function calledFromCodebase() {
   // dependency reading the value through enough helper frames would otherwise
   // push the codebase frame past the limit, and every remaining frame is a
   // skipped dependency frame — the read would be waved through.
+  // Generated under the stack machinery captured BEFORE any artifact code
+  // ran (Codex P2, round 24 on #1107): an artifact that installs its own
+  // `Error.prepareStackTrace` before reading the value would otherwise format
+  // this stack — and a formatter that drops the codebase frames would turn a
+  // consulted read into a waved-through one.
   const previousLimit = Error.stackTraceLimit;
+  const previousPrepare = Error.prepareStackTrace;
   Error.stackTraceLimit = Infinity;
+  Error.prepareStackTrace = PRISTINE_PREPARE_STACK_TRACE;
   let stack;
   try {
     stack = new Error().stack ?? "";
   } finally {
     Error.stackTraceLimit = previousLimit;
+    Error.prepareStackTrace = previousPrepare;
   }
   // A module-loader frame between the reader and the codebase means the read
   // happened while a dependency was being LOADED — `firebase-functions`'s own
