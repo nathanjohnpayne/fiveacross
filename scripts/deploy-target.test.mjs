@@ -36,19 +36,30 @@ describe('deploy target selection', () => {
     ).rejects.toThrow(/Cannot understand what targets/);
   });
 
+  // The pinned CLI's `command.js` splits `--only` / `--except` on
+  // `/[\s,]+/` (firebase-tools 15.29.0, lines 181 and 188), so a whitespace
+  // separator selects the same targets a comma does. The classifier has to
+  // read the value the way the deploy will, or `--except "functions hosting"`
+  // would be classified as deploying both while the CLI deploys neither. The
+  // classification reports the NORMALISED comma form, which is the one value
+  // every downstream consumer compares against.
   it.each(["hosting functions", "hosting\tfunctions"])(
-    "preserves Firebase's comma-only --only grammar for whitespace value %j",
+    "splits a whitespace-separated --only value exactly as the pinned CLI does (%j)",
     async (only) => {
-      await expect(
-        classifyFirebaseDeployRequest(["fiveacross", "--only", only], {
-          defaultConfigPath: resolve(repoRoot, "firebase.json"),
-        }),
-      ).rejects.toThrow(/Cannot understand what targets/);
+      const result = await classifyFirebaseDeployRequest(["fiveacross", "--only", only], {
+        defaultConfigPath: resolve(repoRoot, "firebase.json"),
+      });
+
+      expect(result).toMatchObject({
+        only: "hosting,functions",
+        hostingAttempted: true,
+        functionsAttempted: true,
+      });
     },
   );
 
   it.each(["functions hosting", "functions\thosting"])(
-    "preserves Firebase's comma-only --except grammar for whitespace value %j",
+    "splits a whitespace-separated --except value exactly as the pinned CLI does (%j)",
     async (except) => {
       const result = await classifyFirebaseDeployRequest(
         ["fiveacross", "--except", except],
@@ -56,12 +67,12 @@ describe('deploy target selection', () => {
       );
 
       expect(result).toMatchObject({
-        except,
-        functionsAttempted: true,
-        hostingAttempted: true,
-        bugReportInvokerSelected: true,
-        emailUnsubscribeInvokerSelected: true,
-        authHandoffInvokerSelected: true,
+        except: "functions,hosting",
+        functionsAttempted: false,
+        hostingAttempted: false,
+        bugReportInvokerSelected: false,
+        emailUnsubscribeInvokerSelected: false,
+        authHandoffInvokerSelected: false,
       });
     },
   );
