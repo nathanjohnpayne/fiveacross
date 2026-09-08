@@ -1521,6 +1521,91 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertFails(resolveStats(2));
   });
 
+  // #1151, Codex P2 on PR #1162. The drain gate is what makes the freeze safe to
+  // take, and `archiveEvent` re-takes it from the SERVER after the closing write
+  // — but the flip's transaction reads only the Event document, so a Claim moved
+  // back to `pending` between that read and the commit neither conflicts with it
+  // nor retries it. The archive would then be permanent over exactly the state
+  // the gate exists to refuse, with a Confirm/Reject pair that can only fail.
+  // Rules cannot query a collection, so the drain cannot be a condition of the
+  // flip; the TRANSITION that creates the state can be held here instead.
+  describe('a Claim cannot go back into the queue once play is closed', () => {
+    const claimPath = `${eventPath()}/claims/claim-drained`;
+    const seedClaim = (status: string) =>
+      testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), claimPath), {
+          uid: ALICE,
+          displayName: 'Alice',
+          cellIndex: 3,
+          itemText: 'Something happens',
+          status,
+          createdAt: NOW(),
+          dayIndex: 0,
+          resolvedBy: status === 'pending' ? null : ADMIN,
+        });
+      });
+    const reopenClaim = () =>
+      updateDoc(doc(db(ADMIN), claimPath), { status: 'pending', resolvedBy: null });
+
+    it('DENIES a terminal Claim being made pending again while the Event is CLOSING', async () => {
+      await seedClaim('confirmed');
+      // Live, this is an ordinary admin correction and still works — the control
+      // that keeps the denial below about the freeze and nothing else.
+      await assertSucceeds(reopenClaim());
+      await seedClaim('rejected');
+      await assertSucceeds(reopenClaim());
+
+      await seedClaim('confirmed');
+      await quiesce();
+      await assertFails(reopenClaim());
+      await seedClaim('rejected');
+      await assertFails(reopenClaim());
+    });
+
+    it('DENIES it on the ARCHIVED half of the freeze too', async () => {
+      await seedClaim('confirmed');
+      await freeze();
+      await assertFails(reopenClaim());
+    });
+
+    it('still lets the drain FINISH from the closing state', async () => {
+      // The window exists so the queue can be emptied. A pending Claim must
+      // still reach a terminal status from here, or the gate would bar the very
+      // remedy it points the Admin at.
+      await seedClaim('pending');
+      await quiesce();
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'confirmed', resolvedBy: ADMIN }),
+      );
+      await seedClaim('pending');
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'rejected', resolvedBy: ADMIN }),
+      );
+    });
+
+    it('leaves an unchanged restatement, other fields, and the DELETE alone while closed', async () => {
+      // Restating a stored `pending` is not a transition into it, so a partial
+      // update that echoes the status still passes…
+      await seedClaim('pending');
+      await quiesce();
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'pending', resolvedBy: null }),
+      );
+      // …an update that never names `status` at all is untouched…
+      await assertSucceeds(updateDoc(doc(db(ADMIN), claimPath), { resolvedBy: ADMIN }));
+      // …and the admin's clear-it-away delete is the moderation path the freeze
+      // deliberately leaves open (#808).
+      await assertSucceeds(deleteDoc(doc(db(ADMIN), claimPath)));
+    });
+
+    it('keeps the arm admin-only, closed or not', async () => {
+      await seedClaim('confirmed');
+      await assertFails(updateDoc(doc(db(BOB), claimPath), { status: 'pending' }));
+      await quiesce();
+      await assertFails(updateDoc(doc(db(BOB), claimPath), { status: 'pending' }));
+    });
+  });
+
   it('keeps the admin Event delete open on a LIVE Event (the control)', async () => {
     await assertFails(deleteDoc(doc(db(BOB), eventPath())));
     await assertSucceeds(deleteDoc(doc(db(ADMIN), eventPath())));

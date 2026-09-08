@@ -2152,7 +2152,42 @@ service cloud.firestore {
         allow create: if signedIn()
           && eventOpenForPlay(eventId)
           && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isAdmin(eventId);
+        // …AND NO UPDATE MAY PUT ONE BACK INTO THE QUEUE (#1151, Codex P2 on PR
+        // #1162). The drain gate is what makes the freeze safe to take: a Claim
+        // still pending at the flip is pending FOREVER, behind a Confirm/Reject
+        // pair whose Board and Player writes the freeze denies. `archiveEvent`
+        // re-reads the queue from the SERVER after the closing write, which
+        // closes the window between the console's last render and the quiesce —
+        // but not the one after that read. The flip's transaction reads only the
+        // Event document, so an admin client moving a terminal Claim back to
+        // `pending` in between neither conflicts with it nor retries it, and the
+        // archive commits permanently over exactly the state the gate exists to
+        // refuse. Rules cannot query a collection, so the drain itself cannot be
+        // a condition of the flip; what CAN be held here is the transition that
+        // creates the state, and that is enough — a Claim that was terminal when
+        // the drain read saw it cannot become pending afterwards.
+        //
+        // Scoped to the RESULTING status, and only while play is closed: a
+        // pending Claim may still be confirmed or rejected from the closing
+        // state, because finishing the drain is the whole point of the window
+        // (`allow update` is the paper half of that resolution — the Board and
+        // Player writes beside it are denied, which is why the console drains
+        // BEFORE it shuts the Event). Restating a stored `pending` is not a
+        // transition and is left alone. On a live Event nothing changes at all.
+        //
+        // It reuses the Event document `isAdmin` has already read rather than
+        // calling `eventClosedToPlay`, which would add an `exists()` on the same
+        // path: `isAdmin` fails closed on a missing Event document (`get()`
+        // returns null and reading `.data` errors), so the arm already requires
+        // the document that answers this question. The disjunction is ordered so
+        // an ordinary resolution short-circuits before the Event is consulted at
+        // all.
+        allow update: if isAdmin(eventId)
+          && (request.resource.data.get('status', '') != 'pending'
+              || resource.data.get('status', '') == 'pending'
+              || (eventData(eventId).get('status', 'active') != 'archived'
+                  && eventData(eventId).get('archiving', false) != true));
+        allow delete: if isAdmin(eventId);
       }
 
       // Per-Prompt Tally (ADR 0002). A Mark is PRIVATE on the Board but PUBLIC as an
