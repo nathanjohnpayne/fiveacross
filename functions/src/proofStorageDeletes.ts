@@ -11,15 +11,23 @@
  *
  * The client therefore writes a tombstone — `events/{eventId}/proofStorageDeletes/{proofId}`,
  * carrying `{ storagePath, uid, requestedAt }` — in the SAME transaction as the
- * Proof delete, and clears it once the object is provably gone. This module is
- * the other half of that promise: the trigger on tombstone CREATE performs the
- * revocation server-side, so a client that failed, navigated away, or lost the
- * network never strands the media. It throws on a real failure so Cloud
+ * Proof delete, and that is the LAST it touches it. This module is the other
+ * half of that promise: the trigger on tombstone CREATE performs the revocation
+ * server-side and retires the row, so a client that failed, navigated away, or
+ * lost the network never strands the media. It throws on a real failure so Cloud
  * Functions redelivers (`retry: true`), which is the durability a client-side
  * retry cannot offer — and which is why #1153 retired the device-local
  * `localStorage` queue child 1 shipped as the interim record: this record is
  * atomic with the delete, visible from every device, and does not depend on the
  * deleting Player ever coming back.
+ *
+ * RETIREMENT IS THIS MODULE'S ALONE (#1153, Codex round 3 P1). `firestore.rules`
+ * denies every client delete on the row, because the row's path is entirely
+ * predictable and the media's OWNER is exactly the party an admin takedown is
+ * aimed at: a blind delete against it would make `revokeProofMedia` find no
+ * tombstone, abandon the sweep by design, and leave the reported photo
+ * reachable. The Admin SDK bypasses those rules, so the sweeper below is the
+ * only writer that ever clears one.
  *
  * Every seam is injected, so the whole flow is unit-testable without a Functions
  * runtime or an emulator (the `autohide.ts` / `notify.ts` precedent).
@@ -47,10 +55,11 @@ export interface RevokeProofMediaDeps {
    * The event snapshot is a statement about the past, and a delivery can arrive
    * arbitrarily late: `retry: true` keeps a failed one coming back for days, and
    * even a first delivery is not instantaneous. By the time it runs, the
-   * revocation may already be discharged and the row retired — by the deleting
-   * client, or by an earlier delivery of this very event — at which point the
-   * rules deliberately FREE the Proof id for reuse. This is the sweeper asking
-   * whether the debt it is about to collect is still owed.
+   * revocation may already be discharged and the row retired by an earlier
+   * delivery of this very event — retirement is server-only, so that is now the
+   * only way one goes — at which point the rules deliberately FREE the Proof id
+   * for reuse. This is the sweeper asking whether the debt it is about to
+   * collect is still owed.
    */
   tombstoneExists(): Promise<boolean>;
   /**
@@ -172,11 +181,12 @@ export function isGenerationMismatch(err: unknown): boolean {
  * delete, so "should be unreachable" is not a safe premise for revoking media.
  *
  * FIRST, IS THE DEBT STILL OWED. The triggering row is re-read on EVERY
- * delivery, not only when the path is unbound: the ordinary case is precisely
- * the retired one — the deleting client's own Storage delete usually wins the
- * race and clears the row before this ever runs — and the moment it is cleared
- * the rules FREE the Proof id for reuse. A delayed delivery that skipped this
- * check would still be holding a generation-less row (a metadata read that
+ * delivery, not only when the path is unbound. Retirement is server-only
+ * (#1153, Codex round 3 P1), so the row can only have gone one way: an EARLIER
+ * delivery of this same event already discharged the revocation and cleared it,
+ * which `retry: true` makes an ordinary thing to arrive after. The moment it is
+ * cleared the rules FREE the Proof id for reuse. A delayed delivery that skipped
+ * this check would still be holding a generation-less row (a metadata read that
  * failed) and would delete whatever now answers to that path: a permitted
  * re-post can have uploaded its replacement media BEFORE creating its Proof
  * document, so the Proof read below is still false and the object taken is the
@@ -221,10 +231,11 @@ export async function revokeProofMedia(
   // every delivery before anything else is asked, because a retired row means
   // the revocation is already discharged AND the Proof id is free again — so
   // every later question in this function would be answered about somebody
-  // else's object. Nothing is deleted here, the tombstone least of all: there is
-  // no row of ours left to retire, and a blind delete would take a LATER
-  // revocation's row with it. A read failure propagates, for the same reason the
-  // Proof read's does.
+  // else's object. Only an earlier delivery of this same event can have retired
+  // it; no client may (#1153, Codex round 3 P1). Nothing is deleted here, the
+  // tombstone least of all: there is no row of ours left to retire, and a blind
+  // delete would take a LATER revocation's row with it. A read failure
+  // propagates, for the same reason the Proof read's does.
   if (!(await deps.tombstoneExists())) {
     warn('proof media revocation skipped: the tombstone was already retired', {
       eventId,

@@ -1873,8 +1873,9 @@ service cloud.firestore {
           //
           // One `exists()` closes it: while the revocation is outstanding the id
           // cannot come back, and the moment the row is retired — by the
-          // deleting client, or by the sweeper once the object is provably gone
-          // — the id is free again. It costs the app nothing, because
+          // sweeper, which is the only writer that may retire one, once the
+          // object is provably gone — the id is free again. It costs the app
+          // nothing, because
           // `attachProof` mints a fresh auto-id per capture and never re-posts
           // under an id it has already used.
           && !exists(/databases/$(database)/documents/events/$(eventId)/proofStorageDeletes/$(proofId))
@@ -2006,9 +2007,10 @@ service cloud.firestore {
       // was supposed to be deleted, so a Storage failure afterwards used to
       // leave media reachable through its download URL with nothing anywhere
       // saying otherwise. This collection IS that record: written in the same
-      // transaction as the Proof delete, removed once the object is provably
-      // gone, and swept server-side (`revokeDeletedProofMedia`) so a client that
-      // never comes back does not strand the media.
+      // transaction as the Proof delete, and both swept AND retired server-side
+      // by `revokeDeletedProofMedia`, once the object is provably gone, so
+      // neither a client that never comes back nor one that comes back hostile
+      // can strand the media.
       //
       // The document id IS the Proof's own id — one pending revocation per
       // Proof — which is what lets the object path be pinned by string
@@ -2029,12 +2031,38 @@ service cloud.firestore {
       // named after THIS document's Proof id, under the uid the row itself
       // declares, inside THIS Event.
       match /proofStorageDeletes/{proofId} {
-        // Clients never read the queue and never mutate a row. Update is denied
+        // CREATE IS THE ONLY CLIENT WRITE THIS COLLECTION HAS. A row is minted
+        // alongside its own Proof's deletion by the arm below and is never read,
+        // never changed and never removed from a browser again. Update is denied
         // outright rather than shape-checked, so a pending revocation can never
         // be re-pointed at another object after the fact; the create arm below
         // admits a row only alongside its own Proof's deletion, so a legitimate
         // `set` is always a create and never meets this arm.
-        allow read, update: if false;
+        //
+        // AND RETIREMENT IS THE SERVER'S ALONE (#1153, Codex round 3 P1). The
+        // delete arm used to read `isAdmin(eventId) || isOwner(resource.data.uid)`
+        // — who may retire a discharged revocation, mirrored off who may delete
+        // the media directly. That mirror is wrong on the one path this whole
+        // collection exists for. When an Admin takes reported media down and the
+        // inline Storage delete fails or is interrupted, this row is the ONLY
+        // thing left that owes the revocation, and its path is entirely
+        // predictable: `events/{eventId}/proofStorageDeletes/{proofId}`. The
+        // media's OWNER could therefore issue a blind delete against it —
+        // denying the READ never prevented a delete, only denying the delete
+        // does — after which `revokeDeletedProofMedia` finds no tombstone,
+        // abandons the sweep by design, and the reported photo stays reachable
+        // through its download URL. The subject of a takedown must not be able
+        // to cancel its durable half.
+        //
+        // Nothing is lost by closing it, because the client's retirement was
+        // only ever an OPTIMISATION. The sweeper retires the row itself once the
+        // object is provably gone, and "already gone" — precisely what the
+        // deleting client's own inline Storage delete leaves behind — is the
+        // 404 it counts as success. The Admin SDK bypasses these rules
+        // entirely, so the sweeper is untouched by this arm; `deleteProof` no
+        // longer issues the retirement at all, rather than issuing a write that
+        // is always denied.
+        allow read, update, delete: if false;
         allow create: if (isAdmin(eventId)
                           || (isOwner(request.resource.data.uid) && eventOpenForPlay(eventId)))
           // BOUND TO A REAL PROOF, OWNED BY THE UID THE ROW DECLARES, so the
@@ -2114,15 +2142,6 @@ service cloud.firestore {
           // refused a tombstone outright, which is correct: it owes no
           // revocation, and `deleteProof` writes no row for one anyway.
           && get(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId)).data.storagePath == request.resource.data.storagePath;
-        // Retiring a discharged revocation. The Admin SDK sweeper bypasses these
-        // rules; this arm is for the client that just watched its own Storage
-        // delete succeed. Ungated by the freeze on purpose — a tombstone that
-        // could not be cleared after the media was revoked would be swept
-        // forever, and clearing one can only ever leave an object in place that
-        // its own deleter is already entitled to remove (and which, since the
-        // create arm requires the Proof's deletion, is an ORPHAN the owner may
-        // clear directly under `storage.rules` in every state).
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
       }
 
       // The Vision scanner's hand-off record (#1143, specs/cloud-vision-moderation.md

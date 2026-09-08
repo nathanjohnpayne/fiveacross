@@ -1,4 +1,4 @@
-import { collection, deleteDoc, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
+import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
@@ -604,11 +604,6 @@ export async function deleteProof(
   // each attempt reassigns it, so only the committed attempt's value survives
   // to the purge call.
   let mediaURL: string | null | undefined;
-  // Whether the committed attempt wrote the media's pending-revocation
-  // tombstone (#1153). Declared out here for the same reason `mediaURL` is: the
-  // callback can re-run, and only the committed attempt's value may drive the
-  // post-commit half.
-  let tombstoned = false;
 
   // THE OBJECT THIS TAKEDOWN ACTUALLY REVOKES, taken from the Proof document
   // the transaction read rather than from the caller's argument (#1153, Phase
@@ -849,18 +844,17 @@ export async function deleteProof(
     // So the pending revocation is written IN THE SAME COMMIT as the delete,
     // before the reference disappears. Same transaction, so there is no window
     // in which the Proof is gone and the record of its media is not: either
-    // both land or neither does. The post-commit half retires it once the
-    // object is provably revoked; a failure leaves it standing, and
-    // `revokeDeletedProofMedia` (functions/src/proofStorageDeletes.ts) finishes
-    // the job on the tombstone's CREATE even when this client never comes back
-    // at all — which is the case no client-side retry can cover.
+    // both land or neither does. WRITING IT IS ALL THIS CLIENT EVER DOES WITH
+    // IT: `revokeDeletedProofMedia` (functions/src/proofStorageDeletes.ts)
+    // revokes the object on the tombstone's CREATE and retires the row itself,
+    // which covers both the client that never comes back and the client that
+    // comes back hostile (#1153, Codex round 3 P1 — see the post-commit half).
     //
     // Written only when the Proof document was actually READ here: a second
     // delete of an already-deleted Proof has nothing to record, and its `set`
     // would be an update the rules deny (create-only, precisely so a pending
     // revocation cannot be re-pointed). The first attempt's tombstone is still
     // standing in that case, so the revocation is still owed either way.
-    tombstoned = false;
     if (proof && revokePath) {
       const ownerUid = proofMediaOwnerUid(revokePath, eventId, id);
       // Both halves the rule will check, checked here first: the path parses to
@@ -896,7 +890,6 @@ export async function deleteProof(
           // own transaction.
           ...(generation === null || storagePath !== revokePath ? {} : { generation }),
         });
-        tombstoned = true;
       }
     }
 
@@ -912,34 +905,25 @@ export async function deleteProof(
   // The rejection still PROPAGATES, so a takedown that did not revoke the media
   // is never reported as clean — and it no longer has to carry the retry with
   // it, because the sweeper does.
+  //
+  // AND THE REVOCATION IS ALL THIS CLIENT DOES. It does not retire the tombstone
+  // it has just discharged (#1153, Codex round 3 P1). Retirement is SERVER-ONLY
+  // now: `firestore.rules` denies every client delete on the row, and
+  // `revokeDeletedProofMedia` retires it once the object is provably gone —
+  // "already gone" is exactly the answer the delete below leaves behind, and the
+  // sweeper counts that as success. The client's retirement was only ever an
+  // optimisation, and it was one the media's OWNER could turn against an ADMIN
+  // takedown: the row sits at the entirely predictable
+  // `events/{eventId}/proofStorageDeletes/{proofId}`, so an owner who could
+  // delete it could cancel the durable half of a takedown aimed at their own
+  // reported photo the moment the Admin's inline Storage delete failed or was
+  // interrupted. Denying the READ never prevented that delete; only denying the
+  // delete does. So the write is REMOVED rather than left in place to be denied.
   try {
     // The SAME object the tombstone names (#1153, Phase 4b P2) — the stored one
     // wherever the transaction could read the Proof, so the fast path and the
     // durable record can never target different blobs.
-    if (revokePath) {
-      await deleteStoragePath(revokePath);
-      // The object is gone (`deleteStoragePath` swallows only "already gone"
-      // and rethrows every real failure), so the pending revocation has been
-      // discharged and the tombstone is retired. Failures HERE are swallowed on
-      // purpose: the media IS revoked, so reporting a failed takedown would be
-      // a lie, and a tombstone this leaves behind costs one sweeper run that
-      // finds the object already gone — which it counts as success and retires
-      // itself.
-      //
-      // AND IT IS NOT AWAITED (Phase 4b P2). Both substantive deletions have
-      // already landed by this line — the Firestore commit and the Storage
-      // revocation — so what is left is bookkeeping the sweeper redoes anyway.
-      // Awaiting it made the whole takedown hostage to it: a `deleteDoc` that
-      // never settles, which is exactly what a Firestore client does when
-      // connectivity disappears mid-call rather than rejecting, left
-      // `deleteProof` pending forever, so the caller never learned the delete
-      // had succeeded and — worse — the `finally` below never ran, leaving this
-      // device serving the deleted photo out of its own cache. Swallowing the
-      // REJECTION was never the whole problem; waiting for an answer at all
-      // was. Detached, the completion and the purge depend only on the two
-      // operations that actually changed something.
-      if (tombstoned) void deleteDoc(rawProofStorageDelete(id, eventId)).catch(() => {});
-    }
+    if (revokePath) await deleteStoragePath(revokePath);
   } finally {
     // Fire-and-forget, AFTER commit (never inside the retryable transaction
     // callback above — a callback re-run on conflict would fire this on every

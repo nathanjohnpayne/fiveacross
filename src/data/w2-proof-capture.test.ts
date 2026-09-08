@@ -35,9 +35,10 @@ const {
   // assert the generation reaches the row, and that a failed read is absorbed.
   generationSpy,
   purgeCacheSpy,
-  // The out-of-transaction `deleteDoc` that RETIRES a discharged media
-  // revocation tombstone (#1153) — spied so the cases below can assert it fires
-  // only after the Storage delete actually resolved.
+  // `deleteDoc`, which this layer no longer calls at all (#1153, Codex round 3
+  // P1: retiring a discharged media-revocation tombstone is SERVER-ONLY). Kept
+  // as a spy precisely so the cases below can assert it never fires — a silent
+  // un-mocked import would prove nothing.
   deleteDocSpy,
 } = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
@@ -1272,19 +1273,35 @@ describe('deleteProof — the media revocation outlives the commit that removes 
     );
   });
 
-  it('retires the tombstone only AFTER the Storage delete has actually resolved', async () => {
-    // Never on the strength of an attempt: the row is the outstanding debt, so
-    // it is cleared only once the object is provably gone.
-    let retirementsWhileDeleting = -1;
-    deleteStorageSpy.mockImplementationOnce(async () => {
-      retirementsWhileDeleting = deleteDocSpy.mock.calls.length;
-    });
+  it('writes NO retirement at all — the sweeper is the only writer that may clear the row (#1153)', async () => {
+    // Codex round 3 P1. This client used to retire the tombstone it had just
+    // discharged, which was only ever an OPTIMISATION — and one the media's
+    // OWNER could turn against an ADMIN takedown. The row's path is entirely
+    // predictable, so an owner who could delete it could cancel the durable half
+    // of a takedown aimed at their own reported photo the moment the Admin's
+    // inline Storage delete failed or was interrupted; the sweeper would then
+    // find no tombstone, abandon by design, and leave the download URL live.
+    // `firestore.rules` therefore denies EVERY client delete on the row, and the
+    // write is removed here rather than left in place to be denied.
+    //
+    // Nothing is lost: `deleteStoragePath` leaves the object gone, which is the
+    // 404 `revokeDeletedProofMedia` counts as success before retiring the row
+    // itself. The whole takedown still resolves, and the cache is still purged.
+    proofState = {
+      uid: 'u1',
+      cellIndex: 5,
+      storagePath: `proofs/${EVENT_ID}/u1/P.jpg`,
+      mediaURL: 'https://firebasestorage.googleapis.com/x',
+    };
 
-    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
 
-    expect(retirementsWhileDeleting).toBe(0);
-    expect(deleteDocSpy).toHaveBeenCalledTimes(1);
-    expect((deleteDocSpy.mock.calls[0][0] as Ref).path).toBe(TOMBSTONE);
+    // The row was written and the object revoked …
+    expect(tombstoneSet()).toBeGreaterThanOrEqual(0);
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+    // … and no `deleteDoc` was issued against the tombstone, or anything else.
+    expect(deleteDocSpy).not.toHaveBeenCalled();
+    expect(purgeCacheSpy).toHaveBeenCalledWith('https://firebasestorage.googleapis.com/x');
   });
 
   it('LEAVES the tombstone standing when the Storage delete rejects, and still surfaces the error', async () => {
@@ -1298,38 +1315,6 @@ describe('deleteProof — the media revocation outlives the commit that removes 
 
     expect(tombstoneSet()).toBeGreaterThanOrEqual(0);
     expect(deleteDocSpy).not.toHaveBeenCalled();
-  });
-
-  it('SWALLOWS a failed retirement — the media is gone, so the takedown is not a failure', async () => {
-    // A tombstone left behind costs one sweeper run that finds the object
-    // already gone, which it counts as success and retires itself.
-    deleteDocSpy.mockRejectedValueOnce(new Error('permission-denied'));
-
-    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
-  });
-
-  it('does not WAIT for the retirement: a call that never answers still finishes the takedown and purges the cache', async () => {
-    // Swallowing the rejection was never the whole problem — waiting for an
-    // answer at all was. A Firestore client whose connectivity disappears
-    // mid-call does not reject, it stays pending, and awaiting that left
-    // `deleteProof` pending with it: the caller never learned a delete that had
-    // fully succeeded HAD succeeded, and the `finally` never ran, so this device
-    // went on serving the deleted photo out of its own CacheFirst copy. Both
-    // substantive deletions are already committed by this point, and the sweeper
-    // retires the row anyway, so the retirement is detached.
-    proofState = {
-      uid: 'u1',
-      cellIndex: 5,
-      storagePath: `proofs/${EVENT_ID}/u1/P.jpg`,
-      mediaURL: 'https://firebasestorage.googleapis.com/x',
-    };
-    deleteDocSpy.mockReturnValueOnce(new Promise<void>(() => {}));
-
-    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
-
-    // Issued, just not waited on — the row is still asked to go.
-    expect(deleteDocSpy).toHaveBeenCalledTimes(1);
-    expect(purgeCacheSpy).toHaveBeenCalledWith('https://firebasestorage.googleapis.com/x');
   });
 
   it('still purges this device’s cache when the revocation rejects (#1148)', async () => {

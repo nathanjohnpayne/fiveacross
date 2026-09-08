@@ -340,15 +340,19 @@ export const moderateProof = VISION_ENABLED
  * against two services, Firestore first, and that commit destroys the only
  * reference to the object. The tombstone this triggers on is written in the SAME
  * transaction as the Proof delete, so the media's revocation outlives the row
- * that named it: the client clears the tombstone once the object is provably
- * gone, and this finishes the job when it never does.
+ * that named it — and writing it is the LAST thing the client does with it. This
+ * both finishes the revocation and RETIRES the row, because `firestore.rules`
+ * denies every client delete on it (#1153, Codex round 3 P1): the row's path is
+ * entirely predictable, and letting the media's owner clear it would let the
+ * subject of an admin takedown cancel its durable half.
  *
  * `retry: true` is load-bearing — `revokeProofMedia` rethrows a real Storage
  * failure with the tombstone still standing, so the platform redelivers rather
  * than silently accepting media that is still reachable. "Already gone" counts as
- * success, which is also the ordinary case: the client's own delete usually wins
- * the race. NOT gated on the freeze: this IS the takedown, and an archived Event
- * is exactly where a permanent record most needs one (#808).
+ * success, which is also the ordinary case: the client's own inline Storage
+ * delete usually wins the race. NOT gated on the freeze: this IS the takedown,
+ * and an archived Event is exactly where a permanent record most needs one
+ * (#808).
  *
  * `ADMIN_SDK_SERVICE_ACCOUNT` for the ordinary reason the other data-plane
  * triggers pin it: the sweep deletes a bucket object and then a Firestore
@@ -370,10 +374,10 @@ export const revokeDeletedProofMedia = onDocumentCreated(
       {
         // Strongly consistent, and read at SWEEP time rather than trusted from
         // the event snapshot: `event.data` is the row as it was CREATED, this is
-        // whether it is still standing (#1153, Phase 4b P2). A delivery can
-        // arrive long after the deleting client retired the row — the ordinary
-        // case, since the client's own Storage delete usually wins — and the
-        // rules free the Proof id the moment it does.
+        // whether it is still standing (#1153, Phase 4b P2). Retirement is
+        // server-only, so a delivery that finds nothing was preceded by another
+        // delivery of this same event that already discharged the revocation —
+        // and the rules free the Proof id the moment it does.
         tombstoneExists: async () =>
           (await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get()).exists,
         // Strongly consistent, and read at SWEEP time rather than trusted from

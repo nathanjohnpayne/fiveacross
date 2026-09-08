@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -1496,18 +1496,41 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     );
   });
 
-  it('ALLOWS the admin and the named owner to retire a discharged revocation, and DENIES a stranger', async () => {
+  it('DENIES every client RETIREMENT — the media’s OWNER above all (#1153)', async () => {
+    // Codex round 3 P1. The delete arm used to be `isAdmin || isOwner`, mirrored
+    // off who may delete the media directly. That mirror is wrong on the one
+    // path this collection exists for: when an Admin takes reported media down
+    // and the inline Storage delete fails or is interrupted, this row is the
+    // only thing still owing the revocation, and it sits at the entirely
+    // predictable `events/{eventId}/proofStorageDeletes/{proofId}`. Denying the
+    // READ never prevented a DELETE, so the owner could blind-delete the row,
+    // after which `revokeDeletedProofMedia` finds no tombstone, abandons the
+    // sweep by design, and the reported photo stays reachable through its
+    // download URL. The subject of a takedown must not be able to cancel its
+    // durable half, so retirement is SERVER-ONLY — the Admin SDK sweeper
+    // bypasses these rules and is untouched.
     await seedTombstone();
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(ADMIN), tombstonePath())));
     await assertFails(deleteDoc(doc(db(BOB), tombstonePath())));
-    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
-    await seedTombstone();
-    await assertSucceeds(deleteDoc(doc(db(ADMIN), tombstonePath())));
+    await assertFails(deleteDoc(doc(unauthDb(), tombstonePath())));
+    // …and the row is still standing afterwards, so the denials above are real
+    // rather than a delete of something already gone.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const snap = await getDoc(doc(ctx.firestore(), tombstonePath()));
+      expect(snap.exists()).toBe(true);
+    });
   });
 
-  it('leaves the retirement OPEN on a frozen Event — a tombstone that could not be cleared would be swept forever', async () => {
+  it('DENIES the retirement on a FROZEN Event too — the freeze is not what closes it', async () => {
+    // The old arm was deliberately ungated by the freeze, because a tombstone
+    // nobody could clear would be swept forever. The sweeper clears it now, so
+    // the state of the Event has nothing to do with the answer: no client
+    // retires one in any state.
     await seedTombstone();
     await freeze();
-    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(ADMIN), tombstonePath())));
   });
 
   it('REFUSES bringing the Proof id back while its revocation stands, and FREES it the moment the row is retired (#1153)', async () => {
@@ -1528,10 +1551,15 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     // …and the refusal is about THAT id, not about the Event: every other id is
     // untouched, so a Player who just had a Proof taken down can post again.
     await assertSucceeds(createProof('unheld-proof'));
-    // Retiring the row releases the id. The deleting client does this once its
-    // own Storage delete resolves; the sweeper does the same server-side once
-    // the object is provably gone.
-    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+    // Retiring the row releases the id — and ONLY the sweeper can retire one
+    // (#1153, Codex round 3 P1), so the release is modelled with the rules
+    // disabled, which is what the Admin SDK's bypass actually is. A client
+    // attempt is denied and leaves the hold exactly where it was.
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(createProof(PROOF));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), tombstonePath()));
+    });
     await assertSucceeds(createProof(PROOF));
   });
 
