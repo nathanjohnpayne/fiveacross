@@ -22,7 +22,21 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown };
 
-const { activeEvent, txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy, purgeCacheSpy } = vi.hoisted(() => ({
+const {
+  activeEvent,
+  txGet,
+  txSet,
+  txDelete,
+  runTx,
+  uploadSpy,
+  deleteStorageSpy,
+  purgeCacheSpy,
+  // Proof document paths the stubbed `getDoc` should report as EXISTING. The
+  // revocation drain reads the document a queued object belongs to before it
+  // revokes anything (#1157 run 4), so the default — empty — is "the delete
+  // landed", which is what every pre-existing queue case assumes.
+  liveProofDocs,
+} = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
   txGet: vi.fn(),
   txSet: vi.fn(),
@@ -31,6 +45,7 @@ const { activeEvent, txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy,
   uploadSpy: vi.fn(),
   deleteStorageSpy: vi.fn(),
   purgeCacheSpy: vi.fn(),
+  liveProofDocs: new Set<string>(),
 }));
 
 vi.mock('../firebase', () => ({
@@ -78,6 +93,7 @@ vi.mock('firebase/firestore', () => {
     return { __kind: 'doc', id: rest[rest.length - 1], path: rest.join('/') };
   },
   runTransaction: (_db: unknown, fn: (tx: unknown) => unknown) => runTx(_db, fn),
+  getDoc: (ref: Ref) => Promise.resolve({ exists: () => liveProofDocs.has(ref.path) }),
   increment: (n: number) => ({ __inc: n }),
   updateDoc: vi.fn(),
   };
@@ -112,6 +128,7 @@ function setPayload(frag: string): Record<string, unknown> | undefined {
 beforeEach(() => {
   vi.clearAllMocks();
   activeEvent.id = EVENT_ID;
+  liveProofDocs.clear();
   autoSeq = 0;
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   boardState = { cells: dealt() };
@@ -1292,6 +1309,12 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
 
     expect(runTx).toHaveBeenCalled();
     expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/STUCK.jpg`]);
+    // The drain reads the Proof document before it revokes (#1157 run 4), so
+    // its Storage call lands a tick later than the takedown's own work — which
+    // is the point: the takedown had already finished above.
+    await vi.waitFor(() =>
+      expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/STUCK.jpg`),
+    );
     releaseStuck();
     await vi.waitFor(() => expect(queued()).toEqual([]));
   });
@@ -1310,12 +1333,16 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
 
   it('KEEPS a queued path whose retry fails again', async () => {
     localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/OLD.jpg`]));
-    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/unauthorized')); // the drain
-    deleteStorageSpy.mockResolvedValueOnce(undefined); // this delete's own revocation
+    // Keyed on the path rather than on call ORDER: the drain reads a document
+    // before it revokes, so its Storage call and this delete's own are no
+    // longer in a fixed sequence.
+    deleteStorageSpy.mockImplementation((path: string) =>
+      path.endsWith('OLD.jpg') ? Promise.reject(new Error('storage/unauthorized')) : Promise.resolve(),
+    );
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
-    expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/OLD.jpg`]);
+    await vi.waitFor(() => expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/OLD.jpg`]));
   });
 
   it('drains on EVERY signed-in transition, not only the restored one', async () => {
@@ -1336,6 +1363,109 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
     expect(drain).toHaveBeenCalledTimes(2);
     stop();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the deletion INTENT before the transaction is SENT, and keeps it through the commit', async () => {
+    // Phase 4b P2, PR #1157 run 4. Recording after `runTransaction` RESOLVES
+    // covered the wrong window: Firestore can accept the commit and the tab die
+    // before the acknowledgement gets back, taking the Proof, its `storagePath`
+    // and the surface that offered the delete with it, so nothing on this
+    // device knows an object was ever meant to go.
+    let queuedInsideTransaction: string[] = [];
+    runTx.mockImplementationOnce((_db: unknown, fn: (tx: unknown) => unknown) => {
+      queuedInsideTransaction = queued();
+      return fn({ get: txGet, set: txSet, delete: txDelete });
+    });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(queuedInsideTransaction).toEqual([`proofs/${EVENT_ID}/u1/P.jpg`]);
+    // …and it survives the commit, cleared only once the object is gone.
+    expect(queued()).toEqual([]);
+  });
+
+  it('CLEARS the intent when the transaction is REFUSED — nothing committed, nothing to revoke', async () => {
+    // The other side of recording early: an intent can now outlive a
+    // transaction that never landed. The refusal is decided here, so the only
+    // ambiguous entry the drain has to resolve is a tab killed mid-flight.
+    let queuedInsideTransaction: string[] = [];
+    runTx.mockImplementationOnce(() => {
+      queuedInsideTransaction = queued();
+      return Promise.reject(new Error('permission-denied'));
+    });
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
+      'permission-denied',
+    );
+
+    // It was recorded before the write was sent…
+    expect(queuedInsideTransaction).toEqual([`proofs/${EVENT_ID}/u1/P.jpg`]);
+    // …and withdrawn the moment the refusal was known.
+    expect(queued()).toEqual([]);
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('DROPS an intent whose Proof document still EXISTS, without touching Storage', async () => {
+    // The killed-tab case the early record makes possible: the transaction
+    // never committed, so the Proof still points at this object and revoking it
+    // would produce exactly the Feed entry whose image can never load that the
+    // commit-first ordering exists to prevent. The delete plainly did not
+    // happen and nothing later will make it happen, so the record goes.
+    const { drainProofMediaRevocations } = await import('./proofMediaRevocations');
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/LIVE.jpg`]));
+    const proofExists = vi.fn(async () => true);
+
+    await drainProofMediaRevocations(EVENT_ID, { proofExists });
+
+    expect(proofExists).toHaveBeenCalledWith(EVENT_ID, 'LIVE');
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+    expect(queued()).toEqual([]);
+  });
+
+  it('REVOKES an intent whose Proof document is GONE', async () => {
+    const { drainProofMediaRevocations } = await import('./proofMediaRevocations');
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/DEAD.jpg`]));
+
+    await drainProofMediaRevocations(EVENT_ID, { proofExists: async () => false });
+
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/DEAD.jpg`);
+    expect(queued()).toEqual([]);
+  });
+
+  it('derives the document from the path, stripping only the FINAL extension', async () => {
+    // `uploadProofMedia` writes proofs/{eventId}/{uid}/{proofId}.{ext}, and a
+    // dotted proof id such as `p.q` must be recovered whole — splitting on the
+    // first dot looked up `p` and released media a surviving document still
+    // pointed at (the same trap Phase 4b P1 on run 2 fixed in storage.rules).
+    const { drainProofMediaRevocations } = await import('./proofMediaRevocations');
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/p.q.jpg`]));
+    const proofExists = vi.fn(async () => false);
+
+    await drainProofMediaRevocations(EVENT_ID, { proofExists });
+
+    expect(proofExists).toHaveBeenCalledWith(EVENT_ID, 'p.q');
+  });
+
+  it('KEEPS an intent whose document check FAILS, and drops a path that names no document', async () => {
+    // Offline says nothing about the document, so the entry waits; a path this
+    // build could never have written cannot be shown to be an orphan, and an
+    // orphan is all this queue is for, so it goes without a Storage call.
+    const { drainProofMediaRevocations } = await import('./proofMediaRevocations');
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/OFFLINE.jpg`]));
+
+    await drainProofMediaRevocations(EVENT_ID, {
+      proofExists: async () => {
+        throw new Error('unavailable');
+      },
+    });
+
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+    expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/OFFLINE.jpg`]);
+
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(['legacy/not-a-proof-path.jpg']));
+    await drainProofMediaRevocations(EVENT_ID, { proofExists: async () => false });
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+    expect(queued()).toEqual([]);
   });
 
   it('completes the delete when localStorage is CORRUPTED or unavailable', async () => {
