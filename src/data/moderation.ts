@@ -110,3 +110,64 @@ export function isSystemAuthor(uid: string | null | undefined): boolean {
 export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: boolean): boolean {
   return spicy === true && !adultRequired;
 }
+
+/**
+ * The subset of a Proof the confirm-time safety gate reads. Both fields are
+ * SERVER-OWNED: `firestore.rules` bounds a non-admin's Proof update to
+ * `reportCount` alone and admits neither key at create, so nothing a Player can
+ * write ever appears here.
+ */
+export interface SafetyHideState {
+  status?: string;
+  /** `hideProofOnVisionFlag`'s marker (functions/src/visionHide.ts § SAFETY_HIDE_MARKER). */
+  safetyHide?: boolean | null;
+}
+
+/**
+ * Does a server-authoritative safety hide currently STAND on this Proof? True iff
+ * the server RECORDED one (`safetyHide === true`), or the Proof is still
+ * `'flagged'`.
+ *
+ * The marker arm is now the one that does the work. Both server-side verdict
+ * writers stamp `safetyHide: true` in the SAME update as an allowlisted
+ * `visionFlag` (`visionVerdictWrite`, functions/src/visionHide.ts), so on any
+ * Proof this deployment flagged the record exists from the first moment the
+ * verdict does, and the `'flagged'` arm is redundant for it.
+ *
+ * The `'flagged'` arm is kept for the interval that stamping closed but cannot
+ * un-write: a Proof flagged by a PRE-#1143 Functions build carries the verdict
+ * and no marker until the hide arm reaches it, and this gate is the only thing
+ * standing between that doc and a Confirm that would publish it. It also covers
+ * a verdict outside the auto-hide allowlist, which is deliberately marker-less
+ * and never auto-hidden (ADR 0004) but is still an unreviewed AI flag that
+ * Confirm should not publish out from under the admin queue.
+ *
+ * It reads no verdict and holds no allowlist, and that is the whole point (Codex
+ * P1 on #133). The verdict strings live in `AUTO_HIDE_VISION_FLAGS`
+ * (functions/src/visionHide.ts), and Functions and the PWA deploy separately: a
+ * client mirroring that list would, between a widening deploy and every cached
+ * bundle catching up, read a newly hide-worthy verdict as safe and publish a
+ * Proof the server had deliberately hidden. A parity test catches that drift only
+ * WITHIN one revision — it cannot catch two revisions running at once. So the
+ * decision moved onto facts the server itself writes: a boolean a client that has
+ * never heard of the verdict still understands, and a `'flagged'` status no
+ * client may set.
+ *
+ * The one caller is `confirmClaim` (./admin), which publishes an admin_confirmed
+ * claim's `'pending'` Proof by writing `status: 'active'`. Active Proofs sit
+ * OUTSIDE `qualifiesForVisionHide`, so without this gate confirming the Mark
+ * would put extreme/illegal media back in front of every Player and the trigger
+ * would never hide it again — from a control whose row shows only the submitter
+ * and the Prompt, and which is emphatically NOT the warned, explicit moderation
+ * Restore. The claim still resolves and the Mark is still confirmed; only the
+ * media stays hidden, and the queue row says so.
+ *
+ * A `'hidden'` Proof carrying NO marker is deliberately publishable: it was
+ * hidden by an admin's own Hide or by the report-count threshold, each of which
+ * has its own console lift (`Restore`, `Clear reports`) and neither of which
+ * confirm's behaviour has ever withheld. This closes the SAFETY hole ADR 0004
+ * exists for, and nothing else.
+ */
+export function safetyHideStands(proof: SafetyHideState | undefined): boolean {
+  return proof?.safetyHide === true || proof?.status === 'flagged';
+}

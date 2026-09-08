@@ -36,10 +36,16 @@ const MODERATION_STATES = ['flagged', 'hidden'];
 /**
  * Pure predicate: notify only when `status` CHANGED into a moderation state.
  * Serves an onDocumentWritten source, so it covers create and delete: a create
- * (`before` undefined) INTO flagged/hidden notifies — moderateProof's merge-set
- * can create a proof doc already flagged in the upload-before-doc race (#101
- * Codex F2) — while a create INTO active, and any delete (`after` undefined),
- * do not.
+ * (`before` undefined) INTO flagged/hidden notifies (#101 Codex F2), while a
+ * create INTO active, and any delete (`after` undefined), do not.
+ *
+ * moderateProof's merge-set used to produce that create-flagged shape by creating
+ * the proof doc itself in the upload-before-doc race; since #1143 it never
+ * creates the doc at all — a verdict that beats the document is parked in
+ * `proofScans` and applied as an UPDATE on the create (./visionHide). The create
+ * arm stays because the predicate is about transitions, not about which writer
+ * happens to make them, and a create into a moderation state must never be the
+ * one transition nobody is told about.
  */
 export function shouldNotify(before: ModeratedDoc | undefined, after: ModeratedDoc | undefined): boolean {
   const next = after?.status;

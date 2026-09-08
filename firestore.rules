@@ -1817,6 +1817,21 @@ service cloud.firestore {
         // crosses `settings.reportHideThreshold`; admins keep manual hide/restore
         // and confirm-claim (`status: 'active'`) via the `isAdmin(eventId)` branch.
         // Pinned by tests/rules/w4-server-authoritative-hide.test.ts.
+        //
+        // #133 adds a SECOND admin-SDK writer of the same field with no rules
+        // change: `hideProofOnVisionFlag` takes a Proof left `status: 'flagged'`
+        // with an extreme/illegal `visionFlag` to `'hidden'`, stamping the
+        // `safetyHide` marker in the same update. All THREE moderation fields stay
+        // server-set for every non-admin — `visionFlag` cannot be written at create
+        // (`visionFlag == null` above), `safetyHide` is not in the create
+        // `hasOnly` list at all so a create carrying it is denied, and neither can
+        // be added, changed, or CLEARED on update because `hasOnly(['reportCount'])`
+        // bounds a non-admin to the counter alone. So a client can neither
+        // self-hide, un-hide, forge an AI verdict, forge or scrub the safety
+        // marker `confirmClaim` gates on, nor erase the verdict an admin's Restore
+        // deliberately leaves behind; and the read rule keeps `flagged` and
+        // `hidden` Proofs admin-only either way. Pinned by
+        // tests/rules/cloud-vision-moderation.test.ts.
         allow update: if isAdmin(eventId)
           || (signedIn()
               // #134: the report path is a player write and stops at the freeze.
@@ -1829,6 +1844,26 @@ service cloud.firestore {
         // has a route (and the Admin remains able to act on their own archive).
         allow delete: if isAdmin(eventId)
           || (isOwner(resource.data.uid) && eventOpenForPlay(eventId));
+      }
+
+      // The Vision scanner's hand-off record (#1143, specs/cloud-vision-moderation.md
+      // § "The scanner never creates the Proof"). moderateProof is a STORAGE trigger
+      // and attachProof uploads the media BEFORE the transaction that writes the
+      // Proof, so a fast scan can reach a verdict with no document to put it on. It
+      // parks the verdict here instead of merge-CREATING the Proof, because a
+      // scanner-created Proof turns the Player's own create into a rules-denied
+      // update (bounded to `reportCount` above) and lets an admin uploader's full
+      // `set` overwrite `status`/`visionFlag`/`safetyHide` back to a public Proof.
+      // hideProofOnVisionFlag consumes and DELETES the record on the Proof's create.
+      //
+      // Server-to-server only: the admin SDK bypasses these rules, and NO client —
+      // Player, uploader, or admin — may read or write this collection in any way.
+      // A readable record would leak a moderation verdict for a Proof the read rule
+      // above keeps admin-only; a writable one would let a Player pre-empt or forge
+      // their own scan result. Nothing in src/ knows the path exists. Pinned by
+      // tests/rules/cloud-vision-moderation.test.ts.
+      match /proofScans/{proofId} {
+        allow read, write: if false;
       }
 
       // admin_confirmed-mode claims: a player creates a claim for their own square;

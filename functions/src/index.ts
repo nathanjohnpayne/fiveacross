@@ -22,6 +22,7 @@ import {
 } from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
+import { applyVisionFlagHide, recordVisionVerdict, type VisionFlaggedDoc } from './visionHide';
 import {
   applyEventAdultContent,
   applyItemAdultContent,
@@ -291,7 +292,19 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
         ? 'extreme'
         : null;
     if (flag) {
-      await db.doc(`events/${eventId}/proofs/${proofId}`).set({ status: 'flagged', visionFlag: flag }, { merge: true });
+      // #1143: record the verdict WITHOUT ever creating the Proof document.
+      // This is a STORAGE trigger, and attachProof uploads the media before the
+      // transaction that writes the Proof — so a fast scan can land here with no
+      // document to write on. The merge-set this replaces created one, and the
+      // created doc turned the Player's still-in-flight `attachProof` create into
+      // a rules-denied UPDATE (a non-admin is bounded to `reportCount`), while an
+      // admin uploader's full `set` overwrote the verdict and the safety marker
+      // back to a public Proof no arm of the hide trigger could reach again.
+      // `recordVisionVerdict` writes the Proof when it exists and parks the
+      // verdict in the server-only `proofScans` collection when it does not;
+      // `hideProofOnVisionFlag` applies a parked verdict on the Proof's create.
+      // See functions/src/visionHide.ts § PROOF_SCANS_COLLECTION.
+      await recordVisionVerdict(eventId, proofId, flag);
     }
   } catch {
     /* Vision optional; reporting still covers moderation */
@@ -333,9 +346,13 @@ export const moderateProof = VISION_ENABLED
  * old one on the next deploy, and there is no behavioural reason to pay that.
  *
  * Uses onDocumentWritten (not onDocumentUpdated) so a proof CREATED already
- * flagged — moderateProof's merge-set can create the doc in the
- * upload-before-doc race (#101 Codex F2) — still alerts; `alertsForWrite`
- * ignores create-into-active and deletes (`after` undefined). `transitionId` is
+ * flagged still alerts (#101 Codex F2); `alertsForWrite` ignores
+ * create-into-active and deletes (`after` undefined). Since #1143 the scanner no
+ * longer produces that shape itself — it never creates the Proof, and a verdict
+ * reached before the document existed is parked in `proofScans` and applied as an
+ * UPDATE on the Proof's create (see moderateProofHandler above). onDocumentWritten
+ * stays because it is the shape that cannot miss a transition, whoever writes it.
+ * `transitionId` is
  * the CloudEvent id, which is stable across platform retries of one delivery
  * and unique per distinct write — it becomes the queue document's id, so a
  * redelivered trigger is a no-op rather than a duplicate row (#101 Codex F3,
@@ -590,6 +607,63 @@ export const hideProofAtThreshold = onDocumentWritten(
       event.params.proofId,
       event.data?.before.data() as ReportableDoc | undefined,
       event.data?.after.data() as ReportableDoc | undefined,
+    ),
+);
+
+/**
+ * Server-authoritative Vision auto-hide (issue #133, ADR 0004 Phase 1) — the
+ * CONSUMER of the `visionFlag` `moderateProof` produces. When a Proof is left
+ * `'flagged'` with an extreme/illegal `visionFlag`, flip `status → 'hidden'` via
+ * the admin SDK, keeping `visionFlag` on the doc so the hide stays legible as a
+ * Vision hide rather than a plain one. The predicate, the allowlist that keeps
+ * raciness out of it, and the transactional live re-confirm live in
+ * `applyVisionFlagHide` (./visionHide); this is the thin trigger seam, mirroring
+ * the threshold pair above.
+ *
+ * It takes `before` as well as `after` for one reason (#1143): a Proof's own
+ * CREATE is where a verdict the scanner had to park — because the upload beat the
+ * document — is applied, and only `before` tells a create from every other write
+ * that leaves the same state. Every non-create write is judged on `after` alone,
+ * plus the bounded hand-off reconciliation `awaitsPendingVisionScan` describes.
+ *
+ * `retry: true`, and it is load-bearing rather than defensive (Phase 4b runs 2
+ * and 3 on #1143). Event-driven Functions do not retry by default, so a failing
+ * create-time hand-off used to be acknowledged as a success: the verdict stayed
+ * parked in `proofScans`, the Proof stayed active with `visionFlag` null, and
+ * nothing looked again. `applyVisionFlagHide` therefore RETHROWS a hand-off
+ * failure — the one failure it does not swallow — and this flag is what turns
+ * that throw into a redelivery. `event.time` is passed so the module can stop
+ * asking for one on a non-transient failure rather than retrying to the
+ * platform's retention limit; the hide arms remain best-effort and never throw,
+ * so no other failure here is ever redelivered.
+ *
+ * A SECOND trigger on the same document path rather than a branch inside
+ * `hideProofAtThreshold`: the two hides share no input (one reads the Event's
+ * `reportHideThreshold`, the other reads the Proof's own verdict), no state (one
+ * owns `'active'` docs, the other `'flagged'` ones), and no failure mode, so
+ * keeping them separate is what makes "#133 does not regress #43" auditable —
+ * `autohide.ts`'s decision path is untouched.
+ *
+ * Exported UNCONDITIONALLY, unlike the `ENABLE_VISION_MODERATION`-gated
+ * `moderateProof`: with the producer off nothing writes a `visionFlag`, so this
+ * short-circuits on every write; with it on, the consumer is already deployed.
+ * `ADMIN_SDK_SERVICE_ACCOUNT` is pinned because the transactional re-read and
+ * the hide write are Firestore data-plane calls the default Gen2 compute
+ * identity cannot make in this project. Firestore triggers stay on us-central1.
+ */
+export const hideProofOnVisionFlag = onDocumentWritten(
+  {
+    document: 'events/{eventId}/proofs/{proofId}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
+  (event) =>
+    applyVisionFlagHide(
+      event.params.eventId,
+      event.params.proofId,
+      event.data?.before.data() as VisionFlaggedDoc | undefined,
+      event.data?.after.data() as VisionFlaggedDoc | undefined,
+      { eventTime: Date.parse(event.time) },
     ),
 );
 

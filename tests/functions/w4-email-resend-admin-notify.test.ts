@@ -20,7 +20,10 @@ describe('shouldNotify', () => {
   });
 
   it('handles create and delete (onDocumentWritten source)', () => {
-    expect(shouldNotify(undefined, { status: 'flagged' })).toBe(true); // create-flagged (upload-before-doc race)
+    // create-flagged: the shape moderateProof's merge-set used to produce in the
+    // upload-before-document race. It no longer creates the Proof (#1143), and the
+    // arm stays because a create into a moderation state must still notify.
+    expect(shouldNotify(undefined, { status: 'flagged' })).toBe(true);
     expect(shouldNotify(undefined, { status: 'hidden' })).toBe(true); // create-hidden
     expect(shouldNotify(undefined, { status: 'active' })).toBe(false); // normal create — no notify
     expect(shouldNotify({ status: 'flagged' }, undefined)).toBe(false); // delete — no notify

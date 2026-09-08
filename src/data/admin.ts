@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocs, limit, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -7,16 +7,17 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor } from './moderation';
+import { isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
+import type { Cell, ClaimMode, ThemeId, ClaimDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
 const itemsRaw = () => collection(db, 'events', EVENT_ID, 'items');
 const proof = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'proofs', id);
 const claim = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'claims', id);
+const claimsRaw = (eventId = EVENT_ID) => collection(db, 'events', eventId, 'claims');
 const board = (uid: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'boards', uid);
 // The day-scoped board a daily-mode claim resolves against (#246).
 const dayBoard = (dayIndex: number, uid: string, eventId = EVENT_ID) =>
@@ -397,8 +398,147 @@ export function bulkApproveItems(
 ): Promise<ApprovalPlacement[]> {
   return approveItems(items, adminUid, eventId);
 }
-export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
-export const restoreProof = (id: string) => updateDoc(proof(id), { status: 'active' });
+/**
+ * The console's Hide — and, when a safety hold is already standing on the Proof,
+ * the write that PRESERVES it (Codex P1 on #1143).
+ *
+ * The queue offers Hide on a `'flagged'` row, because the row is visible the
+ * moment `moderateProof` writes the verdict and `hideProofOnVisionFlag` is not
+ * instantaneous (and, being best-effort, may have swallowed a failure it will
+ * retry). An admin who clicks it there is agreeing with the AI screen, not
+ * overriding it — but a bare `status: 'hidden'` moves the doc OUT of the state
+ * the trigger's hide arm looks for while leaving no marker behind, and
+ * `safetyHideStands` then reads the result as a PLAIN hide: a later Confirm on
+ * the same Proof publishes the media the admin had just taken down.
+ *
+ * So the hide carries the hold forward. `safetyHideStands` (./moderation) is the
+ * same predicate `confirmClaim` gates on, read here against the LIVE doc inside a
+ * transaction because the row may have moved since it rendered — the trigger may
+ * have hidden and marked it already, or an admin at another console may have
+ * Restored it. When a hold stands, the marker rides the same update; when none
+ * does, this is byte-for-byte the write it always was, so an ordinary moderation
+ * hide is untouched and stays liftable by `Restore` and publishable by a confirm.
+ *
+ * It deliberately reads no verdict. The verdict strings live in the Functions
+ * allowlist (`AUTO_HIDE_VISION_FLAGS`) and Functions and this bundle deploy
+ * separately, so a client that re-derived them could only ever UNDER-stamp — and
+ * the trigger's own backfill arm covers exactly that gap, stamping the marker on
+ * any extreme/illegal Proof that reached `'hidden'` without one. The two halves
+ * compose in the safe direction: the client can be stale, and the server is still
+ * authoritative.
+ */
+export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+  return runTransaction(db, async (tx) => {
+    const ref = proof(id, eventId);
+    const snap = await tx.get(ref);
+    const held = snap.exists() && safetyHideStands(snap.data() as SafetyHideState);
+    // `tx.update` on a missing doc still rejects, exactly as the previous
+    // `updateDoc` did — a Hide on a deleted Proof is an error, not a silent no-op.
+    tx.update(ref, held ? { status: 'hidden', safetyHide: true } : { status: 'hidden' });
+  });
+}
+
+/**
+ * The console's Restore — the ONE place an admin may override an AI verdict, and
+ * the only lift for a Vision safety hide (there is no counter to clear).
+ *
+ * It clears the server's `safetyHide` marker in the same write (#133, Codex P1
+ * round 2). The marker, not the verdict string, is what `confirmClaim` reads, so
+ * leaving it set would keep the Proof held after the admin had explicitly lifted
+ * the hide. Writing `false` rather than deleting the key records the override as a
+ * fact, the same reason `visionFlag` itself is left in place: the row keeps its
+ * `AI screen: …` pill, and the queue keeps the Proof (`useReportedProofs` queues
+ * on the verdict), so the decision stays visible and re-hideable instead of
+ * vanishing. A fresh scan that re-flags the Proof takes it back to `'flagged'`,
+ * which the trigger owns again — the override is a lift, not immunity.
+ *
+ * It restores to the state the Proof came FROM, not unconditionally to `'active'`
+ * (#133, Codex P1 round 2). In admin_confirmed claim mode a Proof is created
+ * `'pending'` and stays admin-only readable until the admin confirms its claim,
+ * and Cloud Vision scans the uploaded object — so a photo whose claim is still
+ * undecided can be flagged, hidden, and then Restored. Publishing it `'active'`
+ * there would put it in every Player's Feed BEFORE the claim was judged, and
+ * rejecting the claim afterwards leaves it public: `rejectClaim` deliberately
+ * writes nothing to the Proof (it leaves a rejected Proof `'pending'` rather than
+ * exposed), so nothing would ever take it back down. Restoring to `'pending'`
+ * hands the Proof back to the claim queue instead, where Confirm publishes it and
+ * Reject leaves it unpublished — the decision the console is actually asking for.
+ *
+ * Which claims reference the Proof is discovered OUTSIDE the transaction because
+ * claims carry auto-ids and the web SDK's `Transaction.get` takes a
+ * DocumentReference, never a query. The DECISION is still transactional: each
+ * candidate is re-read live inside the transaction, so a claim resolved between
+ * the query and the write is seen as resolved. Nothing can appear in the gap —
+ * a Proof's claim is created in `attachProof`'s own transaction, alongside the
+ * Proof itself, so an existing Proof never gains a new one.
+ *
+ * That lookup asks for the OWNER's claims, not the Proof's (Codex P2 round 2 on
+ * #1143). Only the owner's claim may steer a restore, and the bound below is
+ * applied to the query — so a `proofId`-only lookup lets any signed-in user
+ * decide what the query returns: 25 forged pending claims naming someone else's
+ * Proof fill the page, the owner's real claim falls off the end, and Restore
+ * publishes a photo whose claim nobody has judged. The forged docs are excluded
+ * where the exclusion cannot be crowded out — by the query itself — and the
+ * in-transaction owner check below stays exactly as it was, because the query
+ * reads a snapshot and only the live re-read can be trusted with the decision.
+ *
+ * Two equality filters need no composite index: Firestore serves an equality-only
+ * conjunction by merging the single-field indexes it maintains by default, so
+ * this adds nothing to `firestore.indexes.json`.
+ */
+/**
+ * How many of the OWNER's claims the restore will consider. A Proof legitimately
+ * backs exactly one (created in `attachProof`'s own transaction), so this is a
+ * read-budget bound for the pathological case the query cannot exclude — a Player
+ * minting many claims against their own Proof — rather than a defence against
+ * forged ones, which the `uid` filter removes before the limit is reached.
+ */
+const RESTORE_CLAIM_LOOKUP_LIMIT = 25;
+
+export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+  // The owner, read plainly and outside the transaction: `uid` is written once at
+  // create and is immutable thereafter, so there is no state here a stale read
+  // could get wrong. It only SCOPES the query; the authority for the decision is
+  // the live re-read inside the transaction below.
+  const ownerSnap = await getDoc(proof(id, eventId));
+  const owner = ownerSnap.exists() ? (ownerSnap.data() as Partial<ProofDoc>).uid : undefined;
+  const claimRefs =
+    owner === undefined
+      ? [] // no Proof, or no owner on it: nothing may steer the restore anyway
+      : (
+          await getDocs(
+            query(
+              claimsRaw(eventId),
+              where('proofId', '==', id),
+              where('uid', '==', owner),
+              limit(RESTORE_CLAIM_LOOKUP_LIMIT),
+            ),
+          )
+        ).docs.map((d) => claim(d.id, eventId));
+  await runTransaction(db, async (tx) => {
+    // The Proof first: a claim steers the restore only when it is the Proof
+    // OWNER's claim. Any signed-in user can create a pending claim that names
+    // someone else's Proof, and trusting it would let a stranger send another
+    // Player's photo back to `pending` instead of to the Feed (Codex P2 on
+    // #1143). The owner is read live, inside the transaction, like the claims.
+    const proofSnap = await tx.get(proof(id, eventId));
+    const owner = proofSnap.exists() ? (proofSnap.data() as Partial<ProofDoc>).uid : undefined;
+    let claimUndecided = false;
+    for (const ref of claimRefs) {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) continue;
+      const data = snap.data() as Partial<ClaimDoc>;
+      if (data.status !== 'pending') continue;
+      if (data.proofId !== id) continue;
+      if (owner === undefined || data.uid !== owner) continue;
+      claimUndecided = true;
+    }
+    tx.update(proof(id, eventId), {
+      status: claimUndecided ? 'pending' : 'active',
+      safetyHide: false,
+    });
+  });
+}
 
 // Lift the ADR 0004 Phase 0 community auto-hide by resetting reportCount to 0 —
 // the explicit admin action the console lacked (Codex P2, PR #107 finding 3).
@@ -1207,6 +1347,13 @@ async function resolve(
       const snap = await tx.get(dayMeta(d, eventId));
       echoMetaSnaps.push({ dayIndex: d, exists: snap.exists() });
     }
+    // The claim's Proof, read LIVE and BEFORE any write (Firestore's
+    // reads-before-writes contract), so the publish below can be conditional on
+    // the state Cloud Vision may have moved it to since the Player submitted it
+    // (#133). `null` whenever there is nothing to publish — a reject, or a
+    // legacy claim carrying no proofId — so no other resolve pays for the read.
+    const claimProofRef = status === 'confirmed' && c.proofId ? proof(c.proofId, eventId) : null;
+    const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
 
     tx.set(
       boardRef,
@@ -1322,8 +1469,39 @@ async function resolve(
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
-    if (status === 'confirmed' && c.proofId) {
-      tx.set(proof(c.proofId, eventId), { status: 'active' }, { merge: true });
+    //
+    // UNLESS a server-authoritative safety hide stands on it (#133, Codex P1).
+    // Cloud Vision scans the uploaded object, so an admin_confirmed claim's Proof
+    // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
+    // unconditionally would write `status: 'active'`, and active Proofs are
+    // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
+    // in front of every Player and the trigger would never hide it again, lifted
+    // by a control that shows only the submitter and the Prompt. This is NOT the
+    // warned, explicit moderation Restore (ReviewQueue), which is the one place
+    // an admin may override an AI verdict, having been told what they are
+    // lifting. So the claim still resolves and the Mark is still confirmed —
+    // only the media stays hidden, and the queue row says so on the claim.
+    //
+    // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s
+    // `safetyHide` marker, and the `'flagged'` status only `moderateProof` writes
+    // — never the verdict string (Codex P1 round 2). The verdict's MEANING lives
+    // in the Functions allowlist, and Functions and this bundle deploy
+    // separately, so a client that re-derived it would publish a Proof hidden for
+    // a verdict its cached copy of the list had never heard of.
+    //
+    // The gate reads the LIVE snapshot, not the stale event that opened the
+    // admin's console, and only a genuinely publishable Proof is moved: a
+    // 'pending' one, an already-active one (a no-op re-write), or a plain
+    // report-count / manual hide, whose lift is `Clear reports` / `Restore` and
+    // whose confirm behaviour is unchanged. A missing snapshot keeps the pre-#133
+    // write.
+    if (claimProofRef) {
+      const liveProof = claimProofSnap?.exists()
+        ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
+        : undefined;
+      if (!safetyHideStands(liveProof)) {
+        tx.set(claimProofRef, { status: 'active' }, { merge: true });
+      }
     }
     return { transitioned: transitionedToConfirmed };
   });
