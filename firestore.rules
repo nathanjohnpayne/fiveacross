@@ -146,9 +146,19 @@ service cloud.firestore {
     function usableArchiveToken(value) {
       return value is string && value.trim() != '';
     }
+    // The binding is a FLIP-ONLY field, `archivedUnder`, that the flip must
+    // write and that must equal the stored generation (Phase 4b P1 on PR #1157,
+    // run 3). Comparing the incoming `archiveToken` was no binding at all:
+    // `request.resource.data` is the whole resulting document, so a flip that
+    // omitted the token inherited the stored one and passed — a stale,
+    // tokenless flip could archive generation B after A was abandoned. A field
+    // the document does not carry until the flip cannot be inherited, and once
+    // written it is locked with the rest of the record.
     function boundToStoredQuiesce(stored, incoming) {
       return usableArchiveToken(stored.get('archiveToken', ''))
-        && incoming.get('archiveToken', '') == stored.get('archiveToken', '');
+        && !('archivedUnder' in stored)
+        && incoming.get('archivedUnder', '') is string
+        && incoming.get('archivedUnder', '') == stored.get('archiveToken', '');
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
@@ -1220,9 +1230,10 @@ service cloud.firestore {
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
                 && request.resource.data.get('archiving', false) == false
-                && !('archivedAt' in request.resource.data))
+                && !('archivedAt' in request.resource.data)
+                && !('archivedUnder' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
-                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken']))
+                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken', 'archivedUnder']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1438,7 +1449,7 @@ service cloud.firestore {
         // a second, clearable spelling of a state that must not be clearable.
         && request.resource.data.get('archiving', false) == false
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['status', 'archivedAt', 'archiving']);
+             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder']);
       // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
       // Event carrying NO usable generation — a document shut out of band, or
       // by a build that predates the token — cannot be flipped (the flip is

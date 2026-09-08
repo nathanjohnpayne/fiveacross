@@ -170,7 +170,7 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     expect(A.updates).toEqual([]);
   });
 
-  it('flips, and restates the generation it was bound to, when the quiesce holds', async () => {
+  it('flips, and binds the record to the generation it took, when the quiesce holds', async () => {
     expect(await archiveEvent('quiesce-1', { now: 5 })).toBe('archived');
     expect(A.updates).toEqual([
       {
@@ -180,7 +180,7 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
         // Restated so the RULES can hold the same binding at the boundary.
         // Writing the value it already has keeps the field out of
         // `affectedKeys()`, so the arm's `hasOnly` guard is unaffected.
-        archiveToken: 'quiesce-1',
+        archivedUnder: 'quiesce-1',
       },
     ]);
   });

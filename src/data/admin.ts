@@ -1065,13 +1065,14 @@ export async function archiveEvent(
       // The quiesce is over. `status` carries the freeze from here, and unlike
       // this flag it cannot be cleared.
       archiving: false,
-      // The generation this flip was bound to, restated so the RULES can hold
-      // the same binding this transaction just checked: the flip arm requires
-      // the write's token to equal the stored one, which denies a direct SDK
-      // write carrying a superseded generation. Writing the value it already
-      // has leaves the field out of `affectedKeys()`, so the arm's `hasOnly`
-      // guard is unaffected.
-      archiveToken: token,
+      // The generation this flip was bound to, written to a FLIP-ONLY field so
+      // the RULES can hold the same binding this transaction just checked
+      // (Phase 4b P1 on PR #1157, run 3): the flip arm requires `archivedUnder`
+      // to be written by the flip and to equal the stored `archiveToken`.
+      // Restating `archiveToken` was no binding — the merged write inherits
+      // it — whereas a field the document does not carry until the flip cannot
+      // be inherited, so a stale or tokenless flip is refused.
+      archivedUnder: token,
     });
     return 'archived';
   });

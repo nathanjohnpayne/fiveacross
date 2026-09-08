@@ -241,6 +241,9 @@ const flip = (uid: string, overrides: Record<string, unknown> = {}) =>
     status: 'archived',
     archivedAt: ARCHIVED_AT,
     archiving: false,
+    // The flip-only binding (Phase 4b P1, PR #1157 run 3): must be written by
+    // the flip and equal the stored generation. `quiesce()` stores QUIESCE.
+    archivedUnder: QUIESCE,
     ...overrides,
   });
 
@@ -389,7 +392,7 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
       await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: '   ' });
     });
     // The flip is not bound to whitespace…
-    await assertFails(flip(ADMIN, { archiveToken: '   ' }));
+    await assertFails(flip(ADMIN, { archivedUnder: '   ' }));
     // …and the repair treats it as absent, so the client's replacement lands.
     await assertSucceeds(
       updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
@@ -513,14 +516,44 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
   // `archiving: true` indistinguishable from the first. The generation id makes
   // the two distinguishable, at the boundary rather than only in the client
   // that checks.
+  it('DENIES a flip that OMITS its binding — the stored token cannot be inherited', async () => {
+    // Phase 4b P1, PR #1157 run 3. `request.resource.data` is the whole resulting
+    // document, so comparing the incoming `archiveToken` let a flip with no
+    // token at all inherit the stored one. The binding is a field only the
+    // flip writes; after a reopen and a re-shut it must name the NEW generation.
+    await quiesce();
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+      }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+    );
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+      }),
+    );
+    await assertFails(flip(ADMIN, { archivedUnder: QUIESCE }));
+    await assertSucceeds(flip(ADMIN, { archivedUnder: 'quiesce-2' }));
+    // Locked with the record from here.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedUnder: 'quiesce-3' }));
+  });
+
   it('DENIES an archive write bound to a superseded quiesce', async () => {
     await quiesce();
     // The caller opened under an earlier generation; play has been reopened and
     // shut again since.
-    await assertFails(flip(ADMIN, { archiveToken: 'quiesce-0' }));
+    await assertFails(flip(ADMIN, { archivedUnder: 'quiesce-0' }));
     // The generation actually in force is accepted — so the denial above is
     // about the binding, not about carrying the field at all.
-    await assertSucceeds(flip(ADMIN, { archiveToken: QUIESCE }));
+    await assertSucceeds(flip(ADMIN, { archivedUnder: QUIESCE }));
   });
 
   it('DENIES the flip from a closing state that carries no generation at all', async () => {

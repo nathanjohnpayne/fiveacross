@@ -357,6 +357,8 @@ export interface EventDoc {
    * on. Two different events, hours or weeks apart.
    */
   archivedAt?: number;
+  /** The generation the flip was bound to — written by the flip alone, locked with the record (#1157). */
+  archivedUnder?: string;
   /**
    * The QUIESCING phase of the archive (#134, specs/post-sailing-archive.md §
    * "The quiesce protocol"). The Admin's FIRST archive write sets this; the
