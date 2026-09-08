@@ -130,6 +130,13 @@ function makeDb(seed: {
           docs[`events/${seed.eventId}`] = { ...current, ...data };
           void ref;
         },
+        // #134: the finale system-Moment write now runs inside the transaction
+        // that reads the Event, so the fake needs the transactional `set` the
+        // real Admin-SDK surface already has. It delegates to the reference's
+        // own `set`, which applies synchronously here just as `update` does.
+        set: (ref: { set(d: Record<string, unknown>): Promise<unknown> }, data: Record<string, unknown>) => {
+          void ref.set(data);
+        },
       };
       return fn(tx);
     },
@@ -559,6 +566,23 @@ describe('runScheduledUnlock — the finale beats through the write path (AC 3)'
     // not the run clock, so post-08:00 marks never slip into the frozen standings.
     await runScheduledUnlock(db, 'e1', { now: () => D10_UNLOCK + 2 * 60 * 60 * 1000 });
     expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+  });
+
+  // #1150, specs/post-sailing-archive.md § "The server-side half". The paired
+  // guard matrix lives in `post-sailing-archive-guards.test.ts`; this case pins
+  // it against THIS suite's schedule fixture, on the one run that does every
+  // beat at once — the freeze stamp, the podium Moment and the farewell Day's
+  // own snapshot. It is the whole write path of the scheduler standing down
+  // together, next to the open-Event control two cases above that produces all
+  // three.
+  it('writes none of the freeze, the podium or the farewell snapshot once the Event is closed', async () => {
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays(), archiving: true } });
+    // `archiving: true` deliberately leaves `status: 'active'`, so the sweep's
+    // own `status == 'active'` selection does not exclude this Event at all.
+    await runScheduledUnlock(db, 'e1', { now: () => D10_UNLOCK });
+    expect(db.readEvent().frozenAt).toBeUndefined();
+    expect(db.moments()).toEqual([]);
+    expect(db.readEvent().days!.find((d) => d.index === 9)!.snapshotItemIds).toBeUndefined();
   });
 });
 

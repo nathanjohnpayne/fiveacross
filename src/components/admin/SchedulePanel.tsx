@@ -51,7 +51,13 @@ function UnlockNowButton({
     try {
       const result = await unlockDayNow(dayIndex);
       setState('done');
-      setMessage(result === 'stamped' ? 'Unlocked.' : `Already handled (${result}).`);
+      setMessage(
+        result === 'stamped'
+          ? 'Unlocked.'
+          : result === 'archived'
+            ? 'Play is closed—nothing was unlocked.'
+            : `Already handled (${result}).`,
+      );
     } catch (err) {
       setState('error');
       setMessage(err instanceof Error ? err.message : 'Unlock failed—try again.');
@@ -120,6 +126,8 @@ function ResnapshotButton({
             ? 'Denied—cards already dealt.'
             : result === 'not-recoverable'
               ? 'Denied—early Days stay untouched.'
+            : result === 'archived'
+              ? 'Play is closed—nothing was re-snapshotted.'
             : `No change (${result}).`,
       );
     } catch (err) {

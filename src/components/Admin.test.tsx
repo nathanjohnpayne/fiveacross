@@ -524,6 +524,18 @@ describe('Admin Schedule surface (specs/d15-admin-schedule.md, at /more/admin/sc
     expect(await within(dueRow).findByText('Unlocked.')).toBeInTheDocument();
   });
 
+  it('a closed Event reports that nothing was unlocked (Codex P2, PR #1161)', async () => {
+    // The server stands down on an archived or closing Event and answers
+    // 'archived'; the client union carries the value so the row can say so.
+    H.unlockDayNow.mockResolvedValue('archived');
+    const days = [dayDef({ index: 0, unlockAt: Date.now() - 3600_000, snapshotItemIds: undefined })];
+    H.event = { ...H.event, days } as unknown as EventDoc;
+    renderAdmin('/more/admin/schedule');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock now' }));
+    expect(await screen.findByText('Play is closed—nothing was unlocked.')).toBeInTheDocument();
+  });
+
   it('a failed unlockDayNow call surfaces an error message on the row instead of throwing', async () => {
     H.unlockDayNow.mockRejectedValue(new Error('permission-denied'));
     const days = [dayDef({ index: 0, unlockAt: Date.now() - 3600_000, snapshotItemIds: undefined })];
@@ -600,6 +612,18 @@ describe('Admin Schedule repair line (#413, specs/admin-console-ia.md § "Schedu
     fireEvent.click(within(row).getByRole('button', { name: 'Re-snapshot' }));
     expect(H.resnapshotDayNow).toHaveBeenCalledWith(3);
     expect(await within(row).findByText('Re-snapshotted with both pools.')).toBeInTheDocument();
+  });
+
+  it('the re-snapshot reports that nothing changed on a closed Event (Codex P2, PR #1161)', async () => {
+    H.resnapshotDayNow.mockResolvedValue('archived');
+    const days = [dayDef({ index: 3, unlockAt: Date.now() - 3600_000, pool: 'main', snapshotItemIds: ['item-1'] })];
+    H.event = { ...H.event, days } as unknown as EventDoc;
+    renderAdmin('/more/admin/schedule');
+
+    const row = screen.getByText(/Day 4 ·/).closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Re-snapshot' }));
+    expect(H.resnapshotDayNow).toHaveBeenCalledWith(3);
+    expect(await within(row).findByText('Play is closed—nothing was re-snapshotted.')).toBeInTheDocument();
   });
 
   it('the controls are the quiet variant (#416): sentence-case DOM labels and a plain-text (non-pill) result', async () => {

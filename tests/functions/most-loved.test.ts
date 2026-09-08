@@ -134,6 +134,13 @@ function makeDb(seed: {
           docs[`events/${seed.eventId}`] = { ...current, ...data };
           void ref;
         },
+        // #134: the finale system-Moment write now runs inside the transaction
+        // that reads the Event, so the fake needs the transactional `set` the
+        // real Admin-SDK surface already has. It delegates to the reference's
+        // own `set`, which applies synchronously here just as `update` does.
+        set: (ref: { set(d: Record<string, unknown>): Promise<unknown> }, data: Record<string, unknown>) => {
+          void ref.set(data);
+        },
       };
       return fn(tx);
     },
@@ -419,5 +426,35 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
 
     await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 15 * 60_000 });
     expect(db.readEvent().mostLovedPhoto).toEqual(first);
+  });
+
+  // #1150, specs/post-sailing-archive.md § "The server-side half". The paired
+  // guard matrix lives in `post-sailing-archive-guards.test.ts`; what this case
+  // adds is the QUIESCE's reversibility, which only this suite can state: the
+  // award beat is WITHHELD while the Event is closing, not consumed by it, so an
+  // Admin who shuts an Event and then reopens it still gets the award the run
+  // would have computed — with the SCHEDULED cutoff, not the reopened clock.
+  it('(i) the quiesce withholds the award and the freeze without consuming the beat', async () => {
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), archiving: true },
+      proofs: [proof('p1')],
+      hearts: [heart('fan-1', 'p1', D9_UNLOCK + 1000)],
+    });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK });
+    expect(db.readEvent().frozenAt).toBeUndefined();
+    expect(db.readEvent().mostLovedPhoto).toBeUndefined();
+
+    // Reopen play — the closing state is the reversible half of the freeze.
+    db.readEvent().archiving = false;
+    const reopenedAt = D10_UNLOCK + 30 * 60_000;
+    await runFinaleBeats(db, 'e1', { now: () => reopenedAt });
+    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+    expect(db.readEvent().mostLovedPhoto).toMatchObject({
+      winnerCount: 1,
+      heartCount: 1,
+      frozenAt: D10_UNLOCK,
+      computedAt: reopenedAt,
+    });
   });
 });
