@@ -42,11 +42,15 @@ vi.mock('./auth/AuthContext', () => ({
 const eventDoc = vi.hoisted(() => ({
   value: null as Record<string, unknown> | null,
   enabled: [] as unknown[],
+  // The server-answered latch `useDocSub` exposes; the closed-Event redirect
+  // waits for it (Codex P2, PR #1157). Defaults to true so every other case
+  // reads as a server-backed snapshot.
+  hasServerData: true,
 }));
 vi.mock('./hooks/useData', () => ({
   useEventDoc: (enabled?: unknown) => {
     eventDoc.enabled.push(enabled);
-    return { data: eventDoc.value };
+    return { data: eventDoc.value, hasServerData: eventDoc.hasServerData };
   },
 }));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
@@ -343,6 +347,7 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     eventScope.eventId = 'event-a';
     eventDoc.value = null;
     eventDoc.enabled = [];
+    eventDoc.hasServerData = true;
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -352,6 +357,18 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     renderApp();
     expect(screen.getByTestId('ranks')).toBeInTheDocument();
     expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board until the closed state is SERVER-BACKED — a cached quiesce cannot redirect', () => {
+    // Codex P2, PR #1157 round 6. This browser can hold `archiving: true` from
+    // before another Admin reopened play; the replace navigation is a URL
+    // change the later open snapshot cannot undo, so it waits for the server.
+    eventDoc.hasServerData = false;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
+    eventDoc.hasServerData = true;
   });
 
   it('routes a CLOSING Event the same way — shut to play, and reversible', () => {

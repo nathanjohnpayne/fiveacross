@@ -92,8 +92,17 @@ function EventApp() {
   // the redemption just turned away. `false` subscribes to nothing (`useEventDoc`
   // passes a null ref), and `event` stays `null`, which the predicate below reads
   // as OPEN — exactly the cold-visit default described above.
-  const { data: event } = useEventDoc(!!user && mayDealUnderAdmission(admission));
-  const eventClosed = isEventArchived(event) || isEventArchiving(event);
+  //
+  // THE REDIRECT WAITS FOR THE SERVER, though (Codex P2 on PR #1157). A cold
+  // visit still renders the Board — `event` is `null` until any snapshot lands
+  // — but a CACHED snapshot is not enough to move a Player off their Card: this
+  // browser can hold `archiving: true` from before another Admin reopened
+  // play, and `<Navigate replace>` is a URL change the later open snapshot
+  // cannot undo. `hasServerData` is the latch `useDocSub` sets once the server
+  // has answered for this Event, the same signal the join and the profile
+  // mirror already require before they treat a closed state as real.
+  const { data: event, hasServerData } = useEventDoc(!!user && mayDealUnderAdmission(admission));
+  const eventClosed = hasServerData && (isEventArchived(event) || isEventArchiving(event));
   const archivePath = TABS.find((tab) => tab.id === 'ranks')?.path ?? FALLBACK_PATH;
 
   // The one pre-auth label the Edition owns (#608): this renders before the
