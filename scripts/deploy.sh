@@ -301,16 +301,28 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # program it is about to run under a platform write-containment mechanism —
 # `sandbox-exec` on macOS, `bwrap` or an unprivileged user+mount namespace on
 # Linux — under which the only writes that succeed are into its own scratch
-# directory and the system temp dir, and it PROVES that with a canary write
-# against this checkout before trusting it. Nothing a Firebase deploy publishes
-# is read from the temp dir, so what that denies is every route from a hook to a
-# deployment input. This is the only guard here that acts on those programs
-# rather than reporting on them afterwards, which is what a detached worker
-# needs: a hook can hand one to the operating system with an environment of its
-# own, past the process group and past the marker sweep, to change a deployment
-# input minutes after this classification was accepted. A machine where the
-# containment cannot be proved gets the conservative classification and runs no
-# hooks at all.
+# directory and the system temp dir, MINUS this checkout wherever it happens to
+# sit. Nothing a Firebase deploy publishes is read from the temp dir, so what
+# that denies is every route from a hook to a deployment input.
+# What it PROVES before trusting any of it is exactly two things, in the
+# containment and before the first hook: a write inside THIS checkout fails, and
+# a write inside the adapter's own staging directory succeeds. Both are
+# required, because a mechanism that denied everything and one that denied
+# nothing each satisfy one of them alone. The first is stated in terms of this
+# checkout rather than of some other read-only directory because a repository
+# checked out beneath the system temp dir used to be dropped from the read-only
+# set — the temp dir has to stay writable for the staging — leaving the canary
+# to pass against $HOME while the deployment inputs stayed writable; the
+# checkout is now carved back out of that writable root as a nested read-only
+# override, and the canary asks about it by name.
+# This is the only guard here that acts on those programs rather than reporting
+# on them afterwards, which is what a detached worker needs: a hook can hand one
+# to the operating system with an environment of its own, past the process group
+# and past the marker sweep, to change a deployment input minutes after this
+# classification was accepted. A machine where either half cannot be proved, or
+# where the checkout cannot be expressed as read-only at all, gets the
+# conservative classification and runs no hooks. Set
+# FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see which half gave way.
 # No conservative answer is returned until the rehearsal has ENDED whatever it
 # started either. A hook can detach a writer into a session of its own and then
 # fail for a reason of the rehearsal's own, so the classifier sweeps its own

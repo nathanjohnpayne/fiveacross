@@ -2,13 +2,24 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   LiveCheckoutDriftError,
   RepositoryMetadataDriftError,
+  WRITE_CONTAINMENT_REFUSAL,
   classifyFirebaseDeployRequest,
   pinnedRewriteWidening,
   targetCodebases,
@@ -180,14 +191,17 @@ const artifact = (body) =>
 /**
  * Where a fixture that has to be OUTSIDE the system temp dir is staged.
  *
- * The write containment leaves the scratch root and the system temp dir
- * writable — see `establishWriteContainment` — so a project staged in the temp
- * dir, which is where every other fixture here lives, is not contained. That is
- * deliberate, and it is what keeps the live-tree fingerprint's own cases
- * exercising the fingerprint. A case whose subject IS the containment therefore
- * has to be staged somewhere a real checkout could be; `node_modules` is ignored
- * by version control, exists by the time any of this runs, and lies outside
- * every writable root.
+ * NOT because the containment would otherwise miss it. Since round 28 the live
+ * checkout is denied to every contained process wherever it lies, including
+ * under the temp dir the staging keeps writable — that is the nested read-only
+ * override `establishWriteContainment` describes, and the reason every fixture
+ * here could stay in the temp dir where it already was. What this root gives is
+ * the OTHER arrangement: a checkout that needs no override at all, because it is
+ * outside every writable root, so a case can show the two layouts answering
+ * identically rather than only ever exercising the nested one.
+ *
+ * `node_modules` is ignored by version control, exists by the time any of this
+ * runs, and lies outside every writable root.
  */
 const LIVE_FIXTURE_ROOT = join(repoRoot, "node_modules");
 
@@ -420,6 +434,81 @@ function runClassifierWrapper(configPath, args, extraEnv) {
     child.on("error", fail);
     child.on("exit", (code) => settle({ code, output }));
   });
+}
+
+/**
+ * A predeploy hook that STOPS in the middle of its run, and the handles a test
+ * needs to write into the checkout while it is stopped there.
+ *
+ * WHY A TEST NEEDS THIS AT ALL. Since round 28 the write containment denies the
+ * live checkout to every process this classifier starts, whether the checkout
+ * lies under the system temp dir or anywhere else, so a HOOK can no longer
+ * produce the drift the guards below it exist to catch. The writer those guards
+ * are still for is an UNCONTAINED one — the parent process, something in another
+ * window, a worker that was already running — and in this suite the test process
+ * is that writer. `onStaged` is the seam for the window before the hooks; this
+ * gate is for the window DURING them, which no seam reaches and which the
+ * exit-ordering and post-hook cases are specifically about.
+ *
+ * The two sentinels live in a temp directory of their own, OUTSIDE the fixture:
+ * writable inside the containment, because saying where it got to is not writing
+ * a deployment input. `sleep 0.05` rather than a spin, so a hook that is waiting
+ * costs nothing; `PREDEPLOY_HOOK_TIMEOUT_MS` is five minutes, and every wait
+ * here is milliseconds.
+ */
+async function openHookGate() {
+  const dir = await mkdtemp(join(tmpdir(), "hook-gate-"));
+  const ready = join(dir, "ready");
+  const go = join(dir, "go");
+  return {
+    /** The shell fragment to put in a `predeploy` array. */
+    command: `printf ready > '${ready}'; while [ ! -e '${go}' ]; do sleep 0.05; done`,
+    /**
+     * The same gate for module-scope code inside a built artifact, which is
+     * loaded synchronously and so cannot await anything. `Atomics.wait` is the
+     * synchronous sleep that leaves no descendant behind — a child process would
+     * be one more thing the discovery guards have to forgive.
+     */
+    javascript: [
+      'const gateFs = require("node:fs");',
+      `gateFs.writeFileSync(${JSON.stringify(ready)}, "ready");`,
+      `while (!gateFs.existsSync(${JSON.stringify(go)})) {`,
+      "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);",
+      "}",
+    ].join("\n"),
+    /** Resolves once the hook has reached the gate. */
+    async reached(timeoutMs = 120_000) {
+      const deadline = Date.now() + timeoutMs;
+      while (!existsSync(ready)) {
+        if (Date.now() > deadline) throw new Error("the gated hook never reached its gate");
+        await new Promise((wake) => setTimeout(wake, 25));
+      }
+    },
+    /** Lets the hook finish. */
+    release: () => writeFile(go, ""),
+    close: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+/**
+ * Run `classifying` while `write` happens with the gated hook held mid-run, and
+ * answer with whatever the classification threw (or `null` if it returned).
+ *
+ * The gate is released in a `finally` so a failing `write` cannot leave a hook
+ * waiting out its five-minute ceiling.
+ */
+async function whileAHookWaits(gate, classifying, write) {
+  const outcome = classifying().then(
+    () => null,
+    (error) => error,
+  );
+  try {
+    await gate.reached();
+    await write();
+  } finally {
+    await gate.release();
+  }
+  return outcome;
 }
 
 /**
@@ -2229,23 +2318,33 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("ABORTS when a hook writes through the overlay into the checkout", async () => {
+  it("ABORTS when a write through the overlay reaches the checkout", async () => {
     // Only the Functions sources are copied; every other project directory is a
-    // symlink to the live tree, so a hook that writes a shared build input —
-    // here a toggle whose second run differs from its first — mutates the real
-    // checkout AFTER the dirty-tree guard has passed (Codex P2, round 17).
+    // symlink to the live tree, so a write through the overlay — here a toggle
+    // whose second run differs from its first — mutates the real checkout AFTER
+    // the dirty-tree guard has passed (Codex P2, round 17).
     //
     // Answering that with a conservative classification was still wrong: the
     // classification SUCCEEDS, so the build and the publish below it go ahead
-    // and ship whatever the hook just wrote into tracked source (Codex P1,
-    // round 18). Detected mutation is fatal, and it names the path.
+    // and ship whatever was just written into tracked source (Codex P1, round
+    // 18). Detected mutation is fatal, and it names the path.
+    //
+    // The writer is the PARENT process, through the `onStaged` seam, and it used
+    // to be a predeploy hook. Round 28's containment denies the live checkout to
+    // every process this classifier starts — including on a fixture under the
+    // system temp dir, which is where this one is — so a hook can no longer
+    // reach this route at all, and the case that proves the hook is stopped is
+    // "denies a hook's write into a checkout under the system temp dir" below.
+    // What is left for the fingerprint is the uncontained writer: the parent,
+    // another window, a worker that was already running. The route and the
+    // assertion are unchanged; only who takes it is.
     await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
-        files: { "shared/toggle": "" },
-      },
+      { functionsConfig: { predeploy: PREDEPLOY }, files: { "shared/toggle": "" } },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ scratchProject }) =>
+            appendFile(join(scratchProject, "shared", "toggle"), "x"),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -2260,25 +2359,49 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     // The status `deploy.sh` reads. It is distinct from the invalid-request
     // status precisely because the request was valid: it is the TREE that is no
     // longer the one the clean-tree guard approved.
-    await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
-        files: { "shared/toggle": "" },
-      },
-      async (configPath) => {
-        const run = await runClassifierWrapper(
-          configPath,
-          ["--only", "functions:daily"],
-          DEPLOY_SH_CLASSIFIER_ENV(configPath),
-        );
-        expect(run.code).toBe(3);
-        expect(run.output).toContain("mutated the live checkout");
-        expect(run.output).toContain("shared/toggle");
-        expect(run.output).toContain("NOTHING HAS BEEN BUILT OR PUBLISHED");
-        // And no classification reached stdout for `deploy.sh` to parse.
-        expect(run.output).not.toContain("FUNCTIONS_ATTEMPTED=");
-      },
-    );
+    //
+    // `main()` is the production entry point and it passes no seam — that is
+    // the point of `onStaged` being an argument — so the drift here is produced
+    // the way a real one now has to be: by a process the classifier did not
+    // start. The hook stops at a gate, this test writes into the checkout while
+    // it is stopped there, and the post-hook fingerprint finds it. Before round
+    // 28 the hook wrote it itself; the containment denies that now (see
+    // `openHookGate`), and the status this asserts is unchanged.
+    const gate = await openHookGate();
+    try {
+      await withFunctionsProject(
+        {
+          functionsConfig: { predeploy: [...PREDEPLOY, gate.command] },
+          files: { "shared/toggle": "" },
+        },
+        async (configPath) => {
+          const checkout = dirname(configPath);
+          const run = await whileAHookWaits(
+            gate,
+            () =>
+              runClassifierWrapper(
+                configPath,
+                ["--only", "functions:daily"],
+                DEPLOY_SH_CLASSIFIER_ENV(configPath),
+              ).then((finished) => {
+                // `whileAHookWaits` reads a REJECTION as the outcome; the
+                // wrapper answers with an exit status instead, so hand it back
+                // through the same channel.
+                throw finished;
+              }),
+            () => appendFile(join(checkout, "shared", "toggle"), "x"),
+          );
+          expect(run.code).toBe(3);
+          expect(run.output).toContain("mutated the live checkout");
+          expect(run.output).toContain("shared/toggle");
+          expect(run.output).toContain("NOTHING HAS BEEN BUILT OR PUBLISHED");
+          // And no classification reached stdout for `deploy.sh` to parse.
+          expect(run.output).not.toContain("FUNCTIONS_ATTEMPTED=");
+        },
+      );
+    } finally {
+      await gate.close();
+    }
   });
 
   it("still exempts when that same write lands inside the staged source dir", async () => {
@@ -2299,32 +2422,44 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("ABORTS when LOADING the artifact writes into the checkout", async () => {
-    // Module-scope code reaches the same symlinks a hook does, and it runs
-    // after the hooks have already been cleared — so the live tree is checked
-    // again once every codebase has been discovered, and that check is fatal
-    // for the same reason the post-hook one is.
-    await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [] },
-        files: {
-          "shared/toggle": "",
-          "functions/lib/index.js": artifact(
-            [
-              'const fs = require("node:fs");',
-              'const path = require("node:path");',
-              'fs.appendFileSync(path.join(__dirname, "..", "..", "shared", "toggle"), "x");',
-              "exports.daily = endpoint();",
-            ].join("\n"),
-          ),
+  it("ABORTS when the checkout changes while the artifact is LOADING", async () => {
+    // The live tree is checked AGAIN once every codebase has been discovered,
+    // because discovery runs after the hooks have been cleared and the post-hook
+    // check can no longer speak for it. That check is fatal for the same reason
+    // the post-hook one is.
+    //
+    // The write used to come from the artifact's own module scope, which reached
+    // the overlay's symlinks the way a hook does. Round 28's containment denies
+    // the checkout to the discovery process too, so the artifact now only STOPS
+    // there — at the same gate a hook uses — and the uncontained writer is this
+    // test. That keeps the window exactly where the case needs it: after the
+    // hooks, inside discovery, where only the post-discovery check is left.
+    const gate = await openHookGate();
+    try {
+      await withFunctionsProject(
+        {
+          functionsConfig: { predeploy: [] },
+          files: {
+            "shared/toggle": "",
+            "functions/lib/index.js": artifact(
+              [gate.javascript, "exports.daily = endpoint();"].join("\n"),
+            ),
+          },
         },
-      },
-      async (configPath) => {
-        await expect(classify(["--only", "functions:daily"], configPath)).rejects.toThrow(
-          LiveCheckoutDriftError,
-        );
-      },
-    );
+        async (configPath) => {
+          const checkout = dirname(configPath);
+          const failure = await whileAHookWaits(
+            gate,
+            () => classify(["--only", "functions:daily"], configPath),
+            () => appendFile(join(checkout, "shared", "toggle"), "x"),
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("shared/toggle");
+        },
+      );
+    } finally {
+      await gate.close();
+    }
   });
 
   it("keeps its own environment out of the predeploy hooks it runs", async () => {
@@ -2575,34 +2710,41 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     // `lifecycleHooks` reads `options.config.get(target)`. Planning from the
     // RAW source handed the planner a string, whose `predeploy` is `undefined`,
     // so the imported hooks were left out of the rehearsal entirely and ran for
-    // real. This one writes through the overlay into the live checkout, which
-    // is fatal — so it also proves the hook actually ran.
-    await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [] },
-        config: { firestore: "firestore.config.json" },
-        files: {
-          "firestore.config.json": JSON.stringify({
-            rules: "firestore.rules",
-            predeploy: ["printf x >> shared/toggle"],
-          }),
-          "firestore.rules": "rules_version = '2';\n",
-          "shared/toggle": "",
-          "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+    // real. The assertion is therefore that the imported hook RAN.
+    //
+    // It used to prove that by writing through the overlay into the live
+    // checkout, whose drift is fatal. Round 28's containment denies the checkout
+    // to every hook, so the proof is now the direct one: the hook leaves a mark
+    // in a temp directory of its own — outside the checkout, and therefore
+    // inside what the containment still allows a hook to write — and this
+    // asserts the mark. That says the same thing about the planner one step
+    // sooner, without borrowing the drift guard to say it.
+    const evidence = await mkdtemp(join(tmpdir(), "imported-hook-ran-"));
+    try {
+      const mark = join(evidence, "ran");
+      await withFunctionsProject(
+        {
+          functionsConfig: { predeploy: [] },
+          config: { firestore: "firestore.config.json" },
+          files: {
+            "firestore.config.json": JSON.stringify({
+              rules: "firestore.rules",
+              predeploy: [`printf ran > '${mark}'`],
+            }),
+            "firestore.rules": "rules_version = '2';\n",
+            "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+          },
         },
-      },
-      async (configPath) => {
-        const failure = await classify(
-          ["--only", "functions:daily,firestore"],
-          configPath,
-        ).then(
-          () => null,
-          (error) => error,
-        );
-        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
-        expect(failure.message).toContain("shared/toggle");
-      },
-    );
+        async (configPath) => {
+          expect(await classify(["--only", "functions:daily,firestore"], configPath)).toMatchObject(
+            EXEMPT,
+          );
+          expect(existsSync(mark)).toBe(true);
+        },
+      );
+    } finally {
+      await rm(evidence, { recursive: true, force: true });
+    }
   });
 
   it("still proves the endpoint when an imported target config carries no hooks", async () => {
@@ -2991,24 +3133,30 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook changes what the repository answers", async () => {
-    // The other half of exposing `.git`: the view is live, so a hook can write
-    // through it. The guard is on what `git` ANSWERS rather than on the files
-    // under `.git`, because that is the property a build can observe — and
-    // because a file-level watch reports drift for a background fetch's
-    // FETCH_HEAD, which no build has ever branched on.
+  it("ABORTS when something changes what the repository answers", async () => {
+    // The other half of exposing `.git`: the view is live, so a write through it
+    // changes what the repository answers. The guard is on what `git` ANSWERS
+    // rather than on the files under `.git`, because that is the property a
+    // build can observe — and because a file-level watch reports drift for a
+    // background fetch's FETCH_HEAD, which no build has ever branched on.
     //
     // Fatal, not conservative (Phase 4b P1, round 19): `vite.config.ts` stamps
-    // the bundle from `git rev-parse HEAD` during BUILD_CMD, so metadata a hook
+    // the bundle from `git rev-parse HEAD` during BUILD_CMD, so metadata that
     // moved after the approved-checkout guards is a deployment input that
     // changed, and the deploy must stop the same way tree drift stops it.
+    //
+    // Through `onStaged` rather than a predeploy hook since round 28: `.git` is
+    // exposed as a symlink INTO the checkout, so the containment denies it to
+    // every hook, whether the checkout lies under the system temp dir (as this
+    // fixture does) or anywhere else. The writer the guard is still for is the
+    // uncontained one — here a `git` this test runs, which is exactly the
+    // background checkout or fetch the guard was written for.
     await withFunctionsProject(
-      {
-        branch: "release",
-        functionsConfig: { predeploy: [...PREDEPLOY, "git checkout -q -b rewritten"] },
-      },
+      { branch: "release", functionsConfig: { predeploy: PREDEPLOY } },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) => gitIn(projectDir, ["checkout", "-q", "-b", "rewritten"]),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3020,22 +3168,31 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook writes THROUGH a symlink inside a linked directory", async () => {
+  it("ABORTS when a write lands THROUGH a symlink inside a linked directory", async () => {
     // A linked project directory can hold a symlink back to a ROOT deployment
     // input — a file the overlay copies rather than links, so the live copy
     // sits under no walked directory. Fingerprinting only the link's own inode
-    // would let a hook write through it — replacing firebase.json, say — with
+    // would let a write pass through it — replacing firebase.json, say — with
     // no watched path changing (Phase 4b / Codex P1, round 20). The target is
     // fingerprinted under the link, so the write reads as drift on the link
     // that reached it, and the message names that link.
+    //
+    // The write comes through `onStaged` rather than from a predeploy hook since
+    // round 28: this route resolves INTO the checkout, and the containment
+    // canonicalises the path before it matches, so a contained hook is refused
+    // whichever link it goes through. The route being fingerprinted is what this
+    // case is about, and the parent takes the identical one.
     await withFunctionsProject(
       {
-        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> tools/config-link"] },
+        functionsConfig: { predeploy: PREDEPLOY },
         files: { "toggle.txt": "", "tools/.keep": "" },
         links: { "tools/config-link": "../toggle.txt" },
       },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ scratchProject }) =>
+            appendFile(join(scratchProject, "tools", "config-link"), "x"),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3046,21 +3203,26 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook overwrites a file THROUGH a directory-valued symlink", async () => {
+  it("ABORTS when a file is overwritten THROUGH a directory-valued symlink", async () => {
     // Codex P1, round 13: overwriting an EXISTING file through a link whose
     // target is a directory moves neither the link nor the directory's mtime,
     // so the target's metadata alone would let the write through. The target
     // directory is walked under the link, so the file it reaches is drift.
+    //
+    // Through `onStaged` for the reason the case above it states: the route ends
+    // in the checkout, which round 28's containment denies to every hook, so the
+    // writer that is left for this guard is an uncontained one.
     await withFunctionsProject(
       {
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, "printf y > tools/config-link/app.txt"],
-        },
+        functionsConfig: { predeploy: PREDEPLOY },
         files: { "config/app.txt": "x", "tools/.keep": "" },
         links: { "tools/config-link": "../config" },
       },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ scratchProject }) =>
+            writeFile(join(scratchProject, "tools", "config-link", "app.txt"), "y"),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3317,35 +3479,33 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
   it.each([
     ["the copied Functions source", "functions/src/index.ts"],
     ["a copied project-root file", "firebase.json"],
-  ])("ABORTS when a hook writes to %s through an absolute live path", async (_label, target) => {
+  ])("ABORTS when %s is written through an absolute live path", async (_label, target) => {
     // Codex P1, round 15: the overlay COPIES the Functions source and the
     // project-root files, so no relative path from the scratch project reaches
-    // their live originals — but a hook launched through npm inherits
-    // `INIT_CWD` pointing at the live repository, and any absolute path lands
-    // on the checkout the deploy will build from. The copied inputs' live
-    // originals are fingerprinted too, so the write is drift.
+    // their live originals — but an absolute path does, and a hook launched
+    // through npm inherits `INIT_CWD` pointing at the live repository. The
+    // copied inputs' live originals are fingerprinted too, so the write is
+    // drift.
+    //
+    // The absolute route is now closed to a hook: round 28's containment denies
+    // the checkout by resolved path, so `$INIT_CWD/...` is refused as flatly as
+    // a relative one, and "denies a hook's write into a checkout under the
+    // system temp dir" is where that is pinned. What this still has to pin is
+    // that the COPIED inputs' live originals are watched at all, which is a
+    // property of the fingerprint and not of who wrote — so the write comes from
+    // the parent through `onStaged`, at the same absolute path.
     await withFunctionsProject(
-      {
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, `printf x >> "$INIT_CWD/${target}"`],
-        },
-      },
+      { functionsConfig: { predeploy: PREDEPLOY } },
       async (configPath) => {
-        const { dirname: dir } = await import("node:path");
-        const previous = process.env.INIT_CWD;
-        process.env.INIT_CWD = dir(configPath);
-        try {
-          const failure = await classify(["--only", "functions:daily"], configPath).then(
-            () => null,
-            (error) => error,
-          );
-          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
-          expect(failure.message).toContain(target.split("/").pop());
-          expect(failure.message).toContain("Nothing has been restored");
-        } finally {
-          if (previous === undefined) delete process.env.INIT_CWD;
-          else process.env.INIT_CWD = previous;
-        }
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) => appendFile(join(projectDir, target), "x"),
+        }).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain(target.split("/").pop());
+        expect(failure.message).toContain("Nothing has been restored");
       },
     );
   });
@@ -3467,20 +3627,23 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook moves a remote-tracking ref", async () => {
-    // Codex P1, round 18: a hook's `git fetch` advances refs/remotes/origin/main
+  it("ABORTS when a remote-tracking ref moves during the rehearsal", async () => {
+    // Codex P1, round 18: a `git fetch` advances refs/remotes/origin/main
     // without touching HEAD, the branch or the nearest tag, and the wrapper's
     // approved-checkout guard asked whether HEAD equals origin/main BEFORE the
     // rehearsal. Every remote-tracking ref is part of what git answers now.
+    //
+    // The mover is the parent through `onStaged` rather than a predeploy hook:
+    // round 28's containment denies `.git`, which the overlay exposes as a
+    // symlink into the checkout, so the fetch this guard was always written for
+    // is the background one — and that one is uncontained by definition.
     await withFunctionsProject(
-      {
-        branch: "release",
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, "git update-ref refs/remotes/origin/main HEAD"],
-        },
-      },
+      { branch: "release", functionsConfig: { predeploy: PREDEPLOY } },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) =>
+            gitIn(projectDir, ["update-ref", "refs/remotes/origin/main", "HEAD"]),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3490,32 +3653,27 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook creates a new project-root entry through an absolute live path", async () => {
+  it("ABORTS when a new project-root entry appears through an absolute live path", async () => {
     // Codex P1, round 18: the roots and copied files are the entries that
     // existed when staging ran, so a marker a non-idempotent hook creates at
     // the live root was in neither snapshot. The root's entry set is part of
     // the fingerprint now.
+    //
+    // Written from `onStaged` since round 28, for the reason the absolute-path
+    // cases above give: the containment denies the checkout to every hook by
+    // resolved path, so what is left to pin here is that the root's ENTRY SET is
+    // fingerprinted, which the parent's identical write exercises.
     await withFunctionsProject(
-      {
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, 'printf x > "$INIT_CWD/.deploy-mode"'],
-        },
-      },
+      { functionsConfig: { predeploy: PREDEPLOY } },
       async (configPath) => {
-        const { dirname: dir } = await import("node:path");
-        const previous = process.env.INIT_CWD;
-        process.env.INIT_CWD = dir(configPath);
-        try {
-          const failure = await classify(["--only", "functions:daily"], configPath).then(
-            () => null,
-            (error) => error,
-          );
-          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
-          expect(failure.message).toContain("root entries");
-        } finally {
-          if (previous === undefined) delete process.env.INIT_CWD;
-          else process.env.INIT_CWD = previous;
-        }
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) => writeFile(join(projectDir, ".deploy-mode"), "x"),
+        }).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("root entries");
       },
     );
   });
@@ -3548,94 +3706,104 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook that leaves descendants running has also moved a remote-tracking ref", async () => {
+  it("ABORTS when a hook leaves descendants running and a remote-tracking ref has moved", async () => {
     // Codex P1, round 19: the background-hook refusal checked the live tree
     // but not what git answers, and returned BEFORE the post-hook metadata
-    // check — so a hook that moved origin/main and left a child running was
+    // check — so a hook that left a child running while origin/main moved was
     // refused conservatively while the wrapper's checkout guard no longer
     // held. The refusal now asks git first and aborts on the moved ref.
-    await withFunctionsProject(
-      {
-        branch: "release",
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, "git update-ref refs/remotes/origin/main HEAD; sleep 3 &"],
+    //
+    // The ORDER is the whole case, so the ref has to move inside the window the
+    // background-hook refusal covers — after the baseline, during the hooks —
+    // which `onStaged` is too early for. The hook therefore stops at a gate and
+    // this test moves the ref while it is stopped there; round 28's containment
+    // is why the hook cannot move it itself (`.git` is a symlink into the
+    // checkout). The hook still leaves the descendant that produces the refusal
+    // this case is about.
+    const gate = await openHookGate();
+    try {
+      await withFunctionsProject(
+        {
+          branch: "release",
+          functionsConfig: { predeploy: [...PREDEPLOY, `sleep 3 & ${gate.command}`] },
         },
-      },
-      async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
-          () => null,
-          (error) => error,
-        );
-        expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
-        expect(failure.message).toContain("refs/remotes/origin/main");
-      },
-    );
+        async (configPath) => {
+          const checkout = dirname(configPath);
+          const failure = await whileAHookWaits(
+            gate,
+            () => classify(["--only", "functions:daily"], configPath),
+            () => gitIn(checkout, ["update-ref", "refs/remotes/origin/main", "HEAD"]),
+          );
+          expect(failure).toBeInstanceOf(RepositoryMetadataDriftError);
+          expect(failure.message).toContain("refs/remotes/origin/main");
+        },
+      );
+    } finally {
+      await gate.close();
+    }
   });
 
-  it("ABORTS when a hook creates an entry in an intermediate overlay directory", async () => {
+  it("ABORTS when an entry appears in an intermediate overlay directory", async () => {
     // Phase 4b P1, run 4: with the source at `packages/functions`, the overlay
     // traverses `packages` to place it and registered only its existing
-    // children, so `$INIT_CWD/packages/generated.ts` was in neither snapshot.
-    // Every traversed directory's entry set is watched now.
+    // children, so `packages/generated.ts` at the live root was in neither
+    // snapshot. Every traversed directory's entry set is watched now.
+    //
+    // From `onStaged` since round 28: the write lands in the checkout, which
+    // the containment denies to every hook, and the property under test is
+    // which directories the overlay's walk REGISTERS — the same either way.
     await withFunctionsProject(
       {
-        functionsConfig: {
-          source: "packages/functions",
-          predeploy: [...PREDEPLOY, 'printf x > "$INIT_CWD/packages/generated.ts"'],
-        },
+        functionsConfig: { source: "packages/functions", predeploy: PREDEPLOY },
         files: { "packages/functions/.keep": "" },
       },
       async (configPath) => {
-        const { dirname: dir, join: under } = await import("node:path");
-        const { cp: copy, rm: remove } = await import("node:fs/promises");
+        const { cp: copy } = await import("node:fs/promises");
         // The fixture installs its toolchain under `functions/`; move it.
-        await copy(under(dir(configPath), "functions"), under(dir(configPath), "packages", "functions"), {
+        const checkout = dirname(configPath);
+        await copy(join(checkout, "functions"), join(checkout, "packages", "functions"), {
           recursive: true,
           verbatimSymlinks: true,
         });
-        await remove(under(dir(configPath), "functions"), { recursive: true, force: true });
-        const previous = process.env.INIT_CWD;
-        process.env.INIT_CWD = dir(configPath);
-        try {
-          const failure = await classify(["--only", "functions:daily"], configPath).then(
-            () => null,
-            (error) => error,
-          );
-          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
-          expect(failure.message).toContain("packages");
-          expect(failure.message).toContain("entries");
-        } finally {
-          if (previous === undefined) delete process.env.INIT_CWD;
-          else process.env.INIT_CWD = previous;
-        }
+        await rm(join(checkout, "functions"), { recursive: true, force: true });
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) => writeFile(join(projectDir, "packages", "generated.ts"), "x"),
+        }).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("packages");
+        expect(failure.message).toContain("entries");
       },
     );
   });
 
-  it("ABORTS when a hook leaves a marker at the root of a linked node_modules", async () => {
+  it("ABORTS when a marker is left at the root of a linked node_modules", async () => {
     // Codex P1, round 22: the dependency tree is linked into the overlay and
-    // was excluded from both fingerprints, so a marker a hook left there for
-    // the deploy's second run was invisible. Each node_modules is watched one
-    // level deep now.
+    // was excluded from both fingerprints, so a marker left there for the
+    // deploy's second run was invisible. Each node_modules is watched one level
+    // deep now.
+    //
+    // From `onStaged` since round 28. The overlay reaches the LIVE dependency
+    // tree through an absolute link, so the route ends in the checkout and the
+    // containment refuses it to a hook; what still has to be pinned is that the
+    // linked tree is fingerprinted one level deep at all.
     await withFunctionsProject(
-      {
-        functionsConfig: {
-          predeploy: [...PREDEPLOY, 'printf x > "$RESOURCE_DIR/node_modules/.deploy-marker"'],
-        },
-      },
+      { functionsConfig: { predeploy: PREDEPLOY } },
       async (configPath) => {
-        const { dirname: dir, join: under } = await import("node:path");
-        const { rm: remove } = await import("node:fs/promises");
-        const marker = under(dir(configPath), "functions", "node_modules", ".deploy-marker");
+        const marker = join(dirname(configPath), "functions", "node_modules", ".deploy-marker");
         try {
-          const failure = await classify(["--only", "functions:daily"], configPath).then(
+          const failure = await classify(["--only", "functions:daily"], configPath, {
+            onStaged: () => writeFile(marker, "x"),
+          }).then(
             () => null,
             (error) => error,
           );
           expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
           expect(failure.message).toContain("node_modules");
         } finally {
-          await remove(marker, { force: true });
+          await rm(marker, { force: true });
         }
       },
     );
@@ -3751,18 +3919,22 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("ABORTS when a hook changes a watched directory's own permissions", async () => {
-    // Codex P1, round 25: the walk recorded only a root's children, so a hook
-    // that flips a linked directory's mode through the scratch symlink moved
-    // nothing the fingerprint compared. Each watched directory's own signature
-    // is part of the fingerprint now.
+  it("ABORTS on a change to a watched directory's own permissions", async () => {
+    // Codex P1, round 25: the walk recorded only a root's children, so flipping
+    // a linked directory's mode through the scratch symlink moved nothing the
+    // fingerprint compared. Each watched directory's own signature is part of
+    // the fingerprint now.
+    //
+    // Through `onStaged`, and through the SAME scratch symlink, since round 28:
+    // the link resolves into the checkout, which the containment denies to
+    // every hook. What is under test is the fingerprint's coverage of a
+    // directory's own signature.
     await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [...PREDEPLOY, "chmod 700 shared"] },
-        files: { "shared/.keep": "" },
-      },
+      { functionsConfig: { predeploy: PREDEPLOY }, files: { "shared/.keep": "" } },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ scratchProject }) => chmod(join(scratchProject, "shared"), 0o700),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3781,18 +3953,22 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     // `chmod` from both snapshots. Structured keys give the two entries
     // separate namespaces.
     //
-    // The route to the live `functions` directory is `shared/..`: `shared` is
-    // a symlinked project directory, so the kernel resolves the link before
-    // `..` and lands back in the live checkout. A plain `chmod 700 functions`
-    // could not pin this — the source dir is a COPY in the scratch project, so
-    // it would move nothing the guard watches.
+    // The mode change has to reach the LIVE `functions` directory: the source
+    // dir is a COPY in the scratch project, so a `chmod` inside the copy would
+    // move nothing the guard watches. A hook used to get there through
+    // `shared/..` — a symlinked project directory the kernel resolves before
+    // `..`, landing back in the checkout — and round 28's containment now
+    // refuses exactly that, canonicalised path and all. `onStaged` takes the
+    // live path directly, which is the same watched entry.
     await withFunctionsProject(
       {
-        functionsConfig: { predeploy: [...PREDEPLOY, "chmod 700 shared/../functions"] },
+        functionsConfig: { predeploy: PREDEPLOY },
         files: { "shared/.keep": "", "functions (self)": "a real file, not a fingerprint key" },
       },
       async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
+        const failure = await classify(["--only", "functions:daily"], configPath, {
+          onStaged: ({ projectDir }) => chmod(join(projectDir, "functions"), 0o700),
+        }).then(
           () => null,
           (error) => error,
         );
@@ -3802,27 +3978,42 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
+  it("ABORTS on a write that lands while a hook is running, and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
     // other way round, the refusal returns first and `deploy.sh` walks into
     // BUILD_CMD with a checkout the clean-tree guard never approved (Phase 4b
     // P1, round 19).
-    await withFunctionsProject(
-      {
-        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle && exit 7"] },
-        files: { "shared/toggle": "" },
-      },
-      async (configPath) => {
-        const failure = await classify(["--only", "functions:daily"], configPath).then(
-          () => null,
-          (error) => error,
-        );
-        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
-        expect(failure.message).toContain("shared/toggle");
-        expect(failure.message).toContain("failing predeploy hook");
-      },
-    );
+    //
+    // The ordering only exists in the window the hooks run in, which `onStaged`
+    // is too early for — a write from there aborts on the staging bracket before
+    // a hook has run at all. So the hook stops at a gate, this test writes into
+    // the checkout while it is stopped there, and the hook then exits 7. Round
+    // 28's containment is why the hook no longer writes it itself; the exit this
+    // asserts is unchanged, and it is still the hook's failure that the drift
+    // has to beat.
+    const gate = await openHookGate();
+    try {
+      await withFunctionsProject(
+        {
+          functionsConfig: { predeploy: [...PREDEPLOY, `${gate.command}; exit 7`] },
+          files: { "shared/toggle": "" },
+        },
+        async (configPath) => {
+          const checkout = dirname(configPath);
+          const failure = await whileAHookWaits(
+            gate,
+            () => classify(["--only", "functions:daily"], configPath),
+            () => appendFile(join(checkout, "shared", "toggle"), "x"),
+          );
+          expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+          expect(failure.message).toContain("shared/toggle");
+          expect(failure.message).toContain("failing predeploy hook");
+        },
+      );
+    } finally {
+      await gate.close();
+    }
   });
 
   it("preserves the codebase loading sequence inside one project probe", async () => {
@@ -3924,7 +4115,13 @@ const DETACHING_HOOK = [
 ].join("\n");
 
 describe("write containment holds a rehearsal's writes inside the scratch root", RUNS_A_BUILD, () => {
-  it("stops a writer a hook detached with an environment of its own", async () => {
+  it.each([
+    ["under the system temp dir", undefined],
+    ["outside every writable root", LIVE_FIXTURE_ROOT],
+  ])("stops a writer a hook detached with an environment of its own, %s", async (
+    _label,
+    fixtureRoot,
+  ) => {
     // Phase 4b P1 on #1107. Everything else in this classifier answers AFTER the
     // fact — the group is signalled when a step ends, the marker sweep looks for
     // what escaped it, the fingerprints compare before with after — and an
@@ -3938,13 +4135,17 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
     // pinned beside it because nothing about this hook is visible to the
     // classifier — an exact selector stays exact — which is precisely why
     // containment rather than detection is the fix.
+    //
+    // BOTH LAYOUTS, since round 28. This case only ever ran on a checkout
+    // outside the writable set, because the read-only set used to drop a
+    // checkout that lay inside one — so this exact worker, on a repository
+    // beneath `tmpdir()`, wrote its deployment input while the canary went on
+    // passing against `$HOME` (Codex P1, round 28). The nested read-only
+    // override is what makes the two arrangements answer identically, and the
+    // only way to say so is to run both.
     await withFunctionsProject(
       {
-        // Outside the system temp dir, which the containment leaves writable:
-        // this case is about a real checkout, while every other fixture here is
-        // staged where a hook may still write and the fingerprint is what
-        // catches it.
-        fixtureRoot: LIVE_FIXTURE_ROOT,
+        fixtureRoot,
         // Its own checkout root, because staging it inside this repository's
         // tree would otherwise put `.git` above it and refuse the exemption for
         // the layout instead (`nestedProjectRefusal`) — which would pass this
@@ -3970,6 +4171,75 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
           if (previous === undefined) delete process.env.INIT_CWD;
           else process.env.INIT_CWD = previous;
         }
+      },
+    );
+  });
+
+  // Codex P1, round 28 on #1107. The read-only set used to DROP the live
+  // checkout whenever it lay inside a writable root, because the system temp dir
+  // has to stay writable for the staging — so a repository checked out beneath
+  // `tmpdir()` kept only the home directory in that set, the nonempty-root check
+  // passed, the canary proved containment against `$HOME`, and every mechanism
+  // handed the rehearsal a WRITABLE checkout while reporting success. The
+  // checkout is now expressed as a read-only override INSIDE that writable root
+  // (`establishWriteContainment`), and the canary asks about the checkout by
+  // name, so the same denial holds for both layouts.
+  //
+  // Both arrangements are asserted, because the whole finding was one of them
+  // answering differently from the other while the guard reported the same
+  // thing. The hook is the same in each: an ordinary append into a shared build
+  // input, which the containment refuses, and whose failure the classifier then
+  // treats as it treats any failing hook — a project-wide refusal. The live file
+  // is checked in both, because a refusal that arrived after the write would be
+  // no better than the exemption it replaced.
+  it.each([
+    ["under the system temp dir", undefined],
+    ["outside every writable root", LIVE_FIXTURE_ROOT],
+  ])("denies a hook's write into a checkout %s", async (_label, fixtureRoot) => {
+    await withFunctionsProject(
+      {
+        fixtureRoot,
+        // Its own checkout root when staged inside this repository, or `.git`
+        // above it would refuse the layout instead (`nestedProjectRefusal`).
+        ...(fixtureRoot ? { branch: "release" } : {}),
+        functionsConfig: { predeploy: [...PREDEPLOY, "printf x >> shared/toggle"] },
+        files: { "shared/toggle": "" },
+      },
+      async (configPath) => {
+        const toggle = join(dirname(configPath), "shared", "toggle");
+        const { result, reasons } = await withRefusalReasons(() =>
+          classify(["--only", "functions:daily"], configPath),
+        );
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+        expect(reasons).toContain("predeploy hook failed");
+        expect(await readFile(toggle, "utf8")).toBe("");
+      },
+    );
+  });
+
+  it.each([
+    ["under the system temp dir", undefined],
+    ["outside every writable root", LIVE_FIXTURE_ROOT],
+  ])("still proves the endpoint for a checkout %s whose hook writes nothing", async (
+    _label,
+    fixtureRoot,
+  ) => {
+    // The control for the pair above, in both arrangements. Without it, a
+    // containment that refused every hook — or one that took the temp-dir
+    // checkout's nested override to mean the staging root as well, so no build
+    // could run — would pass those cases for the wrong reason.
+    await withFunctionsProject(
+      {
+        fixtureRoot,
+        ...(fixtureRoot ? { branch: "release" } : {}),
+        functionsConfig: { predeploy: [...PREDEPLOY, 'printf x >> "$RESOURCE_DIR/toggle"'] },
+        files: { "functions/toggle": "" },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+        // The hook wrote into the STAGED copy of its own `$RESOURCE_DIR`, so
+        // the live one is untouched — which is also what says the build ran.
+        expect(await readFile(join(dirname(configPath), "functions", "toggle"), "utf8")).toBe("");
       },
     );
   });
@@ -4007,7 +4277,7 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
             functionsAttempted: true,
             ...ALL_INVOKERS_CONSERVATIVE,
           });
-          expect(reasons).toContain("write containment");
+          expect(reasons).toContain(WRITE_CONTAINMENT_REFUSAL.DISABLED);
           expect(existsSync(join(checkout, "hook-ran"))).toBe(false);
         } finally {
           if (previous === undefined) delete process.env.INIT_CWD;

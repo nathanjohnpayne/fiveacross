@@ -2718,13 +2718,29 @@ fi
 # other — the way an exact single-endpoint scope got its invoker reconciliation
 # switched off for an artifact the deploy would publish as a protected group.
 #
-# The fixture's Hosting hook reads a marker in $RESOURCE_DIR and writes through
-# the staging overlay into the live checkout ONLY when it sees the override
-# directory's marker. That write is the classifier's fatal drift status (3), so
-# the override reaching the hook is legible here from deploy.sh's own
-# behaviour: it stops before BUILD_CMD and before op-firebase-deploy. 27b is
-# the control — the same fixture and the same selector without `--public` —
-# which reads the configured directory, writes nothing, and publishes.
+# The fixture's Hosting hook reads a marker in $RESOURCE_DIR and tries to write
+# through the staging overlay into the live checkout ONLY when it sees the
+# override directory's marker.
+#
+# That write is now DENIED by the classifier's write containment — round 28
+# stopped dropping the live checkout from the read-only set when the checkout
+# lies under the system temp dir, which is exactly where `$WORKDIR` puts these
+# fixtures — so the branch is legible from the hook's FAILURE instead of from
+# the drift it used to cause. A failing predeploy hook refuses the whole
+# project and NAMES that refusal on stderr under
+# FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1, which reaches deploy.sh's own transcript
+# because deploy.sh captures only the classifier's stdout. 27b is the control —
+# the same fixture and the same selector without `--public`, and the same debug
+# flag — which reads the configured directory, never takes the branch, exits 0,
+# and produces no such line.
+#
+# The deploy PUBLISHES in both now, which is the correct outcome and the point
+# of the change: the write never reached the tree, so there is nothing for the
+# clean-tree guard to have lost, and the only cost of the hook this classifier
+# could not rehearse is a wider scope. Before round 28 the write landed and 27a
+# asserted the deploy stopping (status 3) instead. The live `shared/toggle` is
+# checked in 27a too, because a refusal reached after the write would be no
+# better than the drift it replaced.
 #
 # Both name an established ADC document, because a rehearsal that has none runs
 # no hook at all: the classifier refuses every exemption before staging rather
@@ -2750,7 +2766,10 @@ init_public_override_repo() {
       "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
       "export const dailyEngagementEmail = onSchedule('every day 00:00', () => {});" \
       > functions/src/index.ts
-    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist","predeploy":["grep -q override \"$RESOURCE_DIR/which\" && printf x >> shared/toggle || true"]},"functions":{"source":"functions","predeploy":[]}}' > firebase.json
+    # `if … then … fi` rather than `&& … || true`: the compound's status has to
+    # be the denied write's in the override branch and 0 in the other, and a
+    # `&&` chain would hand back the failing `grep` in the control instead.
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist","predeploy":["if grep -q override \"$RESOURCE_DIR/which\"; then printf x >> shared/toggle; fi"]},"functions":{"source":"functions","predeploy":[]}}' > firebase.json
     git add -A
     git commit --quiet -m "initial"
   )
@@ -2765,22 +2784,23 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-27a.log" \
 NPM_LOG="$WORKDIR/npm-calls-27a.log" \
 FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
   bash -c "cd '$REPO27A' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting --public other" \
   >"$WORKDIR/case27a.out" 2>"$WORKDIR/case27a.err"
 RC27A=$?
 set -e
-if [[ $RC27A -eq 0 ]]; then
-  fail "public-override: deploy returned 0 though the Hosting hook, run against the overridden directory, mutated the checkout."
-elif [[ -s "$WORKDIR/ofd-calls-27a.log" ]]; then
-  fail "public-override: op-firebase-deploy ran after the Hosting hook had written into the checkout."
-elif [[ -s "$WORKDIR/npm-calls-27a.log" ]]; then
-  fail "public-override: the build ran after the Hosting hook had written into the checkout. npm log was:"
-  cat "$WORKDIR/npm-calls-27a.log" >&2
-elif ! grep -q 'mutated this checkout during classification' "$WORKDIR/case27a.err"; then
-  fail "public-override: the Hosting hook did not see the --public directory as \$RESOURCE_DIR. stderr was:"
+if [[ $RC27A -ne 0 ]]; then
+  fail "public-override: deploy.sh returned $RC27A. stderr was:"
   cat "$WORKDIR/case27a.err" >&2
+elif ! grep -q 'predeploy hook failed' "$WORKDIR/case27a.err"; then
+  fail "public-override: the Hosting hook did not see the --public directory as \$RESOURCE_DIR, so it never took the branch whose write the containment denies. stderr was:"
+  cat "$WORKDIR/case27a.err" >&2
+elif [[ -s "$REPO27A/shared/toggle" ]]; then
+  fail "public-override: the Hosting hook's write reached the live checkout, so the write containment did not hold."
+elif [[ ! -s "$WORKDIR/ofd-calls-27a.log" ]]; then
+  fail "public-override: the deploy never published, though the denied write left the tree exactly as the guards approved it."
 else
-  pass "public-override: --public moves the Hosting hook's \$RESOURCE_DIR in the rehearsal too (rc=$RC27A)."
+  pass "public-override: --public moves the Hosting hook's \$RESOURCE_DIR in the rehearsal too, and its write into the checkout is denied (rc=$RC27A)."
 fi
 
 REPO27B="$WORKDIR/case27b-public-override-control"
@@ -2792,6 +2812,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-27b.log" \
 NPM_LOG="$WORKDIR/npm-calls-27b.log" \
 FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
   bash -c "cd '$REPO27B' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting" \
   >"$WORKDIR/case27b.out" 2>"$WORKDIR/case27b.err"
 RC27B=$?
@@ -2800,9 +2821,12 @@ if [[ $RC27B -ne 0 ]]; then
   fail "public-override-control: the same deploy without --public returned $RC27B. stderr was:"
   cat "$WORKDIR/case27b.err" >&2
 elif [[ ! -s "$WORKDIR/ofd-calls-27b.log" ]]; then
-  fail "public-override-control: the deploy never published, so 27a's stop is not attributable to --public."
+  fail "public-override-control: the deploy never published, so 27a's refusal is not attributable to --public."
+elif grep -q 'predeploy hook failed' "$WORKDIR/case27b.err"; then
+  fail "public-override-control: the Hosting hook took the override branch without --public too, so 27a proves nothing about the override. stderr was:"
+  cat "$WORKDIR/case27b.err" >&2
 else
-  pass "public-override-control: without --public the Hosting hook reads firebase.json's own directory and the deploy publishes (rc=$RC27B)."
+  pass "public-override-control: without --public the Hosting hook reads firebase.json's own directory, takes no branch, and the deploy publishes (rc=$RC27B)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -2964,15 +2988,23 @@ fi
 # `$RESOURCE_DIR` during the deploy and a freshly stamped one in the rehearsal,
 # and could take one branch here and the other for real.
 #
-# The fixture's Functions hook writes through the staging overlay into the live
-# checkout ONLY when it sees `$RESOURCE_DIR` NEWER than a project-root stamp.
-# That write is the classifier's fatal drift status (3), so which timestamp the
-# hook read is legible from deploy.sh's own behaviour. 29a past-dates the live
-# Functions directory: with the restored timestamps the hook sees the older
-# directory, writes nothing, and the deploy publishes. 29b is the control — the
-# same fixture with the STAMP past-dated instead, so the hook really is looking
-# at a newer `$RESOURCE_DIR`, writes, and stops the deploy. Without 29b, 29a
-# would pass for a hook that never ran.
+# The fixture's Functions hook tries to write through the staging overlay into
+# the live checkout ONLY when it sees `$RESOURCE_DIR` NEWER than a project-root
+# stamp.
+#
+# That write is DENIED by the write containment since round 28, which no longer
+# drops the live checkout from the read-only set when the checkout lies under
+# the system temp dir — and `$WORKDIR` is exactly there. Which timestamp the
+# hook read is therefore legible from the hook's FAILURE, which the classifier
+# names on stderr under FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 and deploy.sh passes
+# through, exactly as case 27 reads it. 29a past-dates the live Functions
+# directory: with the restored timestamps the hook sees the older directory,
+# takes no branch, exits 0, and the deploy publishes with no such line. 29b is
+# the control — the same fixture with the STAMP past-dated instead, so the hook
+# really is looking at a newer `$RESOURCE_DIR`, takes the branch, and is
+# refused. Without 29b, 29a would pass for a hook that never ran. Both check the
+# live `shared/toggle`, because a refusal reached after the write would be no
+# better than the drift it replaced.
 # ---------------------------------------------------------------------------
 init_dir_mtime_repo() {
   local repo="$1"
@@ -2992,7 +3024,10 @@ init_dir_mtime_repo() {
       "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
       "export const dailyEngagementEmail = onSchedule('every day 00:00', () => {});" \
       > functions/src/index.ts
-    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":["[ \"$RESOURCE_DIR\" -nt \"$PROJECT_DIR/shared/stamp\" ] && printf x >> shared/toggle || true"]}}' > firebase.json
+    # `if … then … fi` rather than `[ … ] && … || true`, for the reason case 27
+    # states: the compound's status has to be the denied write's in one branch
+    # and 0 in the other.
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":["if [ \"$RESOURCE_DIR\" -nt \"$PROJECT_DIR/shared/stamp\" ]; then printf x >> shared/toggle; fi"]}}' > firebase.json
     git add -A
     git commit --quiet -m "initial"
   )
@@ -3013,33 +3048,43 @@ run_dir_mtime_case() {
   OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
   NPM_LOG="$WORKDIR/npm-calls-${case_id}.log" \
   FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+  FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
     bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail" \
     >"$WORKDIR/case${case_id}.out" 2>"$WORKDIR/case${case_id}.err"
   local rc=$?
   set -e
-  if [[ "$expectation" == "published" ]]; then
-    if [[ $rc -ne 0 ]]; then
-      fail "dir-mtime ($case_id): the rehearsed hook saw a fresh \$RESOURCE_DIR and mutated the checkout (rc=$rc). stderr was:"
-      cat "$WORKDIR/case${case_id}.err" >&2
-    elif [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+  if [[ $rc -ne 0 ]]; then
+    fail "dir-mtime ($case_id): deploy.sh returned $rc. stderr was:"
+    cat "$WORKDIR/case${case_id}.err" >&2
+    return
+  fi
+  if [[ -s "$repo/shared/toggle" ]]; then
+    fail "dir-mtime ($case_id): the hook's write reached the live checkout, so the write containment did not hold."
+    return
+  fi
+  if [[ "$expectation" == "no-branch" ]]; then
+    if [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
       fail "dir-mtime ($case_id): the deploy never published, so nothing here is attributable to the restored directory mtime."
+    elif grep -q 'predeploy hook failed' "$WORKDIR/case${case_id}.err"; then
+      fail "dir-mtime ($case_id): the rehearsed hook saw a fresh \$RESOURCE_DIR and took the branch the deploy will not. stderr was:"
+      cat "$WORKDIR/case${case_id}.err" >&2
     else
       pass "dir-mtime ($case_id): a copied directory carries its live timestamps, so the hook answers as it will in the deploy (rc=$rc)."
     fi
   else
-    if [[ $rc -eq 0 ]]; then
-      fail "dir-mtime ($case_id): the hook never wrote, so 29a's pass is not attributable to the timestamp it read."
-    elif ! grep -q 'mutated this checkout during classification' "$WORKDIR/case${case_id}.err"; then
-      fail "dir-mtime ($case_id): the deploy stopped for some reason other than the hook's write. stderr was:"
+    if ! grep -q 'predeploy hook failed' "$WORKDIR/case${case_id}.err"; then
+      fail "dir-mtime ($case_id): the hook never took the branch, so 29a's pass is not attributable to the timestamp it read. stderr was:"
       cat "$WORKDIR/case${case_id}.err" >&2
+    elif [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+      fail "dir-mtime ($case_id): the deploy never published, though the denied write left the tree exactly as the guards approved it."
     else
-      pass "dir-mtime ($case_id): a genuinely newer \$RESOURCE_DIR still takes the other branch (rc=$rc)."
+      pass "dir-mtime ($case_id): a genuinely newer \$RESOURCE_DIR still takes the other branch, whose write is denied (rc=$rc)."
     fi
   fi
 }
 
-run_dir_mtime_case 29a functions published
-run_dir_mtime_case 29b shared/stamp stopped
+run_dir_mtime_case 29a functions no-branch
+run_dir_mtime_case 29b shared/stamp branch-taken
 
 # ---------------------------------------------------------------------------
 # Case 30 (#547 — Codex P1, round 26): `locationId` is one of the firebase-admin
@@ -3406,6 +3451,128 @@ elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-35.log"; then
 else
   pass "imported-hosting: a Hosting target written as an import path is read from the materialised config (rc=$RC35)."
 fi
+
+# ---------------------------------------------------------------------------
+# Cases 36a-36b (#547 — Codex P1, round 28): a checkout beneath the system temp
+# dir is contained like any other.
+#
+# The classifier's write containment keeps the scratch root and the system temp
+# dir writable, because a build's toolchain cannot work without a temp dir, and
+# it used to DROP the live checkout from the read-only set whenever the checkout
+# lay inside one of them. A repository checked out beneath `$TMPDIR` therefore
+# kept only the home directory in that set: the nonempty-root check passed, the
+# canary proved containment against `$HOME`, and every mechanism handed the
+# rehearsal a WRITABLE checkout while reporting proved containment. The checkout
+# is now expressed as a read-only override INSIDE that writable root, and the
+# canary asks about the checkout by name.
+#
+# The hook here is the one the containment exists for and the one every
+# after-the-fact guard misses: it hands a worker to the operating system with
+# `detached`, `stdio: "ignore"` and an environment of its OWN, so `setsid` puts
+# it past the process group, the withheld marker puts it past the sweep, and its
+# delay puts its write past the fingerprints — minutes after deploy.sh accepted
+# the classification and carried on. Nothing about it is visible to the
+# classifier, so the deploy publishes either way; the assertion is the
+# FILESYSTEM.
+#
+# 36b is the control, and it is the reason 36a's empty checkout means anything:
+# the identical worker, aimed at a path OUTSIDE the checkout but still inside the
+# temp dir the staging needs, must land. Without it a fixture whose worker never
+# ran at all would pass 36a.
+# ---------------------------------------------------------------------------
+init_detached_writer_repo() {
+  local repo="$1"
+  local target="$2"
+  mkdir -p "$repo/functions/src" "$repo/dist"
+  (
+    cd "$repo"
+    git init --quiet -b feature/deploy-test
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
+    printf '%s\n' \
+      "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
+      "export const dailyEngagementEmail = onSchedule('every day 00:00', () => {});" \
+      > functions/src/index.ts
+    # In a FILE, not inline: a predeploy command containing a backslash is
+    # refused before it runs, and an inline `node -e` cannot escape its own
+    # quotes without one.
+    cat > detach.cjs <<'DETACH'
+const { spawn } = require("node:child_process");
+const worker = [
+  'const fs = require("node:fs");',
+  'setTimeout(() => { try { fs.writeFileSync(process.argv[1], "landed"); } catch {} }, 1200);',
+].join("");
+// An environment of its OWN: no rehearsal marker travels with this worker, so
+// nothing in the process table identifies it as this run's.
+spawn(process.execPath, ["-e", worker, process.argv[2]], {
+  detached: true,
+  stdio: "ignore",
+  env: { PATH: process.env.PATH },
+}).unref();
+DETACH
+    # `$PROJECT_DIR` is the staged project, where `detach.cjs` is a copied root
+    # file; the TARGET is absolute, so the scratch directory's removal cannot
+    # spare the tree for the wrong reason.
+    printf '%s\n' "{\"hosting\":{\"site\":\"fiveacross\",\"public\":\"dist\"},\"functions\":{\"source\":\"functions\",\"predeploy\":[\"node \\\"\$PROJECT_DIR/detach.cjs\\\" $target\"]}}" > firebase.json
+    git add -A
+    git commit --quiet -m "initial"
+  )
+}
+
+run_detached_writer_case() {
+  local case_id="$1"
+  local expectation="$2"
+  local repo="$WORKDIR/case${case_id}-detached-writer"
+  local target
+  if [[ "$expectation" == "denied" ]]; then
+    target="$repo/late-write"
+  else
+    target="$WORKDIR/case${case_id}-outside-write"
+  fi
+  rm -f "$target"
+  init_detached_writer_repo "$repo" "$target"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+  : >"$WORKDIR/npm-calls-${case_id}.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  NPM_LOG="$WORKDIR/npm-calls-${case_id}.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail" \
+    >"$WORKDIR/case${case_id}.out" 2>"$WORKDIR/case${case_id}.err"
+  local rc=$?
+  set -e
+  # Past the worker's own delay, so an absent file is containment rather than a
+  # race this test happened to win.
+  sleep 3
+  if [[ $rc -ne 0 ]]; then
+    fail "detached-writer ($case_id): deploy.sh returned $rc. stderr was:"
+    cat "$WORKDIR/case${case_id}.err" >&2
+    return
+  fi
+  if [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+    fail "detached-writer ($case_id): the deploy never published, so nothing here is attributable to the hook."
+    return
+  fi
+  if [[ "$expectation" == "denied" ]]; then
+    if [[ -e "$target" ]]; then
+      fail "detached-writer ($case_id): a worker the hook detached wrote into a checkout under the system temp dir, minutes after the classification returned."
+    else
+      pass "detached-writer ($case_id): a checkout under the system temp dir is denied to a detached worker that every after-the-fact guard misses (rc=$rc)."
+    fi
+  else
+    if [[ ! -e "$target" ]]; then
+      fail "detached-writer ($case_id): the worker never wrote outside the checkout either, so 36a's empty checkout proves nothing."
+    else
+      pass "detached-writer ($case_id): the same worker still writes where the containment allows it, so 36a's denial is the checkout's (rc=$rc)."
+    fi
+  fi
+}
+
+run_detached_writer_case 36a denied
+run_detached_writer_case 36b allowed
 
 # ---------------------------------------------------------------------------
 # Summary

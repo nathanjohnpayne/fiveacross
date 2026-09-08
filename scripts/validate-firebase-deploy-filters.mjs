@@ -677,6 +677,32 @@ function runCapturedProcess(
 /** How long the containment canary gets to write its files and exit. */
 const CONTAINMENT_PROBE_TIMEOUT_MS = 30_000;
 
+/**
+ * Every refusal write containment can return, as a NAMED and STABLE string.
+ *
+ * Named rather than composed at each site because each one is a different
+ * finding about this machine, and a caller — `deploy.sh`'s operator reading
+ * `FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1`, or a test — has to be able to tell them
+ * apart. Stable because the tests pin them: a case that means to prove the
+ * CHECKOUT canary would otherwise pass on the staging canary's failure, which
+ * is the opposite guarantee.
+ */
+export const WRITE_CONTAINMENT_REFUSAL = Object.freeze({
+  DISABLED: "write containment was disabled for this run, so no hook may be executed",
+  UNEXPRESSIBLE:
+    "the live checkout cannot be expressed as read-only inside the writable set this rehearsal " +
+    "needs for staging, so a hook's writes cannot be kept out of the deployment inputs",
+  NO_MECHANISM:
+    "offers no mechanism this classifier can use to keep a rehearsal's writes out of the live " +
+    "checkout, so no predeploy hook is run here",
+  CHECKOUT_CANARY: "a contained child could still write into the live checkout",
+  STAGING_CANARY: "a contained child could not write inside the staging root",
+  ESCAPED_ROOT: "a contained child could still write outside the writable set",
+  UNPROVED:
+    "no write containment could be proved on this machine, so a hook could write into the live " +
+    "checkout after this classification returned",
+});
+
 /** One argument, as a POSIX shell will read it back verbatim. */
 function shellQuote(argument) {
   return `'${String(argument).replaceAll("'", `'\\''`)}'`;
@@ -705,20 +731,34 @@ async function resolvedPath(path) {
  * `/dev` is the piece node cannot do without: a shell opens its controlling
  * terminal, and `> /dev/null` is in half the hooks anyone writes.
  *
+ * `nestedReadOnly` is the reason the order runs past the carve-outs. A required
+ * read-only path can lie INSIDE the writable set — a checkout under the system
+ * temp dir is the whole of Codex P1, round 28 on #1107 — and dropping it there
+ * left the deployment inputs writable while the canary went on passing against
+ * the home directory. Expressed as a deny AFTER the allows, last-rule-wins
+ * turns the writable root back into a hole with the checkout punched out of it,
+ * so the staging keeps its temp dir and the checkout is still denied.
+ *
  * Verified on this repository's development Mac (Darwin 25.6.0): a contained
  * `/bin/sh` writes inside the writable set, and its writes outside it are denied
  * BOTH by absolute path and through a symlink that points at them — the sandbox
  * canonicalises the path before it matches, so the overlay's links into the
- * checkout are not a way around this. `npm run build` and the `tsc` it runs
- * finish normally inside it.
+ * checkout are not a way around this. The nested form was verified the same way
+ * and on the same machine: with a scratch root and a checkout as SIBLINGS under
+ * `/private/var/folders/…/T`, a contained child writes in the scratch root and
+ * is refused in the checkout, by absolute path and through an overlay symlink
+ * into it. `npm run build` and the `tsc` it runs finish normally inside it.
  */
-function macosSandboxProfile(writable) {
+function macosSandboxProfile(writable, nestedReadOnly) {
   return [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
     ...writable.map((path) => `(allow file-write* (subpath ${JSON.stringify(path)}))`),
     '(allow file-write* (subpath "/dev"))',
+    // LAST, so the nesting holds. SBPL takes the last matching rule, so a deny
+    // written here beats the `writable` allow that contains it.
+    ...nestedReadOnly.map((path) => `(deny file-write* (subpath ${JSON.stringify(path)}))`),
     "",
   ].join("\n");
 }
@@ -752,7 +792,7 @@ function macosSandboxProfile(writable) {
  * none of the three works, the canary fails, the exemption is refused, and every
  * deploy classifies conservatively rather than silently running hooks loose.
  */
-function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
+function writeContainmentCandidates({ writable, readOnlyRoots, nestedReadOnly, profilePath }) {
   if (process.platform === "darwin") {
     return [{ label: "sandbox-exec", prefix: ["/usr/bin/sandbox-exec", "-f", profilePath] }];
   }
@@ -761,15 +801,32 @@ function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
     // Applied after the read-only root, so each replaces what it covered.
     bwrap.push("--proc", "/proc", "--dev-bind", "/dev", "/dev");
     for (const path of writable) bwrap.push("--bind", path, path);
+    // AFTER the writable binds, and for the same reason the macOS profile puts
+    // its denies last: bwrap applies binds in order and a later one covers an
+    // earlier one, so this is how a checkout that lies INSIDE the writable set
+    // is still denied without taking the staging's temp dir away (Codex P1,
+    // round 28 on #1107). Nothing here can drop the checkout.
+    for (const path of nestedReadOnly) bwrap.push("--ro-bind", path, path);
     bwrap.push("--");
     // Bind each read-only root over itself, then remount that bind read-only —
     // two steps, because Linux applies `ro` to a bind mount only on the
     // remount. Anything unmountable fails the whole run rather than leaving a
     // root writable, and the canary would catch it either way.
+    //
+    // Nesting needs nothing extra here: this fallback starts from the host's
+    // own mounts rather than from a blanket read-only root, so a checkout under
+    // `/tmp` is covered by its OWN bind while the temp dir around it stays
+    // writable. The roots arrive outermost-first, so a bind of a parent cannot
+    // shadow the bind of a child made before it.
+    //
+    // The count is passed rather than a fixed pair of slots: the old form read
+    // `"$1" "$2"` and would have SILENTLY dropped a third root, which is the
+    // shape of the finding this containment exists to answer.
     const readOnly =
-      'for d in "$1" "$2"; do [ -n "$d" ] || continue; ' +
+      'n="$1"; shift; while [ "$n" -gt 0 ]; do d="$1"; shift; n=$((n - 1)); ' +
+      '[ -n "$d" ] || continue; ' +
       'mount --bind "$d" "$d" && mount -o remount,bind,ro "$d" "$d" || exit 111; ' +
-      'done; shift 2; exec "$@"';
+      'done; exec "$@"';
     const unshare = (label, mapping) => ({
       label,
       prefix: [
@@ -781,8 +838,8 @@ function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
         "-c",
         readOnly,
         "sh",
-        readOnlyRoots[0] ?? "",
-        readOnlyRoots[1] ?? "",
+        String(readOnlyRoots.length),
+        ...readOnlyRoots,
       ],
     });
     return [
@@ -805,7 +862,8 @@ function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
 /**
  * WRITE CONTAINMENT: a mechanism under which every process this rehearsal
  * starts is unable to write outside the scratch root and the system temp dir,
- * whatever it does to escape everything else.
+ * and is unable to write into the live checkout even when the checkout is one
+ * of the places inside them, whatever it does to escape everything else.
  *
  * WHY DETECTION IS NOT ENOUGH. Every other guard here answers AFTER the fact —
  * the process group is signalled when a step ends, the marker sweep scans for
@@ -834,25 +892,42 @@ function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
  * mean handing every contained program a temp dir of this classifier's choosing,
  * which is one more way to tell this run from the deploy. Nothing a Firebase
  * deploy publishes is read from the temp dir: the deployment inputs are the
- * checkout, and the checkout is what this denies. The consequence to state
- * plainly is that a project directory placed INSIDE the system temp dir is not
- * contained — no real deploy is, and the fixtures that prove this behaviour are
- * deliberately staged outside it.
+ * checkout, and the checkout is what this denies.
+ *
+ * A REQUIRED READ-ONLY ROOT IS NEVER DROPPED, IT IS NESTED. The live checkout
+ * can itself lie under the system temp dir, and this used to drop it from the
+ * read-only set for exactly that reason — leaving the home directory behind, so
+ * the nonempty-root check passed, the canary passed against `$HOME`, and every
+ * mechanism handed the rehearsal a WRITABLE checkout while reporting proved
+ * containment. A hook could then detach a worker and change a deployment input
+ * after the fingerprints, which is the one thing this function exists to make
+ * impossible (Codex P1, round 28 on #1107). The checkout is therefore expressed
+ * as a read-only override INSIDE the writable root that contains it — a trailing
+ * `(deny file-write* (subpath …))` on macOS, a `--ro-bind` ordered after the
+ * writable `--bind`s under `bwrap`, and its own bind under `unshare`, which
+ * starts from the host's mounts and needs no override at all. The only layout
+ * that cannot be expressed is one where a writable root lies INSIDE the
+ * checkout — a project directory that IS the system temp dir — and that refuses.
+ *
+ * The home directory is a SUPPLEMENTARY canary target, not a required one: it
+ * is there because the checkout is not always the whole of what a hook can
+ * reach. It is still dropped when it lies inside the writable set, because
+ * nothing a deploy publishes is read from `$HOME` and denying a temp-dir-rooted
+ * home would take the toolchain's own scratch space away from every build.
  *
  * PROBED, NEVER ASSUMED. Nothing here is trusted until a contained canary has
- * failed to write outside the writable set while succeeding inside it.
- * `sandbox-exec` is deprecated, `bwrap` may be absent, an unprivileged user
- * namespace may be administratively disabled, and each of those failures is
- * silent in the direction that matters. A mechanism that does not pass, and a
- * platform with no mechanism at all, REFUSE — before any hook or probe runs,
- * because preceding them is the whole point.
+ * failed to write into the LIVE CHECKOUT while succeeding inside the STAGING
+ * root. `sandbox-exec` is deprecated, `bwrap` may be absent, an unprivileged
+ * user namespace may be administratively disabled, and each of those failures is
+ * silent in the direction that matters. Both halves are required and each has
+ * its own named refusal, because a mechanism that denied everything and a
+ * mechanism that denied nothing both pass a one-sided check. A mechanism that
+ * does not pass, and a platform with no mechanism at all, REFUSE — before any
+ * hook or probe runs, because preceding them is the whole point.
  */
 async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
   if (mode === "unavailable") {
-    return {
-      ok: false,
-      reason: "write containment was disabled for this run, so no hook may be executed",
-    };
+    return { ok: false, reason: WRITE_CONTAINMENT_REFUSAL.DISABLED };
   }
   // Resolved, because both mechanisms match on the path the kernel resolves:
   // macOS's `/var/folders/…` is `/private/var/folders/…`, and a subpath rule
@@ -864,29 +939,41 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
 
   /**
    * The roots a contained child must NOT be able to write, and the canary's
-   * targets. The live checkout is the one that matters; the home directory is
-   * there because the checkout is not always the whole of what a hook can
-   * reach, and because it answers the same question when the checkout itself
-   * lies inside the writable set — which only a fixture's does.
+   * targets. The live checkout leads and is never dropped — see above — and the
+   * home directory follows unless it lies inside the writable set.
    */
-  const readOnlyRoots = [];
-  for (const path of [await resolvedPath(projectDir), await resolvedPath(homedir())]) {
-    if (writable.some((allowed) => within(path, allowed))) continue;
-    if (!readOnlyRoots.includes(path)) readOnlyRoots.push(path);
+  const checkout = await resolvedPath(projectDir);
+  const readOnlyRoots = [checkout];
+  const home = await resolvedPath(homedir());
+  if (!readOnlyRoots.includes(home) && !writable.some((allowed) => within(home, allowed))) {
+    readOnlyRoots.push(home);
   }
-  if (readOnlyRoots.length === 0) {
-    return {
-      ok: false,
-      reason:
-        "every directory this classifier could prove containment against lies inside the writable set, " +
-        "so a hook's writes cannot be shown to stay out of the live checkout",
-    };
+  // Outermost first. One root can contain another (a checkout under `$HOME` is
+  // the ordinary case), and `unshare` binds them in this order: a parent bound
+  // after its child would put a fresh view of the parent over the child's
+  // mount. Every ancestor is a strict prefix of its descendant, so ordering by
+  // length is ordering by containment.
+  readOnlyRoots.sort((left, right) => left.length - right.length);
+
+  /**
+   * The read-only roots that lie INSIDE the writable set, and so have to be
+   * expressed as an override rather than covered by the blanket rule.
+   */
+  const nestedReadOnly = readOnlyRoots.filter((path) =>
+    writable.some((allowed) => within(path, allowed)),
+  );
+  // The one layout no mechanism here can express: a writable root INSIDE a
+  // read-only one it must also keep. Denying it would take the staging's own
+  // root away, and allowing it would punch the hole straight back through the
+  // checkout. Fail closed rather than pick either.
+  if (nestedReadOnly.some((path) => writable.some((allowed) => within(allowed, path)))) {
+    return { ok: false, reason: WRITE_CONTAINMENT_REFUSAL.UNEXPRESSIBLE };
   }
 
   const profilePath = join(root, "write-containment.sb");
   if (process.platform === "darwin") {
     try {
-      await writeFile(profilePath, macosSandboxProfile(writable), "utf8");
+      await writeFile(profilePath, macosSandboxProfile(writable, nestedReadOnly), "utf8");
     } catch (error) {
       return {
         ok: false,
@@ -895,18 +982,18 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
     }
   }
 
-  const candidates = writeContainmentCandidates({ writable, readOnlyRoots, profilePath });
+  const candidates = writeContainmentCandidates({
+    writable,
+    readOnlyRoots,
+    nestedReadOnly,
+    profilePath,
+  });
   if (candidates.length === 0) {
-    return {
-      ok: false,
-      reason:
-        `${process.platform} offers no mechanism this classifier can use to keep a rehearsal's writes ` +
-        "out of the live checkout, so no predeploy hook is run here",
-    };
+    return { ok: false, reason: `${process.platform} ${WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM}` };
   }
   const failures = [];
   for (const candidate of candidates) {
-    const proof = await proveWriteContainment(candidate, { root, readOnlyRoots });
+    const proof = await proveWriteContainment(candidate, { root, checkout, readOnlyRoots });
     if (proof.ok) {
       return {
         ok: true,
@@ -924,31 +1011,39 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
   }
   return {
     ok: false,
-    reason:
-      "no write containment could be proved on this machine, so a hook could write into the live " +
-      `checkout after this classification returned (${failures.join("; ")})`,
+    reason: `${WRITE_CONTAINMENT_REFUSAL.UNPROVED} (${failures.join("; ")})`,
   };
 }
 
 /**
- * The canary: one contained child, a write it must be denied for every
- * read-only root, one it must be allowed inside the scratch, and the filesystem
- * as the verdict.
+ * The canary: one contained child, and the filesystem as the verdict.
  *
- * Both halves are load-bearing — a mechanism that denied everything, or a
- * command that never ran at all, would pass a test that only asked whether the
- * checkout had been written to.
+ * TWO CHECKS, BOTH REQUIRED, EACH NAMED. The write into the LIVE CHECKOUT must
+ * fail, and the write into the STAGING root must succeed. A mechanism that
+ * denied everything and a command that never ran at all both pass a check that
+ * only asks whether the checkout was written to, and a mechanism that denied
+ * nothing passes one that only asks whether the staging root was — so neither
+ * half can stand alone, and each refusal says which half gave way.
+ *
+ * The checkout is checked BY NAME rather than as one anonymous read-only root,
+ * because it is the only one whose contents are the deploy's inputs: this is
+ * the check that makes `deploy.sh`'s "PROVES it against this checkout" true for
+ * every layout, including a checkout that lies under the system temp dir (Codex
+ * P1, round 28 on #1107). The home directory is checked alongside it and is
+ * reported separately, because failing there is a weaker finding.
  *
  * Each canary path is uniquely named and removed if it lands, so a broken
  * mechanism leaves the tree as it found it. Its presence is the whole finding in
  * miniature: it is the write this classifier could not otherwise prevent.
  */
-async function proveWriteContainment(candidate, { root, readOnlyRoots }) {
+async function proveWriteContainment(candidate, { root, checkout, readOnlyRoots }) {
   const inside = join(root, `containment-canary-${randomUUID()}`);
-  const outside = readOnlyRoots.map((path) =>
-    join(path, `.firebase-deploy-scope-canary-${randomUUID()}`),
-  );
-  const script = [inside, ...outside]
+  /** Each canary path, against the read-only root it is there to prove. */
+  const outside = readOnlyRoots.map((path) => ({
+    at: join(path, `.firebase-deploy-scope-canary-${randomUUID()}`),
+    root: path,
+  }));
+  const script = [inside, ...outside.map((target) => target.at)]
     .map((path) => `printf canary > ${shellQuote(path)}`)
     .concat("exit 0")
     .join("; ");
@@ -962,20 +1057,31 @@ async function proveWriteContainment(candidate, { root, readOnlyRoots }) {
     },
   );
   const escaped = [];
-  for (const path of outside) {
-    if (!existsSync(path)) continue;
-    escaped.push(path);
-    await unlink(path).catch(() => {});
+  let checkoutEscaped = null;
+  for (const target of outside) {
+    if (!existsSync(target.at)) continue;
+    if (target.root === checkout) checkoutEscaped = target.at;
+    escaped.push(target.at);
+    await unlink(target.at).catch(() => {});
   }
   const contained = existsSync(inside);
   await unlink(inside).catch(() => {});
+  if (checkoutEscaped !== null) {
+    return {
+      ok: false,
+      reason: `${WRITE_CONTAINMENT_REFUSAL.CHECKOUT_CANARY} — it wrote ${checkoutEscaped}`,
+    };
+  }
   if (escaped.length > 0) {
-    return { ok: false, reason: `a contained child still wrote ${escaped.join(", ")}` };
+    return {
+      ok: false,
+      reason: `${WRITE_CONTAINMENT_REFUSAL.ESCAPED_ROOT} — it wrote ${escaped.join(", ")}`,
+    };
   }
   if (!contained) {
     return {
       ok: false,
-      reason: `a contained child could not write inside the scratch root — ${
+      reason: `${WRITE_CONTAINMENT_REFUSAL.STAGING_CANARY} — ${
         run.output.trim().slice(-200) || `exit ${run.code ?? "?"}`
       }`,
     };
