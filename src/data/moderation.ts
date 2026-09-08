@@ -4,6 +4,12 @@
 // which re-exports it) and the deal path (src/data/api.ts's joinAndDeal, which
 // must NOT import React) apply the identical test — a new Player's frozen card can
 // no longer be dealt a Prompt the live pool hides (Codex P2, PR #107 finding 1).
+//
+// It also carries the admin-confirmed claim queue's own predicates
+// (`claimsQueueOpen` / `claimsAwaitingAdmin`), for the same reason: the archive's
+// drain gate is applied by BOTH the Admin console and the freeze writer, and a
+// gate expressed twice is a gate the two halves can disagree about.
+import type { ClaimDoc, EventDoc } from '../types';
 
 /**
  * True iff `reportCount` has REACHED a POSITIVE `reportHideThreshold` — at OR
@@ -109,6 +115,47 @@ export function isSystemAuthor(uid: string | null | undefined): boolean {
  */
 export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: boolean): boolean {
   return spicy === true && !adultRequired;
+}
+
+/**
+ * Whether the Review queue offers a Confirm/Reject affordance for pending Claims
+ * (#269's mode gate: in the other Claim Modes nothing creates a claim, so the
+ * group is absent entirely). One exported predicate rather than the same literal
+ * in each surface, because `claimsAwaitingAdmin` below turns it into a
+ * PRECONDITION ON ARCHIVING (#1151), and a gate that disagreed with the queue it
+ * points at would name a fix the Admin cannot perform.
+ */
+export function claimsQueueOpen(
+  event: Partial<Pick<EventDoc, 'claimMode'>> | null | undefined,
+): boolean {
+  return event?.claimMode === 'admin_confirmed';
+}
+
+/**
+ * The pending Claims an Admin must resolve BEFORE the Event can be archived
+ * (#1151, spec § "The pending-claim drain gate"). Resolving a claim writes the
+ * claimant's Board and Player row (`resolve` in `src/data/admin.ts`), and the
+ * freeze denies both — so a claim left pending at the moment of the flip is
+ * pending forever, with a Confirm/Reject pair still on screen that can now only
+ * fail. `ArchiveEvent` gates on this being empty.
+ *
+ * Scoped to `claimsQueueOpen` deliberately. A stale pending claim in a
+ * non-admin-confirmed Event has NO Confirm/Reject affordance to drain it
+ * (#269's mode gate, unchanged by this ticket), so blocking archival on one
+ * would be a dead end rather than a gate — recorded as a residual in the spec.
+ *
+ * Read by BOTH halves of the gate, on purpose: the console applies it to its
+ * live subscription so the control is disabled before the first tap, and
+ * `archiveEvent` applies it to a SERVER read taken after the closing write, so a
+ * claim that commits in the window between the two is still caught. Same
+ * predicate, so the two can never disagree about what counts.
+ */
+export function claimsAwaitingAdmin(
+  event: Partial<Pick<EventDoc, 'claimMode'>> | null | undefined,
+  claims: readonly ClaimDoc[],
+): ClaimDoc[] {
+  if (!claimsQueueOpen(event)) return [];
+  return claims.filter((c) => c.status === 'pending');
 }
 
 /**

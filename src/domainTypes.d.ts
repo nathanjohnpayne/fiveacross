@@ -293,6 +293,116 @@ export interface MostLovedPhotoAward {
   computedAt: number;              // scheduler run clock, diagnostics only
 }
 
+/** One row of the frozen final standings (#1151, specs/post-sailing-archive.md).
+ *  Every field is COPIED from the Player-written `PlayerDoc` at the archive — the
+ *  archive snapshots the client-authoritative standings, it never recomputes or
+ *  re-verifies them (ADR 0001). */
+export interface ArchivedStandingRow {
+  uid: string;
+  displayName: string;
+  bingoCount: number;
+  squaresMarked: number;
+  blackout: boolean;
+  firstBingoAt: number | null;
+}
+
+/** The hall of fame's headline honour: the Event-wide First to BINGO at the
+ *  archive, selected by the SAME `eventFirstBingoWinner` the live Leaderboard
+ *  pin and the frozen podium read, so the archive cannot name a fourth answer to
+ *  a question three surfaces already agree on. */
+export interface ArchivedFirstBingo {
+  uid: string;
+  displayName: string;
+  at: number;
+}
+
+/** The headline holder's OWN standings row, kept whole beside the honour so the
+ *  Share Card's pinned eleventh row can be built even when they rank outside the
+ *  bounded `standings` prefix (#1151, Codex P2 on PR #1139). `rank` is their
+ *  place in the COMPLETE ban-filtered standings at the freeze, which the
+ *  retained prefix no longer has the rows to recompute. */
+export interface ArchivedFirstBingoRow extends ArchivedStandingRow {
+  rank: number;
+}
+
+/** One Day's frozen First to BINGO honour — the `{dayIndex, uid, displayName,
+ *  firstBingoAt}` shape `DayHonor` carries live, resolved pinned-day-meta-first
+ *  exactly as the Leaderboard's honours strip resolves it, plus the chip LABEL
+ *  the strip renders it under. */
+export interface ArchivedDayHonor {
+  dayIndex: number;
+  uid: string;
+  displayName: string;
+  firstBingoAt: number;
+  /**
+   * The honour's chip label, frozen at the archive (#1151, Codex P2 on PR
+   * #1139): the Day's theme emoji plus its ordinal, as `dayHonorChipLabel`
+   * rendered them from the schedule the record was taken against.
+   *
+   * Stored rather than looked up, because the live `EventDoc.days` is NOT
+   * frozen — `firestore.rules`' write-once clause protects `status`,
+   * `archivedAt`, `archivedUnder` and `archive` and deliberately nothing else,
+   * so an Admin editing a Day's theme after the freeze would silently re-label
+   * a frozen honour. The whole promise of the archive is that the hall of fame
+   * renders from the record alone.
+   */
+  dayLabel: string;
+}
+
+/**
+ * The frozen post-Event record (#1151, specs/post-sailing-archive.md): the final
+ * Leaderboard standings plus the First-to-BINGO hall of fame, written ONCE by
+ * the archive flip and never rewritten. Present means archived and frozen;
+ * ABSENT on every Event that has not been archived.
+ *
+ * `standings` retains a bounded prefix in Leaderboard rank order and
+ * `playerCount` records the complete roster cardinality, mirroring
+ * `MostLovedPhotoAward`'s `winners`/`winnerCount` pair: the Event document has
+ * one 1 MiB budget and `days`/`bannedUids`/`mostLovedPhoto` already spend part
+ * of it, so an unbounded roster copy is the one field that could make the
+ * document unwritable.
+ */
+export interface EventArchive {
+  /**
+   * The Event's own name at the freeze, or `null` when it had none (#1151,
+   * Codex P2 on PR #1139).
+   *
+   * Stored rather than read live for the reason `ArchivedDayHonor.dayLabel` is:
+   * `EventDoc.name` sits OUTSIDE the write-once clause — which protects
+   * `status`, `archivedAt`, `archivedUnder` and `archive` and deliberately
+   * nothing else — so an Admin renaming the Event afterwards re-titled the
+   * archived Share Card, and two people sharing the same frozen standings a week
+   * apart got two different images of them. It is the only Event copy the
+   * archived surface consumes.
+   */
+  eventName: string | null;
+  /** The final Leaderboard rows, already ranked, ban-filtered, bounded prefix. */
+  standings: ArchivedStandingRow[];
+  /** Complete ban-filtered roster size; `standings.length` when nothing was dropped. */
+  playerCount: number;
+  /** Event-wide First to BINGO; `null` when nobody held a qualifying bingo. */
+  firstBingo: ArchivedFirstBingo | null;
+  /**
+   * The headline holder's own standings row and true rank, carried OUTSIDE the
+   * bounded `standings` prefix so the Share Card can always print the pinned
+   * eleventh row (#1151, Codex P2 on PR #1139). `null` exactly when `firstBingo`
+   * is — they are selected together and neither survives the other.
+   *
+   * Necessary because the two bounds are independent: `standings` keeps 200 rows
+   * in RANK order while the headline honour is decided by who bingoed EARLIEST,
+   * so on a large roster the holder can sit outside the prefix entirely.
+   * Searching only `standings` for them then finds nothing and the Share Card
+   * silently drops the row it names in its own headline.
+   */
+  firstBingoRow: ArchivedFirstBingoRow | null;
+  /** Each Day's own First to BINGO, ordered by Day index; `[]` on a pre-Day-Cards roster. */
+  dailyHonors: ArchivedDayHonor[];
+  /** The Standings Freeze the snapshot was taken as of (`resolvedStandingsFreezeAt`), or `null`. */
+  freezeAt: number | null;
+  /** The archive stamp — always equal to `EventDoc.archivedAt`. */
+  archivedAt: number;
+}
+
 export interface EventDoc {
   name: string;
   // The Event's date window. Docs written before the #566 rename persist
@@ -346,9 +456,10 @@ export interface EventDoc {
   /**
    * The post-Event archive stamp (ms epoch, #134,
    * specs/post-sailing-archive.md): when an Admin froze this Event. Written in
-   * the SAME update that flips `status` to `'archived'` and clears `archiving`,
-   * so no reader ever sees an archived Event with no stamp or a stamp on a live
-   * one. Absent until the Event is archived.
+   * the SAME update that flips `status` to `'archived'`, clears `archiving` and
+   * persists the frozen `archive` record, so no reader ever sees an archived
+   * Event with no stamp, a stamp on a live one, or a record that disagrees with
+   * the stamp beside it. Absent until the Event is archived.
    *
    * Named at arm's length from `frozenAt` for the reason `standingsFreezeAt` is
    * (ADR 0011): `frozenAt` stamps the FINALE — competitive scoring stops, the
@@ -405,6 +516,25 @@ export interface EventDoc {
    * write-once — and absent on every Event that has never been mid-archive.
    */
   archiveToken?: number;
+  /**
+   * The DURABLE archive record (#1151, specs/post-sailing-archive.md § "The
+   * frozen record"): the final Leaderboard standings and the First-to-BINGO hall
+   * of fame as they stood at `archivedAt`. Written in the SAME update as
+   * `status: 'archived'`, `archivedAt` and `archivedUnder`, so no reader ever
+   * sees an archived Event with no record or a record on a live one.
+   *
+   * WRITE-ONCE. `firestore.rules` locks it with `status`, `archivedAt` and
+   * `archivedUnder` once the flip lands, which is what "the final Leaderboard
+   * and hall of fame persist unchanged" means at the boundary: a second archive
+   * pass cannot overwrite the record with a later roster, and post-freeze
+   * moderation cannot edit it. Every OTHER Event field stays editable, so
+   * `bannedUids` and configuration survive the freeze.
+   *
+   * ABSENT on every Event that has not been archived, and on an Event archived
+   * by a build older than this field — the archived surfaces fall back to the
+   * live standings there, exactly as they did before the record existed.
+   */
+  archive?: EventArchive;
   // Presentational, event-scoped hide/mute of a Player's content (ADR 0004
   // Phase 0) — NOT hard access revocation. An admin-maintained roster of banned
   // uids kept on the (already admin-writable) event doc; a follow-up (#108) will
