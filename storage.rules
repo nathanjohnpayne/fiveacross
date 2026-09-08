@@ -143,7 +143,54 @@ service firebase.storage {
       // media during moderation, in every state including the frozen one. An
       // ORPHANED object — one no Proof document points at — is the owner's to
       // clear in every state; see `mayDeleteProofMedia`.
+      //
+      // CREATE ONLY: A PROOF OBJECT IS IMMUTABLE (#1153, Codex round 3 P2). The
+      // arm used to read `create, update`, so the owner — or another tab of
+      // theirs — could OVERWRITE the canonical object in place. `deleteProof`
+      // reads the object's Storage `generation` before its transaction opens and
+      // records it on the tombstone; an overwrite landing in the window between
+      // that read and the commit leaves the row bound to the PREVIOUS blob,
+      // although the Proof pointed at the replacement when it was deleted. The
+      // inline Storage delete then fails, the sweeper's `ifGenerationMatch`
+      // answers `412`, and it retires the row as a post-delete replacement —
+      // leaving the deleted Proof's own media reachable through its download
+      // URL, which is exactly the outcome the tombstone exists to prevent.
+      //
+      // Immutability closes it at the source rather than teaching the sweeper to
+      // tell an overwrite that PRECEDES its row from one that FOLLOWS it: with
+      // no overwrite possible, a `412` can only mean the name was re-occupied
+      // after a DELETE, which is the case retirement is already correct for.
+      //
+      // `resource == null` IS THE PREDICATE, not an `allow create` without
+      // `update`. The two are supposed to be equivalent — `create` is documented
+      // as the new-object method and `update` as the existing-object one — and
+      // they are not: the Storage emulator evaluates a second `uploadBytes` at
+      // an occupied path under `create` and lets it through, so an arm that only
+      // dropped `update` would deny nothing and no test could catch it. Asking
+      // the state directly is both correct and provable, and it holds whichever
+      // method a platform decides a wholesale object replacement is. `resource`
+      // is the EXISTING object's metadata — null when there is none — so this
+      // reads the bucket, not Firestore, and the two-access budget below is
+      // untouched. The method list stays `create, update` so neither can slip
+      // past the predicate.
+      //
+      // The app never wanted the overwrite. `attachProof` mints a fresh
+      // Firestore auto-id per capture and `uploadProofMedia` names the object
+      // after it, so every upload is a first write to a name nothing has used; a
+      // refused transaction DELETES its object and the Player's retry re-uploads
+      // under a NEW id. `src/data/storage.ts` has asserted this invariant since
+      // #363 — it is why proof media is served `immutable` while
+      // `avatars/{uid}.jpg`, which IS overwritten in place on a profile edit,
+      // deliberately is not. That avatar arm is a separate `match` above and
+      // keeps its full `write`.
+      //
+      // NOT a claim that nothing under this prefix is ever rewritten. The Vision
+      // handler's thumbnail (`functions/src/index.ts`) saves
+      // `{proofId}_thumb.jpg` on the Admin SDK, which bypasses these rules
+      // entirely and can legitimately re-save on a redelivered Storage trigger.
+      // What this arm governs is the browser.
       allow create, update: if isOwner(uid)
+        && resource == null
         && !eventClosedToPlay(eventId)
         && (okImage() || okAudio());
       allow delete: if mayDeleteProofMedia(eventId, uid, file);

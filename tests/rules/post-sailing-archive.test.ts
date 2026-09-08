@@ -9,6 +9,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { deleteObject, ref, uploadBytes } from 'firebase/storage';
+import { clearStorageDeep } from '../support/storage-emulator';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
 // proved in pairs so none can pass vacuously:
@@ -130,7 +131,9 @@ let proofCreatedAt = 0;
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
-  await testEnv.clearStorage();
+  // Deep, because `testEnv.clearStorage()` lists only the bucket root and every
+  // object here lives under a prefix — see tests/support/storage-emulator.ts.
+  await clearStorageDeep(testEnv);
   proofCreatedAt = NOW();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const fs = ctx.firestore();

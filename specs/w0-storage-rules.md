@@ -4,18 +4,20 @@ Prove `storage.rules` against the Firebase Storage emulator with `@firebase/rule
 
 Every claim below is asserted by `tests/rules/w0-storage-rules.test.ts` (layer: rules-emulator; runner `npm run test:rules`, which boots the Firestore + Storage emulators via `firebase emulators:exec`). Object paths mirror `src/data/storage.ts` (`uploadProofMedia`, `uploadAvatar`).
 
+The suite empties the bucket between cases through `tests/support/storage-emulator.ts`, not `RulesTestEnvironment.clearStorage()`: that helper lists the bucket ROOT and deletes the `items` it finds, and `listAll()` does not recurse, so every object this app writes—all of them under a prefix—survives it. The no-op was invisible while proof objects could be overwritten, and became load-bearing the moment they could not.
+
 ## okImage—image caps on the content-validated proof path
 
 - An owner uploading a 7 MB `image/*` object to `proofs/{eventId}/{uid}/{proofId}.jpg` is ALLOWED (`okImage()` size cap `< 8 MB`).
-- The same owner uploading a 9 MB `image/*` object is DENIED (over the 8 MB cap).
-- The 8 MB cap is enforced on the first create of a proof path, not only on an update to an already-uploaded path: an owner uploading a 9 MB `image/*` object to a brand-new proof path is DENIED.
+- The same owner uploading a 9 MB `image/*` object to a path of its own is DENIED (over the 8 MB cap). Each cap case gets its OWN fresh object path: proof objects are immutable ([#1153](https://github.com/nathanjohnpayne/fiveacross/issues/1153), below), so a second upload to a path the case already occupied would be denied whatever it weighed and the assertion would say nothing about the cap.
+- The 8 MB cap is enforced on the create a real upload performs, which is the only write the arm admits: an owner uploading a 9 MB `image/*` object to a brand-new proof path is DENIED.
 - An owner uploading a non-image, non-audio object (`application/pdf`) to a proof path is DENIED (neither `okImage()` nor `okAudio()` accepts the content type).
 
 ## okAudio—audio caps on the content-validated proof path
 
 - An owner uploading an 11 MB `audio/*` object to `proofs/{eventId}/{uid}/{proofId}.webm` is ALLOWED (`okAudio()` size cap `< 12 MB`).
-- The same owner uploading a 13 MB `audio/*` object is DENIED (over the 12 MB cap).
-- The 12 MB cap is enforced on the first create of a proof path too: an owner uploading a 13 MB `audio/*` object to a brand-new proof path is DENIED.
+- The same owner uploading a 13 MB `audio/*` object to a path of its own is DENIED (over the 12 MB cap), on a fresh path for the same reason as the image cap above.
+- The 12 MB cap is enforced on the create a real upload performs: an owner uploading a 13 MB `audio/*` object to a brand-new proof path is DENIED.
 - `okAudio()` gates on `contentType.matches('audio/.*')`, not the object's filename extension—a `.m4a` object with `Content-Type: audio/mp4` (what `uploadProofMedia` writes for a Safari-recorded MP4/AAC clip, #295) is subject to the exact same size cap as a `.webm` object; `storage.rules` needs no change to accept it.
 
 ## avatars/{uid}.jpg—owner-only, filename-pinned
@@ -29,6 +31,9 @@ Every claim below is asserted by `tests/rules/w0-storage-rules.test.ts` (layer: 
 
 - The owning uploader creating `proofs/{eventId}/{uid}/{proofId}.jpg` (valid image) is ALLOWED.
 - A non-owner creating an object under another user's proof folder is DENIED.
+- **A proof object is IMMUTABLE** ([#1153](https://github.com/nathanjohnpayne/fiveacross/issues/1153); rationale in `specs/post-sailing-archive.md` § "The enforcement"). A SECOND upload to a path that already holds an object is DENIED even for the owner—at the same bytes the create accepted, and at any other accepted size or content type, for audio as much as photo. The arm's predicate is `resource == null` rather than an `allow create` without `update`: the Storage emulator evaluates a second upload to an occupied path under `create` and admits it, so dropping `update` alone would deny nothing and no test could catch it. `resource` is the existing object's metadata, so this reads the bucket, not Firestore, and the arm's Firestore-access budget is unchanged.
+- Immutability is about an OBJECT, not a name: a first upload to a fresh path is ALLOWED, and so is a re-upload to the same name AFTER that object is deleted—which is what keeps `attachProof`'s rollback-then-retry working, and what makes the revocation sweeper's `412` mean "re-occupied after a delete" and nothing else.
+- `avatars/{uid}.jpg` stays overwritable in place (§ above), which is what proves the immutability is confined to the proofs arm. The Vision handler's `{proofId}_thumb.jpg` also re-saves under this prefix, on the Admin SDK, which bypasses these rules entirely.
 - The owner deleting their own proof object is ALLOWED.
 - An Event admin (uid listed in `events/{eventId}.admins`) deleting the object is ALLOWED—a delete carries no `request.resource`, so it is intentionally exempt from the `okImage()`/`okAudio()` content check.
 - An authenticated caller who is neither the object's owner nor listed in `events/{eventId}.admins` is DENIED from deleting the proof object.
@@ -45,12 +50,14 @@ Every claim below is asserted by `tests/rules/w0-storage-rules.test.ts` (layer: 
 
 ## Acceptance criteria
 
-- Given a > 8 MB image, when uploaded to a proof/avatar path, then Storage DENIES it (`okImage` cap), on both a first create and an update to an existing object.
+- Given a > 8 MB image, when uploaded to a proof/avatar path, then Storage DENIES it (`okImage` cap), each proof case measured on its own fresh object path.
+- Given a second upload to a proof object path that is already occupied, then Storage DENIES it whatever it carries; given a fresh path, or the same name after a delete, then ALLOWED; given `avatars/{uid}.jpg`, then an in-place overwrite is still ALLOWED.
 - Given `avatars/{uid}.jpg`, when the owner writes it, then ALLOWED; a different uid's path is DENIED.
 - Given a Proof delete request, when the caller is signed in but neither the object's owner nor an Event admin, then Storage DENIES it.
 - Given a valid Proof object path, when checked against the Firestore Proof-create rule, then both accept it (pinning in lockstep); given a mismatched Proof object path that Storage alone accepts, Firestore DENIES pinning it (negative lockstep).
 - Given a write to `og/**`, then Storage DENIES it whether the object already exists or is brand-new.
 - `okImage`/`okAudio` size + MIME caps asserted.
+- Proof-object immutability asserted, with the avatar arm's mutability asserted beside it.
 - Avatar + Proof-object owner-only paths asserted.
 - Inert `og/**` write-deny asserted.
 - Storage ↔ Firestore Proof pinning cross-checked, including the negative case.

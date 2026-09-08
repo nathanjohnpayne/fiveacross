@@ -82,6 +82,15 @@ export async function seedEmulatorEvent(
     // (boardHasMarkedText) and the leaderboard count reads the Firestore players
     // rows this wipe just reset — so auth accumulation is harmless.
     await testEnv.clearFirestore();
+    // …AND THE BUCKET WITH IT, for the same reason and one more (#1153, Codex
+    // round 3 P2). A proof object is IMMUTABLE now — `storage.rules` allows
+    // `create` only — and the parity fixture seeds its media under HARD-CODED
+    // proof ids rather than auto-ids. A retry that re-ran this seed against a
+    // bucket still holding the previous attempt's objects would therefore be
+    // making an UPDATE, and the seed would fail closed. Wiping the objects keeps
+    // every attempt's upload the create the rule expects. Only when Storage was
+    // actually wired in: `clearStorage()` on an env without it is meaningless.
+    if (opts.withStorage) await testEnv.clearStorage();
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();

@@ -10,6 +10,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
 import { doc, setDoc } from 'firebase/firestore';
+import { clearStorageDeep } from '../support/storage-emulator';
 
 // Storage security-rules coverage for storage.rules (ADR 0004): the okImage()
 // (image/* < 8 MB) and okAudio() (audio/* < 12 MB) upload caps, the
@@ -83,7 +84,12 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await testEnv.clearStorage();
+  // `clearStorageDeep`, not `testEnv.clearStorage()`: the latter lists only the
+  // bucket ROOT and every object here lives under a prefix, so it deletes
+  // nothing (tests/support/storage-emulator.ts). Load-bearing now that proof
+  // objects are immutable — a leaked object from an earlier test would deny the
+  // next test's create.
+  await clearStorageDeep(testEnv);
   await testEnv.clearFirestore();
 });
 
@@ -92,16 +98,25 @@ afterAll(async () => {
 });
 
 describe('storage.rules — okImage / okAudio upload caps (ADR 0004)', () => {
+  // EACH CAP IS MEASURED ON ITS OWN FRESH PATH (#1153, Codex round 3 P2).
+  // These cases used to allow the under-cap object and then deny the over-cap
+  // one at the SAME path, which made the denial an UPDATE. Proof objects are
+  // immutable now — the arm allows `create` only — so a repeat at an occupied
+  // path is denied whatever it weighs, and the assertion would pass without
+  // saying anything about the size cap. A virgin path per upload keeps each
+  // denial about `okImage()` / `okAudio()`, which is also the shape
+  // `uploadProofMedia` actually performs: a first write to a name nothing has
+  // used.
   it('allows a 7 MB image but denies a 9 MB image (okImage < 8 MB)', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, photoPath, sized(7), IMAGE));
-    await assertFails(put(owner, photoPath, sized(9), IMAGE));
+    await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-over.jpg`, sized(9), IMAGE));
   });
 
   it('allows an 11 MB audio but denies a 13 MB audio (okAudio < 12 MB)', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, audioPath, sized(11), AUDIO));
-    await assertFails(put(owner, audioPath, sized(13), AUDIO));
+    await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-over.webm`, sized(13), AUDIO));
   });
 
   it('#295: applies the SAME okAudio() cap to a Safari-recorded .m4a/audio-mp4 clip', async () => {
@@ -111,19 +126,15 @@ describe('storage.rules — okImage / okAudio upload caps (ADR 0004)', () => {
     // by the exact same rule as a .webm/audio-webm object, not a separate path.
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, audioPathM4a, sized(11), AUDIO_MP4));
-    await assertFails(put(owner, audioPathM4a, sized(13), AUDIO_MP4));
+    await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-over.m4a`, sized(13), AUDIO_MP4));
   });
 
-  it('denies an over-cap image CREATE on a brand-new path, not just an update', async () => {
-    // Reusing `photoPath` (as the tests above do) would make the denied
-    // request an update, since a 7 MB object was already put() there first.
-    // A path with no prior object isolates the cap on the first-write create
-    // that uploadProofMedia() actually performs for a new proof.
+  it('denies an over-cap image CREATE on a brand-new path', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-fresh.jpg`, sized(9), IMAGE));
   });
 
-  it('denies an over-cap audio CREATE on a brand-new path, not just an update', async () => {
+  it('denies an over-cap audio CREATE on a brand-new path', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-fresh.webm`, sized(13), AUDIO));
   });
@@ -165,6 +176,55 @@ describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/a
   it("denies a non-owner writing under another user's proof folder", async () => {
     const other = testEnv.authenticatedContext(OTHER);
     await assertFails(put(other, photoPath, TINY, IMAGE));
+  });
+
+  it('DENIES a second upload to an existing proof object — the OWNER’s included (#1153)', async () => {
+    // Codex round 3 P2. The arm read `create, update`, so the owner (or another
+    // tab of theirs) could overwrite the canonical object in place. `deleteProof`
+    // reads the object's Storage `generation` before its transaction opens and
+    // records it on the media-revocation tombstone; an overwrite landing between
+    // that read and the commit binds the row to the PREVIOUS blob although the
+    // Proof pointed at the replacement when it was deleted. The inline Storage
+    // delete then fails, the sweeper's `ifGenerationMatch` answers 412, and it
+    // retires the row as a post-delete replacement — leaving the deleted Proof's
+    // own media reachable.
+    //
+    // So a proof object is IMMUTABLE: create only, and a valid second upload is
+    // denied whatever it weighs and whatever type it carries. The app never
+    // wanted the update — `attachProof` mints a fresh auto-id per capture — and
+    // `src/data/storage.ts` has served proof media `immutable` on that basis
+    // since #363.
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertSucceeds(put(owner, photoPath, TINY, IMAGE));
+    await assertFails(put(owner, photoPath, TINY, IMAGE));
+    // Not a content check and not a size check: the replacement here is exactly
+    // what the create accepted.
+    await assertFails(put(owner, photoPath, sized(1), IMAGE));
+    // Audio is the same arm, so it is the same answer.
+    await assertSucceeds(put(owner, audioPath, TINY, AUDIO));
+    await assertFails(put(owner, audioPath, TINY, AUDIO));
+  });
+
+  it('still ALLOWS a fresh upload, and one that follows a DELETE of the same name', async () => {
+    // Immutability is about an object, not about a name. Once the object is
+    // gone the name is free again — which is what keeps `attachProof`'s
+    // rollback-then-retry and every ordinary capture working, and what makes a
+    // sweeper `412` mean "re-occupied after a delete" and nothing else.
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertSucceeds(put(owner, photoPath, TINY, IMAGE));
+    await assertSucceeds(deleteObject(ref(owner.storage(), photoPath)));
+    await assertSucceeds(put(owner, photoPath, TINY, IMAGE));
+    await assertSucceeds(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-2.jpg`, TINY, IMAGE));
+  });
+
+  it('leaves the AVATAR arm mutable — it is overwritten in place on a profile edit', async () => {
+    // The asymmetry is deliberate and lives in a separate `match` block:
+    // `avatars/{uid}.jpg` is one object per Player rewritten whenever they
+    // change their picture, which is why it is NOT served `immutable`. A
+    // create-only proofs arm must not reach it.
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertSucceeds(put(owner, avatarPath(OWNER), TINY, IMAGE));
+    await assertSucceeds(put(owner, avatarPath(OWNER), TINY, IMAGE));
   });
 
   it('allows the owner to delete their own proof object', async () => {
