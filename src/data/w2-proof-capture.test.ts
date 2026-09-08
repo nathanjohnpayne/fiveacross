@@ -1308,6 +1308,30 @@ describe('deleteProof — the media revocation outlives the commit that removes 
     await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
   });
 
+  it('does not WAIT for the retirement: a call that never answers still finishes the takedown and purges the cache', async () => {
+    // Swallowing the rejection was never the whole problem — waiting for an
+    // answer at all was. A Firestore client whose connectivity disappears
+    // mid-call does not reject, it stays pending, and awaiting that left
+    // `deleteProof` pending with it: the caller never learned a delete that had
+    // fully succeeded HAD succeeded, and the `finally` never ran, so this device
+    // went on serving the deleted photo out of its own CacheFirst copy. Both
+    // substantive deletions are already committed by this point, and the sweeper
+    // retires the row anyway, so the retirement is detached.
+    proofState = {
+      uid: 'u1',
+      cellIndex: 5,
+      storagePath: `proofs/${EVENT_ID}/u1/P.jpg`,
+      mediaURL: 'https://firebasestorage.googleapis.com/x',
+    };
+    deleteDocSpy.mockReturnValueOnce(new Promise<void>(() => {}));
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).resolves.toBeUndefined();
+
+    // Issued, just not waited on — the row is still asked to go.
+    expect(deleteDocSpy).toHaveBeenCalledTimes(1);
+    expect(purgeCacheSpy).toHaveBeenCalledWith('https://firebasestorage.googleapis.com/x');
+  });
+
   it('still purges this device’s cache when the revocation rejects (#1148)', async () => {
     // The commit is what the purge follows, not the blob delete: the Proof is
     // gone from the Feed either way, so this device must stop serving the photo

@@ -873,7 +873,20 @@ export async function deleteProof(
       // a lie, and a tombstone this leaves behind costs one sweeper run that
       // finds the object already gone — which it counts as success and retires
       // itself.
-      if (tombstoned) await deleteDoc(rawProofStorageDelete(id, eventId)).catch(() => {});
+      //
+      // AND IT IS NOT AWAITED (Phase 4b P2). Both substantive deletions have
+      // already landed by this line — the Firestore commit and the Storage
+      // revocation — so what is left is bookkeeping the sweeper redoes anyway.
+      // Awaiting it made the whole takedown hostage to it: a `deleteDoc` that
+      // never settles, which is exactly what a Firestore client does when
+      // connectivity disappears mid-call rather than rejecting, left
+      // `deleteProof` pending forever, so the caller never learned the delete
+      // had succeeded and — worse — the `finally` below never ran, leaving this
+      // device serving the deleted photo out of its own cache. Swallowing the
+      // REJECTION was never the whole problem; waiting for an answer at all
+      // was. Detached, the completion and the purge depend only on the two
+      // operations that actually changed something.
+      if (tombstoned) void deleteDoc(rawProofStorageDelete(id, eventId)).catch(() => {});
     }
   } finally {
     // Fire-and-forget, AFTER commit (never inside the retryable transaction
