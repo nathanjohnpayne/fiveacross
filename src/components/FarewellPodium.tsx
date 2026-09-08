@@ -462,7 +462,19 @@ function FarewellPodiumInner({
   // could mint a First to BINGO the scheduler's immutable podium Moment does
   // not have — the card and the Feed naming different winners.
   const freezeAt = resolvedStandingsFreezeAt(event ?? null);
-  const podium = buildPodium(players, days, dayMetas, dayMetasLoaded, freezeAt);
+  // `players` arrives ban-filtered from `Board`, which is what keeps the
+  // champion, the runners-up, the headline honour and the DERIVED daily honours
+  // clean. The ban roster is passed separately for the day-meta PIN branch
+  // (#1146): a pin carries its own name and instant and needs no Player row, so
+  // roster absence is not a ban and only the list can say who is banned.
+  const podium = buildPodium(
+    players,
+    days,
+    dayMetas,
+    dayMetasLoaded,
+    freezeAt,
+    event?.bannedUids ?? [],
+  );
   const dayLabel = makeDayLabel(days);
 
   // The render-time display gate (specs/most-loved-photo.md): persisted winners

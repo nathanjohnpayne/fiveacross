@@ -4,6 +4,8 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
+import { isBanned } from './moderation';
+import { THEMES } from '../theme/themes';
 import {
   ceremonialDayIndexSet,
   comparePlayers,
@@ -104,19 +106,38 @@ function podiumStandingRow(
  * per-Day `dayStats`, with the farewell Day frozen out so a post-freeze goodbye
  * mark never changes who is on the podium.
  */
-function pinnedOrDerivedDailyHonors(
+/**
+ * The per-Day First to BINGO honours: the write-once day-meta pin when the Day
+ * has one, the roster-derived fallback when it does not, and nothing at all for
+ * a Day whose pinned holder is BANNED — hidden, never reassigned.
+ *
+ * ONE selection, shared by the live Leaderboard's honours strip, the podium and
+ * the frozen record (#1151, #1146, #1142 item 8). It used to hide a pin whose
+ * holder was absent from the supplied roster, which read roster ABSENCE as a
+ * ban: an Admin deleting a Player row left that Player's honour on the live
+ * strip (which checks `bannedUids` explicitly) and dropped it from every surface
+ * built through here — permanently, once the record froze. A pin is a write-once
+ * day-meta document with its own name and instant, so it needs no Player row to
+ * render; the only reason to hide one is the ban policy, and that is now the
+ * only thing that does.
+ *
+ * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and callers
+ * that have already ban-filtered their roster pass the same list again — the
+ * derived fallback reads the roster, the pin reads the list.
+ */
+export function pinnedOrDerivedDailyHonors(
   players: readonly PlayerDoc[],
   days: readonly DayDef[] | undefined,
   dayMetas: ReadonlyMap<number, DayMetaDoc> | undefined,
   dayMetasLoaded: boolean,
+  bannedUids: readonly string[] = [],
 ): DayHonor[] {
   const derivedHonors = perDayHonors(players);
   if (!days?.length || !dayMetas) return derivedHonors;
-  const visibleUids = new Set(players.map((p) => p.uid));
   return days.flatMap((day) => {
     const pinned = dayMetas.get(day.index)?.firstBingo;
     if (pinned) {
-      if (!visibleUids.has(pinned.uid)) return [];
+      if (isBanned(pinned.uid, bannedUids)) return [];
       return [
         {
           dayIndex: day.index,
@@ -132,12 +153,46 @@ function pinnedOrDerivedDailyHonors(
   });
 }
 
+/**
+ * How one Day's honour chip is LABELLED on an honours strip: the Day's theme
+ * emoji, if the schedule names a theme this build knows, then the Day's own
+ * ordinal (`D1`, `D2`, …).
+ *
+ * Shared rather than restated (#1151, Codex P2 on PR #1139). The live
+ * Leaderboard's strip computes it from the CURRENT `EventDoc.days`, and the
+ * post-Event archive computes it ONCE, at the freeze, and stores the result on
+ * the honour — so an Admin who later re-themes a Day cannot change a frozen
+ * honour's chip. Two callers, one derivation, so the frozen label is by
+ * construction the label the last live strip rendered.
+ *
+ * The ordinal half is derived from the index rather than the schedule on
+ * purpose: it is what the strip shows for a Day the schedule has nothing to say
+ * about, and it cannot drift.
+ */
+export function dayHonorChipLabel(
+  dayIndex: number,
+  days: readonly DayDef[] | undefined,
+): string {
+  const day = days?.find((d) => d.index === dayIndex);
+  const emoji = day ? (THEMES.find((t) => t.id === day.theme)?.emoji ?? '') : '';
+  return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
+}
+
 export function buildPodium(
   players: readonly PlayerDoc[],
   days: readonly DayDef[] | undefined,
   dayMetas?: ReadonlyMap<number, DayMetaDoc>,
   dayMetasLoaded = true,
   freezeAt?: number | null,
+  /**
+   * The Event's ban roster, for the day-meta PIN branch of the honours strip
+   * (#1146). `players` is already ban-filtered by every caller, which is what
+   * keeps the champion, the headline honour and the DERIVED honours clean — but
+   * a pin carries its own name and instant and needs no Player row, so hiding
+   * one required its own check. Passing `[]` renders every pin, which is right
+   * only for a caller with no ban roster in hand.
+   */
+  bannedUids: readonly string[] = [],
 ): Podium {
   // The podium is "as of the freeze", not live (Phase 4b P1). This module reads
   // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
@@ -198,7 +253,7 @@ export function buildPodium(
   return {
     champion,
     firstBingo,
-    dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded),
+    dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
     runnersUp,
   };
 }

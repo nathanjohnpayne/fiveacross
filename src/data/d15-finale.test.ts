@@ -253,7 +253,13 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     ]);
   });
 
-  it('hides a pinned honor whose uid is absent from the filtered podium roster', () => {
+  // #1146 / #1142 item 8: a pin is hidden by the BAN LIST and by nothing else.
+  // It used to be hidden whenever its holder was absent from the supplied
+  // roster, which read roster absence as a ban — so an Admin deleting a Player
+  // row dropped that Player's honour here while the live Leaderboard strip
+  // (which checks `bannedUids` explicitly) kept showing it, and #1151's frozen
+  // record inherited the disagreement permanently.
+  it('hides a pinned honor whose holder is BANNED', () => {
     const players = [
       player({
         uid: 'alice',
@@ -264,8 +270,30 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
       }),
     ];
     const metas = new Map([[1, { firstBingo: { uid: 'banned', displayName: 'Banned Blair', at: NOW - HOUR } }]]);
-    const podium = buildPodium(players, DAYS, metas);
+    const podium = buildPodium(players, DAYS, metas, true, undefined, ['banned']);
+    // Hidden, never reassigned: Alice's own derived honour for the same Day
+    // does NOT take the chip, because the pin still wins on a pinned Day.
     expect(podium.dailyHonors).toEqual([]);
+  });
+
+  it('KEEPS a pinned honor whose holder no longer has a Player row', () => {
+    const players = [
+      player({
+        uid: 'alice',
+        bingoCount: 1,
+        squaresMarked: 10,
+        firstBingoAt: NOW,
+        dayStats: { 1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: NOW } },
+      }),
+    ];
+    const metas = new Map([[1, { firstBingo: { uid: 'gone', displayName: 'Departed Devon', at: NOW - HOUR } }]]);
+    // No ban list, and no Player row for `gone`. The pin is a write-once
+    // day-meta document carrying its own name and instant, so it needs no
+    // roster row to render — exactly as the live strip renders it.
+    const podium = buildPodium(players, DAYS, metas);
+    expect(podium.dailyHonors).toEqual([
+      { dayIndex: 1, uid: 'gone', displayName: 'Departed Devon', firstBingoAt: NOW - HOUR },
+    ]);
   });
 
   it('does not use derived daily honors while day-meta pins are still loading', () => {

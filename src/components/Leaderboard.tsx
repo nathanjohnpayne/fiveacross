@@ -9,7 +9,7 @@ import {
   resolvedStandingsFreezeAt,
   tutorialDayIndexSet,
 } from '../game/logic';
-import { THEMES } from '../theme/themes';
+import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from '../data/finale';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
@@ -211,44 +211,41 @@ export default function Leaderboard() {
   // #264: the PINNED day-meta honors merge with the roster-derived fallback.
   // Precedence (Codex P2s on #280): a banned Player's pin renders as "—" —
   // hidden, never promoted (the ban policy hides content; it never reassigns
-  // an honor) — and the EARLIEST timestamp wins between a pin and a derived
-  // honoree, so a true winner whose unknown-identity bingo skipped its pin is
-  // not permanently displaced by a later Player's pin. On a daily event every
-  // Day gets a chip ("—" until someone bingoes that Day); a legacy event
-  // keeps the derived-only strip.
-  const honors = (event?.days ?? []).map((d) => {
-    const pinned = dayMetas.get(d.index)?.firstBingo;
-    const derived = derivedHonors.find((h) => h.dayIndex === d.index);
-    // THE PIN WINS when present (#280 round 4): the write-once, rules-
-    // timestamped day-meta doc is the honor's source of truth. Derived
-    // dayStats timestamps are NOT reliable tiebreakers — a proof-backed Mark
-    // could seed a later day's bucket from the cruise-wide root firstBingoAt,
-    // so an "earlier" derived stamp may be another day's time entirely. The
-    // write paths no longer copy the root (#1049, `boardFirstBingoAt`), but
-    // that ticket ships no backfill, so rows persisted before it can still
-    // carry another Day's instant and this pin-wins rule still stands. The derived
-    // roster is the fallback for UNPINNED days only. If the pinned winner is
-    // banned, the chip renders blank — hidden, never reassigned. The unknown-
-    // identity-winner residual the old earliest-wins rule chased is now covered
-    // by the module-state held-pin queue (which survives unmounts and fires on
-    // identity resolve); what remains — a reload before the row resolves — is
-    // accepted and documented.
-    let winner: { displayName: string } | null;
-    if (pinned && isBanned(pinned.uid, bannedUids)) {
-      winner = null;
-    } else if (pinned) {
-      winner = pinned;
-    } else {
-      winner = dayMetasLoaded ? (derived ?? null) : null;
-    }
-    return { dayIndex: d.index, displayName: winner?.displayName ?? null };
-  });
+  // an honor) — and the pin wins over a derived honoree on a pinned Day, so a
+  // true winner whose unknown-identity bingo skipped its pin is not permanently
+  // displaced by a later Player's pin. On a daily event every Day gets a chip
+  // ("—" until someone bingoes that Day); a legacy event keeps the derived-only
+  // strip.
+  //
+  // THE PIN WINS when present (#280 round 4): the write-once, rules-timestamped
+  // day-meta doc is the honor's source of truth. Derived `dayStats` timestamps
+  // are NOT reliable tiebreakers — a proof-backed Mark could seed a later day's
+  // bucket from the cruise-wide root `firstBingoAt`, so an "earlier" derived
+  // stamp may be another day's time entirely. The write paths no longer copy the
+  // root (#1049, `boardFirstBingoAt`), but that ticket ships no backfill, so
+  // rows persisted before it can still carry another Day's instant and this
+  // pin-wins rule still stands. The derived roster is the fallback for UNPINNED
+  // days only. The unknown-identity-winner residual the old earliest-wins rule
+  // chased is now covered by the module-state held-pin queue (which survives
+  // unmounts and fires on identity resolve); what remains — a reload before the
+  // row resolves — is accepted and documented.
+  //
+  // The precedence itself now lives in ONE place (#1151, #1146): this strip, the
+  // frozen podium and the durable archive record all resolve it through
+  // `pinnedOrDerivedDailyHonors`, so the record cannot name a different holder
+  // from the last live strip. It is handed the ban roster explicitly, because a
+  // pin needs no Player row to render and roster absence is not a ban.
+  const honorByDay = new Map(
+    pinnedOrDerivedDailyHonors(roster, event?.days, dayMetas, dayMetasLoaded, bannedUids).map(
+      (h) => [h.dayIndex, h],
+    ),
+  );
+  const honors = (event?.days ?? []).map((d) => ({
+    dayIndex: d.index,
+    displayName: honorByDay.get(d.index)?.displayName ?? null,
+  }));
   const legacyHonors = event?.days?.length ? [] : derivedHonors;
-  const dayChipLabel = (dayIndex: number): string => {
-    const d = event?.days?.find((day) => day.index === dayIndex);
-    const emoji = d ? (THEMES.find((t) => t.id === d.theme)?.emoji ?? '') : '';
-    return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
-  };
+  const dayChipLabel = (dayIndex: number): string => dayHonorChipLabel(dayIndex, event?.days);
 
   // Filters narrow this render's visible subset of the already-ranked,
   // ban-filtered roster — a plain `.filter`, never a `.sort`, so the relative
