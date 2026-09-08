@@ -4,7 +4,7 @@ Prove `storage.rules` against the Firebase Storage emulator with `@firebase/rule
 
 Every claim below is asserted by `tests/rules/w0-storage-rules.test.ts` (layer: rules-emulator; runner `npm run test:rules`, which boots the Firestore + Storage emulators via `firebase emulators:exec`). Object paths mirror `src/data/storage.ts` (`uploadProofMedia`, `uploadAvatar`).
 
-The suite empties the bucket between cases through `tests/support/storage-emulator.ts`, not `RulesTestEnvironment.clearStorage()`: that helper lists the bucket ROOT and deletes the `items` it finds, and `listAll()` does not recurse, so every object this app writes—all of them under a prefix—survives it. The no-op was invisible while proof objects could be overwritten, and became load-bearing the moment they could not.
+The suite empties the bucket between cases through `tests/support/storage-emulator.ts`, not `RulesTestEnvironment.clearStorage()`: that helper lists the bucket ROOT and deletes the `items` it finds, and `listAll()` does not recurse, so every object this app writes—all of them under a prefix—survives it. The no-op was invisible while proof objects could be overwritten, and became load-bearing the moment they could not. The E2E seed's `withStorage` fixture clears the bucket through the same helper, for the same reason: it seeds proof media under hard-coded ids, so a rerun against a bucket `clearStorage()` had not actually emptied re-uploaded them as denied updates.
 
 ## okImage—image caps on the content-validated proof path
 

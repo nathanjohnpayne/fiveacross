@@ -21,6 +21,9 @@ import { adminRoster, eventWritePayload, seedItemDocId } from '../../../scripts/
 import { EVENT_SEED, ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 import { EVENT_ID, FIRESTORE_HOST, FIRESTORE_PORT, PROJECT_ID } from './env';
 import { cellsFromData } from '../../../src/game/cells';
+// The recursive bucket wipe the rules suites already use (#1153, Codex round 4
+// P2). `RulesTestEnvironment.clearStorage()` lists only the bucket ROOT.
+import { clearStorageDeep } from '../../support/storage-emulator';
 
 const RULES_PATH = fileURLToPath(new URL('../../../firestore.rules', import.meta.url));
 const STORAGE_RULES_PATH = fileURLToPath(new URL('../../../storage.rules', import.meta.url));
@@ -89,8 +92,20 @@ export async function seedEmulatorEvent(
     // bucket still holding the previous attempt's objects would therefore be
     // making an UPDATE, and the seed would fail closed. Wiping the objects keeps
     // every attempt's upload the create the rule expects. Only when Storage was
-    // actually wired in: `clearStorage()` on an env without it is meaningless.
-    if (opts.withStorage) await testEnv.clearStorage();
+    // actually wired in: a bucket wipe on an env without it is meaningless.
+    //
+    // `clearStorageDeep`, NOT `testEnv.clearStorage()` (#1153, Codex round 4
+    // P2). `clearStorage()` lists the bucket ROOT and deletes the `items` it
+    // finds, and `listAll()` does not recurse — every object this app writes
+    // lives under a prefix (`proofs/{eventId}/{uid}/{file}`), so the root has no
+    // `items` at all and the call deletes NOTHING. It was a silent no-op that
+    // only became load-bearing when proof objects turned immutable, which is
+    // exactly the case this line exists for: a Playwright retry or a second
+    // seeded suite in the same `emulators:exec` process would re-upload the
+    // parity fixture's hard-coded ids as denied UPDATES and never recover. The
+    // helper walks the prefixes with rules disabled (tests/support/storage-emulator.ts),
+    // which is what both rules suites already call in their own `beforeEach`.
+    if (opts.withStorage) await clearStorageDeep(testEnv);
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();
