@@ -1263,6 +1263,91 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("refuses the same branch taken through the BACKING options object", async () => {
+    // Codex P1, round 27 on #1107. `get options()` is `deepCopy(this.options_)`,
+    // so the pinned firebase-admin keeps the real configuration in `options_` —
+    // an own property of the app, reachable from the artifact. Watching only the
+    // accessor left that alias unwatched, so the condition below matched the
+    // real project while both synthetic probes read `undefined`, agreed on the
+    // single endpoint, and exempted a scope whose deploy exports the group.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        'const grouped = admin.app().options_.locationId === "nam5";',
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses a branch reached through the accessor the watch shadows", async () => {
+    // The second alias, and the reason shadowing is not removing: the own
+    // property the watch defines hides `FirebaseApp.prototype`'s `options`
+    // getter from `app.options`, and leaves it reachable through its
+    // descriptor. Called against the app it answers with the same values,
+    // uninstrumented, so the holder is guarded too.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "const app = admin.app();",
+        'const shadowed = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(app), "options");',
+        'const grouped = shadowed.get.call(app).locationId === "nam5";',
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("refuses a branch on the credential firebase-admin holds a second time", async () => {
+    // The third alias. `FirebaseApp`'s constructor hands `options_.credential`
+    // to `FirebaseAppInternals`, which keeps it as `credential_` — so
+    // `app.INTERNAL.credential_` is the ADC document this classifier gets from
+    // the wrapper or not at all, read without touching `options` at all.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "const held = admin.app().INTERNAL.credential_;",
+        'const grouped = Boolean(held && held.projectId === "gaycruisebingo");',
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
+  it("still exempts a branch on the project id read through the backing object", async () => {
+    // The control for the three cases above: the aliases are guarded per KEY,
+    // exactly as `app.options` is, rather than refused wholesale. `projectId` is
+    // deliberately outside `ADMIN_OPTION_KEYS` — it is the pinned project, the
+    // same value in both probes and in the deploy — so a branch on it is
+    // reproduced rather than guessed at, whichever alias it is read through.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        'const grouped = admin.app().options_.projectId === "not-this-project";',
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
   it("reads an artifact's mutated options snapshot the way the real SDK does", async () => {
     // Codex P1, round 25 on #1107. `FirebaseApp`'s own `get options()` returns
     // `deepCopy(this.options_)`, so a write to one result is invisible to the

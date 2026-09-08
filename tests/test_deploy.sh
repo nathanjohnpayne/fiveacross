@@ -3317,6 +3317,52 @@ run_post_classification_guard_case 33a advance
 run_post_classification_guard_case 33b hold
 
 # ---------------------------------------------------------------------------
+# Case 34 (#547 — Codex P1, round 27): the firebase-admin watch guards the
+# BACKING options object, not only the accessor that copies from it.
+#
+# `FirebaseApp`'s `get options()` is `deepCopy(this.options_)`, so the pinned
+# firebase-admin keeps the real configuration in `options_` — an own property of
+# the app the artifact can read directly. With only the accessor watched, an
+# artifact reading `admin.app().options_.locationId` matched the real project
+# while the minimal probe supplied no `locationId` and the populated one invented
+# `us-central1`: both rehearsals reported the direct endpoint, agreed, and the
+# scope was proved exact while Firebase's own discovery exported the protected
+# `daily-submitBugReport` group with its invoker reconciliation switched off. The
+# deployment-safety property asserted here is therefore the reconciliation:
+# submitbugreport must still be reconciled.
+#
+# Case 30 is the control on one side — the same branch through `app.options`,
+# which the watch already caught — and case 28b on the other, where an artifact
+# that reads the options without consulting an unsupplied value really is
+# exempted and reconciles nothing.
+# ---------------------------------------------------------------------------
+ADMIN_OPTIONS_BACKING_BRANCH='const options = admin.app().options_;
+exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
+
+REPO34="$WORKDIR/case34-admin-options-backing"
+init_admin_options_repo "$REPO34" "$ADMIN_OPTIONS_BACKING_BRANCH"
+: >"$WORKDIR/ofd-calls-34.log"
+: >"$WORKDIR/gcloud-calls-34.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-34.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-34.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+  bash -c "cd '$REPO34' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case34.out" 2>"$WORKDIR/case34.err"
+RC34=$?
+set -e
+if [[ $RC34 -ne 0 ]]; then
+  fail "admin-options-backing: deploy.sh returned $RC34. stderr was:"
+  cat "$WORKDIR/case34.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-34.log"; then
+  fail "admin-options-backing: an artifact branching on the backing options object was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-34.log" >&2
+else
+  pass "admin-options-backing: reading a locationId through firebase-admin's own options_ forfeits the exemption too (rc=$RC34)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

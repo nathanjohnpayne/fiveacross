@@ -422,29 +422,45 @@ if (watching) {
   const watchedExports = new WeakSet();
 
   /**
-   * The `options` accessor firebase-admin itself installed, as a function of no
-   * arguments bound to this app — or null when the app has no such property.
+   * The original `options` descriptor of every object this module has since
+   * redefined `options` on, so a later app is read through the accessor
+   * firebase-admin installed rather than through the recording one that
+   * replaced it — which would wrap a view in a view.
+   */
+  const originalOptions = new WeakMap();
+
+  /**
+   * Where `options` lives for this app, and the descriptor firebase-admin
+   * itself installed there — or null when no object on the chain has one.
    *
-   * Captured from wherever it sits on the prototype chain rather than read back
-   * through the app, because the own property defined below is about to shadow
-   * it: calling `app.options` from inside that getter would recurse forever.
+   * Found on the chain rather than read back through the app, because the own
+   * property `watchApp` defines is about to shadow it: calling `app.options`
+   * from inside that getter would recurse forever.
+   */
+  const optionsAccessor = (app) => {
+    for (let holder = app; holder; holder = Object.getPrototypeOf(holder)) {
+      const own = Object.getOwnPropertyDescriptor(holder, "options");
+      if (!own) continue;
+      return { holder, descriptor: originalOptions.get(holder) ?? own };
+    }
+    return null;
+  };
+
+  /**
+   * That descriptor as a function of no arguments bound to this app.
+   *
    * A getter is called on each read, so it answers with whatever firebase-admin
    * would have answered; a DATA property is not, so the value it holds is
    * captured once, which is the same object every uninstrumented read of it
    * would return.
    */
-  const optionsReader = (app) => {
-    for (let holder = app; holder; holder = Object.getPrototypeOf(holder)) {
-      const descriptor = Object.getOwnPropertyDescriptor(holder, "options");
-      if (!descriptor) continue;
-      if (typeof descriptor.get === "function") {
-        const read = descriptor.get;
-        return () => read.call(app);
-      }
-      const value = descriptor.value;
-      return () => value;
+  const boundOptionsReader = (app, descriptor) => {
+    if (typeof descriptor.get === "function") {
+      const read = descriptor.get;
+      return () => read.call(app);
     }
-    return null;
+    const value = descriptor.value;
+    return () => value;
   };
 
   /** A recording view of ONE options object, watching every access form. */
@@ -468,6 +484,126 @@ if (watching) {
     });
   };
 
+  // THE ALIASES. `get options()` is not the only way to the values it answers
+  // with, and an alias this module leaves alone is a way around every watch
+  // above it: an artifact reading `admin.app().options_.locationId` matched the
+  // real project while both synthetic probes reported the direct endpoint, and
+  // nothing recorded a consultation (Codex P1, round 27 on #1107).
+  //
+  // The pinned firebase-admin (12.7.0, `lib/app/firebase-app.js`) exposes the
+  // same configuration at three reachable names, and the three helpers below
+  // guard them so that a read through any one is the same consultation as a
+  // read of `app.options`:
+  //
+  //  - `app.options_` — the BACKING OBJECT. `get options()` is
+  //    `deepCopy(this.options_)`, so this is the object the copy is taken from,
+  //    and the real configuration rather than a snapshot of it.
+  //  - `app.INTERNAL.credential_` — the `credential` option, held a second time
+  //    by `FirebaseAppInternals`, which the `FirebaseApp` constructor builds
+  //    from `this.options_.credential`.
+  //  - the class accessor on `FirebaseApp.prototype`, which the own property
+  //    `watchApp` defines shadows for `app.options` but leaves reachable as
+  //    `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(app),
+  //    "options").get.call(app)`.
+  //
+  // Nothing else on the app carries them: the constructor's other own
+  // properties are `appStore`, `services_`, `isDeleted_` and `name_`, and
+  // reaching an app through `appStore` reaches the SAME object, which is
+  // already watched. The services that read a watched value — `storage.js`'s
+  // `storageBucket`, `database.js`'s `databaseURL` — read it through
+  // `app.options` on each call and cache none of it.
+
+  /**
+   * One own DATA property holding an options OBJECT, answered instead with a
+   * recording view of that same object.
+   *
+   * Stable rather than fresh, unlike `options` below, because this is the
+   * backing store and not a copy of it: one object lives for the life of the
+   * app, firebase-admin writes through it, and `app.options_ === app.options_`
+   * answers true. The proxy forwards every trap it does not define, so a write
+   * still lands on the real object and the SDK's own reads still see it.
+   */
+  const watchBackingOptions = (holder, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(holder, name);
+    if (!descriptor || !descriptor.configurable) return;
+    if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return;
+    if (!descriptor.value || typeof descriptor.value !== "object") return;
+    let view = recordingOptions(descriptor.value);
+    try {
+      Object.defineProperty(holder, name, {
+        configurable: true,
+        enumerable: descriptor.enumerable === true,
+        get: () => view,
+        set: (next) => {
+          view = next && typeof next === "object" ? recordingOptions(next) : next;
+        },
+      });
+    } catch {
+      // Nothing to do, and nothing may throw into the codebase's own `require`:
+      // the `options` watch below still covers the same values read through
+      // firebase-admin's own accessor.
+    }
+  };
+
+  /**
+   * One own DATA property holding a single watched option's VALUE, answered
+   * instead through a recording accessor. No view can be interposed here — the
+   * read hands the value over directly — so the read itself is the record.
+   */
+  const watchOptionValue = (holder, name, key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(holder, name);
+    if (!descriptor || !descriptor.configurable) return;
+    if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return;
+    let value = descriptor.value;
+    try {
+      Object.defineProperty(holder, name, {
+        configurable: true,
+        enumerable: descriptor.enumerable === true,
+        get: () => {
+          if (!recorded && consultedAdminOption(key)) record();
+          return value;
+        },
+        set: (next) => {
+          value = next;
+        },
+      });
+    } catch {
+      // As above.
+    }
+  };
+
+  /**
+   * The `options` accessor on whatever object installed it — the class
+   * prototype, for every app firebase-admin builds — answered with a recording
+   * view of what it returns.
+   *
+   * The own property `watchApp` defines shadows this one for `app.options`, and
+   * shadowing is not removing: a descriptor read reaches the original getter
+   * and calls it against the app. Guarding the holder answers that read the
+   * same way, and covers an app that never passed through a wrapped factory
+   * along with it. The original is kept so the own property below still calls
+   * firebase-admin's own accessor rather than this one.
+   */
+  const watchOptionsAccessor = (holder, descriptor) => {
+    if (originalOptions.has(holder)) return;
+    if (!descriptor.configurable || typeof descriptor.get !== "function") return;
+    const read = descriptor.get;
+    originalOptions.set(holder, descriptor);
+    try {
+      Object.defineProperty(holder, "options", {
+        configurable: true,
+        enumerable: descriptor.enumerable === true,
+        get() {
+          const fresh = read.call(this);
+          return fresh && typeof fresh === "object" ? recordingOptions(fresh) : fresh;
+        },
+        set: descriptor.set,
+      });
+    } catch {
+      originalOptions.delete(holder);
+    }
+  };
+
   /**
    * One app, with its `options` replaced by a recording view of the same values.
    *
@@ -487,11 +623,15 @@ if (watching) {
    * The original accessor is therefore called per read and its answer wrapped,
    * which records the watched keys exactly as before and leaves the mutation
    * semantics the SDK's.
+   *
+   * The aliases the same values are also reachable through are guarded first,
+   * and for the same reason: see THE ALIASES above.
    */
   const watchApp = (app) => {
     if (!app || typeof app !== "object" || watchedApps.has(app)) return app;
-    const readOptions = optionsReader(app);
-    if (!readOptions) return app;
+    const accessor = optionsAccessor(app);
+    if (!accessor) return app;
+    const readOptions = boundOptionsReader(app, accessor.descriptor);
     let options;
     try {
       options = readOptions();
@@ -500,6 +640,17 @@ if (watching) {
     }
     if (!options || typeof options !== "object") return app;
     watchedApps.add(app);
+    if (accessor.holder !== app) watchOptionsAccessor(accessor.holder, accessor.descriptor);
+    watchBackingOptions(app, "options_");
+    let internals;
+    try {
+      internals = app.INTERNAL;
+    } catch {
+      internals = null;
+    }
+    if (internals && typeof internals === "object") {
+      watchOptionValue(internals, "credential_", "credential");
+    }
     try {
       Object.defineProperty(app, "options", {
         configurable: true,
