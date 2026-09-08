@@ -2402,6 +2402,108 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  // `-p, --public <path>` overrides the Hosting public directory, and
+  // `deploy/hosting/prepare.js`'s `handlePublicDirectoryFlag` writes that
+  // override into `options.config` from `hasPinnedFunctions`, which
+  // `deploy/index.js` calls BEFORE it chains a single predeploy hook. So the
+  // Hosting hook's `$RESOURCE_DIR` — `config.path(config.public ?? config.source)`
+  // — is the overridden directory during the real deploy. Planning the hook
+  // from `firebase.json` alone let this one read one directory in the
+  // rehearsal and the other in the deploy (Codex P1, round 23 on #1107).
+  const publicOverrideFixture = {
+    functionsConfig: { predeploy: [] },
+    config: {
+      hosting: {
+        public: "public",
+        // Which directory the hook READ decides which artifact it leaves, so
+        // the classification below is an assertion about `$RESOURCE_DIR`.
+        // Written without nested quotes: `runCommand` escapes only `"`, so a
+        // `"` inside a `$(…)` reaches the hook as a literal character — the
+        // pinned CLI's own quoting, mirrored byte for byte.
+        predeploy: [
+          'grep -q override "$RESOURCE_DIR/which" ' +
+            "&& cp functions/group.js functions/lib/index.js " +
+            "|| cp functions/single.js functions/lib/index.js",
+        ],
+      },
+    },
+    files: {
+      "public/which": "configured",
+      "other/which": "override",
+      "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+      "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+      "functions/single.js": artifact("exports.daily = endpoint();"),
+    },
+  };
+
+  it("runs the Hosting hook against the directory --public overrides to", async () => {
+    await withFunctionsProject(publicOverrideFixture, async (configPath) => {
+      expect(
+        await classify(
+          ["--only", "functions:daily,hosting", "--public", "other"],
+          configPath,
+        ),
+      ).toMatchObject({ hostingAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+    });
+  });
+
+  it("accepts every spelling of --public the pinned CLI accepts", async () => {
+    // The pinned CLI parses on commander 5, where `--public=other` and the
+    // attached short form `-pother` are both that path. This classifier parses
+    // on the root commander, which splits an attached short flag into single
+    // letters unless it is normalized first — the same normalization `-P` and
+    // `-c` already get.
+    for (const spelling of [["--public=other"], ["-p", "other"], ["-pother"]]) {
+      await withFunctionsProject(publicOverrideFixture, async (configPath) => {
+        expect(
+          await classify(["--only", "functions:daily,hosting", ...spelling], configPath),
+        ).toMatchObject({ hostingAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      });
+    }
+  });
+
+  it("leaves the configured public directory alone when no --public is given", async () => {
+    // The control: the same fixture, the same selector, and the hook reading
+    // `firebase.json`'s own `public` — which is what makes the case above an
+    // assertion about the override rather than about the hook running at all.
+    await withFunctionsProject(publicOverrideFixture, async (configPath) => {
+      expect(
+        await classify(["--only", "functions:daily,hosting"], configPath),
+      ).toMatchObject({ hostingAttempted: true, ...EXEMPT });
+    });
+  });
+
+  it("refuses --public against a multi-site Hosting configuration, as the CLI does", async () => {
+    // `handlePublicDirectoryFlag` throws for an ARRAY `hosting` — there is no
+    // one site to override — so the deploy never starts. Mirrored as a refusal
+    // rather than modelled: a request the pinned CLI rejects must not be built
+    // for. The second half is the CLI's own scoping: the flag is only ever read
+    // when Hosting is one of the deployed targets, so it is inert here.
+    const multiSite = {
+      config: {
+        hosting: [
+          { target: "app", public: "public" },
+          { target: "docs", public: "docs" },
+        ],
+      },
+      functionsConfig: { predeploy: [] },
+      files: {
+        "public/index.html": "",
+        "docs/index.html": "",
+        "other/index.html": "",
+        "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+      },
+    };
+    await withFunctionsProject(multiSite, async (configPath) => {
+      await expect(
+        classify(["--only", "functions:daily,hosting", "--public", "other"], configPath),
+      ).rejects.toThrow("Cannot specify --public option with multi-site configuration");
+      expect(
+        await classify(["--only", "functions:daily", "--public", "other"], configPath),
+      ).toMatchObject({ hostingAttempted: false, ...EXEMPT });
+    });
+  });
+
   it("answers a git branch lookup the way the deployment will", async () => {
     // A build that selects its exports with `git rev-parse --abbrev-ref HEAD`
     // is an ordinary build. Omitting `.git` from the overlay did not withhold

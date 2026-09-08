@@ -2689,6 +2689,100 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Cases 27a-27b (#547 — Codex P1, round 23): `-p, --public <path>` moves a
+# Hosting predeploy hook's $RESOURCE_DIR, and the classifier plans that hook
+# against the OVERRIDDEN directory.
+#
+# `deploy/hosting/prepare.js`'s handlePublicDirectoryFlag writes the override
+# into the deploy's own config from `hasPinnedFunctions`, which
+# `deploy/index.js` calls before it chains a single predeploy hook. So the real
+# `firebase deploy --only functions:<name>,hosting --public <dir>` runs the
+# Hosting hook with $RESOURCE_DIR pointing at <dir>. A classifier that planned
+# that hook from firebase.json alone rehearsed one directory and released the
+# other — the way an exact single-endpoint scope got its invoker reconciliation
+# switched off for an artifact the deploy would publish as a protected group.
+#
+# The fixture's Hosting hook reads a marker in $RESOURCE_DIR and writes through
+# the staging overlay into the live checkout ONLY when it sees the override
+# directory's marker. That write is the classifier's fatal drift status (3), so
+# the override reaching the hook is legible here from deploy.sh's own
+# behaviour: it stops before BUILD_CMD and before op-firebase-deploy. 27b is
+# the control — the same fixture and the same selector without `--public` —
+# which reads the configured directory, writes nothing, and publishes.
+# ---------------------------------------------------------------------------
+init_public_override_repo() {
+  local repo="$1"
+  mkdir -p "$repo/functions/src" "$repo/dist" "$repo/other" "$repo/shared"
+  (
+    cd "$repo"
+    git init --quiet -b feature/deploy-test
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    printf 'configured\n' > dist/which
+    printf 'override\n' > other/which
+    : > shared/toggle
+    printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
+    # Declared as a builder call so the classifier's source pre-check offers it
+    # as a candidate and the rehearsal — and therefore the Hosting hook — runs.
+    printf '%s\n' \
+      "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
+      "export const dailyEngagementEmail = onSchedule('every day 00:00', () => {});" \
+      > functions/src/index.ts
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist","predeploy":["grep -q override \"$RESOURCE_DIR/which\" && printf x >> shared/toggle || true"]},"functions":{"source":"functions","predeploy":[]}}' > firebase.json
+    git add -A
+    git commit --quiet -m "initial"
+  )
+}
+
+REPO27A="$WORKDIR/case27a-public-override"
+init_public_override_repo "$REPO27A"
+: >"$WORKDIR/ofd-calls-27a.log"
+: >"$WORKDIR/npm-calls-27a.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-27a.log" \
+NPM_LOG="$WORKDIR/npm-calls-27a.log" \
+  bash -c "cd '$REPO27A' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting --public other" \
+  >"$WORKDIR/case27a.out" 2>"$WORKDIR/case27a.err"
+RC27A=$?
+set -e
+if [[ $RC27A -eq 0 ]]; then
+  fail "public-override: deploy returned 0 though the Hosting hook, run against the overridden directory, mutated the checkout."
+elif [[ -s "$WORKDIR/ofd-calls-27a.log" ]]; then
+  fail "public-override: op-firebase-deploy ran after the Hosting hook had written into the checkout."
+elif [[ -s "$WORKDIR/npm-calls-27a.log" ]]; then
+  fail "public-override: the build ran after the Hosting hook had written into the checkout. npm log was:"
+  cat "$WORKDIR/npm-calls-27a.log" >&2
+elif ! grep -q 'mutated this checkout during classification' "$WORKDIR/case27a.err"; then
+  fail "public-override: the Hosting hook did not see the --public directory as \$RESOURCE_DIR. stderr was:"
+  cat "$WORKDIR/case27a.err" >&2
+else
+  pass "public-override: --public moves the Hosting hook's \$RESOURCE_DIR in the rehearsal too (rc=$RC27A)."
+fi
+
+REPO27B="$WORKDIR/case27b-public-override-control"
+init_public_override_repo "$REPO27B"
+: >"$WORKDIR/ofd-calls-27b.log"
+: >"$WORKDIR/npm-calls-27b.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-27b.log" \
+NPM_LOG="$WORKDIR/npm-calls-27b.log" \
+  bash -c "cd '$REPO27B' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting" \
+  >"$WORKDIR/case27b.out" 2>"$WORKDIR/case27b.err"
+RC27B=$?
+set -e
+if [[ $RC27B -ne 0 ]]; then
+  fail "public-override-control: the same deploy without --public returned $RC27B. stderr was:"
+  cat "$WORKDIR/case27b.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-27b.log" ]]; then
+  fail "public-override-control: the deploy never published, so 27a's stop is not attributable to --public."
+else
+  pass "public-override-control: without --public the Hosting hook reads firebase.json's own directory and the deploy publishes (rc=$RC27B)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

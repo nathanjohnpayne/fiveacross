@@ -205,6 +205,15 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # and the same discovery a few steps below — and it is not new mutation, because
 # the build lands in the scratch copy.
 #
+# Those hooks are planned from the request the way firebase-tools assembles it,
+# not from `firebase.json` alone. `--only` / `--except` choose the targets and
+# the codebases whose hooks run; `-c/--config` and `-P/--project` name the
+# project directory and the dotenv files they see; and `-p/--public <path>`
+# overrides the Hosting public directory in the deploy's config BEFORE the
+# first hook, so it moves a Hosting hook's `$RESOURCE_DIR`. A request the
+# pinned CLI rejects outright — `--public` against a multi-site Hosting
+# configuration — is rejected here rather than rehearsed.
+#
 # It costs about 10s on this repository (the codebase's build, then discovery
 # run twice, one project probe at a time from a private copy so that two live
 # probes cannot agree with each other, with every selected codebase discovered

@@ -97,10 +97,24 @@ function hasNamedDestinationOverride(args) {
   }
 }
 
-function normalizeAttachedDestinationOptions(args) {
+/**
+ * The attached short-option spellings the pinned CLI accepts, written out so
+ * the parser below reads them the same way.
+ *
+ * The pinned CLI parses on commander 5, which reads `-Pfoo` / `-cfoo` /
+ * `-pdist` as a short flag with an attached value. The commander this
+ * classifier parses on splits any `-abc` into `-a -b -c`, so `-pdist` becomes
+ * `-p -d -i -s -t` — and `-pf` becomes `-p -f`, whose value is then the string
+ * `-f` rather than `f`. Every short option that TAKES A VALUE and whose value
+ * this classifier reads is therefore split here first: `-P`/`-c` because they
+ * redirect the deploy's destination, and `-p` because it moves a Hosting
+ * predeploy hook's `$RESOURCE_DIR` — see `applyPublicDirectoryOverride`.
+ */
+function normalizeAttachedShortOptions(args) {
   return args.flatMap((argument) => {
     if (/^-P.+/.test(argument)) return ["-P", argument.slice(2)];
     if (/^-c.+/.test(argument)) return ["-c", argument.slice(2)];
+    if (/^-p.+/.test(argument)) return ["-p", argument.slice(2)];
     return [argument];
   });
 }
@@ -117,7 +131,7 @@ function parseFirebaseOptions(args) {
   for (const option of firebaseDeployCommand.options) parser.option(...option);
 
   const parsed = parser.parseOptions(
-    parser.normalize(normalizeAttachedDestinationOptions(args)),
+    parser.normalize(normalizeAttachedShortOptions(args)),
   );
   if (parsed.unknown.length > 0) parser.unknownOption(parsed.unknown[0]);
   return { operands: parsed.args, options: parser.opts() };
@@ -1980,12 +1994,62 @@ function relevantTargetConfigs(target, only, configSource) {
 }
 
 /**
+ * Write `-p, --public <path>` into the materialised config, exactly where and
+ * exactly when the pinned CLI writes it.
+ *
+ * WHY IT BELONGS HERE AND NOT ONLY IN THE HOSTING RELEASE. The flag reads like
+ * a publishing detail — "override the Hosting public directory specified in
+ * firebase.json" — but `deploy/hosting/prepare.js`'s `handlePublicDirectoryFlag`
+ * does not wait for Hosting's own `prepare`. `deploy/index.js` calls
+ * `hasPinnedFunctions(options)` first, which calls it, so `options.config`
+ * already carries the override by the time the deploy chains its FIRST
+ * predeploy hook. `lifecycleHooks.getChildEnvironment` then resolves a Hosting
+ * hook's `$RESOURCE_DIR` as `config.path(config.public ?? config.source)` — the
+ * overridden directory. Planning that hook from `firebase.json` alone let it
+ * read one directory here and another during the deploy, so a hook that emits a
+ * direct endpoint from one and a protected group from the other was rehearsed
+ * as exact and released as a group with its invoker unreconciled (Codex P1,
+ * round 23 on #1107).
+ *
+ * WHEN THE CLI READS IT. Only when Hosting is one of the deployed targets:
+ * `hasPinnedFunctions` is guarded by `targetNames.includes("hosting")` and
+ * Hosting's `prepare` is not chained otherwise, so `--public` beside `--only
+ * functions:<name>` never reaches any config and never moves any hook. The same
+ * guard is applied here rather than a broader one, because overriding a
+ * directory the deploy would not have overridden is its own divergence.
+ *
+ * MULTIPLE SITES. `handlePublicDirectoryFlag` REFUSES an array `hosting` —
+ * there is no single site whose directory the flag could name — and it does so
+ * before the first hook, so the deploy never starts. That is mirrored as a
+ * refusal rather than modelled: this classifier must not build, rehearse or
+ * classify for a request the pinned CLI rejects outright.
+ *
+ * The mutation itself goes through the pinned `Config`'s own `set`, so what a
+ * shape like an EXTERNALISED `"hosting": "hosting.config.json"` ends up with is
+ * whatever the CLI ends up with, rather than this classifier's reading of it.
+ */
+function applyPublicDirectoryOverride(config, publicDir, deployTargets) {
+  if (!publicDir) return;
+  if (!deployTargets.includes("hosting")) return;
+  if (Array.isArray(config.get("hosting"))) {
+    throw new Error("Cannot specify --public option with multi-site configuration");
+  }
+  config.set("hosting.public", publicDir);
+}
+
+/**
  * `getChildEnvironment`'s `$RESOURCE_DIR` for a non-Functions target, as a
  * PROJECT-RELATIVE path, or null when the config names one the overlay cannot
  * place.
  *
  * Hosting resolves `public ?? source`; every other target resolves the project
- * directory itself, which is the empty relative path.
+ * directory itself, which is the empty relative path. `public` is read off the
+ * MATERIALISED config, so a `--public` override is already in it — see
+ * `applyPublicDirectoryOverride`. An absolute or climbing path is refused by
+ * `normalizedSourcePath` whether it came from the config or the flag: the
+ * overlay stages the project directory, so a resource directory outside it is
+ * one the rehearsal cannot place, and `Config.path` hands an absolute one
+ * straight through to the deploy's own hook.
  */
 function targetResourceRel(target, config) {
   if (target !== "hosting") return "";
@@ -3701,9 +3765,16 @@ export async function classifyFirebaseDeployRequest(
   // Functions whether or not the request named it.
   if (pinned.functionsReAdded && !deployTargets.includes("functions")) deployTargets.unshift("functions");
   singleEndpointExports.staging.deployTargets = deployTargets;
+  // `-p, --public <path>` lands in the config BEFORE the plan is taken from it,
+  // because the CLI puts it there before it chains a single predeploy hook.
+  // Only the `functions` target is ever added to `deployTargets` above, so
+  // asking after the unshift asks the same question `deploy/index.js` asks
+  // before it. See `applyPublicDirectoryOverride`.
+  applyPublicDirectoryOverride(deployConfig, options.public, deployTargets);
   // The MATERIALIZED config: hooks are planned from what the CLI's own
   // `getReleventConfigs` will read, so an externalised target's `predeploy`
-  // reaches the plan instead of being read off a string as `undefined`.
+  // reaches the plan instead of being read off a string as `undefined`, and a
+  // Hosting hook's `$RESOURCE_DIR` is the directory `--public` overrode to.
   singleEndpointExports.staging.configSource = deployConfig.data;
   await checkValidTargetFilters({ only, except: exceptTargets });
   const hostingOptions = {
