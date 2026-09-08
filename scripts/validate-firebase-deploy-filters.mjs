@@ -15,6 +15,7 @@ import {
   stat,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -1197,6 +1198,68 @@ async function exposeGitMetadata(from, to, links, metadataDirs, plan) {
 }
 
 /**
+ * Give every COPIED DIRECTORY the timestamps of the one it was copied from.
+ *
+ * `fs.cp`'s `preserveTimestamps` covers files and nothing else: under this
+ * repository's Node every directory the copy creates carries the moment the
+ * copy created it. So a hook that makes an incremental decision from a
+ * DIRECTORY's mtime — `[ "$RESOURCE_DIR" -ot "$PROJECT_DIR/stamp" ]`, the
+ * directory-level form of the file comparison rounds 17 and 19 already fixed —
+ * saw a past-dated `$RESOURCE_DIR` during the deploy and a freshly stamped one
+ * here, and could emit a direct endpoint in the rehearsal and a protected group
+ * for real (Codex P1, round 26 on #1107).
+ *
+ * DEEPEST-FIRST, because writing into a directory stamps it: restoring a parent
+ * before its children would have every child's `utimes` move the parent's mtime
+ * forward again. The walk therefore settles a directory's contents first and
+ * touches the directory itself last, up to and including the staged project
+ * root — which is a `mkdir` rather than a copy and so carries a fresh mtime for
+ * the same reason.
+ *
+ * SYMLINKS ARE SKIPPED, and not merely because a link is not a copy: `utimes`
+ * FOLLOWS one, so touching a symlinked project directory would stamp the LIVE
+ * directory it points at — a write into the very checkout everything else here
+ * exists to keep untouched, and one the fingerprint would then report as drift.
+ * `readdir`'s dirents report the entry's own type, so a link to a directory
+ * never satisfies `isDirectory()`; the explicit test states the intent.
+ *
+ * An original that cannot be read leaves the copy's own times alone rather than
+ * inventing any. That is the same direction as every other uncertainty here:
+ * the rehearsal may answer differently from the deploy, and the fingerprint
+ * bracket around the staging is what notices the disappearance.
+ */
+async function restoreCopiedDirectoryTimes(from, to) {
+  let entries;
+  try {
+    entries = await readdir(to, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+    await restoreCopiedDirectoryTimes(join(from, entry.name), join(to, entry.name));
+  }
+  await copyDirectoryTimes(from, to);
+}
+
+/**
+ * One directory's `atime`/`mtime`, taken from the directory it was copied from.
+ *
+ * Separate from the walk above because `copyStagedProject` recurses on its own
+ * and restores each level as that level returns, which is the same deepest-first
+ * order by construction. See `restoreCopiedDirectoryTimes` for why the order
+ * matters and why an unreadable original is left alone.
+ */
+async function copyDirectoryTimes(from, to) {
+  try {
+    const original = await stat(from);
+    await utimes(to, original.atime, original.mtime);
+  } catch {
+    // Unreadable or gone: the copy keeps its own times.
+  }
+}
+
+/**
  * A project directory in which EVERY configured Functions source dir is a
  * writable copy and every other entry is a symlink to the original.
  *
@@ -1313,6 +1376,9 @@ async function stageProjectOverlay({
       // incremental hook that compares `src/index.ts -ot shared/stamp` must
       // see the same answer here as in the live tree, and a copy that
       // refreshed every mtime would rehearse a build Firebase never runs.
+      // FILES only — a copied DIRECTORY still carries the moment the copy made
+      // it, which `restoreCopiedDirectoryTimes` puts back once the whole walk
+      // has finished writing (Codex P1, round 26).
       preserveTimestamps: true,
       // `node_modules` is symlinked instead: copying it would cost minutes,
       // and the deploy's own build reads the very same tree. EVERY one is
@@ -1400,6 +1466,12 @@ async function stageProjectOverlay({
     scratchProject,
     sourceRels.map((relative) => relative.split("/")),
   );
+  // LAST, after every copy and every link this walk makes, because each of them
+  // stamps the directory it lands in. See `restoreCopiedDirectoryTimes`: the
+  // copy preserves a file's timestamps and a directory's are the copy's own, so
+  // a hook that reads a directory mtime would answer differently here than in
+  // the deploy until they are put back.
+  if (!plan) await restoreCopiedDirectoryTimes(projectDir, scratchProject);
 }
 
 /**
@@ -1814,6 +1886,12 @@ function firstLiveTreeDrift(before, after) {
  * into the developer's checkout and every one of them has to come back in
  * `links` for cleanup to unlink it by name rather than trust a recursive
  * remove's symlink handling — the same care `stageProjectOverlay` takes.
+ *
+ * Each level's DIRECTORY timestamps are restored as that level returns, for the
+ * same reason the staging restores its own: a `mkdir` carries the moment it
+ * ran, so a codebase whose module initialization reads a directory mtime would
+ * see this copy's clock rather than the checkout's. The recursion is already
+ * deepest-first, so the parent is touched only once every child has been.
  */
 async function copyStagedProject(from, to, links) {
   await mkdir(to, { recursive: true });
@@ -1833,6 +1911,7 @@ async function copyStagedProject(from, to, links) {
       await cp(source, target, { dereference: false, preserveTimestamps: true });
     }
   }
+  await copyDirectoryTimes(from, to);
 }
 
 /**

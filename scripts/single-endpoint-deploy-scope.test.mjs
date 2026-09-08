@@ -2919,6 +2919,54 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  // Codex P1, round 26 on #1107: `fs.cp`'s `preserveTimestamps` covers FILES.
+  // Under this repository's Node every DIRECTORY the copy creates carries the
+  // moment the copy created it, so a hook that makes its incremental decision
+  // from a directory's mtime — the directory-level form of the file comparisons
+  // rounds 17 and 19 already fixed — saw a past-dated `$RESOURCE_DIR` during the
+  // deploy and a freshly stamped one here. The staging restores every copied
+  // directory's timestamps from its live original, deepest-first.
+  //
+  // The hook is the whole predeploy, with a prewritten artifact and no build, so
+  // nothing writes into `$RESOURCE_DIR` between the restore and the comparison.
+  const directoryMtimeFixture = {
+    functionsConfig: {
+      predeploy: [
+        'if [ "$RESOURCE_DIR" -ot "$PROJECT_DIR/stamp" ]; then cp "$RESOURCE_DIR/group.js" "$RESOURCE_DIR/lib/index.js"; fi',
+      ],
+    },
+    files: {
+      stamp: "",
+      "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+      "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+    },
+  };
+
+  it("rehearses a directory-mtime incremental hook against the live timestamps", async () => {
+    await withFunctionsProject(directoryMtimeFixture, async (configPath) => {
+      const { utimes } = await import("node:fs/promises");
+      const past = new Date(Date.now() - 3_600_000);
+      await utimes(join(dirname(configPath), "functions"), past, past);
+      expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject({
+        functionsAttempted: true,
+        bugReportInvokerSelected: true,
+      });
+    });
+  });
+
+  it("still exempts that hook when the live directory is the newer one", async () => {
+    // The control, and the reason the case above is attributable to the
+    // restored directory mtime rather than to the hook always grouping: the
+    // same fixture with the STAMP past-dated instead leaves `$RESOURCE_DIR`
+    // newer, the copy never happens, and the single endpoint stays provable.
+    await withFunctionsProject(directoryMtimeFixture, async (configPath) => {
+      const { utimes } = await import("node:fs/promises");
+      const past = new Date(Date.now() - 3_600_000);
+      await utimes(join(dirname(configPath), "stamp"), past, past);
+      expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+    });
+  });
+
   it.each([
     ["the copied Functions source", "functions/src/index.ts"],
     ["a copied project-root file", "firebase.json"],

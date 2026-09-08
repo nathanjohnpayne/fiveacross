@@ -2915,6 +2915,93 @@ else
   pass "admin-options-control: reading app.options without mutating it still proves the single-endpoint scope exact (rc=$RC28B)."
 fi
 
+
+# ---------------------------------------------------------------------------
+# Cases 29a-29b (#547 — Codex P1, round 26): the staging gives every COPIED
+# DIRECTORY the timestamps of the directory it was copied from.
+#
+# `fs.cp`'s `preserveTimestamps` covers files. Under this repository's Node the
+# directories the copy creates carry the moment the copy created them, so a hook
+# that makes an incremental decision from a DIRECTORY's mtime — the directory
+# form of the file comparisons rounds 17 and 19 already fixed — saw a past-dated
+# `$RESOURCE_DIR` during the deploy and a freshly stamped one in the rehearsal,
+# and could take one branch here and the other for real.
+#
+# The fixture's Functions hook writes through the staging overlay into the live
+# checkout ONLY when it sees `$RESOURCE_DIR` NEWER than a project-root stamp.
+# That write is the classifier's fatal drift status (3), so which timestamp the
+# hook read is legible from deploy.sh's own behaviour. 29a past-dates the live
+# Functions directory: with the restored timestamps the hook sees the older
+# directory, writes nothing, and the deploy publishes. 29b is the control — the
+# same fixture with the STAMP past-dated instead, so the hook really is looking
+# at a newer `$RESOURCE_DIR`, writes, and stops the deploy. Without 29b, 29a
+# would pass for a hook that never ran.
+# ---------------------------------------------------------------------------
+init_dir_mtime_repo() {
+  local repo="$1"
+  mkdir -p "$repo/functions/src" "$repo/dist" "$repo/shared"
+  (
+    cd "$repo"
+    git init --quiet -b feature/deploy-test
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    : > shared/stamp
+    : > shared/toggle
+    printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
+    # Declared as a builder call so the classifier's source pre-check offers it
+    # as a candidate and the rehearsal — and therefore the hook — runs.
+    printf '%s\n' \
+      "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
+      "export const dailyEngagementEmail = onSchedule('every day 00:00', () => {});" \
+      > functions/src/index.ts
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":["[ \"$RESOURCE_DIR\" -nt \"$PROJECT_DIR/shared/stamp\" ] && printf x >> shared/toggle || true"]}}' > firebase.json
+    git add -A
+    git commit --quiet -m "initial"
+  )
+}
+
+run_dir_mtime_case() {
+  local case_id="$1"
+  local past_dated="$2"
+  local expectation="$3"
+  local repo="$WORKDIR/case${case_id}-dir-mtime"
+  init_dir_mtime_repo "$repo"
+  # A timestamp far enough back that no filesystem resolution can call it a tie.
+  touch -t 202001010000 "$repo/$past_dated"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+  : >"$WORKDIR/npm-calls-${case_id}.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  NPM_LOG="$WORKDIR/npm-calls-${case_id}.log" \
+    bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail" \
+    >"$WORKDIR/case${case_id}.out" 2>"$WORKDIR/case${case_id}.err"
+  local rc=$?
+  set -e
+  if [[ "$expectation" == "published" ]]; then
+    if [[ $rc -ne 0 ]]; then
+      fail "dir-mtime ($case_id): the rehearsed hook saw a fresh \$RESOURCE_DIR and mutated the checkout (rc=$rc). stderr was:"
+      cat "$WORKDIR/case${case_id}.err" >&2
+    elif [[ ! -s "$WORKDIR/ofd-calls-${case_id}.log" ]]; then
+      fail "dir-mtime ($case_id): the deploy never published, so nothing here is attributable to the restored directory mtime."
+    else
+      pass "dir-mtime ($case_id): a copied directory carries its live timestamps, so the hook answers as it will in the deploy (rc=$rc)."
+    fi
+  else
+    if [[ $rc -eq 0 ]]; then
+      fail "dir-mtime ($case_id): the hook never wrote, so 29a's pass is not attributable to the timestamp it read."
+    elif ! grep -q 'mutated this checkout during classification' "$WORKDIR/case${case_id}.err"; then
+      fail "dir-mtime ($case_id): the deploy stopped for some reason other than the hook's write. stderr was:"
+      cat "$WORKDIR/case${case_id}.err" >&2
+    else
+      pass "dir-mtime ($case_id): a genuinely newer \$RESOURCE_DIR still takes the other branch (rc=$rc)."
+    fi
+  fi
+}
+
+run_dir_mtime_case 29a functions published
+run_dir_mtime_case 29b shared/stamp stopped
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
