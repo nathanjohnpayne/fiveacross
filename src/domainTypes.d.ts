@@ -343,6 +343,68 @@ export interface EventDoc {
   // with `winners: []` = computed, no eligible winner (the explicit no-award
   // record the write-once guard needs). Never recomputed after it exists.
   mostLovedPhoto?: MostLovedPhotoAward;
+  /**
+   * The post-Event archive stamp (ms epoch, #134,
+   * specs/post-sailing-archive.md): when an Admin froze this Event. Written in
+   * the SAME update that flips `status` to `'archived'` and clears `archiving`,
+   * so no reader ever sees an archived Event with no stamp or a stamp on a live
+   * one. Absent until the Event is archived.
+   *
+   * Named at arm's length from `frozenAt` for the reason `standingsFreezeAt` is
+   * (ADR 0011): `frozenAt` stamps the FINALE — competitive scoring stops, the
+   * podium computes, the closing Day opens, and the Event keeps running. This
+   * stamps the END — gameplay writes are denied at the rules boundary from here
+   * on. Two different events, hours or weeks apart.
+   */
+  archivedAt?: number;
+  /** The generation the flip was bound to — written by the flip alone, locked with the record (#1157). */
+  archivedUnder?: number;
+  /**
+   * The QUIESCING phase of the archive (#134, specs/post-sailing-archive.md §
+   * "The quiesce protocol"). The Admin's FIRST archive write sets this; the
+   * rules then treat the Event exactly as if it were archived for every
+   * gameplay write, so the roster, the Day honours and the Claim queue stop
+   * moving. Only then does the second write flip `status` and clear this flag.
+   *
+   * Without it the archive is one document read and one document write, and
+   * neither can serialize against a Board write or a Claim create in another
+   * collection — so a Mark committed alongside the flip would land on an Event
+   * the rules immediately make permanent.
+   *
+   * REVERSIBLE until the archive commits, deliberately: an abandoned or failed
+   * archive must not leave an Event shut forever, so an Admin may clear it. It
+   * is inert afterwards — the freeze is carried by `status`, which is
+   * write-once. Absent on every Event that is not mid-archive.
+   */
+  archiving?: boolean;
+  /**
+   * WHICH quiesce this is (#134, Codex P1 on PR #1139): a MONOTONIC GENERATION
+   * COUNTER — a positive integer — minted by `beginArchive` beside `archiving`,
+   * and unchanged for as long as that one closing state holds.
+   *
+   * `archiving: true` says the Event is shut; it cannot say WHICH shut. The
+   * archive's second write is decided against one closing state and then
+   * commits against whatever the transaction finds — so an Event reopened and
+   * shut AGAIN underneath a slow caller (an Admin reopening play, gameplay
+   * resuming, a second archive beginning) presents an `archiving: true`
+   * indistinguishable from the first. Comparing the generation the caller
+   * opened against with the one the transaction sees is what tells the two
+   * apart, and `firestore.rules` requires the flip write to name it in
+   * `archivedUnder`.
+   *
+   * A COUNTER rather than an opaque id (Phase 4b P1 on PR #1157, run 4): the
+   * rules can only see the ONE value the document still carries, so "different
+   * from the stored one" let a generation come back into force after a second
+   * quiesce had replaced it (1, then 2, then 1 again). Every shut must instead
+   * install a number STRICTLY GREATER than the stored one, which makes each
+   * generation dead the moment it is superseded, permanently, with the
+   * document's own field as the high-water mark. Preserved when `beginArchive`
+   * is called on an Event that is already closing, because that call is
+   * idempotent and joins the quiesce already in force. REVERSIBLE and inert
+   * exactly as `archiving` is — the freeze is carried by `status`, which is
+   * write-once — and absent on every Event that has never been mid-archive.
+   */
+  archiveToken?: number;
   // Presentational, event-scoped hide/mute of a Player's content (ADR 0004
   // Phase 0) — NOT hard access revocation. An admin-maintained roster of banned
   // uids kept on the (already admin-writable) event doc; a follow-up (#108) will
@@ -370,7 +432,8 @@ export interface EventDoc {
    * (calls, not distinct paths), and the membership check itself spends one.
    * A switch on any third document would be unreadable from Storage, so the
    * only reachable home is a document the Storage predicate already fetches —
-   * this one, which `isEventAdmin()` (`storage.rules:7-10`) already reads.
+   * this one, which both proof-media arms already read (`storage.rules`:
+   * `eventClosedToPlay` on upload, `mayDeleteProofMedia` on delete).
    *
    * NOT CLIENT-WRITABLE, and that is not yet true: the `events/{eventId}`
    * update rule has no key whitelist, so until #804 adds an immutability

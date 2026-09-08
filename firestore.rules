@@ -38,6 +38,144 @@ service cloud.firestore {
     function admitted(eventId) {
       return admittedWithEvent(eventId, eventData(eventId));
     }
+    // The post-Event freeze (#134, specs/post-sailing-archive.md). An Event that
+    // is CLOSING (`archiving: true`) or ARCHIVED (`status: 'archived'`) accepts
+    // NO GAMEPLAY WRITE from anyone — Boards, Player rows, per-Day honours,
+    // Prompts, Proofs, Claims, Doubts, Hearts, Moments, retractions and Tally
+    // markers alike, and Admins are bound by it too: an "archive" whose own
+    // organiser can still mark a square is not a frozen record.
+    // `specs/path-addressing-and-root.md` § D8 states the same requirement from
+    // the addressing side and is explicit that hiding the controls client-side
+    // would not satisfy it.
+    //
+    // TWO STATES, ONE PREDICATE, and the first one is why the record can be
+    // trusted at all. `archiving` is the QUIESCING phase: the Admin's first
+    // write shuts gameplay, and only once the inputs have been re-read against
+    // that shut Event is the snapshot taken and `status` flipped. Without it the
+    // archive is one document read and one document write, which can never
+    // serialize against a Board write or a Claim create in another collection —
+    // so a Mark that committed alongside it would be missing from a record the
+    // rules then make permanent, and a Claim could go pending one instant
+    // before the freeze that makes it unresolvable (Codex P1, PR #1139). Both
+    // halves deny identically here, because a quiescing phase a Player could
+    // still write through would quiesce nothing.
+    //
+    // `archiving` is REVERSIBLE and `status` is not. An abandoned archive must
+    // not leave an Event shut forever, so the Event arm below lets an Admin
+    // clear the flag right up until the archive commits; afterwards it is inert,
+    // because `status: 'archived'` is write-once and denies here on its own.
+    //
+    // MODERATION IS NOT A GAMEPLAY WRITE, and is deliberately left open. Every
+    // `isAdmin(eventId)` arm below — hide/restore, delete, ban, resolve a
+    // dangling claim, edit Event config — keeps working on an archived Event,
+    // because a permanent record needs a takedown path (a reported photo that
+    // can never be hidden again is the support incident, #808).
+    //
+    // READS ARE UNTOUCHED. An archived Event stays exactly as readable as it
+    // was live, to exactly the audience it was readable to. Who may read an
+    // archived Event, and for how long, is #808's question; this ticket
+    // deliberately answers only the write half.
+    //
+    // The `exists()` guard, and the `'active'` / `false` defaults, all preserve
+    // today's behaviour rather than extending the freeze by accident: an Event
+    // document that carries neither key (every doc written before they were
+    // consumed) reads as OPEN, and a write under an Event id with no document
+    // at all is decided by the arm's own rules exactly as it is today, rather
+    // than newly erroring on a missing `get()`.
+    function eventClosedToPlay(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId))
+        && (eventData(eventId).get('status', 'active') == 'archived'
+            || eventData(eventId).get('archiving', false) == true);
+    }
+    function eventOpenForPlay(eventId) {
+      return !eventClosedToPlay(eventId);
+    }
+    // The QUIESCE ALONE — shut, but not yet frozen (#134, Codex P2 on PR #1139).
+    // `eventClosedToPlay` above is true for BOTH halves of the freeze, and the
+    // two halves want OPPOSITE answers about the deletes below.
+    //
+    // The record is read between the two writes: `archiveEvent` re-reads the
+    // roster and every Day's honour pin from the server after the close, and
+    // then commits in a transaction that READS ONLY THE EVENT DOCUMENT. A
+    // Firestore transaction serializes against the documents it reads, so a
+    // Player row or a Day honour DELETED in that window neither conflicts with
+    // the freeze nor retries it — the write-once record simply keeps a row
+    // moderation had already removed, permanently. Those two deletes are the
+    // only admin writes that define what the snapshot contains, so they hold
+    // still for the length of the quiesce, exactly as the gameplay writes do.
+    //
+    // ONCE ARCHIVED THEY REOPEN, and that asymmetry is the point: a permanent
+    // record needs a takedown path (#808), the write-once clause protects
+    // `status`/`archivedAt`/`archive` and nothing else, and the archived
+    // Leaderboard renders the frozen record rather than these documents. The
+    // remedy while closing is the one the console already offers beside the
+    // button — reopen play, moderate, archive again.
+    function eventQuiescing(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId))
+        && eventData(eventId).get('archiving', false) == true
+        && eventData(eventId).get('status', 'active') != 'archived';
+    }
+    // The flip is BOUND to the quiesce the record was read against (#134,
+    // Codex P1 on PR #1139). `archiving: true` says the Event is shut; it
+    // cannot say WHICH shut. Play can be reopened and shut AGAIN while a
+    // snapshot is being read — gameplay resumes, Marks land, a second archive
+    // begins — and the document the freeze then writes against carries an
+    // `archiving: true` indistinguishable from the first, so stale standings
+    // commit as a permanent record.
+    //
+    // `beginArchive` mints `archiveToken` per quiesce and the writer restates
+    // the one it read; this requires the two to agree, so a write carrying a
+    // SUPERSEDED generation is denied at the boundary rather than only by the
+    // client that happens to check. It also requires the stored closing state
+    // to CARRY one: an unidentified quiesce is exactly the state the binding
+    // exists to tell apart from another, so it fails closed — `beginArchive`
+    // mints one, which is how a closing state shut by a pre-token build becomes
+    // archivable again.
+    //
+    // Its own helper, on this arm only. The general Event arm deliberately does
+    // NOT type-check the field: that arm sits against Firestore's
+    // 1000-expression cap (#850/#934), and a malformed token can only ever fail
+    // the flip closed here, never open a hole.
+    // ONE validity predicate for the generation, shared by the shut, the
+    // binding and the repair (Codex P2 on PR #1157, round 8), and the same one
+    // the client's `usableArchiveToken` applies: a POSITIVE INTEGER.
+    //
+    // The generation is a MONOTONIC COUNTER, not an opaque id (Phase 4b P1 on
+    // PR #1157, run 4). An opaque token compared only against the value the
+    // document still carries proved nothing about freshness: close and reopen
+    // under A, close and reopen under B, and a delayed shut carrying A passes
+    // again because A != B — after which an outstanding `archiveEvent(A)`, or a
+    // direct flip restating `archivedUnder: A`, archives a closing state it was
+    // never taken against. A number that must strictly INCREASE on every shut
+    // cannot come back: once generation N is stored, every generation below it
+    // is dead for the life of the Event, so a replayed one is refused by
+    // arithmetic rather than by an inequality that only sees one step back.
+    function usableArchiveToken(value) {
+      return value is int && value > 0;
+    }
+    // The stored generation as a NUMBER the shut and the repair can order
+    // against, and 0 for a document carrying none this build can read (absent,
+    // or a string left by a build that predates the counter). Read as `is
+    // number` rather than `is int` deliberately: a hand-written float is not a
+    // usable generation, but the next one still has to EXCEED it, or the
+    // repair would hand back a counter that had already been passed.
+    function storedGeneration(stored) {
+      return stored.get('archiveToken', 0) is number ? stored.get('archiveToken', 0) : 0;
+    }
+    // The binding is a FLIP-ONLY field, `archivedUnder`, that the flip must
+    // write and that must equal the stored generation (Phase 4b P1 on PR #1157,
+    // run 3). Comparing the incoming `archiveToken` was no binding at all:
+    // `request.resource.data` is the whole resulting document, so a flip that
+    // omitted the token inherited the stored one and passed — a stale,
+    // tokenless flip could archive generation B after A was abandoned. A field
+    // the document does not carry until the flip cannot be inherited, and once
+    // written it is locked with the rest of the record.
+    function boundToStoredQuiesce(stored, incoming) {
+      return usableArchiveToken(stored.get('archiveToken', 0))
+        && !('archivedUnder' in stored)
+        && incoming.get('archivedUnder', 0) is int
+        && incoming.get('archivedUnder', 0) == stored.get('archiveToken', 0);
+    }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
     // absent means off; adding, removing, or changing the field is therefore a
@@ -1051,7 +1189,67 @@ service cloud.firestore {
       // beyond any real Event and finite by construction.
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
+      //
+      // `status` / `archiving` / `archivedAt` (#134,
+      // specs/post-sailing-archive.md) are the post-Event freeze, and they ride
+      // this same admin gate rather than opening any new write path: a Player
+      // cannot write this document at all, so "admin-only archive toggle" is
+      // inherited, not invented. What the clauses below add is the part the gate
+      // cannot express on its own —
+      //   - `status`, now that something finally reads it, must be one of the
+      //     two contract values. A typo'd status would read as OPEN through
+      //     `eventOpenForPlay`'s `'active'` default, so an Event an organiser
+      //     believed was frozen would silently still accept Marks.
+      //   - `archiving` is an admin-only BOOLEAN, and deliberately NOT
+      //     write-once: an abandoned archive must be reversible, or a failed
+      //     freeze would shut an Event's gameplay forever with no way back
+      //     (spec § "The quiesce protocol"). Once `status` is 'archived' the
+      //     flag is inert — the freeze is carried by `status`, which is locked.
+      //   - THE FLIP ITSELF IS NOT ALLOWED HERE. This arm may only produce
+      //     `status: 'archived'` on a document that was ALREADY archived, which
+      //     is what keeps moderation and configuration working after the freeze.
+      //     Minting the archive is the dedicated arm ABOVE, which is where the
+      //     quiesce precondition and the generation binding live. Two arms
+      //     rather than three more clauses here for a mechanical reason as well
+      //     as a legible one: this arm already sits one clause from Firestore's
+      //     1000-expression cap (#850/#934), and `allow` statements
+      //     short-circuit — the archive write is decided by the small arm and
+      //     never pays for the schedule and freeze-boundary checks below.
+      //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`
+      //     and `archivedAt` are locked to their stored values, so a second
+      //     archive pass cannot restamp the freeze and un-archiving is not a
+      //     client operation. Every OTHER field stays editable, so moderation
+      //     (`bannedUids`) and configuration survive the freeze. The durable
+      //     `archive` RECORD, and the write-once clause that locks it, are
+      //     #1151's — this ticket freezes the Event, not the standings.
+      //
+      // THE LIFECYCLE FIELDS NEVER MOVE ON THIS ARM (#134; Codex P1 on PR
+      // #1157, round 6). `status`, `archiving`, `archivedAt` and
+      // `archiveToken` are moved only by the dedicated arms BELOW — the shut,
+      // the reopen, the flip and the repair — each of which states the one
+      // transition it performs and the shape it requires. The token is in the
+      // set too (Codex P2, round 7): a closing Event's generation must be
+      // IMMUTABLE here, or a whole-document writer could restore an abandoned
+      // token B beside the current quiesce and a stale `archiveEvent(B)` would
+      // pass `boundToStoredQuiesce` after all. This arm refuses any change to
+      // the four in ONE `affectedKeys` check, which is what keeps the freeze write-once (an
+      // un-archive, a second stamp, a re-shut under the old generation and a
+      // stray stamp on a live Event are all a CHANGE to one of them and land
+      // here first), and which is cheaper than the five shape and lock clauses
+      // it replaces: this arm sits at Firestore's 1000-expression cap (#1142
+      // item 1), and the transition check the round-6 finding needed did not
+      // fit beside them. Restating an UNCHANGED value is not a change, so a
+      // partial update that echoes the stored state still passes. A create
+      // has no stored document to diff against, so it is held to the one
+      // shape a new Event may be born in: open, not closing, no stamp.
       allow create, update: if isAdmin(eventId)
+        && (resource == null
+            ? (request.resource.data.get('status', 'active') == 'active'
+                && request.resource.data.get('archiving', false) == false
+                && !('archivedAt' in request.resource.data)
+                && !('archivedUnder' in request.resource.data))
+            : !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken', 'archivedUnder']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1174,7 +1372,152 @@ service cloud.firestore {
                 && ('days' in request.resource.data) == ('days' in resource.data)
                 && (!('days' in request.resource.data)
                     || request.resource.data.days == resource.data.days)));
-      allow delete: if isAdmin(eventId);
+      // THE SHUT, on its own arm (Codex P1 on PR #1157). `abandonArchive`
+      // deliberately leaves `archiveToken` in place when it clears `archiving`,
+      // so a write that merely set `archiving: true` again re-shut the Event
+      // under the OLD generation, and a stale `archiveEvent(A)` — one whose
+      // record was read before the reopen — then passed `boundToStoredQuiesce`
+      // and could commit standings from before gameplay resumed. Every
+      // false-to-true transition must therefore install a generation that has
+      // never been in force, and may touch nothing else: the general arm ABOVE
+      // accepts `archiving` only as `false`, so this is the only way a live
+      // Event is ever shut. It sits AFTER that arm on purpose — the Event arm
+      // is at Firestore's 1000-expression cap, and an `allow` placed ahead of
+      // it is paid for by every ordinary admin write; placed here it is reached
+      // only by a write the general arm has already refused at its cheap
+      // `archiving` check. Reopening (true to false) stays on the general arm,
+      // where the token is left as it was so a conditional
+      // `abandonArchive(expectedToken)` can still tell its own generation from
+      // a newer one.
+      //
+      // STRICTLY INCREASING, not merely different (Phase 4b P1 on PR #1157, run
+      // 4). `!=` compared the new generation against ONE stored value — the
+      // immediately preceding one — which says nothing about whether the
+      // generation was ever in force before that. Shut under 1, reopen, shut
+      // under 2, reopen, and a delayed shut carrying 1 passed (1 != 2), putting
+      // a dead generation back in force: an outstanding `archiveEvent(1)`, or a
+      // direct write restating `archivedUnder: 1`, then archived a closing
+      // state neither was taken against. `>` is what makes a used generation
+      // unusable FOREVER rather than for one step, without the rules having to
+      // remember anything: the stored counter is the high-water mark, and the
+      // document itself carries it.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) != true
+        && resource.data.get('status', 'active') != 'archived'
+        && isAdmin(eventId)
+        && request.resource.data.get('archiving', false) == true
+        && usableArchiveToken(request.resource.data.get('archiveToken', 0))
+        && request.resource.data.get('archiveToken', 0) > storedGeneration(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiving', 'archiveToken']);
+      // THE REOPEN, on its own arm. True to false, touching nothing else, from
+      // the quiescing state only: `abandonArchive` writes exactly this. The
+      // generation token is deliberately LEFT where it is — it only ever means
+      // anything while `archiving` is true, and a conditional
+      // `abandonArchive(expectedToken)` still needs it to tell its own
+      // generation from a newer one. The next shut mints a fresh one, and the
+      // shut arm refuses the old one, so leaving it is harmless (Codex P1 on
+      // PR #1157, round 6).
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && isAdmin(eventId)
+        && request.resource.data.get('archiving', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiving']);
+      // THE ARCHIVE FLIP, on its own arm and in its own transaction-shaped
+      // write (#134, Codex P1+P2 on PR #1139). Everything the freeze needs to be
+      // trustworthy is stated here, in one place:
+      //
+      //   - it may only be taken from the QUIESCED state, so a direct SDK write
+      //     cannot skip the window in which gameplay was already shut and the
+      //     roster had stopped moving;
+      //   - and only from the SAME quiesce the record was read against
+      //     (`boundToStoredQuiesce`), because being shut is not the same as
+      //     being the shut the snapshot describes: play reopened and shut again
+      //     underneath a slow read presents an identical flag. The writer
+      //     restates the token it read, so a superseded generation is denied
+      //     here rather than only by the client that checks. Restating an
+      //     UNCHANGED value leaves the field out of `affectedKeys()`, which is
+      //     why the `hasOnly` guard below names only the three transition keys
+      //     — a write that MOVED it is refused by the binding clause first, and
+      //     by that guard after;
+      //   - it must carry a numeric, bounded `archivedAt`, which is what makes
+      //     "no reader ever sees an archived Event with no stamp" an enforced
+      //     invariant rather than a property of one client's writer;
+      //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
+      //     this arm skip the configuration validation below without opening a
+      //     hole through it: a write that also moved `days`, `bannedUids` or
+      //     `standingsFreezeAt` is not an archive flip and falls through to the
+      //     arm that checks those fields (where it is denied, because the stored
+      //     document is not archived yet).
+      //
+      // What this arm deliberately does NOT yet require is a COMPLETE frozen
+      // record. #1149 lands the lifecycle primitive only: the flip carries
+      // `status`, `archivedAt` and the cleared quiesce, and nothing more. The
+      // `archive` record, its whole-record validation and its own write-once
+      // lock arrive with #1151, which widens the `hasOnly` guard below by one
+      // key at the same time.
+      //
+      // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: a
+      // write that reaches this arm has already been refused by the general
+      // arm's `affectedKeys` check, and the three dedicated arms sit AFTER
+      // that arm so an ordinary admin write never pays for them at all.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && boundToStoredQuiesce(resource.data, request.resource.data)
+        && isAdmin(eventId)
+        && request.resource.data.status == 'archived'
+        && request.resource.data.archivedAt is number
+        && request.resource.data.archivedAt > 0
+        && request.resource.data.archivedAt < 4102444800000
+        // The quiesce ends with the freeze. Leaving the flag set would be
+        // harmless (`status` denies on its own from here) but it would also be
+        // a second, clearable spelling of a state that must not be clearable.
+        && request.resource.data.get('archiving', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder']);
+      // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
+      // Event carrying NO usable generation — a document shut out of band, or
+      // by a build that predates the counter — cannot be flipped (the flip is
+      // bound to a stored generation) and, with the token immutable on the
+      // general arm, could not be given one either. `beginArchive` mints a
+      // generation when it finds that state; this arm admits exactly that write
+      // and nothing else: from the quiescing state, by an admin, when the
+      // stored generation is absent, non-integer or not positive, installing a
+      // positive integer that still EXCEEDS whatever number the document
+      // carries (Phase 4b P1 on PR #1157, run 4 — a repair that reset the
+      // counter would hand a dead generation back), and touching nothing else.
+      // A closing Event that already HAS a usable generation never matches —
+      // its generation is settled until play reopens.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && !usableArchiveToken(resource.data.get('archiveToken', 0))
+        && isAdmin(eventId)
+        && usableArchiveToken(request.resource.data.get('archiveToken', 0))
+        && request.resource.data.get('archiveToken', 0) > storedGeneration(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiveToken']);
+      // The DELETE of the Event document is the ONE admin write the freeze
+      // refuses (#134, Phase 4b P1 on PR #1139). Deleting a document does not
+      // delete its subcollections, so an admin deleting an archived Event
+      // would destroy the write-once record while every Player row, Board and
+      // Proof beneath it survived — and `eventClosedToPlay` reads a MISSING
+      // Event document as open, which is what keeps every Event written before
+      // the freeze existed playable. The two together turn one delete into a
+      // reopen of writes under a subtree whose record is gone. Denied for BOTH
+      // halves of the freeze, because a delete during the quiesce reopens the
+      // same subtree underneath the snapshot being read; the remedy while
+      // closing is the console's own: reopen play first. The stored document is
+      // read from `resource` rather than through `eventClosedToPlay`, which
+      // would spend a `get()` on the document this arm is already holding. A
+      // takedown of the archive itself is #808's question and a server-side
+      // operation, never a client one.
+      allow delete: if isAdmin(eventId)
+        && !(resource.data.get('status', 'active') == 'archived'
+             || resource.data.get('archiving', false) == true);
 
       // Community-editable prompt pool.
       match /items/{itemId} {
@@ -1216,6 +1559,11 @@ service cloud.firestore {
         // only an admin's `update` (the isAdmin(eventId) arm below) may transition
         // a row to 'rejected' — a non-admin can never CREATE one pre-rejected.
         allow create: if signedIn()
+          // #134: an archived Event's pool is closed — to the admin curated-add
+          // arm below as well as the community one. Adding a Prompt to a frozen
+          // Event can only ever be inert (ADR 0003: Boards froze at join), and a
+          // pending submission nobody can approve into play is worse than inert.
+          && eventOpenForPlay(eventId)
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
           && request.resource.data.text.size() <= 80
@@ -1243,6 +1591,9 @@ service cloud.firestore {
             && targetDayIndexUnchangedOrValid()
             && itemPoolSpicyUnchangedOrValid())
           || (signedIn()
+              // #134: reporting is a player write, so it stops at the freeze.
+              // The admin arm above does NOT — moderation outlives the Event.
+              && eventOpenForPlay(eventId)
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
               && request.resource.data.reportCount == resource.data.reportCount + 1);
         allow delete: if isAdmin(eventId);
@@ -1268,8 +1619,21 @@ service cloud.firestore {
       match /players/{uid} {
         allow read: if signedIn();
         allow create, update: if (isOwner(uid) || isAdmin(eventId))
+          // #134: the Player row IS the standings, and the standings are frozen
+          // once the Event is archived — so no stat write, and no late join,
+          // lands after the freeze. Admin DELETE (below) stays open as the
+          // moderation path.
+          && eventOpenForPlay(eventId)
           && reshuffleCounterMonotonic();
-        allow delete: if isAdmin(eventId);
+        // …but NOT while the record is being read (#134, Codex P2 on PR #1139).
+        // This row is one of the two documents the snapshot is built from, and
+        // the freeze's transaction reads only the Event document, so a delete
+        // landing between the server re-read and the commit neither conflicts
+        // with it nor retries it: the permanent record keeps a row moderation
+        // had already removed. See `eventQuiescing` — the delete reopens the
+        // moment the record exists, because that record is what the archived
+        // Leaderboard renders and a permanent one needs a takedown path (#808).
+        allow delete: if isAdmin(eventId) && !eventQuiescing(eventId);
 
         // Immutable, server-authored direct Board transition records. The
         // owner consumes them to deliver durable analytics after an offline
@@ -1305,6 +1669,8 @@ service cloud.firestore {
       match /reshuffles/{markerId} {
         allow read: if signedIn();
         allow create: if signedIn()
+          // #134: a reshuffle replaces a card, which is play.
+          && eventOpenForPlay(eventId)
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.n is int
           && request.resource.data.n >= 1
@@ -1367,6 +1733,11 @@ service cloud.firestore {
         match /boards/{uid} {
           allow read: if isOwner(uid) || isAdmin(eventId);
           allow create, update: if (isOwner(uid) || isAdmin(eventId))
+            // #134: THE Mark path. Placed ahead of every shape check below so
+            // an archived Event denies in O(1) — before the cells diff, the
+            // prompt-carry unroll, or any of the evaluation-budget reasoning
+            // those clauses depend on.
+            && eventOpenForPlay(eventId)
             && isCanonicalDay(dayIndex)
             && request.time.toMillis() >= get(/databases/$(database)/documents/events/$(eventId)).data.days[int(dayIndex)].unlockAt
             // The #457 cells-map contract: any write that CREATES a board or
@@ -1442,6 +1813,9 @@ service cloud.firestore {
         match /meta/{metaId} {
           allow read: if signedIn();
           allow create: if signedIn()
+            // #134: an unclaimed daily honour stays unclaimed once the Event is
+            // archived — the frozen record already says who holds each Day.
+            && eventOpenForPlay(eventId)
             && metaId == dayIndex
             && isCanonicalDay(dayIndex)
             && request.time.toMillis() >= get(/databases/$(database)/documents/events/$(eventId)).data.days[int(dayIndex)].unlockAt
@@ -1450,7 +1824,14 @@ service cloud.firestore {
             && request.resource.data.firstBingo.displayName.size() > 0
             && request.resource.data.firstBingo.displayName.size() <= 100
             && request.resource.data.firstBingo.at is number;
-          allow delete: if isAdmin(eventId);
+          // Held still for the length of the quiesce, for the same reason the
+          // Player row above is (#134, Codex P2 on PR #1139): this pin is the
+          // other document the frozen record is built from, and the freeze's
+          // transaction reads only the Event document — so a delete taken
+          // between the server re-read and the commit is neither ordered
+          // against it nor caught by it, and the archive keeps an honour
+          // moderation had removed. Reopens once the record lands.
+          allow delete: if isAdmin(eventId) && !eventQuiescing(eventId);
         }
       }
 
@@ -1458,11 +1839,24 @@ service cloud.firestore {
       match /proofs/{proofId} {
         // Non-admins can read only visible ('active') proofs; hidden/flagged
         // proofs are moderation-only and readable by admins.
-        allow read: if signedIn() && (isAdmin(eventId) || resource.data.status == 'active');
+        // A MISSING Proof document reads as not-found for any signed-in user
+        // (Codex P2 on PR #1157): `resource` is null for a get of a document
+        // that does not exist, and `resource.data.status` on it errored into a
+        // denial, so an owner's media-revocation drain could never observe the
+        // absence it needs before retrying a Storage delete. The cost is an
+        // existence oracle by id — a signed-in user can tell "no such Proof"
+        // from "a Proof you may not read" — on random document ids, which the
+        // spec records as a residual. Lists never see a null resource.
+        allow read: if signedIn()
+          && (resource == null || isAdmin(eventId) || resource.data.status == 'active');
         // Constrain the payload like /items: the uploader owns the doc, only the
         // known fields are allowed, the proof starts visible + unreported, and
         // moderation fields (visionFlag, thumbURL) must be server-set, not client.
         allow create: if signedIn()
+          // #134: no new Proof lands in an archived Event. The Storage half of
+          // the same denial is in `storage.rules` — a Proof document and its
+          // media must refuse together, or the archive still grows a blob.
+          && eventOpenForPlay(eventId)
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.keys().hasOnly([
                'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
@@ -1571,9 +1965,16 @@ service cloud.firestore {
         // tests/rules/cloud-vision-moderation.test.ts.
         allow update: if isAdmin(eventId)
           || (signedIn()
+              // #134: the report path is a player write and stops at the freeze.
+              && eventOpenForPlay(eventId)
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
               && request.resource.data.reportCount == resource.data.reportCount + 1);
-        allow delete: if isOwner(resource.data.uid) || isAdmin(eventId);
+        // #134: an owner can no longer delete their own Proof out of a frozen
+        // record — the Feed an archive preserves would otherwise keep changing
+        // shape. Admin delete is untouched, so a genuine takedown request still
+        // has a route (and the Admin remains able to act on their own archive).
+        allow delete: if isAdmin(eventId)
+          || (isOwner(resource.data.uid) && eventOpenForPlay(eventId));
       }
 
       // The Vision scanner's hand-off record (#1143, specs/cloud-vision-moderation.md
@@ -1600,7 +2001,11 @@ service cloud.firestore {
       // admins read the queue and resolve (confirm/reject) them.
       match /claims/{claimId} {
         allow read: if isAdmin(eventId) || isOwner(resource.data.uid);
-        allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+        // #134: no new claim after the freeze; an admin may still resolve or
+        // clear one that was already in the queue when the Event ended.
+        allow create: if signedIn()
+          && eventOpenForPlay(eventId)
+          && request.resource.data.uid == request.auth.uid;
         allow update, delete: if isAdmin(eventId);
       }
 
@@ -1634,6 +2039,11 @@ service cloud.firestore {
           allow list: if signedIn();
           allow get: if signedIn() && markerReadHasCompatibleEventId(eventId);
           allow create, update: if isOwner(markerUid)
+            // #134: the PUBLIC half of a Mark (ADR 0002) freezes with the
+            // private half — the Board write above and this attribution write
+            // are one Mark, and a freeze that stopped only one of them would
+            // leave the Tally and the Boards permanently disagreeing.
+            && eventOpenForPlay(eventId)
             && request.resource.data.uid == request.auth.uid
             && request.resource.data.displayName is string
             && request.resource.data.displayName.size() > 0
@@ -1641,7 +2051,9 @@ service cloud.firestore {
             && request.resource.data.markedAt is number
             && markerWriteHasCompatibleEventId(eventId);
           // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if isOwner(markerUid) || isAdmin(eventId);
+          // #134: unmarking is a Mark in reverse, so it stops at the freeze too.
+          allow delete: if isAdmin(eventId)
+            || (isOwner(markerUid) && eventOpenForPlay(eventId));
         }
       }
 
@@ -1654,6 +2066,8 @@ service cloud.firestore {
         // Raised BY the caller, ON someone else's Mark (no self-doubt); a forged
         // `fromUid` is denied.
         allow create: if signedIn()
+          // #134: "pics or it didn't happen" needs a live Event to answer in.
+          && eventOpenForPlay(eventId)
           && request.resource.data.fromUid == request.auth.uid
           && request.resource.data.targetUid is string
           && request.resource.data.targetUid != request.auth.uid
@@ -1703,9 +2117,13 @@ service cloud.firestore {
         // a social resolution recorded in `satisfied*`, not a gate on play (ADR 0001).
         allow update: if isAdmin(eventId)
           || (isOwner(resource.data.targetUid)
+              // #134: satisfying a Doubt attaches a Proof, which the freeze has
+              // already refused — the resolution cannot outlive the mechanism.
+              && eventOpenForPlay(eventId)
               && request.resource.data.diff(resource.data).affectedKeys()
                    .hasOnly(['satisfiedAt', 'satisfiedProofId']));
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.fromUid);
+        allow delete: if isAdmin(eventId)
+          || (isOwner(resource.data.fromUid) && eventOpenForPlay(eventId));
       }
 
       // Hearts (specs/feed-hearts.md): one Player's like on a Feed post — a
@@ -1722,6 +2140,10 @@ service cloud.firestore {
       match /hearts/{heartId} {
         allow read: if signedIn();
         allow create, update: if signedIn()
+          // #134: hearts are Feed activity, and an archived Feed is a record
+          // rather than a live surface — the frozen Most-Loved Photo award
+          // (#560) already depends on the heart count settling.
+          && eventOpenForPlay(eventId)
           // Own heart only — a forged uid is denied, and the id binding below
           // makes a cross-Player update structurally impossible too (the slot
           // id embeds the OWNER's uid; the writer's payload uid must equal
@@ -1759,7 +2181,9 @@ service cloud.firestore {
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
+        // #134: un-hearting is the toggle's other half and freezes with it.
+        allow delete: if isAdmin(eventId)
+          || (isOwner(resource.data.uid) && eventOpenForPlay(eventId));
       }
 
       // Moments (ADR 0002): a broadcast of a big social beat (BINGO / Blackout /
@@ -1769,6 +2193,11 @@ service cloud.firestore {
       match /moments/{momentId} {
         allow read: if signedIn();
         allow create: if isOwner(request.resource.data.uid)
+          // #134: no new ceremony after the freeze. The Event-wide `first_bingo`
+          // singleton in particular is the honour the archive has already
+          // frozen, so a late post would put a Moment on the Feed that the hall
+          // of fame contradicts.
+          && eventOpenForPlay(eventId)
           && request.resource.data.kind in ['bingo', 'blackout', 'first_bingo']
           // Bind the doc id to the payload kind so a caller cannot squat an id with a
           // MISMATCHED kind (issue #103). Mirrors the writer's deterministic scheme
@@ -1901,8 +2330,13 @@ service cloud.firestore {
         // over-blocks a STALE bundle's later legacy-id post for a DIFFERENT Day —
         // accepted residual in the silence direction (the current bundle's
         // day-scoped post for that other Day is untouched); see the spec.
+        // #134: a retraction is a Feed mutation. It is already unreachable on an
+        // archived Event (its paired tombstone create is denied below, and this
+        // arm requires one), but the condition is stated here too rather than
+        // left as an emergent property of another rule.
         allow delete: if isAdmin(eventId)
           || (isOwner(resource.data.uid)
+              && eventOpenForPlay(eventId)
               && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid
               && (momentId == resource.data.uid + '-' + resource.data.kind
                     ? (!resource.data.keys().hasAny(['dayIndex'])
@@ -1956,6 +2390,8 @@ service cloud.firestore {
       match /momentRetractions/{momentId} {
         allow read: if signedIn();
         allow create: if isOwner(request.resource.data.uid)
+          // #134: no tombstone after the freeze — see the moments delete above.
+          && eventOpenForPlay(eventId)
           // Exactly the contract's fields, no extras riding along. Deliberately
           // STRICTER than the moments create rule (which has no hasOnly and so
           // accepts stray fields — the honesty pin in the spec): a tombstone is

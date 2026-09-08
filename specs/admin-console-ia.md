@@ -56,7 +56,7 @@ The Proof & Claims panel's "Pending claims" count-plus-jump-link row (`#admin-pe
 
 ### Game settings (`/more/admin/settings`)
 
-`src/components/admin/GameSettings.tsx`—Easy mix (below), then Claims & proof (claim mode / photo source / EXIF strip / AI image screen / auto-hide stepper—every caption and write path per `d15-admin-proof-claims`), then Appearance › default theme (the old Default-theme section verbatim).
+`src/components/admin/GameSettings.tsx`—Easy mix (below), then Claims & proof (claim mode / photo source / EXIF strip / AI image screen / auto-hide stepper—every caption and write path per `d15-admin-proof-claims`), then Appearance › default theme (the old Default-theme section verbatim), then **End the {occasion}** (#134/#1149, [`post-sailing-archive`](post-sailing-archive.md))—the admin-only action that ends play. It sits LAST and inside this surface rather than behind a seventh hub door: it is a once-per-Event switch, not a place anyone visits, and giving it its own card would put the console's most destructive control at the same level as the prompt pool. Two actions on that child, both reversible—**Close play** (the quiesce) and **Reopen play**—and it retires them once the Event is archived, still naming that state. The irreversible **Archive** flip joins the same section with [#1151](https://github.com/nathanjohnpayne/fiveacross/issues/1151), which brings the pending-claim drain gate and the snapshot that make a one-way door safe to press.
 
 ### Easy mix slider
 

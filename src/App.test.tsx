@@ -33,6 +33,37 @@ vi.mock('./auth/AuthContext', () => ({
 // renders its ROUTING (the #434 deal-error decision) in isolation. SignIn stays
 // real so the genuine DealError panel renders; CachedCardFallback + cardCache
 // stay real so the durable-cache path is exercised end to end.
+// #134: App reads the Event document to decide whether the Card tab still has a
+// card to render. Stubbed to a mutable fixture — the routing decision is what is
+// under test, not the subscription.
+// `enabled` is recorded, not ignored: whether App opens the Event LISTENER at
+// all is itself under test (Phase 4b P1 on PR #1157), and `useEventDoc(false)`
+// subscribes to nothing.
+const eventDoc = vi.hoisted(() => ({
+  value: null as Record<string, unknown> | null,
+  enabled: [] as unknown[],
+  // The server-answered latch `useDocSub` exposes; the closed-Event redirect
+  // waits for it (Codex P2, PR #1157). Defaults to true so every other case
+  // reads as a server-backed snapshot.
+  hasServerData: true,
+  // Per-snapshot cache flag; the redirect needs the CURRENT snapshot to be the
+  // server's, not only the latch (Codex P2, PR #1157 round 8).
+  fromCache: false,
+  // An optimistic local write not yet decided by the rules (Codex P2, PR #1157
+  // round 9): the redirect waits it out too.
+  hasPendingWrites: false,
+}));
+vi.mock('./hooks/useData', () => ({
+  useEventDoc: (enabled?: unknown) => {
+    eventDoc.enabled.push(enabled);
+    return {
+      data: eventDoc.value,
+      hasServerData: eventDoc.hasServerData,
+      fromCache: eventDoc.fromCache,
+      hasPendingWrites: eventDoc.hasPendingWrites,
+    };
+  },
+}));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
 vi.mock('./components/NoticeBanner', () => ({ default: () => null }));
 vi.mock('./components/Leaderboard', () => ({ default: () => <div data-testid="ranks" /> }));
@@ -135,6 +166,8 @@ describe('App — Card route deal-error routing (#434)', () => {
     vi.stubGlobal('localStorage', new MemoryStorage());
     authState.value = {};
     eventScope.eventId = 'event-a';
+    eventDoc.value = null;
+    eventDoc.enabled = [];
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -230,6 +263,34 @@ describe('App — Card route deal-error routing (#434)', () => {
     expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
   });
 
+  // The Event LISTENER, not merely the rendered shell (Phase 4b P1 on PR #1157).
+  // `EventApp` stays mounted through every one of these states, and the
+  // `useEventDoc` call runs BEFORE the guards above can return — a hook cannot
+  // be skipped by a branch taken after it. Gated on `!!user` alone it opened a
+  // subscription for a visit the Invitation redemption had refused, and the
+  // Event read rule is signed-in-only, so the whole document reached the
+  // browser. Asserted on the `enabled` argument because that is what decides
+  // whether `useDocSub` is handed a ref or a null.
+  it.each([
+    ['held', { kind: 'held', captureId: 'c' }],
+    ['pending', { kind: 'pending', captureId: 'c' }],
+    ['retryable', { kind: 'retryable', captureId: 'c', reason: 'unavailable' }],
+    ['blocked', { kind: 'blocked', message: 'This invitation is no longer valid.' }],
+  ] as const)('opens NO Event listener while an Invitation is %s', (_kind, admission) => {
+    authState.value = { admission };
+    renderApp();
+    expect(eventDoc.enabled.length).toBeGreaterThan(0);
+    expect(eventDoc.enabled.every((on) => on === false)).toBe(true);
+  });
+
+  it('opens the Event listener once admission is clear — the control', () => {
+    // Without this the assertion above would pass on an App that never
+    // subscribes at all.
+    renderApp();
+    expect(eventDoc.enabled.length).toBeGreaterThan(0);
+    expect(eventDoc.enabled.every((on) => on === true)).toBe(true);
+  });
+
   it('withholds the routed shell while attestation authority is still settling', () => {
     authState.value = { canRenderEventContent: false, dealError: null };
     renderApp();
@@ -282,5 +343,105 @@ describe('App — Card route deal-error routing (#434)', () => {
     // sailor-1 has nothing cached -> the reload screen, never someone-else's card.
     expect(screen.getByText(DEAL_ERROR)).toBeInTheDocument();
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
+  });
+});
+
+describe('App — a closed Event routes the visit to the standings (#134)', () => {
+  // specs/post-sailing-archive.md § "The enforcement". Once the Event is shut
+  // there is no card to play — `joinAndDeal` declines the join and `Board`'s own
+  // Day-Card deal is a write the rules deny — so the Card tab routes to the
+  // standings rather than mounting the Board. The redirect is what keeps the
+  // Board, its listeners and its deal from mounting at all.
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    authState.value = {};
+    eventScope.eventId = 'event-a';
+    eventDoc.value = null;
+    eventDoc.enabled = [];
+    eventDoc.hasServerData = true;
+    eventDoc.fromCache = false;
+    eventDoc.hasPendingWrites = false;
+    authMocks.retryDeal.mockClear();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('renders the standings instead of the Board on an ARCHIVED Event', () => {
+    eventDoc.value = { status: 'archived', archivedAt: 1_700_000_000_000 };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board while an optimistic close is still PENDING — the rules may yet refuse it', () => {
+    // Codex P2, PR #1157 round 9. An Admin's own `archiving: true` is emitted
+    // server-backed but pending before the rules decide it; a refusal rolls
+    // back to open, and a replace navigation taken meanwhile cannot be undone.
+    eventDoc.hasServerData = true;
+    eventDoc.fromCache = false;
+    eventDoc.hasPendingWrites = true;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board when the CURRENT snapshot is cached, even after the server once answered', () => {
+    // Codex P2, PR #1157 round 8. `hasServerData` is a lifetime latch: a device
+    // that once saw the quiesce, then went offline while another Admin reopened
+    // play, must not be redirected off its Card by the cached closed value.
+    eventDoc.hasServerData = true;
+    eventDoc.fromCache = true;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board until the closed state is SERVER-BACKED — a cached quiesce cannot redirect', () => {
+    // Codex P2, PR #1157 round 6. This browser can hold `archiving: true` from
+    // before another Admin reopened play; the replace navigation is a URL
+    // change the later open snapshot cannot undo, so it waits for the server.
+    eventDoc.hasServerData = false;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
+    eventDoc.hasServerData = true;
+  });
+
+  it('routes a CLOSING Event the same way — shut to play, and reversible', () => {
+    // The quiesce denies every gameplay write, so the standings the Leaderboard
+    // renders simply cannot move. The Card tab has nothing to offer either way.
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('routes past a stale deal error rather than stranding the visit on Retry', () => {
+    // The failure this fixes: a deal that ran while the Event was open leaves
+    // `dealError` set, and App used to replace the Card tab with a retry surface
+    // whose Retry repeated the write the freeze denies.
+    eventDoc.value = { status: 'archived' };
+    authState.value = { dealError: DEAL_ERROR, dealErrorReason: 'permanent', dealing: false };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByText(DEAL_ERROR)).not.toBeInTheDocument();
+  });
+
+  it('leaves an OPEN Event on the Board — the control, so the routing is not vacuous', () => {
+    eventDoc.value = { status: 'active' };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+  });
+
+  it('renders the Board while the Event document has not arrived, rather than waiting', () => {
+    // A cold visit reads `null`, which is OPEN by the predicate's own default —
+    // making every LIVE Event's Card tab wait on a round trip would cost far more
+    // than one late redirect. The write half needs no such wait: `joinAndDeal`
+    // asks the server itself.
+    eventDoc.value = null;
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
   });
 });

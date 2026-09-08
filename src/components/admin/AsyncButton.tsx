@@ -10,6 +10,16 @@ import { useState, type ReactNode } from 'react';
  * the pill clears on the next attempt), and a success clears everything —
  * including the common case where the row unmounts because the subscription
  * removed it.
+ *
+ * `failureLabelFor` is the one way the pill says something OTHER than the
+ * caller's fixed `failureLabel` (#134, Phase 4b P2 on PR #1157 run 4): a write
+ * that refuses for a reason the Admin can act on — the moderation delete
+ * refused because the Proof still backs a marked square on a CLOSING Event —
+ * has to say what to do about it, and "Failed, try again" is exactly wrong
+ * there, because trying again does the same thing. It is opt-in per call site
+ * and consulted only on rejection; returning `undefined` (or omitting the prop)
+ * falls back to `failureLabel`, so no other control's copy changes and a raw
+ * Firestore error is never rendered by default.
  */
 export default function AsyncButton({
   onAction,
@@ -18,6 +28,7 @@ export default function AsyncButton({
   title,
   ariaLabel,
   failureLabel = 'Failed—try again.',
+  failureLabelFor,
 }: {
   onAction: () => Promise<unknown> | unknown;
   children: ReactNode;
@@ -25,15 +36,18 @@ export default function AsyncButton({
   title?: string;
   ariaLabel?: string;
   failureLabel?: string;
+  failureLabelFor?: (error: unknown) => string | undefined;
 }) {
   const [state, setState] = useState<'idle' | 'busy' | 'error'>('idle');
+  const [label, setLabel] = useState<string | null>(null);
   const run = async () => {
     if (state === 'busy') return;
     setState('busy');
     try {
       await onAction();
       setState('idle');
-    } catch {
+    } catch (error) {
+      setLabel(failureLabelFor?.(error) ?? null);
       setState('error');
     }
   };
@@ -51,7 +65,7 @@ export default function AsyncButton({
       </button>
       {state === 'error' && (
         <span className="pill pill-error" role="alert">
-          {failureLabel}
+          {label ?? failureLabel}
         </span>
       )}
     </>

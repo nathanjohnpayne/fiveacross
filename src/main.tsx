@@ -21,6 +21,9 @@ import { enforceBuildFloor } from './shellRecovery';
 import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
+import { drainProofMediaRevocationsOnSignIn } from './data/proofMediaRevocations';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from './firebase';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
 import { HANDOFF_AUTH_PATH } from './auth/handoffClient';
@@ -295,6 +298,24 @@ if (atCentralAuthOrigin) {
       // `emitInitialPageView`'s own doc for why Event resolution having
       // already settled here is half of the ordering guarantee it needs.
       if (urlSafeForTelemetry) void emitInitialPageView();
+      // Finish any proof-media revocation this device started and could not
+      // complete (#134, `specs/post-sailing-archive.md`; Codex P1 on PR #1157).
+      // `deleteProof` commits before it revokes the media, so a Storage failure
+      // — or a tab closed in that window — leaves an ORPHANED blob and a queued
+      // path recording it. Here is the retry that outlives the tab.
+      //
+      // Placed after resolution so the queue is read under the RESOLVED
+      // `EVENT_ID`, and gated on Firebase Auth's restored state because
+      // `storage.rules` authorises the orphan delete to its OWNER: fired before
+      // the persisted session is back it would be a guaranteed permission
+      // failure that only re-queues what it read. Fire-and-forget, and the
+      // drain itself never rejects, so this cannot delay or fail a mount.
+      if (resolution.kind === 'event') {
+        // On every signed-in transition, the restored one included — a
+        // one-shot behind `authStateReady()` skipped a Player who started
+        // signed out and signed in afterwards (Codex P2 on PR #1157, round 7).
+        drainProofMediaRevocationsOnSignIn((listener) => onAuthStateChanged(auth, listener));
+      }
       // An Event can resolve on an origin the AUTH stack has never been
       // configured for — hostname resolution is exactly what made that possible
       // (ADR 0010; Codex P1 on #576). Mounting the app there would render a

@@ -637,6 +637,104 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
   });
 });
 
+describe('joinAndDeal on a CLOSED Event (#134, specs/post-sailing-archive.md)', () => {
+  // The daily branch merges identity into `players/{uid}` on EVERY visit — a
+  // returning Player included — and `eventOpenForPlay` denies that write on both
+  // halves of the freeze. Attempting it hands `runDeal` a permission-denied it
+  // classifies as PERMANENT, which replaces the Card tab with a retry surface
+  // whose Retry repeats the same forbidden write. So the join is DECLINED on the
+  // Event read the mode decision already takes: nothing is written, nothing
+  // throws, and the visit is free to reach the archive.
+  const closedEvent = (over: Record<string, unknown>) => ({
+    exists: () => true,
+    data: () => ({ days: [{ index: 0 }], ...over }),
+  });
+
+  it('writes nothing and reports no join on an ARCHIVED Event', async () => {
+    H.getDoc.mockResolvedValueOnce(closedEvent({ status: 'archived' }));
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false);
+
+    expect(H.getDoc).toHaveBeenCalledTimes(1); // the mode read, and nothing after it
+    expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing on a SERVER-BACKED CLOSING Event, which is shut before any record exists', async () => {
+    // The `fromCache: false` half of the pair below: a closed state the server
+    // actually told us about is the one the join declines.
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: false, hasPendingWrites: false },
+    });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false);
+
+    expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('ATTEMPTS the join when the closed state came from the CACHE — the rules decide', async () => {
+    // Codex P2, PR #1157, and the same rule the profile mirror already follows
+    // (4caa1e8). `getDoc` can resolve from the persistent cache during a
+    // transient Firestore outage even while the browser reports online, and a
+    // cached `archiving: true` can describe a quiesce another Admin has since
+    // lifted. Skipping on THAT is the worst outcome available: the join reports
+    // a clean "no new Board was dealt", `runDeal` records no retryable error
+    // and never reruns, and a first-time visitor sits without a Player row or a
+    // Board until the next connectivity transition or reload. So only a
+    // SERVER-BACKED closed snapshot skips; a cached one attempts the write and
+    // leaves the freeze, if it still holds, to the permission-denied the deal
+    // path already handles.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: true, hasPendingWrites: false },
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true); // a genuine first join
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
+  });
+  it('ATTEMPTS the join while a local close is still PENDING — the rules may yet refuse it', async () => {
+    // Phase 4b P2, PR #1157 run 3: a pending local `archiving: true` is not
+    // authoritative; if the rules refuse it, the rollback to open comes after
+    // this decision would have skipped the join for good.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: false, hasPendingWrites: true },
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true); // a genuine first join
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
+  });
+
+  it('still merges the returning Player identity while the Event is OPEN', async () => {
+    // The control, so the two refusals above are a claim about the freeze rather
+    // than about the daily branch: the same visit on a live Event writes.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce(closedEvent({ status: 'active' }));
+    H.txGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ uid: 'sailor-1', joinedAt: 111, bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false, reshufflesUsed: 0 }),
+    });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false); // already joined
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
+  });
+});
+
 describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', () => {
   // joinAndDeal denormalizes an identity into the public players/{uid} row.
   // It must prefer the Player's SAVED users/{uid} profile — read order in

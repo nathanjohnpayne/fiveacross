@@ -25,6 +25,7 @@ const H = vi.hoisted(() => ({
   unbanUser: vi.fn(),
   adminAddItem: vi.fn(),
   adminUpdateItemText: vi.fn(),
+  deleteProof: vi.fn(),
 }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
@@ -87,7 +88,16 @@ vi.mock('../data/admin', () => ({
   unlockDayNow: vi.fn(),
   resnapshotDayNow: vi.fn(),
 }));
-vi.mock('../data/proofs', () => ({ deleteProof: vi.fn() }));
+// The REAL error class beside the stubbed write, because the Delete control's
+// `failureLabelFor` narrows on it — a stand-in class would make the assertion
+// about the test's own double rather than about the console (#1157 run 4).
+vi.mock('../data/proofs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../data/proofs')>();
+  return {
+    ProofBacksMarkWhileClosingError: actual.ProofBacksMarkWhileClosingError,
+    deleteProof: (...a: unknown[]) => H.deleteProof(...a),
+  };
+});
 // Admin pickers read the EDITION-SCOPED list, not the registry (#555).
 vi.mock('../theme/themes', () => {
   const THEMES = [{ id: 'neon-playground', emoji: '🎉', label: 'Neon' }];
@@ -179,6 +189,34 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     const row = screen.getByText('Alice').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('button', { name: 'Confirm' }));
     expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+  });
+
+  // #134, Phase 4b P2 on PR #1157 run 4. The moderation delete REFUSES a Proof
+  // that still backs a marked square while play is closed but not archived,
+  // because the Board unmark that keeps the square honest is denied and the
+  // closing state is reversible. "Failed, try again" is exactly the wrong thing
+  // to say about a refusal that repeats until an Admin reopens play, so the
+  // error's own message rides the pill this control already renders.
+  it('names the CLOSING-Event refusal on the Delete pill, and keeps the generic copy otherwise', async () => {
+    const { ProofBacksMarkWhileClosingError } = await import('../data/proofs');
+    H.flagged = [
+      { id: 'p1', displayName: 'Bea', reportCount: 2, type: 'photo', itemText: 'A square', status: 'active' } as never,
+    ];
+    H.deleteProof
+      .mockRejectedValueOnce(new ProofBacksMarkWhileClosingError('p1'))
+      .mockRejectedValueOnce(new Error('permission-denied'));
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Bea').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByTitle('Delete'));
+    expect(await within(row).findByRole('alert')).toHaveTextContent(/Reopen play first/);
+
+    // Any OTHER rejection keeps the shared retry copy — the opt-in label is for
+    // the one refusal an Admin can act on, not a channel for raw write errors.
+    fireEvent.click(within(row).getByTitle('Delete'));
+    await waitFor(() =>
+      expect(within(row).getByRole('alert')).toHaveTextContent('Failed—try again.'),
+    );
   });
 
   it('a rejected spicy correction alerts, reverts the checkbox, and retries cleanly', async () => {

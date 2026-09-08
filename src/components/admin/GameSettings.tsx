@@ -9,6 +9,7 @@ import {
   setEasyMixRatio,
   setForceAdult,
 } from '../../data/admin';
+import ArchiveEvent from './ArchiveEvent';
 import { themesForEditionIncluding } from '../../theme/themes';
 import { useAdultContent } from '../../hooks/useAdultContent';
 import { useAdultContentFlipConfirm } from './AdultContentConfirm';
@@ -328,6 +329,11 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
           ))}
         </div>
       </div>
+
+      {/* Last, because it is the one control here that ends PLAY rather than
+          tuning it (#134, specs/post-sailing-archive.md). The irreversible
+          archive flip joins it from #1151, with its drain gate. */}
+      <ArchiveEvent event={event} />
       {dialog}
     </>
   );

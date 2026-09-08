@@ -10,7 +10,7 @@ import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
+import type { Cell, ClaimMode, ThemeId, ClaimDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
@@ -768,6 +768,337 @@ export async function resnapshotDayNow(dayIndex: number): Promise<ResnapshotDayR
 export const banUser = (uid: string): Promise<void> =>
   isSystemAuthor(uid) ? Promise.resolve() : updateDoc(evt(), { bannedUids: arrayUnion(uid) });
 export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRemove(uid) });
+
+/** What the archive's FIRST write reports back — shutting the Event to gameplay
+ *  so the freeze has something that has stopped moving to land on. */
+export type BeginArchiveResult = 'closing' | 'already-archived' | 'no-event';
+
+/**
+ * `beginArchive`'s outcome, WITH the quiesce generation it left in force
+ * (Codex P2, PR #1139) and WHETHER THIS CALL OPENED IT (#1142 item 6).
+ *
+ * The token is returned rather than kept private because the caller is the one
+ * that has to clean up after a refused freeze, and a cleanup that cannot name
+ * the closing state it is lifting can lift somebody else's.
+ *
+ * `created` is the other half of that same question, and the token alone cannot
+ * answer it. `beginArchive` is idempotent: called on an Event ALREADY closing it
+ * preserves the stored generation and still reports `'closing'`, so a caller
+ * that joined another Admin's in-flight quiesce comes back holding a token that
+ * matches perfectly — and an automatic reopen keyed on the token alone would
+ * then succeed in clearing a closing state this call never took, which is
+ * precisely what the binding exists to prevent one step later. Only the CREATOR
+ * of a quiesce may reopen it automatically.
+ *
+ * Both are `null` / `false` on every outcome but `'closing'` — there is no
+ * quiesce to name and none was opened.
+ */
+export type BeginArchiveOutcome = {
+  result: BeginArchiveResult;
+  token: number | null;
+  created: boolean;
+};
+
+/** What abandoning a started-but-uncommitted archive reports back.
+ *  `quiesce-changed` is the CONDITIONAL reopen declining: the stored closing
+ *  state is not the one the caller asked to lift, so nothing was written
+ *  (Codex P2, PR #1139). */
+export type AbandonArchiveResult =
+  | 'reopened'
+  | 'already-archived'
+  | 'no-event'
+  | 'quiesce-changed';
+
+/** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
+ *  the Admin surface can say what happened instead of inferring it from a
+ *  resolved promise. `not-closing` means the quiesce was never taken (or was
+ *  abandoned under this call), which the rules refuse to archive from;
+ *  `quiesce-changed` means the closing state in force is not the one this call
+ *  was bound to — play was reopened and shut AGAIN underneath it (Codex P1, PR
+ *  #1139). Both write NOTHING (#134). */
+export type ArchiveEventResult =
+  | 'archived'
+  | 'already-archived'
+  | 'no-event'
+  | 'not-closing'
+  | 'quiesce-changed';
+
+/**
+ * A usable quiesce generation — the shape `beginArchive` mints and the shape
+ * `archiveEvent` will bind a flip to, mirroring `usableArchiveToken` in
+ * `firestore.rules` exactly: a POSITIVE INTEGER. A missing, non-numeric,
+ * fractional or non-positive value is not one this build can bind to, so it is
+ * refused rather than treated as a wildcard: an unidentified closing state is
+ * exactly the state the binding exists to distinguish from another.
+ */
+function usableArchiveToken(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+/**
+ * The NEXT generation for an Event whose stored one is `stored` — the counter
+ * `beginArchive` installs when it shuts a live Event (Phase 4b P1 on PR #1157,
+ * run 4).
+ *
+ * A COUNTER rather than a fresh opaque id, because the rules can only compare
+ * against the ONE value the document still carries: "different from the stored
+ * token" let generation 1 come back into force after 2 had superseded it (shut
+ * 1, reopen, shut 2, reopen, shut 1 again — 1 != 2, so it passed), and an
+ * `archiveEvent(1)` still in flight could then archive a closing state it was
+ * never taken against. `firestore.rules` requires every shut to install a
+ * number STRICTLY GREATER than the stored one, so a superseded generation is
+ * dead permanently rather than for one step, and this is the client half of the
+ * same arithmetic.
+ *
+ * It reads the stored value rather than trusting a type: a document written by
+ * a build that predates the counter carries a STRING there, and a hand edit
+ * could carry anything, so anything not already a usable counter restarts at 1
+ * — which the repair arm accepts precisely because it exceeds the 0 the rules
+ * read such a document as. A stored FRACTION is floored and stepped past, so
+ * the number written still exceeds the number the rules will compare it with.
+ */
+function nextArchiveGeneration(stored: unknown): number {
+  return typeof stored === 'number' && Number.isFinite(stored) && stored >= 1
+    ? Math.floor(stored) + 1
+    : 1;
+}
+
+/**
+ * THE QUIESCE (#134, specs/post-sailing-archive.md § "The quiesce protocol") —
+ * the archive's first write, and the reason the freeze can be trusted.
+ *
+ * It sets `archiving: true` and the generation that identifies it, and nothing
+ * else. `firestore.rules`' and `storage.rules`' `eventClosedToPlay` then treat
+ * the Event exactly as if it were already archived for EVERY gameplay write, so
+ * from the moment this commits the roster, the Day honours and the Claim queue
+ * cannot move again.
+ *
+ * Why it has to exist: the flip itself is one document read and one document
+ * write, and a Firestore transaction serializes only against the documents it
+ * READS. A Player's Board write, a stat write, or a Claim create lands in
+ * another collection entirely, so a Mark can commit alongside the freeze — and
+ * on an Event the rules then make permanent, a Claim can go pending one instant
+ * before the freeze that makes it unresolvable. No client-side latch can close
+ * that: the UI's server-data latches say the server has spoken, never that it
+ * has stopped speaking. Only a server-enforced closed state can (Codex P1, PR
+ * #1139).
+ *
+ * IT ALSO IDENTIFIES THE QUIESCE (Codex P1, PR #1139). `archiving: true` says
+ * the Event is shut; it cannot say WHICH shut, and the archive's second write
+ * needs to know — it is decided against one closing state and commits against
+ * whatever the transaction finds. An Event reopened and shut AGAIN underneath a
+ * slow caller presents an identical flag, so `archiveToken` is minted here and
+ * carried through the protocol as the thing that tells two generations apart.
+ *
+ * IDEMPOTENT and REVERSIBLE. Calling it on an Event that is already closing is
+ * a no-op that still reports `'closing'` — and PRESERVES the stored token,
+ * because nothing about that call reopened play, so re-minting would abort an
+ * in-flight freeze that is still perfectly valid. A closing Event carrying no
+ * usable token gets one, which is how a state shut by a pre-token build becomes
+ * archivable again. `abandonArchive` is the way back out, because a freeze that
+ * failed halfway must not shut an Event forever; the next `beginArchive` after
+ * it opens a NEW generation, which is exactly what a caller bound to the old one
+ * must not commit against.
+ *
+ * IT REPORTS THE TOKEN IT LEFT IN FORCE, AND WHETHER IT OPENED IT (Codex P2, PR
+ * #1139; #1142 item 6). The caller that shut the Event is the caller that must
+ * put it back if the freeze refuses, and an unconditional reopen there can clear
+ * a LATER Admin's quiesce out from under their own in-flight freeze. Naming the
+ * generation is what makes that cleanup conditional — see `abandonArchive` — and
+ * `created` is what stops a caller that merely JOINED an in-flight quiesce from
+ * reopening it: the token it holds matches, so the conditional reopen would
+ * happily succeed at exactly the write the condition exists to refuse.
+ */
+export async function beginArchive(): Promise<BeginArchiveOutcome> {
+  const eventRef = evt();
+  return runTransaction(db, async (tx): Promise<BeginArchiveOutcome> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return { result: 'no-event', token: null, created: false };
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') {
+      return { result: 'already-archived', token: null, created: false };
+    }
+    // JOINED, not created: the Event was already closing under a generation
+    // this build can bind to, so that generation stands and this call owns
+    // nothing (#1142 item 6). The token is restated rather than left alone so
+    // the write shape is the same from either state.
+    const stored = data.archiveToken;
+    if (data.archiving === true && usableArchiveToken(stored)) {
+      tx.update(eventRef, { archiving: true, archiveToken: stored });
+      return { result: 'closing', token: stored, created: false };
+    }
+    // A closing Event carrying no USABLE generation is not a join — there is no
+    // quiesce this build could have bound to, and the rules refuse the flip
+    // from an unidentified one — so minting here opens a new generation and
+    // this call owns it.
+    //
+    // MINTED FROM THE STORED VALUE, INSIDE THIS TRANSACTION, because the
+    // generation must strictly exceed the one on the document (Phase 4b P1 on
+    // PR #1157, run 4). The transaction is what makes `stored + 1` safe against
+    // two Admins closing at once: both read the same document, so the loser
+    // re-runs against the winner's value instead of writing the same counter
+    // twice. A random id needed no read and bought no freshness — the rules
+    // could only tell it apart from the ONE token still stored.
+    const token = nextArchiveGeneration(stored);
+    tx.update(eventRef, { archiving: true, archiveToken: token });
+    return { result: 'closing', token, created: true };
+  });
+}
+
+/**
+ * Reopen an Event whose archive was started and not committed — the escape
+ * hatch that makes the quiesce safe to take at all.
+ *
+ * `archiving` is deliberately NOT write-once (unlike `status` / `archivedAt`):
+ * the first write shuts gameplay for everyone, so a tab closed mid-flight, a
+ * failed second write, or an Admin who simply changed their mind would otherwise
+ * leave a live Event permanently unplayable with no client-side way back. Once
+ * `status` is `'archived'` this reports `already-archived` and writes nothing —
+ * the freeze is carried by `status` from there, and that IS write-once
+ * (spec § Recovery).
+ *
+ * `archiveToken` is deliberately LEFT in place rather than cleared. It only
+ * ever means anything while `archiving` is true, and the next `beginArchive`
+ * mints a fresh one precisely because the Event is no longer closing when it
+ * runs — so a freeze still in flight under the old generation sees a token that
+ * has moved and aborts, which is the whole point.
+ *
+ * IT CAN BE MADE CONDITIONAL, and the automatic cleanup path always is (Codex
+ * P2, PR #1139). Pass the `expectedToken` `beginArchive` reported and this
+ * reopens ONLY the closing state that token names: a quiesce taken over by
+ * another Admin in the meantime carries a different generation, and clearing it
+ * would reopen an Event underneath somebody else's in-flight freeze — the same
+ * hazard `archiveEvent`'s own `quiesce-changed` refusal exists for, one step
+ * later in the same handler. It reports `quiesce-changed` and writes nothing.
+ *
+ * The token is NOT the whole condition, though, and the caller carries the rest:
+ * a call that merely JOINED an in-flight quiesce holds a matching token, so the
+ * automatic-reopen caller gates on `BeginArchiveOutcome.created` as well (#1142
+ * item 6). That caller is the console's **Archive** handler, which ships with
+ * the pending-claim drain gate in #1151 (Phase 4b P1, PR #1157) — this child's
+ * console has no flip to fail, so the only reopen on screen is the
+ * unconditional one below.
+ *
+ * Called with NO token it is unconditional, which is what the console's own
+ * **Reopen play** button wants: that is a deliberate act on the Event as it
+ * stands in front of the Admin, not an automatic cleanup of a call that has
+ * already failed.
+ *
+ * A stale token cannot be laundered into a match. `abandonArchive` leaves the
+ * generation in place, so a reopened-and-re-shut Event carries the FRESH one
+ * `beginArchive` minted (it only preserves a token while the Event is still
+ * closing), and the stale caller's comparison fails.
+ */
+export async function abandonArchive(expectedToken?: number): Promise<AbandonArchiveResult> {
+  const eventRef = evt();
+  return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return 'no-event';
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') return 'already-archived';
+    if (expectedToken !== undefined && data.archiveToken !== expectedToken) {
+      return 'quiesce-changed';
+    }
+    tx.update(eventRef, { archiving: false });
+    return 'reopened';
+  });
+}
+
+/**
+ * Freeze this Event after the occasion (#134, specs/post-sailing-archive.md):
+ * the archive's SECOND write — ONE update that flips `status` to `'archived'`,
+ * stamps `archivedAt`, and clears the `archiving` flag the first write set.
+ *
+ * ONE update on ONE document is the whole atomicity requirement here: the rules
+ * deny gameplay writes on an archived Event and read the stamp beside the
+ * status, so an observer must never see one half without the other.
+ *
+ * IT MUST FOLLOW `beginArchive`, and the rules enforce that too: `status` may
+ * only become `'archived'` from a stored document already carrying
+ * `archiving: true`. This call re-checks it inside the transaction, reporting
+ * `not-closing` rather than freezing an Event whose gameplay was never shut.
+ *
+ * IT IS BOUND TO THE QUIESCE IT WAS HANDED (Codex P1, PR #1139). `archiving:
+ * true` cannot say WHICH shut, and play can be reopened and shut AGAIN between
+ * the caller taking its quiesce and this transaction committing — the document
+ * then carries an `archiving: true` indistinguishable from the first. So the
+ * caller passes the generation `beginArchive` left in force, the transaction
+ * refuses with `quiesce-changed` when the stored one has moved, and the flip arm
+ * in `firestore.rules` requires the write to restate the stored token besides —
+ * so a direct SDK write carrying a superseded generation is denied at the
+ * boundary too, not only by the client that happens to check.
+ *
+ * `quiesce-changed` deliberately leaves the Event SHUT: the closing state in
+ * force belongs to whoever took it, and clearing it would reopen an Event
+ * underneath their in-flight freeze.
+ *
+ * Archiving is ONE-WAY from the client. The transaction re-reads the Event
+ * inside itself and reports `already-archived` rather than re-flipping, so a
+ * double tap (or a second Admin's tap) can never restamp the freeze — and the
+ * rules refuse the rewrite besides. Un-archiving is deliberately not a client
+ * operation at all; see the spec's § Recovery.
+ *
+ * WHAT IT DOES NOT DO, on this ticket: it takes no snapshot. The durable
+ * `EventArchive` record — the frozen final standings and the First-to-BINGO hall
+ * of fame, the server re-reads it is built from, the drain gate and the
+ * configuration fingerprint that hold its inputs still — is #1151. This is the
+ * lifecycle primitive those depend on, and nothing more.
+ *
+ * AND IT HAS NO CONSOLE CALLER ON THIS CHILD (Phase 4b P1, PR #1157). It is
+ * exported and pinned by `src/data/post-sailing-archive.test.ts`, and the
+ * console's **Archive** button arrives with #1151, beside the pending-claim
+ * drain gate. An exposed flip without that gate can freeze an Event whose Claim
+ * queue still holds an `admin_confirmed` Claim, after which Confirm and Reject
+ * both fail — `resolve()` writes the claimant's Board and Player row, and the
+ * freeze denies both — with no way to reopen from the console.
+ */
+export async function archiveEvent(
+  token: number,
+  params: { now?: number } = {},
+): Promise<ArchiveEventResult> {
+  const eventRef = evt();
+  // Refused before the transaction opens rather than compared inside it: a
+  // missing, non-integer or non-positive generation is not one this build can
+  // bind to, so there is nothing for the stored value to agree WITH — and the
+  // rules refuse the flip from an unidentified quiesce besides. `beginArchive`
+  // mints one, so reopening and archiving again is the way through.
+  if (!usableArchiveToken(token)) return 'quiesce-changed';
+  return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
+    const snap = await tx.get(eventRef);
+    if (!snap.exists()) return 'no-event';
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') return 'already-archived';
+    // Re-checked HERE, inside the transaction that writes: an Admin (or another
+    // console) can abandon the archive between the caller's own read and this
+    // commit, and an Event whose gameplay reopened in that window is one that
+    // was never quiesced for this freeze at all.
+    if (data.archiving !== true) return 'not-closing';
+    // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play
+    // can be REOPENED and SHUT AGAIN inside the window this call occupies, and
+    // the document the transaction reads then carries an `archiving: true`
+    // indistinguishable from the one the caller took. Refused, never repaired,
+    // and deliberately WITHOUT reopening play: the closing state in force
+    // belongs to whoever took it.
+    if (data.archiveToken !== token) return 'quiesce-changed';
+    const archivedAt = params.now ?? Date.now();
+    tx.update(eventRef, {
+      status: 'archived',
+      archivedAt,
+      // The quiesce is over. `status` carries the freeze from here, and unlike
+      // this flag it cannot be cleared.
+      archiving: false,
+      // The generation this flip was bound to, written to a FLIP-ONLY field so
+      // the RULES can hold the same binding this transaction just checked
+      // (Phase 4b P1 on PR #1157, run 3): the flip arm requires `archivedUnder`
+      // to be written by the flip and to equal the stored `archiveToken`.
+      // Restating `archiveToken` was no binding — the merged write inherits
+      // it — whereas a field the document does not carry until the flip cannot
+      // be inherited, so a stale or tokenless flip is refused.
+      archivedUnder: token,
+    });
+    return 'archived';
+  });
+}
 
 /** Recompute a player's stats after an admin resolves one of their claims. */
 /**

@@ -22,6 +22,7 @@ import type { User } from 'firebase/auth';
 import { db, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
+import { isEventArchived, isEventArchiving } from './eventArchive';
 import { adultContentRequired } from '../adultContent';
 import { itemsCol, eventRef } from './paths';
 import { defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
@@ -436,6 +437,47 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // the threshold/ban fields then fall open on the absent keys as before.
   const joinEventSnap = await getDoc(rawEvent(eventId));
   const joinEventData = joinEventSnap.exists() ? (joinEventSnap.data() as Partial<EventDoc>) : null;
+  // A CLOSED Event TAKES NO JOIN (#134, Codex P1 on PR #1139). The daily branch
+  // below merges identity into `players/{uid}` on EVERY visit, returning Players
+  // included — and `eventOpenForPlay` denies that write on both halves of the
+  // freeze. Attempting it anyway is not a harmless failure: `runDeal` classifies
+  // a permission-denied as PERMANENT, so `App` replaces the Card tab with the
+  // full-screen `DealError`, and its Retry repeats exactly the same forbidden
+  // write. A returning Player would have found the archive unreachable behind a
+  // retry surface that could never succeed.
+  //
+  // So the client asks the question the rules already answer, through the ONE
+  // predicate pair that spells it (`src/data/eventArchive.ts`), and declines the
+  // whole join: `false` is the same "no new Board was dealt" this function
+  // already returns for a returning Player, so no `join_event` is recorded, no
+  // error is raised, and `runDeal` clears any stale one.
+  //
+  // The read this decides on is the Event read the mode decision already takes,
+  // so the skip costs nothing; `getDoc` goes to the server whenever it can reach
+  // it, and the deal path is online-gated in `AuthContext`. An Event that closes
+  // in the window between this read and the write is the residual the spec
+  // records — the write is denied, exactly as it is for every other gameplay
+  // write that straddles the quiesce.
+  //
+  // Only a SERVER-BACKED snapshot may skip (Codex P2 on PR #1157), exactly as
+  // the profile mirror decides it. `getDoc` can still resolve from the
+  // persistent cache during a transient Firestore outage even while the browser
+  // reports online, and a cached `archiving: true` can describe a quiesce
+  // another Admin has since lifted. Skipping on THAT is the worst outcome
+  // available here: the join reports a clean "no new Board was dealt", so
+  // `runDeal` records no retryable error and never reruns, and a first-time
+  // visitor sits without a Player row or a Board until the next connectivity
+  // transition or reload. A cached closed state therefore attempts the join and
+  // lets the rules decide — if the freeze really does still hold, the write is
+  // denied and `runDeal` surfaces it as the declined/retryable outcome it
+  // already handles for every other closed-Event write.
+  const closed = isEventArchived(joinEventData) || isEventArchiving(joinEventData);
+  // Only a server-COMMITTED closed snapshot declines (Phase 4b P2 on PR #1157,
+  // run 3): a pending local close is not authoritative, and a refused one rolls
+  // back to open after this decision would have skipped the join for good.
+  if (closed && !joinEventSnap.metadata?.fromCache && !joinEventSnap.metadata?.hasPendingWrites) {
+    return false;
+  }
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
   if (daily) {
