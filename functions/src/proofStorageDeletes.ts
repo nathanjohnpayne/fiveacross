@@ -49,19 +49,22 @@ export interface ProofStorageDeleteDoc {
 
 export interface RevokeProofMediaDeps {
   /**
-   * Whether `events/{eventId}/proofStorageDeletes/{proofId}` — the row that
-   * TRIGGERED this delivery — is still standing, read with the Admin SDK.
+   * The row standing at `events/{eventId}/proofStorageDeletes/{proofId}` RIGHT
+   * NOW, read with the Admin SDK — or `null` when nothing is there.
    *
-   * The event snapshot is a statement about the past, and a delivery can arrive
+   * Its CONTENT, not merely its existence (#1153, Codex round 3 P2). The event
+   * snapshot is a statement about the past, and a delivery can arrive
    * arbitrarily late: `retry: true` keeps a failed one coming back for days, and
    * even a first delivery is not instantaneous. By the time it runs, the
    * revocation may already be discharged and the row retired by an earlier
    * delivery of this very event — retirement is server-only, so that is now the
    * only way one goes — at which point the rules deliberately FREE the Proof id
-   * for reuse. This is the sweeper asking whether the debt it is about to
-   * collect is still owed.
+   * for reuse, and a Proof re-posted under that id can leave a tombstone of its
+   * OWN at the very same path. An existence test answers "yes" to that second
+   * row, so this hands back the row itself and `isSameRevocation` decides
+   * whether it is the one this delivery was created for.
    */
-  tombstoneExists(): Promise<boolean>;
+  currentTombstone(): Promise<ProofStorageDeleteDoc | null>;
   /**
    * Whether `events/{eventId}/proofs/{proofId}` still exists, read with the
    * Admin SDK. A standing tombstone is supposed to mean a Proof that is gone;
@@ -84,6 +87,46 @@ export interface RevokeProofMediaTarget {
   eventId: string;
   proofId: string;
   tombstone: ProofStorageDeleteDoc;
+}
+
+/**
+ * Is the row standing at the tombstone's path the SAME revocation this delivery
+ * was created for (#1153, Codex round 3 P2)?
+ *
+ * A path plus an existence test is not an identity. Retirement FREES the Proof
+ * id for reuse, so the sequence "delivery A created → A's row retired by an
+ * earlier delivery → the freed id re-posted and taken down again → row B
+ * standing at the same path" is reachable, and a delayed delivery of A that
+ * asked only `.exists` would proceed on its own stale snapshot: A's generation
+ * answers `412` against B's object, and the retirement a 412 triggers would then
+ * clear B while B's media is still in the bucket. That is a real revocation
+ * marked done that never happened — the one state this collection exists to make
+ * impossible.
+ *
+ * The row is CREATE-ONLY and update-denied in `firestore.rules`, so its fields
+ * cannot change while it stands: two readings that agree on all four are two
+ * readings of ONE row, and any disagreement is two different rows. `requestedAt`,
+ * `storagePath` and `uid` are the three required keys; `generation` is the
+ * optional fourth and is compared the same way, so present-against-absent is
+ * itself a mismatch rather than a field quietly skipped.
+ *
+ * Strict equality on purpose. All four are primitives in every row the rules
+ * admit (string, string, number, string), so a value that is not one — reachable
+ * only through a hand-written Admin SDK document — compares unequal and the
+ * delivery ABANDONS rather than sweeping on it. Nothing is deleted and nothing
+ * is retired on that path, which is the safe direction for a question this
+ * handler cannot answer.
+ */
+export function isSameRevocation(
+  current: ProofStorageDeleteDoc,
+  fromEvent: ProofStorageDeleteDoc,
+): boolean {
+  return (
+    current.requestedAt === fromEvent.requestedAt &&
+    current.storagePath === fromEvent.storagePath &&
+    current.uid === fromEvent.uid &&
+    current.generation === fromEvent.generation
+  );
 }
 
 /**
@@ -172,15 +215,16 @@ export function isGenerationMismatch(err: unknown): boolean {
  * buys an immortal poison row. It is logged, because the only way one exists is
  * a write that did not come through `firestore.rules`.
  *
- * THREE CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
+ * FOUR CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
  * promise about the past and this runs in the future (#1153, Phase 4b P1 and
- * P2). A tombstone is admitted only alongside its own Proof's deletion and the
- * Proof create arm now refuses to bring that id back while the row stands, so a
- * live Proof under a pending revocation should be unreachable — but the Admin
- * SDK bypasses those rules entirely and this handler holds a bucket-wide
- * delete, so "should be unreachable" is not a safe premise for revoking media.
+ * P2, Codex round 3 P2). A tombstone is admitted only alongside its own Proof's
+ * deletion and the Proof create arm now refuses to bring that id back while the
+ * row stands, so a live Proof under a pending revocation should be unreachable —
+ * but the Admin SDK bypasses those rules entirely and this handler holds a
+ * bucket-wide delete, so "should be unreachable" is not a safe premise for
+ * revoking media.
  *
- * FIRST, IS THE DEBT STILL OWED. The triggering row is re-read on EVERY
+ * FIRST, IS ANY DEBT STILL OWED. The triggering row is re-read on EVERY
  * delivery, not only when the path is unbound. Retirement is server-only
  * (#1153, Codex round 3 P1), so the row can only have gone one way: an EARLIER
  * delivery of this same event already discharged the revocation and cleared it,
@@ -195,17 +239,30 @@ export function isGenerationMismatch(err: unknown): boolean {
  * delete either, because there is nothing left to retire and a blind delete
  * could only take a LATER revocation's row with it.
  *
- * SECOND, IS THE PROOF BACK. If it is THERE, the revocation is abandoned rather
+ * SECOND, IS IT THIS DELIVERY'S DEBT. Existence is not identity: the freed id
+ * can be re-posted and taken down AGAIN, leaving a SECOND tombstone at the same
+ * path, and a delivery that only asked "is something there" would answer yes to
+ * somebody else's revocation. Proceeding on its own stale snapshot, it would
+ * take `412` against the new object and then RETIRE the new row — a revocation
+ * marked done with its media still in the bucket. So the standing row is
+ * compared against the event snapshot's own operation identity
+ * (`isSameRevocation`: `requestedAt`, `storagePath`, `uid`, `generation`), and a
+ * mismatch is logged and ABANDONED with the row left exactly where it is. It is
+ * not this delivery's to retire, and its own delivery is still coming.
+ *
+ * THIRD, IS THE PROOF BACK. If it is THERE, the revocation is abandoned rather
  * than performed, because whatever the row was owed for, it is not this Feed
  * entry's media.
  *
- * THIRD, IS IT THE SAME OBJECT. The object is deleted by GENERATION when the
+ * FOURTH, IS IT THE SAME OBJECT. The object is deleted by GENERATION when the
  * row recorded one, so even a name re-occupied by a blob with no document
  * pointing at it is left alone instead of swept.
  *
  * The last two retire the row: neither condition can improve on redelivery, and
- * a row that cannot be discharged is a poison row. The first retires nothing,
- * because the row it would retire is already gone.
+ * a row that cannot be discharged is a poison row. The first two retire nothing
+ * — the first because the row it would retire is already gone, the second
+ * because the row standing there belongs to a revocation this delivery knows
+ * nothing about.
  *
  * A read failure in either Firestore check PROPAGATES rather than resolving to
  * a delete: "I could not tell" must never become "delete it", and `retry: true`
@@ -227,20 +284,39 @@ export async function revokeProofMedia(
     return;
   }
 
-  // THE ROW MUST STILL BE STANDING. One strongly consistent read, taken on
-  // every delivery before anything else is asked, because a retired row means
-  // the revocation is already discharged AND the Proof id is free again — so
-  // every later question in this function would be answered about somebody
-  // else's object. Only an earlier delivery of this same event can have retired
-  // it; no client may (#1153, Codex round 3 P1). Nothing is deleted here, the
-  // tombstone least of all: there is no row of ours left to retire, and a blind
-  // delete would take a LATER revocation's row with it. A read failure
-  // propagates, for the same reason the Proof read's does.
-  if (!(await deps.tombstoneExists())) {
+  // THE ROW MUST STILL BE STANDING, AND IT MUST BE OURS. One strongly
+  // consistent read, taken on every delivery before anything else is asked,
+  // because a retired row means the revocation is already discharged AND the
+  // Proof id is free again — so every later question in this function would be
+  // answered about somebody else's object. Only an earlier delivery of this same
+  // event can have retired it; no client may (#1153, Codex round 3 P1). Nothing
+  // is deleted on this path, the tombstone least of all: there is no row of ours
+  // left to retire, and a blind delete would take a LATER revocation's row with
+  // it. A read failure propagates, for the same reason the Proof read's does.
+  const current = await deps.currentTombstone();
+  if (!current) {
     warn('proof media revocation skipped: the tombstone was already retired', {
       eventId,
       proofId,
       storagePath,
+    });
+    return;
+  }
+
+  // …AND IT MUST BE THE ROW THIS DELIVERY WAS CREATED FOR (#1153, Codex round 3
+  // P2). Existence alone answers "yes" to a SECOND tombstone the freed Proof id
+  // produced after the first was retired, and proceeding on the event snapshot
+  // would then take `412` against that second revocation's object and RETIRE its
+  // row with its media still in place. Abandoned rather than retired, and rather
+  // than rethrown: the standing row is not ours to clear, redelivering this
+  // event can never make it ours, and its own delivery is still owed.
+  if (!isSameRevocation(current, tombstone)) {
+    warn('proof media revocation abandoned: a DIFFERENT revocation now holds this path', {
+      eventId,
+      proofId,
+      storagePath,
+      requestedAt: tombstone.requestedAt,
+      standingRequestedAt: current.requestedAt,
     });
     return;
   }

@@ -29,7 +29,7 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
-import { revokeProofMedia } from './proofStorageDeletes';
+import { revokeProofMedia, type ProofStorageDeleteDoc } from './proofStorageDeletes';
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -374,12 +374,17 @@ export const revokeDeletedProofMedia = onDocumentCreated(
       {
         // Strongly consistent, and read at SWEEP time rather than trusted from
         // the event snapshot: `event.data` is the row as it was CREATED, this is
-        // whether it is still standing (#1153, Phase 4b P2). Retirement is
-        // server-only, so a delivery that finds nothing was preceded by another
-        // delivery of this same event that already discharged the revocation —
-        // and the rules free the Proof id the moment it does.
-        tombstoneExists: async () =>
-          (await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get()).exists,
+        // the row that is standing NOW (#1153, Phase 4b P2, Codex round 3 P2).
+        // Retirement is server-only, so a delivery that finds nothing was
+        // preceded by another delivery of this same event that already
+        // discharged the revocation — and the rules free the Proof id the moment
+        // it does, which is why the CONTENT comes back rather than a boolean:
+        // the freed id can be re-posted and taken down again, leaving a
+        // different revocation's row at the very same path.
+        currentTombstone: async () => {
+          const snap = await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get();
+          return snap.exists ? ((snap.data() ?? {}) as ProofStorageDeleteDoc) : null;
+        },
         // Strongly consistent, and read at SWEEP time rather than trusted from
         // the row: the tombstone says a Proof was deleted, this says whether one
         // is there now (#1153, Phase 4b P1).

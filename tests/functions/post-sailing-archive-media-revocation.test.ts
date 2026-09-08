@@ -3,7 +3,9 @@ import {
   confinedProofMediaPath,
   isGenerationMismatch,
   isObjectAlreadyGone,
+  isSameRevocation,
   revokeProofMedia,
+  type ProofStorageDeleteDoc,
   type RevokeProofMediaDeps,
 } from '../../functions/src/proofStorageDeletes';
 
@@ -27,9 +29,12 @@ function makeDeps(
   // is what a standing tombstone is supposed to mean; the cases that matter set
   // it true, or reject, on purpose.
   proofExists: () => Promise<boolean> = async () => false,
-  // Whether the row that triggered this delivery is still standing. Default
-  // TRUE — the ordinary delivery, arriving while the revocation is still owed.
-  tombstoneExists: () => Promise<boolean> = async () => true,
+  // The row standing at the tombstone's path at sweep time. Default `undefined`,
+  // which the harness resolves to the target's OWN row — the ordinary delivery,
+  // arriving while its own revocation is still owed. Cases pass `null` for a
+  // retired row, a different row for the reuse hazard, or a rejecting reader.
+  currentTombstone?: () => Promise<ProofStorageDeleteDoc | null>,
+  ownRow: ProofStorageDeleteDoc = TARGET.tombstone,
 ): RevokeProofMediaDeps & {
   objectDeletes: Array<{ storagePath: string; generation: string | null }>;
   tombstoneDeletes: number;
@@ -41,7 +46,10 @@ function makeDeps(
     objectDeletes,
     tombstoneDeletes: 0,
     warnings,
-    tombstoneExists,
+    // A FRESH object on every read, so the identity check below is proven to
+    // compare by VALUE — a reference-equality implementation would pass the
+    // ordinary cases here and still mis-handle a real Firestore snapshot.
+    currentTombstone: currentTombstone ?? (async () => ({ ...ownRow })),
     proofExists,
     deleteObject: async (storagePath: string, generation: string | null) => {
       objectDeletes.push({ storagePath, generation });
@@ -177,7 +185,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
         throw new Error('the bucket must not be reached');
       },
       async () => false,
-      async () => false,
+      async () => null,
     );
 
     await revokeProofMedia(deps, TARGET);
@@ -185,6 +193,71 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.objectDeletes).toEqual([]);
     expect(deps.tombstoneDeletes).toBe(0);
     expect(deps.warnings).toHaveLength(1);
+  });
+
+  it('ABANDONS a delivery whose path now holds a DIFFERENT revocation — and leaves that row STANDING', async () => {
+    // The reuse hazard the `.exists` recheck still admitted (#1153, Codex round
+    // 3 P2). Retirement frees the Proof id, so the sequence is reachable:
+    // delivery A is created, an earlier delivery retires A's row, the freed id
+    // is re-posted and taken down again, and row B is now standing at the very
+    // same path. `.exists` answers yes to B, so A proceeds on its own stale
+    // snapshot — and A's generation takes `412` against B's object, after which
+    // the unconditional retirement clears B while B's media is still in the
+    // bucket. A real revocation marked done that never happened.
+    //
+    // So the standing row is compared against the event snapshot's own operation
+    // identity, and a mismatch abandons: the bucket is never touched, and B's row
+    // is left exactly where it is, because B's own delivery still owes it.
+    const rowB: ProofStorageDeleteDoc = {
+      ...TARGET.tombstone,
+      requestedAt: 9000,
+      generation: '1700000000000002',
+    };
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket must not be reached');
+      },
+      async () => false,
+      async () => rowB,
+    );
+
+    await revokeProofMedia(deps, BOUND);
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(0);
+    expect(deps.warnings).toHaveLength(1);
+    expect(deps.warnings[0].context).toMatchObject({
+      requestedAt: 1000,
+      standingRequestedAt: 9000,
+    });
+  });
+
+  it('ABANDONS on ANY disagreeing field, generation PRESENCE included', async () => {
+    // Each of the four is load-bearing. `generation` above all: a row that
+    // records one and a row that does not are two different revocations even
+    // when everything else matches, and the absent-generation row is precisely
+    // the one that would sweep by PATH and take whatever now answers to it.
+    const differing: ProofStorageDeleteDoc[] = [
+      { ...BOUND.tombstone, requestedAt: 2000 },
+      { ...BOUND.tombstone, uid: 'bob' },
+      { ...BOUND.tombstone, storagePath: 'proofs/med-2026/alice/proof-1.webm' },
+      { ...BOUND.tombstone, generation: '1700000000000002' },
+      { ...TARGET.tombstone },
+    ];
+    for (const standing of differing) {
+      const deps = makeDeps(
+        async () => {
+          throw new Error('the bucket must not be reached');
+        },
+        async () => false,
+        async () => standing,
+      );
+
+      await revokeProofMedia(deps, BOUND);
+
+      expect(deps.objectDeletes).toEqual([]);
+      expect(deps.tombstoneDeletes).toBe(0);
+    }
   });
 
   it('REDELIVERS rather than deleting when it cannot tell whether the tombstone still stands', async () => {
@@ -223,7 +296,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
       },
       async () => {
         order.push('tombstone-read');
-        return true;
+        return { ...TARGET.tombstone };
       },
     );
     const wrapped: RevokeProofMediaDeps = {
@@ -254,6 +327,8 @@ describe('revokeProofMedia — the server finishes a revocation the client could
         throw new Error('the bucket must not be reached');
       },
       async () => true,
+      undefined,
+      BOUND.tombstone,
     );
 
     await revokeProofMedia(deps, BOUND);
@@ -281,7 +356,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
   });
 
   it('binds the delete to the generation the row recorded, and to nothing when it recorded none', async () => {
-    const bound = makeDeps(async () => {});
+    const bound = makeDeps(async () => {}, undefined, undefined, BOUND.tombstone);
     await revokeProofMedia(bound, BOUND);
     expect(bound.objectDeletes).toEqual([
       { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: '1700000000000001' },
@@ -298,11 +373,9 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // A non-string generation is no generation: the row is client-written and
     // this handler holds a bucket-wide delete, so a value it cannot use is
     // ignored rather than passed through to the precondition.
-    const junk = makeDeps(async () => {});
-    await revokeProofMedia(junk, {
-      ...TARGET,
-      tombstone: { ...TARGET.tombstone, generation: 17 },
-    });
+    const junkRow = { ...TARGET.tombstone, generation: 17 };
+    const junk = makeDeps(async () => {}, undefined, undefined, junkRow);
+    await revokeProofMedia(junk, { ...TARGET, tombstone: junkRow });
     expect(junk.objectDeletes[0].generation).toBeNull();
   });
 
@@ -312,9 +385,14 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // was written, so the bytes there now belong to a write this revocation says
     // nothing about. Retiring rather than retrying, because redelivery cannot
     // turn the old generation back up.
-    const deps = makeDeps(async () => {
-      throw Object.assign(new Error('Precondition Failed'), { code: 412 });
-    });
+    const deps = makeDeps(
+      async () => {
+        throw Object.assign(new Error('Precondition Failed'), { code: 412 });
+      },
+      undefined,
+      undefined,
+      BOUND.tombstone,
+    );
 
     await expect(revokeProofMedia(deps, BOUND)).resolves.toBeUndefined();
 
@@ -327,7 +405,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     try {
       await revokeProofMedia(
         {
-          tombstoneExists: async () => true,
+          currentTombstone: async () => ({ ...TARGET.tombstone }),
           proofExists: async () => false,
           deleteObject: async () => {
             throw new Error('the bucket must not be reached');
@@ -340,6 +418,52 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('isSameRevocation — is the standing row the one THIS delivery was created for', () => {
+  const ROW: ProofStorageDeleteDoc = {
+    storagePath: 'proofs/med-2026/alice/proof-1.jpg',
+    uid: 'alice',
+    requestedAt: 1000,
+    generation: '1700000000000001',
+  };
+
+  it('accepts an equal row read back as a separate object', () => {
+    // Two readings of ONE row: the fields cannot change while it stands, because
+    // `firestore.rules` denies every update on the collection.
+    expect(isSameRevocation({ ...ROW }, { ...ROW })).toBe(true);
+  });
+
+  it('rejects a disagreement in ANY of the four identity fields', () => {
+    expect(isSameRevocation({ ...ROW, requestedAt: 1001 }, ROW)).toBe(false);
+    expect(isSameRevocation({ ...ROW, uid: 'bob' }, ROW)).toBe(false);
+    expect(isSameRevocation({ ...ROW, storagePath: 'proofs/med-2026/alice/proof-1.webm' }, ROW)).toBe(
+      false,
+    );
+    expect(isSameRevocation({ ...ROW, generation: '1700000000000002' }, ROW)).toBe(false);
+  });
+
+  it('treats generation PRESENCE as part of the identity, in both directions', () => {
+    // A row that recorded a generation and a row that did not are two different
+    // revocations even when the other three agree — and the absent-generation
+    // one is exactly the row that would sweep by PATH and take whatever now
+    // answers to it.
+    const withoutGeneration: ProofStorageDeleteDoc = {
+      storagePath: ROW.storagePath,
+      uid: ROW.uid,
+      requestedAt: ROW.requestedAt,
+    };
+    expect(isSameRevocation(withoutGeneration, ROW)).toBe(false);
+    expect(isSameRevocation(ROW, withoutGeneration)).toBe(false);
+    expect(isSameRevocation({ ...withoutGeneration }, withoutGeneration)).toBe(true);
+  });
+
+  it('rejects a row whose fields are not primitives at all', () => {
+    // Unreachable through `firestore.rules`, which type-checks all four. A
+    // hand-written Admin SDK document can still produce one, and comparing
+    // unequal is the safe direction: the delivery abandons and deletes nothing.
+    expect(isSameRevocation({ ...ROW, uid: ['alice'] }, { ...ROW, uid: ['alice'] })).toBe(false);
   });
 });
 
