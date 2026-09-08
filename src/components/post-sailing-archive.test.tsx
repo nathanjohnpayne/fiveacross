@@ -139,6 +139,25 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
+  it('shows nothing after a completed ROUND TRIP back to the starting phase', async () => {
+    // Phase 4b P2, PR #1157 run 3. Close play commits, another Admin observes
+    // it and reopens, and only then does beginArchive() settle: the Event is
+    // back where the action started, but equality with the starting phase is
+    // not evidence the message is true — the phase moved during the action.
+    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settle = resolve; }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
+    settle({ result: 'closing', token: 'quiesce-1', created: true });
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
+
   it('shows nothing when the Event has moved somewhere the outcome does not describe', async () => {
     let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
     H.beginArchive.mockImplementationOnce(

@@ -98,7 +98,15 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
   // state is observed it is rebased there, so any LATER move — someone else's
   // — clears the message rather than contradicting the controls.
   const [result, setResult] = useState<{ outcome: ArchiveOutcome; from: Phase } | null>(null);
+  // Whether the phase moved at all while an action was in flight (Phase 4b P2
+  // on PR #1157, run 3): a round trip — closing delivered, then someone else's
+  // reopen — lands back on the starting phase, which equality alone cannot
+  // tell from "nothing happened yet". Any move during the action means the
+  // starting phase is no longer evidence the message is true.
+  const inFlightRef = useRef(false);
+  const movedDuringActionRef = useRef(false);
   useEffect(() => {
+    if (inFlightRef.current) movedDuringActionRef.current = true;
     setResult((current) => {
       if (!current || phase === current.from) return current;
       if (phase === RESULT_PHASE[current.outcome]) return { ...current, from: phase };
@@ -117,11 +125,22 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
   phaseRef.current = phase;
   const report = (outcome: ArchiveOutcome, startedIn: Phase) => {
     const observed = phaseRef.current;
+    const stillWhereItStarted = observed === startedIn && !movedDuringActionRef.current;
     setResult(
-      observed === RESULT_PHASE[outcome] || observed === startedIn
+      observed === RESULT_PHASE[outcome] || stillWhereItStarted
         ? { outcome, from: observed }
         : null,
     );
+  };
+  const act = async (run: () => Promise<ArchiveOutcome>) => {
+    const startedIn = phase;
+    inFlightRef.current = true;
+    movedDuringActionRef.current = false;
+    try {
+      report(await run(), startedIn);
+    } finally {
+      inFlightRef.current = false;
+    }
   };
 
   return (
@@ -153,10 +172,7 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
             // in front of them, not an automatic cleanup of a call that already
             // failed — the token binding exists to stop a STALE handler
             // reopening a newer quiesce, and there is no stale handler here.
-            onAction={async () => {
-              const startedIn = phase;
-              report(await abandonArchive(), startedIn);
-            }}
+            onAction={() => act(() => abandonArchive())}
           >
             Reopen play
           </AsyncButton>
@@ -173,10 +189,7 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
           <AsyncButton
             ariaLabel="Close play"
             failureLabel="Closing play failed—try again."
-            onAction={async () => {
-              const startedIn = phase;
-              report((await beginArchive()).result, startedIn);
-            }}
+            onAction={() => act(async () => (await beginArchive()).result)}
           >
             Close play
           </AsyncButton>
