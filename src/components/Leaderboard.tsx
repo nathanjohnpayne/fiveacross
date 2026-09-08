@@ -195,19 +195,25 @@ function buildShareStandings(
 export default function Leaderboard() {
   const { data: event, serverResolved } = useEventDoc();
   const online = useOnline();
-  // A MONOTONE latch, held here rather than in the hook because only half of it
-  // is the hook's business. Without it a reconnect (`online` false → true, with
-  // the server snapshot still a round trip away) would bounce an already-
-  // rendered live view back through the spinner — unmounting `LiveLeaderboard`,
-  // dropping its listeners and resetting the Player's filter. Writing `true`
-  // over `true` is idempotent, so a double-invoked render cannot change it.
-  const statusSettled = useRef(false);
-  if (serverResolved || !online) statusSettled.current = true;
+  // MONOTONE, and latched in STATE rather than in a ref — the adjust-during-
+  // render idiom `Board`'s dangling-sheet close already uses, and deliberately
+  // not the ref write CodeRabbit rejected on #452: React discards state updates
+  // from an abandoned render, whereas a ref written during one would keep a
+  // conclusion that never committed.
+  //
+  // The latch exists because only ONE of its two inputs is monotone. A
+  // reconnect (`online` false → true, with the server snapshot still a round
+  // trip away) would otherwise bounce an already-rendered live view back
+  // through the spinner, unmounting `LiveLeaderboard`, dropping its listeners
+  // and resetting the Player's filter with them.
+  const [statusLatched, setStatusLatched] = useState(false);
+  const statusSettled = statusLatched || serverResolved || !online;
+  if (statusSettled && !statusLatched) setStatusLatched(true);
 
   if (isEventArchived(event) && event?.archive) {
     return <ArchivedLeaderboard event={event} archive={event.archive} />;
   }
-  if (!statusSettled.current) return <LoadingState label="Tallying the leaderboard…" />;
+  if (!statusSettled) return <LoadingState label="Tallying the leaderboard…" />;
   return <LiveLeaderboard event={event} />;
 }
 
