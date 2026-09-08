@@ -90,6 +90,22 @@ printf '%s\n' \
   '{"type":"service_account","client_email":"firebase-deployer@fiveacross.iam.gserviceaccount.com"}' \
   >"$READINESS_CREDENTIAL"
 
+# A stand-in for the ADC document `op-firebase-deploy` establishes immediately
+# before `firebase deploy`, for the cases that need the classifier to reach its
+# exact single-endpoint answer at all.
+#
+# The classifier refuses EVERY exemption unless a wrapper NAMES the document its
+# hooks will run against, because a synthetic stand-in of the same shape is what
+# let a hook branch one way in the rehearsal and the other for real (#1107). This
+# harness is exactly the caller that has no real credential, so a case about
+# anything else has to supply one or it is only re-proving that refusal. The
+# document is the shape the wrapper's documented default path produces: the
+# target service account handed over directly.
+ESTABLISHED_CREDENTIAL="$WORKDIR/established-adc.json"
+printf '%s\n' \
+  '{"type":"service_account","client_email":"firebase-deployer@gaycruisebingo.iam.gserviceaccount.com"}' \
+  >"$ESTABLISHED_CREDENTIAL"
+
 PASS=0
 FAIL=0
 pass() { echo "PASS: $*"; PASS=$((PASS + 1)); }
@@ -2709,6 +2725,11 @@ fi
 # behaviour: it stops before BUILD_CMD and before op-firebase-deploy. 27b is
 # the control — the same fixture and the same selector without `--public` —
 # which reads the configured directory, writes nothing, and publishes.
+#
+# Both name an established ADC document, because a rehearsal that has none runs
+# no hook at all: the classifier refuses every exemption before staging rather
+# than hand a hook a synthetic credential (#1107). Without it these two cases
+# would pass by never running the hook they are about.
 # ---------------------------------------------------------------------------
 init_public_override_repo() {
   local repo="$1"
@@ -2743,6 +2764,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-27a.log" \
 NPM_LOG="$WORKDIR/npm-calls-27a.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO27A' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting --public other" \
   >"$WORKDIR/case27a.out" 2>"$WORKDIR/case27a.err"
 RC27A=$?
@@ -2769,6 +2791,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-27b.log" \
 NPM_LOG="$WORKDIR/npm-calls-27b.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO27B' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting" \
   >"$WORKDIR/case27b.out" 2>"$WORKDIR/case27b.err"
 RC27B=$?
@@ -2805,6 +2828,11 @@ fi
 # what keeps 28a's reconciliation attributable to the group the artifact
 # exports rather than to a classifier that refuses this fixture shape for some
 # unrelated reason (an unprovable write containment, say).
+#
+# Both name an established ADC document for the reason 27a/27b do: with none,
+# the classifier refuses every exemption before it stages anything, and 28b's
+# control would pass without ever proving the scope exact. Case 32 below is the
+# case about that refusal.
 # ---------------------------------------------------------------------------
 FUNCTIONS_TOOLCHAIN="$ROOT/functions/node_modules"
 if [[ ! -d "$FUNCTIONS_TOOLCHAIN" ]]; then
@@ -2884,6 +2912,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-28a.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-28a.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO28A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
   >"$WORKDIR/case28a.out" 2>"$WORKDIR/case28a.err"
 RC28A=$?
@@ -2906,6 +2935,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-28b.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-28b.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO28B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
   >"$WORKDIR/case28b.out" 2>"$WORKDIR/case28b.err"
 RC28B=$?
@@ -2982,6 +3012,7 @@ run_dir_mtime_case() {
   PATH="$STUB_DIR:$PATH" \
   OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
   NPM_LOG="$WORKDIR/npm-calls-${case_id}.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
     bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail" \
     >"$WORKDIR/case${case_id}.out" 2>"$WORKDIR/case${case_id}.err"
   local rc=$?
@@ -3037,6 +3068,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-30.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-30.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO30' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
   >"$WORKDIR/case30.out" 2>"$WORKDIR/case30.err"
 RC30=$?
@@ -3076,6 +3108,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-31a.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-31a.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO31A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
   >"$WORKDIR/case31a.out" 2>"$WORKDIR/case31a.err"
 RC31A=$?
@@ -3099,6 +3132,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-31b.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-31b.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
   bash -c "cd '$REPO31B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
   >"$WORKDIR/case31b.out" 2>"$WORKDIR/case31b.err"
 RC31B=$?
@@ -3113,6 +3147,52 @@ elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31b.log"; then
   cat "$WORKDIR/gcloud-calls-31b.log" >&2
 else
   pass "hosting-public: a plain public directory runs no framework build and keeps the single-endpoint scope exact (rc=$RC31B)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 32 (#547 — Codex P1, round 26): with no established deploy credential,
+# every exact single-endpoint exemption is refused.
+#
+# `lifecycleHooks.getChildEnvironment` hands a hook the wrapper's own
+# environment, in which GOOGLE_APPLICATION_CREDENTIALS points at the ADC
+# document `op-firebase-deploy` has just established. The rehearsal used to
+# write a synthetic document of the same SHAPE instead, under an obviously fake
+# account — while the documented path gives that wrapper the target service
+# account directly, so the real document is a `service_account` carrying the real
+# `client_email`. A hook that merely inspects the JSON therefore branched one way
+# here and the other for real, with nothing failing and nothing drifting to say
+# so. The rehearsal now runs the hooks against the document a wrapper NAMES
+# through FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL, or it refuses.
+#
+# This is the standalone case: `deploy.sh` invoked with no such document, which
+# is every ordinary deploy — op-firebase-deploy mints that document inside its
+# own process immediately before `firebase deploy` and deletes it in its own
+# EXIT trap, and it refuses to run an arbitrary command under the credential it
+# establishes, so there is no point in the wrapper's sequence at which the real
+# document exists and nothing has been published. The fixture is 28b's, which
+# really does export one endpoint and IS exempted once the document is named —
+# so the reconciliation below is attributable to the missing credential alone.
+# ---------------------------------------------------------------------------
+REPO32="$WORKDIR/case32-no-established-credential"
+init_admin_options_repo "$REPO32" "$ADMIN_OPTIONS_CONTROL_BRANCH"
+: >"$WORKDIR/ofd-calls-32.log"
+: >"$WORKDIR/gcloud-calls-32.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-32.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-32.log" \
+  bash -c "cd '$REPO32' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case32.out" 2>"$WORKDIR/case32.err"
+RC32=$?
+set -e
+if [[ $RC32 -ne 0 ]]; then
+  fail "no-established-credential: deploy.sh returned $RC32. stderr was:"
+  cat "$WORKDIR/case32.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-32.log"; then
+  fail "no-established-credential: a rehearsal with no real ADC document still exempted the scope, so a hook that reads the credential could have taken a different branch in the deploy. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-32.log" >&2
+else
+  pass "no-established-credential: a standalone deploy classifies conservatively rather than rehearsing against a synthetic credential (rc=$RC32)."
 fi
 # ---------------------------------------------------------------------------
 # Summary

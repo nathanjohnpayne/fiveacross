@@ -82,6 +82,15 @@ set -euo pipefail
 #                        deploy.sh runs exact-SA handoff readiness after every
 #                        pre-build guard and before BUILD_CMD for a Hosting or
 #                        handoff-Function scope.
+#   FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL
+#                        Path of the ADC document GOOGLE_APPLICATION_CREDENTIALS
+#                        will point at when `firebase deploy` runs. Naming it
+#                        lets the classifier rehearse predeploy hooks against
+#                        the credential they will really run with. Unset is the
+#                        ordinary case — op-firebase-deploy mints that document
+#                        inside its own process and deletes it on exit — and
+#                        then every exact single-endpoint exemption is refused
+#                        and this deploy classifies conservatively.
 #
 # Credentials:
 #   The invoker steps (1.6 and 2.5) shell out to `gcloud`. When a named deploy
@@ -108,7 +117,7 @@ ENV_CHECK_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,89p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,97p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -252,6 +261,21 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # `hosting.public` and can write a Functions artifact — so the request the
 # adapter would rehearse is not the request the deploy runs, and no rehearsal of
 # the hooks can be made to speak for it.
+# The hooks run against the ADC document the deploy will hand them, or the
+# exemption is refused. A synthetic stand-in was worse than nothing: the
+# documented path gives op-firebase-deploy the target service account directly,
+# so the real document is a `service_account` carrying the real `client_email`,
+# while the rehearsal always wrote an `impersonated_service_account` for a
+# synthetic one — and a hook that merely inspects that JSON took one branch here
+# and the other for real, with nothing failing to say so. This wrapper cannot
+# supply the real document: `op-firebase-deploy` mints it inside its own process
+# immediately before `firebase deploy`, deletes it in its own EXIT trap, and
+# refuses to run an arbitrary command under it, so there is no point in this
+# sequence where the document exists and nothing has been published. Every
+# ordinary deploy therefore classifies conservatively, and
+# FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL below is the seam through which a
+# wrapper that CAN establish it first names the document — an assertion that the
+# named file is the one the deploy's own hooks will read.
 # Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
 # codebase this request loads cannot be vouched for — it consulted a value the
 # preflight cannot supply, it left work running outside its process group, it
@@ -300,6 +324,7 @@ FIREBASE_REQUEST_CLASSIFICATION="$(
   FIREBASE_DEPLOY_DEFAULT_PROJECT="${DEPLOY_TARGET_PROJECT:-}" \
   FIREBASE_DEPLOY_DEFAULT_CONFIG="$PWD/firebase.json" \
   FIREBASE_DEPLOY_REJECT_OVERRIDES="$([[ -n "${DEPLOY_TARGET_PROJECT:-}" ]] && printf true || printf false)" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="${FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL:-}" \
   FIREBASE_DEPLOY_CLASSIFIER_FORMAT=shell \
     node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" -- \
       ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}

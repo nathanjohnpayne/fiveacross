@@ -368,6 +368,11 @@ const CLASSIFIER_PRIVATE_ENV = Object.freeze([
   "FIREBASE_DEPLOY_DEFAULT_CONFIG",
   "FIREBASE_DEPLOY_REJECT_OVERRIDES",
   "FIREBASE_DEPLOY_CLASSIFIER_FORMAT",
+  // The wrapper names the established ADC document to THIS classifier, and to
+  // nothing else: `firebase deploy` is handed the document through
+  // `GOOGLE_APPLICATION_CREDENTIALS` and never sees this name, so a hook that
+  // could read it here would be reading a variable its real run cannot.
+  "FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL",
   // Never ambient — the classifier sets it on a discovery child — but a shell
   // that had it set would make the preload's watch look like the codebase's own
   // configuration.
@@ -411,45 +416,88 @@ function productionHookEnvironment(project) {
 }
 
 /**
+ * The ADC document the hooks will run against, or the reason there is none.
+ *
+ * WHY A SYNTHETIC ONE IS NOT AN OPTION. The wrapper's documented default path
+ * hands `op-firebase-deploy` the TARGET service account directly, so the
+ * document it establishes is a `service_account` carrying the real
+ * `client_email`; the rehearsal used to write an `impersonated_service_account`
+ * for an obviously synthetic account instead. A hook that merely INSPECTS that
+ * JSON — its `type`, its `client_email` — therefore took one branch here and
+ * the other during the deploy, with nothing failing and nothing drifting to
+ * say so: an exact endpoint in the rehearsal, a protected group for real, and
+ * the invoker reconciliation switched off for it (Codex P1, round 26 on
+ * #1107). The same shape is not the same document, and "a hook that only reads
+ * the shape behaves the same" was the assumption that was wrong.
+ *
+ * SO THE INVARIANT IS BYTES, NOT SHAPE: the rehearsal runs the hooks against
+ * the very document the deploy will, or it does not claim to have rehearsed
+ * them. `FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL` is the seam a wrapper uses to
+ * name that document; supplying it is an assertion that this file is the one
+ * `GOOGLE_APPLICATION_CREDENTIALS` will point at during `firebase deploy`, in
+ * the same family as the pinned project and config path `deploy.sh` already
+ * passes in. Nothing here reads its contents.
+ *
+ * WITHOUT IT, EVERY EXEMPTION IS REFUSED — a standalone invocation, a dry run,
+ * this repository's own deployment-safety harness, and `deploy.sh` itself,
+ * which cannot supply one: `op-firebase-deploy` mints that document inside its
+ * own process, immediately before `firebase deploy`, and deletes it in its own
+ * EXIT trap, and it refuses to run an arbitrary command under the credential it
+ * establishes. So there is no point in the wrapper's sequence at which the real
+ * document exists and nothing has been published yet. The refusal is the
+ * conservative answer to that, and it is the answer this classifier gives for
+ * every other input it cannot reproduce.
+ */
+async function establishedDeployCredential(path) {
+  if (!path) {
+    return {
+      ok: false,
+      reason:
+        "no established deploy credential was supplied (FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL), so a " +
+        "predeploy hook that reads the ADC document would see a different credential here than the " +
+        "deploy will establish for it",
+    };
+  }
+  const resolved = resolve(path);
+  try {
+    const stats = await stat(resolved);
+    if (!stats.isFile()) {
+      return {
+        ok: false,
+        reason: `the established deploy credential at ${resolved} is not a file`,
+      };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `the established deploy credential at ${resolved} could not be read — ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  return { ok: true, path: resolved };
+}
+
+/**
  * The two variables the wrapper points at freshly made TEMPORARIES, reproduced
- * inside the scratch dir.
+ * for the rehearsal.
  *
  * `XDG_CONFIG_HOME` is exact: the wrapper's is a `mktemp -d`, an empty
  * directory that exists only for that deploy, and so is this one.
  *
- * `GOOGLE_APPLICATION_CREDENTIALS` cannot be. The wrapper writes a real ADC
- * document for the pinned project, and minting one is precisely what an offline
- * preflight cannot do. It is given the same SHAPE under an obviously synthetic
- * account — the same answer `CONFIG_PROBES` gives for the project config it
- * cannot obtain — so a hook that merely tests for the variable, or reads its
- * JSON shape, behaves here as it will during the deploy, while a hook that
- * actually AUTHENTICATES with it fails. A failed hook already refuses the whole
- * project, so that residual is closed in the fail-closed direction rather than
- * left open.
+ * `GOOGLE_APPLICATION_CREDENTIALS` is the document `establishedDeployCredential`
+ * settled on, passed through by PATH rather than copied, so a hook reads the
+ * same bytes the deploy's own hooks will. Running them against it costs one
+ * more run with a credential they run with anyway; the write containment is
+ * still in force, so what that credential can reach is unchanged from every
+ * other program this rehearsal starts. There is no third state: a run with no
+ * established document never reaches here, because the whole project has
+ * already been refused.
  */
-async function productionCredentialEnvironment(scratch, project) {
+async function productionCredentialEnvironment(scratch, credentialPath) {
   const configHome = join(scratch, "configstore");
   await mkdir(configHome, { recursive: true });
-  const credential = join(scratch, "application_default_credentials.json");
-  const account =
-    "firebase-deploy-scope-probe@firebase-deploy-scope-probe.iam.gserviceaccount.com";
-  await writeFile(
-    credential,
-    JSON.stringify({
-      type: "impersonated_service_account",
-      service_account_impersonation_url:
-        `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${account}:generateAccessToken`,
-      source_credentials: {
-        type: "authorized_user",
-        client_id: "firebase-deploy-scope-probe",
-        client_secret: "firebase-deploy-scope-probe",
-        refresh_token: "firebase-deploy-scope-probe",
-      },
-      quota_project_id: project || "firebase-deploy-scope-probe",
-    }),
-    "utf8",
-  );
-  return { XDG_CONFIG_HOME: configHome, GOOGLE_APPLICATION_CREDENTIALS: credential };
+  return { XDG_CONFIG_HOME: configHome, GOOGLE_APPLICATION_CREDENTIALS: credentialPath };
 }
 
 const POSIX = process.platform !== "win32";
@@ -2294,7 +2342,10 @@ class RehearsalExit {
  * Hosting config with a `source` makes the pinned CLI run the app's own
  * framework build ahead of every lifecycle hook, replacing `hosting.public` and
  * possibly writing a Functions artifact; the whole project is refused rather
- * than rehearsed (`frameworkPreparationRefusal`).
+ * than rehearsed (`frameworkPreparationRefusal`). And the hooks run against the
+ * ADC document the deploy will hand them or not at all — see
+ * `establishedDeployCredential`, which refuses every exemption when no wrapper
+ * has named one.
  *
  * WHAT THE EXEMPTION REQUIRES OF THE LAYOUT. `firebase.json` at the CHECKOUT
  * ROOT. The staging and the fingerprint both start from the configured project
@@ -2314,7 +2365,8 @@ class RehearsalExit {
  * hooks at all.
  *
  * FAILS CLOSED on every uncertainty: a config directory below a repository root,
- * a Hosting config the CLI would build as a web framework, a containment this machine cannot prove,
+ * a Hosting config the CLI would build as a web framework, a deploy credential
+ * no wrapper established, a containment this machine cannot prove,
  * an unmirrorable source path, a staging failure, a
  * symlink out of the staged tree, a non-zero or timed-out hook, a write into
  * the repository metadata, a discovery manifest, an artifact that will not
@@ -2343,6 +2395,7 @@ async function buildAndInventoryProject({
   discoveryTimeoutMs,
   writeContainment,
   onStaged,
+  establishedCredentialPath,
   frameworkPreparation,
   configs,
   codebaseNames,
@@ -2383,6 +2436,12 @@ async function buildAndInventoryProject({
   // ahead of the staging and ahead of every child process, for the same reason
   // the nested-config refusal is. See `frameworkPreparationRefusal`.
   if (frameworkPreparation) return refuseAll(frameworkPreparation);
+
+  // The deploy credential is settled before anything is staged or started, so a
+  // request this classifier cannot rehearse faithfully costs nothing to refuse.
+  // See `establishedDeployCredential`.
+  const credential = await establishedDeployCredential(establishedCredentialPath);
+  if (!credential.ok) return refuseAll(credential.reason);
 
   const relevant = relevantFunctionsConfigs(only, configs);
   const unstageable = relevant.find((config) => !config.sourceRel);
@@ -2549,7 +2608,7 @@ async function buildAndInventoryProject({
 
     let deployEnv;
     try {
-      deployEnv = await productionCredentialEnvironment(scratch, project);
+      deployEnv = await productionCredentialEnvironment(scratch, credential.path);
     } catch (error) {
       return refuseAll(
         `could not establish the production hook environment — ${error instanceof Error ? error.message : String(error)}`,
@@ -3297,10 +3356,17 @@ async function singleEndpointInventory(
   configPath,
   { project, projectAlias },
   only,
-  predeployTimeoutMs,
-  discoveryTimeoutMs,
-  writeContainment,
-  onStaged,
+  // The rehearsal's own controls, named rather than positional: they are the
+  // arguments `main()` never passes (the two deadlines, the containment mode
+  // and the two test seams) plus the one it does — the established deploy
+  // credential a wrapper names. See `classifyFirebaseDeployRequest`.
+  {
+    predeployTimeoutMs,
+    discoveryTimeoutMs,
+    writeContainment,
+    onStaged,
+    establishedCredentialPath,
+  },
 ) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -3452,6 +3518,7 @@ async function singleEndpointInventory(
       discoveryTimeoutMs,
       writeContainment,
       onStaged,
+      establishedCredentialPath,
       codebaseNames,
       configs,
     },
@@ -3918,6 +3985,16 @@ export async function classifyFirebaseDeployRequest(
     // this classifier can otherwise only lose a race in. A test uses it to be
     // the concurrent writer the bracket around the staging refuses.
     onStaged = null,
+    // The ADC document `GOOGLE_APPLICATION_CREDENTIALS` will point at when
+    // `firebase deploy` runs, named by whatever wrapper established it. UNLIKE
+    // the arguments above, `main()` DOES pass this one, from
+    // `FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL` — a wrapper is the only thing
+    // that can know the answer, and the same environment already carries the
+    // pinned project and config path. It cannot widen a safety bound by being
+    // absent or wrong in the cautious direction: with no document named, every
+    // exemption is refused. See `establishedDeployCredential` for what naming
+    // one asserts and why no synthetic substitute is written any more.
+    establishedCredentialPath = null,
   } = {},
 ) {
   if (rejectDestinationOverrides && hasNamedDestinationOverride(args)) {
@@ -3963,10 +4040,13 @@ export async function classifyFirebaseDeployRequest(
     configPath,
     { project, projectAlias },
     effectiveOnly,
-    predeployTimeoutMs,
-    discoveryTimeoutMs,
-    writeContainment,
-    onStaged,
+    {
+      predeployTimeoutMs,
+      discoveryTimeoutMs,
+      writeContainment,
+      onStaged,
+      establishedCredentialPath,
+    },
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
@@ -4081,6 +4161,8 @@ async function main() {
         process.env.FIREBASE_DEPLOY_DEFAULT_CONFIG ?? "firebase.json",
       rejectDestinationOverrides:
         process.env.FIREBASE_DEPLOY_REJECT_OVERRIDES === "true",
+      establishedCredentialPath:
+        process.env.FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL || null,
     });
     if (process.env.FIREBASE_DEPLOY_CLASSIFIER_FORMAT === "shell")
       printShellClassification(result);

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
@@ -22,9 +22,46 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The conventional Firebase predeploy hook. */
 const PREDEPLOY = ['npm --prefix "$RESOURCE_DIR" run build'];
 
+/**
+ * A stand-in for the ADC document a wrapper establishes, shared by every case
+ * that is not about the credential itself.
+ *
+ * The classifier refuses EVERY exemption when no established deploy credential
+ * is named — a synthetic substitute is exactly what the round-26 finding ruled
+ * out — so a suite that named none would prove nothing but that refusal. The
+ * cases about the credential pass their own document, or `null` to be the
+ * standalone caller that has none.
+ *
+ * The document is the shape the wrapper's documented default path produces: the
+ * target service account handed over directly, so `type` is `service_account`
+ * and `client_email` is the real deployer. Nothing in the classifier reads it;
+ * the fixtures' own hooks do.
+ */
+const ESTABLISHED_CREDENTIAL_DOCUMENT = {
+  type: "service_account",
+  project_id: "fiveacross",
+  client_email: "firebase-deployer@fiveacross.iam.gserviceaccount.com",
+};
+
+let establishedCredentialDir = null;
+let establishedCredential = null;
+
+/** One ADC document on disk, outside every fixture, for one case to name. */
+async function withEstablishedCredential(document, run) {
+  const dir = await mkdtemp(join(tmpdir(), "established-credential-"));
+  try {
+    const path = join(dir, "application_default_credentials.json");
+    await writeFile(path, JSON.stringify(document), "utf8");
+    await run(path);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 function classify(args, configPath = resolve(repoRoot, "firebase.json"), options = {}) {
   return classifyFirebaseDeployRequest(["fiveacross", ...args], {
     defaultConfigPath: configPath,
+    establishedCredentialPath: establishedCredential,
     ...options,
   });
 }
@@ -392,7 +429,11 @@ const ENV_SNIFFING_FIXTURE = {
     predeploy: [
       "test -n " +
         '"$FIREBASE_DEPLOY_DEFAULT_PROJECT$FIREBASE_DEPLOY_DEFAULT_CONFIG' +
-        '$FIREBASE_DEPLOY_REJECT_OVERRIDES$FIREBASE_DEPLOY_CLASSIFIER_FORMAT" ' +
+        '$FIREBASE_DEPLOY_REJECT_OVERRIDES$FIREBASE_DEPLOY_CLASSIFIER_FORMAT' +
+        // The wrapper names the established ADC document to the classifier and
+        // to nothing else: `firebase deploy` reads that document through
+        // GOOGLE_APPLICATION_CREDENTIALS and never sees this name.
+        '$FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL" ' +
         "&& cp functions/group.js functions/lib/index.js " +
         "|| cp functions/single.js functions/lib/index.js",
     ],
@@ -404,11 +445,19 @@ const ENV_SNIFFING_FIXTURE = {
   },
 };
 
-/** The environment `deploy.sh` builds for the classifier and for nothing else. */
+/**
+ * The environment `deploy.sh` builds for the classifier and for nothing else.
+ *
+ * The established deploy credential is part of it: the wrapper forwards
+ * whatever named the ADC document, and without one the classifier refuses every
+ * exemption, so a wrapper case that omitted it could not tell a refusal about
+ * the credential apart from the one it means to prove.
+ */
 const DEPLOY_SH_CLASSIFIER_ENV = (configPath) => ({
   FIREBASE_DEPLOY_DEFAULT_PROJECT: "fiveacross",
   FIREBASE_DEPLOY_DEFAULT_CONFIG: configPath,
   FIREBASE_DEPLOY_REJECT_OVERRIDES: "true",
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL: establishedCredential,
   FIREBASE_DEPLOY_CLASSIFIER_FORMAT: "shell",
 });
 
@@ -442,6 +491,27 @@ const ALL_INVOKERS_CONSERVATIVE = {
 // Installing the Functions dependencies on a cold runner is the slowest thing
 // this file does, and every fixture needs them.
 beforeAll(ensureFunctionsDependencies, 600_000);
+
+// The established deploy credential every case inherits. See
+// ESTABLISHED_CREDENTIAL_DOCUMENT for why a suite without one proves nothing.
+beforeAll(async () => {
+  establishedCredentialDir = await mkdtemp(join(tmpdir(), "established-credential-"));
+  establishedCredential = join(
+    establishedCredentialDir,
+    "application_default_credentials.json",
+  );
+  await writeFile(
+    establishedCredential,
+    JSON.stringify(ESTABLISHED_CREDENTIAL_DOCUMENT),
+    "utf8",
+  );
+});
+
+afterAll(async () => {
+  if (establishedCredentialDir) {
+    await rm(establishedCredentialDir, { recursive: true, force: true });
+  }
+});
 
 describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
   it("does not select any invoker for endpoints the artifact deploys alone", async () => {
@@ -1778,7 +1848,11 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
         const started = Date.now();
         const result = await classifyFirebaseDeployRequest(
           ["fiveacross", "--only", "functions:daily"],
-          { defaultConfigPath: configPath, predeployTimeoutMs: 250 },
+          {
+            defaultConfigPath: configPath,
+            establishedCredentialPath: establishedCredential,
+            predeployTimeoutMs: 250,
+          },
         );
         expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
         expect(Date.now() - started).toBeLessThan(3_000);
@@ -1988,7 +2062,10 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
       async (configPath) => {
         const result = await classifyFirebaseDeployRequest(
           ["--project", "prod", "--only", "functions:daily"],
-          { defaultConfigPath: configPath },
+          {
+            defaultConfigPath: configPath,
+            establishedCredentialPath: establishedCredential,
+          },
         );
         expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
       },
@@ -2615,6 +2692,106 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
         hostingAttempted: false,
         ...EXEMPT,
       });
+    });
+  });
+
+  // THE DEPLOY CREDENTIAL. `lifecycleHooks.getChildEnvironment` hands a hook the
+  // wrapper's own `process.env`, in which `GOOGLE_APPLICATION_CREDENTIALS`
+  // points at the ADC document `op-firebase-deploy` has just established. The
+  // rehearsal used to write a SYNTHETIC document of the same shape instead — an
+  // `impersonated_service_account` for an obviously fake account — while the
+  // documented path gives that wrapper the target service account directly and
+  // so establishes a `service_account` carrying the real `client_email`. A hook
+  // that merely inspects the JSON therefore took one branch here and the other
+  // for real, with nothing failing and nothing drifting to say so (Codex P1,
+  // round 26 on #1107). The hooks now run against the document a wrapper NAMES,
+  // or the exemption is refused.
+  const credentialSniffingFixture = {
+    functionsConfig: {
+      predeploy: [
+        'grep -q impersonated_service_account "$GOOGLE_APPLICATION_CREDENTIALS" ' +
+          "&& cp functions/group.js functions/lib/index.js " +
+          "|| cp functions/single.js functions/lib/index.js",
+      ],
+    },
+    files: {
+      "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+      "functions/group.js": artifact("exports.daily = { submitBugReport: endpoint() };"),
+      "functions/single.js": artifact("exports.daily = endpoint();"),
+    },
+  };
+
+  it("runs a hook that reads the ADC document against the document a wrapper named", async () => {
+    // The wrapper's documented default: the source credential IS the target
+    // service account, so `op-firebase-deploy` writes that document straight
+    // through and the hook sees `service_account`.
+    await withFunctionsProject(credentialSniffingFixture, async (configPath) => {
+      await withEstablishedCredential(ESTABLISHED_CREDENTIAL_DOCUMENT, async (path) => {
+        expect(
+          await classify(["--only", "functions:daily"], configPath, {
+            establishedCredentialPath: path,
+          }),
+        ).toMatchObject(EXEMPT);
+      });
+    });
+  });
+
+  it("takes the other branch when the wrapper established an impersonated document", async () => {
+    // The same hook and the same fixture against the wrapper's OTHER documented
+    // output — the impersonation wrapper it writes when the source credential is
+    // not the target service account. Together with the case above this is the
+    // whole claim: the branch follows the supplied document, so no synthetic
+    // stand-in is deciding it.
+    await withFunctionsProject(credentialSniffingFixture, async (configPath) => {
+      await withEstablishedCredential(
+        {
+          type: "impersonated_service_account",
+          service_account_impersonation_url:
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" +
+            "firebase-deployer@fiveacross.iam.gserviceaccount.com:generateAccessToken",
+          source_credentials: { type: "authorized_user" },
+        },
+        async (path) => {
+          expect(
+            await classify(["--only", "functions:daily"], configPath, {
+              establishedCredentialPath: path,
+            }),
+          ).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+        },
+      );
+    });
+  });
+
+  it("refuses every exemption when no wrapper established a deploy credential", async () => {
+    // The standalone caller, a dry run, and this repository's own
+    // deployment-safety harness all land here, and so does `deploy.sh`: that
+    // wrapper cannot name the document, because `op-firebase-deploy` mints it
+    // inside its own process immediately before `firebase deploy` and deletes
+    // it in its own EXIT trap. Conservative is the answer, never a synthetic
+    // substitute.
+    await withFunctionsProject({}, async (configPath) => {
+      const { result, reasons } = await withRefusalReasons(() =>
+        classify(["--only", "functions:daily"], configPath, {
+          establishedCredentialPath: null,
+        }),
+      );
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      expect(reasons).toContain("no established deploy credential");
+    });
+  });
+
+  it("refuses when the named deploy credential is not there to read", async () => {
+    // Naming a document is an assertion that the deploy's hooks will read it.
+    // One that cannot be read is not that assertion, and guessing which way it
+    // would have gone is the mistake the synthetic document made.
+    await withFunctionsProject({}, async (configPath) => {
+      const { result, reasons } = await withRefusalReasons(() =>
+        classify(["--only", "functions:daily"], configPath, {
+          establishedCredentialPath: join(tmpdir(), "no-such-adc-document.json"),
+        }),
+      );
+      expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+      expect(reasons).toContain("could not be read");
     });
   });
 
@@ -3414,6 +3591,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
         const { result, reasons } = await withRefusalReasons(() =>
           classifyFirebaseDeployRequest(["fiveacross", "--only", "functions:daily"], {
             defaultConfigPath: configPath,
+            establishedCredentialPath: establishedCredential,
             discoveryTimeoutMs: 5_000,
           }),
         );
