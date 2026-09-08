@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   abandonArchive,
   beginArchive,
@@ -16,6 +16,26 @@ function archivedOn(at: number | undefined): string {
 }
 
 type ArchiveOutcome = AbandonArchiveResult | BeginArchiveResult;
+
+/** The three states this surface renders, in the order the lifecycle moves. */
+type Phase = 'open' | 'closing' | 'archived';
+
+/**
+ * The lifecycle state each outcome DESCRIBES (Codex P2 on PR #1157). A result
+ * is a sentence about the Event as the action left it, so it is shown only
+ * while the Event is still there: from the state the action was taken in until
+ * its target state is observed, and then for as long as that state holds.
+ * Another Admin moving the Event on — reopening after this Admin closed it,
+ * or archiving it — clears the message instead of leaving "Play is closed"
+ * beside the open controls indefinitely.
+ */
+const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
+  closing: 'closing',
+  reopened: 'open',
+  'already-archived': 'archived',
+  'no-event': 'open',
+  'quiesce-changed': 'closing',
+};
 
 const RESULT_COPY: Record<ArchiveOutcome, string> = {
   closing: 'Play is closed. Reopen play to put it back.',
@@ -73,7 +93,19 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
 export default function ArchiveEvent({ event }: { event: EventDoc | null | undefined }) {
   const archived = isEventArchived(event);
   const closing = !archived && isEventArchiving(event);
-  const [result, setResult] = useState<ArchiveOutcome | null>(null);
+  const phase: Phase = archived ? 'archived' : closing ? 'closing' : 'open';
+  // `from` is the state the action was taken in; once the outcome's target
+  // state is observed it is rebased there, so any LATER move — someone else's
+  // — clears the message rather than contradicting the controls.
+  const [result, setResult] = useState<{ outcome: ArchiveOutcome; from: Phase } | null>(null);
+  useEffect(() => {
+    setResult((current) => {
+      if (!current || phase === current.from) return current;
+      if (phase === RESULT_PHASE[current.outcome]) return { ...current, from: phase };
+      return null;
+    });
+  }, [phase]);
+  const report = (outcome: ArchiveOutcome) => setResult({ outcome, from: phase });
 
   return (
     <div className="admin-section">
@@ -105,7 +137,7 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
             // failed — the token binding exists to stop a STALE handler
             // reopening a newer quiesce, and there is no stale handler here.
             onAction={async () => {
-              setResult(await abandonArchive());
+              report(await abandonArchive());
             }}
           >
             Reopen play
@@ -124,7 +156,7 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
             ariaLabel="Close play"
             failureLabel="Closing play failed—try again."
             onAction={async () => {
-              setResult((await beginArchive()).result);
+              report((await beginArchive()).result);
             }}
           >
             Close play
@@ -133,7 +165,7 @@ export default function ArchiveEvent({ event }: { event: EventDoc | null | undef
       )}
       {result && (
         <p className="schedule-row-result" role="status">
-          {RESULT_COPY[result]}
+          {RESULT_COPY[result.outcome]}
         </p>
       )}
     </div>

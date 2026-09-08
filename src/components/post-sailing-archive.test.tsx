@@ -103,6 +103,34 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is open again/);
   });
 
+  it('clears the action message when someone else moves the Event on (Codex P2, PR #1157)', async () => {
+    // The message is a sentence about the state the action left the Event in.
+    // It stays through the transition this Admin caused, and goes the moment
+    // another Admin moves the Event somewhere the sentence no longer describes.
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
+    // The subscription delivers the closing state this Admin produced: still true.
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    expect(screen.getByRole('status')).toHaveTextContent(/Play is closed/);
+    // Another Admin archives it: "Reopen play to put it back" is now false.
+    view.rerender(
+      <ArchiveEvent event={mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 })} />,
+    );
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('clears the closed message when someone else REOPENS the Event underneath it', async () => {
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    await screen.findByRole('status');
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    expect(screen.getByRole('status')).toHaveTextContent(/Play is closed/);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
+
   it('retires the controls once the Event is archived, and still names the state', () => {
     // The flip can reach the document without this surface (an Admin-SDK edit
     // today, #1151's console action next), so the archived state is rendered
