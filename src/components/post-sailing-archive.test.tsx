@@ -28,8 +28,17 @@ const H = vi.hoisted(() => {
      *  turns on: the persistent cache supplies a document, not a confirmation. */
     eventConfirmed: true,
     players: [] as PlayerDoc[],
-    rosterConfirmed: true,
-    dayMetasServerLoaded: true,
+    /** `useLeaderboard`'s LIFETIME latch — the server has answered this roster
+     *  at least once. Kept apart from the two per-snapshot flags below because
+     *  that is exactly the distinction the gate turns on (Codex P2 on PR
+     *  #1162): the latch never clears, so it cannot say whether the rows on
+     *  screen right now are the ones the server sent. */
+    rosterSeen: true,
+    rosterFromCache: false,
+    rosterPending: false,
+    /** `useDayMetasStatus`'s CURRENT answer: every Day's latest snapshot is
+     *  fully server-committed. Not a latch, for the same reason. */
+    dayMetasServerConfirmed: true,
     pendingClaims: [] as ClaimDoc[],
     pendingClaimsLoaded: true,
     /** The order the writes were issued in, so the quiesce-first contract is
@@ -41,15 +50,21 @@ const H = vi.hoisted(() => {
     useLeaderboard: vi.fn(() => ({
       players: state.players,
       loading: false,
-      hasServerData: state.rosterConfirmed,
+      hasServerData: state.rosterSeen,
+      fromCache: state.rosterFromCache,
+      hasPendingWrites: state.rosterPending,
     })),
-    /** At least one Day's honour subscription DIED, so `serverLoaded` can never
-     *  complete for this key (Codex P2 on PR #1162). */
+    /** At least one Day's honour subscription DIED. NOT the complement of
+     *  `dayMetasServerConfirmed` — a Day answered before its listener died stays
+     *  confirmed (Codex P2 and CodeRabbit on PR #1162). */
     dayMetasFailed: false,
     useDayMetasStatus: vi.fn(() => ({
       metas: new Map(),
       loaded: true,
-      serverLoaded: state.dayMetasServerLoaded,
+      // The latch is still on the hook for the consumers that ask "has the
+      // server ever spoken"; the archive gate reads the current answer below.
+      serverLoaded: state.dayMetasServerConfirmed,
+      serverConfirmed: state.dayMetasServerConfirmed,
       failed: state.dayMetasFailed,
     })),
   };
@@ -125,8 +140,10 @@ beforeEach(() => {
   H.event = mkEvent();
   H.eventConfirmed = true;
   H.players = [mkPlayer('alice'), mkPlayer('bob', { squaresMarked: 3 })];
-  H.rosterConfirmed = true;
-  H.dayMetasServerLoaded = true;
+  H.rosterSeen = true;
+  H.rosterFromCache = false;
+  H.rosterPending = false;
+  H.dayMetasServerConfirmed = true;
   H.dayMetasFailed = false;
   H.pendingClaims = [];
   H.pendingClaimsLoaded = true;
@@ -560,14 +577,15 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
   // cold ADR 0006 cache, and archiving on one would freeze empty standings and
   // missing honours forever.
   it('disables the control while the roster is still cache-only', () => {
-    H.rosterConfirmed = false;
+    H.rosterSeen = false;
+    H.rosterFromCache = true;
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
   });
 
   it('disables the control while a Day-meta subscription is unconfirmed', () => {
-    H.dayMetasServerLoaded = false;
+    H.dayMetasServerConfirmed = false;
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
   });
@@ -608,13 +626,13 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
   });
 
   // Codex P2 on PR #1162. A day-meta listener that dies before any server
-  // snapshot can never satisfy `serverLoaded`, so "loading" would be a message
-  // that never resolves — and the preview beside it is showing the roster-DERIVED
-  // honour, or none, where the freeze's own server re-read may find the PINNED
-  // holder and keep them instead.
+  // snapshot can never be confirmed, so "loading" would be a message that never
+  // resolves — and the preview beside it is showing the roster-DERIVED honour,
+  // or none, where the freeze's own server re-read may find the PINNED holder
+  // and keep them instead.
   it('says the honours could not be READ when a Day subscription failed, not "loading"', () => {
     H.dayMetasFailed = true;
-    H.dayMetasServerLoaded = false;
+    H.dayMetasServerConfirmed = false;
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent(
@@ -626,7 +644,7 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
 
   it('holds the CLOSING-state freeze shut on unreadable honours, and says nothing was frozen', () => {
     H.dayMetasFailed = true;
-    H.dayMetasServerLoaded = false;
+    H.dayMetasServerConfirmed = false;
     H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
@@ -634,6 +652,64 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
     expect(screen.getByRole('status')).toHaveTextContent(
       /The daily honours could not be read from the server.*Play is already closed—nothing has been frozen\./,
     );
+  });
+
+  // CodeRabbit, PR #1162. `failed` is not the complement of the confirmation: a
+  // Day the server answered before its listener died stays confirmed, and
+  // nothing clears it. So `failed` alone printed a TERMINAL "reload the console"
+  // message beside an ENABLED control, sending the Admin after a problem that
+  // was not standing in their way.
+  it('says nothing about unreadable honours while every Day is still confirmed', () => {
+    H.dayMetasFailed = true;
+    H.dayMetasServerConfirmed = true;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  // Codex P2 on PR #1162. `hasServerData` and `serverLoaded` are LATCHES: they
+  // say the server HAS spoken, never that this is what it says. They never
+  // clear, so a console that confirmed its inputs and then went offline armed
+  // Archive over a preview the persistent cache re-served — and the record the
+  // freeze takes is permanent.
+  it('disarms when a CONFIRMED roster starts coming back from the cache', () => {
+    H.rosterSeen = true; // the latch holds — the server did answer, once
+    H.rosterFromCache = true; // …and this is not that answer
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
+  });
+
+  it('disarms while a local roster write is still pending', () => {
+    // Emitted server-backed but UNDECIDED, exactly as an Admin's own optimistic
+    // `archiving: true` is on the Event document — and a refusal rolls it back.
+    H.rosterSeen = true;
+    H.rosterFromCache = false;
+    H.rosterPending = true;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
+  });
+
+  it('holds the CLOSING-state freeze shut on a cache-served roster too', () => {
+    // The other surface that reaches the flip, which an Admin who has already
+    // used Close play cannot get back from.
+    H.rosterSeen = true;
+    H.rosterFromCache = true;
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+  });
+
+  it('disarms when a CONFIRMED Day fan starts coming back from the cache', () => {
+    // The Day-meta half of the same claim: the honour the preview shows has to
+    // be the one the server is answering with now, because `archiveEvent`'s own
+    // re-read may recover a PINNED holder the cached view never had.
+    H.dayMetasServerConfirmed = false;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
   });
 });
 

@@ -45,7 +45,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard, useDayMetasStatus, useMyUser } from './useData';
+import { useItems, useBoard, useDayMetasStatus, useLeaderboard, useMyUser } from './useData';
 
 beforeEach(() => {
   H.eventId = 'event-a';
@@ -249,13 +249,15 @@ describe('hasServerData latch (Codex P2, round 4 — persistent-cache cold start
 });
 
 // Codex P2 on PR #1162. `useDayMetasStatus` fans one subscription per Day, and
-// `serverLoaded` is the strict latch the post-Event archive gates on (#1151):
-// "every Day's honour has been answered by the SERVER". An errored subscription
-// used to satisfy it, which made the strict latch a lie in exactly the case it
-// exists for — a listener that died before any server snapshot confirmed
-// nothing, yet the archive read the Day as confirmed and armed over a preview
-// that had fallen back to a DERIVED honour, or to none, while `archiveEvent`'s
-// own server re-read could recover the PINNED one and freeze it instead.
+// `serverLoaded` is the strict LATCH: "every Day's honour has been answered by
+// the SERVER at least once". An errored subscription used to satisfy it, which
+// made the latch a lie in exactly the case it exists for — a listener that died
+// before any server snapshot confirmed nothing, yet the archive read the Day as
+// confirmed and armed over a preview that had fallen back to a DERIVED honour,
+// or to none, while `archiveEvent`'s own server re-read could recover the PINNED
+// one and freeze it instead. (The archive now gates on `serverConfirmed`, the
+// stricter per-render answer pinned in the block below; an errored Day has to
+// stay out of BOTH, for the same reason.)
 describe('useDayMetasStatus — a failed honour subscription confirms nothing (#1151)', () => {
   /** Captures every per-Day subscription's `onNext`/`onError` pair, in fan
    *  order. The real hook calls onSnapshot(ref, options, onNext, onError). */
@@ -332,5 +334,121 @@ describe('useDayMetasStatus — a failed honour subscription confirms nothing (#
     fan.error(0);
     expect(result.current.serverLoaded).toBe(true);
     expect(result.current.failed).toBe(true);
+    // …and `failed` overlaps the CURRENT answer for the same reason (CodeRabbit,
+    // PR #1162): the last snapshot this Day delivered was server-committed and
+    // the error callback removes nothing, so a consumer that read `failed` as
+    // "not confirmed" would show a terminal message beside an armed control.
+    expect(result.current.serverConfirmed).toBe(true);
+  });
+});
+
+// Codex P2 on PR #1162. `serverLoaded` above is a LATCH — "the server has spoken
+// at least once" — and the archive gate needs the stricter question: is the
+// preview on screen right now what the server said? A confirmed console that
+// goes offline, or that has a local write in flight, keeps the latch while the
+// ADR 0006 persistent cache re-serves every Day, and the freeze it takes is
+// permanent.
+describe('useDayMetasStatus — serverConfirmed is the CURRENT snapshot, not a latch (#1151)', () => {
+  function captureFan(): { next: (i: number, snap: unknown) => void } {
+    const subs: Array<{ onNext: (s: unknown) => void }> = [];
+    H.onSnapshot.mockImplementation(
+      (_target: unknown, _options: unknown, onNext: (s: unknown) => void) => {
+        subs.push({ onNext });
+        return () => {};
+      },
+    );
+    return { next: (i, snap) => act(() => subs[i].onNext(snap)) };
+  }
+
+  const metaSnap = (fromCache: boolean, hasPendingWrites = false) => ({
+    exists: () => false,
+    data: () => undefined,
+    metadata: { fromCache, hasPendingWrites },
+  });
+
+  it('falls FALSE again when a confirmed Day re-delivers from the cache', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(2));
+
+    fan.next(0, metaSnap(false));
+    fan.next(1, metaSnap(false));
+    expect(result.current.serverConfirmed).toBe(true);
+
+    // The admin goes offline: this Day is re-delivered from the persistent
+    // cache. The LATCH holds, because the server did speak once…
+    fan.next(1, metaSnap(true));
+    expect(result.current.serverLoaded).toBe(true);
+    // …and the current answer does not, because that is a different claim.
+    expect(result.current.serverConfirmed).toBe(false);
+
+    // Connectivity returns and the Day is confirmed again — it is not a latch
+    // in either direction.
+    fan.next(1, metaSnap(false));
+    expect(result.current.serverConfirmed).toBe(true);
+  });
+
+  it('is FALSE while a local write on a Day meta is still pending', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(1));
+
+    // Emitted server-backed but UNDECIDED: `fromCache` is false and the write
+    // has not been acked, so it can still roll back.
+    fan.next(0, metaSnap(false, true));
+    expect(result.current.serverLoaded).toBe(true);
+    expect(result.current.serverConfirmed).toBe(false);
+
+    fan.next(0, metaSnap(false, false));
+    expect(result.current.serverConfirmed).toBe(true);
+  });
+
+  it('needs EVERY Day, and is vacuously true for a schedule with none', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(2));
+
+    fan.next(0, metaSnap(false));
+    expect(result.current.serverConfirmed).toBe(false);
+    fan.next(1, metaSnap(false));
+    expect(result.current.serverConfirmed).toBe(true);
+
+    // No Days to confirm: the same vacuous answer `loaded`/`serverLoaded` give,
+    // which is why the console gates the Event document separately.
+    const { result: none } = renderHook(() => useDayMetasStatus(0));
+    expect(none.current.serverConfirmed).toBe(true);
+  });
+});
+
+// Codex P2 on PR #1162, the roster half of the same finding. `useColSub` already
+// carries the current snapshot's metadata; this hook used to discard it, leaving
+// the archive gate with the lifetime latch alone.
+describe('useLeaderboard — the CURRENT snapshot beside the latch (#1151)', () => {
+  const rosterSnap = (fromCache: boolean, hasPendingWrites = false) => ({
+    docs: [],
+    metadata: { fromCache, hasPendingWrites },
+  });
+
+  it('reports the latest snapshot’s origin and pending-write state', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    // Cold persistent cache.
+    sub.fire(rosterSnap(true));
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.fromCache).toBe(true);
+
+    sub.fire(rosterSnap(false));
+    expect(result.current.hasServerData).toBe(true);
+    expect(result.current.fromCache).toBe(false);
+    expect(result.current.hasPendingWrites).toBe(false);
+
+    // Offline again: Board's ceremonial edge keeps the latch it reads, and the
+    // archive gate gets the per-snapshot answer it needs beside it.
+    sub.fire(rosterSnap(true));
+    expect(result.current.hasServerData).toBe(true);
+    expect(result.current.fromCache).toBe(true);
+
+    // Server-backed but UNDECIDED — an optimistic local roster write.
+    sub.fire(rosterSnap(false, true));
+    expect(result.current.fromCache).toBe(false);
+    expect(result.current.hasPendingWrites).toBe(true);
   });
 });
