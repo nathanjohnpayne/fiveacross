@@ -49,18 +49,38 @@ const TOO_LARGE_COPY =
 const REOPEN_SUPERSEDED_COPY =
   ' Play was left closed: the Event has been shut again by another archive, and that closing state is not this one to lift. Reopen play below if that archive is not going ahead.';
 
+/** An outcome together with the phase the handler's own CLEANUP left the Event
+ *  in, for the one path that has a cleanup: an open-phase `runArchive` whose
+ *  flip refused and whose automatic reopen then succeeded (Codex P2 on PR
+ *  #1162). Absent means nothing cleaned up, and `RESULT_PHASE` below decides. */
+type ArchiveReport = { outcome: ArchiveOutcome; settledAt?: Phase };
+
 /**
- * The lifecycle state each outcome DESCRIBES (Codex P2 on PR #1157). A result is
- * a sentence about the Event as the action left it, so it is shown only while
- * the Event is still there: from the state the action was taken in until its
- * target state is observed, and then for as long as that state holds. Another
- * Admin moving the Event on — reopening after this Admin closed it, or archiving
- * it — clears the message instead of leaving "Play is closed" beside the open
- * controls indefinitely.
+ * The lifecycle state each outcome DESCRIBES when nothing cleaned up after it
+ * (Codex P2 on PR #1157). A result is a sentence about the Event as the action
+ * left it, so it is shown only while the Event is still there: from the state the
+ * action was taken in until its target state is observed, and then for as long as
+ * that state holds. Another Admin moving the Event on — reopening after this
+ * Admin closed it, or archiving it — clears the message instead of leaving "Play
+ * is closed" beside the open controls indefinitely.
  *
- * Every refusal the flip can report describes a CLOSING Event, because that is
- * where the flip leaves one: each of them writes nothing, and the quiesce this
- * handler took (or found) is still in force.
+ * Every refusal the flip can report is mapped to a CLOSING Event, because that is
+ * where the flip ITSELF leaves one: each of them writes nothing, and the quiesce
+ * is still in force when `archiveEvent` returns.
+ *
+ * BUT THAT IS NOT ALWAYS WHERE THE EVENT ENDS UP (Codex P2 on PR #1162). An
+ * open-phase `runArchive` that CREATED the quiesce reopens play for all four of
+ * those refusals, so the Event lands back OPEN — and the message was then
+ * discarded twice over: the reopen the handler itself performed moved the phase
+ * away from `closing`, and `movedDuringActionRef` had already recorded that the
+ * phase moved during the action, so neither the observed-phase test nor the
+ * still-where-it-started test could hold. The Admin was left with reopened
+ * controls and no explanation of why nothing was frozen. So a refusal followed by
+ * a successful automatic reopen is reported against `open` instead, through
+ * `ArchiveReport.settledAt`; `closing` is retained only where no reopen was
+ * attempted or none succeeded — a quiesce this handler merely JOINED, one another
+ * archive has taken over, and the closing surface's own **Freeze the record**,
+ * which never reopens at all.
  */
 const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
   closing: 'closing',
@@ -198,8 +218,15 @@ export default function ArchiveEvent({
   const [beforeFinale, setBeforeFinale] = useState(false);
   // `from` is the state the action was taken in; once the outcome's target state
   // is observed it is rebased there, so any LATER move — someone else's — clears
-  // the message rather than contradicting the controls.
-  const [result, setResult] = useState<{ outcome: ArchiveOutcome; from: Phase } | null>(null);
+  // the message rather than contradicting the controls. `describes` is that
+  // target state, carried on the record rather than looked up from the outcome,
+  // because a refusal the handler then cleaned up after describes where the
+  // CLEANUP left the Event and not where the flip did (Codex P2 on PR #1162).
+  const [result, setResult] = useState<{
+    outcome: ArchiveOutcome;
+    from: Phase;
+    describes: Phase;
+  } | null>(null);
   // Whether the automatic reopen declined because the quiesce in force is no
   // longer the one this handler took. Carried BESIDE the result rather than
   // replacing it: the Admin needs both halves — why nothing was frozen, and why
@@ -216,7 +243,7 @@ export default function ArchiveEvent({
     if (inFlightRef.current) movedDuringActionRef.current = true;
     setResult((current) => {
       if (!current || phase === current.from) return current;
-      if (phase === RESULT_PHASE[current.outcome]) return { ...current, from: phase };
+      if (phase === current.describes) return { ...current, from: phase };
       return null;
     });
   }, [phase]);
@@ -230,22 +257,34 @@ export default function ArchiveEvent({
   // would be stale before it appeared, so nothing is shown at all.
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
-  const report = (outcome: ArchiveOutcome, startedIn: Phase) => {
+  const report = (outcome: ArchiveOutcome, startedIn: Phase, settledAt?: Phase) => {
+    // A CLEANUP THIS HANDLER PERFORMED IS EVIDENCE IN ITS OWN RIGHT (Codex P2 on
+    // PR #1162). The tests below are about a phase somebody ELSE may have moved
+    // while the write was in flight; where the handler's own reopen succeeded it
+    // knows exactly where it left the Event, so the record is made against that
+    // phase directly. Nothing is bypassed by doing so — the `[phase]` effect
+    // above still rebases the message when the subscription delivers the reopen,
+    // and still clears it the moment anyone moves the Event anywhere else.
+    if (settledAt) {
+      setResult({ outcome, from: settledAt, describes: settledAt });
+      return;
+    }
+    const describes = RESULT_PHASE[outcome];
     const observed = phaseRef.current;
     const stillWhereItStarted = observed === startedIn && !movedDuringActionRef.current;
     setResult(
-      observed === RESULT_PHASE[outcome] || stillWhereItStarted
-        ? { outcome, from: observed }
-        : null,
+      observed === describes || stillWhereItStarted ? { outcome, from: observed, describes } : null,
     );
   };
-  const act = async (run: () => Promise<ArchiveOutcome>) => {
+  const act = async (run: () => Promise<ArchiveOutcome | ArchiveReport>) => {
     const startedIn = phase;
     inFlightRef.current = true;
     movedDuringActionRef.current = false;
     setReopenSuperseded(false);
     try {
-      report(await run(), startedIn);
+      const settled = await run();
+      if (typeof settled === 'string') report(settled, startedIn);
+      else report(settled.outcome, startedIn, settled.settledAt);
     } finally {
       inFlightRef.current = false;
     }
@@ -322,13 +361,16 @@ export default function ArchiveEvent({
     </label>
   );
 
-  /** The Archive action: both writes, in order, with the cleanup a refusal needs. */
-  const runArchive = async () => {
+  /** The Archive action: both writes, in order, with the cleanup a refusal needs
+   *  — and the phase that cleanup LEFT the Event in, so the explanation is shown
+   *  against the controls the Admin is actually looking at (Codex P2 on PR
+   *  #1162). */
+  const runArchive = async (): Promise<ArchiveReport> => {
     // The quiesce this handler took, and the Event it took it on (#1142 item 7):
     // `EVENT_ID` is a live binding, so the freeze and the cleanup name the Event
     // the SHUT actually landed on rather than re-resolving it per call.
     const { result: opened, token, created, eventId } = await beginArchive();
-    if (opened !== 'closing') return opened;
+    if (opened !== 'closing') return { outcome: opened };
     const outcome = await archiveEvent(token as number, { eventId, beforeFinale });
     // THIS handler is what shut the Event, so this handler is what puts it back
     // when the second write refuses (Codex P2, PR #1139). Each of these refusals
@@ -361,6 +403,14 @@ export default function ArchiveEvent({
       if (created) {
         const reopened = await abandonArchive(token ?? undefined, eventId);
         setReopenSuperseded(reopened === 'quiesce-changed');
+        // WHERE THE EVENT ACTUALLY ENDS UP (Codex P2 on PR #1162). The reopen
+        // this handler just performed put it back OPEN, so the refusal is a
+        // sentence about an open Event and belongs beside the open controls —
+        // where, without this, it was discarded as stale by the very phase move
+        // the handler caused. Only a reopen that SUCCEEDED settles it there: a
+        // superseded or already-archived one wrote nothing and the Event is
+        // wherever it already was.
+        if (reopened === 'reopened') return { outcome, settledAt: 'open' };
       } else {
         // Joined, not created: the closing state belongs to whoever opened it,
         // and it is left exactly as found. Reported for the same reason a
@@ -368,7 +418,7 @@ export default function ArchiveEvent({
         setReopenSuperseded(true);
       }
     }
-    return outcome;
+    return { outcome };
   };
 
   return (
