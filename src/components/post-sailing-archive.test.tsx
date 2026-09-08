@@ -660,15 +660,67 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     expect(screen.getByRole('status')).toHaveTextContent(/Nothing has been closed\./);
   });
 
-  it('holds the closing-state freeze shut too, and names the way out', () => {
+  // Codex P2 on PR #1162. The copy used to blame extra text on a Player row and
+  // recommend banning that Player. The archive copies six SELECTED fields per
+  // row, clips every name at 100 characters and pins each uid to a bounded
+  // document id, so unrelated Player text contributes nothing — and banning is
+  // the one remedy that can make the DOCUMENT bigger, because `bannedUids` is
+  // stored on the very Event the record has to fit beside.
+  it('names the levers that actually move the size, and does not recommend a ban', () => {
+    H.players = [whale()];
+    renderConsole();
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent(
+      /The record itself is bounded: 200 standings rows, one honour per Day, and names clipped at 100 characters/,
+    );
+    expect(status).toHaveTextContent(
+      /the Day schedule with each Day’s frozen Prompt list, the ban list, and the Most-Loved award/,
+    );
+    expect(status).toHaveTextContent(/Banning a Player does not/);
+    expect(status).not.toHaveTextContent(/far more text than a name/);
+    expect(status).not.toHaveTextContent(/ban that Player/);
+  });
+
+  it('says WHICH ceiling refused it — the record’s own share', () => {
+    // This roster's `dayStats` mention 6,000 Day indexes, and with no schedule
+    // on the Event the honours fall back to one derived honour per index — so
+    // the RECORD is over its own quarter of the budget before the Event data is
+    // counted at all.
+    H.players = [whale()];
+    renderConsole();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /The record is over its own share of the budget on its own, before the Event data is counted\./,
+    );
+  });
+
+  it('says WHICH ceiling refused it — the Event document, on an ordinary record', () => {
+    // The other, and the commoner one: two ordinary Players, a record of a few
+    // hundred bytes, and an Event whose own retained ban list has already spent
+    // the document's budget. Naming the record here would send the Admin after
+    // the wrong thing entirely.
+    H.event = mkEvent({
+      bannedUids: Array.from({ length: 25_000 }, (_, i) => `banned-uid-${i}`.padEnd(40, 'x')),
+    } as Partial<EventDoc>);
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent(/too large to freeze onto the Event/);
+    expect(status).toHaveTextContent(
+      /The record fits its own share; it is the Event document that has no room left for it\./,
+    );
+  });
+
+  it('holds the closing-state freeze shut too, and says nothing was frozen', () => {
     H.players = [whale()];
     H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
     expect(screen.getByRole('status')).toHaveTextContent(
-      /Play is already closed—reopen it, ban that Player, then archive again\./,
+      /Play is already closed—nothing has been frozen\./,
     );
+    // …and never the ban the old copy sent an Admin after from here.
+    expect(screen.getByRole('status')).not.toHaveTextContent(/ban that Player/);
   });
 
   it('still renders Game settings when a Player row is unreadable to the selectors', () => {

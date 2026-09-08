@@ -13,6 +13,7 @@ import {
   finaleHasRun,
   isEventArchived,
   isEventArchiving,
+  MAX_ARCHIVE_BYTES,
 } from '../../data/eventArchive';
 import { useDayMetasStatus, useLeaderboard } from '../../hooks/useData';
 import { editionLexicon } from '../../editions';
@@ -29,18 +30,45 @@ type ArchiveOutcome = AbandonArchiveResult | BeginArchiveResult | ArchiveEventRe
 /** The three states this surface renders, in the order the lifecycle moves. */
 type Phase = 'open' | 'closing' | 'archived';
 
-/** Stated identically wherever the oversized record is refused — before the
- *  quiesce (the blocked control) and after it (the flip's own report) — so an
- *  Admin who meets it twice is told the same thing about the same cause.
+/**
+ * Stated identically wherever the oversized record is refused — before the
+ * quiesce (the blocked control) and after it (the flip's own report) — so an
+ * Admin who meets it twice is told the same thing about the same cause.
  *
- *  It names the DOCUMENT rather than the record, because the check is on the
- *  projected document: the record plus everything already on the Event (`days`,
- *  `bannedUids`, `mostLovedPhoto`). The remedy is still the one an Admin can
- *  actually take from the console, and an over-long Player row is still
- *  overwhelmingly the cause once rows and names are both bounded — but the copy
- *  no longer asserts a cause the size check cannot prove. */
+ * IT NAMES THE LEVERS THAT ACTUALLY MOVE THE SIZE (Codex P2 on PR #1162). It
+ * used to blame "a Player row carrying far more text than a name" and recommend
+ * banning that Player, and neither half survives what `buildEventArchive`
+ * actually copies. The record takes six SELECTED fields per row and nothing
+ * else — no `dayStats`, no photo, no arbitrary Player text — with every name
+ * clipped at `MAX_ARCHIVED_DISPLAY_NAME` (100), the roster prefix bounded at
+ * `MAX_ARCHIVED_STANDING_ROWS` (200), and each row's `uid` pinned to a document
+ * id `usableUid` has already bounded. So unrelated text on a Player document
+ * cannot contribute a byte, and a full-sized record is tens of kilobytes. Worse,
+ * banning was the one remedy that can make the DOCUMENT bigger: it drops one
+ * bounded row and adds a uid to `bannedUids`, which is stored on the very Event
+ * the record has to fit beside.
+ *
+ * What is left, and what this now names: the Event's own retained fields, which
+ * the projected-document check measures and which are the only unbounded things
+ * in the sum — `days` with each Day's frozen Prompt list, `bannedUids` at up to
+ * 1000 entries, and `mostLovedPhoto` at up to 100 winners. The one honest
+ * exception is the honours count on an Event with NO schedule, where the derived
+ * fallback yields one honour per Day index any Player's `dayStats` mentions; the
+ * ceiling sentence below is what tells those two cases apart.
+ */
 const TOO_LARGE_COPY =
-  'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. That is almost always a Player row carrying far more text than a name, and banning that Player drops their row from the record.';
+  'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. The record itself is bounded: 200 standings rows, one honour per Day, and names clipped at 100 characters, copied field by field from each row. So the room is almost always taken by what the Event already carries—the Day schedule with each Day’s frozen Prompt list, the ban list, and the Most-Loved award—and trimming one of those is what helps. Banning a Player does not: it drops one bounded row and adds a uid to the ban list stored on the same document.';
+
+/** WHICH ceiling the draft met, appended wherever the draft is in hand (Codex P2
+ *  on PR #1162). Two are measured and they mean different things: the record's
+ *  own quarter of the budget, and the whole document it would land on. Only the
+ *  console's pre-quiesce check can say — the flip's own `too-large` is decided
+ *  server-side over a roster this surface never saw — so this is stated beside
+ *  the shared copy rather than folded into it. */
+const tooLargeCeiling = (draft: { bytes: number; projectedBytes: number }): string =>
+  draft.bytes > MAX_ARCHIVE_BYTES
+    ? ' The record is over its own share of the budget on its own, before the Event data is counted.'
+    : ' The record fits its own share; it is the Event document that has no room left for it.';
 
 /** Why the archive will not open when a Day's honour listener has DIED (Codex P2
  *  on PR #1162).
@@ -443,7 +471,7 @@ export default function ArchiveEvent({
       : blockingClaims.length > 0
         ? `Resolve the ${blockingClaims.length} pending claim${blockingClaims.length === 1 ? '' : 's'} in the Review queue first. Confirming or rejecting a claim writes to a Board, which the freeze denies—so a claim left pending here stays pending forever.${closing ? ' Reopen play to drain the queue, then archive again.' : ''}`
         : !fits
-          ? `${TOO_LARGE_COPY}${closing ? ' Play is already closed—reopen it, ban that Player, then archive again.' : ' Nothing has been closed.'}`
+          ? `${TOO_LARGE_COPY}${tooLargeCeiling(draft)}${closing ? ' Play is already closed—nothing has been frozen.' : ' Nothing has been closed.'}`
           : null;
 
   const frozen = event?.archive;
