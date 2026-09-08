@@ -768,6 +768,52 @@ function runPredeployHook(
 }
 
 /**
+ * The nearest `.git` ABOVE `projectDir`, or null when there is none.
+ *
+ * A `firebase.json` in a subdirectory of a checkout (`-c deploy/firebase.json`)
+ * leaves `.git` above the configured project directory, where the overlay never
+ * walks. `git` itself walks UP until it finds one, so a hook run from `deploy/`
+ * during the real deploy gets the repository's answers — see
+ * `stageProjectOverlay` for what is done about that.
+ */
+function nearestAncestorGit(projectDir) {
+  let dir = dirname(projectDir);
+  for (;;) {
+    const candidate = join(dir, ".git");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * The repository's own metadata, exposed at `to` so a `git` call from a build
+ * answers as it does during the deploy, and registered so that a change in what
+ * `git` ANSWERS is caught.
+ *
+ * A worktree or submodule checkout spells `.git` as a FILE holding
+ * `gitdir: <path>`; copying it verbatim keeps the pointer working, where a
+ * symlink to the file would resolve the same way but leave the scratch
+ * project's own `.git` outside the copy. What is RECORDED either way is that a
+ * repository is now reachable, which is what makes `gitAnswerFingerprint` run
+ * at all.
+ */
+async function exposeGitMetadata(from, to, links, metadataDirs) {
+  if ((await lstat(from)).isDirectory()) {
+    await symlink(from, to, "junction");
+    links.push(to);
+    metadataDirs.push(from);
+    return;
+  }
+  await cp(from, to, { dereference: true, preserveTimestamps: true });
+  const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(from, "utf8"));
+  if (!pointer) return;
+  const gitDir = resolve(dirname(from), pointer[1]);
+  if (existsSync(gitDir)) metadataDirs.push(gitDir);
+}
+
+/**
  * A project directory in which EVERY configured Functions source dir is a
  * writable copy and every other entry is a symlink to the original.
  *
@@ -814,6 +860,7 @@ async function stageProjectOverlay({
   liveFiles,
   liveEntryDirs,
   metadataDirs,
+  ancestorGit,
 }) {
   const linkTo = async (from, to) => {
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
@@ -889,30 +936,6 @@ async function stageProjectOverlay({
     }
   };
 
-  /**
-   * The repository's own metadata, exposed so a `git` call from a build answers
-   * as it does during the deploy.
-   *
-   * A worktree or submodule checkout spells `.git` as a FILE holding
-   * `gitdir: <path>`; copying it verbatim keeps the pointer working, where a
-   * symlink to the file would resolve the same way but leave the scratch
-   * project's own `.git` outside the copy. What is RECORDED either way is that
-   * a repository is now reachable from the scratch project, which is what makes
-   * `gitAnswerFingerprint` run at all.
-   */
-  const exposeGitMetadata = async (from, to) => {
-    if ((await lstat(from)).isDirectory()) {
-      await linkTo(from, to);
-      metadataDirs.push(from);
-      return;
-    }
-    await cp(from, to, { dereference: true, preserveTimestamps: true });
-    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(from, "utf8"));
-    if (!pointer) return;
-    const gitDir = resolve(dirname(from), pointer[1]);
-    if (existsSync(gitDir)) metadataDirs.push(gitDir);
-  };
-
   const overlay = async (realDir, scratchDir, remaining) => {
     await mkdir(scratchDir, { recursive: true });
     // Every directory the overlay traverses to place a nested source
@@ -926,7 +949,7 @@ async function stageProjectOverlay({
       const from = join(realDir, entry);
       const to = join(scratchDir, entry);
       if (entry === ".git") {
-        await exposeGitMetadata(from, to);
+        await exposeGitMetadata(from, to, links, metadataDirs);
         continue;
       }
       // FILES are copied, directories symlinked. A symlinked `firebase.json`
@@ -980,6 +1003,23 @@ async function stageProjectOverlay({
     scratchProject,
     sourceRels.map((relative) => relative.split("/")),
   );
+
+  // A `firebase.json` BELOW the checkout root (`-c deploy/firebase.json`) puts
+  // `.git` above the configured project directory, where the walk above never
+  // goes — so the scratch project, a directory under the system temp dir, had
+  // no repository anywhere above it: every `git` call a hook made failed here
+  // and succeeded during the deploy, and if the failing branch happened to
+  // produce a single endpoint the group was wrongly exempted (barrier round on
+  // #1107). The ancestor's `.git` is exposed one level above the scratch
+  // project instead. Depth is not load-bearing: the commit, the branch, the
+  // nearest tag and the remote-tracking refs are properties of the REPOSITORY
+  // rather than of where in it the call is made, and `git` walks up until it
+  // finds one either way. Registering it in `metadataDirs` is what turns the
+  // git-answer fingerprint on, so a hook that moves a ref through this view
+  // forfeits exactly as it does for a checkout-rooted config.
+  if (ancestorGit) {
+    await exposeGitMetadata(ancestorGit, join(dirname(scratchProject), ".git"), links, metadataDirs);
+  }
 }
 
 /**
@@ -1777,6 +1817,15 @@ async function buildAndInventoryProject({
    */
   const rehearsalMarker = randomUUID();
 
+  /**
+   * `.git` sitting ABOVE the project directory, which is where a nested
+   * `firebase.json` leaves it. Only consulted when the project directory has
+   * none of its own: that case the overlay already handles, as an entry.
+   */
+  const ancestorGit = existsSync(join(projectDir, ".git"))
+    ? null
+    : nearestAncestorGit(projectDir);
+
   const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
   const scratchProject = join(scratch, "project");
   /** Every symlink this staging created, so cleanup can unlink them by name. */
@@ -1800,6 +1849,7 @@ async function buildAndInventoryProject({
         liveFiles,
         liveEntryDirs,
         metadataDirs,
+        ancestorGit,
       });
     } catch (error) {
       return refuseAll(
@@ -1971,6 +2021,13 @@ async function buildAndInventoryProject({
         probeRoot = await mkdtemp(join(scratch, "probe-"));
         const probeProject = join(probeRoot, "project");
         await copyStagedProject(scratchProject, probeProject, probeLinks);
+        // The probe copies the PROJECT, so an ancestor repository has to be
+        // exposed above it as well, or a codebase whose module load calls `git`
+        // answers one way in the hooks and another in discovery. Its metadata
+        // dir is already registered by the staging above.
+        if (ancestorGit) {
+          await exposeGitMetadata(ancestorGit, join(probeRoot, ".git"), probeLinks, []);
+        }
         const results = new Map();
         for (const config of selected) {
           results.set(

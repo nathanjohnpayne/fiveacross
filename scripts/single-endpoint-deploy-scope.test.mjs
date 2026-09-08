@@ -151,12 +151,19 @@ const artifact = (body) =>
  *   files?: Record<string, string>, // extra files, relative to the fixture root
  *   links?: Record<string, string>, // symlinks (path -> target), fixture-relative
  *   branch?: string,            // make the fixture a git repo on this branch
+ *   projectSubdir?: string,     // put the whole project under this subdirectory
  * }} spec
  */
 async function withFunctionsProject(spec, run) {
   const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-scope-"));
   try {
-    const functionsDir = resolve(fixture, "functions");
+    // `projectSubdir` puts `firebase.json` and its codebases BELOW the fixture
+    // root, which is where `initFixtureRepository` puts `.git` — the nested
+    // config layout `-c deploy/firebase.json` produces. Everything else in a
+    // spec stays project-relative, so a case reads the same either way.
+    const project = spec.projectSubdir ? resolve(fixture, spec.projectSubdir) : fixture;
+    await mkdir(project, { recursive: true });
+    const functionsDir = resolve(project, "functions");
     await mkdir(resolve(functionsDir, "src"), { recursive: true });
     await installToolchain(functionsDir);
     await writeUnder(
@@ -173,15 +180,15 @@ async function withFunctionsProject(spec, run) {
     }
     await writeUnder(functionsDir, "src/index.ts", spec.source ?? endpoint("daily"));
     for (const [file, contents] of Object.entries(spec.files ?? {})) {
-      await writeUnder(fixture, file, contents);
+      await writeUnder(project, file, contents);
     }
     for (const [link, target] of Object.entries(spec.links ?? {})) {
-      const at = resolve(fixture, link);
+      const at = resolve(project, link);
       await mkdir(dirname(at), { recursive: true });
       await symlink(target, at);
     }
     await writeUnder(
-      fixture,
+      project,
       "firebase.json",
       JSON.stringify({
         functions: { source: "functions", predeploy: PREDEPLOY, ...spec.functionsConfig },
@@ -189,7 +196,7 @@ async function withFunctionsProject(spec, run) {
       }),
     );
     if (spec.branch) await initFixtureRepository(fixture, spec.branch);
-    await run(resolve(fixture, "firebase.json"));
+    await run(resolve(project, "firebase.json"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -2289,6 +2296,38 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     // rather than passing it for the wrong reason.
     await withFunctionsProject(
       {
+        branch: "release",
+        functionsConfig: {
+          predeploy: [
+            'test "$(git rev-parse --abbrev-ref HEAD)" = "release" ' +
+              "&& cp functions/single.js functions/lib/index.js " +
+              "|| cp functions/group.js functions/lib/index.js",
+          ],
+        },
+        files: {
+          "functions/lib/index.js": artifact("exports.placeholder = 1;"),
+          "functions/group.js": artifact("exports.daily = { grouped: endpoint() };"),
+          "functions/single.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
+  it("answers a git lookup when firebase.json sits below the checkout root", async () => {
+    // Barrier round on #1107: `-c deploy/firebase.json` runs the hooks from
+    // `deploy/`, where `git` walks UP to the checkout root and answers. The
+    // overlay only exposed `.git` when it was an ENTRY of the configured
+    // project directory, so a nested config produced a scratch project with no
+    // repository above it: every lookup failed here and succeeded during the
+    // deploy. Written the way its checkout-rooted twin above is — the
+    // git-visible branch is the EXEMPT one — so a run that cannot see the
+    // branch fails this rather than passing it for the wrong reason.
+    await withFunctionsProject(
+      {
+        projectSubdir: "deploy",
         branch: "release",
         functionsConfig: {
           predeploy: [
