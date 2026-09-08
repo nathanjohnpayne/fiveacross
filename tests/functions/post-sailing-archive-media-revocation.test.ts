@@ -35,9 +35,16 @@ function makeDeps(
   // retired row, a different row for the reuse hazard, or a rejecting reader.
   currentTombstone?: () => Promise<ProofStorageDeleteInput | null>,
   ownRow: ProofStorageDeleteInput = TARGET.tombstone,
+  // The row the RETIREMENT transaction finds when it re-reads (#1153, Codex
+  // round 4 P2). Default `undefined`, which the harness resolves to whatever
+  // `currentTombstone` hands back — the ordinary case, where nothing moved
+  // between the pre-check and the retirement. A case that passes something else
+  // is modelling exactly the gap this dep exists to close.
+  atRetirement?: () => Promise<ProofStorageDeleteInput | null>,
 ): RevokeProofMediaDeps & {
   objectDeletes: Array<{ storagePath: string; generation: string | null }>;
   tombstoneDeletes: number;
+  retirementRefusals: number;
   warnings: Array<{ message: string; context: Record<string, unknown> }>;
 } {
   const objectDeletes: Array<{ storagePath: string; generation: string | null }> = [];
@@ -45,6 +52,7 @@ function makeDeps(
   const deps = {
     objectDeletes,
     tombstoneDeletes: 0,
+    retirementRefusals: 0,
     warnings,
     // A FRESH object on every read, so the identity check below is proven to
     // compare by VALUE — a reference-equality implementation would pass the
@@ -55,8 +63,18 @@ function makeDeps(
       objectDeletes.push({ storagePath, generation });
       await deleteObject(storagePath);
     },
-    deleteTombstone: async () => {
+    // The REAL compare-and-delete, modelled: re-read the row and delete it only
+    // while it is still the one this delivery is holding. `index.ts` runs this
+    // inside `db.runTransaction`; here the re-read is a seam so a case can put a
+    // DIFFERENT row there and prove the retirement declines.
+    retireTombstoneIfSame: async (identity: ProofStorageDeleteInput) => {
+      const standing = await (atRetirement ?? deps.currentTombstone)();
+      if (standing === null || !isSameRevocation(standing, identity)) {
+        deps.retirementRefusals += 1;
+        return false;
+      }
       deps.tombstoneDeletes += 1;
+      return true;
     },
     warn: (message: string, context: Record<string, unknown>) => {
       warnings.push({ message, context });
@@ -88,9 +106,9 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     });
     const wrapped: RevokeProofMediaDeps = {
       ...deps,
-      deleteTombstone: async () => {
+      retireTombstoneIfSame: async (identity) => {
         order.push('tombstone');
-        await deps.deleteTombstone();
+        return await deps.retireTombstoneIfSame(identity);
       },
     };
 
@@ -142,12 +160,12 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // one. If one exists anyway it did not come through the rules, and no amount
     // of redelivery can make an unconfinable path confinable: retrying would only
     // buy an immortal poison row. The bucket is never touched.
-    const deps = makeDeps(async () => {});
+    // The row STANDING at the path is the poison row — it is what triggered this
+    // delivery — so the compare-and-delete matches and retires it.
+    const poison = { ...TARGET.tombstone, storagePath: 'proofs/other-event/alice/proof-1.jpg' };
+    const deps = makeDeps(async () => {}, undefined, undefined, poison);
 
-    await revokeProofMedia(deps, {
-      ...TARGET,
-      tombstone: { ...TARGET.tombstone, storagePath: 'proofs/other-event/alice/proof-1.jpg' },
-    });
+    await revokeProofMedia(deps, { ...TARGET, tombstone: poison });
 
     expect(deps.objectDeletes).toEqual([]);
     expect(deps.tombstoneDeletes).toBe(1);
@@ -155,9 +173,10 @@ describe('revokeProofMedia — the server finishes a revocation the client could
   });
 
   it('drops a row carrying no usable storagePath at all', async () => {
-    const deps = makeDeps(async () => {});
+    const unusable = { uid: 'alice' };
+    const deps = makeDeps(async () => {}, undefined, undefined, unusable);
 
-    await revokeProofMedia(deps, { ...TARGET, tombstone: { uid: 'alice' } });
+    await revokeProofMedia(deps, { ...TARGET, tombstone: unusable });
 
     expect(deps.objectDeletes).toEqual([]);
     expect(deps.tombstoneDeletes).toBe(1);
@@ -177,7 +196,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     // delayed delivery would delete the REPLACEMENT and leave the new Feed entry
     // pointing at nothing.
     //
-    // So a missing row ends the delivery outright. `deleteTombstone` is NOT
+    // So a missing row ends the delivery outright. Retirement is NOT
     // called either: there is nothing of ours left to retire, and a blind delete
     // at that path could only take a LATER revocation's row with it.
     const deps = makeDeps(
@@ -301,15 +320,24 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     );
     const wrapped: RevokeProofMediaDeps = {
       ...deps,
-      deleteTombstone: async () => {
-        order.push('tombstone-delete');
-        await deps.deleteTombstone();
+      retireTombstoneIfSame: async (identity) => {
+        order.push('tombstone-retire');
+        return await deps.retireTombstoneIfSame(identity);
       },
     };
 
     await revokeProofMedia(wrapped, TARGET);
 
-    expect(order).toEqual(['tombstone-read', 'proof', 'object', 'tombstone-delete']);
+    // The trailing `tombstone-read` is the RETIREMENT's own re-read (#1153,
+    // Codex round 4 P2): retiring is a compare-and-delete against the row as it
+    // stands at that moment, not a delete authorised by the pre-check above.
+    expect(order).toEqual([
+      'tombstone-read',
+      'proof',
+      'object',
+      'tombstone-retire',
+      'tombstone-read',
+    ]);
     expect(paths(deps.objectDeletes)).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
   });
 
@@ -400,6 +428,59 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.warnings).toHaveLength(1);
   });
 
+  it('LEAVES a row that was REPLACED between the pre-check and the retirement (#1153)', async () => {
+    // Codex round 4 P2, and the reason retirement is a compare-and-delete rather
+    // than a delete. `currentTombstone()` is a pre-check taken at one instant;
+    // the retirement it authorises happens at a later one, after a bucket round
+    // trip. Duplicate delivery A validates row A, pauses, and A2 discharges and
+    // retires it; the rules FREE the Proof id the moment that lands, so the id
+    // is re-posted and taken down again and row B is standing at the same path
+    // when A resumes. A's generation answers 412 against B's object — and an
+    // UNCONDITIONAL retirement would then delete B, whose own delivery would
+    // find no tombstone, abandon by design, and leave B's media in the bucket.
+    //
+    // So the identity is re-checked INSIDE the transaction that deletes: B is
+    // left exactly where it is, its own delivery still owed.
+    const rowB = { ...BOUND.tombstone, requestedAt: 9000, generation: '1700000000000002' };
+    const deps = makeDeps(
+      async () => {
+        throw Object.assign(new Error('Precondition Failed'), { code: 412 });
+      },
+      undefined,
+      undefined,
+      BOUND.tombstone,
+      // Row A stood at the pre-check; row B stands by the time the retirement
+      // re-reads. This seam IS the window the transaction closes.
+      async () => rowB,
+    );
+
+    await expect(revokeProofMedia(deps, BOUND)).resolves.toBeUndefined();
+
+    expect(deps.tombstoneDeletes).toBe(0);
+    expect(deps.retirementRefusals).toBe(1);
+    expect(deps.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation skipped: the object was replaced after the tombstone',
+      'proof media revocation: the tombstone was NOT retired — the row there is no longer ours',
+    ]);
+  });
+
+  it('still retires the row on the ORDINARY delivery, where nothing moved (#1153)', async () => {
+    // The control the case above needs: the compare-and-delete is a guard on a
+    // race, not a new refusal. When the row that triggered the delivery is still
+    // the row standing at retirement time — which is every ordinary sweep — the
+    // object goes and the row goes with it, and the successful path logs nothing.
+    const deps = makeDeps(async () => {}, undefined, undefined, BOUND.tombstone, async () => ({
+      ...BOUND.tombstone,
+    }));
+
+    await revokeProofMedia(deps, BOUND);
+
+    expect(paths(deps.objectDeletes)).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
+    expect(deps.tombstoneDeletes).toBe(1);
+    expect(deps.retirementRefusals).toBe(0);
+    expect(deps.warnings).toEqual([]);
+  });
+
   it('logs through console.warn when no sink is injected', async () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -410,7 +491,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
           deleteObject: async () => {
             throw new Error('the bucket must not be reached');
           },
-          deleteTombstone: async () => {},
+          retireTombstoneIfSame: async () => true,
         },
         { ...TARGET, tombstone: { storagePath: 'nonsense' } },
       );

@@ -29,7 +29,11 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
-import { revokeProofMedia, type ProofStorageDeleteInput } from './proofStorageDeletes';
+import {
+  isSameRevocation,
+  revokeProofMedia,
+  type ProofStorageDeleteInput,
+} from './proofStorageDeletes';
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -398,8 +402,26 @@ export const revokeDeletedProofMedia = onDocumentCreated(
           // carried no generation — then the path is all there is to go on.
           await file.delete(generation === null ? {} : { ifGenerationMatch: generation });
         },
-        deleteTombstone: async () => {
-          await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).delete();
+        // COMPARE-AND-DELETE, not a delete (#1153, Codex round 4 P2). The
+        // sweeper's own pre-check reads the row at one instant and this runs at
+        // a later one — after a bucket round trip on the ordinary path — and
+        // the row can be retired, its Proof id freed, re-posted and taken down
+        // again inside that gap, leaving a DIFFERENT revocation's row here. An
+        // unconditional delete would clear that one, whose own delivery would
+        // then find nothing, abandon by design, and leave its media in the
+        // bucket. So the identity check runs INSIDE the transaction that
+        // deletes, against the row this transaction itself read.
+        retireTombstoneIfSame: async (identity) => {
+          const ref = db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`);
+          return await db.runTransaction(async (tx) => {
+            const snap = await tx.get(ref);
+            if (!snap.exists) return false;
+            if (!isSameRevocation((snap.data() ?? {}) as ProofStorageDeleteInput, identity)) {
+              return false;
+            }
+            tx.delete(ref);
+            return true;
+          });
         },
       },
       { eventId, proofId, tombstone },

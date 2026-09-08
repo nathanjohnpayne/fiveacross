@@ -113,8 +113,32 @@ export interface RevokeProofMediaDeps {
    * 412-shaped one if the generation no longer matches.
    */
   deleteObject(storagePath: string, generation: string | null): Promise<void>;
-  /** Retires the tombstone once the object is provably gone. */
-  deleteTombstone(): Promise<void>;
+  /**
+   * Retires the tombstone — but ONLY if the row standing there is still the one
+   * `identity` describes. A COMPARE-AND-DELETE, run inside an Admin SDK
+   * transaction that re-reads the row and applies `isSameRevocation` against it
+   * (#1153, Codex round 4 P2). Resolves `true` when it retired the row and
+   * `false` when it left a different one — or nothing — where it was.
+   *
+   * THE PRE-CHECK IS NOT THE RETIREMENT, which is the whole reason this dep has
+   * this shape. `currentTombstone()` reads at one instant and every retirement
+   * below happens at a later one, so an unconditional delete is a lost update
+   * waiting for the gap between them: duplicate delivery A can validate row A,
+   * pause, and let delivery A2 discharge and retire it; the rules FREE the Proof
+   * id the moment that lands, so the id can be re-posted and taken down again,
+   * leaving row B at the very same path. A's `ifGenerationMatch` then answers
+   * 412 against B's object and A's unconditional retirement would delete B —
+   * B's own delivery would find no tombstone, abandon by design, and B's media
+   * would stay in the bucket. A revocation marked done that never happened is
+   * the one state this collection exists to make impossible, so the identity
+   * check has to be inside the same transaction as the delete rather than a
+   * separate read some milliseconds earlier.
+   *
+   * A rejection PROPAGATES, like every other Firestore failure here: `retry:
+   * true` brings the delivery back, and the row it could not retire is still
+   * standing to be found.
+   */
+  retireTombstoneIfSame(identity: ProofStorageDeleteInput): Promise<boolean>;
   /** Structured log sink; defaults to `console.warn`. */
   warn?(message: string, context: Record<string, unknown>): void;
 }
@@ -239,6 +263,41 @@ export function isGenerationMismatch(err: unknown): boolean {
 }
 
 /**
+ * Retire the row this delivery is holding — atomically, or not at all.
+ *
+ * Every retirement in `revokeProofMedia` goes through here, and each one is a
+ * COMPARE-AND-DELETE against the delivery's own event snapshot rather than an
+ * unconditional delete of whatever now sits at the path (#1153, Codex round 4
+ * P2). The pre-check `revokeProofMedia` performs is a read at one instant and
+ * the retirement happens at a later one; the row can be retired and the freed
+ * Proof id re-posted and taken down again in the gap, and an unconditional
+ * delete would then clear a revocation this delivery knows nothing about,
+ * leaving its media in the bucket with nothing left owing it.
+ *
+ * A refusal is LOGGED AND ACCEPTED, never rethrown. The row standing there
+ * belongs to somebody else's delivery, which is still owed and still coming;
+ * redelivering this one cannot make it ours, so there is nothing for `retry:
+ * true` to improve. Whatever this delivery came to do — drop a poison row,
+ * stand down on a returned Proof, take the object — has already been done or
+ * decided by the time this is called.
+ */
+async function retireIfStillOurs(
+  deps: RevokeProofMediaDeps,
+  { eventId, proofId, tombstone }: RevokeProofMediaTarget,
+  warn: (message: string, context: Record<string, unknown>) => void,
+): Promise<void> {
+  const retired = await deps.retireTombstoneIfSame(tombstone);
+  if (!retired) {
+    warn('proof media revocation: the tombstone was NOT retired — the row there is no longer ours', {
+      eventId,
+      proofId,
+      storagePath: tombstone.storagePath,
+      requestedAt: tombstone.requestedAt,
+    });
+  }
+}
+
+/**
  * Revoke one Proof's media and retire its tombstone.
  *
  * Ordering is the whole contract: the tombstone is removed ONLY after the object
@@ -300,6 +359,19 @@ export function isGenerationMismatch(err: unknown): boolean {
  * because the row standing there belongs to a revocation this delivery knows
  * nothing about.
  *
+ * AND EVERY RETIREMENT IS ITSELF A COMPARE-AND-DELETE (#1153, Codex round 4
+ * P2). The two checks above are a PRE-check: they read the row at one instant,
+ * and the retirement they authorise happens at a later one — after a bucket
+ * round trip, in the case that matters. The gap is enough. Duplicate delivery A
+ * can validate row A and pause; A2 finishes and retires it; the rules free the
+ * Proof id, which is re-posted and taken down again, leaving row B at the same
+ * path — and A, resuming, takes `412` against B's object and would have deleted
+ * B on the way out. B's own delivery would then find no tombstone, abandon by
+ * design, and B's media would stay in the bucket. So `retireIfStillOurs` re-reads
+ * the row inside a transaction and deletes it only while `isSameRevocation`
+ * still holds against this delivery's snapshot; a refusal is logged and the row
+ * is left standing for the delivery it actually belongs to.
+ *
  * A read failure in either Firestore check PROPAGATES rather than resolving to
  * a delete: "I could not tell" must never become "delete it", and `retry: true`
  * brings the sweep back.
@@ -316,7 +388,7 @@ export async function revokeProofMedia(
       proofId,
       storagePath: tombstone.storagePath,
     });
-    await deps.deleteTombstone();
+    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
     return;
   }
 
@@ -366,7 +438,7 @@ export async function revokeProofMedia(
       proofId,
       storagePath,
     });
-    await deps.deleteTombstone();
+    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
     return;
   }
 
@@ -385,10 +457,10 @@ export async function revokeProofMedia(
         storagePath,
         generation,
       });
-      await deps.deleteTombstone();
+      await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
       return;
     }
     if (!isObjectAlreadyGone(err)) throw err;
   }
-  await deps.deleteTombstone();
+  await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
 }
