@@ -191,11 +191,55 @@ service cloud.firestore {
     // Its own helper for the reason `completeArchiveRecord` is one: the arm
     // that calls it sits against Firestore's expression cap (#850/#934), so
     // the pairing is expressed once here rather than unrolled inline.
+    //
+    // AND EACH HALF IS VALIDATED WHOLE, not only matched (#1151, Codex P2 on
+    // PR #1162). Two maps carrying nothing but the same `uid` satisfied the
+    // pairing, so a direct admin write could flip an Event whose `firstBingo`
+    // had no `displayName` or `at` and whose `firstBingoRow` had none of the
+    // standings fields and no `rank` — and the flip is irreversible, so the
+    // archived Leaderboard and Share Card the record exists to feed would then
+    // read a hole out of a record the rules had already locked. Matching uids
+    // prove the two halves agree about WHO; they say nothing about whether
+    // either half can be rendered.
+    //
+    // The fields and types are exactly what `src/data/eventArchive.ts` writes:
+    // `archiveName` always yields a string, `archiveCount` a number,
+    // `archiveInstant` a number or `null`, `blackout` a coerced bool, and `rank`
+    // the holder's 1-based place in the complete ban-filtered standings. An
+    // ABSENT key needs no clause of its own, exactly as in
+    // `completeArchiveRecord`: reading a missing key errors the expression,
+    // which denies.
+    //
+    // Type checks only, deliberately — no `size()` bound on the two strings,
+    // matching the rest of `completeArchiveRecord`. The record's own length
+    // ceiling is bytes, measured twice before the quiesce and again inside the
+    // transaction (`MAX_ARCHIVE_BYTES` / `MAX_ARCHIVED_EVENT_BYTES`), and a
+    // character bound here would be a SECOND, differently-counted ceiling on a
+    // value the writer clamps in JS UTF-16 units: an emoji-heavy name inside
+    // the writer's clamp could fail it, and this arm is reached only after the
+    // Event has already been shut.
+    function firstBingoHonorComplete(honor) {
+      return honor.uid is string
+        && honor.displayName is string
+        && honor.at is number;
+    }
+    // The holder's own kept row: `ArchivedStandingRow` plus the `rank` that is
+    // the whole reason it is carried outside the bounded `standings` prefix.
+    function firstBingoRowComplete(row) {
+      return row.uid is string
+        && row.displayName is string
+        && row.bingoCount is number
+        && row.squaresMarked is number
+        && row.blackout is bool
+        && (row.firstBingoAt == null || row.firstBingoAt is number)
+        && row.rank is number;
+    }
     function firstBingoPairComplete(archive) {
       return (archive.firstBingo == null && archive.firstBingoRow == null)
         || (archive.firstBingo is map
             && archive.firstBingoRow is map
-            && archive.firstBingo.uid is string
+            && firstBingoHonorComplete(archive.firstBingo)
+            && firstBingoRowComplete(archive.firstBingoRow)
             && archive.firstBingoRow.uid == archive.firstBingo.uid);
     }
     // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed
@@ -1537,8 +1581,11 @@ service cloud.firestore {
       //     own, and that state is both irreversible and useless: the freeze
       //     denies every gameplay write while the archived surfaces fall back to
       //     the LIVE view the record exists to replace. `completeArchiveRecord`
-      //     types every top-level key, validates the First-BINGO pair TOGETHER,
-      //     and requires the record's own stamp to equal the document's;
+      //     types every top-level key, validates the First-BINGO pair TOGETHER
+      //     and each half WHOLE — every scalar `ArchivedFirstBingo` and
+      //     `ArchivedFirstBingoRow` declare, not just the matching uids (Codex
+      //     P2 on PR #1162) — and requires the record's own stamp to equal the
+      //     document's;
       //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
       //     this arm skip the configuration validation below without opening a
       //     hole through it: a write that also moved `days`, `bannedUids` or

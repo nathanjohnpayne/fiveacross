@@ -529,6 +529,85 @@ describe('post-sailing-archive — the archive write must carry the whole record
     );
   });
 
+  // Codex P2 on PR #1162. Matching uids prove the two halves agree about WHO;
+  // they say nothing about whether either half can be RENDERED. Two uid-only
+  // maps satisfied the pairing, so a direct admin write could flip an Event
+  // whose headline honour had no name and no instant and whose kept row had
+  // none of the standings fields and no rank — irreversibly, into the record
+  // the archived Leaderboard and Share Card read from.
+  it('DENIES a uid-only First-BINGO pair, which names a holder nothing can render', async () => {
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingo: { uid: ALICE },
+        firstBingoRow: { uid: ALICE },
+      }),
+    );
+  });
+
+  it('DENIES a half-built honour or kept row, field by field', async () => {
+    // Each scalar `ArchivedFirstBingo` declares, dropped one at a time. An
+    // absent key errors the expression and denies, exactly as a missing
+    // top-level key does.
+    for (const key of ['uid', 'displayName', 'at'] as const) {
+      const honor: Record<string, unknown> = { ...FROZEN_RECORD.firstBingo };
+      delete honor[key];
+      await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingo: honor }));
+    }
+    // …and each scalar `ArchivedFirstBingoRow` declares, `rank` included: it is
+    // the whole reason the row is carried outside the bounded prefix, so a row
+    // without it cannot print the pinned eleventh line it exists for.
+    for (const key of [
+      'uid',
+      'displayName',
+      'bingoCount',
+      'squaresMarked',
+      'blackout',
+      'firstBingoAt',
+      'rank',
+    ] as const) {
+      const row: Record<string, unknown> = { ...FROZEN_RECORD.firstBingoRow };
+      delete row[key];
+      await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingoRow: row }));
+    }
+  });
+
+  it('DENIES an honour or kept row whose fields carry the wrong types', async () => {
+    for (const wrong of [{ displayName: 7 }, { at: 'first thing' }]) {
+      await assertFails(
+        archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, ...wrong } }),
+      );
+    }
+    for (const wrong of [
+      { displayName: 7 },
+      { bingoCount: '2' },
+      { squaresMarked: '14' },
+      { blackout: 'no' },
+      { firstBingoAt: 'first thing' },
+      { rank: '1' },
+    ]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, ...wrong },
+        }),
+      );
+    }
+  });
+
+  it('ALLOWS a kept row whose holder never bingoed on a scored Day', async () => {
+    // `firstBingoAt` is the one nullable scalar on the row (`archiveInstant`
+    // yields `number | null`), so the check is type-or-null there and a bare
+    // type check everywhere else. Present so the denials above cannot be
+    // mistaken for "any null is refused".
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, firstBingoAt: null },
+      }),
+    );
+  });
+
   it('ALLOWS the pair when both halves name the same holder', async () => {
     // The matching control, so the denials above are not vacuous.
     await assertSucceeds(archiveWith(FROZEN_RECORD));
