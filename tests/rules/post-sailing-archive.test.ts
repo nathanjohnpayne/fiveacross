@@ -1047,6 +1047,32 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/proofs/${PROOF}`)));
   });
 
+  // Phase 4b P1, PR #1139. Deleting a document leaves its subcollections in
+  // place, and a MISSING Event document reads as open (the pre-freeze default
+  // below). An admin delete of an archived Event would therefore destroy the
+  // write-once record and reopen every gameplay write under the surviving
+  // subtree in one operation — the freeze undone by the one arm it did not
+  // guard. Denied for both halves of the freeze; the open-Event control proves
+  // the arm itself is unchanged for a live Event.
+  it('DENIES deleting the Event document itself once it is closing or archived', async () => {
+    await quiesce();
+    await assertFails(deleteDoc(doc(db(ADMIN), eventPath())));
+    await freeze();
+    await assertFails(deleteDoc(doc(db(ADMIN), eventPath())));
+    // A Player never could, live or frozen.
+    await assertFails(deleteDoc(doc(db(BOB), eventPath())));
+    // The record and the freeze it carries are still there.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const snap = await getDoc(doc(ctx.firestore(), eventPath()));
+      if (snap.data()?.status !== 'archived') throw new Error('the archive was deleted');
+    });
+  });
+
+  it('keeps the admin Event delete open on a LIVE Event (the control)', async () => {
+    await assertFails(deleteDoc(doc(db(BOB), eventPath())));
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), eventPath())));
+  });
+
   it('leaves an Event document that carries no status key OPEN', async () => {
     // Every Event written before this ticket has no `status` key at all (and
     // both live Events carry 'active'). A missing status that read as archived

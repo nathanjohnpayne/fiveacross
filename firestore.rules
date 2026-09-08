@@ -1442,7 +1442,24 @@ service cloud.firestore {
                 && ('days' in request.resource.data) == ('days' in resource.data)
                 && (!('days' in request.resource.data)
                     || request.resource.data.days == resource.data.days)));
-      allow delete: if isAdmin(eventId);
+      // The DELETE of the Event document is the ONE admin write the freeze
+      // refuses (#134, Phase 4b P1 on PR #1139). Deleting a document does not
+      // delete its subcollections, so an admin deleting an archived Event
+      // would destroy the write-once record while every Player row, Board and
+      // Proof beneath it survived — and `eventClosedToPlay` reads a MISSING
+      // Event document as open, which is what keeps every Event written before
+      // the freeze existed playable. The two together turn one delete into a
+      // reopen of writes under a subtree whose record is gone. Denied for BOTH
+      // halves of the freeze, because a delete during the quiesce reopens the
+      // same subtree underneath the snapshot being read; the remedy while
+      // closing is the console's own: reopen play first. The stored document is
+      // read from `resource` rather than through `eventClosedToPlay`, which
+      // would spend a `get()` on the document this arm is already holding. A
+      // takedown of the archive itself is #808's question and a server-side
+      // operation, never a client one.
+      allow delete: if isAdmin(eventId)
+        && !(resource.data.get('status', 'active') == 'archived'
+             || resource.data.get('archiving', false) == true);
 
       // Community-editable prompt pool.
       match /items/{itemId} {
