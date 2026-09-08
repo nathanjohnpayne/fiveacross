@@ -16,6 +16,7 @@ import {
   MAX_ARCHIVED_UID,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
+import { comparePlayers } from '../game/logic';
 import { migrateDayFields, playerConverter } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
@@ -1126,6 +1127,70 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(archiveInstant(undefined)).toBeNull();
   });
 
+  // #1151, Codex P1 on PR #1162. The stamp is normalised because the SELECTION
+  // reads it; the root counts are normalised because the ORDER reads them, and
+  // the order is the other thing the builder decides. Both belong to the same
+  // pass for the same reason: `toStandingRow` serialises the malformed row at
+  // `0`, so a sort that saw anything else froze an order the record contradicts.
+  it('normalises the ROOT COUNTS before the standings are sorted', () => {
+    for (const bad of [Number.NaN, undefined, Number.POSITIVE_INFINITY]) {
+      const draft = draftEventArchive({
+        players: [
+          // Listed FIRST, which is what a stable sort over a NaN comparator
+          // leaves in place — and what an `Infinity` count wins outright.
+          {
+            ...mkPlayer({ uid: 'bad', displayName: 'Bad', squaresMarked: 1 }),
+            bingoCount: bad,
+          } as unknown as PlayerDoc,
+          mkPlayer({
+            uid: 'champion',
+            displayName: 'Champion',
+            bingoCount: 4,
+            squaresMarked: 20,
+            firstBingoAt: 900,
+          }),
+        ],
+        event: { days: DAYS, bannedUids: [] },
+        archivedAt: 1,
+      });
+      // The legitimate champion holds rank 1, and the malformed row is BELOW
+      // them — not merely serialised at zero underneath a rank it kept.
+      expect(draft.archive.standings.map((r) => r.uid)).toEqual(['champion', 'bad']);
+      // …and the row the record prints agrees with the order it was sorted in.
+      expect(draft.archive.standings[1].bingoCount).toBe(0);
+    }
+    // `squaresMarked` is the second key and gets the same treatment: the two
+    // rows tie on bingos, so the sort falls through to the count that is junk.
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'bad', displayName: 'Bad', bingoCount: 2 }),
+          squaresMarked: Number.POSITIVE_INFINITY,
+        } as unknown as PlayerDoc,
+        mkPlayer({ uid: 'champion', displayName: 'Champion', bingoCount: 2, squaresMarked: 20 }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.standings.map((r) => r.uid)).toEqual(['champion', 'bad']);
+    expect(draft.archive.standings[1].squaresMarked).toBe(0);
+  });
+
+  it('hands the comparator a row it can order, rather than NaN', () => {
+    // The mechanism, pinned at the seam: `comparePlayers` SUBTRACTS the counts,
+    // so a missing or `NaN` one makes every comparison against that row `NaN` —
+    // and `Array.prototype.sort` is free to do anything at all with a `NaN`
+    // comparator result. The readable pass is what removes that freedom.
+    const bad = {
+      ...mkPlayer({ uid: 'bad', displayName: 'Bad' }),
+      bingoCount: Number.NaN,
+    } as unknown as PlayerDoc;
+    const champion = mkPlayer({ uid: 'champion', displayName: 'Champion', bingoCount: 4 });
+    expect(comparePlayers(bad, champion)).toBeNaN();
+    expect(comparePlayers(withReadableDayStats(bad), champion)).toBeGreaterThan(0);
+    expect(comparePlayers(champion, withReadableDayStats(bad))).toBeLessThan(0);
+  });
+
   it('leaves a well-formed row untouched, object identity included', () => {
     // The normalisation must be a no-op on every ordinary roster: the console
     // re-runs this on every render, and copying each row would defeat the
@@ -1134,6 +1199,16 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(withReadableDayStats(clean)).toBe(clean);
     const nulled = mkPlayer({ uid: 'nulled', displayName: 'Nulled', firstBingoAt: null });
     expect(withReadableDayStats(nulled)).toBe(nulled);
+    // A row with real counts is untouched too — the counts are COPIED, never
+    // recomputed (ADR 0001), so only an unreadable one moves.
+    const scored = mkPlayer({
+      uid: 'scored',
+      displayName: 'Scored',
+      bingoCount: 3,
+      squaresMarked: 17,
+      firstBingoAt: 900,
+    });
+    expect(withReadableDayStats(scored)).toBe(scored);
   });
 
   it('coerces a missing name and missing counts to safe defaults', () => {

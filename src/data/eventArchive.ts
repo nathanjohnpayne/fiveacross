@@ -425,16 +425,46 @@ export function archiveInstant(value: unknown): number | null {
  * root stamp cannot be read now simply has no eligible instant, which is exactly
  * how the selector already treats a row that never bingoed.
  *
- * A well-formed row is unchanged by construction, and no root TOTAL is touched:
- * `toStandingRow` copies those off the Player's own row as it always did (ADR
- * 0001). This decides nothing about who won — it only makes the row readable by
- * the selectors that were already reading it.
+ * AND SO ARE THE ROOT COUNTS, in the same pass and for the same reason (#1151,
+ * Codex P1 on PR #1162). The stamp was normalised because the headline SELECTION
+ * reads it; `bingoCount` and `squaresMarked` are what the ORDER reads, and the
+ * order is the other thing this builder decides. `comparePlayers` subtracts them
+ * (`b.bingoCount - a.bingoCount`), so a missing or `NaN` count yields `NaN` for
+ * every comparison against that row — and a `NaN` comparator result leaves
+ * `Array.prototype.sort` free to keep the malformed row exactly where it started,
+ * which on the roster order this builder is handed can be AHEAD of a legitimate
+ * champion. `Infinity` is worse than free: it compares as the largest count there
+ * is and takes rank 1 outright. Either way `toStandingRow` then serialises the
+ * same row at `0` — so the frozen record ranked a Player first and printed no
+ * bingos beside them, permanently, on the one write that can never be amended.
+ * Normalising here rather than at serialisation is what makes the ORDER and the
+ * ROW agree: they are then the same numbers, read from the same row, in one pass
+ * before anything is sorted.
+ *
+ * This is the whole of `Rankable` — the three fields `comparePlayers` reads — and
+ * nothing beyond it: `blackout` and `displayName` are coerced where they are
+ * serialised, because no selector or comparator reads them.
+ *
+ * A well-formed row is unchanged by construction, and no count is RECOMPUTED:
+ * whatever the Player's own row said is still what the record says (ADR 0001).
+ * This decides nothing about who won — it only makes the row readable by the
+ * selectors and the comparator that were already reading it.
  */
 export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
   const firstBingoAt = archiveInstant(p.firstBingoAt);
+  const bingoCount = archiveCount(p.bingoCount);
+  const squaresMarked = archiveCount(p.squaresMarked);
+  // Object identity is preserved for every ordinary row: the console re-runs
+  // this on each render, and copying rows would defeat the reference equality
+  // React's memoisation elsewhere relies on. `NaN === NaN` is false, so a row
+  // carrying one is correctly seen as changed.
+  const rootReadable =
+    firstBingoAt === p.firstBingoAt
+    && bingoCount === p.bingoCount
+    && squaresMarked === p.squaresMarked;
   const raw = p.dayStats;
   if (!raw || typeof raw !== 'object') {
-    return firstBingoAt === p.firstBingoAt ? p : { ...p, firstBingoAt };
+    return rootReadable ? p : { ...p, firstBingoAt, bingoCount, squaresMarked };
   }
   const readable = Object.fromEntries(
     Object.entries(raw as Record<string, unknown>)
@@ -451,7 +481,7 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
         ];
       }),
   ) as NonNullable<PlayerDoc['dayStats']>;
-  return { ...p, firstBingoAt, dayStats: readable };
+  return { ...p, firstBingoAt, bingoCount, squaresMarked, dayStats: readable };
 }
 
 /**
@@ -671,13 +701,18 @@ export function draftEventArchive(params: {
   // step here reads `uid` — which is the row's DOCUMENT ID by the time it
   // arrives here (`playerConverter`), not the unvalidated field beside it.
   //
-  // …and every surviving row's instants are made readable in the SAME pass,
-  // before any selector reads one (`withReadableDayStats`). The honour selectors
-  // read `stat.firstBingoAt` off a Player-written map with no rules validation
-  // at all, so one malformed bucket threw out of the builder — and this draft is
-  // built during `ArchiveEvent`'s RENDER, so the throw took Game settings and
-  // its Reopen play control with it. The ROOT stamp is normalised in the same
-  // place, because a `NaN` there wins the headline outright (#1142 item 9).
+  // …and every surviving row is made READABLE in the SAME pass, before any
+  // selector or the comparator reads one (`withReadableDayStats`). The honour
+  // selectors read `stat.firstBingoAt` off a Player-written map with no rules
+  // validation at all, so one malformed bucket threw out of the builder — and
+  // this draft is built during `ArchiveEvent`'s RENDER, so the throw took Game
+  // settings and its Reopen play control with it. The ROOT stamp is normalised
+  // in the same place, because a `NaN` there wins the headline outright (#1142
+  // item 9), and so are the ROOT COUNTS, because those are what `sortPlayers`
+  // below reads: a `NaN` count makes every `comparePlayers` result `NaN` and an
+  // `Infinity` one takes rank 1, while `toStandingRow` serialises both at `0`
+  // (#1151, Codex P1 on PR #1162). Normalising before the sort is what keeps the
+  // ORDER and the frozen ROW reading the same numbers.
   const identified = players.filter((p) => usableUid(p.uid)).map(withReadableDayStats);
   const skippedRows = players.length - identified.length;
 
