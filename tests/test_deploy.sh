@@ -2783,6 +2783,139 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Cases 28a-28b (#547 — Codex P1, round 25): the classifier's firebase-admin
+# watch answers a read of `app.options` with a FRESH object, the way the SDK's
+# own accessor does, so the rehearsal cannot disagree with the deploy about
+# what the artifact exports.
+#
+# `FirebaseApp`'s `get options()` returns `deepCopy(this.options_)`: no write to
+# one result is ever visible in the next. The watch used to hand out ONE
+# recording view over ONE snapshot, which made such a write persist — a
+# difference no uninstrumented run has, and it ran in the dangerous direction.
+# 28a's artifact keeps one `app.options` result, marks it, and branches on a
+# LATER read: with the snapshot pinned it took the single-endpoint branch in
+# both rehearsal probes and `--only functions:daily` was exempted, while
+# Firebase's own discovery read a fresh copy, found no marker, and exported the
+# protected `daily-submitBugReport` group whose invoker reconciliation that
+# exemption had just switched off. The deployment-safety property asserted here
+# is therefore the reconciliation: submitbugreport must still be reconciled.
+#
+# 28b is the control — the same artifact with the mutation removed, which
+# really is one endpoint. It must be exempted and reconcile nothing, which is
+# what keeps 28a's reconciliation attributable to the group the artifact
+# exports rather than to a classifier that refuses this fixture shape for some
+# unrelated reason (an unprovable write containment, say).
+# ---------------------------------------------------------------------------
+FUNCTIONS_TOOLCHAIN="$ROOT/functions/node_modules"
+if [[ ! -d "$FUNCTIONS_TOOLCHAIN" ]]; then
+  # These two cases run the classifier's REAL discovery, so they need the real
+  # Firebase Functions SDK and firebase-admin. app-ci installs them before this
+  # harness runs (the vitest suite does it first); this is the same install a
+  # few seconds earlier for a clean local checkout, and a no-op otherwise.
+  npm --prefix "$ROOT/functions" install --no-audit --no-fund --prefer-offline >/dev/null 2>&1 || true
+fi
+
+# One fixture checkout whose Functions codebase has no predeploy hook, so
+# whatever `main` already points at is exactly what Firebase loads and what the
+# rehearsal inventories. The toolchain is symlinked entry by entry, as the
+# vitest fixtures do it: the real SDK's discovery binary lives in `.bin`, which
+# a bare `*` glob would miss.
+init_admin_options_repo() {
+  local repo="$1"
+  local branch_body="$2"
+  local entry
+  mkdir -p "$repo/functions/src" "$repo/functions/lib" "$repo/functions/node_modules" "$repo/dist"
+  for entry in "$FUNCTIONS_TOOLCHAIN"/* "$FUNCTIONS_TOOLCHAIN"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    ln -s "$entry" "$repo/functions/node_modules/$(basename "$entry")"
+  done
+  (
+    cd "$repo"
+    git init --quiet -b feature/deploy-test
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    printf '%s\n' 'functions/node_modules/' > .gitignore
+    printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
+    # Declared as a builder call so the classifier's source pre-check offers
+    # `daily` as a candidate and the rehearsal discovers the artifact below.
+    printf '%s\n' \
+      "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
+      "export const daily = onSchedule('every day 00:00', () => {});" \
+      > functions/src/index.ts
+    {
+      printf '%s\n' '"use strict";'
+      printf '%s\n' 'const admin = require("firebase-admin");'
+      printf '%s\n' 'admin.initializeApp();'
+      printf '%s\n' 'function endpoint() {'
+      printf '%s\n' '  const e = function handler() {};'
+      printf '%s\n' '  e.__endpoint = { platform: "gcfv2", entryPoint: "handler" };'
+      printf '%s\n' '  return e;'
+      printf '%s\n' '}'
+      printf '%s\n' "$branch_body"
+    } > functions/lib/index.js
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":[]}}' > firebase.json
+    git add -A
+    git commit --quiet -m "initial"
+  )
+}
+
+# `marker` is not one of the options this classifier cannot supply, so nothing
+# here is recorded as a consultation: what decides the classification is purely
+# the surface the artifact exports.
+ADMIN_OPTIONS_MUTATED_BRANCH='const snapshot = admin.app().options;
+snapshot.marker = true;
+exports.daily = admin.app().options.marker ? endpoint() : { submitBugReport: endpoint() };'
+ADMIN_OPTIONS_CONTROL_BRANCH='const snapshot = admin.app().options;
+exports.daily = snapshot.marker ? { submitBugReport: endpoint() } : endpoint();'
+
+REPO28A="$WORKDIR/case28a-admin-options-snapshot"
+init_admin_options_repo "$REPO28A" "$ADMIN_OPTIONS_MUTATED_BRANCH"
+: >"$WORKDIR/ofd-calls-28a.log"
+: >"$WORKDIR/gcloud-calls-28a.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-28a.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-28a.log" \
+  bash -c "cd '$REPO28A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case28a.out" 2>"$WORKDIR/case28a.err"
+RC28A=$?
+set -e
+if [[ $RC28A -ne 0 ]]; then
+  fail "admin-options-snapshot: deploy.sh returned $RC28A. stderr was:"
+  cat "$WORKDIR/case28a.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28a.log"; then
+  fail "admin-options-snapshot: an artifact that mutates one app.options snapshot was exempted, so the protected group it really exports was released with no invoker reconciliation. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-28a.log" >&2
+else
+  pass "admin-options-snapshot: a mutated app.options snapshot does not survive into the rehearsal's next read, so the group the deploy would export is still reconciled (rc=$RC28A)."
+fi
+
+REPO28B="$WORKDIR/case28b-admin-options-control"
+init_admin_options_repo "$REPO28B" "$ADMIN_OPTIONS_CONTROL_BRANCH"
+: >"$WORKDIR/ofd-calls-28b.log"
+: >"$WORKDIR/gcloud-calls-28b.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-28b.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-28b.log" \
+  bash -c "cd '$REPO28B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case28b.out" 2>"$WORKDIR/case28b.err"
+RC28B=$?
+set -e
+if [[ $RC28B -ne 0 ]]; then
+  fail "admin-options-control: the unmutated fixture returned $RC28B. stderr was:"
+  cat "$WORKDIR/case28b.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-28b.log" ]]; then
+  fail "admin-options-control: the deploy never published, so 28a's reconciliation is not attributable to the group its artifact exports."
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28b.log"; then
+  fail "admin-options-control: a codebase that reads app.options and really exports one endpoint was not exempted. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-28b.log" >&2
+else
+  pass "admin-options-control: reading app.options without mutating it still proves the single-endpoint scope exact (rc=$RC28B)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

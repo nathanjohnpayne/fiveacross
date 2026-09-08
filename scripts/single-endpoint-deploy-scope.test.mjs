@@ -1164,6 +1164,39 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("reads an artifact's mutated options snapshot the way the real SDK does", async () => {
+    // Codex P1, round 25 on #1107. `FirebaseApp`'s own `get options()` returns
+    // `deepCopy(this.options_)`, so a write to one result is invisible to the
+    // next read. The watch used to hand out ONE recording view over ONE
+    // snapshot, which made a write to it persist — and the difference ran the
+    // wrong way: the artifact below sees its `marker` in both rehearsal probes,
+    // takes the single-endpoint branch in both, and is exempted, while
+    // Firebase's uninstrumented discovery reads a fresh copy, finds no marker,
+    // and exports the protected `daily-submitBugReport` group the exemption
+    // just switched the invoker reconciliation off for.
+    //
+    // Neither `marker` nor the branch is a watched key, so nothing here is
+    // recorded as a consultation: what is under test is that the REHEARSAL
+    // agrees with an uninstrumented run, and the conservative answer below is
+    // the surface Firebase itself would load.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "const snapshot = admin.app().options;",
+        "snapshot.marker = true;",
+        "exports.daily = admin.app().options.marker",
+        "  ? endpoint()",
+        "  : { submitBugReport: endpoint() };",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it("exempts an artifact that only initialises firebase-admin", async () => {
     // The control for both cases above, and the reason the admin watch is on the
     // OPTIONS rather than on `initializeApp` itself: this repository's own

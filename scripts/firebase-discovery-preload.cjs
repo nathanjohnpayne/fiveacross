@@ -28,7 +28,9 @@
  *  - the firebase-admin APP OPTIONS, which are the same values read back
  *    through the SDK: `initializeApp()` loads `FIREBASE_CONFIG` itself, so a
  *    codebase reading `admin.app().options.storageBucket` never touches
- *    `process.env` at all.
+ *    `process.env` at all. The watch there wraps what the SDK's OWN accessor
+ *    answers, once per read, so it observes those reads without changing what
+ *    a second read returns — see `watchApp`.
  *
  * The line in both cases is whether this classifier can REPRODUCE the value, not
  * whether the value came from the project. The pinned project id can be and is
@@ -45,7 +47,7 @@
  * themselves. `firebase-functions`'s v1 `config.js` reads the legacy runtime
  * config while the codebase's top-level `require` is still running, and
  * `firebase-admin`'s `initializeApp()` reads `FIREBASE_CONFIG` to build the very
- * options object the proxy below then watches. Both exemptions are settled by
+ * options the proxy below then watches. Both exemptions are settled by
  * the READER — the frame that actually touched the value — so they belong to
  * those two packages and to nothing else: any other dependency can read a value
  * as it loads and export what it found for the entrypoint to branch on, which is
@@ -407,28 +409,37 @@ if (watching) {
   const watchedExports = new WeakSet();
 
   /**
-   * One app, with its `options` replaced by a recording view of the same values.
+   * The `options` accessor firebase-admin itself installed, as a function of no
+   * arguments bound to this app — or null when the app has no such property.
    *
-   * Defined as an OWN property, which shadows the class getter and leaves the
-   * app's identity alone: `instanceof` still answers, and every firebase-admin
-   * service that takes an app takes this one. The getter itself returns a fresh
-   * deep copy on each read, so pinning one snapshot behind the proxy changes
-   * nothing a caller can rely on.
+   * Captured from wherever it sits on the prototype chain rather than read back
+   * through the app, because the own property defined below is about to shadow
+   * it: calling `app.options` from inside that getter would recurse forever.
+   * A getter is called on each read, so it answers with whatever firebase-admin
+   * would have answered; a DATA property is not, so the value it holds is
+   * captured once, which is the same object every uninstrumented read of it
+   * would return.
    */
-  const watchApp = (app) => {
-    if (!app || typeof app !== "object" || watchedApps.has(app)) return app;
-    let options;
-    try {
-      options = app.options;
-    } catch {
-      return app;
+  const optionsReader = (app) => {
+    for (let holder = app; holder; holder = Object.getPrototypeOf(holder)) {
+      const descriptor = Object.getOwnPropertyDescriptor(holder, "options");
+      if (!descriptor) continue;
+      if (typeof descriptor.get === "function") {
+        const read = descriptor.get;
+        return () => read.call(app);
+      }
+      const value = descriptor.value;
+      return () => value;
     }
-    if (!options || typeof options !== "object") return app;
-    watchedApps.add(app);
+    return null;
+  };
+
+  /** A recording view of ONE options object, watching every access form. */
+  const recordingOptions = (options) => {
     const seen = (property) => {
       if (!recorded && consultedAdminOption(property)) record();
     };
-    const view = new Proxy(options, {
+    return new Proxy(options, {
       get(target, property) {
         seen(property);
         return target[property];
@@ -442,11 +453,48 @@ if (watching) {
         return Reflect.getOwnPropertyDescriptor(target, property);
       },
     });
+  };
+
+  /**
+   * One app, with its `options` replaced by a recording view of the same values.
+   *
+   * Defined as an OWN property, which shadows the class getter and leaves the
+   * app's identity alone: `instanceof` still answers, and every firebase-admin
+   * service that takes an app takes this one.
+   *
+   * A FRESH OBJECT ON EVERY READ, wrapped fresh, because that is what the real
+   * getter does: `FirebaseApp`'s `get options()` returns `deepCopy(this.options_)`,
+   * so no write to one result is ever visible in the next. Pinning a single view
+   * over a single snapshot made this rehearsal's app the one thing it must never
+   * be — different from the deploy's. An artifact that kept one `app.options`
+   * result, set an ordinary `marker` on it and branched on `app.options.marker`
+   * later saw the marker in BOTH probes and never at deploy time, so the two
+   * probes agreed on a single endpoint while Firebase's own discovery loaded the
+   * other branch and exported a protected group (Codex P1, round 25 on #1107).
+   * The original accessor is therefore called per read and its answer wrapped,
+   * which records the watched keys exactly as before and leaves the mutation
+   * semantics the SDK's.
+   */
+  const watchApp = (app) => {
+    if (!app || typeof app !== "object" || watchedApps.has(app)) return app;
+    const readOptions = optionsReader(app);
+    if (!readOptions) return app;
+    let options;
+    try {
+      options = readOptions();
+    } catch {
+      return app;
+    }
+    if (!options || typeof options !== "object") return app;
+    watchedApps.add(app);
     try {
       Object.defineProperty(app, "options", {
         configurable: true,
         enumerable: true,
-        get: () => view,
+        get: () => {
+          const fresh = readOptions();
+          return fresh && typeof fresh === "object" ? recordingOptions(fresh) : fresh;
+        },
       });
     } catch {
       // A frozen app cannot be watched this way. The environment watch above
