@@ -22,9 +22,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The conventional Firebase predeploy hook. */
 const PREDEPLOY = ['npm --prefix "$RESOURCE_DIR" run build'];
 
-function classify(args, configPath = resolve(repoRoot, "firebase.json")) {
+function classify(args, configPath = resolve(repoRoot, "firebase.json"), options = {}) {
   return classifyFirebaseDeployRequest(["fiveacross", ...args], {
     defaultConfigPath: configPath,
+    ...options,
   });
 }
 
@@ -140,6 +141,20 @@ const artifact = (body) =>
   ].join("\n");
 
 /**
+ * Where a fixture that has to be OUTSIDE the system temp dir is staged.
+ *
+ * The write containment leaves the scratch root and the system temp dir
+ * writable — see `establishWriteContainment` — so a project staged in the temp
+ * dir, which is where every other fixture here lives, is not contained. That is
+ * deliberate, and it is what keeps the live-tree fingerprint's own cases
+ * exercising the fingerprint. A case whose subject IS the containment therefore
+ * has to be staged somewhere a real checkout could be; `node_modules` is ignored
+ * by version control, exists by the time any of this runs, and lies outside
+ * every writable root.
+ */
+const LIVE_FIXTURE_ROOT = join(repoRoot, "node_modules");
+
+/**
  * One temp project with one Functions codebase.
  *
  * @param {{
@@ -152,10 +167,11 @@ const artifact = (body) =>
  *   links?: Record<string, string>, // symlinks (path -> target), fixture-relative
  *   branch?: string,            // make the fixture a git repo on this branch
  *   projectSubdir?: string,     // put the whole project under this subdirectory
+ *   fixtureRoot?: string,       // stage the fixture here instead of the temp dir
  * }} spec
  */
 async function withFunctionsProject(spec, run) {
-  const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-scope-"));
+  const fixture = await mkdtemp(join(spec.fixtureRoot ?? tmpdir(), "single-endpoint-scope-"));
   try {
     // `projectSubdir` puts `firebase.json` and its codebases BELOW the fixture
     // root, which is where `initFixtureRepository` puts `.git` — the nested
@@ -3162,6 +3178,131 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * A hook that hands a worker to the operating system and walks away.
+ *
+ * `spawn(..., { detached: true, stdio: "ignore", env: {...} })` is the shape
+ * every after-the-fact guard here misses at once: `setsid` puts the worker in a
+ * session no group signal reaches, the explicit environment withholds the
+ * rehearsal marker so the process-table sweep cannot recognise it either, and on
+ * macOS `ps -E` would withhold a SIP-protected binary's environment regardless.
+ * The delay puts its write past the fingerprint that was watching.
+ *
+ * Written to a file rather than inlined in the hook because a predeploy command
+ * containing a BACKSLASH is refused before it runs (`runPredeployHook`), and an
+ * inline `node -e` cannot escape its own quotes without one.
+ */
+const DETACHING_HOOK = [
+  'const { spawn } = require("node:child_process");',
+  "const worker = [",
+  "  'const fs = require(\"node:fs\");',",
+  "  'setTimeout(() => { try { fs.writeFileSync(process.argv[1], \"landed\"); } catch {} }, 1200);',",
+  '].join("");',
+  "// An environment of its OWN: no rehearsal marker travels with this worker,",
+  "// so nothing in the process table identifies it as this run's.",
+  'spawn(process.execPath, ["-e", worker, process.argv[2]], {',
+  "  detached: true,",
+  '  stdio: "ignore",',
+  "  env: { PATH: process.env.PATH },",
+  "}).unref();",
+  "",
+].join("\n");
+
+describe("write containment holds a rehearsal's writes inside the scratch root", RUNS_A_BUILD, () => {
+  it("stops a writer a hook detached with an environment of its own", async () => {
+    // Phase 4b P1 on #1107. Everything else in this classifier answers AFTER the
+    // fact — the group is signalled when a step ends, the marker sweep looks for
+    // what escaped it, the fingerprints compare before with after — and an
+    // answer does not neutralise a writer that is already running. This worker
+    // escapes all three by construction, resolves an ABSOLUTE live path so that
+    // the scratch directory's removal cannot spare the tree for the wrong
+    // reason, and fires on a clock of its own.
+    //
+    // The assertion is therefore the filesystem, not the classification: the
+    // write must not land, whenever it is attempted. The classification is
+    // pinned beside it because nothing about this hook is visible to the
+    // classifier — an exact selector stays exact — which is precisely why
+    // containment rather than detection is the fix.
+    await withFunctionsProject(
+      {
+        // Outside the system temp dir, which the containment leaves writable:
+        // this case is about a real checkout, while every other fixture here is
+        // staged where a hook may still write and the fingerprint is what
+        // catches it.
+        fixtureRoot: LIVE_FIXTURE_ROOT,
+        // Its own checkout root, because staging it inside this repository's
+        // tree would otherwise put `.git` above it and refuse the exemption for
+        // the layout instead (`nestedProjectRefusal`) — which would pass this
+        // case for the wrong reason.
+        branch: "release",
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'node "$INIT_CWD/detach.cjs" "$INIT_CWD/late-write"'],
+        },
+        files: { "detach.cjs": DETACHING_HOOK },
+      },
+      async (configPath) => {
+        const checkout = dirname(configPath);
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = checkout;
+        try {
+          const result = await classify(["--only", "functions:daily"], configPath);
+          // Past the worker's own delay, so absence is containment rather than
+          // a race this test happened to win.
+          await new Promise((wake) => setTimeout(wake, 2_500));
+          expect(existsSync(join(checkout, "late-write"))).toBe(false);
+          expect(result).toMatchObject(EXEMPT);
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  });
+
+  it("refuses every selector, and runs no hook, when containment cannot be proved", async () => {
+    // The canary's refusal arm. `sandbox-exec` is deprecated, `bwrap` may be
+    // absent, and an unprivileged user namespace can be administratively
+    // disabled — each of those fails silently in the direction that matters, so
+    // the mechanism is proved with a canary write before any hook runs, and a
+    // machine that cannot prove one runs no hooks at all.
+    //
+    // `writeContainment: "unavailable"` is how a test reaches that machine. It
+    // only ever narrows — it is the behaviour of a platform with no mechanism —
+    // and `main()` never passes it, so no shell can. The hook writes a sentinel
+    // into the checkout that must never appear, because a refusal reached after
+    // running the hook is a refusal reached after the write.
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf ran > "$INIT_CWD/hook-ran"'],
+        },
+        files: { "functions/lib/index.js": artifact("exports.placeholder = 1;") },
+      },
+      async (configPath) => {
+        const checkout = dirname(configPath);
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = checkout;
+        try {
+          const { result, reasons } = await withRefusalReasons(() =>
+            classify(["--only", "functions:daily"], configPath, {
+              writeContainment: "unavailable",
+            }),
+          );
+          expect(result).toMatchObject({
+            functionsAttempted: true,
+            ...ALL_INVOKERS_CONSERVATIVE,
+          });
+          expect(reasons).toContain("write containment");
+          expect(existsSync(join(checkout, "hook-ran"))).toBe(false);
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
   });
 });
 

@@ -19,8 +19,8 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
@@ -608,6 +608,315 @@ function runCapturedProcess(
   });
 }
 
+/** How long the containment canary gets to write its files and exit. */
+const CONTAINMENT_PROBE_TIMEOUT_MS = 30_000;
+
+/** One argument, as a POSIX shell will read it back verbatim. */
+function shellQuote(argument) {
+  return `'${String(argument).replaceAll("'", `'\\''`)}'`;
+}
+
+/** Whether `path` is `root` or sits below it. */
+function within(path, root) {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/** A path as the kernel resolves it, which is the form both mechanisms match on. */
+async function resolvedPath(path) {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * The macOS profile: everything a process may normally do, except WRITE outside
+ * the writable set.
+ *
+ * `(allow default)` first, then a blanket `(deny file-write*)`, then the
+ * carve-outs — SBPL takes the LAST matching rule, so the order is the policy.
+ * `/dev` is the piece node cannot do without: a shell opens its controlling
+ * terminal, and `> /dev/null` is in half the hooks anyone writes.
+ *
+ * Verified on this repository's development Mac (Darwin 25.6.0): a contained
+ * `/bin/sh` writes inside the writable set, and its writes outside it are denied
+ * BOTH by absolute path and through a symlink that points at them — the sandbox
+ * canonicalises the path before it matches, so the overlay's links into the
+ * checkout are not a way around this. `npm run build` and the `tsc` it runs
+ * finish normally inside it.
+ */
+function macosSandboxProfile(writable) {
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny file-write*)",
+    ...writable.map((path) => `(allow file-write* (subpath ${JSON.stringify(path)}))`),
+    '(allow file-write* (subpath "/dev"))',
+    "",
+  ].join("\n");
+}
+
+/**
+ * The mechanisms that can hold a rehearsal's writes inside the writable set, in
+ * the order they are tried on this platform.
+ *
+ * Each is an argv PREFIX: put in front of a command and its arguments it yields
+ * the contained form of that run, which is what lets one mechanism serve both
+ * the shelled-out predeploy hooks and the directly spawned discovery process.
+ *
+ * macOS has one: `sandbox-exec`, deprecated for a decade, still present, and
+ * still the only unprivileged path-scoped write policy the platform offers.
+ *
+ * Linux has three, tried in order. `bwrap` is preferred and is the exact
+ * counterpart of the macOS profile — the whole filesystem read-only, the
+ * writable set bound back over it — so both platforms deny the same paths.
+ * `unshare` is the fallback for a machine without `bwrap`: an unprivileged
+ * user+mount namespace in which the roots that must not be written are
+ * bind-mounted read-only over themselves. That is the same guarantee stated from
+ * the other side, and it is why the canary below is written in terms of those
+ * roots rather than of a mechanism. The two `unshare` spellings differ only in
+ * how the caller is mapped into the namespace, which older util-linux releases
+ * and stricter kernels each refuse in their own way.
+ *
+ * NOT VERIFIED HERE. The Linux forms were written against the documented
+ * behaviour of `bwrap` and `unshare`; this repository's development machine is
+ * a Mac, so only the `sandbox-exec` form has been exercised by hand. That is
+ * precisely why nothing is trusted without the canary: on a Linux machine where
+ * none of the three works, the canary fails, the exemption is refused, and every
+ * deploy classifies conservatively rather than silently running hooks loose.
+ */
+function writeContainmentCandidates({ writable, readOnlyRoots, profilePath }) {
+  if (process.platform === "darwin") {
+    return [{ label: "sandbox-exec", prefix: ["/usr/bin/sandbox-exec", "-f", profilePath] }];
+  }
+  if (process.platform === "linux") {
+    const bwrap = ["bwrap", "--ro-bind", "/", "/"];
+    // Applied after the read-only root, so each replaces what it covered.
+    bwrap.push("--proc", "/proc", "--dev-bind", "/dev", "/dev");
+    for (const path of writable) bwrap.push("--bind", path, path);
+    bwrap.push("--");
+    // Bind each read-only root over itself, then remount that bind read-only —
+    // two steps, because Linux applies `ro` to a bind mount only on the
+    // remount. Anything unmountable fails the whole run rather than leaving a
+    // root writable, and the canary would catch it either way.
+    const readOnly =
+      'for d in "$1" "$2"; do [ -n "$d" ] || continue; ' +
+      'mount --bind "$d" "$d" && mount -o remount,bind,ro "$d" "$d" || exit 111; ' +
+      'done; shift 2; exec "$@"';
+    const unshare = (label, mapping) => ({
+      label,
+      prefix: [
+        "unshare",
+        ...mapping,
+        "--mount",
+        "--",
+        "/bin/sh",
+        "-c",
+        readOnly,
+        "sh",
+        readOnlyRoots[0] ?? "",
+        readOnlyRoots[1] ?? "",
+      ],
+    });
+    return [
+      { label: "bwrap", prefix: bwrap },
+      // The current user first: a rehearsal running as uid 0 would answer an
+      // `id -u` test differently from the deploy, and mapping the caller still
+      // carries, inside the new namespace, the capability the bind mounts need.
+      unshare("unshare (current user)", ["--user", "--map-current-user"]),
+      // The classic `unshare -rm`, for a util-linux without `--map-current-user`.
+      // It maps the caller to uid 0 INSIDE the namespace, which is a divergence
+      // a hook can see; it is last for that reason, and it is still preferable
+      // to running the hook with no containment at all — which is the only other
+      // thing left at this point.
+      unshare("unshare (root-mapped)", ["--user", "--map-root-user"]),
+    ];
+  }
+  return [];
+}
+
+/**
+ * WRITE CONTAINMENT: a mechanism under which every process this rehearsal
+ * starts is unable to write outside the scratch root and the system temp dir,
+ * whatever it does to escape everything else.
+ *
+ * WHY DETECTION IS NOT ENOUGH. Every other guard here answers AFTER the fact —
+ * the process group is signalled when a step ends, the marker sweep scans for
+ * what escaped it, the live-tree fingerprint compares before with after. All
+ * three are answers, and an answer does not neutralise a writer that is already
+ * running. A hook can `spawn(cmd, {detached: true, stdio: "ignore", env:
+ * {…explicit}})`: `setsid` puts the worker beyond any group signal, the explicit
+ * environment withholds `REHEARSAL_MARKER_VAR` so the sweep cannot find it
+ * either, and on macOS `ps -E` would have withheld the environment of a
+ * SIP-protected binary regardless. Such a worker sleeps past the fingerprint,
+ * outlives the scratch directory it can no longer see, and writes a deployment
+ * input through an absolute live path minutes later — after `deploy.sh` accepted
+ * the conservative classification and carried on (Phase 4b P1 on #1107).
+ *
+ * So the containment comes FIRST, and its answer is the same for the escapee as
+ * for the hook: the write does not land, whenever it is attempted and whatever
+ * the classification said. The group kill, the marker sweep and the fingerprints
+ * all stay behind it, as defence in depth for a mechanism that is one kernel bug
+ * from being wrong — and because a process that escaped is still one whose
+ * effect on the artifact this rehearsal cannot reproduce, which is a refusal
+ * even when it wrote nothing.
+ *
+ * WHAT STAYS WRITABLE, AND WHY THAT IS ENOUGH. The scratch root, which is where
+ * the build belongs, and the system temp dir, which is where the toolchain puts
+ * everything from `mktemp` to a compiler's spill files — carving it out would
+ * mean handing every contained program a temp dir of this classifier's choosing,
+ * which is one more way to tell this run from the deploy. Nothing a Firebase
+ * deploy publishes is read from the temp dir: the deployment inputs are the
+ * checkout, and the checkout is what this denies. The consequence to state
+ * plainly is that a project directory placed INSIDE the system temp dir is not
+ * contained — no real deploy is, and the fixtures that prove this behaviour are
+ * deliberately staged outside it.
+ *
+ * PROBED, NEVER ASSUMED. Nothing here is trusted until a contained canary has
+ * failed to write outside the writable set while succeeding inside it.
+ * `sandbox-exec` is deprecated, `bwrap` may be absent, an unprivileged user
+ * namespace may be administratively disabled, and each of those failures is
+ * silent in the direction that matters. A mechanism that does not pass, and a
+ * platform with no mechanism at all, REFUSE — before any hook or probe runs,
+ * because preceding them is the whole point.
+ */
+async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
+  if (mode === "unavailable") {
+    return {
+      ok: false,
+      reason: "write containment was disabled for this run, so no hook may be executed",
+    };
+  }
+  // Resolved, because both mechanisms match on the path the kernel resolves:
+  // macOS's `/var/folders/…` is `/private/var/folders/…`, and a subpath rule
+  // written the other way would match nothing and deny the scratch root along
+  // with everything else.
+  const root = await resolvedPath(scratchRoot);
+  const temp = await resolvedPath(tmpdir());
+  const writable = [...new Set([root, temp])];
+
+  /**
+   * The roots a contained child must NOT be able to write, and the canary's
+   * targets. The live checkout is the one that matters; the home directory is
+   * there because the checkout is not always the whole of what a hook can
+   * reach, and because it answers the same question when the checkout itself
+   * lies inside the writable set — which only a fixture's does.
+   */
+  const readOnlyRoots = [];
+  for (const path of [await resolvedPath(projectDir), await resolvedPath(homedir())]) {
+    if (writable.some((allowed) => within(path, allowed))) continue;
+    if (!readOnlyRoots.includes(path)) readOnlyRoots.push(path);
+  }
+  if (readOnlyRoots.length === 0) {
+    return {
+      ok: false,
+      reason:
+        "every directory this classifier could prove containment against lies inside the writable set, " +
+        "so a hook's writes cannot be shown to stay out of the live checkout",
+    };
+  }
+
+  const profilePath = join(root, "write-containment.sb");
+  if (process.platform === "darwin") {
+    try {
+      await writeFile(profilePath, macosSandboxProfile(writable), "utf8");
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `write containment could not be prepared — ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  const candidates = writeContainmentCandidates({ writable, readOnlyRoots, profilePath });
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `${process.platform} offers no mechanism this classifier can use to keep a rehearsal's writes ` +
+        "out of the live checkout, so no predeploy hook is run here",
+    };
+  }
+  const failures = [];
+  for (const candidate of candidates) {
+    const proof = await proveWriteContainment(candidate, { root, readOnlyRoots });
+    if (proof.ok) {
+      return {
+        ok: true,
+        label: candidate.label,
+        /** The contained form of a directly spawned command. */
+        wrap: (command, args) => ({
+          command: candidate.prefix[0],
+          args: [...candidate.prefix.slice(1), command, ...args],
+        }),
+        /** The contained form of a command a shell will parse. */
+        wrapShell: (command) => `${candidate.prefix.map(shellQuote).join(" ")} ${command}`,
+      };
+    }
+    failures.push(`${candidate.label}: ${proof.reason}`);
+  }
+  return {
+    ok: false,
+    reason:
+      "no write containment could be proved on this machine, so a hook could write into the live " +
+      `checkout after this classification returned (${failures.join("; ")})`,
+  };
+}
+
+/**
+ * The canary: one contained child, a write it must be denied for every
+ * read-only root, one it must be allowed inside the scratch, and the filesystem
+ * as the verdict.
+ *
+ * Both halves are load-bearing — a mechanism that denied everything, or a
+ * command that never ran at all, would pass a test that only asked whether the
+ * checkout had been written to.
+ *
+ * Each canary path is uniquely named and removed if it lands, so a broken
+ * mechanism leaves the tree as it found it. Its presence is the whole finding in
+ * miniature: it is the write this classifier could not otherwise prevent.
+ */
+async function proveWriteContainment(candidate, { root, readOnlyRoots }) {
+  const inside = join(root, `containment-canary-${randomUUID()}`);
+  const outside = readOnlyRoots.map((path) =>
+    join(path, `.firebase-deploy-scope-canary-${randomUUID()}`),
+  );
+  const script = [inside, ...outside]
+    .map((path) => `printf canary > ${shellQuote(path)}`)
+    .concat("exit 0")
+    .join("; ");
+  const run = await runCapturedProcess(
+    candidate.prefix[0],
+    [...candidate.prefix.slice(1), "/bin/sh", "-c", script],
+    {
+      cwd: root,
+      timeout: CONTAINMENT_PROBE_TIMEOUT_MS,
+      env: withoutClassifierPrivateEnv(process.env),
+    },
+  );
+  const escaped = [];
+  for (const path of outside) {
+    if (!existsSync(path)) continue;
+    escaped.push(path);
+    await unlink(path).catch(() => {});
+  }
+  const contained = existsSync(inside);
+  await unlink(inside).catch(() => {});
+  if (escaped.length > 0) {
+    return { ok: false, reason: `a contained child still wrote ${escaped.join(", ")}` };
+  }
+  if (!contained) {
+    return {
+      ok: false,
+      reason: `a contained child could not write inside the scratch root — ${
+        run.output.trim().slice(-200) || `exit ${run.code ?? "?"}`
+      }`,
+    };
+  }
+  return { ok: true, reason: null };
+}
+
 /**
  * The environment variable every process this rehearsal starts carries.
  *
@@ -616,10 +925,19 @@ function runCapturedProcess(
  * `setsid`, which puts the new process in a session no group signal can reach
  * (Phase 4b, run 6 on #1107). Such a descendant outlives the rehearsal and goes
  * on writing — into the live checkout during the BUILD that follows, where the
- * fingerprint is no longer watching anything. Containment therefore needs a tag
- * that survives both `setsid` and `exec`, and the environment is the only
- * carrier that does: `cwd` is defeated by a `cwd` option, an inherited
- * descriptor by `stdio: "ignore"`, and the process group by `setsid` itself.
+ * fingerprint is no longer watching anything. Finding one needs a tag that
+ * survives both `setsid` and `exec`, and the environment is the only carrier
+ * that does: `cwd` is defeated by a `cwd` option, an inherited descriptor by
+ * `stdio: "ignore"`, and the process group by `setsid` itself.
+ *
+ * WHY IT IS NO LONGER THE CONTAINMENT. A hook that spawns with an EXPLICIT
+ * `env` withholds this marker as easily as it escapes the group, so the sweep
+ * cannot be what stops such a worker — `establishWriteContainment` is, and it
+ * stops it by making the write impossible rather than by finding the writer.
+ * The marker stays because a process that escaped is still a process whose
+ * effect on the artifact this rehearsal cannot reproduce, and because a
+ * containment mechanism is one kernel bug from being wrong: it is now the
+ * second layer, not the first.
  *
  * WHAT IT COSTS. A hook and an artifact can both READ this variable, and the
  * real deploy does not set it — one more way to tell the rehearsal from the
@@ -728,7 +1046,7 @@ async function sweepEscapedProcesses(marker) {
  */
 function runPredeployHook(
   command,
-  { projectDir, resourceDir, project, timeoutMs, deployEnv, rehearsalMarker },
+  { projectDir, resourceDir, project, timeoutMs, deployEnv, rehearsalMarker, containment },
 ) {
   // firebase-tools escapes only `"` when it wraps the hook. That is incomplete
   // for a command containing a BACKSLASH, which could close its own quote — so
@@ -739,7 +1057,11 @@ function runPredeployHook(
   // what `runCommand` produces.
   const quoted = command.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const translated = `"${process.execPath}" "${crossEnvShellPath()}" "${quoted}"`;
-  return runCapturedProcess(translated, [], {
+  // Under the write containment, which the caller established and proved before
+  // this hook — or any other program of the config's — was allowed to start.
+  // The mechanism is an argv prefix, so the shell parses it and then the hook's
+  // own translated command exactly as it would have without one.
+  return runCapturedProcess(containment.wrapShell(translated), [], {
     cwd: projectDir,
     shell: true,
     inheritStdin: true,
@@ -1763,7 +2085,18 @@ class RehearsalExit {
  * fingerprint. That layout is refused before anything is staged or started —
  * see `nestedProjectRefusal`.
  *
+ * NOTHING RUNS UNCONTAINED. Before the first hook, `establishWriteContainment`
+ * puts every program this rehearsal starts under a mechanism that cannot write
+ * outside the scratch root, and PROVES it with a canary rather than assuming it.
+ * The guards below all answer after the fact, and an answer does not neutralise
+ * a writer that is already running: a hook can detach a worker with an
+ * environment of its own, past the process group and past the marker sweep, to
+ * write a deployment input minutes after this returned. A machine where the
+ * containment cannot be proved gets the conservative classification and no
+ * hooks at all.
+ *
  * FAILS CLOSED on every uncertainty: a config directory below a repository root,
+ * a containment this machine cannot prove,
  * an unmirrorable source path, a staging failure, a
  * symlink out of the staged tree, a non-zero or timed-out hook, a write into
  * the repository metadata, a discovery manifest, an artifact that will not
@@ -1789,6 +2122,7 @@ async function buildAndInventoryProject({
   projectAlias,
   predeployTimeoutMs,
   discoveryTimeoutMs,
+  writeContainment,
   configs,
   codebaseNames,
   deployTargets,
@@ -1918,6 +2252,17 @@ async function buildAndInventoryProject({
   /** The repository metadata the overlay exposed, watched on its own terms. */
   const metadataDirs = [];
   try {
+    // FIRST, and before the staging: the hooks and the probes are other
+    // people's programs, and this is the only guard that acts on them rather
+    // than reporting on them afterwards. A machine that cannot prove it refuses
+    // here, having started nothing.
+    const containment = await establishWriteContainment({
+      scratchRoot: scratch,
+      projectDir,
+      mode: writeContainment,
+    });
+    if (!containment.ok) return refuseAll(containment.reason);
+
     try {
       await stageProjectOverlay({
         projectDir,
@@ -2071,6 +2416,7 @@ async function buildAndInventoryProject({
           timeoutMs: predeployTimeoutMs,
           deployEnv,
           rehearsalMarker,
+          containment,
         });
         if (!result.ok) {
           // A hook can write through the overlay and THEN fail — and it can
@@ -2166,6 +2512,7 @@ async function buildAndInventoryProject({
                 probe,
                 discoveryTimeoutMs,
                 rehearsalMarker,
+                containment,
               }),
             );
           }
@@ -2311,6 +2658,7 @@ async function discoverEndpointsFromSdk({
   environment,
   timeout,
   rehearsalMarker,
+  containment,
 }) {
   const binary = findFunctionsBinary(sourceDir, projectDir);
   if (!binary) return { ok: false, reason: "no firebase-functions binary for this codebase" };
@@ -2325,9 +2673,20 @@ async function discoverEndpointsFromSdk({
   }
 
   const deadline = Date.now() + timeout;
+  // Loading an artifact runs its module-scope code, which is another of this
+  // config's programs and gets the same containment the hooks got: an endpoint
+  // whose module initialisation detaches a writer cannot reach the checkout
+  // either. The mechanism is an argv prefix, so the SDK binary still receives
+  // exactly the argv `spawnFunctionsProcess` gives it.
+  const contained = containment.wrap(process.execPath, [
+    "--require",
+    DISCOVERY_PRELOAD,
+    binary,
+    sourceDir,
+  ]);
   const server = runCapturedProcess(
-    process.execPath,
-    ["--require", DISCOVERY_PRELOAD, binary, sourceDir],
+    contained.command,
+    contained.args,
     {
       cwd: sourceDir,
       timeout,
@@ -2466,6 +2825,7 @@ async function discoverCodebaseInProbe({
   probe,
   discoveryTimeoutMs,
   rehearsalMarker,
+  containment,
 }) {
   const scratchSource = resolve(probeProject, config.sourceRel);
 
@@ -2513,6 +2873,7 @@ async function discoverCodebaseInProbe({
     environment,
     timeout: discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
     rehearsalMarker,
+    containment,
   });
 }
 
@@ -2622,6 +2983,7 @@ async function singleEndpointInventory(
   only,
   predeployTimeoutMs,
   discoveryTimeoutMs,
+  writeContainment,
 ) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -2759,6 +3121,7 @@ async function singleEndpointInventory(
       projectAlias: projectAlias || "",
       predeployTimeoutMs,
       discoveryTimeoutMs,
+      writeContainment,
       codebaseNames,
       configs,
     },
@@ -3212,6 +3575,13 @@ export async function classifyFirebaseDeployRequest(
     // shorten it to prove that a codebase whose discovery process will not end
     // forfeits the inventory rather than being inventoried anyway.
     discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
+    // Whether write containment may be established at all. An argument for the
+    // same reason again, and one that only ever NARROWS: `"unavailable"` makes
+    // this classifier behave as it does on a machine with no mechanism, which
+    // is to refuse every exemption without running a hook. `main()` never
+    // passes it, so no shell can reach it, and a test that does cannot widen
+    // anything by doing so.
+    writeContainment = "auto",
   } = {},
 ) {
   if (rejectDestinationOverrides && hasNamedDestinationOverride(args)) {
@@ -3259,6 +3629,7 @@ export async function classifyFirebaseDeployRequest(
     effectiveOnly,
     predeployTimeoutMs,
     discoveryTimeoutMs,
+    writeContainment,
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an

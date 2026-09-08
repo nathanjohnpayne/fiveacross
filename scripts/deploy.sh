@@ -225,12 +225,26 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # would not load — then no codebase in the request is judged exact, because the
 # codebases are loaded in one sequence and any of them can rewrite another's
 # artifact before that one is read.
+# Nothing runs uncontained. Before the first hook, the adapter puts every
+# program it is about to run under a platform write-containment mechanism —
+# `sandbox-exec` on macOS, `bwrap` or an unprivileged user+mount namespace on
+# Linux — under which the only writes that succeed are into its own scratch
+# directory and the system temp dir, and it PROVES that with a canary write
+# against this checkout before trusting it. Nothing a Firebase deploy publishes
+# is read from the temp dir, so what that denies is every route from a hook to a
+# deployment input. This is the only guard here that acts on those programs
+# rather than reporting on them afterwards, which is what a detached worker
+# needs: a hook can hand one to the operating system with an environment of its
+# own, past the process group and past the marker sweep, to change a deployment
+# input minutes after this classification was accepted. A machine where the
+# containment cannot be proved gets the conservative classification and runs no
+# hooks at all.
 # No conservative answer is returned until the rehearsal has ENDED whatever it
-# started. A hook can detach a writer into a session of its own and then fail
-# for a reason of the rehearsal's own, so the classifier sweeps its own escaped
-# processes and re-checks the tree on every exit, not only on the exits a
-# process caused; otherwise the conservative classification accepted here would
-# be followed minutes later by that writer changing a deployment input.
+# started either. A hook can detach a writer into a session of its own and then
+# fail for a reason of the rehearsal's own, so the classifier sweeps its own
+# escaped processes and re-checks the tree on every exit, not only on the exits a
+# process caused — the second layer behind the containment, because a process
+# that escaped is still one whose effect on the artifact cannot be rehearsed.
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
 #
