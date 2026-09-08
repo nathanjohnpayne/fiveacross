@@ -22,6 +22,11 @@ import type { ClaimDoc, EventDoc, PlayerDoc } from '../types';
 const H = vi.hoisted(() => {
   const state = {
     event: null as EventDoc | null,
+    /** Whether the Event snapshot beside it is fully SERVER-COMMITTED — the
+     *  console's own `hasServerData && !fromCache && !hasPendingWrites`. Kept
+     *  separate from `event` because that is exactly the distinction the gate
+     *  turns on: the persistent cache supplies a document, not a confirmation. */
+    eventConfirmed: true,
     players: [] as PlayerDoc[],
     rosterConfirmed: true,
     dayMetasServerLoaded: true,
@@ -114,6 +119,7 @@ function mkClaim(over: Partial<ClaimDoc> = {}): ClaimDoc {
 beforeEach(() => {
   vi.clearAllMocks();
   H.event = mkEvent();
+  H.eventConfirmed = true;
   H.players = [mkPlayer('alice'), mkPlayer('bob', { squaresMarked: 3 })];
   H.rosterConfirmed = true;
   H.dayMetasServerLoaded = true;
@@ -132,6 +138,7 @@ beforeEach(() => {
 
 const props = (event: EventDoc | null = H.event) => ({
   event,
+  eventConfirmed: H.eventConfirmed,
   pendingClaims: H.pendingClaims,
   pendingClaimsLoaded: H.pendingClaimsLoaded,
 });
@@ -566,7 +573,30 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
   });
 
-  it('enables it once the roster and every Day-meta subscription are confirmed', () => {
+  // Codex P2 on PR #1162. A present Event is what the ADR 0006 persistent cache
+  // delivers; it is not what the server said. The roster and the Day-meta
+  // listeners latch INDEPENDENTLY, so both can confirm while the Event is still
+  // the cached copy — and the schedule, name and ban list the preview is built
+  // from are then whatever that cache held, on a write that cannot be undone.
+  it('does NOT arm on a cached-only Event, however confirmed the other inputs are', () => {
+    H.eventConfirmed = false;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the final standings/);
+  });
+
+  it('holds the CLOSING-state freeze shut on a cached-only Event too', () => {
+    // The other surface that reaches the flip. An Admin who has already used
+    // Close play cannot get back to the confirm row, so the gate has to hold
+    // here on its own terms.
+    H.eventConfirmed = false;
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+  });
+
+  it('enables it once the Event, the roster and every Day-meta subscription are confirmed', () => {
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
