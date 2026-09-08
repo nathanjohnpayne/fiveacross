@@ -205,16 +205,21 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
  * THE PRECONDITIONS ahead of the first tap, because the write is permanent
  * behind write-once rules and there is no second attempt to correct it:
  *
- *  1. **Every preview input server-confirmed.** `useLeaderboard`'s
- *     `hasServerData` and `useDayMetasStatus`'s `serverLoaded` are LATCHES on
- *     "the server has spoken", and until they hold, an empty roster and an
- *     unpinned Day are indistinguishable from a roster the ADR 0006 persistent
- *     cache has not filled in yet — so the confirm row would understate what is
- *     about to be frozen. The Event doc is part of the same precondition:
- *     `dayCount` is derived from it, so `serverLoaded` is vacuously true while it
+ *  1. **Every preview input server-confirmed, THE EVENT INCLUDED.**
+ *     `useLeaderboard`'s `hasServerData` and `useDayMetasStatus`'s `serverLoaded`
+ *     are LATCHES on "the server has spoken", and until they hold, an empty
+ *     roster and an unpinned Day are indistinguishable from a roster the ADR 0006
+ *     persistent cache has not filled in yet — so the confirm row would understate
+ *     what is about to be frozen. The Event document is the third input and it is
+ *     gated the same way (`eventConfirmed`, Codex P2 on PR #1162): a non-null
+ *     `event` is what the cache delivers, not what the server said, and the other
+ *     two latches can hold while it is still the cached copy — so truthiness
+ *     armed Archive over a stale schedule, name or ban list, and `dayCount` is
+ *     derived from it besides, which makes `serverLoaded` vacuously true while it
  *     is absent. (The RECORD does not depend on these subscriptions at all —
  *     `archiveEvent` re-reads its inputs after the quiesce — but a console that
- *     has not loaded is still not a console to end an Event from.)
+ *     has not loaded is still not a console to end an Event from, and the record
+ *     the freeze takes is the one the Admin was shown.)
  *  2. **The claim queue drained.** Resolving a Claim writes the claimant's Board
  *     and Player row, and the freeze denies both — so a Claim still pending at
  *     the moment of the flip is pending forever, with a Confirm/Reject pair in
@@ -252,10 +257,27 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
  */
 export default function ArchiveEvent({
   event,
+  eventConfirmed,
   pendingClaims,
   pendingClaimsLoaded,
 }: {
   event: EventDoc | null | undefined;
+  /**
+   * Whether the Event snapshot beside it is fully SERVER-COMMITTED (Codex P2 on
+   * PR #1162): `useEventDoc`'s `hasServerData` latch, and this snapshot's own
+   * `fromCache` and `hasPendingWrites` both false — the same test `src/App.tsx`
+   * applies before it moves a Player off their Card.
+   *
+   * A separate prop rather than a property of `event` because the two answer
+   * different questions and only one of them is on the document. A non-null
+   * `event` says the ADR 0006 persistent cache had something; it does NOT say
+   * the server has spoken. The roster and the Day-meta listeners latch
+   * independently, so both could confirm while the Event itself was still the
+   * cached copy — and the Admin would then be shown, and asked to approve, a
+   * preview built from a stale schedule, name or ban list. `archiveEvent` re-
+   * reads the Event from the server and freezes THAT one, permanently.
+   */
+  eventConfirmed: boolean;
   /** `usePendingClaims`' queue, threaded from the console (no extra listener). */
   pendingClaims: readonly ClaimDoc[];
   /** That subscription's `hasServerData`: a not-yet-arrived queue reads as
@@ -351,7 +373,12 @@ export default function ArchiveEvent({
   // The drain gate is the ONE precondition BOTH writes share: a Claim left
   // pending across the freeze can never be resolved again.
   const drained = pendingClaimsLoaded && blockingClaims.length === 0;
-  const previewConfirmed = !!event && rosterConfirmed && dayMetasConfirmed;
+  // The Event ITSELF has to be server-confirmed, not merely present (Codex P2 on
+  // PR #1162). `!!event` was reading truthiness as confirmation, and the
+  // persistent cache makes those different facts: the roster and the Day-meta
+  // listeners latch independently, so both could hold while `event` was still
+  // the cached copy — arming Archive over a stale schedule, name or ban list.
+  const previewConfirmed = !!event && eventConfirmed && rosterConfirmed && dayMetasConfirmed;
   const finaleDone = finaleHasRun(event);
 
   // What WOULD be frozen, so the confirm row can state the record's size before

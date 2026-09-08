@@ -169,10 +169,15 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
  */
 export default function GameSettings({
   event,
+  eventConfirmed,
   pendingClaims,
   pendingClaimsLoaded,
 }: {
   event: EventDoc | null | undefined;
+  /** Threaded straight through to `ArchiveEvent`, whose arming gate (#1151)
+   *  needs to know the Event it previews came from the SERVER and not the
+   *  ADR 0006 persistent cache. */
+  eventConfirmed: boolean;
   /** Threaded straight through to `ArchiveEvent`, whose drain gate (#1151) needs
    *  the console's already-subscribed claim queue rather than a second listener:
    *  a gate that disagreed with the Review queue it points at would name a fix
@@ -346,6 +351,7 @@ export default function GameSettings({
           than tuning it (#134, specs/post-sailing-archive.md). */}
       <ArchiveEvent
         event={event}
+        eventConfirmed={eventConfirmed}
         pendingClaims={pendingClaims}
         pendingClaimsLoaded={pendingClaimsLoaded}
       />
