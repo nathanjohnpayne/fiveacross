@@ -507,15 +507,7 @@ export default function ArchiveEvent({
   // replacing it: the Admin needs both halves — why nothing was frozen, and why
   // play is nonetheless still closed.
   const [reopenSuperseded, setReopenSuperseded] = useState(false);
-  // Whether the phase moved at all while an action was in flight (Phase 4b P2 on
-  // PR #1157, run 3): a round trip — closing delivered, then someone else's
-  // reopen — lands back on the starting phase, which equality alone cannot tell
-  // from "nothing happened yet". Any move during the action means the starting
-  // phase is no longer evidence the message is true.
-  const inFlightRef = useRef(false);
-  const movedDuringActionRef = useRef(false);
   useEffect(() => {
-    if (inFlightRef.current) movedDuringActionRef.current = true;
     setResult((current) => {
       if (!current || phase === current.from) return current;
       if (phase === current.describes) return { ...current, from: phase };
@@ -530,9 +522,41 @@ export default function ArchiveEvent({
   // happened in: if the Event is already where the outcome describes, or still
   // where the action started, the message is true and shown; anywhere else it
   // would be stale before it appeared, so nothing is shown at all.
+  //
+  // AND HOW MANY TIMES IT HAS MOVED, beside it (Codex round 10 on PR #1157, and
+  // the Phase 4b run-3 finding it generalises). A round trip — closing delivered,
+  // then someone else's reopen — lands back on the STARTING phase, which equality
+  // alone cannot tell from "nothing happened yet". A boolean "it moved" flag
+  // answers that for ONE action; a monotonic count, snapshotted at click time,
+  // answers it PER action, so a second action cannot clear the record the first
+  // was relying on (or vice versa). Both live in refs written during render,
+  // together, so they can never disagree about the same commit: an abandoned
+  // render would bump the count for a phase that never committed, which
+  // suppresses a message rather than showing a stale one — the safe direction,
+  // and the same posture the unconditional `phaseRef` write already took.
   const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-  const report = (outcome: ArchiveOutcome, startedIn: Phase, settledAt?: Phase) => {
+  const phaseSeqRef = useRef(0);
+  if (phaseRef.current !== phase) {
+    phaseRef.current = phase;
+    phaseSeqRef.current += 1;
+  }
+  // WHICH invocation is speaking (the post-4b barrier round on PR #1157). The
+  // controls are swapped by the listener, not by the action: while a Close is
+  // pending, the closing snapshot puts **Reopen play** on screen, the Admin
+  // presses it, and the Close then resolves — restoring "Play is closed" beside
+  // the open controls, because both actions shared one in-flight record. A
+  // sequence number captured at CLICK time settles it: an outcome from anything
+  // but the newest invocation describes an intent the Admin has already replaced,
+  // so it is discarded outright rather than reconciled against a phase.
+  const actionSeqRef = useRef(0);
+  const report = (
+    outcome: ArchiveOutcome,
+    startedIn: Phase,
+    seq: number,
+    phaseSeqAtStart: number,
+    settledAt?: Phase,
+  ) => {
+    if (seq !== actionSeqRef.current) return;
     // A CLEANUP THIS HANDLER PERFORMED IS EVIDENCE IN ITS OWN RIGHT (Codex P2 on
     // PR #1162). The tests below are about a phase somebody ELSE may have moved
     // while the write was in flight; where the handler's own reopen succeeded it
@@ -546,23 +570,25 @@ export default function ArchiveEvent({
     }
     const describes = RESULT_PHASE[outcome];
     const observed = phaseRef.current;
-    const stillWhereItStarted = observed === startedIn && !movedDuringActionRef.current;
+    const stillWhereItStarted =
+      observed === startedIn && phaseSeqRef.current === phaseSeqAtStart;
     setResult(
       observed === describes || stillWhereItStarted ? { outcome, from: observed, describes } : null,
     );
   };
-  const act = async (run: () => Promise<ArchiveOutcome | ArchiveReport>) => {
+  const act = async (
+    run: (isCurrent: () => boolean) => Promise<ArchiveOutcome | ArchiveReport>,
+  ) => {
     const startedIn = phase;
-    inFlightRef.current = true;
-    movedDuringActionRef.current = false;
+    const seq = (actionSeqRef.current += 1);
+    const phaseSeqAtStart = phaseSeqRef.current;
+    // Handed to the runner so a write that reports a SECOND fact — the reopen
+    // that declined — can drop it on the same terms the outcome is dropped on.
+    const isCurrent = () => seq === actionSeqRef.current;
     setReopenSuperseded(false);
-    try {
-      const settled = await run();
-      if (typeof settled === 'string') report(settled, startedIn);
-      else report(settled.outcome, startedIn, settled.settledAt);
-    } finally {
-      inFlightRef.current = false;
-    }
+    const settled = await run(isCurrent);
+    if (typeof settled === 'string') report(settled, startedIn, seq, phaseSeqAtStart);
+    else report(settled.outcome, startedIn, seq, phaseSeqAtStart, settled.settledAt);
   };
 
   const blockingClaims = claimsAwaitingAdmin(event, pendingClaims);
@@ -690,8 +716,11 @@ export default function ArchiveEvent({
   /** The Archive action: both writes, in order, with the cleanup a refusal needs
    *  — and the phase that cleanup LEFT the Event in, so the explanation is shown
    *  against the controls the Admin is actually looking at (Codex P2 on PR
-   *  #1162). */
-  const runArchive = async (): Promise<ArchiveReport> => {
+   *  #1162).
+   *
+   *  `isCurrent` is this invocation's own liveness check — the reopen's outcome is
+   *  a second fact about the same action, so a superseded one drops it too. */
+  const runArchive = async (isCurrent: () => boolean): Promise<ArchiveReport> => {
     // The quiesce this handler took, and the Event it took it on (#1142 item 7):
     // `EVENT_ID` is a live binding, so the freeze and the cleanup name the Event
     // the SHUT actually landed on rather than re-resolving it per call.
@@ -713,7 +742,7 @@ export default function ArchiveEvent({
     if (REOPEN_AFTER.has(outcome)) {
       if (created) {
         const reopened = await abandonArchive(token ?? undefined, eventId);
-        setReopenSuperseded(reopened === 'quiesce-changed');
+        if (isCurrent()) setReopenSuperseded(reopened === 'quiesce-changed');
         // WHERE THE EVENT ACTUALLY ENDS UP (Codex P2 on PR #1162). The reopen
         // this handler just performed put it back OPEN, so the refusal is a
         // sentence about an open Event and belongs beside the open controls —
@@ -722,7 +751,7 @@ export default function ArchiveEvent({
         // superseded or already-archived one wrote nothing and the Event is
         // wherever it already was.
         if (reopened === 'reopened') return { outcome, settledAt: 'open' };
-      } else {
+      } else if (isCurrent()) {
         // Joined, not created: the closing state belongs to whoever opened it,
         // and it is left exactly as found. Reported for the same reason a
         // superseded generation is — play is still shut, deliberately.
@@ -866,8 +895,8 @@ export default function ArchiveEvent({
                 // armed.
                 disabled={!ready}
                 onAction={() =>
-                  act(async () => {
-                    const outcome = await runArchive();
+                  act(async (isCurrent) => {
+                    const outcome = await runArchive(isCurrent);
                     setArming(false);
                     return outcome;
                   })

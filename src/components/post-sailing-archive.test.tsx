@@ -445,6 +445,70 @@ describe('ArchiveEvent — the two reversible lifecycle actions (#1149)', () => 
     expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
   });
 
+  it('discards a superseded action’s outcome, whatever state it lands in', async () => {
+    // The post-4b barrier round on PR #1157. The controls are swapped by the
+    // LISTENER, not by the action: while this Close is pending, the closing
+    // snapshot puts Reopen play on screen, the Admin presses it, and the Close
+    // then resolves — restoring "Play is closed" beside the open controls,
+    // because both actions shared one in-flight record.
+    let settleClose: (value: unknown) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settleClose = resolve; }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+
+    // The quiesce lands and the controls swap under the pending Close.
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    expect(await screen.findByRole('status')).toHaveTextContent(/Play is open again/);
+
+    // …and only now does the superseded Close answer.
+    settleClose({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('status')).toHaveTextContent(/Play is open again/);
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Play is closed/);
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
+
+  it('records the round trip of the action that is still in flight, not of the one that finished', async () => {
+    // The other half of the same shared-record bug (Codex round 10 on PR #1157).
+    // A boolean "the phase moved" flag belongs to whichever action wrote it last
+    // and is cleared by whichever finishes first, so the LATEST action's own
+    // round trip went unrecorded. A monotonic count snapshotted at click time is
+    // per-action, and cannot be reset out from under anyone.
+    let settleClose: (value: unknown) => void = () => {};
+    let settleReopen: (value: unknown) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settleClose = resolve; }),
+    );
+    H.abandonArchive.mockImplementationOnce(
+      () => new Promise((resolve) => { settleReopen = resolve; }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
+
+    // The first action finishes — and it is the one that used to clear the shared
+    // record the second is still relying on.
+    settleClose({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+
+    // A COMPLETED ROUND TRIP under the pending Reopen: someone else reopens, then
+    // shuts the Event again. It ends where the Reopen started, so equality alone
+    // cannot tell it from "nothing happened yet".
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 2 }))} />);
+
+    settleReopen('reopened');
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
+    // "Play is open again" beside a CLOSED Event is exactly what must not appear.
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
+  });
+
   it('shows nothing when the Event has moved somewhere the outcome does not describe', async () => {
     let settle: (value: unknown) => void = () => {};
     H.beginArchive.mockImplementationOnce(
