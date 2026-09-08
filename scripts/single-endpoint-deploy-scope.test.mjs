@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
@@ -293,6 +293,28 @@ async function withNeighbourCodebase(
     await run(resolve(fixture, "firebase.json"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Run `body` with the classifier's own debug reporting on, and hand back every
+ * refusal reason it printed.
+ *
+ * A refusal reaches stdout only as a conservative CLASSIFICATION, which several
+ * different causes share. `FIREBASE_DEPLOY_CLASSIFIER_DEBUG` is the classifier's
+ * own channel for the cause, so a case that has to distinguish two refusals can
+ * assert on the one it means.
+ */
+async function withRefusalReasons(body) {
+  const reasons = [];
+  const spy = vi.spyOn(console, "error").mockImplementation((...parts) => {
+    reasons.push(parts.map(String).join(" "));
+  });
+  try {
+    const result = await withEnv({ FIREBASE_DEPLOY_CLASSIFIER_DEBUG: "1" }, body);
+    return { result, reasons: reasons.join("\n") };
+  } finally {
+    spy.mockRestore();
   }
 }
 
@@ -2666,6 +2688,72 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
       async (configPath) => {
         const result = await classify(["--only", "functions:daily"], configPath);
         expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
+  it("refuses the inventory when a discovery descendant holds the SDK's pipes", async () => {
+    // Phase 4b, runs 6 and 7 on #1107. The same generator as above, but with
+    // the SDK's own stdio INHERITED rather than ignored — the ordinary shape,
+    // since a child gets its parent's descriptors unless told otherwise. The
+    // runner settled on `close`, which waits for those PIPES rather than for
+    // the process, so the deadline is what ended the wait: it killed the group
+    // first, and the run was then reported with no descendants left and the
+    // SDK's own exit status. The group was inventoried as exact — twenty
+    // seconds late. Settling on `exit` asks the question while the answer is
+    // still true.
+    await withFunctionsProject(
+      {
+        source:
+          'import { spawn } from "node:child_process";\n' +
+          // Long enough that it is unambiguously still running when the SDK
+          // process exits; the group kill at settle is what ends it.
+          'spawn("/bin/sleep", ["30"], {\n' +
+          '  stdio: ["ignore", "inherit", "inherit"],\n' +
+          // An explicit environment, so the spawn does not COPY `process.env`:
+          // enumerating it reads `CLOUD_RUNTIME_CONFIG`, which would refuse
+          // this fixture for the watcher's reason rather than for the
+          // descendant's.
+          "  env: {},\n" +
+          "}).unref();\n" +
+          endpoint("daily"),
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
+  it("refuses the inventory when discovery outlives its own deadline", async () => {
+    // The other half of the same fix: a codebase that leaves a live handle
+    // behind keeps the discovery process running after `quitquitquit` closes
+    // the server, so the deadline — not the program — is what ends it. The
+    // manifest it had already served used to be inventoried anyway, because a
+    // timeout was indistinguishable from an ordinary exit once the group had
+    // been killed. A run the deadline ended is a run that did not finish.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        files: {
+          "functions/lib/index.js": artifact(
+            ["setInterval(() => {}, 1000);", "exports.daily = endpoint();"].join("\n"),
+          ),
+        },
+      },
+      async (configPath) => {
+        // The REASON is the assertion here, not only the verdict: killing the
+        // group at the deadline leaves the immediate child briefly unreaped,
+        // so `descendantsLeft` could refuse this by accident. Only a refusal
+        // that names the deadline proves the timeout itself is visible.
+        const { result, reasons } = await withRefusalReasons(() =>
+          classifyFirebaseDeployRequest(["fiveacross", "--only", "functions:daily"], {
+            defaultConfigPath: configPath,
+            discoveryTimeoutMs: 5_000,
+          }),
+        );
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+        expect(reasons).toContain("discovery did not end before the deadline");
       },
     );
   });

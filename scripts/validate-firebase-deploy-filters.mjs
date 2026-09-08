@@ -307,6 +307,15 @@ function crossEnvShellPath() {
 const KILL_GRACE_MS = 5_000;
 
 /**
+ * How long a run that settles on `exit` waits for the verdict descriptor to
+ * end before giving up on it.
+ *
+ * The pipe ends as soon as every writer has let go, which the group kill
+ * guarantees, so this is reached only by a holder that would not die.
+ */
+const CHANNEL_DRAIN_MS = 2_000;
+
+/**
  * Environment variables that exist ONLY because this classifier ran.
  *
  * `deploy.sh` sets each of these on the classifier's own command line — they
@@ -476,6 +485,13 @@ function runCapturedProcess(
     // cannot unlink and the parent alone holds.
     let channel = "";
     let settled = false;
+    /**
+     * Whether the DEADLINE fired, which a caller has to be able to see.
+     * Settling on `exit` reports a killed child as an ordinary termination, so
+     * without this a run that blew its ceiling is indistinguishable from one
+     * that merely failed (Phase 4b, runs 6 and 7 on #1107).
+     */
+    let timedOut = false;
     let deadline;
     let grace;
     const settle = (result) => {
@@ -493,6 +509,35 @@ function runCapturedProcess(
     child.stdio[3]?.on("data", (chunk) => {
       if (channel.length < 1024) channel += chunk.toString("utf8");
     });
+    /**
+     * Wait for the verdict descriptor to END, then settle.
+     *
+     * Settling on `exit` is what keeps the deadline honest, but `exit` fires as
+     * soon as the child is gone — before the parent has necessarily read what
+     * it wrote on descriptor 3, which is the one signal this runner must not
+     * lose. The pipe ends once every writer has let go; the group kill in the
+     * settle path above is what makes that happen, and the bound is here so
+     * that a holder which will not die cannot keep this open either.
+     */
+    const drainChannel = (done) => {
+      const verdict = child.stdio[3];
+      if (!verdict || verdict.destroyed || verdict.readableEnded) {
+        done();
+        return;
+      }
+      let drained = false;
+      const complete = () => {
+        if (drained) return;
+        drained = true;
+        clearTimeout(bound);
+        verdict.destroy();
+        done();
+      };
+      const bound = setTimeout(complete, CHANNEL_DRAIN_MS);
+      verdict.on("end", complete);
+      verdict.on("close", complete);
+      verdict.on("error", complete);
+    };
     child.on("error", (error) => settle({ ok: false, output: `${output}${error.message}`, channel }));
     child.on(settleOn, (code, signal) => {
       // On `exit` the pipes may still be open (a background descendant holds
@@ -528,11 +573,16 @@ function runCapturedProcess(
           // Already gone.
         }
       }
-      if (signal) settle({ ok: false, output: `${output}terminated with signal ${signal}`, channel, descendantsLeft });
-      else settle({ ok: code === 0, output, code, channel, descendantsLeft });
+      const answer = signal
+        ? { ok: false, output: `${output}terminated with signal ${signal}`, descendantsLeft, timedOut }
+        : { ok: code === 0, output, code, descendantsLeft, timedOut };
+      // `channel` is read when the drain finishes, not now: whatever the child
+      // wrote on descriptor 3 may still be in the pipe at `exit`.
+      drainChannel(() => settle({ ...answer, channel }));
     });
 
     deadline = setTimeout(() => {
+      timedOut = true;
       try {
         if (POSIX && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
@@ -544,7 +594,7 @@ function runCapturedProcess(
         }
       }
       grace = setTimeout(
-        () => settle({ ok: false, output: `${output}timed out after ${timeout}ms`, channel }),
+        () => settle({ ok: false, output: `${output}timed out after ${timeout}ms`, channel, timedOut: true }),
         KILL_GRACE_MS,
       );
     }, timeout);
@@ -1489,6 +1539,7 @@ async function buildAndInventoryProject({
   project,
   projectAlias,
   predeployTimeoutMs,
+  discoveryTimeoutMs,
   configs,
   codebaseNames,
   deployTargets,
@@ -1757,7 +1808,14 @@ async function buildAndInventoryProject({
         for (const config of selected) {
           results.set(
             config.codebase,
-            await discoverCodebaseInProbe({ probeProject, config, project, projectAlias, probe }),
+            await discoverCodebaseInProbe({
+              probeProject,
+              config,
+              project,
+              projectAlias,
+              probe,
+              discoveryTimeoutMs,
+            }),
           );
         }
         perProbe.push({ probe, results });
@@ -1889,6 +1947,15 @@ async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, ti
       cwd: sourceDir,
       timeout,
       extraChannel: true,
+      // `serveAdmin`'s teardown waits for the SDK process's `exit` and for
+      // nothing else, so this waits for the same event (Phase 4b, runs 6 and 7
+      // on #1107). Settling on `close` waited on the PIPES instead, which a
+      // background descendant that inherited stdout holds open: the deadline
+      // then expired, killed the group, and the run was reported with the SDK's
+      // own exit status and no descendants left — a fail-OPEN answer for
+      // exactly the shape the refusals below exist to catch. The verdict
+      // descriptor is drained separately, so settling earlier does not lose it.
+      settleOn: "exit",
       env: {
         ...environment,
         PORT: String(port),
@@ -1908,7 +1975,18 @@ async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, ti
     await fetch(`http://127.0.0.1:${port}/__/quitquitquit`).catch(() => {});
     finished = await server;
   }
-  if (finished?.descendantsLeft) {
+  if (!finished) {
+    return { ok: false, reason: "the discovery process produced no result" };
+  }
+  if (finished.timedOut) {
+    // The deadline fired, so this run was ENDED rather than finished: whatever
+    // the codebase had still to do at that moment, the deploy will let it do.
+    return {
+      ok: false,
+      reason: "discovery did not end before the deadline, so what it would have done cannot be rehearsed",
+    };
+  }
+  if (finished.descendantsLeft) {
     // The same refusal the predeploy-hook path applies (Phase 4b P1, run 5):
     // Firebase's serveAdmin teardown waits only for the SDK process, so a
     // generator a codebase left running with ignored stdio finishes on its own
@@ -1927,6 +2005,16 @@ async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, ti
       reason:
         "the codebase consulted CLOUD_RUNTIME_CONFIG, whose legacy functions.config() " +
         "namespaces only the deploy's authenticated fetch can supply",
+    };
+  }
+  if (!manifest.ok) return manifest;
+  if (!finished.ok) {
+    // The manifest was served, but the process that served it did not end the
+    // way the deploy's will. Whatever made it fail ran inside the codebase's
+    // own load, so the surface it reported is not one to inventory.
+    return {
+      ok: false,
+      reason: `discovery ended abnormally after answering — ${finished.output.trim().slice(-400) || `exit ${finished.code ?? "?"}`}`,
     };
   }
   return manifest;
@@ -1981,7 +2069,14 @@ async function pollDiscoveryManifest(port, deadline, server) {
  * because a codebase this classifier cannot read must not veto a selector
  * qualified to another one.
  */
-async function discoverCodebaseInProbe({ probeProject, config, project, projectAlias, probe }) {
+async function discoverCodebaseInProbe({
+  probeProject,
+  config,
+  project,
+  projectAlias,
+  probe,
+  discoveryTimeoutMs,
+}) {
   const scratchSource = resolve(probeProject, config.sourceRel);
 
   // The Node delegate tries `functions.yaml` BEFORE running the SDK's
@@ -2026,7 +2121,7 @@ async function discoverCodebaseInProbe({ probeProject, config, project, projectA
     sourceDir: scratchSource,
     projectDir: probeProject,
     environment,
-    timeout: DISCOVERY_TIMEOUT_MS,
+    timeout: discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
   });
 }
 
@@ -2106,6 +2201,7 @@ async function singleEndpointInventory(
   { project, projectAlias },
   only,
   predeployTimeoutMs,
+  discoveryTimeoutMs,
 ) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -2242,6 +2338,7 @@ async function singleEndpointInventory(
       project: project || "",
       projectAlias: projectAlias || "",
       predeployTimeoutMs,
+      discoveryTimeoutMs,
       codebaseNames,
       configs,
     },
@@ -2691,6 +2788,10 @@ export async function classifyFirebaseDeployRequest(
     // from outside, while a test can shorten it enough to prove that a hook
     // whose descendants outlive their shell still settles promptly.
     predeployTimeoutMs = PREDEPLOY_HOOK_TIMEOUT_MS,
+    // The discovery deadline, an argument for the same reasons: a test can
+    // shorten it to prove that a codebase whose discovery process will not end
+    // forfeits the inventory rather than being inventoried anyway.
+    discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
   } = {},
 ) {
   if (rejectDestinationOverrides && hasNamedDestinationOverride(args)) {
@@ -2737,6 +2838,7 @@ export async function classifyFirebaseDeployRequest(
     { project, projectAlias },
     effectiveOnly,
     predeployTimeoutMs,
+    discoveryTimeoutMs,
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an
