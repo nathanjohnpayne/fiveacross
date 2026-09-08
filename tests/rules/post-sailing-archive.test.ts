@@ -496,8 +496,22 @@ describe.each([
   });
 
   it('DENIES un-marking (the Tally marker delete)', async () => {
+    const unmark = () => deleteDoc(doc(db(ALICE), `${eventPath()}/tally/${ITEM}/markers/${ALICE}`));
+    // The live control (CodeRabbit on PR #1157): the SAME delete succeeds
+    // before the shut, so the denial below cannot pass for an unrelated reason.
+    await assertSucceeds(unmark());
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/tally/${ITEM}/markers/${ALICE}`), {
+        eventId: EVENT,
+        uid: ALICE,
+        displayName: 'Alice',
+        markedAt: NOW(),
+        itemText: 'Something happens',
+        dayIndex: 0,
+      });
+    });
     await close();
-    await assertFails(deleteDoc(doc(db(ALICE), `${eventPath()}/tally/${ITEM}/markers/${ALICE}`)));
+    await assertFails(unmark());
   });
 
   it('DENIES a Player stat write and a late join', async () => {
@@ -599,11 +613,19 @@ describe.each([
         source: null,
         dayIndex: 0,
       });
+    const report = (count: number) =>
+      updateDoc(doc(db(BOB), `${eventPath()}/proofs/${PROOF}`), { reportCount: count });
+    const ownerDelete = (id: string) => deleteDoc(doc(db(ALICE), `${eventPath()}/proofs/${id}`));
+    // Live controls for all three writes (CodeRabbit on PR #1157): the report
+    // bump and the owner delete each succeed before the shut, on a separately
+    // seeded Proof for the delete so the frozen half still has one to refuse.
     await assertSucceeds(createProof('proof-2'));
+    await assertSucceeds(report(1));
+    await assertSucceeds(ownerDelete('proof-2'));
     await close();
     await assertFails(createProof('proof-3'));
-    await assertFails(updateDoc(doc(db(BOB), `${eventPath()}/proofs/${PROOF}`), { reportCount: 1 }));
-    await assertFails(deleteDoc(doc(db(ALICE), `${eventPath()}/proofs/${PROOF}`)));
+    await assertFails(report(2));
+    await assertFails(ownerDelete(PROOF));
   });
 
   it('DENIES a Claim create', async () => {
