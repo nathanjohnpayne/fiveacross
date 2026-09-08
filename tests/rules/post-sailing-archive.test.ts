@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
+import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { deleteObject, ref, uploadBytes } from 'firebase/storage';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
@@ -348,6 +348,36 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     await assertSucceeds(
       updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
     );
+  });
+
+  // Codex P2, PR #1157 round 7. With the shut minting a fresh generation, the
+  // remaining way to replay an abandoned token was to WRITE it back: the
+  // general arm protected `status`, `archiving` and `archivedAt` but not the
+  // token, so a whole-document writer could restore B beside the current
+  // quiesce. The token is immutable while the Event is closing — and on a live
+  // Event, where it is inert but the next shut must differ from it — with one
+  // narrow exception: a closing state carrying no usable token may be given one.
+  it('KEEPS the generation immutable while closing, and lets an unidentified quiesce be repaired', async () => {
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-9' }));
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-9' }));
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-9' }),
+    );
+    // The repair: shut out of band with no generation at all.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { archiveToken: deleteField() });
+    });
+    await assertFails(updateDoc(doc(db(ALICE), eventPath()), { archiveToken: 'quiesce-2' }));
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-2', bannedUids: [BOB] }),
+    );
+    // `beginArchive`'s own shape for that state: the flag restated, the token minted.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+    );
+    // …and settled again from then on.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-3' }));
   });
 
   it('DENIES a shut that smuggles configuration with it, and a create born shut', async () => {

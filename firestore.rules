@@ -1189,11 +1189,15 @@ service cloud.firestore {
       //     #1151's — this ticket freezes the Event, not the standings.
       //
       // THE LIFECYCLE FIELDS NEVER MOVE ON THIS ARM (#134; Codex P1 on PR
-      // #1157, round 6). `status`, `archiving` and `archivedAt` are moved only
-      // by the three dedicated arms BELOW — the shut, the reopen and the flip —
-      // each of which states the one transition it performs and the shape it
-      // requires. This arm refuses any change to the three in ONE
-      // `affectedKeys` check, which is what keeps the freeze write-once (an
+      // #1157, round 6). `status`, `archiving`, `archivedAt` and
+      // `archiveToken` are moved only by the dedicated arms BELOW — the shut,
+      // the reopen, the flip and the repair — each of which states the one
+      // transition it performs and the shape it requires. The token is in the
+      // set too (Codex P2, round 7): a closing Event's generation must be
+      // IMMUTABLE here, or a whole-document writer could restore an abandoned
+      // token B beside the current quiesce and a stale `archiveEvent(B)` would
+      // pass `boundToStoredQuiesce` after all. This arm refuses any change to
+      // the four in ONE `affectedKeys` check, which is what keeps the freeze write-once (an
       // un-archive, a second stamp, a re-shut under the old generation and a
       // stray stamp on a live Event are all a CHANGE to one of them and land
       // here first), and which is cheaper than the five shape and lock clauses
@@ -1209,7 +1213,7 @@ service cloud.firestore {
                 && request.resource.data.get('archiving', false) == false
                 && !('archivedAt' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
-                 .hasAny(['status', 'archiving', 'archivedAt']))
+                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1427,6 +1431,26 @@ service cloud.firestore {
         && request.resource.data.get('archiving', false) == false
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['status', 'archivedAt', 'archiving']);
+      // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
+      // Event carrying NO usable generation — a document shut out of band, or
+      // by a build that predates the token — cannot be flipped (the flip is
+      // bound to a stored token) and, with the token immutable on the general
+      // arm, could not be given one either. `beginArchive` mints a fresh
+      // generation when it finds that state; this arm admits exactly that
+      // write and nothing else: from the quiescing state, by an admin, when
+      // the stored token is absent or empty, installing a non-empty one, and
+      // touching nothing else. A closing Event that already HAS a usable token
+      // never matches — its generation is settled until play reopens.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && !(resource.data.get('archiveToken', '') is string
+             && resource.data.get('archiveToken', '') != '')
+        && isAdmin(eventId)
+        && request.resource.data.get('archiveToken', '') is string
+        && request.resource.data.get('archiveToken', '') != ''
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiveToken']);
       // The DELETE of the Event document is the ONE admin write the freeze
       // refuses (#134, Phase 4b P1 on PR #1139). Deleting a document does not
       // delete its subcollections, so an admin deleting an archived Event
