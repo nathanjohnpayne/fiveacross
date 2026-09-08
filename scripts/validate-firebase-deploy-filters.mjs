@@ -17,6 +17,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -337,6 +338,12 @@ const CHANNEL_DRAIN_MS = 2_000;
  * their environment from `{}` rather than from `process.env`, so nothing
  * ambient reaches them in the first place (`assert`ed by the deployment-safety
  * suite, because that is a property of the code rather than of a list).
+ *
+ * `REHEARSAL_MARKER_VAR` runs the other way and is the one deliberate
+ * exception: it is ADDED to both the hook and the discovery environments,
+ * because it is the only tag that survives a `setsid` and so the only way to
+ * find a descendant that escaped the process group. Its own docblock states
+ * what that costs.
  */
 const CLASSIFIER_PRIVATE_ENV = Object.freeze([
   "FIREBASE_DEPLOY_DEFAULT_PROJECT",
@@ -602,6 +609,118 @@ function runCapturedProcess(
 }
 
 /**
+ * The environment variable every process this rehearsal starts carries.
+ *
+ * WHY A MARKER AT ALL. The process GROUP is what bounds a rehearsal's children,
+ * and it is not enough: `spawn(..., { detached: true, stdio: "ignore" })` calls
+ * `setsid`, which puts the new process in a session no group signal can reach
+ * (Phase 4b, run 6 on #1107). Such a descendant outlives the rehearsal and goes
+ * on writing — into the live checkout during the BUILD that follows, where the
+ * fingerprint is no longer watching anything. Containment therefore needs a tag
+ * that survives both `setsid` and `exec`, and the environment is the only
+ * carrier that does: `cwd` is defeated by a `cwd` option, an inherited
+ * descriptor by `stdio: "ignore"`, and the process group by `setsid` itself.
+ *
+ * WHAT IT COSTS. A hook and an artifact can both READ this variable, and the
+ * real deploy does not set it — one more way to tell the rehearsal from the
+ * deploy, which is the divergence `CLASSIFIER_PRIVATE_ENV` exists to remove.
+ * It is accepted here, and only here, because a program written to detect the
+ * rehearsal can already do so from `$PROJECT_DIR` alone (see
+ * `liveTreeFingerprint` § WHAT NO REHEARSAL CAN CLOSE): the marker adds no
+ * capability that was not already there, while withholding it leaves an
+ * escaped process that nobody can find.
+ */
+const REHEARSAL_MARKER_VAR = "FIREBASE_DEPLOY_SCOPE_REHEARSAL";
+
+/**
+ * Every live process still carrying THIS run's marker, and whether the platform
+ * could be asked at all.
+ *
+ * Linux reads `/proc/<pid>/environ`, which answers for every process of the
+ * same user. macOS has no `/proc`, so the question goes to `ps -E`, which
+ * prints a process's environment after its command — verified on macOS 26,
+ * where `ps -A -E -o pid=,stat=,command=` shows a detached `node` child's
+ * variables. A zombie state is skipped: a process that has been killed and not
+ * yet reaped is not one that can still act.
+ *
+ * PLATFORM COVERAGE, HONESTLY. On macOS `ps -E` WITHHOLDS the environment of a
+ * process whose executable is a SIP-protected platform binary — `/bin/sleep`
+ * and `/bin/sh` among them — so a descendant that both detaches and execs one
+ * of those carries the marker and hides it. That residual is macOS's alone, it
+ * is the same class as the residuals `liveTreeFingerprint` documents, and it is
+ * stated rather than papered over. Every other platform, Windows included,
+ * reports `scanned: false`, and the caller refuses the exemption rather than
+ * reading silence as an all-clear.
+ */
+async function markedProcesses(marker) {
+  /** @type {number[]} */
+  const pids = [];
+  const wanted = `${REHEARSAL_MARKER_VAR}=${marker}`;
+  if (process.platform === "linux") {
+    let entries;
+    try {
+      entries = await readdir("/proc");
+    } catch (error) {
+      return { scanned: false, pids, reason: `/proc could not be read (${error?.code ?? "?"})` };
+    }
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      let environ;
+      try {
+        environ = await readFile(`/proc/${entry}/environ`, "utf8");
+      } catch {
+        // Gone already, or not ours to read. Either way it is not this run's.
+        continue;
+      }
+      if (environ.split("\u0000").includes(wanted)) pids.push(Number(entry));
+    }
+    return { scanned: true, pids, reason: null };
+  }
+  if (process.platform === "darwin") {
+    const listing = await runCapturedProcess("ps", ["-A", "-E", "-o", "pid=,stat=,command="], {
+      timeout: 10_000,
+      // The listing IS the answer, so it is not truncated to the diagnostic cap.
+      outputLimit: Infinity,
+    });
+    if (!listing.ok) {
+      return { scanned: false, pids, reason: "ps could not list the process table" };
+    }
+    for (const line of listing.output.split("\n")) {
+      const row = /^\s*(\d+)\s+(\S+)\s+([\s\S]*)$/.exec(line);
+      if (!row) continue;
+      if (row[2].startsWith("Z")) continue;
+      if (!row[3].includes(wanted)) continue;
+      pids.push(Number(row[1]));
+    }
+    return { scanned: true, pids, reason: null };
+  }
+  return {
+    scanned: false,
+    pids,
+    reason: `${process.platform} cannot be scanned for processes this rehearsal started`,
+  };
+}
+
+/**
+ * End every process this rehearsal started that is still running, and report
+ * what was found.
+ *
+ * Run at the end of EVERY rehearsal — each predeploy hook and each project
+ * probe — because a process that escaped one of them is loose for all of them.
+ */
+async function sweepEscapedProcesses(marker) {
+  const found = await markedProcesses(marker);
+  for (const pid of found.pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Gone between the scan and the signal. It is still counted: it ran.
+    }
+  }
+  return found;
+}
+
+/**
  * Run one `predeploy` entry exactly as `firebase-tools` does
  * (`lib/deploy/lifecycleHooks.js`): the whole value is handed to
  * `cross-env-shell` under a shell, with the PROJECT directory as cwd and the
@@ -609,7 +728,7 @@ function runCapturedProcess(
  */
 function runPredeployHook(
   command,
-  { projectDir, resourceDir, project, timeoutMs, deployEnv },
+  { projectDir, resourceDir, project, timeoutMs, deployEnv, rehearsalMarker },
 ) {
   // firebase-tools escapes only `"` when it wraps the hook. That is incomplete
   // for a command containing a BACKSLASH, which could close its own quote — so
@@ -636,6 +755,10 @@ function runPredeployHook(
       // deployment is the one it will have when Firebase runs it.
       ...productionHookEnvironment(project || ""),
       ...deployEnv,
+      // This rehearsal's own tag, so a process the hook detaches into its own
+      // session can still be found and ended — see `REHEARSAL_MARKER_VAR` for
+      // why that is worth one more variable the real deploy does not set.
+      [REHEARSAL_MARKER_VAR]: rehearsalMarker,
       // `getChildEnvironment`'s three, applied LAST exactly as it applies them.
       GCLOUD_PROJECT: project || "",
       PROJECT_DIR: projectDir,
@@ -1639,6 +1762,12 @@ async function buildAndInventoryProject({
     }
   }
 
+  /**
+   * The tag every process this rehearsal starts carries, unique to this run so
+   * that a concurrent classifier's children are never mistaken for its own.
+   */
+  const rehearsalMarker = randomUUID();
+
   const scratch = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-"));
   const scratchProject = join(scratch, "project");
   /** Every symlink this staging created, so cleanup can unlink them by name. */
@@ -1719,6 +1848,32 @@ async function buildAndInventoryProject({
       }
     };
 
+    /**
+     * Whatever this rehearsal started and its process group could not hold,
+     * ended and described — or null when there was nothing.
+     *
+     * A process outside the group can already have written by the time it is
+     * found, so the FATAL checks run first, exactly as they do for a hook that
+     * left work inside its own group. A platform that cannot be scanned is
+     * itself a refusal: silence there is not an all-clear.
+     */
+    const sweepEscapees = async (what) => {
+      const escaped = await sweepEscapedProcesses(rehearsalMarker);
+      if (escaped.scanned && escaped.pids.length === 0) return null;
+      const wrote = await liveDrift();
+      if (wrote) throw new LiveCheckoutDriftError(wrote, what);
+      const moved = await metadataDrift();
+      if (moved) throw new RepositoryMetadataDriftError(moved, what);
+      if (!escaped.scanned) {
+        return `this platform cannot prove that ${what} left nothing running outside its process group — ${escaped.reason}`;
+      }
+      return (
+        `${what} left ${escaped.pids.length} process(es) running outside its process group, ` +
+        "where no signal of this rehearsal's could reach them; they have been ended, but what " +
+        "they would have done to the artifact cannot be rehearsed"
+      );
+    };
+
     for (const hook of hookPlan) {
       const result = await runPredeployHook(hook.command, {
         projectDir: scratchProject,
@@ -1726,6 +1881,7 @@ async function buildAndInventoryProject({
         project,
         timeoutMs: predeployTimeoutMs,
         deployEnv,
+        rehearsalMarker,
       });
       if (!result.ok) {
         // A hook can write through the overlay and THEN fail. Its failure is a
@@ -1760,6 +1916,8 @@ async function buildAndInventoryProject({
           `predeploy hook left work running in the background, whose effect on the artifact cannot be rehearsed: ${hook.command}`,
         );
       }
+      const escapedHook = await sweepEscapees("a predeploy hook");
+      if (escapedHook) return refuseAll(escapedHook);
     }
 
     const afterHooks = await liveDrift();
@@ -1815,6 +1973,7 @@ async function buildAndInventoryProject({
               projectAlias,
               probe,
               discoveryTimeoutMs,
+              rehearsalMarker,
             }),
           );
         }
@@ -1838,6 +1997,8 @@ async function buildAndInventoryProject({
         for (const link of probeLinks) await unlink(link).catch(() => {});
         if (probeRoot) await rm(probeRoot, { recursive: true, force: true }).catch(() => {});
       }
+      const escapedProbe = await sweepEscapees("a discovery probe");
+      if (escapedProbe) return refuseAll(escapedProbe);
     }
 
     for (const config of selected) {
@@ -1926,7 +2087,13 @@ function findFunctionsBinary(sourceDir, projectDir) {
  * `process.argv`, which records whether anything consulted the one environment
  * value the classifier cannot reproduce.
  */
-async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, timeout }) {
+async function discoverEndpointsFromSdk({
+  sourceDir,
+  projectDir,
+  environment,
+  timeout,
+  rehearsalMarker,
+}) {
   const binary = findFunctionsBinary(sourceDir, projectDir);
   if (!binary) return { ok: false, reason: "no firebase-functions binary for this codebase" };
 
@@ -1962,6 +2129,10 @@ async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, ti
         // The preload deletes this before the artifact can see it; its verdict
         // comes back over the descriptor, not through anything on disk.
         FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG: "1",
+        // Kept, unlike the watch flag above: a process the artifact detaches
+        // inherits this copy of the environment, and the marker is the only
+        // thing by which the sweep can then find it.
+        [REHEARSAL_MARKER_VAR]: rehearsalMarker,
       },
     },
   );
@@ -2076,6 +2247,7 @@ async function discoverCodebaseInProbe({
   projectAlias,
   probe,
   discoveryTimeoutMs,
+  rehearsalMarker,
 }) {
   const scratchSource = resolve(probeProject, config.sourceRel);
 
@@ -2122,6 +2294,7 @@ async function discoverCodebaseInProbe({
     projectDir: probeProject,
     environment,
     timeout: discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
+    rehearsalMarker,
   });
 }
 

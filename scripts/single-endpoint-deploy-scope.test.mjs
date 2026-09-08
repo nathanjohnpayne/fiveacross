@@ -2378,6 +2378,48 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("refuses a hook's descendant that detached into a session of its own, and ends it", async () => {
+    // Phase 4b, run 6 on #1107: `spawn(..., { detached: true, stdio: "ignore" })`
+    // calls `setsid`, so the child sits in a session no group signal reaches.
+    // The group probe found nothing, the hook looked clean, and the escapee ran
+    // on into the build that follows — where the live-tree fingerprint is no
+    // longer watching. Every process a rehearsal starts now carries a marker,
+    // and the sweep at the end of each rehearsal finds it by that.
+    //
+    // The escapee would write into the live checkout through the overlay's
+    // `shared` symlink two and a half seconds later, so the file below is the
+    // proof that it was actually ended and not merely noticed.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "node escapee.js"] },
+        files: {
+          "shared/toggle": "",
+          "escapee.js": [
+            'const { spawn } = require("node:child_process");',
+            'const marker = require("node:path").join(__dirname, "shared", "toggle");',
+            "spawn(",
+            "  process.execPath,",
+            "  [",
+            '    "-e",',
+            "    \"setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'x'), 2500)\",",
+            "    marker,",
+            "  ],",
+            '  { detached: true, stdio: "ignore" },',
+            ").unref();",
+          ].join("\n"),
+        },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+        await new Promise((settle) => setTimeout(settle, 4_000));
+        await expect(
+          readFile(join(dirname(configPath), "shared", "toggle"), "utf8"),
+        ).resolves.toBe("");
+      },
+    );
+  });
+
   it("refuses a backgrounded artifact rewrite that a later hook would let finish", async () => {
     // Codex P1, round 17, verbatim: Firebase would let the copy finish before
     // discovery and deploy the group; awaiting or killing it here are both
