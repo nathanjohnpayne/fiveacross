@@ -49,11 +49,19 @@ const eventDoc = vi.hoisted(() => ({
   // Per-snapshot cache flag; the redirect needs the CURRENT snapshot to be the
   // server's, not only the latch (Codex P2, PR #1157 round 8).
   fromCache: false,
+  // An optimistic local write not yet decided by the rules (Codex P2, PR #1157
+  // round 9): the redirect waits it out too.
+  hasPendingWrites: false,
 }));
 vi.mock('./hooks/useData', () => ({
   useEventDoc: (enabled?: unknown) => {
     eventDoc.enabled.push(enabled);
-    return { data: eventDoc.value, hasServerData: eventDoc.hasServerData, fromCache: eventDoc.fromCache };
+    return {
+      data: eventDoc.value,
+      hasServerData: eventDoc.hasServerData,
+      fromCache: eventDoc.fromCache,
+      hasPendingWrites: eventDoc.hasPendingWrites,
+    };
   },
 }));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
@@ -352,6 +360,7 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     eventDoc.enabled = [];
     eventDoc.hasServerData = true;
     eventDoc.fromCache = false;
+    eventDoc.hasPendingWrites = false;
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -361,6 +370,19 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     renderApp();
     expect(screen.getByTestId('ranks')).toBeInTheDocument();
     expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board while an optimistic close is still PENDING — the rules may yet refuse it', () => {
+    // Codex P2, PR #1157 round 9. An Admin's own `archiving: true` is emitted
+    // server-backed but pending before the rules decide it; a refusal rolls
+    // back to open, and a replace navigation taken meanwhile cannot be undone.
+    eventDoc.hasServerData = true;
+    eventDoc.fromCache = false;
+    eventDoc.hasPendingWrites = true;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
   });
 
   it('keeps the Board when the CURRENT snapshot is cached, even after the server once answered', () => {

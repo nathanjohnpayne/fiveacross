@@ -106,13 +106,21 @@ function EventApp() {
   // (Codex P2 on PR #1157, round 8): `hasServerData` is a lifetime latch, so a
   // device that once saw `archiving: true`, then went offline while another
   // Admin reopened play, would navigate back to `/card` on a cached closed
-  // value with the latch still true. `fromCache` is per snapshot; both must
-  // agree before the replace navigation fires.
-  const { data: event, hasServerData, fromCache } = useEventDoc(
+  // value with the latch still true. `fromCache` is per snapshot, and so is
+  // `hasPendingWrites` (Codex P2, round 9): an Admin's own optimistic
+  // `archiving: true` is emitted server-backed but PENDING before the rules
+  // decide it, and if they refuse it the rollback to open cannot bring the
+  // Player back from the standings. All three must agree — the fully
+  // server-committed snapshot `useDocSub` itself defines — before the replace
+  // navigation fires.
+  const { data: event, hasServerData, fromCache, hasPendingWrites } = useEventDoc(
     !!user && mayDealUnderAdmission(admission),
   );
   const eventClosed =
-    hasServerData && !fromCache && (isEventArchived(event) || isEventArchiving(event));
+    hasServerData &&
+    !fromCache &&
+    !hasPendingWrites &&
+    (isEventArchived(event) || isEventArchiving(event));
   const archivePath = TABS.find((tab) => tab.id === 'ranks')?.path ?? FALLBACK_PATH;
 
   // The one pre-auth label the Edition owns (#608): this renders before the
