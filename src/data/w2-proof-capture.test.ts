@@ -83,7 +83,7 @@ vi.mock('firebase/firestore', () => {
   };
 });
 
-import { attachProof, deleteProof } from './proofs';
+import { attachProof, deleteProof, ProofBacksMarkWhileClosingError } from './proofs';
 
 // A dealt board: every non-free Square unmarked, the free center (12) "on".
 function dealt(): Cell[] {
@@ -1080,13 +1080,42 @@ describe('deleteProof — the moderation delete survives the freeze (#134)', () 
     expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/tally/'))).toBeUndefined();
   });
 
-  it('completes on a CLOSING Event the same way — the quiesce denies the same writes', async () => {
+  it('REFUSES a Proof that backs a marked cell while the Event is only CLOSING', async () => {
+    // Phase 4b P2, PR #1157 run 4. Closing is REVERSIBLE, so the archived
+    // skip is not safe here: skipping the unmark, the stat rewrite and the
+    // Tally cleanup leaves a marked square backed by a Proof that no longer
+    // exists the moment an Admin reopens play, and nothing repairs it later
+    // because the delete already reported success. The transaction refuses
+    // instead, and the message names the way through.
     withBackingCell();
+    eventReads({ status: 'active', archiving: true });
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toBeInstanceOf(
+      ProofBacksMarkWhileClosingError,
+    );
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(/Reopen play/);
+
+    // NOTHING was written, and the media is untouched — the Proof, its Board
+    // cell and its blob are all exactly as they were.
+    expect(txDelete).not.toHaveBeenCalled();
+    expect(setPayload('/boards/')).toBeUndefined();
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('still deletes on a CLOSING Event when the Proof backs NOTHING', async () => {
+    // Nothing to keep consistent: the cell was already unmarked (or the Proof
+    // never held one), so there is no gameplay cleanup the refusal exists to
+    // protect and the takedown is the ordinary one.
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
+    boardState = { cells: dealt() };
+    playerState = { firstBingoAt: null };
     eventReads({ status: 'active', archiving: true });
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
     expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/proofs/P'))).toBeDefined();
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
     expect(setPayload('/boards/')).toBeUndefined();
     expect(setPayload('/players/')).toBeUndefined();
   });
@@ -1135,7 +1164,7 @@ describe('deleteProof — the moderation delete survives the freeze (#134)', () 
   });
 
   it('commits before revoking on the ADMIN takedown path too', async () => {
-    // The closed-Event skip lives INSIDE the transaction, so the ordering and
+    // The archived-Event skip lives INSIDE the transaction, so the ordering and
     // the freeze behaviour are independent — this pins both at once.
     withBackingCell();
     eventReads({ status: 'archived' });

@@ -448,6 +448,36 @@ export async function reportProof(id: string): Promise<void> {
   await updateDoc(rawProof(id), { reportCount: increment(1) });
 }
 
+/**
+ * The moderation delete REFUSED, because the Proof still backs a marked cell on
+ * an Event that is merely CLOSING (#134, Phase 4b P2 on PR #1157 run 4).
+ *
+ * The archived skip and the closing skip look the same and are not the same
+ * thing. ARCHIVED is permanent: Marks can never move again, so the cell the
+ * deleted Proof backed is exactly as frozen as everything around it and there
+ * is nothing to repair — the skip is correct and stays. CLOSING is REVERSIBLE
+ * by design, and skipping there leaves live gameplay inconsistent the moment an
+ * Admin reopens play: a marked cell backed by a Proof that no longer exists,
+ * counted in the owner's squares and lines, with a Tally marker still standing
+ * behind it. Nothing puts that right later, because the delete that would have
+ * done it has already been reported as clean.
+ *
+ * So the transaction refuses instead of skipping, and says what the Admin has
+ * to do first. Reopening play is one tap away in Game settings and makes the
+ * delete the ordinary one, cleanup included; the alternative — attempting the
+ * cleanup — is the denial that used to take the whole takedown down with it.
+ * A Proof that backs NOTHING (already unmarked, or never on a cell) still
+ * deletes in either state, because there is nothing to keep consistent.
+ */
+export class ProofBacksMarkWhileClosingError extends Error {
+  constructor(readonly proofId: string) {
+    super(
+      'This photo still backs a marked square. Reopen play first, then delete it—while play is closed the square cannot be unmarked.',
+    );
+    this.name = 'ProofBacksMarkWhileClosingError';
+  }
+}
+
 export async function deleteProof(
   id: string,
   storagePath?: string | null,
@@ -516,11 +546,20 @@ export async function deleteProof(
     // advertised takedown would fail outright on exactly the Event whose play
     // can never resume.
     //
-    // So the cleanup is SKIPPED on a closed Event rather than attempted: there
-    // is nothing for it to repair. Marks cannot move again in either half of
-    // the freeze, so the cell the deleted Proof backed is exactly as frozen as
-    // everything around it. What the delete still does is what a takedown is
-    // for: the document leaves the Feed and the media leaves Storage.
+    // So the cleanup is SKIPPED on an ARCHIVED Event rather than attempted:
+    // there is nothing for it to repair. Marks can never move again, so the
+    // cell the deleted Proof backed is exactly as frozen as everything around
+    // it. What the delete still does is what a takedown is for: the document
+    // leaves the Feed and the media leaves Storage.
+    //
+    // THE TWO HALVES OF THE FREEZE PART COMPANY HERE (Phase 4b P2 on PR #1157
+    // run 4). Closing is REVERSIBLE, so the same skip is not harmless there: an
+    // Admin reopens play and the Board still carries a marked cell backed by a
+    // Proof that no longer exists, counted in the owner's squares and lines,
+    // with its Tally marker standing. Nothing repairs that afterwards, because
+    // the delete that would have has already reported success. So a Proof that
+    // backs a marked cell is REFUSED while closing, with the way through named
+    // in the error — see `ProofBacksMarkWhileClosingError`.
     //
     // Read inside the transaction, not before it: a transaction serializes
     // against the documents it READS, and the quiesce writes this one — so a
@@ -528,12 +567,18 @@ export async function deleteProof(
     // the closed state, instead of a cleanup landing on a Board the freeze has
     // already shut.
     const eventData = (await tx.get(rawEvent(eventId))).data() as Partial<EventDoc> | undefined;
-    const closed = isEventArchived(eventData) || isEventArchiving(eventData);
+    const archived = isEventArchived(eventData);
+    const closing = !archived && isEventArchiving(eventData);
     const proofSnap = await tx.get(proofRef);
     const proof = proofSnap.data() as ProofDoc | undefined;
     mediaURL = proof?.mediaURL;
 
-    if (proof && !closed) {
+    // `!archived` rather than "not closed": an archived Event needs none of
+    // this and reads nothing, while a CLOSING one still has to learn whether
+    // the Proof backs a marked cell before it can decide between deleting and
+    // refusing. Reading the Board while closing costs one `get` on a document
+    // no one may write in that state.
+    if (proof && !archived) {
       // A deleted proof must not leave its square marked-but-uncredited (in
       // proof_required mode a marked cell is backed by this proof). Unmark the
       // backing cell and recompute the owner's derived stats in the same txn.
@@ -567,6 +612,11 @@ export async function deleteProof(
       // `ProofFeed`/`useProofFeed`.
       const backing = cells?.find((c) => c.index === proof.cellIndex);
       if (cells && backing && backing.proofId === id) {
+        // THE REFUSAL, and only for the reversible half of the freeze. Nothing
+        // has been written yet — the throw aborts the transaction before the
+        // Proof delete below, so the document, the Board and the media are all
+        // exactly as they were, and the caller is told to reopen play first.
+        if (closing) throw new ProofBacksMarkWhileClosingError(id);
         const playerSnap = await tx.get(playerRef);
         // A proof can turn an Echo into a local proof-backed Mark while the
         // original source remains confirmed on a sibling day. The tally marker

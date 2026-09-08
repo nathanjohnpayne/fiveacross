@@ -19,7 +19,7 @@ import {
   unbanUser,
   type ApprovalPlacement,
 } from '../../data/admin';
-import { deleteProof } from '../../data/proofs';
+import { deleteProof, ProofBacksMarkWhileClosingError } from '../../data/proofs';
 import { track } from '../../analytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
@@ -213,6 +213,17 @@ function ProofQueueRow({
       <AsyncButton
         className="iconbtn"
         title="Delete"
+        // The one refusal an Admin can do something about (#134, Phase 4b P2 on
+        // PR #1157 run 4): while play is CLOSED but not yet archived, a Proof
+        // that still backs a marked square cannot be deleted, because the Board
+        // unmark that would keep the square honest is denied — and closing is
+        // reversible, so skipping it would leave the inconsistency standing the
+        // moment play reopens. The error carries the remedy, and the pill this
+        // control already renders is where it goes; every other failure keeps
+        // the generic retry copy.
+        failureLabelFor={(error) =>
+          error instanceof ProofBacksMarkWhileClosingError ? error.message : undefined
+        }
         onAction={() =>
           deleteProof(p.id, p.storagePath, {
             daily: !!days?.length,
