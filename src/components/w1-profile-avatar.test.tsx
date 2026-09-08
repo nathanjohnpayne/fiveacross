@@ -297,6 +297,28 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
     expect(updateDocMock).toHaveBeenCalledTimes(1);
   });
 
+  it('attempts the mirror when the closed state came from the CACHE — the denial handler decides', async () => {
+    // Codex P2, PR #1157. Offline, getDoc resolves from the persistent cache, and
+    // a cached `archiving: true` can describe a quiesce another Admin has since
+    // lifted. Skipping on it would drop the mirror for good, so only a
+    // server-backed closed snapshot skips; a cached one attempts the write and
+    // leaves the freeze, if it still holds, to the permission-denied handler.
+    eventState.value = { status: 'active', archiving: true };
+    getDocMock.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => eventState.value,
+      metadata: { fromCache: true, hasPendingWrites: false },
+    } as unknown as Awaited<ReturnType<typeof getDocMock>>);
+    updateDocMock.mockResolvedValueOnce(undefined);
+
+    await expect(updateDisplayName('u1', 'New Name')).resolves.toBeUndefined();
+
+    expect(updateDocMock).toHaveBeenCalledWith(
+      { path: 'events/test-event/players/u1' },
+      { displayName: 'New Name' },
+    );
+  });
+
   it('still writes the mirror when the Event status is unreadable — the read never blocks a save', async () => {
     // An unreadable Event reads as open and the write is attempted, exactly as
     // it was before the read existed: the status decides whether to SKIP a

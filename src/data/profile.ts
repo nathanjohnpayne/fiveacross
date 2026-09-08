@@ -76,11 +76,24 @@ async function updateExistingPlayer(
   // exactly what this function did before the read existed: the status decides
   // whether to skip a write, never whether the save may proceed, so a failed
   // read must not become a new way for a profile edit to fail.
-  const event = await getDoc(rawEvent(eventId)).then(
-    (snap) => snap.data() as Partial<EventDoc> | undefined,
-    () => undefined,
+  //
+  // Only a SERVER-BACKED snapshot may skip (Codex P2 on PR #1157). Offline,
+  // `getDoc` resolves from the persistent cache, and a cached `archiving: true`
+  // can describe a quiesce another Admin has since lifted; skipping on it would
+  // commit the global profile and drop the mirror for good, because nothing
+  // queues a write that was never attempted. A cached closed state therefore
+  // reads as open here and the write is attempted: if the freeze still holds,
+  // the `permission-denied` catch below is the skip, one round trip later, and
+  // if it was lifted the mirror lands when the device reconnects.
+  const closed = await getDoc(rawEvent(eventId)).then(
+    (snap) => {
+      if (snap.metadata?.fromCache) return false;
+      const event = snap.data() as Partial<EventDoc> | undefined;
+      return isEventArchived(event) || isEventArchiving(event);
+    },
+    () => false,
   );
-  if (isEventArchived(event) || isEventArchiving(event)) return;
+  if (closed) return;
   try {
     await updateDoc(rawPlayer(uid, eventId), patch);
   } catch (err) {
