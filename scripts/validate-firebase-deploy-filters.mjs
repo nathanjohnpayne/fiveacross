@@ -4106,11 +4106,42 @@ export async function classifyFirebaseDeployRequest(
   const configPath = resolve(options.config ?? defaultConfigPath);
   const only = normalizedFilter(options.only);
   const exceptTargets = normalizedFilter(options.except);
-  const configSource = JSON.parse(await readFile(configPath, "utf8"));
+  const configText = await readFile(configPath, "utf8");
+  const configSource = JSON.parse(configText);
+  // The pinned CLI's own `Config`, built once and used for everything that
+  // reads a target's configuration. Its constructor runs `MATERIALIZE_TARGETS`,
+  // which replaces any target written as an import path with the parsed file;
+  // `cwd` and `configPath` are what `resolveProjectPath` resolves those imports
+  // against, so they name the CONFIGURED project directory rather than whatever
+  // directory this process happens to have been started in.
+  //
+  // Built HERE, ahead of every question asked about a target, because a target
+  // written as an import path — `"hosting": "hosting.config.json"`, which the
+  // CLI supports — is a STRING everywhere else. `extract()` then tries to set
+  // `site` on it and throws `Cannot create property 'site' on string`, so every
+  // deploy selecting that configuration aborted during classification; the pin
+  // widening asked the same question one line earlier, swallowed the same throw,
+  // and quietly widened nothing for a Hosting config that may pin a function
+  // (Codex P2, round 27 on #1107).
+  //
+  // From a SECOND parse of the same bytes, so the constructor's own writes —
+  // it fills in the default `functions.source` the way the CLI does — land on
+  // the materialised copy rather than back in the object the inventory below
+  // reads. What the rehearsal sees is unchanged by asking this question first.
+  const deployConfig = new Config(JSON.parse(configText), {
+    projectDir: dirname(configPath),
+    cwd: dirname(configPath),
+    configPath: basename(configPath),
+  });
   // What Firebase will deploy once Hosting has added its pinned functions —
   // resolved BEFORE anything is planned, so the rehearsal, the discovery and
   // the classification below all act on one request.
-  const pinned = pinnedRewriteWidening({ only, exceptTargets, configSource, project });
+  const pinned = pinnedRewriteWidening({
+    only,
+    exceptTargets,
+    configSource: deployConfig.data,
+    project,
+  });
   const effectiveOnly = pinned.only;
   const exportedEventInvitationServices =
     await eventInvitationServiceInventory(configSource, configPath);
@@ -4133,17 +4164,6 @@ export async function classifyFirebaseDeployRequest(
   // option-looking required value such as `--only --dry-run`: Commander owns
   // `--dry-run` as the --only value, then filterTargets rejects that value as
   // an unknown deploy target before any build can start.
-  // The pinned CLI's own `Config`, built once and used for everything that
-  // reads a target's configuration. Its constructor runs `MATERIALIZE_TARGETS`,
-  // which replaces any target written as an import path with the parsed file;
-  // `cwd` and `configPath` are what `resolveProjectPath` resolves those imports
-  // against, so they name the CONFIGURED project directory rather than whatever
-  // directory this process happens to have been started in.
-  const deployConfig = new Config(configSource, {
-    projectDir: dirname(configPath),
-    cwd: dirname(configPath),
-    configPath: basename(configPath),
-  });
   const deployTargets = filterTargets(
     { only, except: exceptTargets, config: deployConfig },
     [...VALID_DEPLOY_TARGETS],
@@ -4176,8 +4196,11 @@ export async function classifyFirebaseDeployRequest(
   // Hosting hook's `$RESOURCE_DIR` is the directory `--public` overrode to.
   singleEndpointExports.staging.configSource = deployConfig.data;
   await checkValidTargetFilters({ only, except: exceptTargets });
+  // The materialised config again, for the same reason the pin widening reads
+  // it: an externalised `"hosting": "hosting.config.json"` reaches `extract()`
+  // as a STRING otherwise, and `extract()` writes `site` onto what it is given.
   const hostingOptions = {
-    config: { src: configSource },
+    config: { src: deployConfig.data },
     site: project || undefined,
   };
   let hostingConfigs = extract(hostingOptions);

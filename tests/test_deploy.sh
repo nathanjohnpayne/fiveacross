@@ -3363,6 +3363,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 35 (#547 — Codex P2, round 27): a Hosting target written as an IMPORT
+# PATH classifies like any other.
+#
+# `"hosting": "hosting.config.json"` is a spelling the pinned CLI supports — its
+# `Config` constructor materialises the named file — but this classifier asked
+# the final Hosting question of the raw `firebase.json`, where the target is
+# still a STRING. `extract()` writes `site` onto what it is handed, so the
+# classification died with `Cannot create property 'site' on string` and
+# deploy.sh aborted before BUILD_CMD for a configuration Firebase deploys
+# happily. Case 31b is the control: the same request with that same Hosting
+# config written INLINE, which already published and stayed exempt.
+# ---------------------------------------------------------------------------
+REPO35="$WORKDIR/case35-imported-hosting"
+init_admin_options_repo "$REPO35" "$FRAMEWORK_SINGLE_BRANCH" \
+  '{"hosting":"hosting.config.json","functions":{"source":"functions","predeploy":[]}}'
+(
+  cd "$REPO35"
+  printf '%s\n' '{"site":"gaycruisebingo","public":"dist"}' > hosting.config.json
+  git add -A
+  git commit --quiet -m "externalise the hosting config"
+)
+: >"$WORKDIR/ofd-calls-35.log"
+: >"$WORKDIR/gcloud-calls-35.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-35.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-35.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+  bash -c "cd '$REPO35' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+  >"$WORKDIR/case35.out" 2>"$WORKDIR/case35.err"
+RC35=$?
+set -e
+if [[ $RC35 -ne 0 ]]; then
+  fail "imported-hosting: deploy.sh returned $RC35 for a Hosting target written as an import path. stderr was:"
+  cat "$WORKDIR/case35.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-35.log" ]]; then
+  fail "imported-hosting: the deploy never published, so the imported Hosting config still aborts classification."
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-35.log"; then
+  fail "imported-hosting: the materialised config lost the exemption the same config inline keeps. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-35.log" >&2
+else
+  pass "imported-hosting: a Hosting target written as an import path is read from the materialised config (rc=$RC35)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

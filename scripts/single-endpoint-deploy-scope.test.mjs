@@ -4220,6 +4220,58 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
+  it("classifies a Hosting target written as an import path", async () => {
+    // Codex P2, round 27 on #1107. `"hosting": "hosting.config.json"` is a
+    // supported spelling — the pinned `Config` materialises it from the named
+    // file — but everything that read `firebase.json` directly still saw the
+    // STRING. `extract()` writes `site` onto what it is handed, so the final
+    // Hosting selection threw `Cannot create property 'site' on string` and
+    // EVERY deploy selecting that configuration aborted during classification,
+    // whatever else the request was. The materialised config is what is read
+    // now, so the request classifies like any other.
+    await withFunctionsProject(
+      {
+        config: { hosting: "hosting.config.json" },
+        files: {
+          "hosting.config.json": JSON.stringify({ public: "public" }),
+          "public/index.html": "",
+        },
+      },
+      async (configPath) => {
+        expect(
+          await classify(["--only", "functions:daily,hosting"], configPath),
+        ).toMatchObject({ hostingAttempted: true, ...EXEMPT });
+      },
+    );
+  });
+
+  it("widens the selector for a pinned rewrite inside an imported Hosting config", async () => {
+    // The pin widening asked the same question one line earlier and swallowed
+    // the same throw, so an imported config's `pinTag` rewrite widened nothing:
+    // the CLI would have appended `functions:submitBugReport` to the selector
+    // and this classifier would have proved the un-widened one exact, releasing
+    // a protected callable with its invoker reconciliation switched off.
+    await withFunctionsProject(
+      {
+        config: { hosting: "hosting.config.json" },
+        files: {
+          "hosting.config.json": JSON.stringify(pinned().hosting),
+          "public/index.html": "",
+        },
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily,hosting"], configPath);
+        expect(result).toMatchObject({
+          hostingAttempted: true,
+          functionsAttempted: true,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          authHandoffInvokerSelected: false,
+        });
+      },
+    );
+  });
+
   it("does not widen when Hosting is not part of the deploy", async () => {
     await withFunctionsProject(
       { config: pinned(), files: { "public/index.html": "" } },
