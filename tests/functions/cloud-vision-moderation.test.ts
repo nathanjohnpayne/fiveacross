@@ -1,6 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import {
   AUTO_HIDE_VISION_FLAGS,
+  PENDING_SCAN_RECONCILE_WINDOW_MS,
+  PENDING_SCAN_REDELIVERY_WINDOW_MS,
   PROOF_SCANS_COLLECTION,
   SAFETY_HIDE_MARKER,
   applyPendingVisionScan,
@@ -8,6 +12,7 @@ import {
   isAutoHideVisionFlag,
   proofScanPath,
   qualifiesForVisionHide,
+  redeliverPendingVisionScan,
   visionHideAction,
   hideVisionFlaggedIfQualifies,
   applyVisionFlagHide,
@@ -507,27 +512,69 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
   });
 });
 
-describe('awaitsPendingVisionScan — the create is the only write that looks (#1143)', () => {
-  it('is true for the Proof create attachProof writes, and nothing else', () => {
-    expect(awaitsPendingVisionScan(undefined, { status: 'active', visionFlag: null })).toBe(true);
-    expect(awaitsPendingVisionScan(undefined, { status: 'pending', visionFlag: null })).toBe(true);
-    expect(awaitsPendingVisionScan(undefined, { status: 'active' })).toBe(true);
+describe('awaitsPendingVisionScan — the create, plus the bounded reconciliation (#1143)', () => {
+  const NOW = 1_000_000_000;
+  const young = (extra: Partial<VisionFlaggedDoc> = {}): VisionFlaggedDoc => ({
+    status: 'active', visionFlag: null, createdAt: NOW - 60_000, ...extra,
   });
 
-  it('is false for every write that is not a create, so no read is added to them', () => {
-    // A report bump, an admin hide, an admin Restore, a claim confirm, and this
-    // trigger's own writes re-firing — the pre-#1143 cost, unchanged.
-    expect(awaitsPendingVisionScan({ status: 'active', reportCount: 0 } as VisionFlaggedDoc, { status: 'active' })).toBe(false);
-    expect(awaitsPendingVisionScan(PRIOR, { status: 'hidden' })).toBe(false);
-    expect(awaitsPendingVisionScan(PRIOR, { status: 'active', safetyHide: false })).toBe(false);
-    expect(awaitsPendingVisionScan(PRIOR, undefined)).toBe(false); // a delete
-    expect(awaitsPendingVisionScan(undefined, undefined)).toBe(false); // no event data at all
+  it('is true for the Proof create attachProof writes, whatever its age says', () => {
+    expect(awaitsPendingVisionScan(undefined, { status: 'active', visionFlag: null }, NOW)).toBe(true);
+    expect(awaitsPendingVisionScan(undefined, { status: 'pending', visionFlag: null }, NOW)).toBe(true);
+    expect(awaitsPendingVisionScan(undefined, { status: 'active' }, NOW)).toBe(true);
+    // The create never consults `createdAt` at all, so a forged stamp cannot
+    // suppress the PRIMARY hand-off — only the backstop below is age-bounded.
+    expect(awaitsPendingVisionScan(undefined, { status: 'active', createdAt: 0 }, NOW)).toBe(true);
   });
 
   it('is false for a create that already carries a verdict — it cannot be waiting for one', () => {
     // Unreachable through the rules (`visionFlag == null` at create), but the
     // gate states it rather than assuming it.
-    expect(awaitsPendingVisionScan(undefined, { status: 'flagged', visionFlag: 'violence' })).toBe(false);
+    expect(awaitsPendingVisionScan(undefined, { status: 'flagged', visionFlag: 'violence' }, NOW)).toBe(false);
+  });
+
+  it('reconciles a LATER verdict-less write while the Proof is still young — the failed hand-off\'s second chance', () => {
+    // Phase 4b runs 2 and 3: before this, a create whose hand-off failed had no
+    // later write that would ever look at `proofScans` again.
+    expect(awaitsPendingVisionScan(PRIOR, young(), NOW)).toBe(true); // a report bump
+    expect(awaitsPendingVisionScan(PRIOR, young({ status: 'hidden' }), NOW)).toBe(true); // an admin hide
+    expect(awaitsPendingVisionScan(PRIOR, young({ safetyHide: false }), NOW)).toBe(true); // a Restore
+    // The boundary is inclusive, and one millisecond past it the window is shut.
+    expect(awaitsPendingVisionScan(PRIOR, young({ createdAt: NOW - PENDING_SCAN_RECONCILE_WINDOW_MS }), NOW)).toBe(true);
+    expect(awaitsPendingVisionScan(PRIOR, young({ createdAt: NOW - PENDING_SCAN_RECONCILE_WINDOW_MS - 1 }), NOW)).toBe(false);
+  });
+
+  it('adds NO read to a write on an older Proof, to a delete, or to one already carrying a verdict', () => {
+    const old = NOW - PENDING_SCAN_RECONCILE_WINDOW_MS - 1;
+    expect(awaitsPendingVisionScan(PRIOR, young({ createdAt: old }), NOW)).toBe(false);
+    // Anything already carrying a verdict — the scanner's own flag write, and the
+    // hide it fires — short-circuits however young the Proof is.
+    expect(awaitsPendingVisionScan(PRIOR, young({ status: 'flagged', visionFlag: 'violence' }), NOW)).toBe(false);
+    expect(
+      awaitsPendingVisionScan(
+        { status: 'flagged', visionFlag: 'violence' },
+        young({ status: 'hidden', visionFlag: 'violence', safetyHide: true }),
+        NOW,
+      ),
+    ).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, undefined, NOW)).toBe(false); // a delete
+    expect(awaitsPendingVisionScan(undefined, undefined, NOW)).toBe(false); // no event data at all
+  });
+
+  it('fails CLOSED on a missing or malformed createdAt, so no doc buys a read forever', () => {
+    // The window guards a COST, not a decision, so a stamp that is absent or not
+    // a finite number simply does not open it. Every one of these is a write to
+    // a Proof this trigger has no reason to look up.
+    expect(awaitsPendingVisionScan({ status: 'active', reportCount: 0 } as VisionFlaggedDoc, { status: 'active' }, NOW)).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, { status: 'hidden' }, NOW)).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, { status: 'active', safetyHide: false }, NOW)).toBe(false);
+    for (const createdAt of [null, undefined, 'yesterday', NaN, Infinity, {}]) {
+      expect(awaitsPendingVisionScan(PRIOR, { status: 'active', createdAt }, NOW)).toBe(false);
+    }
+  });
+
+  it('treats a slightly FUTURE stamp as young — the rules admit a minute of clock skew', () => {
+    expect(awaitsPendingVisionScan(PRIOR, young({ createdAt: NOW + 60_000 }), NOW)).toBe(true);
   });
 });
 
@@ -560,29 +607,110 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
     expect(hide).not.toHaveBeenCalled();
   });
 
-  it('adds NO lookup to any write that is not a create — the cost model is unchanged', async () => {
+  it('adds NO lookup outside the create and the reconciliation window — the cost model holds', async () => {
     const applyPendingScan = vi.fn(async () => true);
     const hide = vi.fn(async () => true);
+    const NOW = 1_000_000_000;
+    const OLD = NOW - PENDING_SCAN_RECONCILE_WINDOW_MS - 1;
     for (const [before, after] of [
-      [PRIOR, { status: 'active', visionFlag: null }], // a report bump
-      [PRIOR, { status: 'flagged', visionFlag: 'violence' }], // the scanner's own write
-      [{ status: 'flagged', visionFlag: 'violence' }, { status: 'hidden', safetyHide: true, visionFlag: 'violence' }], // ours, re-firing
+      [PRIOR, { status: 'active', visionFlag: null, createdAt: OLD }], // a report bump, later
+      [PRIOR, { status: 'flagged', visionFlag: 'violence', createdAt: NOW }], // the scanner's own write
+      [{ status: 'flagged', visionFlag: 'violence' }, { status: 'hidden', safetyHide: true, visionFlag: 'violence', createdAt: NOW }], // ours, re-firing
       [PRIOR, undefined], // a delete
     ] satisfies Array<[VisionFlaggedDoc | undefined, VisionFlaggedDoc | undefined]>) {
-      await applyVisionFlagHide('e', 'p1', before, after, { applyPendingScan, hideIfQualifies: hide });
+      await applyVisionFlagHide('e', 'p1', before, after, { applyPendingScan, hideIfQualifies: hide, now: NOW });
     }
     expect(applyPendingScan).not.toHaveBeenCalled();
   });
 
-  it('swallows a failing hand-off, so a scan race never crashes the proof pipeline', async () => {
+  it('consults the hand-off once more on a later write inside the window, and hides what it finds', async () => {
+    const applyPendingScan = vi.fn(async () => true);
+    const hide = vi.fn(async () => true);
+    const NOW = 1_000_000_000;
+    expect(
+      await applyVisionFlagHide('e', 'p1', PRIOR, { status: 'active', visionFlag: null, createdAt: NOW - 1_000 }, {
+        applyPendingScan,
+        hideIfQualifies: hide,
+        now: NOW,
+      }),
+    ).toBe(true);
+    expect(applyPendingScan).toHaveBeenCalledWith('e', 'p1');
+    // Same shape as the create: the flag write re-fires the trigger and the hide
+    // happens there, so `visionHideAction` stays the only place a status moves.
+    expect(hide).not.toHaveBeenCalled();
+  });
+
+  it('PROPAGATES a failing hand-off, so `retry: true` redelivers instead of losing the verdict', async () => {
+    // Phase 4b runs 2 and 3. Swallowing this acknowledged the event as a success
+    // while the verdict was still parked: the Proof stayed active with
+    // `visionFlag` null and nothing ever looked at `proofScans` again.
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const boom = vi.fn(async () => {
       throw new Error('transaction failed');
     });
     await expect(
-      applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, { applyPendingScan: boom }),
+      applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, {
+        applyPendingScan: boom,
+        eventTime: 1_000,
+        now: 1_000 + PENDING_SCAN_REDELIVERY_WINDOW_MS,
+      }),
+    ).rejects.toThrow('transaction failed');
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('stops asking for redelivery once the budget is spent — no poison-event retry loop', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('transaction failed');
+    });
+    const hide = vi.fn(async () => false);
+    await expect(
+      applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, {
+        applyPendingScan: boom,
+        hideIfQualifies: hide,
+        eventTime: 1_000,
+        now: 1_000 + PENDING_SCAN_REDELIVERY_WINDOW_MS + 1,
+      }),
     ).resolves.toBe(false);
     expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('still swallows a failing HIDE — only the hand-off is worth a redelivery', async () => {
+    // The hide arm recovers on its own: its STATE predicate re-attempts on any
+    // later write that leaves the doc `'flagged'`. The hand-off, gated on one
+    // write, could not — which is the whole asymmetry.
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('hide failed');
+    });
+    await expect(
+      applyVisionFlagHide('e', 'p1', PRIOR, { status: 'flagged', visionFlag: 'violence' }, {
+        hideIfQualifies: boom,
+        eventTime: 1_000,
+        now: 1_000,
+      }),
+    ).resolves.toBe(false);
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('redelivers when the event carries no usable timestamp — a lost verdict beats a spare retry', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('transaction failed');
+    });
+    for (const eventTime of [undefined, Number.NaN]) {
+      // `Date.parse` of a malformed CloudEvent `time` is NaN; the budget fails OPEN.
+      expect(redeliverPendingVisionScan(eventTime, 1_000)).toBe(true);
+      await expect(
+        applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, {
+          applyPendingScan: boom,
+          eventTime,
+        }),
+      ).rejects.toThrow('transaction failed');
+    }
     err.mockRestore();
   });
 
@@ -613,6 +741,109 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
     expect(
       await applyVisionFlagHide('e', 'p1', { status: 'flagged' }, store[PROOF] as VisionFlaggedDoc, deps),
     ).toBe(false);
+  });
+});
+
+// The hand-off's retry story (specs/cloud-vision-moderation.md § "When the
+// hand-off does not land"). Phase 4b runs 2 and 3: a failed create-time hand-off
+// used to be acknowledged as a success, so the platform never redelivered it and
+// no later write ever consulted `proofScans` again.
+
+describe('the hand-off survives a failure — redelivery, then reconciliation (#1143)', () => {
+  it('orders the two windows so the reconciliation OUTLIVES the redelivery budget', () => {
+    // The whole claim in one assertion: the retries give up first, inside the
+    // window that still reconciles what they left behind.
+    expect(PENDING_SCAN_RECONCILE_WINDOW_MS).toBeGreaterThan(PENDING_SCAN_REDELIVERY_WINDOW_MS);
+  });
+
+  it('asks for a redelivery while the delivery is young, and stops once it is not', () => {
+    const t = 1_000_000;
+    expect(redeliverPendingVisionScan(t, t)).toBe(true);
+    expect(redeliverPendingVisionScan(t, t + PENDING_SCAN_REDELIVERY_WINDOW_MS)).toBe(true);
+    expect(redeliverPendingVisionScan(t, t + PENDING_SCAN_REDELIVERY_WINDOW_MS + 1)).toBe(false);
+    // A malformed CloudEvent `time` parses to NaN; the budget fails OPEN there.
+    expect(redeliverPendingVisionScan(Number.NaN, t)).toBe(true);
+    expect(redeliverPendingVisionScan(undefined, t)).toBe(true);
+  });
+
+  it('recovers a verdict whose redeliveries ran out, on the Proof\'s very next write', async () => {
+    const PROOF = 'events/e/proofs/p1';
+    const NOW = 1_000_000_000;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { db, store } = fakeDb({});
+
+    // 1. The scan lands before attachProof commits, so the verdict is parked…
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', NOW)).toBe('scan');
+    // …and the Player's create then succeeds, as a create.
+    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0, createdAt: NOW };
+
+    // 2. The create fires the trigger and the hand-off transaction fails. It is
+    //    RETHROWN, which is what `retry: true` turns into a redelivery…
+    const boom = async () => {
+      throw new Error('firestore unavailable');
+    };
+    const hideIfQualifies = (e: string, id: string) => hideVisionFlaggedIfQualifies(db, e, id);
+    const created = store[PROOF] as VisionFlaggedDoc;
+    await expect(
+      applyVisionFlagHide('e', 'p1', undefined, created, {
+        applyPendingScan: boom, hideIfQualifies, eventTime: NOW, now: NOW,
+      }),
+    ).rejects.toThrow('firestore unavailable');
+    // …until the budget is spent, when it stops rather than retrying forever.
+    await expect(
+      applyVisionFlagHide('e', 'p1', undefined, created, {
+        applyPendingScan: boom,
+        hideIfQualifies,
+        eventTime: NOW,
+        now: NOW + PENDING_SCAN_REDELIVERY_WINDOW_MS + 1,
+      }),
+    ).resolves.toBe(false);
+
+    // 3. This is the exhausted state the finding named: media public, the
+    //    server's own verdict parked where no client can even read it.
+    expect(store[PROOF]).toMatchObject({ status: 'active', visionFlag: null });
+    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW });
+
+    // 4. The next ordinary write — a report bump — reconciles it, because the
+    //    Proof is still inside the window.
+    const deps = {
+      applyPendingScan: (e: string, id: string) => applyPendingVisionScan(db, e, id),
+      hideIfQualifies,
+      now: NOW + 60_000,
+    };
+    store[PROOF] = { ...(store[PROOF] as Record<string, unknown>), reportCount: 1 };
+    expect(
+      await applyVisionFlagHide('e', 'p1', created, store[PROOF] as VisionFlaggedDoc, deps),
+    ).toBe(true);
+    expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'violence' });
+    expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
+
+    // 5. …and the flag write re-fires the trigger, where the hide arm takes over.
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'active' }, store[PROOF] as VisionFlaggedDoc, deps),
+    ).toBe(true);
+    expect(store[PROOF]).toMatchObject({ status: 'hidden', safetyHide: true, visionFlag: 'violence' });
+    err.mockRestore();
+  });
+
+  it('does not reconcile a Proof past the window — the cost model, and the residual', async () => {
+    // The honest boundary: a Proof whose hand-off failed AND which takes no write
+    // for a whole day keeps its verdict parked. Bounded by a named constant now,
+    // where before it was terminal at the create.
+    const PROOF = 'events/e/proofs/p1';
+    const NOW = 1_000_000_000;
+    const { db, store } = fakeDb({});
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', NOW);
+    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 1, createdAt: NOW };
+    const applyPendingScan = vi.fn(async () => true);
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'active' }, store[PROOF] as VisionFlaggedDoc, {
+        applyPendingScan,
+        now: NOW + PENDING_SCAN_RECONCILE_WINDOW_MS + 1,
+      }),
+    ).toBe(false);
+    expect(applyPendingScan).not.toHaveBeenCalled();
+    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW });
   });
 });
 
@@ -796,3 +1027,50 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
   });
 });
 
+// firebase-admin lives only in functions/node_modules, so resolve it the way
+// functions/src does — rooted at functions/package.json, through Node's own
+// package-exports-aware resolver (mirrors tests/functions/w4-gate-vision-moderation.test.ts).
+const functionsRequire = createRequire(fileURLToPath(new URL('../../functions/package.json', import.meta.url)));
+const { getApps, deleteApp } = functionsRequire('firebase-admin/app') as typeof import('firebase-admin/app');
+
+describe('the hideProofOnVisionFlag endpoint manifest (#1143)', () => {
+  const prior = { config: process.env.FIREBASE_CONFIG, project: process.env.GCLOUD_PROJECT };
+
+  beforeAll(() => {
+    // index.ts resolves the Admin identity and the default bucket from these at
+    // TRIGGER DISCOVERY, exactly as the firebase CLI sets them during a deploy.
+    process.env.FIREBASE_CONFIG = JSON.stringify({
+      storageBucket: 'gaycruisebingo-test.appspot.com',
+      projectId: 'gaycruisebingo-test',
+    });
+    process.env.GCLOUD_PROJECT = 'gaycruisebingo-test';
+  });
+
+  afterAll(async () => {
+    for (const app of getApps()) await deleteApp(app);
+    process.env.FIREBASE_CONFIG = prior.config;
+    process.env.GCLOUD_PROJECT = prior.project;
+  });
+
+  it('declares retry, so a rethrown hand-off is actually redelivered', async () => {
+    // The throw in `applyVisionFlagHide` and this flag are ONE mechanism:
+    // event-driven Functions do not retry by default, so without it the throw
+    // buys nothing and the parked verdict is lost exactly as it was when the
+    // failure was swallowed (Phase 4b runs 2 and 3). Asserting the manifest is
+    // the only way to keep the two from drifting apart.
+    for (const app of getApps()) await deleteApp(app);
+    vi.resetModules();
+    const mod = await import('../../functions/src/index');
+    const endpoint = mod.hideProofOnVisionFlag.__endpoint;
+    expect(endpoint.eventTrigger.retry).toBe(true);
+    // …and it still pins the Admin identity: the transactional re-read and every
+    // write it makes are Firestore data-plane calls the default Gen2 compute
+    // identity cannot make in this project.
+    expect(endpoint.serviceAccountEmail).toBe(
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+    );
+    expect(endpoint.eventTrigger.eventFilterPathPatterns.document).toBe(
+      'events/{eventId}/proofs/{proofId}',
+    );
+  });
+});

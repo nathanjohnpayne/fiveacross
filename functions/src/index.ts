@@ -624,7 +624,18 @@ export const hideProofAtThreshold = onDocumentWritten(
  * CREATE is where a verdict the scanner had to park — because the upload beat the
  * document — is applied, and only `before` tells a create from every other write
  * that leaves the same state. Every non-create write is judged on `after` alone,
- * exactly as before.
+ * plus the bounded hand-off reconciliation `awaitsPendingVisionScan` describes.
+ *
+ * `retry: true`, and it is load-bearing rather than defensive (Phase 4b runs 2
+ * and 3 on #1143). Event-driven Functions do not retry by default, so a failing
+ * create-time hand-off used to be acknowledged as a success: the verdict stayed
+ * parked in `proofScans`, the Proof stayed active with `visionFlag` null, and
+ * nothing looked again. `applyVisionFlagHide` therefore RETHROWS a hand-off
+ * failure — the one failure it does not swallow — and this flag is what turns
+ * that throw into a redelivery. `event.time` is passed so the module can stop
+ * asking for one on a non-transient failure rather than retrying to the
+ * platform's retention limit; the hide arms remain best-effort and never throw,
+ * so no other failure here is ever redelivered.
  *
  * A SECOND trigger on the same document path rather than a branch inside
  * `hideProofAtThreshold`: the two hides share no input (one reads the Event's
@@ -641,13 +652,18 @@ export const hideProofAtThreshold = onDocumentWritten(
  * identity cannot make in this project. Firestore triggers stay on us-central1.
  */
 export const hideProofOnVisionFlag = onDocumentWritten(
-  { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  {
+    document: 'events/{eventId}/proofs/{proofId}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
   (event) =>
     applyVisionFlagHide(
       event.params.eventId,
       event.params.proofId,
       event.data?.before.data() as VisionFlaggedDoc | undefined,
       event.data?.after.data() as VisionFlaggedDoc | undefined,
+      { eventTime: Date.parse(event.time) },
     ),
 );
 

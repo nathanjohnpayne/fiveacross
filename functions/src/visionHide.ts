@@ -86,6 +86,17 @@ export interface VisionFlaggedDoc {
   visionFlag?: string | null;
   /** The marker below. Read as well as written, so a stamp is never re-applied. */
   safetyHide?: boolean | null;
+  /**
+   * The Proof's own creation stamp, read for ONE purpose: to bound the hand-off
+   * reconciliation in `awaitsPendingVisionScan` to a Proof young enough that a
+   * verdict could still be parked for it. It is CLIENT-set (`attachProof`
+   * writes it and `firestore.rules` only bounds it to a plausible range), which
+   * is exactly why it gates a COST and never a safety decision: the worst a
+   * forged stamp can do is buy its own Proof one extra read per write, or give
+   * up a backstop the forger would also have had to break the create-time
+   * hand-off to need.
+   */
+  createdAt?: unknown;
 }
 
 /** The Proof document this module hides. */
@@ -444,23 +455,114 @@ export async function recordVisionVerdict(
 }
 
 /**
- * The trigger-side gate on the hand-off lookup: is THIS write the Proof's own
- * creation, arriving without a verdict?
+ * How long after the triggering write a FAILED hand-off is still worth asking
+ * Cloud Functions to redeliver the event, and half of the answer to "what
+ * happens when the create-time hand-off does not land" (Phase 4b rounds 2 and 3
+ * on #1143).
  *
- * A parked record exists only because the scanner found no Proof, and the Proof's
- * create is therefore the write that must consume it (see `writeVisionVerdict`
- * for why no record can be parked AFTER the create). Gating on the create keeps
- * every other Proof write — every report bump, every admin action, every write
- * this trigger makes itself — on the pre-#1143 cost of one predicate and no read.
- * A create that already carries a verdict cannot be waiting on one: the rules
- * pin `visionFlag == null` at create, and `attachProof` writes exactly that.
+ * `hideProofOnVisionFlag` is exported `retry: true`, and `applyVisionFlagHide`
+ * lets a hand-off failure PROPAGATE — the one failure in this module that is not
+ * swallowed — so a transient Firestore error on the Proof's create is retried by
+ * the platform instead of leaving the verdict parked and the media public. The
+ * budget exists because `retry: true` without one is the classic poison-event
+ * footgun: a hand-off that fails for a NON-transient reason would be redelivered
+ * with exponential backoff for the platform's whole retention window, and every
+ * attempt would re-run the same doomed transaction. The failures this path can
+ * plausibly survive are transient — contention on two small documents in the
+ * same region as the write that triggered it — and ten minutes of backoff is
+ * many attempts at them. Past it the throw stops (the error is logged and
+ * swallowed) and the reconciliation below is what remains.
+ *
+ * Measured against the EVENT's own timestamp, not the Proof's: it is the
+ * platform's unforgeable record of when this delivery's write happened, and
+ * "how long have we been retrying" is a fact about the delivery. A CloudEvent's
+ * `time` is its OCCURRENCE time and is carried through redeliveries, so the
+ * budget is measured from the original write. If a platform ever re-stamped it
+ * per delivery the budget would simply never expire, degrading to the plain
+ * `retry: true` behaviour — the safe direction, and one the reconciliation below
+ * covers either way.
+ */
+export const PENDING_SCAN_REDELIVERY_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * How long after a Proof was CREATED any verdict-less write to it still consults
+ * the hand-off, and the other half of that answer: the backstop for a verdict
+ * that is still parked once the create-time attempt and its redeliveries are
+ * done.
+ *
+ * Strictly longer than `PENDING_SCAN_REDELIVERY_WINDOW_MS` on purpose, and that
+ * ordering is the whole claim: the redelivery budget runs out first, so the
+ * exhausted case is still inside the window that reconciles it. Without it the
+ * gate below accepted only creates, and a create whose hand-off failed had no
+ * second chance at all — the verdict stayed parked and the media stayed public
+ * (Phase 4b runs 2 and 3).
+ *
+ * Bounded by the Proof's age rather than left open because the cost model is
+ * load-bearing here. A parked record can only exist because the scan beat
+ * `attachProof`'s transaction by milliseconds, so the record's whole lifetime is
+ * anchored to the Proof's create; a day is generous cover for a redelivery
+ * budget measured in minutes, and past it every write is back to one predicate
+ * and no read. Inside it the extra reads land on writes that are rare by
+ * construction — a report bump, an admin action — because a Proof document is
+ * written once at create and thereafter only by moderation. Nothing
+ * high-frequency touches it.
+ */
+export const PENDING_SCAN_RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Is a failed hand-off still worth a redelivery? True while the triggering event
+ * is younger than `PENDING_SCAN_REDELIVERY_WINDOW_MS`.
+ *
+ * Fails OPEN on a missing or unparseable event time (`Date.parse` of a malformed
+ * `CloudEvent.time` is `NaN`): a redelivery is bounded by the platform anyway,
+ * and losing a safety verdict is the worse outcome than one extra retry. The
+ * reconciliation window fails the other way — see `awaitsPendingVisionScan`.
+ */
+export function redeliverPendingVisionScan(eventTime: number | undefined, now: number): boolean {
+  if (typeof eventTime !== 'number' || !Number.isFinite(eventTime)) return true;
+  return now - eventTime <= PENDING_SCAN_REDELIVERY_WINDOW_MS;
+}
+
+/**
+ * The trigger-side gate on the hand-off lookup: could a parked verdict still be
+ * waiting for THIS write?
+ *
+ * Two ways in, and neither costs a read on a write that is not one of them:
+ *
+ *   - **The create.** A parked record exists only because the scanner found no
+ *     Proof, so the Proof's create is the write that must consume it (see
+ *     `writeVisionVerdict` for why no record can be parked AFTER the create).
+ *     This is the primary path, and it always looks.
+ *   - **The reconciliation** (Phase 4b runs 2 and 3). A create-time hand-off can
+ *     FAIL, and until this landed the failure was terminal: the gate accepted
+ *     only creates, so no later write ever consulted `proofScans` again and the
+ *     verdict stayed parked with the media public. The redelivery budget above
+ *     is the first answer and this is the second — any later verdict-less write
+ *     to a Proof still inside `PENDING_SCAN_RECONCILE_WINDOW_MS` of its own
+ *     `createdAt` looks once more.
+ *
+ * Either way a doc that ALREADY carries a verdict cannot be waiting on one, so
+ * the scanner's own flag write, the hide it fires, and every write after them
+ * short-circuit here. (At create that is belt-and-braces the rules already
+ * enforce — `visionFlag == null` at create, and `attachProof` writes exactly
+ * that — but the gate states it rather than assuming it.)
+ *
+ * The reconciliation fails CLOSED on an absent or non-numeric `createdAt`: that
+ * clock guards a COST, and a malformed stamp must not be able to put a read on
+ * every write to a document forever. The create-time path does not consult it,
+ * so nothing a client writes can suppress the primary hand-off.
  */
 export function awaitsPendingVisionScan(
   before: VisionFlaggedDoc | undefined,
   after: VisionFlaggedDoc | undefined,
+  now: number = Date.now(),
 ): boolean {
-  if (before !== undefined || after === undefined) return false;
-  return after.visionFlag === null || after.visionFlag === undefined;
+  if (after === undefined) return false; // a delete — nothing to apply a verdict to
+  if (after.visionFlag !== null && after.visionFlag !== undefined) return false;
+  if (before === undefined) return true; // the create — the write the record was parked for
+  const createdAt = after.createdAt;
+  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return false;
+  return now - createdAt <= PENDING_SCAN_RECONCILE_WINDOW_MS;
 }
 
 export interface VisionHideDeps {
@@ -468,31 +570,60 @@ export interface VisionHideDeps {
   hideIfQualifies?: (eventId: string, proofId: string) => Promise<boolean>;
   /** Transactionally consume a parked verdict, if one is waiting; defaults to `applyPendingVisionScan`. */
   applyPendingScan?: (eventId: string, proofId: string) => Promise<boolean>;
+  /**
+   * The triggering CloudEvent's own `time`, in ms since the epoch — the trigger
+   * seam passes `Date.parse(event.time)`. Bounds how long a failing hand-off is
+   * rethrown for redelivery (`redeliverPendingVisionScan`).
+   */
+  eventTime?: number;
+  /** Clock for both windows; defaults to `Date.now()`, and injected under test. */
+  now?: number;
 }
 
 /**
- * Best-effort: decide on the event snapshot, then hand off to the TRANSACTIONAL
+ * Decide on the event snapshot, then hand off to the TRANSACTIONAL
  * `hideVisionFlaggedIfQualifies`, which re-confirms live state before writing.
- * Never throws — a write failure is swallowed so the trigger never crashes the
- * proof pipeline (ADR 0001; mirrors `applyThresholdHide`, `moderateProof`, and
- * the #101 notifier). Returns whether it wrote.
+ * Best-effort in every arm but one: a failing hide is swallowed so the trigger
+ * never crashes the proof pipeline, while a failing create-time hand-off is
+ * rethrown so the platform redelivers it (see below). Returns whether it wrote.
  *
- * The snapshot predicate runs BEFORE any Firestore access, so the overwhelmingly
- * common write (every report bump, every admin action on an unscreened Proof, and
- * our own writes, which all leave a doc no arm claims) costs one predicate and no
- * read. Nothing here reads the Event doc at all: unlike the report threshold, the
- * Vision verdict is already on the Proof.
+ * The snapshot predicates run BEFORE any Firestore access, so the overwhelmingly
+ * common write (every report bump on a settled Proof, every admin action on an
+ * unscreened one, and our own writes, which all leave a doc no arm claims) costs
+ * two predicates and no read. Nothing here reads the Event doc at all: unlike the
+ * report threshold, the Vision verdict is already on the Proof.
  *
- * A Proof's own CREATE is the one write that also consults the scanner hand-off
+ * A Proof's own CREATE is the one write that ALWAYS consults the scanner hand-off
  * (`awaitsPendingVisionScan`, #1143), because a verdict reached while the Proof
  * did not exist is parked in `proofScans` rather than merge-created onto the
  * Proof, and the create is the write that must pick it up. That costs one read on
- * the write that already costs a document write, and nothing on any other. When a
- * verdict IS waiting, applying it leaves the Proof `'flagged'`, and the hide
- * itself happens on the re-fire through the ordinary arms — this function never
- * hides and flags in one write, so `visionHideAction` stays the single place a
- * status moves. The action pass still runs after a lookup that found nothing, so
- * a create is judged exactly as it was before.
+ * the write that already costs a document write; a verdict-less write inside the
+ * reconciliation window costs one more, and every other write — anything already
+ * carrying a verdict, anything to a Proof older than the window — costs none.
+ * When a verdict IS waiting, applying it leaves the Proof `'flagged'`, and the
+ * hide itself happens on the re-fire through the ordinary arms — this function
+ * never hides and flags in one write, so `visionHideAction` stays the single
+ * place a status moves. The action pass still runs after a lookup that found
+ * nothing, so a create is judged exactly as it was before.
+ *
+ * THE ONE FAILURE THAT IS NOT SWALLOWED is the hand-off (Phase 4b runs 2 and 3).
+ * Swallowing it acknowledged the event successfully while the verdict was still
+ * parked, so the platform never redelivered and — because the gate accepted only
+ * creates — nothing ever looked again: extreme/illegal media public, with the
+ * server's own verdict sitting in a collection no client can read. So a hand-off
+ * failure is RETHROWN while `redeliverPendingVisionScan` says the delivery is
+ * young enough to be worth another attempt, which is what `retry: true` on the
+ * trigger acts on. Past that budget it is logged and swallowed, and the
+ * reconciliation arm of `awaitsPendingVisionScan` — which outlives the budget by
+ * construction — is what catches the exhausted case on the Proof's next write.
+ *
+ * Every OTHER failure keeps the never-throw contract unchanged: a failing hide,
+ * backfill, or re-hide is swallowed (`console.error`, return `false`) so the
+ * trigger never crashes the proof pipeline, and the state predicate re-attempts
+ * on any later write that leaves the doc `'flagged'` (ADR 0001; mirrors
+ * `applyThresholdHide`, `moderateProof`, and the #101 notifier). The hide arm
+ * recovers on its own and therefore needs no redelivery; the hand-off, gated on
+ * one write, could not.
  */
 export async function applyVisionFlagHide(
   eventId: string,
@@ -501,11 +632,24 @@ export async function applyVisionFlagHide(
   after: VisionFlaggedDoc | undefined,
   deps: VisionHideDeps = {},
 ): Promise<boolean> {
-  try {
-    if (awaitsPendingVisionScan(before, after)) {
-      const applied = await (deps.applyPendingScan ?? defaultApplyPendingVisionScan)(eventId, proofId);
-      if (applied) return true; // now 'flagged'; the re-fire hides it through the hide arm
+  const now = deps.now ?? Date.now();
+  if (awaitsPendingVisionScan(before, after, now)) {
+    let applied = false;
+    try {
+      applied = await (deps.applyPendingScan ?? defaultApplyPendingVisionScan)(eventId, proofId);
+    } catch (err) {
+      if (redeliverPendingVisionScan(deps.eventTime, now)) {
+        // PROPAGATE. `retry: true` on the trigger redelivers the event, and the
+        // parked verdict lands on an attempt that works. The only throw here.
+        console.error('applyVisionFlagHide hand-off failed; requesting redelivery', err);
+        throw err;
+      }
+      // Budget spent: stop the retry loop and leave it to the reconciliation.
+      console.error('applyVisionFlagHide hand-off failed past its redelivery budget', err);
     }
+    if (applied) return true; // now 'flagged'; the re-fire hides it through the hide arm
+  }
+  try {
     if (!visionHideAction(after)) return false;
     return await (deps.hideIfQualifies ?? defaultHideVisionFlaggedIfQualifies)(eventId, proofId);
   } catch (err) {
