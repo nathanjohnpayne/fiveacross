@@ -951,8 +951,11 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
  *
  * The token is NOT the whole condition, though, and the caller carries the rest:
  * a call that merely JOINED an in-flight quiesce holds a matching token, so the
- * console gates the automatic reopen on `BeginArchiveOutcome.created` as well
- * (#1142 item 6).
+ * automatic-reopen caller gates on `BeginArchiveOutcome.created` as well (#1142
+ * item 6). That caller is the console's **Archive** handler, which ships with
+ * the pending-claim drain gate in #1151 (Phase 4b P1, PR #1157) — this child's
+ * console has no flip to fail, so the only reopen on screen is the
+ * unconditional one below.
  *
  * Called with NO token it is unconditional, which is what the console's own
  * **Reopen play** button wants: that is a deliberate act on the Event as it
@@ -1018,6 +1021,14 @@ export async function abandonArchive(expectedToken?: string): Promise<AbandonArc
  * of fame, the server re-reads it is built from, the drain gate and the
  * configuration fingerprint that hold its inputs still — is #1151. This is the
  * lifecycle primitive those depend on, and nothing more.
+ *
+ * AND IT HAS NO CONSOLE CALLER ON THIS CHILD (Phase 4b P1, PR #1157). It is
+ * exported and pinned by `src/data/post-sailing-archive.test.ts`, and the
+ * console's **Archive** button arrives with #1151, beside the pending-claim
+ * drain gate. An exposed flip without that gate can freeze an Event whose Claim
+ * queue still holds an `admin_confirmed` Claim, after which Confirm and Reject
+ * both fail — `resolve()` writes the claimant's Board and Player row, and the
+ * freeze denies both — with no way to reopen from the console.
  */
 export async function archiveEvent(
   token: string,

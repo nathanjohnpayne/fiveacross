@@ -4,21 +4,29 @@ import userEvent from '@testing-library/user-event';
 import type { EventDoc } from '../types';
 
 // specs/post-sailing-archive.md, RTL layer (#1149, epic #134). The Admin console's
-// three actions and the states they move between:
+// two actions and the states they move between:
 //
 //   Close play → the quiesce (reversible, gameplay shut, nothing permanent)
 //   Reopen play → lifting it, unconditionally, on the Event in front of the Admin
-//   Archive → both writes in order, and the only irreversible one
+//
+// THE IRREVERSIBLE FLIP IS NOT ON THIS SURFACE (Phase 4b P1 on PR #1157).
+// `archiveEvent(token)` ships and is pinned at the data layer by
+// `src/data/post-sailing-archive.test.ts`; the console's **Archive** action
+// arrives with #1151, together with the pending-claim drain gate and the
+// snapshot that make it safe to press. So this file asserts the flip is
+// UNREACHABLE from the console — the mock stays wired precisely so a re-added
+// button that called it would be caught here — rather than asserting how it
+// sequences.
 //
 // The write functions are `vi.fn()`s because what is under test is the console's
-// SEQUENCING and its cleanup decision, not Firestore: `src/data/post-sailing-archive.test.ts`
-// pins what each write does, and `tests/rules/post-sailing-archive.test.ts` pins
-// what the boundary accepts.
+// own behaviour, not Firestore: `src/data/post-sailing-archive.test.ts` pins what
+// each write does, and `tests/rules/post-sailing-archive.test.ts` pins what the
+// boundary accepts.
 
 const H = vi.hoisted(() => ({
   event: null as EventDoc | null,
-  /** The order the writes were issued in, so the quiesce-first contract is
-   *  asserted on the SEQUENCE rather than on each call alone. */
+  /** The order the writes were issued in, so "no flip from here" is asserted on
+   *  the SEQUENCE rather than on one spy alone. */
   writes: [] as string[],
   beginArchive: vi.fn(),
   abandonArchive: vi.fn(),
@@ -59,11 +67,10 @@ beforeEach(() => {
 
 const renderConsole = () => render(<ArchiveEvent event={H.event} />);
 
-describe('ArchiveEvent — the three lifecycle actions (#1149)', () => {
-  it('offers Close play and Archive on a LIVE Event, and no way back yet', () => {
+describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
+  it('offers Close play on a LIVE Event, and no way back yet', () => {
     renderConsole();
     expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reopen play' })).not.toBeInTheDocument();
   });
 
@@ -73,14 +80,14 @@ describe('ArchiveEvent — the three lifecycle actions (#1149)', () => {
     await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
     // Reversible on purpose: gameplay is shut, and nothing permanent happened.
     expect(H.archiveEvent).not.toHaveBeenCalled();
+    expect(H.writes).toEqual(['begin']);
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
   });
 
-  it('offers Reopen play and Archive on a CLOSING Event, and no second Close play', () => {
+  it('offers Reopen play on a CLOSING Event, and no second Close play', () => {
     H.event = mkEvent({ archiving: true, archiveToken: 'quiesce-1' });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Close play' })).not.toBeInTheDocument();
   });
 
@@ -96,77 +103,46 @@ describe('ArchiveEvent — the three lifecycle actions (#1149)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is open again/);
   });
 
-  it('runs BOTH writes in order, and binds the flip to the generation the first one left', async () => {
-    renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
-    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
-    // The order IS the guarantee: gameplay is shut before anything is frozen.
-    expect(H.writes).toEqual(['begin', 'archive']);
-    expect(H.archiveEvent).toHaveBeenCalledWith('quiesce-1');
-    expect(await screen.findByRole('status')).toHaveTextContent(/Archived/);
-  });
-
-  it('retires the controls once the Event is archived', () => {
+  it('retires the controls once the Event is archived, and still names the state', () => {
+    // The flip can reach the document without this surface (an Admin-SDK edit
+    // today, #1151's console action next), so the archived state is rendered
+    // even though nothing here can produce it.
     H.event = mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000, archiving: false });
     renderConsole();
     expect(screen.queryByRole('button', { name: 'Close play' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reopen play' })).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: 'Archive the Event now' }),
-    ).not.toBeInTheDocument();
     expect(screen.getByText(/^Archived /)).toBeInTheDocument();
-  });
-
-  it('does not run the second write when the quiesce could not be taken', async () => {
-    H.beginArchive.mockResolvedValue({ result: 'already-archived', token: null, created: false });
-    renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
-    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
-    expect(H.archiveEvent).not.toHaveBeenCalled();
-    expect(await screen.findByRole('status')).toHaveTextContent(/Already archived/);
   });
 });
 
-// #1142 item 6. `beginArchive` is idempotent: called on an Event already closing
-// it preserves the stored generation and reports `'closing'` all the same, so a
-// call that merely JOINED another Admin's in-flight quiesce comes back holding a
-// token that matches perfectly. An automatic reopen keyed on the token alone
-// would then succeed at exactly the write the binding exists to refuse.
-describe('ArchiveEvent — only the CREATOR of a quiesce reopens it (#1142 item 6)', () => {
-  beforeEach(() => {
-    H.archiveEvent.mockRejectedValue(new Error('permission-denied'));
-  });
-
-  it('reopens play when the flip fails under a quiesce this call opened', async () => {
-    H.beginArchive.mockResolvedValue({ result: 'closing', token: 'quiesce-1', created: true });
+// Phase 4b P1 on PR #1157. The exposed Archive control could flip an Event whose
+// Claim queue still held an `admin_confirmed` Claim, after which Confirm and
+// Reject both fail — `resolve()` writes the claimant's Board and Player row, and
+// the freeze denies both — and the console cannot reopen a state it never took.
+// The drain gate that refuses to archive over a pending Claim belongs to #1151,
+// so the one-way door ships with it rather than ahead of it.
+describe('ArchiveEvent — the irreversible flip is not reachable from the console (#1157)', () => {
+  it.each([
+    ['live', mkEvent()],
+    ['closing', mkEvent({ archiving: true, archiveToken: 'quiesce-1' })],
+    ['archived', mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 })],
+  ])('offers no Archive control on a %s Event', (_state, event) => {
+    H.event = event;
     renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
-    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
-    // Conditional on the SAME generation besides, so a quiesce that moved
-    // between the flip returning and this cleanup running declines too.
-    expect(H.abandonArchive).toHaveBeenCalledWith('quiesce-1');
-    expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+    expect(screen.queryByRole('button', { name: /archive/i })).not.toBeInTheDocument();
   });
 
-  it('LEAVES the Event shut when the flip fails under a quiesce it merely JOINED', async () => {
-    // That Event was already closing when this Admin arrived, and **Reopen
-    // play** sits beside the button they pressed.
+  it('never calls archiveEvent, whichever control the Admin presses', async () => {
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+
     H.event = mkEvent({ archiving: true, archiveToken: 'quiesce-1' });
-    H.beginArchive.mockResolvedValue({ result: 'closing', token: 'quiesce-1', created: false });
     renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
-    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
-    expect(H.abandonArchive).not.toHaveBeenCalled();
-    // The failure is surfaced rather than swallowed.
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Archive failed/);
-  });
-
-  it('says why play stayed closed when the cleanup finds a newer quiesce in force', async () => {
-    H.beginArchive.mockResolvedValue({ result: 'closing', token: 'quiesce-1', created: true });
-    H.abandonArchive.mockResolvedValue('quiesce-changed');
-    renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await userEvent.click(screen.getAllByRole('button', { name: 'Reopen play' })[0]!);
     await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('status')).toHaveTextContent(/Play was left closed/);
+
+    expect(H.archiveEvent).not.toHaveBeenCalled();
+    expect(H.writes).toEqual(['begin', 'abandon']);
   });
 });
