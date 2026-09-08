@@ -22,6 +22,7 @@ import type { User } from 'firebase/auth';
 import { db, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
+import { isEventArchived, isEventArchiving } from './eventArchive';
 import { adultContentRequired } from '../adultContent';
 import { itemsCol, eventRef } from './paths';
 import { defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
@@ -436,6 +437,30 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // the threshold/ban fields then fall open on the absent keys as before.
   const joinEventSnap = await getDoc(rawEvent(eventId));
   const joinEventData = joinEventSnap.exists() ? (joinEventSnap.data() as Partial<EventDoc>) : null;
+  // A CLOSED Event TAKES NO JOIN (#134, Codex P1 on PR #1139). The daily branch
+  // below merges identity into `players/{uid}` on EVERY visit, returning Players
+  // included — and `eventOpenForPlay` denies that write on both halves of the
+  // freeze. Attempting it anyway is not a harmless failure: `runDeal` classifies
+  // a permission-denied as PERMANENT, so `App` replaces the Card tab with the
+  // full-screen `DealError`, and its Retry repeats exactly the same forbidden
+  // write. A returning Player would have found the archive unreachable behind a
+  // retry surface that could never succeed.
+  //
+  // So the client asks the question the rules already answer, through the ONE
+  // predicate pair that spells it (`src/data/eventArchive.ts`), and declines the
+  // whole join: `false` is the same "no new Board was dealt" this function
+  // already returns for a returning Player, so no `join_event` is recorded, no
+  // error is raised, and `runDeal` clears any stale one. Nothing is lost by
+  // skipping it — the record froze every standings row's `displayName`, and the
+  // archived Leaderboard renders that record rather than these rows.
+  //
+  // The read this decides on is the Event read the mode decision already takes,
+  // so the skip costs nothing; `getDoc` goes to the server whenever it can reach
+  // it, and the deal path is online-gated in `AuthContext`. An Event that closes
+  // in the window between this read and the write is the residual the spec
+  // records — the write is denied, exactly as it is for every other gameplay
+  // write that straddles the quiesce.
+  if (isEventArchived(joinEventData) || isEventArchiving(joinEventData)) return false;
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
   if (daily) {

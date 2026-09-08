@@ -31,6 +31,13 @@ vi.mock('./auth/AuthContext', () => ({
 // renders its ROUTING (the #434 deal-error decision) in isolation. SignIn stays
 // real so the genuine DealError panel renders; CachedCardFallback + cardCache
 // stay real so the durable-cache path is exercised end to end.
+// #134: App reads the Event document to decide whether the Card tab still has a
+// card to render. Stubbed to a mutable fixture — the routing decision is what is
+// under test, not the subscription.
+const eventDoc = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }));
+vi.mock('./hooks/useData', () => ({
+  useEventDoc: () => ({ data: eventDoc.value }),
+}));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
 vi.mock('./components/NoticeBanner', () => ({ default: () => null }));
 vi.mock('./components/Leaderboard', () => ({ default: () => <div data-testid="ranks" /> }));
@@ -133,6 +140,7 @@ describe('App — Card route deal-error routing (#434)', () => {
     vi.stubGlobal('localStorage', new MemoryStorage());
     authState.value = {};
     eventScope.eventId = 'event-a';
+    eventDoc.value = null;
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -235,5 +243,64 @@ describe('App — Card route deal-error routing (#434)', () => {
     // sailor-1 has nothing cached -> the reload screen, never someone-else's card.
     expect(screen.getByText(DEAL_ERROR)).toBeInTheDocument();
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
+  });
+});
+
+describe('App — a closed Event routes the visit to the archive (#134)', () => {
+  // specs/post-sailing-archive.md § "The archived visit". Once the Event is shut
+  // there is no card to play — `joinAndDeal` declines the join and `Board`'s own
+  // Day-Card deal is a write the rules deny — so the Card tab routes to the
+  // standings rather than mounting the Board. The redirect is what keeps the
+  // Board, its listeners and its deal from mounting at all.
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    authState.value = {};
+    eventScope.eventId = 'event-a';
+    eventDoc.value = null;
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('renders the archive surface instead of the Board on an ARCHIVED Event', () => {
+    eventDoc.value = { status: 'archived', archive: { standings: [] } };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('routes a CLOSING Event the same way — shut to play, with no record yet', () => {
+    // The quiesce denies every gameplay write while carrying no `archive`, so the
+    // standings surface renders them LIVE and they simply cannot move. The Card
+    // tab has nothing to offer either way.
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('routes past a stale deal error rather than stranding the visit on Retry', () => {
+    // The failure this fixes: a deal that ran while the Event was open leaves
+    // `dealError` set, and App used to replace the Card tab with a retry surface
+    // whose Retry repeated the write the freeze denies.
+    eventDoc.value = { status: 'archived' };
+    authState.value = { dealError: DEAL_ERROR, dealErrorReason: 'permanent', dealing: false };
+    renderApp();
+    expect(screen.getByTestId('ranks')).toBeInTheDocument();
+    expect(screen.queryByText(DEAL_ERROR)).not.toBeInTheDocument();
+  });
+
+  it('leaves an OPEN Event on the Board — the control, so the routing is not vacuous', () => {
+    eventDoc.value = { status: 'active' };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+  });
+
+  it('renders the Board while the Event document has not arrived, rather than waiting', () => {
+    // A cold visit reads `null`, which is OPEN by the predicate's own default —
+    // making every LIVE Event's Card tab wait on a round trip would cost far more
+    // than one late redirect. The write half needs no such wait: `joinAndDeal`
+    // asks the server itself.
+    eventDoc.value = null;
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
   });
 });

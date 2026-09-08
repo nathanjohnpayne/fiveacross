@@ -131,7 +131,12 @@ export type ArchivableEvent = Pick<
  * Player reaches the archive at all.
  */
 export function isEventArchived(
-  event: Pick<EventDoc, 'status'> | null | undefined,
+  // PARTIAL, so a raw or partially-decoded Event document answers the question
+  // too: `status` is absent on every document written before this ticket, and
+  // the predicate's own contract is that absent means OPEN — a caller holding a
+  // `Partial<EventDoc>` (the deal path's mode read, the freeze's own raw
+  // re-reads) must not have to assert its way past the type to ask.
+  event: Partial<Pick<EventDoc, 'status'>> | null | undefined,
 ): boolean {
   return event?.status === 'archived';
 }
