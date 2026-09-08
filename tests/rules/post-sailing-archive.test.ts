@@ -405,6 +405,52 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the record 
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { bannedUids: [BOB] }));
   });
 
+  // Codex P2, PR #1139. Moderation stays open across the quiesce on purpose —
+  // but the two documents the frozen record is BUILT from are the exception.
+  // `archiveEvent` re-reads the roster and every Day's honour pin from the
+  // server after the close and then commits in a transaction that reads ONLY
+  // the Event document, so a delete landing in that window is neither ordered
+  // against the freeze nor caught by it: the write-once record keeps a row
+  // moderation had already removed. They hold still until the record exists.
+  it('DENIES deleting a Player row or a Day honour while the Event is closing', async () => {
+    const honorPath = `${eventPath()}/days/0/meta/0`;
+    const seed = async () => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const fs = ctx.firestore();
+        await setDoc(doc(fs, `${eventPath()}/players/${ALICE}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          bingoCount: 0,
+          squaresMarked: 0,
+          firstBingoAt: null,
+          reshufflesUsed: 0,
+        });
+        await setDoc(doc(fs, honorPath), {
+          firstBingo: { uid: ALICE, displayName: 'Alice', at: 1000 },
+        });
+      });
+    };
+
+    // Open for play: both are ordinary admin moderation, exactly as before.
+    await seed();
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/players/${ALICE}`)));
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), honorPath)));
+
+    // Shut: the record is being read against these documents.
+    await seed();
+    await quiesce();
+    await assertFails(deleteDoc(doc(db(ADMIN), `${eventPath()}/players/${ALICE}`)));
+    await assertFails(deleteDoc(doc(db(ADMIN), honorPath)));
+
+    // The way through is the one the console offers beside the button: reopen
+    // play, moderate, archive again.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: false });
+    });
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/players/${ALICE}`)));
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), honorPath)));
+  });
+
   it('DENIES archiving an Event that was never shut, and ALLOWS it from the closing state', async () => {
     const archive = () =>
       updateDoc(doc(db(ADMIN), eventPath()), {
@@ -949,7 +995,17 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/items/${ITEM}`)));
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { bannedUids: [BOB] }));
     await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/days/0/boards/${ALICE}`)));
+    // The two snapshot-defining deletes REOPEN once the record exists (#1139).
+    // They are shut only for the length of the quiesce, because the archived
+    // Leaderboard renders the frozen record rather than these documents — and a
+    // permanent record whose Players could never be erased is #808 again.
     await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/players/${ALICE}`)));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/days/0/meta/0`), {
+        firstBingo: { uid: ALICE, displayName: 'Alice', at: 1000 },
+      });
+    });
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/days/0/meta/0`)));
   });
 
   it('leaves an Event document that carries no status key OPEN', async () => {

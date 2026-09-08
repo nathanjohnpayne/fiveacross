@@ -90,6 +90,31 @@ service cloud.firestore {
     function eventOpenForPlay(eventId) {
       return !eventClosedToPlay(eventId);
     }
+    // The QUIESCE ALONE — shut, but not yet frozen (#134, Codex P2 on PR #1139).
+    // `eventClosedToPlay` above is true for BOTH halves of the freeze, and the
+    // two halves want OPPOSITE answers about the deletes below.
+    //
+    // The record is read between the two writes: `archiveEvent` re-reads the
+    // roster and every Day's honour pin from the server after the close, and
+    // then commits in a transaction that READS ONLY THE EVENT DOCUMENT. A
+    // Firestore transaction serializes against the documents it reads, so a
+    // Player row or a Day honour DELETED in that window neither conflicts with
+    // the freeze nor retries it — the write-once record simply keeps a row
+    // moderation had already removed, permanently. Those two deletes are the
+    // only admin writes that define what the snapshot contains, so they hold
+    // still for the length of the quiesce, exactly as the gameplay writes do.
+    //
+    // ONCE ARCHIVED THEY REOPEN, and that asymmetry is the point: a permanent
+    // record needs a takedown path (#808), the write-once clause protects
+    // `status`/`archivedAt`/`archive` and nothing else, and the archived
+    // Leaderboard renders the frozen record rather than these documents. The
+    // remedy while closing is the one the console already offers beside the
+    // button — reopen play, moderate, archive again.
+    function eventQuiescing(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId))
+        && eventData(eventId).get('archiving', false) == true
+        && eventData(eventId).get('status', 'active') != 'archived';
+    }
     // The flip is BOUND to the quiesce the record was read against (#134,
     // Codex P1 on PR #1139). `archiving: true` says the Event is shut; it
     // cannot say WHICH shut. Play can be reopened and shut AGAIN while a
@@ -1519,7 +1544,15 @@ service cloud.firestore {
           // moderation path.
           && eventOpenForPlay(eventId)
           && reshuffleCounterMonotonic();
-        allow delete: if isAdmin(eventId);
+        // …but NOT while the record is being read (#134, Codex P2 on PR #1139).
+        // This row is one of the two documents the snapshot is built from, and
+        // the freeze's transaction reads only the Event document, so a delete
+        // landing between the server re-read and the commit neither conflicts
+        // with it nor retries it: the permanent record keeps a row moderation
+        // had already removed. See `eventQuiescing` — the delete reopens the
+        // moment the record exists, because that record is what the archived
+        // Leaderboard renders and a permanent one needs a takedown path (#808).
+        allow delete: if isAdmin(eventId) && !eventQuiescing(eventId);
 
         // Immutable, server-authored direct Board transition records. The
         // owner consumes them to deliver durable analytics after an offline
@@ -1710,7 +1743,14 @@ service cloud.firestore {
             && request.resource.data.firstBingo.displayName.size() > 0
             && request.resource.data.firstBingo.displayName.size() <= 100
             && request.resource.data.firstBingo.at is number;
-          allow delete: if isAdmin(eventId);
+          // Held still for the length of the quiesce, for the same reason the
+          // Player row above is (#134, Codex P2 on PR #1139): this pin is the
+          // other document the frozen record is built from, and the freeze's
+          // transaction reads only the Event document — so a delete taken
+          // between the server re-read and the commit is neither ordered
+          // against it nor caught by it, and the archive keeps an honour
+          // moderation had removed. Reopens once the record lands.
+          allow delete: if isAdmin(eventId) && !eventQuiescing(eventId);
         }
       }
 
