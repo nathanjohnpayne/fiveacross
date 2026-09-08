@@ -434,7 +434,18 @@ const POSIX = process.platform !== "win32";
 function runCapturedProcess(
   command,
   args,
-  { timeout, settleOn = "close", inheritStdin = false, extraChannel = false, ...options },
+  {
+    timeout,
+    settleOn = "close",
+    inheritStdin = false,
+    extraChannel = false,
+    // The diagnostic capture is bounded so a chatty hook cannot balloon a
+    // classification, but a caller whose OUTPUT is the answer — the git-answer
+    // fingerprint (Phase 4b P2, run 5) — passes `Infinity`, because a changed
+    // ref past the cap would otherwise fall in a discarded suffix.
+    outputLimit = 8192,
+    ...options
+  },
 ) {
   return new Promise((resolve) => {
     let child;
@@ -475,7 +486,7 @@ function runCapturedProcess(
       resolve(result);
     };
     const collect = (chunk) => {
-      if (output.length < 8192) output += chunk.toString("utf8");
+      if (output.length < outputLimit) output += chunk.toString("utf8");
     };
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
@@ -1097,7 +1108,7 @@ export class RepositoryMetadataDriftError extends LiveCheckoutDriftError {
  * server, and no offline classifier closes it. Withholding `.git` did not close
  * it either; it only changed what an ordinary build computes.
  */
-async function gitAnswerFingerprint(projectDir) {
+export async function gitAnswerFingerprint(projectDir) {
   const answers = [];
   for (const args of [
     ["rev-parse", "HEAD"],
@@ -1111,7 +1122,11 @@ async function gitAnswerFingerprint(projectDir) {
     // drift; FETCH_HEAD itself stays out, as the note above explains.
     ["for-each-ref", "refs/remotes", "--format=%(refname) %(objectname)"],
   ]) {
-    const run = await runCapturedProcess("git", args, { cwd: projectDir, timeout: 10_000 });
+    const run = await runCapturedProcess("git", args, {
+      cwd: projectDir,
+      timeout: 10_000,
+      outputLimit: Infinity,
+    });
     answers.push(`git ${args.join(" ")} => ${run.ok ? run.output.trim() : `failed ${run.code ?? "?"}`}`);
   }
   return answers.join("\n");
@@ -1826,6 +1841,19 @@ async function discoverEndpointsFromSdk({ sourceDir, projectDir, environment, ti
     // `serveAdmin`'s teardown: ask it to stop, then make sure of it.
     await fetch(`http://127.0.0.1:${port}/__/quitquitquit`).catch(() => {});
     finished = await server;
+  }
+  if (finished?.descendantsLeft) {
+    // The same refusal the predeploy-hook path applies (Phase 4b P1, run 5):
+    // Firebase's serveAdmin teardown waits only for the SDK process, so a
+    // generator a codebase left running with ignored stdio finishes on its own
+    // clock during the real deploy and can rewrite a LATER codebase's artifact
+    // before that one is discovered. Both rehearsals end it, so neither can
+    // see what it would have done; the inventory is refused instead.
+    return {
+      ok: false,
+      reason:
+        "discovery left work running in the background, whose effect on a later codebase's artifact cannot be rehearsed",
+    };
   }
   if (manifest.ok && finished.channel.includes("consulted")) {
     return {

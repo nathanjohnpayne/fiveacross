@@ -13,6 +13,7 @@ import {
   pinnedRewriteWidening,
   targetCodebases,
   classifyInvokerScope,
+  gitAnswerFingerprint,
 } from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -2570,6 +2571,49 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
         }
       },
     );
+  });
+
+  it("refuses the inventory when discovery leaves work running in the background", async () => {
+    // Phase 4b P1, run 5: an artifact can leave an unref'd generator running
+    // with ignored stdio; Firebase's teardown waits only for the SDK process,
+    // so the generator finishes during the real deploy and can rewrite a later
+    // codebase's artifact. Both rehearsals end it, so the inventory is refused
+    // the way a background predeploy hook is.
+    await withFunctionsProject(
+      {
+        source:
+          'import { spawn } from "node:child_process";\n' +
+          'spawn("sleep", ["3"], { stdio: "ignore" }).unref();\n' +
+          endpoint("daily"),
+      },
+      async (configPath) => {
+        const result = await classify(["--only", "functions:daily"], configPath);
+        expect(result).toMatchObject({ functionsAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      },
+    );
+  });
+
+  it("fingerprints every remote-tracking ref, past the diagnostic capture cap", async () => {
+    // Phase 4b P2, run 5: the runner keeps 8 KiB of a child's output as a
+    // diagnostic; the git-answer fingerprint is the ANSWER, so it is captured
+    // whole — a moved ref in the discarded suffix would otherwise be invisible.
+    await withFunctionsProject({ branch: "release" }, async (configPath) => {
+      const { dirname: dir } = await import("node:path");
+      const { execFileSync } = await import("node:child_process");
+      const repo = dir(configPath);
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+      for (let i = 0; i < 400; i += 1) {
+        execFileSync("git", ["update-ref", `refs/remotes/origin/padding-ref-${String(i).padStart(4, "0")}`, head], { cwd: repo });
+      }
+      const before = await gitAnswerFingerprint(repo);
+      expect(before.length).toBeGreaterThan(8192);
+      expect(before).toContain("refs/remotes/origin/padding-ref-0399");
+      execFileSync("git", ["update-ref", "refs/remotes/origin/padding-ref-0399", `${head}`], { cwd: repo });
+      execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "moved"], { cwd: repo });
+      execFileSync("git", ["update-ref", "refs/remotes/origin/padding-ref-0399", "HEAD"], { cwd: repo });
+      const after = await gitAnswerFingerprint(repo);
+      expect(after).not.toBe(before);
+    });
   });
 
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {

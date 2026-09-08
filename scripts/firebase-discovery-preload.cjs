@@ -118,8 +118,32 @@ function sourceRoot() {
 function calledFromCodebase() {
   const root = sourceRoot();
   if (!root) return false;
-  const stack = new Error().stack ?? "";
+  // The WHOLE stack, not Node's default ten frames (Phase 4b P2, run 5): a
+  // dependency reading the value through enough helper frames would otherwise
+  // push the codebase frame past the limit, and every remaining frame is a
+  // skipped dependency frame — the read would be waved through.
+  const previousLimit = Error.stackTraceLimit;
+  Error.stackTraceLimit = Infinity;
+  let stack;
+  try {
+    stack = new Error().stack ?? "";
+  } finally {
+    Error.stackTraceLimit = previousLimit;
+  }
+  // A module-loader frame between the reader and the codebase means the read
+  // happened while a dependency was being LOADED — `firebase-functions`'s own
+  // v1 `config.js` reads the variable at module load, beneath the codebase's
+  // top-level `require` — which is the dependency initialising itself, not the
+  // codebase consulting the value. A codebase that does consult it calls into
+  // the SDK directly, with no loader frame in between; and a dependency that
+  // reads it through a long chain of helper frames (Phase 4b P2, run 5) has no
+  // loader frame in between either, so the full stack above finds the caller.
+  let loaderBetween = false;
   for (const line of stack.split("\n").slice(1)) {
+    if (/\bModule\.(?:_load|_compile|require|load)\b|node:internal\/modules\//.test(line)) {
+      loaderBetween = true;
+      continue;
+    }
     // An ESM frame is reported as a `file://` URL rather than a path (Phase 4b
     // P2, run 4); it is converted before the root test so an ESM artifact's
     // own frames count as the codebase reading the value.
@@ -135,7 +159,7 @@ function calledFromCodebase() {
     }
     if (file === __filename) continue;
     if (file.split(path.sep).includes("node_modules")) continue;
-    if (file.startsWith(root)) return true;
+    if (file.startsWith(root)) return !loaderBetween;
   }
   return false;
 }
