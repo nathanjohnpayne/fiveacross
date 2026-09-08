@@ -43,8 +43,14 @@ const H = vi.hoisted(() => {
     /** The order the two archive writes were issued in, so the quiesce-first
      *  contract is asserted on the SEQUENCE rather than on each call alone. */
     writes: [] as string[],
-    beginArchive: vi.fn(async () => 'closing' as string),
-    abandonArchive: vi.fn(async () => 'reopened' as string),
+    /** The generation `beginArchive` reports back, so the console's cleanup can
+     *  name the closing state it is lifting (#1139). */
+    quiesceToken: 'quiesce-1' as string | null,
+    beginArchive: vi.fn(async () => ({ result: 'closing', token: 'quiesce-1' }) as {
+      result: string;
+      token: string | null;
+    }),
+    abandonArchive: vi.fn(async (_expectedToken?: string) => 'reopened' as string),
     archiveEvent: vi.fn(async () => 'archived' as string),
     useLeaderboard: vi.fn(() => ({
       players: state.players,
@@ -236,10 +242,11 @@ beforeEach(() => {
   H.eventServerResolved = true;
   H.online = true;
   H.writes = [];
+  H.quiesceToken = 'quiesce-1';
   H.beginArchive.mockClear();
   H.beginArchive.mockImplementation(async () => {
     H.writes.push('begin');
-    return 'closing';
+    return { result: 'closing', token: H.quiesceToken };
   });
   H.abandonArchive.mockClear();
   H.abandonArchive.mockImplementation(async () => {
@@ -574,7 +581,7 @@ describe('the Admin archive control', () => {
     H.event = liveEvent();
     H.beginArchive.mockImplementation(async () => {
       H.writes.push('begin');
-      return 'no-event';
+      return { result: 'no-event', token: null };
     });
     renderArchiveControl();
 
@@ -639,6 +646,9 @@ describe('the archive control surfaces and reverses an uncommitted archive', () 
 
     await user.click(screen.getByRole('button', { name: 'Reopen play' }));
     expect(H.writes).toEqual(['abandon']);
+    // UNCONDITIONAL, deliberately (#1139): this is an Admin acting on the Event
+    // in front of them, not a stale handler cleaning up after its own failure.
+    expect(H.abandonArchive).toHaveBeenCalledWith();
     expect(H.archiveEvent).not.toHaveBeenCalled();
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Play is open again. Nothing was frozen.',
@@ -889,6 +899,51 @@ describe('the archive control drains the claim queue first', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Play was reopened and shut again while the record was being taken, so nothing was frozen. Archive again from where the Event stands now.',
     );
+  });
+
+  // Codex P2, PR #1139. `archiveEvent` holds the generation inside its own
+  // transaction, but this cleanup runs AFTER it returns — and everything the ABA
+  // case describes can happen in that gap too. So the reopen names the quiesce
+  // this handler took, and lifts only that one.
+  it('reopens the quiesce it took, by name', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'too-large';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    expect(H.abandonArchive).toHaveBeenCalledWith('quiesce-1');
+  });
+
+  it('says so when the reopen finds a newer quiesce and leaves it alone', async () => {
+    const user = userEvent.setup();
+    H.event = liveEvent();
+    H.archiveEvent.mockImplementation(async () => {
+      H.writes.push('archive');
+      return 'config-changed';
+    });
+    // The Event was shut again by another Admin between the refusal and the
+    // cleanup, so the closing state standing there is not this handler's to
+    // lift — clearing it would pull an Event out from under their freeze.
+    H.abandonArchive.mockImplementation(async () => {
+      H.writes.push('abandon-declined');
+      return 'quiesce-changed';
+    });
+    renderArchiveControl();
+
+    await user.click(screen.getByRole('button', { name: 'Archive…' }));
+    await user.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+
+    expect(H.writes).toEqual(['begin', 'archive', 'abandon-declined']);
+    // BOTH halves are stated: why nothing was frozen, and why play is closed.
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent(/The Event settings changed while the record was being taken/);
+    expect(status).toHaveTextContent(/Play was left closed/);
   });
 
   it('leaves an already-closing Event closed, where the way back is one tap away', async () => {

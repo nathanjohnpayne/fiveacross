@@ -30,6 +30,13 @@ function archivedOn(at: number | undefined): string {
 const TOO_LARGE_COPY =
   'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. That is almost always a Player row carrying far more text than a name, and banning that Player drops their row from the record.';
 
+/** Appended to the refusal's own copy when the automatic reopen DECLINED — the
+ *  closing state in force is a later Admin's, so this handler left it alone
+ *  (Codex P2, PR #1139). Stated rather than silent: play is still shut, and the
+ *  Admin needs to know that is deliberate and whose it is. */
+const REOPEN_SUPERSEDED_COPY =
+  ' Play was left closed: the Event has been shut again by another archive, and that closing state is not this one to lift. Reopen play below if that archive is not going ahead.';
+
 const RESULT_COPY: Record<ArchiveEventResult | 'reopened', string> = {
   archived: 'Archived. The final standings are frozen.',
   'already-archived': 'Already archived—the record is unchanged.',
@@ -139,6 +146,11 @@ export default function ArchiveEvent({
   } = useDayMetasStatus(event?.days?.length ?? 0);
   const [arming, setArming] = useState(false);
   const [result, setResult] = useState<ArchiveEventResult | 'reopened' | null>(null);
+  // Whether the automatic reopen above declined because the quiesce in force is
+  // no longer the one this handler took. Carried BESIDE the result rather than
+  // replacing it: the Admin needs both halves — why nothing was frozen, and why
+  // play is nonetheless still closed.
+  const [reopenSuperseded, setReopenSuperseded] = useState(false);
 
   const blockingClaims = claimsAwaitingAdmin(event, pendingClaims);
   // The drain gate is the ONE precondition BOTH writes share: a Claim left
@@ -187,7 +199,9 @@ export default function ArchiveEvent({
   const frozen = event?.archive;
 
   const runArchive = async () => {
-    const opened = await beginArchive();
+    setReopenSuperseded(false);
+    // The quiesce this handler took, captured so the cleanup below can name it.
+    const { result: opened, token } = await beginArchive();
     if (opened !== 'closing') {
       setResult(opened);
       return;
@@ -214,8 +228,19 @@ export default function ArchiveEvent({
     // there is not the one this handler shut, and reopening it would clear
     // someone else's quiesce out from under their own in-flight freeze. The
     // Event is reported and left exactly as found.
+    //
+    // AND THE REOPEN IS CONDITIONAL ON THAT SAME TOKEN (Codex P2, PR #1139).
+    // `archiveEvent` checks the generation inside its own transaction, but this
+    // call happens after it returns — and everything the ABA case describes can
+    // happen in that gap too. Reopening unconditionally there clears a LATER
+    // Admin's quiesce out from under their in-flight freeze, which is precisely
+    // what `quiesce-changed` refuses to do one step earlier. `abandonArchive`
+    // compares the stored generation with the one `beginArchive` left in force
+    // and declines when they differ; the Admin is told why play stayed closed
+    // rather than being left to wonder.
     if (outcome === 'claims-pending' || outcome === 'too-large' || outcome === 'config-changed') {
-      await abandonArchive();
+      const reopened = await abandonArchive(token ?? undefined);
+      setReopenSuperseded(reopened === 'quiesce-changed');
     }
     setResult(outcome);
   };
@@ -246,7 +271,14 @@ export default function ArchiveEvent({
           <AsyncButton
             ariaLabel="Reopen play"
             failureLabel="Reopening failed—try again."
-            onAction={async () => setResult(await abandonArchive())}
+            // UNCONDITIONAL, deliberately. This is an Admin acting on the Event
+            // in front of them, not an automatic cleanup of a call that already
+            // failed — the token binding above exists to stop a STALE handler
+            // reopening a newer quiesce, and there is no stale handler here.
+            onAction={async () => {
+              setReopenSuperseded(false);
+              setResult(await abandonArchive());
+            }}
           >
             Reopen play
           </AsyncButton>
@@ -254,7 +286,10 @@ export default function ArchiveEvent({
             ariaLabel="Freeze the record now"
             failureLabel="Freeze failed—try again."
             disabled={!drained || !fits}
-            onAction={async () => setResult(await archiveEvent())}
+            onAction={async () => {
+              setReopenSuperseded(false);
+              setResult(await archiveEvent());
+            }}
           >
             Freeze the record
           </AsyncButton>
@@ -326,6 +361,7 @@ export default function ArchiveEvent({
       {result && (
         <p className="schedule-row-result" role="status">
           {RESULT_COPY[result]}
+          {reopenSuperseded && REOPEN_SUPERSEDED_COPY}
         </p>
       )}
     </div>

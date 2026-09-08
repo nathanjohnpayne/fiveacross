@@ -702,19 +702,24 @@ describe('the quiesce is identified, and the snapshot is bound to the one it rea
     A.betweenReadsAndTx = null;
   });
 
-  it('mints a generation id when it shuts the Event', async () => {
+  it('mints a generation id when it shuts the Event, and reports it back', async () => {
     A.event = { status: 'active', days: [], bannedUids: [] };
-    expect(await beginArchive()).toBe('closing');
+    const opened = await beginArchive();
+    expect(opened.result).toBe('closing');
     expect(A.updates).toHaveLength(1);
     expect(A.updates[0].archiving).toBe(true);
     expect(typeof A.updates[0].archiveToken).toBe('string');
     expect(A.updates[0].archiveToken as string).not.toBe('');
+    // Reported to the caller, because the caller is what has to clean up after
+    // a refused freeze — and a cleanup that cannot name the closing state it is
+    // lifting can lift somebody else's (Codex P2, PR #1139).
+    expect(opened.token).toBe(A.updates[0].archiveToken);
   });
 
   it('keeps the generation id when the Event is already closing', async () => {
     // The call is idempotent and takes no new snapshot, so re-minting here
     // would abort an in-flight freeze that is still perfectly valid.
-    expect(await beginArchive()).toBe('closing');
+    expect((await beginArchive()).result).toBe('closing');
     expect(A.updates[0].archiveToken).toBe('quiesce-1');
   });
 
@@ -722,7 +727,7 @@ describe('the quiesce is identified, and the snapshot is bound to the one it rea
     // The shape a pre-token build leaves behind: unidentified, so it gets an
     // identity rather than being bound to by guesswork.
     A.event = closingEvent({ archiveToken: undefined });
-    expect(await beginArchive()).toBe('closing');
+    expect((await beginArchive()).result).toBe('closing');
     expect(typeof A.updates[0].archiveToken).toBe('string');
     expect(A.updates[0].archiveToken).not.toBe('');
   });
@@ -733,7 +738,7 @@ describe('the quiesce is identified, and the snapshot is bound to the one it rea
     A.event = closingEvent();
     expect(await abandonArchive()).toBe('reopened');
     A.event = { ...closingEvent(), archiving: false };
-    expect(await beginArchive()).toBe('closing');
+    expect((await beginArchive()).result).toBe('closing');
     expect(A.updates[1].archiveToken).not.toBe('quiesce-1');
   });
 
@@ -769,6 +774,45 @@ describe('the quiesce is identified, and the snapshot is bound to the one it rea
     expect(await archiveEvent({ now: 5 })).toBe('quiesce-changed');
     expect(A.updates).toEqual([]);
     expect(A.serverReads).toEqual(['events/test-event']);
+  });
+
+  // Codex P2, PR #1139. `archiveEvent` compares the generation inside its own
+  // transaction — but the console's cleanup runs AFTER it returns, and
+  // everything the ABA case describes can happen in that gap too. An
+  // unconditional reopen there clears a later Admin's quiesce out from under
+  // their in-flight freeze, which is exactly what `quiesce-changed` refuses to
+  // do one step earlier in the same handler.
+  it('reopens only the quiesce it was asked to lift', async () => {
+    expect(await abandonArchive('quiesce-1')).toBe('reopened');
+    expect(A.updates).toEqual([{ archiving: false }]);
+  });
+
+  it('LEAVES a superseded quiesce alone, and writes nothing', async () => {
+    // The Event was shut again by somebody else between the failed freeze and
+    // this cleanup. Their closing state is theirs.
+    A.event = closingEvent({ archiveToken: 'quiesce-2' });
+    expect(await abandonArchive('quiesce-1')).toBe('quiesce-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('cannot be laundered by an abandon that leaves the old token behind', async () => {
+    // `abandonArchive` deliberately does not clear `archiveToken`, so the
+    // matching path has to be proof against reopen-then-reshut: `beginArchive`
+    // preserves a token only while the Event is STILL closing, and mints a
+    // fresh one otherwise — so the stale caller's comparison fails.
+    expect(await abandonArchive()).toBe('reopened');
+    A.event = closingEvent({ archiving: false });
+    const reshut = await beginArchive();
+    A.event = closingEvent({ archiveToken: reshut.token as string });
+    expect(await abandonArchive('quiesce-1')).toBe('quiesce-changed');
+  });
+
+  it('stays unconditional when no generation is named', async () => {
+    // The console's own Reopen play button: a deliberate act on the Event in
+    // front of the Admin, not a cleanup of a call that already failed.
+    A.event = closingEvent({ archiveToken: 'quiesce-2' });
+    expect(await abandonArchive()).toBe('reopened');
+    expect(A.updates).toEqual([{ archiving: false }]);
   });
 
   it('still reports not-closing when the quiesce was simply lifted', async () => {

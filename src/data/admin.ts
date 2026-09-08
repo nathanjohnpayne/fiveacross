@@ -645,8 +645,29 @@ export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRe
  *  so the snapshot has something still to photograph. */
 export type BeginArchiveResult = 'closing' | 'already-archived' | 'no-event';
 
-/** What abandoning a started-but-uncommitted archive reports back. */
-export type AbandonArchiveResult = 'reopened' | 'already-archived' | 'no-event';
+/**
+ * `beginArchive`'s outcome, WITH the quiesce generation it left in force
+ * (Codex P2, PR #1139).
+ *
+ * The token is returned rather than kept private because the caller is the one
+ * that has to clean up after a refused freeze, and a cleanup that cannot name
+ * the closing state it is lifting can lift somebody else's. `null` on every
+ * outcome but `'closing'` — there is no quiesce to name.
+ */
+export type BeginArchiveOutcome = {
+  result: BeginArchiveResult;
+  token: string | null;
+};
+
+/** What abandoning a started-but-uncommitted archive reports back.
+ *  `quiesce-changed` is the CONDITIONAL reopen declining: the stored closing
+ *  state is not the one the caller asked to lift, so nothing was written
+ *  (Codex P2, PR #1139). */
+export type AbandonArchiveResult =
+  | 'reopened'
+  | 'already-archived'
+  | 'no-event'
+  | 'quiesce-changed';
 
 /** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
  *  the Admin surface can say what happened instead of inferring it from a
@@ -733,20 +754,26 @@ function newArchiveToken(): string {
  * out, because a freeze that failed halfway must not shut an Event forever; the
  * next `beginArchive` after it opens a NEW generation, which is exactly what
  * the reads taken under the old one must not commit against.
+ *
+ * IT REPORTS THE TOKEN IT LEFT IN FORCE (Codex P2, PR #1139). The caller that
+ * shut the Event is the caller that must put it back if the freeze refuses, and
+ * an unconditional reopen there can clear a LATER Admin's quiesce out from under
+ * their own in-flight freeze. Naming the generation is what makes that cleanup
+ * conditional — see `abandonArchive`.
  */
-export async function beginArchive(): Promise<BeginArchiveResult> {
+export async function beginArchive(): Promise<BeginArchiveOutcome> {
   const eventRef = evt();
-  return runTransaction(db, async (tx): Promise<BeginArchiveResult> => {
+  return runTransaction(db, async (tx): Promise<BeginArchiveOutcome> => {
     const snap = await tx.get(eventRef);
-    if (!snap.exists()) return 'no-event';
+    if (!snap.exists()) return { result: 'no-event', token: null };
     const data = snap.data() as Partial<EventDoc>;
-    if (data.status === 'archived') return 'already-archived';
+    if (data.status === 'archived') return { result: 'already-archived', token: null };
     const token =
       data.archiving === true && usableArchiveToken(data.archiveToken)
         ? data.archiveToken
         : newArchiveToken();
     tx.update(eventRef, { archiving: true, archiveToken: token });
-    return 'closing';
+    return { result: 'closing', token };
   });
 }
 
@@ -767,13 +794,35 @@ export async function beginArchive(): Promise<BeginArchiveResult> {
  * mints a fresh one precisely because the Event is no longer closing when it
  * runs — so a freeze still in flight under the old generation sees a token that
  * has moved and aborts, which is the whole point.
+ *
+ * IT CAN BE MADE CONDITIONAL, and the automatic cleanup path always is (Codex
+ * P2, PR #1139). Pass the `expectedToken` `beginArchive` reported and this
+ * reopens ONLY the closing state that token names: a quiesce taken over by
+ * another Admin in the meantime carries a different generation, and clearing it
+ * would reopen an Event underneath somebody else's in-flight freeze — the same
+ * hazard `archiveEvent`'s own `quiesce-changed` refusal exists for, one step
+ * later in the same handler. It reports `quiesce-changed` and writes nothing.
+ *
+ * Called with NO token it is unconditional, which is what the console's own
+ * **Reopen play** button wants: that is a deliberate act on the Event as it
+ * stands in front of the Admin, not an automatic cleanup of a call that has
+ * already failed.
+ *
+ * A stale token cannot be laundered into a match. `abandonArchive` leaves the
+ * generation in place, so a reopened-and-re-shut Event carries the FRESH one
+ * `beginArchive` minted (it only preserves a token while the Event is still
+ * closing), and the stale caller's comparison fails.
  */
-export async function abandonArchive(): Promise<AbandonArchiveResult> {
+export async function abandonArchive(expectedToken?: string): Promise<AbandonArchiveResult> {
   const eventRef = evt();
   return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
     const snap = await tx.get(eventRef);
     if (!snap.exists()) return 'no-event';
-    if ((snap.data() as Partial<EventDoc>).status === 'archived') return 'already-archived';
+    const data = snap.data() as Partial<EventDoc>;
+    if (data.status === 'archived') return 'already-archived';
+    if (expectedToken !== undefined && data.archiveToken !== expectedToken) {
+      return 'quiesce-changed';
+    }
     tx.update(eventRef, { archiving: false });
     return 'reopened';
   });
