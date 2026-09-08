@@ -318,6 +318,24 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
       { displayName: 'New Name' },
     );
   });
+  it('attempts the mirror while a local close is still PENDING — the denial handler decides', async () => {
+    // Phase 4b P2, PR #1157 run 3: a pending local close is not authoritative
+    // either; a refused close rolls back to open after the mirror was skipped.
+    eventState.value = { status: 'active', archiving: true };
+    getDocMock.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => eventState.value,
+      metadata: { fromCache: false, hasPendingWrites: true },
+    } as unknown as Awaited<ReturnType<typeof getDocMock>>);
+    updateDocMock.mockResolvedValueOnce(undefined);
+
+    await expect(updateDisplayName('u1', 'New Name')).resolves.toBeUndefined();
+
+    expect(updateDocMock).toHaveBeenCalledWith(
+      { path: 'events/test-event/players/u1' },
+      { displayName: 'New Name' },
+    );
+  });
 
   it('still writes the mirror when the Event status is unreadable — the read never blocks a save', async () => {
     // An unreadable Event reads as open and the write is attempted, exactly as

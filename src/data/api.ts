@@ -472,7 +472,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // denied and `runDeal` surfaces it as the declined/retryable outcome it
   // already handles for every other closed-Event write.
   const closed = isEventArchived(joinEventData) || isEventArchiving(joinEventData);
-  if (closed && !joinEventSnap.metadata?.fromCache) return false;
+  // Only a server-COMMITTED closed snapshot declines (Phase 4b P2 on PR #1157,
+  // run 3): a pending local close is not authoritative, and a refused one rolls
+  // back to open after this decision would have skipped the join for good.
+  if (closed && !joinEventSnap.metadata?.fromCache && !joinEventSnap.metadata?.hasPendingWrites) {
+    return false;
+  }
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
   if (daily) {

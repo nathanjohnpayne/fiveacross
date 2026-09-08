@@ -87,7 +87,10 @@ async function updateExistingPlayer(
   // if it was lifted the mirror lands when the device reconnects.
   const closed = await getDoc(rawEvent(eventId)).then(
     (snap) => {
-      if (snap.metadata?.fromCache) return false;
+      // A pending local close is not authoritative either (Phase 4b P2 on PR
+      // #1157, run 3): `fromCache` and `hasPendingWrites` describe different
+      // properties, and a refused close rolls back to open after this decision.
+      if (snap.metadata?.fromCache || snap.metadata?.hasPendingWrites) return false;
       const event = snap.data() as Partial<EventDoc> | undefined;
       return isEventArchived(event) || isEventArchiving(event);
     },

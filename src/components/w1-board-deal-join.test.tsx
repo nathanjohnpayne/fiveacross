@@ -699,6 +699,23 @@ describe('joinAndDeal on a CLOSED Event (#134, specs/post-sailing-archive.md)', 
     expect(H.runTransaction).toHaveBeenCalledTimes(1);
     expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
   });
+  it('ATTEMPTS the join while a local close is still PENDING — the rules may yet refuse it', async () => {
+    // Phase 4b P2, PR #1157 run 3: a pending local `archiving: true` is not
+    // authoritative; if the rules refuse it, the rollback to open comes after
+    // this decision would have skipped the join for good.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: false, hasPendingWrites: true },
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true); // a genuine first join
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
+  });
 
   it('still merges the returning Player identity while the Event is OPEN', async () => {
     // The control, so the two refusals above are a claim about the freeze rather
