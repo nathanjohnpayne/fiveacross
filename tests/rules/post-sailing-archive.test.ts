@@ -380,6 +380,22 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-3' }));
   });
 
+  it('treats a WHITESPACE token as no token at all — shut, binding and repair agree', async () => {
+    // Codex P2, PR #1157 round 8. `!= ''` accepted '   ' on the shut while the
+    // client's usableArchiveToken trims, so the client minted a replacement
+    // that the repair arm (reading '   ' as usable) refused. One predicate now.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: '   ' }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: '   ' });
+    });
+    // The flip is not bound to whitespace…
+    await assertFails(flip(ADMIN, { archiveToken: '   ' }));
+    // …and the repair treats it as absent, so the client's replacement lands.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+    );
+  });
+
   it('DENIES a shut that smuggles configuration with it, and a create born shut', async () => {
     await assertFails(
       updateDoc(doc(db(ADMIN), eventPath()), {

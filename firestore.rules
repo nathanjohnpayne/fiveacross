@@ -136,9 +136,18 @@ service cloud.firestore {
     // NOT type-check the field: that arm sits against Firestore's
     // 1000-expression cap (#850/#934), and a malformed token can only ever fail
     // the flip closed here, never open a hole.
+    // ONE validity predicate for the generation, shared by the shut, the
+    // binding and the repair (Codex P2 on PR #1157, round 8), and the same one
+    // the client's `usableArchiveToken` applies: a string with something in it
+    // besides whitespace. `!= ''` alone let a stale writer shut the Event under
+    // `'   '`, which the client then treated as unusable and tried to replace,
+    // and the repair arm — reading the same value as usable — refused the
+    // replacement, so Close play failed until an Admin reopened by hand.
+    function usableArchiveToken(value) {
+      return value is string && value.trim() != '';
+    }
     function boundToStoredQuiesce(stored, incoming) {
-      return stored.get('archiveToken', '') is string
-        && stored.get('archiveToken', '') != ''
+      return usableArchiveToken(stored.get('archiveToken', ''))
         && incoming.get('archiveToken', '') == stored.get('archiveToken', '');
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
@@ -1358,8 +1367,7 @@ service cloud.firestore {
         && resource.data.get('status', 'active') != 'archived'
         && isAdmin(eventId)
         && request.resource.data.get('archiving', false) == true
-        && request.resource.data.get('archiveToken', '') is string
-        && request.resource.data.get('archiveToken', '') != ''
+        && usableArchiveToken(request.resource.data.get('archiveToken', ''))
         && request.resource.data.get('archiveToken', '') != resource.data.get('archiveToken', '')
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['archiving', 'archiveToken']);
@@ -1444,11 +1452,9 @@ service cloud.firestore {
       allow update: if resource != null
         && resource.data.get('archiving', false) == true
         && resource.data.get('status', 'active') != 'archived'
-        && !(resource.data.get('archiveToken', '') is string
-             && resource.data.get('archiveToken', '') != '')
+        && !usableArchiveToken(resource.data.get('archiveToken', ''))
         && isAdmin(eventId)
-        && request.resource.data.get('archiveToken', '') is string
-        && request.resource.data.get('archiveToken', '') != ''
+        && usableArchiveToken(request.resource.data.get('archiveToken', ''))
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['archiveToken']);
       // The DELETE of the Event document is the ONE admin write the freeze
