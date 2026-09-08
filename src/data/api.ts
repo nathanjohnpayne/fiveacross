@@ -458,7 +458,21 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // in the window between this read and the write is the residual the spec
   // records — the write is denied, exactly as it is for every other gameplay
   // write that straddles the quiesce.
-  if (isEventArchived(joinEventData) || isEventArchiving(joinEventData)) return false;
+  //
+  // Only a SERVER-BACKED snapshot may skip (Codex P2 on PR #1157), exactly as
+  // the profile mirror decides it. `getDoc` can still resolve from the
+  // persistent cache during a transient Firestore outage even while the browser
+  // reports online, and a cached `archiving: true` can describe a quiesce
+  // another Admin has since lifted. Skipping on THAT is the worst outcome
+  // available here: the join reports a clean "no new Board was dealt", so
+  // `runDeal` records no retryable error and never reruns, and a first-time
+  // visitor sits without a Player row or a Board until the next connectivity
+  // transition or reload. A cached closed state therefore attempts the join and
+  // lets the rules decide — if the freeze really does still hold, the write is
+  // denied and `runDeal` surfaces it as the declined/retryable outcome it
+  // already handles for every other closed-Event write.
+  const closed = isEventArchived(joinEventData) || isEventArchiving(joinEventData);
+  if (closed && !joinEventSnap.metadata?.fromCache) return false;
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
   if (daily) {

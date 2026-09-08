@@ -660,13 +660,44 @@ describe('joinAndDeal on a CLOSED Event (#134, specs/post-sailing-archive.md)', 
     expect(H.txSet).not.toHaveBeenCalled();
   });
 
-  it('writes nothing on a CLOSING Event, which is shut before any record exists', async () => {
-    H.getDoc.mockResolvedValueOnce(closedEvent({ archiving: true }));
+  it('writes nothing on a SERVER-BACKED CLOSING Event, which is shut before any record exists', async () => {
+    // The `fromCache: false` half of the pair below: a closed state the server
+    // actually told us about is the one the join declines.
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: false, hasPendingWrites: false },
+    });
 
     await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false);
 
     expect(H.runTransaction).not.toHaveBeenCalled();
     expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('ATTEMPTS the join when the closed state came from the CACHE — the rules decide', async () => {
+    // Codex P2, PR #1157, and the same rule the profile mirror already follows
+    // (4caa1e8). `getDoc` can resolve from the persistent cache during a
+    // transient Firestore outage even while the browser reports online, and a
+    // cached `archiving: true` can describe a quiesce another Admin has since
+    // lifted. Skipping on THAT is the worst outcome available: the join reports
+    // a clean "no new Board was dealt", `runDeal` records no retryable error
+    // and never reruns, and a first-time visitor sits without a Player row or a
+    // Board until the next connectivity transition or reload. So only a
+    // SERVER-BACKED closed snapshot skips; a cached one attempts the write and
+    // leaves the freeze, if it still holds, to the permission-denied the deal
+    // path already handles.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: true, hasPendingWrites: false },
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true); // a genuine first join
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' });
   });
 
   it('still merges the returning Player identity while the Event is OPEN', async () => {
