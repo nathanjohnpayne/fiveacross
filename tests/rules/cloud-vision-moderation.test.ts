@@ -157,6 +157,12 @@ describe('firestore.rules — the admin Restore and the community report path st
       updateDoc(doc(db(ADMIN), at('proofs/pVisionHidden')), { status: 'active', safetyHide: false }),
     );
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('proofs/pFlagged')), { status: 'hidden' })); // and can hide by hand
+    // The hold-preserving Hide (#1143): an admin hiding a Proof a safety hold
+    // already stands on writes the marker in the SAME update, on the same
+    // unconstrained admin arm — so this needed no rules change either.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), at('proofs/pFlagged')), { status: 'hidden', safetyHide: true }),
+    );
   });
 
   it('a bare reportCount+1 still SUCCEEDS on a flagged Proof — #133 did not narrow the report path', async () => {
@@ -167,9 +173,12 @@ describe('firestore.rules — the admin Restore and the community report path st
   it('an admin restores a claim-backed Proof to PENDING, and reads the claims that decide it', async () => {
     // The other half of `restoreProof`: a Proof whose claim nobody has judged goes
     // back to 'pending' (admin-only readable) rather than into the Feed, and the
-    // lookup that decides which — a single-equality `proofId` query over the
-    // claims collection — is a read the admin arm already allows. A non-admin is
-    // denied both, so neither the decision nor its inputs are client-reachable.
+    // lookup that decides which — an equality-only `proofId` + owner `uid` query
+    // over the claims collection — is a read the admin arm already allows. A
+    // non-admin is denied both, so neither the decision nor its inputs are
+    // client-reachable. Scoping the query to the owner is what stops forged
+    // claims crowding the owner's own off the bounded page (#1143); two equality
+    // filters need no composite index, so `firestore.indexes.json` is untouched.
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), at('claims/c1')), {
         uid: ALICE, displayName: 'Alice', cellIndex: 5, itemText: 'Saw a drag show',
@@ -177,7 +186,11 @@ describe('firestore.rules — the admin Restore and the community report path st
       });
     });
     const byProof = (uid: string) =>
-      query(collection(db(uid), at('claims')), where('proofId', '==', 'pVisionHidden'));
+      query(
+        collection(db(uid), at('claims')),
+        where('proofId', '==', 'pVisionHidden'),
+        where('uid', '==', ALICE),
+      );
 
     await assertSucceeds(getDocs(byProof(ADMIN)));
     await assertFails(getDocs(byProof(BOB)));

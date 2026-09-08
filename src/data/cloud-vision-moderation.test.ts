@@ -25,12 +25,13 @@ import type { Cell, ClaimDoc, ProofDoc } from '../types';
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown; exists: () => boolean };
 
-const { txGet, txSet, txUpdate, txDelete, runTx, getDocsMock, ops } = vi.hoisted(() => ({
+const { txGet, txSet, txUpdate, txDelete, runTx, getDocMock, getDocsMock, ops } = vi.hoisted(() => ({
   txGet: vi.fn(),
   txSet: vi.fn(),
   txUpdate: vi.fn(),
   txDelete: vi.fn(),
   runTx: vi.fn(),
+  getDocMock: vi.fn(),
   getDocsMock: vi.fn(),
   // Every transaction operation in call order, so the Firestore
   // reads-before-writes contract is assertable rather than assumed.
@@ -60,8 +61,11 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     // web SDK's Transaction.get takes a DocumentReference, never a query).
     query: (ref: Ref, ...constraints: unknown[]) => ({ __kind: 'query', ref, constraints }),
     where: (field: string, op: string, value: unknown) => ({ field, op, value }),
+    // Faked so the double can APPLY the cap rather than merely observe it: the
+    // point of the owner-scoped lookup is which docs survive the page.
+    limit: (count: number) => ({ __kind: 'limit', count }),
     getDocs: (...a: unknown[]) => getDocsMock(...a),
-    getDoc: vi.fn(() => Promise.resolve({ data: () => ({}) })),
+    getDoc: (...a: unknown[]) => getDocMock(...a),
     getDocFromCache: vi.fn(() => Promise.reject(new Error('no cache in this test double'))),
     writeBatch: () => ({ set: vi.fn(), commit: () => Promise.resolve() }),
     increment: (n: number) => ({ __inc: n }),
@@ -128,9 +132,39 @@ beforeEach(() => {
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   liveProof = undefined;
   claimsForProof = [];
-  getDocsMock.mockImplementation(() =>
-    Promise.resolve({ docs: claimsForProof.map(({ id }) => ({ id })) }),
+  // The Proof read `restoreProof` runs before its transaction, to scope the
+  // claims lookup to the owner. Everything else keeps the inert default.
+  getDocMock.mockImplementation((ref: Ref) =>
+    Promise.resolve(
+      ref.path === 'events/med-2026/proofs/P'
+        ? { exists: () => !!liveProof, data: () => liveProof }
+        : { exists: () => true, data: () => ({}) },
+    ),
   );
+  // A real-enough query: the equality filters select, and the `limit` bounds the
+  // page — in that order, exactly as Firestore does, so a test can prove that
+  // forged docs cannot occupy the page the owner's claim needs to be on.
+  getDocsMock.mockImplementation((q: { constraints?: unknown[] }) => {
+    const constraints = (q?.constraints ?? []) as Array<{
+      field?: string;
+      op?: string;
+      value?: unknown;
+      __kind?: string;
+      count?: number;
+    }>;
+    const equalities = constraints.filter((c) => c.op === '==');
+    const cap = constraints.find((c) => c.__kind === 'limit')?.count;
+    const selected = claimsForProof.filter(
+      ({ live }) =>
+        // A claim deleted between the lookup and the re-read was still returned
+        // by the lookup, so an absent LIVE state is not an absent match.
+        live === undefined ||
+        equalities.every((c) => (live as Record<string, unknown>)[c.field as string] === c.value),
+    );
+    return Promise.resolve({
+      docs: (cap === undefined ? selected : selected.slice(0, cap)).map(({ id }) => ({ id })),
+    });
+  });
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({
       get: (ref: Ref) => {
@@ -508,13 +542,71 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
   });
 
-  it('bounds the claim lookup', async () => {
+  it("asks for the OWNER's claims, bounded — both equalities, then the cap", async () => {
+    // Two equality filters and a limit. Equality-only conjunctions are served by
+    // merging the single-field indexes Firestore maintains by default, so this
+    // needs no composite index (firestore.indexes.json is untouched).
     claimsForProof = [];
 
     await restoreProof('P');
 
     const lookup = getDocsMock.mock.calls[0]?.[0] as { constraints?: unknown[] } | undefined;
-    expect(JSON.stringify(lookup?.constraints ?? [])).toContain('limit');
+    expect(lookup?.constraints).toEqual([
+      { field: 'proofId', op: '==', value: 'P' },
+      { field: 'uid', op: '==', value: 'u1' },
+      { __kind: 'limit', count: 25 },
+    ]);
+  });
+
+  it("cannot be crowded out: 25 forged claims do not displace the owner's", async () => {
+    // Codex P2 round 2 on #1143. The bound is applied to the QUERY, so a lookup
+    // filtered only by proofId lets any signed-in user decide what comes back:
+    // enough forged pending claims fill the page, the owner's real claim falls
+    // off the end, and Restore publishes a photo nobody has judged. Filtering by
+    // the owner in the query is what makes the page uncrowdable — the forged docs
+    // are gone before the cap is reached.
+    claimsForProof = [
+      ...Array.from({ length: 25 }, (_, i) => ({
+        id: `forged-${i}`,
+        live: { status: 'pending' as const, proofId: 'P', uid: `attacker-${i}` },
+      })),
+      { id: 'claim-1', live: { status: 'pending' as const, proofId: 'P', uid: 'u1' } },
+    ];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    // And the forged docs are not even read: the transaction's read budget is
+    // spent on the Proof and the owner's own claim.
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      'events/med-2026/claims/claim-1',
+    ]);
+  });
+
+  it('scopes the lookup with the owner from a plain read, not a transactional one', async () => {
+    // `uid` is written once at create and is immutable, so the pre-transaction
+    // read cannot be stale in any way that matters — it only decides which claims
+    // are FETCHED. The owner check that decides the restore is still the live
+    // re-read inside the transaction, which is why both reads exist.
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
+
+    await restoreProof('P');
+
+    expect(getDocMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'events/med-2026/proofs/P' }),
+    );
+    expect(ops[0]).toEqual({ op: 'get', path: 'events/med-2026/proofs/P' });
+  });
+
+  it('skips the lookup entirely when there is no Proof to own the claims', async () => {
+    liveProof = undefined;
+    claimsForProof = [{ id: 'claim-1', live: { status: 'pending', proofId: 'P', uid: 'u1' } }];
+
+    await restoreProof('P');
+
+    expect(getDocsMock).not.toHaveBeenCalled();
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
   });
 
   it('never touches the claim itself — Restore moves the photo, not the decision', async () => {

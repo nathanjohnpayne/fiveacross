@@ -471,22 +471,50 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * the query and the write is seen as resolved. Nothing can appear in the gap —
  * a Proof's claim is created in `attachProof`'s own transaction, alongside the
  * Proof itself, so an existing Proof never gains a new one.
+ *
+ * That lookup asks for the OWNER's claims, not the Proof's (Codex P2 round 2 on
+ * #1143). Only the owner's claim may steer a restore, and the bound below is
+ * applied to the query — so a `proofId`-only lookup lets any signed-in user
+ * decide what the query returns: 25 forged pending claims naming someone else's
+ * Proof fill the page, the owner's real claim falls off the end, and Restore
+ * publishes a photo whose claim nobody has judged. The forged docs are excluded
+ * where the exclusion cannot be crowded out — by the query itself — and the
+ * in-transaction owner check below stays exactly as it was, because the query
+ * reads a snapshot and only the live re-read can be trusted with the decision.
+ *
+ * Two equality filters need no composite index: Firestore serves an equality-only
+ * conjunction by merging the single-field indexes it maintains by default, so
+ * this adds nothing to `firestore.indexes.json`.
  */
 /**
- * How many claims the restore will consider. A Proof legitimately backs ONE
- * claim (its owner's, created in `attachProof`'s own transaction), so the bound
- * exists for the forged case below: any signed-in user can create a pending
- * claim naming another Player's Proof (the claim-create rule binds `uid` to the
- * caller, not `proofId` to the caller's Proof), and enough of them would push
- * the transaction past Firestore's read limit (Codex P2 on #1143).
+ * How many of the OWNER's claims the restore will consider. A Proof legitimately
+ * backs exactly one (created in `attachProof`'s own transaction), so this is a
+ * read-budget bound for the pathological case the query cannot exclude — a Player
+ * minting many claims against their own Proof — rather than a defence against
+ * forged ones, which the `uid` filter removes before the limit is reached.
  */
 const RESTORE_CLAIM_LOOKUP_LIMIT = 25;
 
 export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
-  const candidates = await getDocs(
-    query(claimsRaw(eventId), where('proofId', '==', id), limit(RESTORE_CLAIM_LOOKUP_LIMIT)),
-  );
-  const claimRefs = candidates.docs.map((d) => claim(d.id, eventId));
+  // The owner, read plainly and outside the transaction: `uid` is written once at
+  // create and is immutable thereafter, so there is no state here a stale read
+  // could get wrong. It only SCOPES the query; the authority for the decision is
+  // the live re-read inside the transaction below.
+  const ownerSnap = await getDoc(proof(id, eventId));
+  const owner = ownerSnap.exists() ? (ownerSnap.data() as Partial<ProofDoc>).uid : undefined;
+  const claimRefs =
+    owner === undefined
+      ? [] // no Proof, or no owner on it: nothing may steer the restore anyway
+      : (
+          await getDocs(
+            query(
+              claimsRaw(eventId),
+              where('proofId', '==', id),
+              where('uid', '==', owner),
+              limit(RESTORE_CLAIM_LOOKUP_LIMIT),
+            ),
+          )
+        ).docs.map((d) => claim(d.id, eventId));
   await runTransaction(db, async (tx) => {
     // The Proof first: a claim steers the restore only when it is the Proof
     // OWNER's claim. Any signed-in user can create a pending claim that names
