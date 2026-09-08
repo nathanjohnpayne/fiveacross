@@ -219,6 +219,24 @@ describe('moderateProof export gating (#126)', () => {
     );
   });
 
+  // #134 (Codex P1 on PR #1139): the media-revocation sweeper's DEPLOY SHAPE is
+  // the durability guarantee. `retry: true` is what turns a rethrown Storage
+  // failure into redelivery — without it a failed revocation is simply dropped
+  // and the media survives with nothing left recording that it should not — and
+  // the Admin identity is what lets it reach the bucket and Firestore at all,
+  // since the default Gen2 compute account has neither data plane.
+  it('exports the proof-media revocation sweeper as a retryable path-scoped Admin trigger', async () => {
+    const mod = await importIndex();
+    const endpoint = mod.revokeDeletedProofMedia.__endpoint;
+    expect(endpoint.eventTrigger.retry).toBe(true);
+    expect(endpoint.eventTrigger.eventFilterPathPatterns.document).toBe(
+      'events/{eventId}/proofStorageDeletes/{proofId}',
+    );
+    expect(endpoint.serviceAccountEmail).toBe(
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+    );
+  });
+
   // ADR 0008: this repo deploys to two Firebase projects. A Service Account only
   // exists inside its own project, so a hardcoded `gaycruisebingo` pin failed the
   // `fiveacross` deploy outright with `iam.serviceaccounts.actAs` on a

@@ -1,4 +1,4 @@
-import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
+import { collection, deleteDoc, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
@@ -25,6 +25,57 @@ const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID) 
   doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
 const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'players', uid);
+
+/**
+ * The pending-revocation tombstone for a deleted Proof's Storage object (#134,
+ * Codex P1 on PR #1139).
+ *
+ * ONE PER PROOF, keyed by the Proof's own id, because the operation it records
+ * is idempotent and single-target: a second tombstone for the same Proof would
+ * name the same object and buy nothing but a duplicate sweep. Keying it that way
+ * also lets `firestore.rules` pin the object path against the document id, and
+ * lets the sweeper read the Proof id straight off its trigger path.
+ */
+export const PROOF_STORAGE_DELETES = 'proofStorageDeletes';
+const rawProofStorageDelete = (proofId: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, PROOF_STORAGE_DELETES, proofId);
+
+/** The three object extensions `uploadProofMedia` can produce (jpg / webm / m4a, #295). */
+const PROOF_MEDIA_EXTENSIONS = ['jpg', 'webm', 'm4a'];
+
+/**
+ * The owner uid a canonical proof-media path names—or `null` when the path is
+ * not one `uploadProofMedia` could have written.
+ *
+ * The tombstone carries `uid` because that is the value `firestore.rules` pins
+ * the object path against by string EQUALITY (`proofs/{eventId}/{uid}/{proofId}.{ext}`),
+ * rather than by a regex interpolating two path variables. Deriving the field
+ * FROM the path is what keeps the two from ever disagreeing—a tombstone whose
+ * `uid` did not match its own `storagePath` would be denied at the boundary, and
+ * a denied write inside this transaction takes the whole takedown down with it,
+ * which is the exact failure class this ticket already fixed once.
+ *
+ * A path this cannot parse therefore yields NO tombstone rather than a denied
+ * one: the delete proceeds exactly as it did before, revoking the media inline.
+ * Nothing reachable produces one—`firestore.rules` has pinned `storagePath` to
+ * these three shapes at Proof create since #295, and the Admin SDK writers never
+ * set the field—so this is the fail-safe for a hand-written document, not a case
+ * the app can reach.
+ */
+export function proofMediaOwnerUid(
+  storagePath: string,
+  eventId: string,
+  proofId: string,
+): string | null {
+  const segments = storagePath.split('/');
+  if (segments.length !== 4) return null;
+  const [root, pathEventId, uid, file] = segments;
+  if (root !== 'proofs' || pathEventId !== eventId || uid.length === 0) return null;
+  const dot = file.lastIndexOf('.');
+  if (dot <= 0 || file.slice(0, dot) !== proofId) return null;
+  if (!PROOF_MEDIA_EXTENSIONS.includes(file.slice(dot + 1))) return null;
+  return uid;
+}
 
 /**
  * The `{ merge: true }` player-stats write a proofed Mark / proof deletion
@@ -438,6 +489,10 @@ export async function deleteProof(
   // each attempt reassigns it, so only the committed attempt's value survives
   // to the purge call.
   let mediaURL: string | null | undefined;
+  // Whether the committed attempt wrote the media's pending-revocation tombstone
+  // (#134). Declared out here for the same reason `mediaURL` is: the callback can
+  // re-run, and only the committed attempt's value may drive the post-commit half.
+  let tombstoned = false;
 
   await runTransaction(db, async (tx) => {
     const proofRef = rawProof(id, eventId);
@@ -598,6 +653,52 @@ export async function deleteProof(
       }
     }
 
+    // THE DELETION SURVIVES THE COMMIT THAT REMOVES ITS ONLY REFERENCE (#134,
+    // Codex P1 on PR #1139). Moving the Storage delete after the Firestore
+    // commit (the note below) fixed one failure and opened another: the Proof
+    // row, its `storagePath` and the retry control are all gone the instant the
+    // transaction lands, so a Storage delete that then fails — offline, a
+    // transient 5xx, a revoked token — leaves media that is still reachable
+    // through its download URL and still sitting in the `proof-media` cache,
+    // with nothing left anywhere that records it was supposed to go.
+    //
+    // So the pending revocation is written IN THE SAME COMMIT as the delete,
+    // before the reference disappears. Same transaction, so there is no window
+    // in which the Proof is gone and the record of its media is not: either both
+    // land or neither does. The post-commit half removes it once the object is
+    // provably revoked; a failure leaves it standing, and the server-side sweeper
+    // (`revokeDeletedProofMedia`, functions/src/proofStorageDeletes.ts) finishes
+    // the job on a tombstone create even when this client never comes back at
+    // all — which is the case a client-side retry can never cover.
+    //
+    // Written only when the Proof document was actually READ here: a second
+    // delete of an already-deleted Proof has nothing to record and must not
+    // rewrite a standing tombstone, which `firestore.rules` denies (create-only)
+    // precisely so a client cannot redirect a pending revocation.
+    tombstoned = false;
+    if (proof && storagePath) {
+      const ownerUid = proofMediaOwnerUid(storagePath, eventId, id);
+      // Both halves the rule will check, checked here first: the path parses to
+      // a canonical object, and the uid it names is the Proof's own owner (the
+      // rule binds the row to the live Proof document, so a disagreement would
+      // be denied). Every Proof written through `firestore.rules` satisfies
+      // both — the create arm pins `storagePath` and `uid` to the same
+      // `request.auth.uid` — so this only ever declines on a hand-written
+      // document, where declining is the safe direction.
+      if (ownerUid && ownerUid === proof.uid) {
+        tx.set(rawProofStorageDelete(id, eventId), {
+          storagePath,
+          uid: ownerUid,
+          // Operational only — how long a revocation has been pending. It is
+          // deliberately NOT bounded to `request.time` in the rules: a wrong
+          // clock could then deny the write, and a denial here fails the whole
+          // takedown, while a lie about the stamp cannot redirect the delete.
+          requestedAt: Date.now(),
+        });
+        tombstoned = true;
+      }
+    }
+
     tx.delete(proofRef);
   });
 
@@ -614,7 +715,20 @@ export async function deleteProof(
   //
   // It stays AWAITED and its rejection still propagates, so a caller is told the
   // media was not revoked rather than being shown a clean takedown.
-  if (storagePath) await deleteStoragePath(storagePath);
+  //
+  // The tombstone above is what makes that retry a promise rather than a hope:
+  // the rejection still propagates, and the revocation still completes even if
+  // this caller never retries.
+  if (storagePath) {
+    await deleteStoragePath(storagePath);
+    // The object is gone (`deleteStoragePath` swallows only "already gone" and
+    // rethrows every real failure), so the pending revocation has been
+    // discharged and the tombstone is retired. Failures here are swallowed on
+    // purpose: the media IS revoked, so reporting a failed takedown would be a
+    // lie, and the sweeper clears a tombstone this leaves behind — its own
+    // Storage delete finds the object gone, which it counts as success.
+    if (tombstoned) await deleteDoc(rawProofStorageDelete(id, eventId)).catch(() => {});
+  }
 
   // Fire-and-forget, AFTER commit (never inside the retryable transaction
   // callback above — a callback re-run on conflict would fire this on every

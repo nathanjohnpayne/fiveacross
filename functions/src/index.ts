@@ -1,6 +1,6 @@
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { onObjectFinalized, type StorageEvent } from 'firebase-functions/v2/storage';
-import { onDocumentWritten } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
@@ -28,6 +28,7 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
+import { revokeProofMedia } from './proofStorageDeletes';
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -317,6 +318,49 @@ export const moderateProof = VISION_ENABLED
       moderateProofHandler,
     )
   : undefined;
+
+/**
+ * Finish a Proof media revocation the deleting client could not (#134, Codex P1
+ * on PR #1139; specs/post-sailing-archive.md § "Moderation is not a gameplay
+ * write").
+ *
+ * `deleteProof` removes the Proof document and its media as two operations
+ * against two services, Firestore first, and that commit destroys the only
+ * reference to the object. The tombstone this triggers on is written in the SAME
+ * transaction as the Proof delete, so the media's revocation outlives the row
+ * that named it: the client clears the tombstone once the object is provably
+ * gone, and this finishes the job when it never does.
+ *
+ * `retry: true` is load-bearing — `revokeProofMedia` rethrows a real Storage
+ * failure with the tombstone still standing, so the platform redelivers rather
+ * than silently accepting media that is still reachable. "Already gone" counts as
+ * success, which is also the ordinary case: the client's own delete usually wins
+ * the race. NOT gated on the freeze: this IS the takedown, and an archived Event
+ * is exactly where a permanent record most needs one (#808).
+ */
+export const revokeDeletedProofMedia = onDocumentCreated(
+  {
+    document: 'events/{eventId}/proofStorageDeletes/{proofId}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
+  async (event) => {
+    const tombstone = event.data?.data();
+    if (!tombstone) return;
+    const { eventId, proofId } = event.params;
+    await revokeProofMedia(
+      {
+        deleteObject: async (storagePath) => {
+          await getStorage().bucket().file(storagePath).delete();
+        },
+        deleteTombstone: async () => {
+          await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).delete();
+        },
+      },
+      { eventId, proofId, tombstone },
+    );
+  },
+);
 
 /**
  * Queue an admin alert when a Proof/Prompt write earns one (issues #101, #638).
