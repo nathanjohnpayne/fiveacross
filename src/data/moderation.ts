@@ -126,8 +126,21 @@ export interface SafetyHideState {
 /**
  * Does a server-authoritative safety hide currently STAND on this Proof? True iff
  * the server RECORDED one (`safetyHide === true`), or the Proof is still
- * `'flagged'` — the state `moderateProof` writes and `hideProofOnVisionFlag` is
- * about to act on, or failed to act on and will retry on the next write.
+ * `'flagged'`.
+ *
+ * The marker arm is now the one that does the work. Both server-side verdict
+ * writers stamp `safetyHide: true` in the SAME update as an allowlisted
+ * `visionFlag` (`visionVerdictWrite`, functions/src/visionHide.ts), so on any
+ * Proof this deployment flagged the record exists from the first moment the
+ * verdict does, and the `'flagged'` arm is redundant for it.
+ *
+ * The `'flagged'` arm is kept for the interval that stamping closed but cannot
+ * un-write: a Proof flagged by a PRE-#1143 Functions build carries the verdict
+ * and no marker until the hide arm reaches it, and this gate is the only thing
+ * standing between that doc and a Confirm that would publish it. It also covers
+ * a verdict outside the auto-hide allowlist, which is deliberately marker-less
+ * and never auto-hidden (ADR 0004) but is still an unreviewed AI flag that
+ * Confirm should not publish out from under the admin queue.
  *
  * It reads no verdict and holds no allowlist, and that is the whole point (Codex
  * P1 on #133). The verdict strings live in `AUTO_HIDE_VISION_FLAGS`

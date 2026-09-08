@@ -5,7 +5,9 @@
  * writes `{ status: 'flagged', visionFlag }` onto a Proof whose media SafeSearch
  * scored as extreme/illegal — through `writeVisionVerdict` below, which parks the
  * verdict rather than creating a Proof that does not exist yet (#1143; see
- * `PROOF_SCANS_COLLECTION`) — but nothing acts on that flag: the
+ * `PROOF_SCANS_COLLECTION`), and which stamps the safety marker in that same
+ * write when the verdict is one this module hides (see `visionVerdictWrite`) —
+ * but nothing acts on that flag: the
  * shipped report-count auto-hide (`./autohide`) is deliberately ACTIVE-ONLY and
  * leaves a `'flagged'` doc alone, precisely so a report bump can never downgrade
  * the stronger Vision state to a plain `'hidden'` an admin might restore without
@@ -178,6 +180,42 @@ export interface PendingVisionScan {
 export const SAFETY_HIDE_MARKER = 'safetyHide' as const;
 
 /**
+ * The verdict write BOTH producer paths make — `writeVisionVerdict`'s
+ * existing-Proof arm and `applyPendingVisionScan` — and the reason the marker
+ * rides it rather than waiting for the hide (Phase 4b round 3 on #1143).
+ *
+ * The hide is a SECOND write, made by the trigger the flag write itself fires,
+ * and between the two the Proof is `'flagged'` with an extreme verdict and no
+ * marker. `safetyHideStands` (src/data/moderation.ts) holds that Proof on its
+ * `'flagged'` arm — but only in a bundle that HAS that arm. An admin console
+ * cached before this work shipped runs the old unconditional `confirmClaim`
+ * publish, and a Confirm landing in the gap writes `status: 'active'`, after
+ * which the live re-read matches no arm of `visionHideAction` below: not
+ * `'hide'` (no longer `'flagged'`), not `'rehide'` (no marker was ever
+ * stamped), not `'backfill'` (not `'hidden'`). Extreme/illegal media in the
+ * Feed with every server-side path to take it down closed — precisely the
+ * failure the `'rehide'` arm exists to prevent, let in through the one interval
+ * where the record it fires on did not exist yet.
+ *
+ * So the hold is recorded ATOMICALLY with the verdict that earns it. There is
+ * no longer an interval in which the verdict stands and the server's record of
+ * it does not, and a stale-client publish in that same instant now leaves
+ * `'active'` WITH the marker — exactly the state `'rehide'` claims.
+ *
+ * ALLOWLISTED VERDICTS ONLY, and that is the same ADR 0004 line drawn one write
+ * earlier. The marker means "a safety hide stands", and nothing racy ever earns
+ * one: a `racy` or otherwise non-allowlisted verdict is flagged for admins,
+ * marker-less, and hidden by nobody, exactly as before. The producer/consumer
+ * split is intact — the producer still decides what is worth FLAGGING, and
+ * `AUTO_HIDE_VISION_FLAGS`, owned here, still decides what is worth HOLDING.
+ */
+export function visionVerdictWrite(visionFlag: string): Record<string, unknown> {
+  const write: Record<string, unknown> = { status: 'flagged', visionFlag };
+  if (isAutoHideVisionFlag(visionFlag)) write[SAFETY_HIDE_MARKER] = true;
+  return write;
+}
+
+/**
  * The whole decision, as a pure predicate over the doc's RESULTING state: it is
  * currently `'flagged'` AND carries an extreme/illegal `visionFlag`.
  *
@@ -280,6 +318,12 @@ export function visionHideAction(doc: VisionFlaggedDoc | undefined): VisionHideA
 export function visionHideWrite(action: VisionHideAction): Record<string, unknown> {
   switch (action) {
     case 'hide':
+      // The marker is normally ALREADY `true` — `visionVerdictWrite` stamps it
+      // in the same update as the verdict, so the hold never lags the flag by a
+      // write. Re-asserting it here is not redundant belt-and-braces for its own
+      // sake: it is what covers a Proof flagged by a PRE-#1143 producer build,
+      // whose `'flagged'` doc carries the verdict and no marker, so that hide is
+      // still one update rather than a hide plus a backfill.
       return { status: 'hidden', [SAFETY_HIDE_MARKER]: true };
     case 'backfill':
       // The status is ALREADY `'hidden'` — this arm supplies only the missing
@@ -350,11 +394,14 @@ export type VisionVerdictTarget = 'proof' | 'scan';
  *
  * One transaction, two arms, chosen by whether `attachProof` has committed yet:
  *
- *   - the Proof EXISTS → `tx.update` writes `{ status: 'flagged', visionFlag }`
- *     onto it, exactly what the scanner's merge-set used to write. `update`
- *     rather than `set` is the guarantee: a Proof deleted since the upload is
- *     never resurrected as a two-field ghost, the same promise
- *     `hideVisionFlaggedIfQualifies` already makes.
+ *   - the Proof EXISTS → `tx.update` writes `visionVerdictWrite`'s payload onto
+ *     it: the `{ status: 'flagged', visionFlag }` the scanner's merge-set used
+ *     to write, plus the `safetyHide` marker when the verdict is one this module
+ *     hides, so the hold is recorded in the SAME write as the verdict rather
+ *     than a trigger-hop later (see `visionVerdictWrite`). `update` rather than
+ *     `set` is the guarantee: a Proof deleted since the upload is never
+ *     resurrected as a ghost, the same promise `hideVisionFlaggedIfQualifies`
+ *     already makes.
  *   - the Proof is ABSENT → `tx.set` parks the verdict in `proofScans` (above),
  *     and `applyPendingVisionScan` applies it when the Proof arrives.
  *
@@ -383,7 +430,7 @@ export async function writeVisionVerdict(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(proofRef);
     if (snap.exists) {
-      tx.update(proofRef, { status: 'flagged', visionFlag });
+      tx.update(proofRef, visionVerdictWrite(visionFlag));
       return 'proof';
     }
     tx.set(scanRef, { visionFlag, scannedAt: now });
@@ -395,15 +442,16 @@ export async function writeVisionVerdict(
  * The CONSUMER side of the same hand-off: apply a parked verdict to the Proof
  * that has just been created, and consume the record in the same transaction.
  *
- * The write is the producer's own — `{ status: 'flagged', visionFlag }`, the
- * verdict string verbatim — so the Proof reaches exactly the state a scan that
- * had won the race would have left it in, and the hide it now deserves is
- * decided where every other hide is: by `visionHideAction` on the write this
- * makes, which re-fires the trigger and takes the `'flagged'` doc to `'hidden'`
- * with the marker. NO allowlist is consulted here. The producer decides what is
- * worth FLAGGING (and a future producer may flag more); this module decides what
- * is worth HIDING, and the split has to survive the race intact or the race
- * would quietly become a second, laxer policy.
+ * The write is the producer's own — `visionVerdictWrite`, the verdict string
+ * verbatim plus the safety marker the allowlisted ones earn — so the Proof
+ * reaches exactly the state a scan that had won the race would have left it in,
+ * and the hide it now deserves is decided where every other hide is: by
+ * `visionHideAction` on the write this makes, which re-fires the trigger and
+ * takes the `'flagged'` doc to `'hidden'`. No allowlist decides what is FLAGGED
+ * here: the verdict is applied whatever it is. The producer decides what is
+ * worth flagging (and a future producer may flag more); this module decides
+ * what is worth HOLDING and HIDING, and the split has to survive the race
+ * intact or the race would quietly become a second, laxer policy.
  *
  * Exactly-once by construction: the record is deleted in the same transaction
  * that applies it, so no later write can re-flag a Proof whose verdict an admin
@@ -430,7 +478,7 @@ export async function applyPendingVisionScan(
       tx.delete(scanRef); // nothing a producer would have written — drop it
       return false;
     }
-    tx.update(proofRef, { status: 'flagged', visionFlag });
+    tx.update(proofRef, visionVerdictWrite(visionFlag));
     tx.delete(scanRef);
     return true;
   });

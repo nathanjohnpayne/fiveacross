@@ -14,6 +14,7 @@ import {
   qualifiesForVisionHide,
   redeliverPendingVisionScan,
   visionHideAction,
+  visionVerdictWrite,
   hideVisionFlaggedIfQualifies,
   applyVisionFlagHide,
   writeVisionVerdict,
@@ -395,8 +396,14 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
       [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
     });
     expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('proof');
-    expect(updates).toEqual([{ path: PROOF, data: { status: 'flagged', visionFlag: 'violence' } }]);
-    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'violence', reportCount: 0 });
+    // The safety hold rides the SAME update as the verdict (see the atomic-marker
+    // block below): there is no interval in which the flag stands unrecorded.
+    expect(updates).toEqual([
+      { path: PROOF, data: { status: 'flagged', visionFlag: 'violence', safetyHide: true } },
+    ]);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
+    });
     // No hand-off record when there is nothing to hand off to.
     expect(store[SCAN]).toBeUndefined();
     expect(ops.filter((o) => o.op === 'set')).toEqual([]);
@@ -434,11 +441,15 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
       [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
     });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
-    expect(updates).toEqual([{ path: PROOF, data: { status: 'flagged', visionFlag: 'violence' } }]);
-    // Exactly the doc the producer's own write would have left, so the hide is
-    // decided where every hide is decided — and the hand-off is gone, so no later
-    // write can re-flag a Proof an admin has since acted on.
-    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'violence', reportCount: 0 });
+    expect(updates).toEqual([
+      { path: PROOF, data: { status: 'flagged', visionFlag: 'violence', safetyHide: true } },
+    ]);
+    // Exactly the doc the producer's own write would have left, marker included,
+    // so the hide is decided where every hide is decided — and the hand-off is
+    // gone, so no later write can re-flag a Proof an admin has since acted on.
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
+    });
     expect(store[SCAN]).toBeUndefined();
   });
 
@@ -454,7 +465,7 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
       uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
     });
     expect(updates.map((u) => u.data)).toEqual([
-      { status: 'flagged', visionFlag: 'violence' },
+      { status: 'flagged', visionFlag: 'violence', safetyHide: true },
       { status: 'hidden', safetyHide: true },
     ]);
     // And the doc it produces is one the client's confirm-time gate holds.
@@ -468,6 +479,8 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5 } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
+    // …and marker-less, because nothing racy ever earns a safety hold (ADR 0004).
+    expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
 
@@ -509,6 +522,88 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
     expect(updates).toHaveLength(1);
     expect(store[PROOF]).toMatchObject({ status: 'active', visionFlag: null });
+  });
+});
+
+// The safety hold is recorded WITH the verdict, not one trigger-hop later
+// (specs/cloud-vision-moderation.md § "The marker rides the verdict write").
+// Phase 4b run 3: between the flag write and the hide there used to be an
+// interval in which the Proof was 'flagged' with an extreme verdict and no
+// marker, and a cached confirmClaim landing there published it as 'active' into
+// a state no arm of visionHideAction claims.
+
+describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', () => {
+  const PROOF = 'events/e/proofs/p1';
+  const SCAN = 'events/e/proofScans/p1';
+
+  it('stamps the marker for exactly the verdicts this module hides', () => {
+    for (const flag of AUTO_HIDE_VISION_FLAGS) {
+      expect(visionVerdictWrite(flag)).toEqual({ status: 'flagged', visionFlag: flag, safetyHide: true });
+    }
+  });
+
+  it('leaves every other verdict marker-less — nothing racy ever earns a hold (ADR 0004)', () => {
+    for (const flag of ['racy', 'adult', 'spoof', 'medical', 'VIOLENCE', ' violence']) {
+      expect(visionVerdictWrite(flag)).toEqual({ status: 'flagged', visionFlag: flag });
+      expect(visionVerdictWrite(flag)).not.toHaveProperty(SAFETY_HIDE_MARKER);
+    }
+  });
+
+  it('is the write BOTH producer paths make, so neither can drift from the other', async () => {
+    // The scan that won the race, and the scan that lost it and was parked.
+    const direct = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
+    await writeVisionVerdict(direct.db, 'e', 'p1', 'extreme', 5);
+
+    const parked = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5 },
+    });
+    await applyPendingVisionScan(parked.db, 'e', 'p1');
+
+    expect(direct.updates.map((u) => u.data)).toEqual([visionVerdictWrite('extreme')]);
+    expect(parked.updates.map((u) => u.data)).toEqual([visionVerdictWrite('extreme')]);
+  });
+
+  it('does NOT put the marker in the parked record — that is a hand-off, not a Proof', async () => {
+    // The record is consumed by `applyPendingVisionScan`, which stamps on the way
+    // out; a marker in the record itself would be a second place to keep the
+    // allowlist, on a document no arm ever reads for a decision.
+    const { db, store } = fakeDb({});
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('scan');
+    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5 });
+  });
+
+  it('closes the pre-hide window: a stale-client publish now lands in the re-hide arm', async () => {
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    // A console cached before this work publishes the claim's Proof before the
+    // hide trigger has run. WITHOUT the marker that doc matched no arm at all…
+    expect(visionHideAction({ status: 'active', visionFlag: 'violence' })).toBe(null);
+    // …and WITH it the server still holds the media, on the marker alone.
+    store[PROOF] = { ...(store[PROOF] as Record<string, unknown>), status: 'active' };
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe('rehide');
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
+    expect(store[PROOF]).toMatchObject({ status: 'hidden', safetyHide: true, visionFlag: 'violence' });
+  });
+
+  it('holds the flagged Proof on the MARKER, not on the status a stale bundle may not read', async () => {
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    const flagged = store[PROOF] as { status?: string; safetyHide?: boolean };
+    expect(safetyHideStands(flagged)).toBe(true);
+    // …and on the marker ALONE — which is what makes the hold survive a client
+    // whose `safetyHideStands` predates the `'flagged'` arm entirely.
+    expect(safetyHideStands({ safetyHide: flagged.safetyHide })).toBe(true);
+  });
+
+  it('leaves a racy flag exactly as it was — flagged for admins, held by nobody, hidden by nobody', async () => {
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'racy', 5);
+    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'racy' });
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+    // The publish it would allow after a Restore is the pre-existing behaviour:
+    // the `'flagged'` arm still holds it while it sits in the queue.
+    expect(safetyHideStands({ status: 'active', safetyHide: undefined })).toBe(false);
   });
 });
 
@@ -815,7 +910,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
     expect(
       await applyVisionFlagHide('e', 'p1', created, store[PROOF] as VisionFlaggedDoc, deps),
     ).toBe(true);
-    expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'violence' });
+    expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'violence', safetyHide: true });
     expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
 
     // 5. …and the flag write re-fires the trigger, where the hide arm takes over.
@@ -1026,6 +1121,7 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
     expect(safetyHideStands(written)).toBe(true);
   });
 });
+
 
 // firebase-admin lives only in functions/node_modules, so resolve it the way
 // functions/src does — rooted at functions/package.json, through Node's own

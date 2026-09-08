@@ -185,7 +185,13 @@ describe('firestore.rules — the scanner hand-off is server-to-server ONLY (#11
       await assertSucceeds(getDoc(doc(s, SCAN)));
       await assertSucceeds(setDoc(doc(s, at('proofs/pPending')), photoProof('pPending')));
       await assertSucceeds(
-        updateDoc(doc(s, at('proofs/pPending')), { status: 'flagged', visionFlag: 'violence' }),
+        // The exact payload `visionVerdictWrite` produces: the verdict AND the
+        // safety marker, in one update, for an allowlisted verdict (#1143).
+        updateDoc(doc(s, at('proofs/pPending')), {
+          status: 'flagged',
+          visionFlag: 'violence',
+          safetyHide: true,
+        }),
       );
       await assertSucceeds(deleteDoc(doc(s, SCAN)));
     });
