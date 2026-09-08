@@ -442,6 +442,55 @@ describe('ArchiveEvent — the pending-claim drain gate (#1151)', () => {
     );
   });
 
+  it('keeps the explanation on the OPEN controls after its own automatic reopen', async () => {
+    // Codex P2 on PR #1162. Every refusal was classified as describing a CLOSING
+    // Event, but an open-phase archive reopens for all four of them when it
+    // created the quiesce — so the Event ends up OPEN and the message was
+    // discarded twice over: the handler's own reopen moved the phase away from
+    // `closing`, and the phase having moved at all during the action disqualified
+    // the still-where-it-started fallback. The Admin was left looking at reopened
+    // controls with no explanation of why nothing was frozen.
+    let settle: (value: unknown) => void = () => {};
+    H.archiveEvent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    // The subscription delivers what this handler's OWN writes produced: the
+    // quiesce it took…
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    settle('claims-pending');
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event'));
+    // …and then the reopen it performed when the freeze refused.
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'A claim arrived as play was closing, so nothing was frozen. Resolve the Review queue, then archive again.',
+    );
+    // Against the controls the Admin is actually looking at.
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
+
+  it('still clears it when someone ELSE moves the Event after that reopen', async () => {
+    // The reopen settles where the message belongs; it does not exempt it from
+    // the staleness rule. Another Admin archiving afterwards makes "archive
+    // again" false, so it goes.
+    H.archiveEvent.mockResolvedValue('config-changed');
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    await screen.findByRole('status');
+    view.rerender(
+      <ArchiveEvent {...props(mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 }))} />,
+    );
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('leaves a quiesce it only JOINED closed, and says why', async () => {
     // #1142 item 6. `beginArchive` is idempotent, so a call that joined another
     // Admin's in-flight quiesce comes back holding a token that matches
@@ -454,12 +503,19 @@ describe('ArchiveEvent — the pending-claim drain gate (#1151)', () => {
       eventId: 'test-event',
     });
     H.archiveEvent.mockResolvedValue('too-large');
-    renderConsole();
+    const view = renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
     await waitFor(() => expect(H.writes).toEqual(['begin', 'archive']));
     expect(H.abandonArchive).not.toHaveBeenCalled();
     expect(await screen.findByRole('status')).toHaveTextContent(/Play was left closed/);
+    // …and because no reopen was attempted, the explanation is a sentence about
+    // a CLOSING Event and stays with the controls that describe one (Codex P2 on
+    // PR #1162): the quiesce belongs to whoever opened it, and this Admin's way
+    // out is **Reopen play** beside the message.
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 4 }))} />);
+    expect(screen.getByRole('status')).toHaveTextContent(/Play was left closed/);
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
   });
 
   it('leaves the Event shut when the quiesce it read was taken over by another', async () => {
