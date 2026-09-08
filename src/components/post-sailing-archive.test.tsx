@@ -621,6 +621,31 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
   });
 
+  it('offers the same acknowledgement on the CLOSING surface, and archives once it is given', async () => {
+    // Codex P2 on PR #1162. `ready` gates **Freeze the record** exactly as it
+    // gates the confirm row, but the box was rendered only in the confirm row —
+    // a surface an Admin who has already used Close play cannot reach. So the
+    // button was permanently disabled and the only way forward was to reopen
+    // gameplay on an Event they had deliberately shut, purely to tick a box.
+    H.event = preFinale({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: true,
+    });
+  });
+
+  it('asks nothing on the closing surface once the marker is stamped — the control', () => {
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
+  });
+
   it('asks nothing on an Event with no scheduled finale at all', async () => {
     // A legacy Event with no ceremonial Day and no stored freeze never freezes
     // on its own, so gating on one would ask the Admin to wait forever.

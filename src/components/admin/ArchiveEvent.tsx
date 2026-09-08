@@ -167,8 +167,11 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
  *     an Event archived first never receives them and nothing else would say so.
  *     Unlike the three above this is a WARNING rather than a bar: an Admin may
  *     legitimately end an Event that will never reach its finale. So it is an
- *     explicit acknowledgement on the confirm row rather than a silent default,
- *     and `archiveEvent` refuses without it.
+ *     explicit acknowledgement rather than a silent default, and `archiveEvent`
+ *     refuses without it. It is offered on BOTH surfaces that reach the flip —
+ *     the confirm row and the closing state's **Freeze the record** — because
+ *     `ready` gates each of them and an Admin who has already shut the Event
+ *     cannot get back to the other one (Codex P2 on PR #1162).
  */
 export default function ArchiveEvent({
   event,
@@ -294,6 +297,31 @@ export default function ArchiveEvent({
 
   const frozen = event?.archive;
 
+  /**
+   * The pre-finale acknowledgement (#1151), rendered wherever `ready` gates the
+   * flip — the open surface's confirm row AND the closing surface's **Freeze the
+   * record** (Codex P2 on PR #1162).
+   *
+   * It lived only in the confirm row, which is a surface an Admin who has
+   * already used **Close play** cannot reach: on a closing Event `ready` was
+   * therefore false forever, the button was permanently disabled, and the only
+   * way forward was to reopen play, arm the confirm row, tick the box and archive
+   * — reopening gameplay on an Event the Admin had deliberately shut, purely to
+   * satisfy a checkbox. Same control, same copy, same state, so an Admin who ends
+   * up in either place is asked the same question and answers it once.
+   */
+  const finaleAcknowledgement = !finaleDone && (
+    <label className="sub archive-before-finale">
+      <input
+        type="checkbox"
+        checked={beforeFinale}
+        onChange={(e) => setBeforeFinale(e.target.checked)}
+      />{' '}
+      The scheduled standings freeze has not run yet. Archive anyway—the podium, the Most-Loved
+      award and the freeze stamp will never arrive.
+    </label>
+  );
+
   /** The Archive action: both writes, in order, with the cleanup a refusal needs. */
   const runArchive = async () => {
     // The quiesce this handler took, and the Event it took it on (#1142 item 7):
@@ -365,6 +393,7 @@ export default function ArchiveEvent({
               No one can Mark, claim, post a Proof or heart while this holds. Freeze the record to
               finish, or reopen play to put the {editionLexicon().occasion} back the way it was.
             </div>
+            {finaleAcknowledgement}
           </div>
           <AsyncButton
             ariaLabel="Reopen play"
@@ -441,21 +470,12 @@ export default function ArchiveEvent({
                   {draft.skippedRows > 0 &&
                     ` ${draft.skippedRows} unreadable row${draft.skippedRows === 1 ? '' : 's'} will not be included.`}
                 </div>
-                {!finaleDone && (
-                  /* The finale acknowledgement (#1151). The quiesce only DELAYS
-                     the finale beats; the flip forgoes them for good, so the
-                     Admin says so explicitly rather than discovering it after
-                     an irreversible write. */
-                  <label className="sub archive-before-finale">
-                    <input
-                      type="checkbox"
-                      checked={beforeFinale}
-                      onChange={(e) => setBeforeFinale(e.target.checked)}
-                    />{' '}
-                    The scheduled standings freeze has not run yet. Archive anyway—the podium, the
-                    Most-Loved award and the freeze stamp will never arrive.
-                  </label>
-                )}
+                {/* The finale acknowledgement (#1151). The quiesce only DELAYS
+                    the finale beats; the flip forgoes them for good, so the
+                    Admin says so explicitly rather than discovering it after an
+                    irreversible write. Shared with the closing surface, which
+                    reaches the same flip behind the same `ready`. */}
+                {finaleAcknowledgement}
               </div>
               <button
                 type="button"
