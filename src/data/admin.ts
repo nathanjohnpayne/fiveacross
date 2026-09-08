@@ -11,7 +11,7 @@ import { claimsAwaitingAdmin, isSystemAuthor } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
 import { archiveSnapshotFingerprint, draftEventArchive } from './eventArchive';
-import { migrateClaimMode } from './converters';
+import { migrateClaimMode, migrateDayFields } from './converters';
 import { claimsCol, dayMetaRef, playersCol } from './paths';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
@@ -1018,7 +1018,27 @@ export async function archiveEvent(params: { now?: number } = {}): Promise<Archi
         // than by a name an Admin can still edit afterwards (Codex P2, PR
         // #1139).
         name: data.name,
-        days: Array.isArray(data.days) ? data.days : [],
+        // NORMALIZED for the derivations, while the raw document above and
+        // below stays raw (Codex P2, PR #1139). The frozen honour chip's label
+        // comes from `dayHonorChipLabel`, which resolves the Day's theme emoji
+        // out of `THEMES` — and every LIVE surface hands that helper Days that
+        // have already been through `migrateDayFields` / `normalizeEventTheme`
+        // (`eventConverter`), while this writer handed it the stored document.
+        // The two disagree on exactly the Days the freeze has to get right: an
+        // unknown persisted theme renders the Edition's default emoji live and
+        // NO emoji in the record, and an off-Edition theme renders the default
+        // live while the record freezes that other Theme's emoji. Either way
+        // the permanent label is not the one the last live strip showed, which
+        // is the whole promise `dayLabel` was stored to keep. Normalizing here
+        // also puts this writer's Tutorial-Day and freeze-boundary derivations
+        // on the same footing as the console preview's, which reads the
+        // converted document.
+        //
+        // Deliberately NOT applied to `archiveSnapshotFingerprint` (which
+        // compares two RAW reads against each other, so normalizing either side
+        // could only invent or hide a change) or to `existing` below (which is
+        // MEASURED, and what the write lands on is the stored document).
+        days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
         bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
         frozenAt: data.frozenAt,
         standingsFreezeAt: data.standingsFreezeAt,

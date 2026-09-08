@@ -12,6 +12,7 @@ import {
   MAX_ARCHIVED_STANDING_ROWS,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
+import { migrateDayFields } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
 // The write path's seam (#134, Codex P2 on PR #1139). `archiveEvent` is the half
@@ -1070,6 +1071,83 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
 // resolution consists of are denied from the moment gameplay shuts. The remedy
 // is the same one the roster gets — a server read taken AFTER the close, when
 // the collection can no longer change.
+// Codex P2, PR #1139. `dayHonorChipLabel` resolves the Day's theme emoji out of
+// `THEMES`, and every LIVE surface hands it Days that have already been through
+// `migrateDayFields` / `normalizeEventTheme` (the Event converter). The WRITER
+// read the stored document, so on a Day whose persisted theme the Edition does
+// not carry, the live strip and the permanent record disagreed — which is the
+// one thing `dayLabel` was stored to make impossible.
+describe('archiveEvent — the frozen Day label is the one the live strip shows', () => {
+  const rawDay = (theme: string) => ({
+    index: 0,
+    date: '2026-07-15',
+    place: 'Somewhere',
+    placeEmoji: '🏖️',
+    theme,
+    tonight: [],
+    pool: 'main',
+    tutorial: false,
+    unlockAt: 1,
+  });
+  const closingWith = (theme: string) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 'quiesce-1',
+    claimMode: 'honor',
+    days: [rawDay(theme)],
+    bannedUids: [],
+  });
+  /** The label the LIVE honours strip renders, which reads the CONVERTED Days. */
+  const liveLabel = (theme: string) =>
+    dayHonorChipLabel(0, [migrateDayFields(rawDay(theme))]);
+
+  beforeEach(() => {
+    A.claims = [];
+    A.players = [
+      {
+        uid: 'alice',
+        displayName: 'Alice',
+        bingoCount: 1,
+        squaresMarked: 9,
+        firstBingoAt: 500,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 9, firstBingoAt: 500 } },
+      },
+    ];
+    A.updates = [];
+    A.serverReads = [];
+    A.betweenReadsAndTx = null;
+  });
+
+  it('freezes the Edition default emoji for a theme this build does not know', async () => {
+    // The live strip shows the Edition's default emoji, because the converter
+    // resolves an unknown theme to it. The raw read resolved to no theme at all,
+    // so the record froze a bare ordinal.
+    A.event = closingWith('not-a-real-theme');
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe(liveLabel('not-a-real-theme'));
+    expect(honors[0].dayLabel).not.toBe('D1');
+  });
+
+  it('freezes the Edition default for an OFF-EDITION theme, not that Theme’s own emoji', async () => {
+    // A real registered Theme, bound to a different Edition. The picker (and so
+    // the converter) resolves it to this Edition's default, while the raw lookup
+    // finds the other Theme's emoji — a DIFFERENT emoji frozen, permanently.
+    A.event = closingWith('the-birds');
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe(liveLabel('the-birds'));
+  });
+
+  it('freezes an on-Edition theme exactly as it always did — the control', async () => {
+    A.event = closingWith('neon-playground');
+    expect(await archiveEvent({ now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe('🌈 D1');
+    expect(honors[0].dayLabel).toBe(liveLabel('neon-playground'));
+  });
+});
+
 describe('archiveEvent — the drain gate is re-taken from the server after the close', () => {
   const closingEvent = (over: Record<string, unknown> = {}) => ({
     status: 'active',
