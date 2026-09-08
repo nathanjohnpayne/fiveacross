@@ -2220,6 +2220,64 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("runs an IMPORTED target config's predeploy hooks too", async () => {
+    // Barrier round on #1107: `firebase.json` may externalise a target —
+    // `"firestore": "firestore.config.json"` — and the pinned CLI materialises
+    // that file in `Config`'s constructor (`MATERIALIZE_TARGETS`) long before
+    // `lifecycleHooks` reads `options.config.get(target)`. Planning from the
+    // RAW source handed the planner a string, whose `predeploy` is `undefined`,
+    // so the imported hooks were left out of the rehearsal entirely and ran for
+    // real. This one writes through the overlay into the live checkout, which
+    // is fatal — so it also proves the hook actually ran.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        config: { firestore: "firestore.config.json" },
+        files: {
+          "firestore.config.json": JSON.stringify({
+            rules: "firestore.rules",
+            predeploy: ["printf x >> shared/toggle"],
+          }),
+          "firestore.rules": "rules_version = '2';\n",
+          "shared/toggle": "",
+          "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        const failure = await classify(
+          ["--only", "functions:daily,firestore"],
+          configPath,
+        ).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("shared/toggle");
+      },
+    );
+  });
+
+  it("still proves the endpoint when an imported target config carries no hooks", async () => {
+    // The control: materialising the imported file is not itself a reason to
+    // forfeit. Same externalised Firestore target, no `predeploy` in it.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [] },
+        config: { firestore: "firestore.config.json" },
+        files: {
+          "firestore.config.json": JSON.stringify({ rules: "firestore.rules" }),
+          "firestore.rules": "rules_version = '2';\n",
+          "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+        },
+      },
+      async (configPath) => {
+        expect(
+          await classify(["--only", "functions:daily,firestore"], configPath),
+        ).toMatchObject(EXEMPT);
+      },
+    );
+  });
+
   it("answers a git branch lookup the way the deployment will", async () => {
     // A build that selects its exports with `git rev-parse --abbrev-ref HEAD`
     // is an ordinary build. Omitting `.git` from the overlay did not withhold

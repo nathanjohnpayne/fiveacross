@@ -1555,6 +1555,15 @@ function relevantFunctionsConfigs(only, configs) {
  * The configs of a NON-Functions target whose `predeploy` hooks this deploy
  * will run, mirroring the else-branch of `getReleventConfigs`.
  *
+ * `configSource` here is the MATERIALIZED config, not the raw `firebase.json`.
+ * `getReleventConfigs` reads `options.config.get(target)`, and `Config`'s
+ * constructor has already run `MATERIALIZE_TARGETS` over every target it
+ * recognises — so a target given as an import path (`"firestore":
+ * "firestore.config.json"`) is by then the parsed FILE. Reading the raw source
+ * handed this function a string, whose `predeploy` is `undefined`, and the
+ * imported hooks were silently left out of the plan while the deploy ran them
+ * (barrier round on #1107).
+ *
  * `deploy/index.js` chains `lifecycleHooks(<target>, "predeploy")` for EVERY
  * selected target before it chains a single `prepare`, so Functions discovery
  * happens only after the last of them has run. A Firestore hook that replaces
@@ -3061,12 +3070,19 @@ export async function classifyFirebaseDeployRequest(
   // option-looking required value such as `--only --dry-run`: Commander owns
   // `--dry-run` as the --only value, then filterTargets rejects that value as
   // an unknown deploy target before any build can start.
+  // The pinned CLI's own `Config`, built once and used for everything that
+  // reads a target's configuration. Its constructor runs `MATERIALIZE_TARGETS`,
+  // which replaces any target written as an import path with the parsed file;
+  // `cwd` and `configPath` are what `resolveProjectPath` resolves those imports
+  // against, so they name the CONFIGURED project directory rather than whatever
+  // directory this process happens to have been started in.
+  const deployConfig = new Config(configSource, {
+    projectDir: dirname(configPath),
+    cwd: dirname(configPath),
+    configPath: basename(configPath),
+  });
   const deployTargets = filterTargets(
-    {
-      only,
-      except: exceptTargets,
-      config: new Config(configSource, { projectDir: dirname(configPath) }),
-    },
+    { only, except: exceptTargets, config: deployConfig },
     [...VALID_DEPLOY_TARGETS],
   );
   // `deploy/index.js` runs EVERY selected target's predeploy hooks before it
@@ -3076,7 +3092,10 @@ export async function classifyFirebaseDeployRequest(
   // Functions whether or not the request named it.
   if (pinned.functionsReAdded && !deployTargets.includes("functions")) deployTargets.unshift("functions");
   singleEndpointExports.staging.deployTargets = deployTargets;
-  singleEndpointExports.staging.configSource = configSource;
+  // The MATERIALIZED config: hooks are planned from what the CLI's own
+  // `getReleventConfigs` will read, so an externalised target's `predeploy`
+  // reaches the plan instead of being read off a string as `undefined`.
+  singleEndpointExports.staging.configSource = deployConfig.data;
   await checkValidTargetFilters({ only, except: exceptTargets });
   const hostingOptions = {
     config: { src: configSource },
