@@ -22,7 +22,17 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown };
 
-const { activeEvent, txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy, purgeCacheSpy } = vi.hoisted(() => ({
+const {
+  activeEvent,
+  txGet,
+  txSet,
+  txDelete,
+  runTx,
+  uploadSpy,
+  deleteStorageSpy,
+  purgeCacheSpy,
+  deleteDocSpy,
+} = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
   txGet: vi.fn(),
   txSet: vi.fn(),
@@ -31,6 +41,8 @@ const { activeEvent, txGet, txSet, txDelete, runTx, uploadSpy, deleteStorageSpy,
   uploadSpy: vi.fn(),
   deleteStorageSpy: vi.fn(),
   purgeCacheSpy: vi.fn(),
+  // #134: the post-commit retirement of a discharged media-revocation tombstone.
+  deleteDocSpy: vi.fn(),
 }));
 
 vi.mock('../firebase', () => ({
@@ -80,10 +92,11 @@ vi.mock('firebase/firestore', () => {
   runTransaction: (_db: unknown, fn: (tx: unknown) => unknown) => runTx(_db, fn),
   increment: (n: number) => ({ __inc: n }),
   updateDoc: vi.fn(),
+  deleteDoc: (ref: unknown) => deleteDocSpy(ref),
   };
 });
 
-import { attachProof, deleteProof } from './proofs';
+import { attachProof, deleteProof, PROOF_STORAGE_DELETES } from './proofs';
 
 // A dealt board: every non-free Square unmarked, the free center (12) "on".
 function dealt(): Cell[] {
@@ -123,6 +136,8 @@ beforeEach(() => {
     url: `https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2F${EVENT_ID}%2Fu1%2FUPLOADED.jpg?alt=media`,
   });
   purgeCacheSpy.mockResolvedValue(undefined);
+  deleteStorageSpy.mockResolvedValue(undefined);
+  deleteDocSpy.mockResolvedValue(undefined);
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({ get: txGet, set: txSet, delete: txDelete }),
   );
@@ -1058,6 +1073,141 @@ describe('deleteProof — the moderation delete survives the freeze (#134)', () 
     await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow('permission-denied');
 
     expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+});
+
+// #134 (Codex P1 on PR #1139, specs/post-sailing-archive.md § "Moderation is not
+// a gameplay write"): moving the Storage delete AFTER the Firestore commit fixed
+// one failure and opened another. The commit destroys the Proof row, its
+// `storagePath` and the retry control all at once, so a Storage delete that then
+// fails leaves media still reachable through its download URL with nothing left
+// anywhere recording that it was supposed to go. The pending revocation is
+// therefore written in the SAME transaction as the delete, retired only once the
+// object is provably gone, and swept server-side when this client never returns.
+describe('deleteProof — the media revocation outlives the commit that removes its only reference (#134)', () => {
+  const PATH = `proofs/${EVENT_ID}/u1/P.jpg`;
+  const TOMBSTONE = `events/${EVENT_ID}/${PROOF_STORAGE_DELETES}/P`;
+
+  /** A Proof whose backing cell is genuinely marked BY IT (the open-Event shape). */
+  function seedProof(storagePath: string | null = PATH): void {
+    proofState = { uid: 'u1', cellIndex: 5, storagePath };
+    const board = dealt();
+    board[5] = { ...board[5], marked: true, markedAt: 9, proofId: 'P', status: 'confirmed' };
+    boardState = { cells: board };
+    playerState = { firstBingoAt: null };
+  }
+
+  /** The invocation order of the first call whose ref path contains `frag`. */
+  function orderOf(spy: typeof txSet | typeof txDelete, frag: string): number {
+    const index = spy.mock.calls.findIndex((c) => (c[0] as Ref).path.includes(frag));
+    expect(index).toBeGreaterThanOrEqual(0);
+    return spy.mock.invocationCallOrder[index];
+  }
+
+  it('writes the tombstone in the SAME transaction as the Proof delete, before the reference goes', async () => {
+    seedProof();
+
+    await deleteProof('P', PATH);
+
+    // Same transaction: both writes are issued through the transaction handle,
+    // so either both land or neither does — there is no window in which the
+    // Proof is gone and the record of its media is not.
+    const tombstone = txSet.mock.calls.find(
+      (c) => (c[0] as Ref).path === TOMBSTONE,
+    );
+    expect(tombstone).toBeDefined();
+    expect(tombstone![1]).toEqual({ storagePath: PATH, uid: 'u1', requestedAt: 1000 });
+    expect(orderOf(txSet, `/${PROOF_STORAGE_DELETES}/`)).toBeLessThan(
+      orderOf(txDelete, '/proofs/P'),
+    );
+    // …and the Storage revocation is still attempted after the commit.
+    expect(deleteStorageSpy).toHaveBeenCalledWith(PATH);
+    expect(Math.min(...deleteStorageSpy.mock.invocationCallOrder)).toBeGreaterThan(
+      orderOf(txSet, `/${PROOF_STORAGE_DELETES}/`),
+    );
+  });
+
+  it('retires the tombstone once the Storage delete has actually succeeded', async () => {
+    seedProof();
+
+    await deleteProof('P', PATH);
+
+    expect(deleteDocSpy).toHaveBeenCalledTimes(1);
+    expect((deleteDocSpy.mock.calls[0][0] as Ref).path).toBe(TOMBSTONE);
+    // Ordering is the contract: nothing is marked done on the strength of an
+    // attempt, only on a completed revocation.
+    expect(Math.min(...deleteDocSpy.mock.invocationCallOrder)).toBeGreaterThan(
+      Math.max(...deleteStorageSpy.mock.invocationCallOrder),
+    );
+  });
+
+  it('leaves the tombstone standing when the Storage delete rejects — the media is still owed', async () => {
+    seedProof();
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
+
+    await expect(deleteProof('P', PATH)).rejects.toThrow('storage/retry-limit-exceeded');
+
+    // The Proof document is gone and the media is not, which is exactly the
+    // state the tombstone exists to record — so it must survive for the sweeper.
+    expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/proofs/P'))).toBeDefined();
+    expect(deleteDocSpy).not.toHaveBeenCalled();
+  });
+
+  it('writes one on an ARCHIVED Event too — the takedown the freeze leaves open still owes its media', async () => {
+    seedProof();
+    txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path === `events/${EVENT_ID}`) return Promise.resolve({ data: () => ({ status: 'archived' }) });
+      if (ref.path.includes('/boards/')) return Promise.resolve({ data: () => boardState });
+      if (ref.path.includes('/players/')) return Promise.resolve({ data: () => playerState });
+      if (ref.path.includes('/proofs/')) return Promise.resolve({ data: () => proofState });
+      return Promise.resolve({ data: () => undefined });
+    });
+
+    await deleteProof('P', PATH);
+
+    expect(txSet.mock.calls.find((c) => (c[0] as Ref).path === TOMBSTONE)).toBeDefined();
+    // …while the gameplay cleanup the freeze denies is still skipped.
+    expect(setPayload('/boards/')).toBeUndefined();
+  });
+
+  it('writes none for a text Proof — there is no object to revoke', async () => {
+    seedProof(null);
+
+    await deleteProof('P');
+
+    expect(txSet.mock.calls.find((c) => (c[0] as Ref).path === TOMBSTONE)).toBeUndefined();
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+    expect(deleteDocSpy).not.toHaveBeenCalled();
+  });
+
+  it('writes none when the Proof document is already gone — the rule allows a create, never a rewrite', async () => {
+    // A re-run after a committed delete: there is nothing left to record, and a
+    // second `set` on a standing tombstone is an UPDATE, which firestore.rules
+    // denies — and a denial inside this transaction would fail the whole
+    // takedown. The inline revocation is still retried.
+    proofState = undefined;
+
+    await deleteProof('P', PATH);
+
+    expect(txSet.mock.calls.find((c) => (c[0] as Ref).path === TOMBSTONE)).toBeUndefined();
+    expect(deleteStorageSpy).toHaveBeenCalledWith(PATH);
+    expect(deleteDocSpy).not.toHaveBeenCalled();
+  });
+
+  it('writes none for a storagePath the naming convention could not have produced, and still revokes it inline', async () => {
+    // The fail-safe direction. The tombstone's `uid` is derived FROM the path
+    // because that is what firestore.rules pins the path against, so a path the
+    // helper cannot parse would produce a row the rules deny — and a denied
+    // write here takes the whole takedown down with it. It yields no tombstone
+    // instead, leaving the pre-#1139 behaviour exactly as it was.
+    const foreign = `proofs/${EVENT_ID}/u1/SOMEONE-ELSE.jpg`;
+    seedProof(foreign);
+
+    await deleteProof('P', foreign);
+
+    expect(txSet.mock.calls.find((c) => (c[0] as Ref).path === TOMBSTONE)).toBeUndefined();
+    expect(deleteStorageSpy).toHaveBeenCalledWith(foreign);
+    expect(deleteDocSpy).not.toHaveBeenCalled();
   });
 });
 

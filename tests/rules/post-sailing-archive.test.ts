@@ -1089,3 +1089,152 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     );
   });
 });
+
+// #134, Codex P1 on PR #1139 (specs/post-sailing-archive.md § "Moderation is not
+// a gameplay write"). Moving the Storage delete after the Firestore commit fixed
+// one failure and opened another: the commit destroys the Proof row, its
+// `storagePath` and the retry control at once, so a Storage delete that then
+// fails leaves media reachable with nothing recording that it was meant to go.
+// `deleteProof` therefore writes the pending revocation in the SAME transaction
+// as the Proof delete. These are the arms that make that write safe — and, just
+// as importantly, make it POSSIBLE on a frozen Event, since a denial inside that
+// transaction would fail the whole takedown, which is the failure this ticket
+// already fixed once on the Board unmark.
+describe('post-sailing-archive — the pending media-revocation tombstone is admin/owner-only and shape-pinned', () => {
+  const tombstonePath = (proofId = PROOF, eventId = EVENT) =>
+    `events/${eventId}/proofStorageDeletes/${proofId}`;
+  const TOMBSTONE = () => ({ storagePath: photoPath, uid: ALICE, requestedAt: NOW() });
+
+  /** Seed one out-of-band, for the arms that need an existing document. */
+  async function seedTombstone(): Promise<void> {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), tombstonePath()), TOMBSTONE());
+    });
+  }
+
+  it('ALLOWS an admin to record a pending revocation for the object the Proof named', async () => {
+    await assertSucceeds(setDoc(doc(db(ADMIN), tombstonePath()), TOMBSTONE()));
+  });
+
+  it('ALLOWS the admin takedown to delete the Proof and record its media IN ONE COMMIT on an ARCHIVED Event', async () => {
+    // The shape `deleteProof` actually writes, on the Event where it matters
+    // most. Both halves must be allowed together: one denial rejects the whole
+    // transaction, and a permanent record still needs a takedown path (#808).
+    await freeze();
+    const adminDb = db(ADMIN);
+    const batch = writeBatch(adminDb);
+    batch.set(doc(adminDb, tombstonePath()), TOMBSTONE());
+    batch.delete(doc(adminDb, `${eventPath()}/proofs/${PROOF}`));
+    await assertSucceeds(batch.commit());
+  });
+
+  it('ALLOWS the media’s OWNER to record one while the Event is open, and DENIES it once frozen', async () => {
+    // The Proof delete arm’s own predicate, restated: exactly the callers who
+    // could delete the Proof this accompanies. An owner cannot delete their own
+    // Proof out of a frozen record, so they cannot tombstone its media either.
+    await assertSucceeds(setDoc(doc(db(ALICE), tombstonePath()), TOMBSTONE()));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), tombstonePath()));
+    });
+    await freeze();
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath()), TOMBSTONE()));
+  });
+
+  it('DENIES a signed-in stranger, and an unauthenticated writer', async () => {
+    await assertFails(setDoc(doc(db(BOB), tombstonePath()), TOMBSTONE()));
+    await assertFails(setDoc(doc(unauthDb(), tombstonePath()), TOMBSTONE()));
+  });
+
+  it('DENIES SQUATTING another Player’s Proof id, which would make the takedown un-runnable', async () => {
+    // Without the binding to the live Proof, BOB could pre-create the row at
+    // ALICE's Proof id — naming an object under his OWN uid, which the path pin
+    // accepts on its own — and `deleteProof`'s `set` would then be an UPDATE
+    // against a squatted row. `update` is denied, and a denial inside that
+    // transaction fails the whole takedown, so one Player could make every media
+    // Proof in the Event permanently un-deletable.
+    await assertFails(
+      setDoc(doc(db(BOB), tombstonePath()), {
+        storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg`,
+        uid: BOB,
+        requestedAt: NOW(),
+      }),
+    );
+    // …and no row may be minted for a Proof that does not exist at all, which is
+    // the same squat aimed one step earlier.
+    await assertFails(
+      setDoc(doc(db(ALICE), tombstonePath('never-existed')), {
+        storagePath: `proofs/${EVENT}/${ALICE}/never-existed.jpg`,
+        uid: ALICE,
+        requestedAt: NOW(),
+      }),
+    );
+    // The admin is bound by the same binding — the row must name the Proof's
+    // real owner, not merely a well-formed path.
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), {
+        storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg`,
+        uid: BOB,
+        requestedAt: NOW(),
+      }),
+    );
+  });
+
+  it('DENIES an extra field, a missing field, and a wrong type', async () => {
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), attempts: 0 }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { storagePath: photoPath, uid: ALICE }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), uid: 7 }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), requestedAt: 'now' }),
+    );
+  });
+
+  it('DENIES a path naming another Player, another Proof, another Event or another prefix', async () => {
+    // The whole point of the durable row is that it authorizes a delete later,
+    // so the object it names is pinned by equality to THIS Event, THIS document's
+    // Proof id and the uid the row itself declares.
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg` }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), storagePath: `proofs/${EVENT}/${ALICE}/other.jpg` }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), storagePath: `proofs/${LEGACY_EVENT}/${ALICE}/${PROOF}.jpg` }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), tombstonePath()), { ...TOMBSTONE(), storagePath: `avatars/${ALICE}.jpg` }),
+    );
+  });
+
+  it('DENIES every client READ and every UPDATE, the admin’s included', async () => {
+    await seedTombstone();
+    await assertFails(getDoc(doc(db(ADMIN), tombstonePath())));
+    await assertFails(getDoc(doc(db(ALICE), tombstonePath())));
+    // Update is denied outright rather than shape-checked, so a pending
+    // revocation can never be re-pointed at another object after the fact.
+    await assertFails(updateDoc(doc(db(ADMIN), tombstonePath()), { requestedAt: NOW() }));
+    await assertFails(
+      updateDoc(doc(db(ALICE), tombstonePath()), { storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg` }),
+    );
+  });
+
+  it('ALLOWS the admin and the named owner to retire a discharged revocation, and DENIES a stranger', async () => {
+    await seedTombstone();
+    await assertFails(deleteDoc(doc(db(BOB), tombstonePath())));
+    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await seedTombstone();
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), tombstonePath())));
+  });
+
+  it('leaves the retirement OPEN on a frozen Event — a tombstone that could not be cleared would be swept forever', async () => {
+    await seedTombstone();
+    await freeze();
+    await assertSucceeds(deleteDoc(doc(db(ALICE), tombstonePath())));
+  });
+});
