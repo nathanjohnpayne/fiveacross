@@ -56,7 +56,7 @@ The Proof & Claims panel's "Pending claims" count-plus-jump-link row (`#admin-pe
 
 ### Game settings (`/more/admin/settings`)
 
-`src/components/admin/GameSettings.tsx`—Easy mix (below), then Claims & proof (claim mode / photo source / EXIF strip / AI image screen / auto-hide stepper—every caption and write path per `d15-admin-proof-claims`), then Appearance › default theme (the old Default-theme section verbatim).
+`src/components/admin/GameSettings.tsx`—Easy mix (below), then Claims & proof (claim mode / photo source / EXIF strip / AI image screen / auto-hide stepper—every caption and write path per `d15-admin-proof-claims`), then Appearance › default theme (the old Default-theme section verbatim), then **Archive the {occasion}** (#134/#1149, [`post-sailing-archive`](post-sailing-archive.md))—the admin-only action that ends the Event. It sits LAST and inside this surface rather than behind a seventh hub door: it is a once-per-Event switch, not a place anyone visits, and giving it its own card would put the console's most destructive control at the same level as the prompt pool. Three actions—**Close play** (the reversible quiesce), **Reopen play** and **Archive** (one-way)—and it retires itself once the Event is archived.
 
 ### Easy mix slider
 
