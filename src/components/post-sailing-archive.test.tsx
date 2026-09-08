@@ -60,7 +60,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   H.event = mkEvent();
   H.writes = [];
-  H.beginArchive.mockResolvedValue({ result: 'closing', token: 'quiesce-1', created: true });
+  H.beginArchive.mockResolvedValue({ result: 'closing', token: 1, created: true });
   H.abandonArchive.mockResolvedValue('reopened');
   H.archiveEvent.mockResolvedValue('archived');
 });
@@ -85,7 +85,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
   });
 
   it('offers Reopen play on a CLOSING Event, and no second Close play', () => {
-    H.event = mkEvent({ archiving: true, archiveToken: 'quiesce-1' });
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Close play' })).not.toBeInTheDocument();
@@ -95,7 +95,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     // A deliberate act on the Event in front of the Admin, not an automatic
     // cleanup of a call that already failed — the token binding exists to stop a
     // STALE handler, and there is no stale handler at this button.
-    H.event = mkEvent({ archiving: true, archiveToken: 'quiesce-1' });
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
     await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
@@ -111,7 +111,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
     // The subscription delivers the closing state this Admin produced: still true.
-    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 1 })} />);
     expect(screen.getByRole('status')).toHaveTextContent(/Play is closed/);
     // Another Admin archives it: "Reopen play to put it back" is now false.
     view.rerender(
@@ -126,14 +126,14 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     // effect runs before any result exists. Reporting against the render the
     // click happened in would leave `from: 'open'`, and a later reopen would
     // then match it and keep "Play is closed" beside the open controls.
-    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    let settle: (value: { result: 'closing'; token: number; created: boolean }) => void = () => {};
     H.beginArchive.mockImplementationOnce(
       () => new Promise((resolve) => { settle = resolve; }),
     );
     const view = renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
-    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
-    settle({ result: 'closing', token: 'quiesce-1', created: false });
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 1 })} />);
+    settle({ result: 'closing', token: 1, created: false });
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
     view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
@@ -144,22 +144,22 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     // it and reopens, and only then does beginArchive() settle: the Event is
     // back where the action started, but equality with the starting phase is
     // not evidence the message is true — the phase moved during the action.
-    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    let settle: (value: { result: 'closing'; token: number; created: boolean }) => void = () => {};
     H.beginArchive.mockImplementationOnce(
       () => new Promise((resolve) => { settle = resolve; }),
     );
     const view = renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
-    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 1 })} />);
     view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
-    settle({ result: 'closing', token: 'quiesce-1', created: true });
+    settle({ result: 'closing', token: 1, created: true });
     await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
   });
 
   it('shows nothing when the Event has moved somewhere the outcome does not describe', async () => {
-    let settle: (value: { result: 'closing'; token: string; created: boolean }) => void = () => {};
+    let settle: (value: { result: 'closing'; token: number; created: boolean }) => void = () => {};
     H.beginArchive.mockImplementationOnce(
       () => new Promise((resolve) => { settle = resolve; }),
     );
@@ -169,7 +169,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     view.rerender(
       <ArchiveEvent event={mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 })} />,
     );
-    settle({ result: 'closing', token: 'quiesce-1', created: true });
+    settle({ result: 'closing', token: 1, created: true });
     await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
@@ -178,7 +178,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
     const view = renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
     await screen.findByRole('status');
-    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 'quiesce-1' })} />);
+    view.rerender(<ArchiveEvent event={mkEvent({ archiving: true, archiveToken: 1 })} />);
     expect(screen.getByRole('status')).toHaveTextContent(/Play is closed/);
     view.rerender(<ArchiveEvent event={mkEvent({ archiving: false })} />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
@@ -206,7 +206,7 @@ describe('ArchiveEvent — the two lifecycle actions (#1149)', () => {
 describe('ArchiveEvent — the irreversible flip is not reachable from the console (#1157)', () => {
   it.each([
     ['live', mkEvent()],
-    ['closing', mkEvent({ archiving: true, archiveToken: 'quiesce-1' })],
+    ['closing', mkEvent({ archiving: true, archiveToken: 1 })],
     ['archived', mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 })],
   ])('offers no Archive control on a %s Event', (_state, event) => {
     H.event = event;
@@ -219,7 +219,7 @@ describe('ArchiveEvent — the irreversible flip is not reachable from the conso
     await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
     await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
 
-    H.event = mkEvent({ archiving: true, archiveToken: 'quiesce-1' });
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     await userEvent.click(screen.getAllByRole('button', { name: 'Reopen play' })[0]!);
     await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));

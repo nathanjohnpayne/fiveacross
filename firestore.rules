@@ -138,13 +138,29 @@ service cloud.firestore {
     // the flip closed here, never open a hole.
     // ONE validity predicate for the generation, shared by the shut, the
     // binding and the repair (Codex P2 on PR #1157, round 8), and the same one
-    // the client's `usableArchiveToken` applies: a string with something in it
-    // besides whitespace. `!= ''` alone let a stale writer shut the Event under
-    // `'   '`, which the client then treated as unusable and tried to replace,
-    // and the repair arm — reading the same value as usable — refused the
-    // replacement, so Close play failed until an Admin reopened by hand.
+    // the client's `usableArchiveToken` applies: a POSITIVE INTEGER.
+    //
+    // The generation is a MONOTONIC COUNTER, not an opaque id (Phase 4b P1 on
+    // PR #1157, run 4). An opaque token compared only against the value the
+    // document still carries proved nothing about freshness: close and reopen
+    // under A, close and reopen under B, and a delayed shut carrying A passes
+    // again because A != B — after which an outstanding `archiveEvent(A)`, or a
+    // direct flip restating `archivedUnder: A`, archives a closing state it was
+    // never taken against. A number that must strictly INCREASE on every shut
+    // cannot come back: once generation N is stored, every generation below it
+    // is dead for the life of the Event, so a replayed one is refused by
+    // arithmetic rather than by an inequality that only sees one step back.
     function usableArchiveToken(value) {
-      return value is string && value.trim() != '';
+      return value is int && value > 0;
+    }
+    // The stored generation as a NUMBER the shut and the repair can order
+    // against, and 0 for a document carrying none this build can read (absent,
+    // or a string left by a build that predates the counter). Read as `is
+    // number` rather than `is int` deliberately: a hand-written float is not a
+    // usable generation, but the next one still has to EXCEED it, or the
+    // repair would hand back a counter that had already been passed.
+    function storedGeneration(stored) {
+      return stored.get('archiveToken', 0) is number ? stored.get('archiveToken', 0) : 0;
     }
     // The binding is a FLIP-ONLY field, `archivedUnder`, that the flip must
     // write and that must equal the stored generation (Phase 4b P1 on PR #1157,
@@ -155,10 +171,10 @@ service cloud.firestore {
     // the document does not carry until the flip cannot be inherited, and once
     // written it is locked with the rest of the record.
     function boundToStoredQuiesce(stored, incoming) {
-      return usableArchiveToken(stored.get('archiveToken', ''))
+      return usableArchiveToken(stored.get('archiveToken', 0))
         && !('archivedUnder' in stored)
-        && incoming.get('archivedUnder', '') is string
-        && incoming.get('archivedUnder', '') == stored.get('archiveToken', '');
+        && incoming.get('archivedUnder', 0) is int
+        && incoming.get('archivedUnder', 0) == stored.get('archiveToken', 0);
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
@@ -1362,24 +1378,36 @@ service cloud.firestore {
       // under the OLD generation, and a stale `archiveEvent(A)` — one whose
       // record was read before the reopen — then passed `boundToStoredQuiesce`
       // and could commit standings from before gameplay resumed. Every
-      // false-to-true transition must therefore install a FRESH, non-empty
-      // token, different from whatever the document still carries, and may
-      // touch nothing else: the general arm ABOVE accepts `archiving` only as
-      // `false`, so this is the only way a live Event is ever shut. It sits
-      // AFTER that arm on purpose — the Event arm is at Firestore's
-      // 1000-expression cap, and an `allow` placed ahead of it is paid for by
-      // every ordinary admin write; placed here it is reached only by a write
-      // the general arm has already refused at its cheap `archiving` check. Reopening
-      // (true to false) stays on the general arm, where the token is left as
-      // it was so a conditional `abandonArchive(expectedToken)` can still tell
-      // its own generation from a newer one.
+      // false-to-true transition must therefore install a generation that has
+      // never been in force, and may touch nothing else: the general arm ABOVE
+      // accepts `archiving` only as `false`, so this is the only way a live
+      // Event is ever shut. It sits AFTER that arm on purpose — the Event arm
+      // is at Firestore's 1000-expression cap, and an `allow` placed ahead of
+      // it is paid for by every ordinary admin write; placed here it is reached
+      // only by a write the general arm has already refused at its cheap
+      // `archiving` check. Reopening (true to false) stays on the general arm,
+      // where the token is left as it was so a conditional
+      // `abandonArchive(expectedToken)` can still tell its own generation from
+      // a newer one.
+      //
+      // STRICTLY INCREASING, not merely different (Phase 4b P1 on PR #1157, run
+      // 4). `!=` compared the new generation against ONE stored value — the
+      // immediately preceding one — which says nothing about whether the
+      // generation was ever in force before that. Shut under 1, reopen, shut
+      // under 2, reopen, and a delayed shut carrying 1 passed (1 != 2), putting
+      // a dead generation back in force: an outstanding `archiveEvent(1)`, or a
+      // direct write restating `archivedUnder: 1`, then archived a closing
+      // state neither was taken against. `>` is what makes a used generation
+      // unusable FOREVER rather than for one step, without the rules having to
+      // remember anything: the stored counter is the high-water mark, and the
+      // document itself carries it.
       allow update: if resource != null
         && resource.data.get('archiving', false) != true
         && resource.data.get('status', 'active') != 'archived'
         && isAdmin(eventId)
         && request.resource.data.get('archiving', false) == true
-        && usableArchiveToken(request.resource.data.get('archiveToken', ''))
-        && request.resource.data.get('archiveToken', '') != resource.data.get('archiveToken', '')
+        && usableArchiveToken(request.resource.data.get('archiveToken', 0))
+        && request.resource.data.get('archiveToken', 0) > storedGeneration(resource.data)
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['archiving', 'archiveToken']);
       // THE REOPEN, on its own arm. True to false, touching nothing else, from
@@ -1452,20 +1480,24 @@ service cloud.firestore {
              .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder']);
       // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
       // Event carrying NO usable generation — a document shut out of band, or
-      // by a build that predates the token — cannot be flipped (the flip is
-      // bound to a stored token) and, with the token immutable on the general
-      // arm, could not be given one either. `beginArchive` mints a fresh
-      // generation when it finds that state; this arm admits exactly that
-      // write and nothing else: from the quiescing state, by an admin, when
-      // the stored token is absent or empty, installing a non-empty one, and
-      // touching nothing else. A closing Event that already HAS a usable token
-      // never matches — its generation is settled until play reopens.
+      // by a build that predates the counter — cannot be flipped (the flip is
+      // bound to a stored generation) and, with the token immutable on the
+      // general arm, could not be given one either. `beginArchive` mints a
+      // generation when it finds that state; this arm admits exactly that write
+      // and nothing else: from the quiescing state, by an admin, when the
+      // stored generation is absent, non-integer or not positive, installing a
+      // positive integer that still EXCEEDS whatever number the document
+      // carries (Phase 4b P1 on PR #1157, run 4 — a repair that reset the
+      // counter would hand a dead generation back), and touching nothing else.
+      // A closing Event that already HAS a usable generation never matches —
+      // its generation is settled until play reopens.
       allow update: if resource != null
         && resource.data.get('archiving', false) == true
         && resource.data.get('status', 'active') != 'archived'
-        && !usableArchiveToken(resource.data.get('archiveToken', ''))
+        && !usableArchiveToken(resource.data.get('archiveToken', 0))
         && isAdmin(eventId)
-        && usableArchiveToken(request.resource.data.get('archiveToken', ''))
+        && usableArchiveToken(request.resource.data.get('archiveToken', 0))
+        && request.resource.data.get('archiveToken', 0) > storedGeneration(resource.data)
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['archiveToken']);
       // The DELETE of the Event document is the ONE admin write the freeze

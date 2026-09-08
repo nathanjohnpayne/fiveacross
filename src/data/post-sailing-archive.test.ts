@@ -90,7 +90,7 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
   const closingEvent = (over: Record<string, unknown> = {}) => ({
     status: 'active',
     archiving: true,
-    archiveToken: 'quiesce-1',
+    archiveToken: 1,
     claimMode: 'honor',
     days: [],
     bannedUids: [],
@@ -103,14 +103,13 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     A.beforeTx = null;
   });
 
-  it('mints a generation id when it shuts the Event, and reports it back as CREATED', async () => {
+  it('mints generation 1 when it shuts an Event that has never closed, and reports it as CREATED', async () => {
     A.event = { status: 'active', days: [], bannedUids: [] };
     const opened = await beginArchive();
     expect(opened.result).toBe('closing');
     expect(A.updates).toHaveLength(1);
     expect(A.updates[0].archiving).toBe(true);
-    expect(typeof A.updates[0].archiveToken).toBe('string');
-    expect(A.updates[0].archiveToken as string).not.toBe('');
+    expect(A.updates[0].archiveToken).toBe(1);
     // Reported to the caller, because the caller is what has to clean up after
     // a refused freeze — and a cleanup that cannot name the closing state it is
     // lifting can lift somebody else's (Codex P2, PR #1139).
@@ -119,39 +118,66 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     expect(opened.created).toBe(true);
   });
 
+  it('mints STORED + 1 on an Event that has closed before, inside the transaction', async () => {
+    // Phase 4b P1, PR #1157 run 4. The rules require every shut to install a
+    // generation strictly ABOVE the stored one, so the client has to read the
+    // stored value to know what to write — and it reads it inside the
+    // transaction that writes, which is what serializes two Admins closing at
+    // once: the loser re-runs against the winner's value rather than writing
+    // the same counter twice.
+    A.event = { status: 'active', archiving: false, archiveToken: 7, days: [], bannedUids: [] };
+    const opened = await beginArchive();
+    expect(A.updates).toEqual([{ archiving: true, archiveToken: 8 }]);
+    expect(opened).toEqual({ result: 'closing', token: 8, created: true });
+  });
+
   it('keeps the generation id when the Event is already closing, and reports it as JOINED', async () => {
     // The call is idempotent and takes no new snapshot, so re-minting here
     // would abort an in-flight freeze that is still perfectly valid.
     const opened = await beginArchive();
     expect(opened.result).toBe('closing');
-    expect(opened.token).toBe('quiesce-1');
-    expect(A.updates[0].archiveToken).toBe('quiesce-1');
+    expect(opened.token).toBe(1);
+    expect(A.updates[0].archiveToken).toBe(1);
     // #1142 item 6: the token MATCHES, so a conditional reopen keyed on it alone
     // would happily clear a quiesce this call never took. `created` is the half
     // that stops it.
     expect(opened.created).toBe(false);
   });
 
-  it('mints a fresh id for a closing state that carries none, and OWNS it', async () => {
-    // The shape a pre-token build leaves behind: unidentified, so it gets an
-    // identity rather than being bound to by guesswork. Minting one opens a new
-    // generation, which is a create rather than a join.
+  it('mints a generation for a closing state that carries none, and OWNS it', async () => {
+    // The shape a build older than the counter leaves behind: unidentified, so
+    // it gets an identity rather than being bound to by guesswork. Minting one
+    // opens a new generation, which is a create rather than a join.
     A.event = closingEvent({ archiveToken: undefined });
     const opened = await beginArchive();
     expect(opened.result).toBe('closing');
-    expect(typeof A.updates[0].archiveToken).toBe('string');
-    expect(A.updates[0].archiveToken).not.toBe('');
+    expect(A.updates[0].archiveToken).toBe(1);
     expect(opened.created).toBe(true);
   });
 
-  it('mints a NEW id for the next quiesce after an abandon', async () => {
+  it('steps PAST a stored value the counter cannot use, rather than restarting under it', async () => {
+    // A legacy string, and a hand-written fraction. Neither is a generation the
+    // rules can bind a flip to, so both are replaced — but the replacement must
+    // still exceed the NUMBER the rules read there, or the repair would hand
+    // back generations that had already been passed (Phase 4b P1, run 4).
+    A.event = closingEvent({ archiveToken: 'quiesce-1' });
+    expect((await beginArchive()).token).toBe(1);
+    A.updates = [];
+    A.event = closingEvent({ archiveToken: 5.5 });
+    expect((await beginArchive()).token).toBe(6);
+  });
+
+  it('mints a HIGHER generation for the next quiesce after an abandon', async () => {
     // The whole point of the ABA case: the generation after a reopen must not
-    // be mistakable for the one before it.
+    // be mistakable for the one before it — and, since the rules can only
+    // compare against the one value the document carries, it must be above it
+    // rather than merely different.
     expect(await abandonArchive()).toBe('reopened');
     A.event = closingEvent({ archiving: false });
     const reshut = await beginArchive();
     expect(reshut.created).toBe(true);
-    expect(A.updates[1].archiveToken).not.toBe('quiesce-1');
+    expect(reshut.token).toBe(2);
+    expect(A.updates[1].archiveToken).toBe(2);
   });
 
   it('reports already-archived, and writes nothing, once the freeze has landed', async () => {
@@ -166,12 +192,12 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     A.event = undefined;
     expect(await beginArchive()).toEqual({ result: 'no-event', token: null, created: false });
     expect(await abandonArchive()).toBe('no-event');
-    expect(await archiveEvent('quiesce-1')).toBe('no-event');
+    expect(await archiveEvent(1)).toBe('no-event');
     expect(A.updates).toEqual([]);
   });
 
   it('flips, and binds the record to the generation it took, when the quiesce holds', async () => {
-    expect(await archiveEvent('quiesce-1', { now: 5 })).toBe('archived');
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
     expect(A.updates).toEqual([
       {
         status: 'archived',
@@ -180,7 +206,7 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
         // Restated so the RULES can hold the same binding at the boundary.
         // Writing the value it already has keeps the field out of
         // `affectedKeys()`, so the arm's `hasOnly` guard is unaffected.
-        archivedUnder: 'quiesce-1',
+        archivedUnder: 1,
       },
     ]);
   });
@@ -190,17 +216,33 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     // second archive begun. A's transaction sees `archiving: true` either way —
     // only the generation distinguishes them.
     A.beforeTx = () => {
-      A.event = closingEvent({ archiveToken: 'quiesce-2' });
+      A.event = closingEvent({ archiveToken: 2 });
     };
-    expect(await archiveEvent('quiesce-1', { now: 5 })).toBe('quiesce-changed');
+    expect(await archiveEvent(1, { now: 5 })).toBe('quiesce-changed');
     expect(A.updates).toEqual([]);
   });
 
-  it('refuses a token it cannot bind to, before opening a transaction at all', async () => {
-    // Blank or missing: not a generation this build can distinguish from
-    // another, and the rules refuse the flip from an unidentified quiesce
-    // besides — so it is refused here rather than attempted on a shut Event.
-    for (const bad of ['', '   ']) {
+  it('refuses a DELAYED flip carrying a generation two quiesces old', async () => {
+    // Phase 4b P1, PR #1157 run 4, the client half of the replay the counter
+    // ends. Play was shut as 1, reopened, shut as 2, reopened and shut as 3 —
+    // and the caller that took 1 is still holding it. Under an opaque token the
+    // rules could only see that 1 was not 3; here the transaction sees that the
+    // generation in force is not the one it was handed, and writes nothing.
+    A.event = closingEvent({ archiveToken: 3 });
+    expect(await archiveEvent(1, { now: 5 })).toBe('quiesce-changed');
+    expect(A.updates).toEqual([]);
+    // The one actually in force still flips, so the refusal is about the
+    // binding rather than about the delay.
+    expect(await archiveEvent(3, { now: 5 })).toBe('archived');
+  });
+
+  it('refuses a generation it cannot bind to, before opening a transaction at all', async () => {
+    // Not a positive integer: not a generation this build can order against,
+    // and the rules refuse the flip from an unidentified quiesce besides — so
+    // it is refused here rather than attempted on a shut Event. The string is
+    // the value an Event shut by a build older than the counter carries, which
+    // no type annotation stops arriving at runtime.
+    for (const bad of [0, -1, 1.5, Number.NaN, 'quiesce-1' as unknown as number]) {
       expect(await archiveEvent(bad, { now: 5 })).toBe('quiesce-changed');
     }
     expect(A.updates).toEqual([]);
@@ -212,21 +254,21 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     A.beforeTx = () => {
       A.event = closingEvent({ archiving: false });
     };
-    expect(await archiveEvent('quiesce-1', { now: 5 })).toBe('not-closing');
+    expect(await archiveEvent(1, { now: 5 })).toBe('not-closing');
     expect(A.updates).toEqual([]);
   });
 
   it('reports already-archived rather than re-stamping a freeze that already landed', async () => {
     // A double tap, or a second Admin's tap. The rules refuse the rewrite
     // besides; this is the client half of the same one-way property.
-    A.event = { status: 'archived', archivedAt: 5, archiving: false, archiveToken: 'quiesce-1' };
-    expect(await archiveEvent('quiesce-1', { now: 9 })).toBe('already-archived');
+    A.event = { status: 'archived', archivedAt: 5, archiving: false, archiveToken: 1 };
+    expect(await archiveEvent(1, { now: 9 })).toBe('already-archived');
     expect(A.updates).toEqual([]);
   });
 
   it('never flips an Event that was never shut', async () => {
     A.event = { status: 'active', days: [], bannedUids: [] };
-    expect(await archiveEvent('quiesce-1', { now: 5 })).toBe('not-closing');
+    expect(await archiveEvent(1, { now: 5 })).toBe('not-closing');
     expect(A.updates).toEqual([]);
   });
 
@@ -237,15 +279,15 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
   // their in-flight freeze, which is exactly what `quiesce-changed` refuses to
   // do one step earlier in the same handler.
   it('reopens only the quiesce it was asked to lift', async () => {
-    expect(await abandonArchive('quiesce-1')).toBe('reopened');
+    expect(await abandonArchive(1)).toBe('reopened');
     expect(A.updates).toEqual([{ archiving: false }]);
   });
 
   it('LEAVES a superseded quiesce alone, and writes nothing', async () => {
     // The Event was shut again by somebody else between the failed freeze and
     // this cleanup. Their closing state is theirs.
-    A.event = closingEvent({ archiveToken: 'quiesce-2' });
-    expect(await abandonArchive('quiesce-1')).toBe('quiesce-changed');
+    A.event = closingEvent({ archiveToken: 2 });
+    expect(await abandonArchive(1)).toBe('quiesce-changed');
     expect(A.updates).toEqual([]);
   });
 
@@ -257,14 +299,14 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     expect(await abandonArchive()).toBe('reopened');
     A.event = closingEvent({ archiving: false });
     const reshut = await beginArchive();
-    A.event = closingEvent({ archiveToken: reshut.token as string });
-    expect(await abandonArchive('quiesce-1')).toBe('quiesce-changed');
+    A.event = closingEvent({ archiveToken: reshut.token as number });
+    expect(await abandonArchive(1)).toBe('quiesce-changed');
   });
 
   it('stays unconditional when no generation is named', async () => {
     // The console's own Reopen play button: a deliberate act on the Event in
     // front of the Admin, not a cleanup of a call that already failed.
-    A.event = closingEvent({ archiveToken: 'quiesce-2' });
+    A.event = closingEvent({ archiveToken: 2 });
     expect(await abandonArchive()).toBe('reopened');
     expect(A.updates).toEqual([{ archiving: false }]);
   });

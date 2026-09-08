@@ -208,15 +208,16 @@ beforeEach(async () => {
   });
 });
 
-/** The generation id `beginArchive` mints per quiesce (#1139): `archiving: true`
+/** The generation `beginArchive` mints per quiesce (#1139): `archiving: true`
  *  says the Event is shut, never WHICH shut, and the flip is bound to the one
- *  the caller took. */
-const QUIESCE = 'quiesce-1';
+ *  the caller took. A MONOTONIC positive integer since Phase 4b P1 on PR #1157
+ *  run 4 — see "REFUSES a generation that was already in force" below. */
+const QUIESCE = 1;
 
 /** Shut the Event out-of-band into the archive's QUIESCING phase — gameplay
  *  denied, nothing permanent — so the paired gameplay cases can prove the
  *  closing half of the freeze denies exactly what the archived half does. */
-async function quiesce(token: string = QUIESCE): Promise<void> {
+async function quiesce(token: number = QUIESCE): Promise<void> {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: token });
   });
@@ -325,32 +326,72 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     // freeze that failed halfway (or an Admin who changed their mind) must not
     // leave a live Event permanently unplayable.
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }),
     );
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
   });
 
-  // Codex P1, PR #1157 round 6. `abandonArchive` leaves the token in place when
-  // it reopens, so a write that merely set `archiving: true` again re-shut the
-  // Event under the OLD generation — and a stale `archiveEvent(A)` whose record
+  // Codex P1, PR #1157 round 6. `abandonArchive` leaves the generation in place
+  // when it reopens, so a write that merely set `archiving: true` again re-shut
+  // the Event under the OLD one — and a stale `archiveEvent(A)` whose record
   // predates the reopen then passed `boundToStoredQuiesce`. Every shut now has
-  // to mint a fresh generation, and nothing but the shut arm can shut.
-  it('REQUIRES a fresh generation on every shut — the old token cannot be reused', async () => {
+  // to install a generation ABOVE the stored one, and nothing but the shut arm
+  // can shut.
+  it('REQUIRES a strictly greater generation on every shut', async () => {
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: '' }));
-    await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+    // Neither a non-positive value nor a fraction nor a string is a generation
+    // the rules can order against, so none of them may shut the Event — and the
+    // string is the shape a build older than the counter would have written.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 0 }));
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1.5 }),
     );
-    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
-    // Reopened, token still 'quiesce-1' on the document: re-shutting under it
-    // is exactly the replay the arm exists to refuse.
     await assertFails(
       updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
     );
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    // Reopened, generation still 1 on the document: re-shutting under it is
+    // exactly the replay the arm exists to refuse.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }));
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 2 }),
     );
+  });
+
+  // Phase 4b P1, PR #1157 run 4. THE REPLAY A MERE INEQUALITY MISSED. An opaque
+  // generation compared only against the value the document STILL CARRIES
+  // proves nothing about freshness: the rules can see one step back and no
+  // further. Shut under A, reopen, shut under B, reopen — and a delayed SDK
+  // shut carrying A was accepted again, because A is merely different from B.
+  // That put a dead generation back in force, after which an outstanding
+  // `archiveEvent(A)`, or a direct flip naming `archivedUnder: A`, archived a
+  // closing state neither was ever taken against. A counter that must INCREASE
+  // cannot come back: the stored value is the high-water mark, so every
+  // generation at or below it is dead for the life of the Event.
+  it('REFUSES a generation that was already in force two quiesces ago', async () => {
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 2 }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    // The delayed shut, carrying the generation from two quiesces ago. Under
+    // `!=` this PASSED: the document carries 2, and 1 is simply not 2.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }));
+    // Only a generation above the high-water mark shuts the Event…
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 3 }),
+    );
+    // …and the flip is bound to THAT one, so the freeze an old caller is still
+    // holding cannot land on it.
+    await assertFails(flip(ADMIN, { archivedUnder: 1 }));
+    await assertSucceeds(flip(ADMIN, { archivedUnder: 3 }));
   });
 
   // Codex P2, PR #1157 round 7. With the shut minting a fresh generation, the
@@ -361,41 +402,62 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
   // Event, where it is inert but the next shut must differ from it — with one
   // narrow exception: a closing state carrying no usable token may be given one.
   it('KEEPS the generation immutable while closing, and lets an unidentified quiesce be repaired', async () => {
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-9' }));
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 9 }));
     await quiesce();
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-9' }));
-    await assertFails(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-9' }),
-    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 9 }));
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 9 }));
     // The repair: shut out of band with no generation at all.
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await updateDoc(doc(ctx.firestore(), eventPath()), { archiveToken: deleteField() });
     });
-    await assertFails(updateDoc(doc(db(ALICE), eventPath()), { archiveToken: 'quiesce-2' }));
+    await assertFails(updateDoc(doc(db(ALICE), eventPath()), { archiveToken: 2 }));
     await assertFails(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-2', bannedUids: [BOB] }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 2, bannedUids: [BOB] }),
     );
-    // `beginArchive`'s own shape for that state: the flag restated, the token minted.
+    // `beginArchive`'s own shape for that state: the flag restated, the
+    // generation minted.
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 2 }),
     );
     // …and settled again from then on.
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 'quiesce-3' }));
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiveToken: 3 }));
   });
 
-  it('treats a WHITESPACE token as no token at all — shut, binding and repair agree', async () => {
-    // Codex P2, PR #1157 round 8. `!= ''` accepted '   ' on the shut while the
-    // client's usableArchiveToken trims, so the client minted a replacement
-    // that the repair arm (reading '   ' as usable) refused. One predicate now.
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: '   ' }));
+  it('treats a NON-COUNTER generation as none at all — shut, binding and repair agree', async () => {
+    // Codex P2, PR #1157 round 8, restated for the counter (Phase 4b P1, run
+    // 4). ONE usability predicate serves the shut, the binding and the repair,
+    // so a value one arm reads as usable can never be a value another replaces:
+    // that disagreement left Close play failing until an Admin reopened by
+    // hand. A legacy STRING is the shape an Event shut by a build older than
+    // the counter carries, and it is unusable in exactly the same way.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+    );
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
-      await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: '   ' });
+      await updateDoc(doc(ctx.firestore(), eventPath()), {
+        archiving: true,
+        archiveToken: 'quiesce-1',
+      });
     });
-    // The flip is not bound to whitespace…
-    await assertFails(flip(ADMIN, { archivedUnder: '   ' }));
-    // …and the repair treats it as absent, so the client's replacement lands.
+    // The flip is not bound to a value the counter cannot order…
+    await assertFails(flip(ADMIN, { archivedUnder: 'quiesce-1' }));
+    // …and the repair reads it as absent, so the client's replacement lands.
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }),
+    );
+  });
+
+  it('REFUSES a repair that would hand a superseded number back', async () => {
+    // Phase 4b P1, PR #1157 run 4. An unusable generation still pins the floor
+    // when it is a NUMBER: a repair that reset the counter to 1 beneath a
+    // stored 5.5 would put every generation up to 5 back in play, which is the
+    // replay the counter exists to end.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { archiving: true, archiveToken: 5.5 });
+    });
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 1 }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 6 }),
     );
   });
 
@@ -403,7 +465,7 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     await assertFails(
       updateDoc(doc(db(ADMIN), eventPath()), {
         archiving: true,
-        archiveToken: 'quiesce-1',
+        archiveToken: 1,
         bannedUids: [BOB],
       }),
     );
@@ -412,7 +474,7 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
         name: 'Born shut',
         admins: [ADMIN],
         archiving: true,
-        archiveToken: 'quiesce-1',
+        archiveToken: 1,
       }),
     );
   });
@@ -531,7 +593,7 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     );
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 2 }),
     );
     await assertFails(
       updateDoc(doc(db(ADMIN), eventPath()), {
@@ -541,19 +603,19 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
       }),
     );
     await assertFails(flip(ADMIN, { archivedUnder: QUIESCE }));
-    await assertSucceeds(flip(ADMIN, { archivedUnder: 'quiesce-2' }));
+    await assertSucceeds(flip(ADMIN, { archivedUnder: 2 }));
     // Locked with the record from here.
-    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedUnder: 'quiesce-3' }));
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedUnder: 3 }));
   });
 
   it('DENIES an archive write bound to a superseded quiesce', async () => {
-    await quiesce();
+    await quiesce(2);
     // The caller opened under an earlier generation; play has been reopened and
     // shut again since.
-    await assertFails(flip(ADMIN, { archivedUnder: 'quiesce-0' }));
+    await assertFails(flip(ADMIN, { archivedUnder: QUIESCE }));
     // The generation actually in force is accepted — so the denial above is
     // about the binding, not about carrying the field at all.
-    await assertSucceeds(flip(ADMIN, { archivedUnder: QUIESCE }));
+    await assertSucceeds(flip(ADMIN, { archivedUnder: 2 }));
   });
 
   it('DENIES the flip from a closing state that carries no generation at all', async () => {

@@ -795,7 +795,7 @@ export type BeginArchiveResult = 'closing' | 'already-archived' | 'no-event';
  */
 export type BeginArchiveOutcome = {
   result: BeginArchiveResult;
-  token: string | null;
+  token: number | null;
   created: boolean;
 };
 
@@ -824,29 +824,43 @@ export type ArchiveEventResult =
   | 'quiesce-changed';
 
 /**
- * A usable quiesce generation id — the shape `beginArchive` mints and the shape
- * `archiveEvent` will bind a flip to. A missing, blank or non-string token is
- * not one this build can bind to, so it is refused rather than treated as a
- * wildcard: an unidentified closing state is exactly the state the binding
- * exists to distinguish from another.
+ * A usable quiesce generation — the shape `beginArchive` mints and the shape
+ * `archiveEvent` will bind a flip to, mirroring `usableArchiveToken` in
+ * `firestore.rules` exactly: a POSITIVE INTEGER. A missing, non-numeric,
+ * fractional or non-positive value is not one this build can bind to, so it is
+ * refused rather than treated as a wildcard: an unidentified closing state is
+ * exactly the state the binding exists to distinguish from another.
  */
-function usableArchiveToken(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+function usableArchiveToken(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
 /**
- * A fresh quiesce generation id. `crypto.randomUUID` where it exists, called
- * THROUGH its receiver (the `newDraftId` discipline in `src/data/eventDraft.ts`
- * — it is a Web IDL method that throws when extracted), with a time+random
- * fallback for environments without it. Uniqueness only has to hold against
- * the ONE token this Event currently stores, so the fallback is ample.
+ * The NEXT generation for an Event whose stored one is `stored` — the counter
+ * `beginArchive` installs when it shuts a live Event (Phase 4b P1 on PR #1157,
+ * run 4).
+ *
+ * A COUNTER rather than a fresh opaque id, because the rules can only compare
+ * against the ONE value the document still carries: "different from the stored
+ * token" let generation 1 come back into force after 2 had superseded it (shut
+ * 1, reopen, shut 2, reopen, shut 1 again — 1 != 2, so it passed), and an
+ * `archiveEvent(1)` still in flight could then archive a closing state it was
+ * never taken against. `firestore.rules` requires every shut to install a
+ * number STRICTLY GREATER than the stored one, so a superseded generation is
+ * dead permanently rather than for one step, and this is the client half of the
+ * same arithmetic.
+ *
+ * It reads the stored value rather than trusting a type: a document written by
+ * a build that predates the counter carries a STRING there, and a hand edit
+ * could carry anything, so anything not already a usable counter restarts at 1
+ * — which the repair arm accepts precisely because it exceeds the 0 the rules
+ * read such a document as. A stored FRACTION is floored and stepped past, so
+ * the number written still exceeds the number the rules will compare it with.
  */
-function newArchiveToken(): string {
-  const c: unknown = globalThis.crypto;
-  if (c && typeof (c as { randomUUID?: unknown }).randomUUID === 'function') {
-    return (c as { randomUUID: () => string }).randomUUID();
-  }
-  return `qz-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+function nextArchiveGeneration(stored: unknown): number {
+  return typeof stored === 'number' && Number.isFinite(stored) && stored >= 1
+    ? Math.floor(stored) + 1
+    : 1;
 }
 
 /**
@@ -913,11 +927,19 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
       tx.update(eventRef, { archiving: true, archiveToken: stored });
       return { result: 'closing', token: stored, created: false };
     }
-    // A closing Event carrying no USABLE token is not a join — there is no
+    // A closing Event carrying no USABLE generation is not a join — there is no
     // quiesce this build could have bound to, and the rules refuse the flip
     // from an unidentified one — so minting here opens a new generation and
     // this call owns it.
-    const token = newArchiveToken();
+    //
+    // MINTED FROM THE STORED VALUE, INSIDE THIS TRANSACTION, because the
+    // generation must strictly exceed the one on the document (Phase 4b P1 on
+    // PR #1157, run 4). The transaction is what makes `stored + 1` safe against
+    // two Admins closing at once: both read the same document, so the loser
+    // re-runs against the winner's value instead of writing the same counter
+    // twice. A random id needed no read and bought no freshness — the rules
+    // could only tell it apart from the ONE token still stored.
+    const token = nextArchiveGeneration(stored);
     tx.update(eventRef, { archiving: true, archiveToken: token });
     return { result: 'closing', token, created: true };
   });
@@ -967,7 +989,7 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
  * `beginArchive` minted (it only preserves a token while the Event is still
  * closing), and the stale caller's comparison fails.
  */
-export async function abandonArchive(expectedToken?: string): Promise<AbandonArchiveResult> {
+export async function abandonArchive(expectedToken?: number): Promise<AbandonArchiveResult> {
   const eventRef = evt();
   return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
     const snap = await tx.get(eventRef);
@@ -1031,15 +1053,15 @@ export async function abandonArchive(expectedToken?: string): Promise<AbandonArc
  * freeze denies both — with no way to reopen from the console.
  */
 export async function archiveEvent(
-  token: string,
+  token: number,
   params: { now?: number } = {},
 ): Promise<ArchiveEventResult> {
   const eventRef = evt();
   // Refused before the transaction opens rather than compared inside it: a
-  // blank or missing token is not a generation this build can bind to, so there
-  // is nothing for the stored value to agree WITH — and the rules refuse the
-  // flip from an unidentified quiesce besides. `beginArchive` mints one, so
-  // reopening and archiving again is the way through.
+  // missing, non-integer or non-positive generation is not one this build can
+  // bind to, so there is nothing for the stored value to agree WITH — and the
+  // rules refuse the flip from an unidentified quiesce besides. `beginArchive`
+  // mints one, so reopening and archiving again is the way through.
   if (!usableArchiveToken(token)) return 'quiesce-changed';
   return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
     const snap = await tx.get(eventRef);

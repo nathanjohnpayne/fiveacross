@@ -358,7 +358,7 @@ export interface EventDoc {
    */
   archivedAt?: number;
   /** The generation the flip was bound to — written by the flip alone, locked with the record (#1157). */
-  archivedUnder?: string;
+  archivedUnder?: number;
   /**
    * The QUIESCING phase of the archive (#134, specs/post-sailing-archive.md §
    * "The quiesce protocol"). The Admin's FIRST archive write sets this; the
@@ -378,26 +378,33 @@ export interface EventDoc {
    */
   archiving?: boolean;
   /**
-   * WHICH quiesce this is (#134, Codex P1 on PR #1139): an opaque id minted by
-   * `beginArchive` beside `archiving`, and unchanged for as long as that one
-   * closing state holds.
+   * WHICH quiesce this is (#134, Codex P1 on PR #1139): a MONOTONIC GENERATION
+   * COUNTER — a positive integer — minted by `beginArchive` beside `archiving`,
+   * and unchanged for as long as that one closing state holds.
    *
    * `archiving: true` says the Event is shut; it cannot say WHICH shut. The
    * archive's second write is decided against one closing state and then
    * commits against whatever the transaction finds — so an Event reopened and
    * shut AGAIN underneath a slow caller (an Admin reopening play, gameplay
    * resuming, a second archive beginning) presents an `archiving: true`
-   * indistinguishable from the first. Comparing the token the caller opened
-   * against with the one the transaction sees is what tells the two generations
-   * apart, and `firestore.rules` requires the flip write to restate it.
+   * indistinguishable from the first. Comparing the generation the caller
+   * opened against with the one the transaction sees is what tells the two
+   * apart, and `firestore.rules` requires the flip write to name it in
+   * `archivedUnder`.
    *
-   * A fresh id per quiesce, so an ABA sequence never collides; preserved when
-   * `beginArchive` is called on an Event that is already closing, because that
-   * call is idempotent and joins the quiesce already in force. REVERSIBLE and
-   * inert exactly as `archiving` is — the freeze is carried by `status`, which
-   * is write-once — and absent on every Event that has never been mid-archive.
+   * A COUNTER rather than an opaque id (Phase 4b P1 on PR #1157, run 4): the
+   * rules can only see the ONE value the document still carries, so "different
+   * from the stored one" let a generation come back into force after a second
+   * quiesce had replaced it (1, then 2, then 1 again). Every shut must instead
+   * install a number STRICTLY GREATER than the stored one, which makes each
+   * generation dead the moment it is superseded, permanently, with the
+   * document's own field as the high-water mark. Preserved when `beginArchive`
+   * is called on an Event that is already closing, because that call is
+   * idempotent and joins the quiesce already in force. REVERSIBLE and inert
+   * exactly as `archiving` is — the freeze is carried by `status`, which is
+   * write-once — and absent on every Event that has never been mid-archive.
    */
-  archiveToken?: string;
+  archiveToken?: number;
   // Presentational, event-scoped hide/mute of a Player's content (ADR 0004
   // Phase 0) — NOT hard access revocation. An admin-maintained roster of banned
   // uids kept on the (already admin-writable) event doc; a follow-up (#108) will
