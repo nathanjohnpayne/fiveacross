@@ -1015,6 +1015,38 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/days/0/meta/0`)));
   });
 
+  it("keeps the admin Proof DELETE open while denying the Board unmark it used to carry", async () => {
+    // The shape `deleteProof` used to write in ONE transaction: remove the Proof
+    // document, unmark the Board cell it backed, rewrite the owner's stats, drop
+    // their Tally marker. The delete is moderation and stays open; the Board and
+    // Player writes are gameplay `eventOpenForPlay` denies — for an ADMIN as
+    // much as anyone, since the freeze binds the organiser too. One transaction,
+    // so those two denials took the delete down with them and the advertised
+    // takedown failed on exactly the Event whose record can never be rewritten.
+    // The client now skips the cleanup; these are the denials that make that the
+    // only workable shape. (The marker delete is admin-open — moderation, like
+    // the Proof delete — but it is skipped WITH the unmark it mirrors: dropping
+    // the public attribution while the Board still carries the Mark would put
+    // the two halves of one Mark out of step, permanently.)
+    await freeze();
+    await assertFails(
+      setDoc(
+        doc(db(ADMIN), `${eventPath()}/days/0/boards/${ALICE}`),
+        { cells: cells() },
+        { merge: true },
+      ),
+    );
+    await assertFails(
+      setDoc(
+        doc(db(ADMIN), `${eventPath()}/players/${ALICE}`),
+        { squaresMarked: 0, bingoCount: 0 },
+        { merge: true },
+      ),
+    );
+    // …and the delete the moderation path actually needs still lands.
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), `${eventPath()}/proofs/${PROOF}`)));
+  });
+
   it('leaves an Event document that carries no status key OPEN', async () => {
     // Every Event written before this ticket has no `status` key at all (and
     // both live Events carry 'active'). A missing status that read as archived
