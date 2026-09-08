@@ -133,15 +133,18 @@ function membershipMarkPreviewRules(source: string): string {
   preview = replaceExactlyOnce(
     preview,
     'players create/update',
+    // Anchored on the arm's OPENING lines only, so the clauses each ticket adds
+    // after them (#134's `eventOpenForPlay` freeze, and whatever follows) ride
+    // through the preview untouched instead of having to be restated here.
     `      match /players/{uid} {
         allow read: if signedIn();
         allow create, update: if (isOwner(uid) || isAdmin(eventId))
-          && reshuffleCounterMonotonic();`,
+`,
     `      match /players/{uid} {
         allow read: if signedIn();
         allow create, update: if admitted(eventId)
           && (isOwner(uid) || isAdmin(eventId))
-          && reshuffleCounterMonotonic();`,
+`,
   );
   preview = replaceExactlyOnce(
     preview,
@@ -149,12 +152,12 @@ function membershipMarkPreviewRules(source: string): string {
     `        match /boards/{uid} {
           allow read: if isOwner(uid) || isAdmin(eventId);
           allow create, update: if (isOwner(uid) || isAdmin(eventId))
-            && isCanonicalDay(dayIndex)`,
+`,
     `        match /boards/{uid} {
           allow read: if isOwner(uid) || isAdmin(eventId);
           allow create, update: if admitted(eventId)
             && (isOwner(uid) || isAdmin(eventId))
-            && isCanonicalDay(dayIndex)`,
+`,
   );
   preview = replaceExactlyOnce(
     preview,
@@ -181,11 +184,11 @@ function membershipMarkPreviewRules(source: string): string {
   preview = replaceExactlyOnce(
     preview,
     'nested tally markers delete',
-    `          // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if isOwner(markerUid) || isAdmin(eventId);`,
-    `          // Unmarking removes exactly that Player's entry; admins can moderate.
-          allow delete: if admitted(eventId)
-            && (isOwner(markerUid) || isAdmin(eventId));`,
+    `          allow delete: if isAdmin(eventId)
+            || (isOwner(markerUid) && eventOpenForPlay(eventId));`,
+    `          allow delete: if admitted(eventId)
+            && (isAdmin(eventId)
+                || (isOwner(markerUid) && eventOpenForPlay(eventId)));`,
   );
   preview = replaceExactlyOnce(
     preview,
