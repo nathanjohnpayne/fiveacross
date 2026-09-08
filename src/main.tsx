@@ -21,7 +21,8 @@ import { enforceBuildFloor } from './shellRecovery';
 import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
-import { drainProofMediaRevocations } from './data/proofMediaRevocations';
+import { drainProofMediaRevocationsOnSignIn } from './data/proofMediaRevocations';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from './firebase';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
@@ -310,10 +311,10 @@ if (atCentralAuthOrigin) {
       // failure that only re-queues what it read. Fire-and-forget, and the
       // drain itself never rejects, so this cannot delay or fail a mount.
       if (resolution.kind === 'event') {
-        void auth
-          .authStateReady()
-          .then(() => (auth.currentUser ? drainProofMediaRevocations() : undefined))
-          .catch(() => undefined);
+        // On every signed-in transition, the restored one included — a
+        // one-shot behind `authStateReady()` skipped a Player who started
+        // signed out and signed in afterwards (Codex P2 on PR #1157, round 7).
+        drainProofMediaRevocationsOnSignIn((listener) => onAuthStateChanged(auth, listener));
       }
       // An Event can resolve on an origin the AUTH stack has never been
       // configured for — hostname resolution is exactly what made that possible

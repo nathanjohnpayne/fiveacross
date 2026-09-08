@@ -126,3 +126,21 @@ export async function drainProofMediaRevocations(eventId: string = EVENT_ID): Pr
     readQueue(eventId).filter((path) => !cleared.includes(path)),
   );
 }
+
+/**
+ * Drain on EVERY signed-in transition, not only the restored one (Codex P2 on
+ * PR #1157, round 7). A one-shot drain behind `authStateReady()` skipped the
+ * queue when the app started signed out, and nothing ran it again after the
+ * Player signed in through the ordinary screen — so an orphan queued on this
+ * device could outlive any number of reopenings. The subscription is injected
+ * so the wiring is testable without Firebase Auth: `main.tsx` passes
+ * `onAuthStateChanged`, which also fires once with the restored state.
+ */
+export function drainProofMediaRevocationsOnSignIn(
+  subscribe: (listener: (user: unknown) => void) => () => void,
+  drain: () => Promise<void> = drainProofMediaRevocations,
+): () => void {
+  return subscribe((user) => {
+    if (user) void drain().catch(() => undefined);
+  });
+}

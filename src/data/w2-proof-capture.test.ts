@@ -1276,6 +1276,26 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
     expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/OLD.jpg`]);
   });
 
+  it('drains on EVERY signed-in transition, not only the restored one', async () => {
+    // Codex P2, PR #1157 round 7. The app-start drain is a subscription, so a
+    // Player who started signed out and signed in later still drains.
+    const { drainProofMediaRevocationsOnSignIn } = await import('./proofMediaRevocations');
+    const drain = vi.fn(async () => undefined);
+    let listener: (user: unknown) => void = () => {};
+    const unsubscribe = vi.fn();
+    const stop = drainProofMediaRevocationsOnSignIn((l) => {
+      listener = l;
+      return unsubscribe;
+    }, drain);
+    listener(null); // restored state: signed out
+    expect(drain).not.toHaveBeenCalled();
+    listener({ uid: 'u1' }); // the later sign-in
+    listener({ uid: 'u1' }); // and every one after it
+    expect(drain).toHaveBeenCalledTimes(2);
+    stop();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('completes the delete when localStorage is CORRUPTED or unavailable', async () => {
     // Private mode, blocked site data and a quota failure all throw, and a
     // hand-edited value parses to nothing. None of them may break a takedown.
