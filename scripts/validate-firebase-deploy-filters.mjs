@@ -810,6 +810,39 @@ async function stageProjectOverlay({
 }
 
 /**
+ * The byte that separates a fingerprint entry's KIND from its path.
+ *
+ * NUL is the only byte a POSIX path cannot contain, so a key built from it
+ * cannot be produced by any filename, however the file is named.
+ */
+const FINGERPRINT_KEY_SEPARATOR = "\u0000";
+
+/**
+ * One fingerprint entry's key: what is being recorded, and about which path.
+ *
+ * `kind` is one of `path` (the entry's own `lstat`), `self` (a watched
+ * directory's own `lstat`, as distinct from its children's), `entries` (a
+ * directory's sorted entry names), `root-entries` (the same for the project
+ * root) and `target` (what a symlink reaches).
+ */
+function fingerprintKey(kind, path) {
+  return `${kind}${FINGERPRINT_KEY_SEPARATOR}${path}`;
+}
+
+/** A fingerprint key as the drift diagnostics name it — the path always first. */
+function describeFingerprintKey(key) {
+  const at = key.indexOf(FINGERPRINT_KEY_SEPARATOR);
+  if (at === -1) return key;
+  const kind = key.slice(0, at);
+  const path = key.slice(at + 1);
+  if (kind === "self") return `${path} (self)`;
+  if (kind === "entries") return `${path} (entries)`;
+  if (kind === "root-entries") return `${path} (root entries)`;
+  if (kind === "target") return `${path} -> target`;
+  return path;
+}
+
+/**
  * A signature of everything reachable through the overlay's symlinks, so that a
  * write into the live checkout can be DETECTED even though it cannot be
  * prevented.
@@ -852,6 +885,19 @@ async function stageProjectOverlay({
  * every route by which a hook changes the inputs the deploy reads, and a hook
  * written to fool the guard is a change to this repository's own hooks, which
  * review catches where classification cannot.
+ *
+ * KEYS ARE STRUCTURED, NOT SENTENCES. Every entry is keyed by
+ * `fingerprintKey(kind, path)` rather than by a filesystem-looking string such
+ * as `<dir> (self)` (barrier round on #1107). Those synthetic keys shared one
+ * namespace with the real paths beside them, so a repository that happens to
+ * contain a file literally named `functions (self)` produced the SAME key as
+ * the `functions` directory's own signature — and because the copied root files
+ * are recorded after the directory walks, the real file's entry overwrote the
+ * directory's, hiding a `chmod` on the watched directory from both snapshots.
+ * `fingerprintKey` separates the two with a NUL, the one byte a POSIX path
+ * cannot contain, so no file can be named into another entry's key.
+ * `describeFingerprintKey` renders the pair back into the sentence
+ * `firstLiveTreeDrift` reports, so the diagnostics still name the path.
  */
 async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEntryDirs = []) {
   /** @type {Map<string, string>} */
@@ -879,11 +925,11 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     try {
       target = await stat(path, { bigint: true });
       fingerprint.set(
-        `${path} -> target`,
+        fingerprintKey("target", path),
         `${target.mode} ${target.ino} ${target.size} ${target.mtimeNs} ${target.ctimeNs}`,
       );
     } catch (error) {
-      fingerprint.set(`${path} -> target`, `absent ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey("target", path), `absent ${error?.code ?? "?"}`);
     }
     if (target?.isDirectory()) {
       const resolved = await realpath(path);
@@ -919,19 +965,19 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
       return `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`;
     };
     try {
-      fingerprint.set(dir, await signature(dir));
+      fingerprint.set(fingerprintKey("path", dir), await signature(dir));
       const names = (await readdir(dir)).sort();
-      fingerprint.set(`${dir} (entries)`, names.join("\n"));
+      fingerprint.set(fingerprintKey("entries", dir), names.join("\n"));
       for (const name of names) {
         const path = join(dir, name);
         try {
-          fingerprint.set(path, await signature(path));
+          fingerprint.set(fingerprintKey("path", path), await signature(path));
         } catch (error) {
-          fingerprint.set(path, `absent ${error?.code ?? "?"}`);
+          fingerprint.set(fingerprintKey("path", path), `absent ${error?.code ?? "?"}`);
         }
       }
     } catch (error) {
-      fingerprint.set(dir, `unreadable ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey("path", dir), `unreadable ${error?.code ?? "?"}`);
     }
   };
   const walk = async (dir) => {
@@ -950,11 +996,11 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     try {
       const own = await lstat(dir, { bigint: true });
       fingerprint.set(
-        `${dir} (self)`,
+        fingerprintKey("self", dir),
         `${own.mode} ${own.ino} ${own.size} ${own.mtimeNs} ${own.ctimeNs}`,
       );
     } catch (error) {
-      fingerprint.set(`${dir} (self)`, `absent ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey("self", dir), `absent ${error?.code ?? "?"}`);
     }
     let entries;
     try {
@@ -962,7 +1008,7 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     } catch (error) {
       // An unreadable directory is recorded AS unreadable: becoming readable
       // (or not) between the two walks is itself a change worth refusing on.
-      fingerprint.set(dir, `unreadable ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey("path", dir), `unreadable ${error?.code ?? "?"}`);
       return;
     }
     for (const entry of entries) {
@@ -975,11 +1021,11 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
       try {
         stats = await lstat(path, { bigint: true });
       } catch (error) {
-        fingerprint.set(path, `absent ${error?.code ?? "?"}`);
+        fingerprint.set(fingerprintKey("path", path), `absent ${error?.code ?? "?"}`);
         continue;
       }
       fingerprint.set(
-        path,
+        fingerprintKey("path", path),
         `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
       );
       // Dirents report the entry's OWN type, so `isDirectory()` below never
@@ -1017,12 +1063,12 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
   // second run and never for this one. Names only: the entries themselves
   // are fingerprinted by the walks and the file list.
   for (const dir of new Set([projectDir, ...liveEntryDirs])) {
-    const label = dir === projectDir ? "root entries" : "entries";
+    const kind = dir === projectDir ? "root-entries" : "entries";
     try {
       const names = await readdir(dir);
-      fingerprint.set(`${dir} (${label})`, names.sort().join("\n"));
+      fingerprint.set(fingerprintKey(kind, dir), names.sort().join("\n"));
     } catch (error) {
-      fingerprint.set(`${dir} (${label})`, `unreadable ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey(kind, dir), `unreadable ${error?.code ?? "?"}`);
     }
   }
   for (const dir of liveDirs) {
@@ -1039,11 +1085,11 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     try {
       stats = await lstat(file, { bigint: true });
       fingerprint.set(
-        file,
+        fingerprintKey("path", file),
         `${stats.mode} ${stats.ino} ${stats.size} ${stats.mtimeNs} ${stats.ctimeNs}`,
       );
     } catch (error) {
-      fingerprint.set(file, `absent ${error?.code ?? "?"}`);
+      fingerprint.set(fingerprintKey("path", file), `absent ${error?.code ?? "?"}`);
     }
     if (stats?.isSymbolicLink()) await recordLinkTarget(file);
   }
@@ -1145,14 +1191,21 @@ export async function gitAnswerFingerprint(projectDir) {
   return answers.join("\n");
 }
 
-/** The first path whose live-tree signature moved, or null. */
+/**
+ * The first path whose live-tree signature moved, or null.
+ *
+ * Reported through `describeFingerprintKey`, so a structured key comes back as
+ * the sentence a human can act on — the path first, then what about it moved.
+ */
 function firstLiveTreeDrift(before, after) {
-  for (const [path, signature] of after) {
-    const previous = before.get(path);
-    if (previous === undefined) return `${path} was created`;
-    if (previous !== signature) return `${path} was modified`;
+  for (const [key, signature] of after) {
+    const previous = before.get(key);
+    if (previous === undefined) return `${describeFingerprintKey(key)} was created`;
+    if (previous !== signature) return `${describeFingerprintKey(key)} was modified`;
   }
-  for (const path of before.keys()) if (!after.has(path)) return `${path} was removed`;
+  for (const key of before.keys()) {
+    if (!after.has(key)) return `${describeFingerprintKey(key)} was removed`;
+  }
   return null;
 }
 

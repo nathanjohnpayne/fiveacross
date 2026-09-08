@@ -2637,6 +2637,36 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS on a mode change a file named like the synthetic key used to mask", async () => {
+    // Barrier round on #1107: the fingerprint keyed a watched directory's own
+    // signature under the filesystem-looking string `<dir> (self)`, so a
+    // repository holding a real file of that exact name produced the SAME key
+    // — and the copied root files are recorded AFTER the directory walks, so
+    // the file's unchanged signature overwrote the directory's and hid the
+    // `chmod` from both snapshots. Structured keys give the two entries
+    // separate namespaces.
+    //
+    // The route to the live `functions` directory is `shared/..`: `shared` is
+    // a symlinked project directory, so the kernel resolves the link before
+    // `..` and lands back in the live checkout. A plain `chmod 700 functions`
+    // could not pin this — the source dir is a COPY in the scratch project, so
+    // it would move nothing the guard watches.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "chmod 700 shared/../functions"] },
+        files: { "shared/.keep": "", "functions (self)": "a real file, not a fingerprint key" },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("functions (self) was modified");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
