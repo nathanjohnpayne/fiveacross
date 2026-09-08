@@ -94,6 +94,7 @@ vi.mock('firebase/firestore', () => {
   },
   runTransaction: (_db: unknown, fn: (tx: unknown) => unknown) => runTx(_db, fn),
   getDoc: (ref: Ref) => Promise.resolve({ exists: () => liveProofDocs.has(ref.path) }),
+  getDocFromServer: (ref: Ref) => Promise.resolve({ exists: () => liveProofDocs.has(ref.path) }),
   increment: (n: number) => ({ __inc: n }),
   updateDoc: vi.fn(),
   };

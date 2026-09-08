@@ -1,4 +1,4 @@
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDocFromServer } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { deleteStoragePath } from './storage';
 
@@ -98,7 +98,12 @@ function proofDocFromStoragePath(path: string): { eventId: string; proofId: stri
  *  Firestore. Rejecting is meaningful: the drain keeps the entry rather than
  *  revoking media it could not prove is unreferenced. */
 async function proofDocumentExists(eventId: string, proofId: string): Promise<boolean> {
-  return (await getDoc(doc(db, 'events', eventId, 'proofs', proofId))).exists();
+  // A SERVER read, never the cache (Codex P2 on PR #1157): after a commit whose
+  // acknowledgement the tab never received, the persistent cache can still hold
+  // the pre-delete document, and a cached `exists()` would clear the only retry
+  // record without revoking the blob. Offline this rejects, and the drain keeps
+  // the entry for a later attempt rather than reading absence into the cache.
+  return (await getDocFromServer(doc(db, 'events', eventId, 'proofs', proofId))).exists();
 }
 
 /** The seams `drainProofMediaRevocations` takes so its decision is testable. */
