@@ -93,6 +93,20 @@ export function queueProofMediaRevocation(path: string, eventId: string = EVENT_
  * than storing the leftovers wholesale, so a revocation queued by a concurrent
  * `deleteProof` while this drain was in flight is not silently dropped.
  */
+/**
+ * Forget a revocation that SUCCEEDED. The path is recorded before the Storage
+ * delete starts (Codex P2 on PR #1157) so a tab killed between the commit and
+ * the delete settling still leaves a record; this is the other half — the
+ * record must not outlive the object, or the next drain would spend a delete
+ * on nothing (harmless, `not-found` is swallowed, but it is litter of its own).
+ */
+export function clearProofMediaRevocation(path: string, eventId: string = EVENT_ID): void {
+  if (!path) return;
+  const queued = readQueue(eventId);
+  if (!queued.includes(path)) return;
+  writeQueue(eventId, queued.filter((queuedPath) => queuedPath !== path));
+}
+
 export async function drainProofMediaRevocations(eventId: string = EVENT_ID): Promise<void> {
   const queued = readQueue(eventId);
   if (queued.length === 0) return;

@@ -1213,6 +1213,21 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
     expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/P.jpg`]);
   });
 
+  it('records the path BEFORE the revocation starts, and forgets it once the object is gone', async () => {
+    // Codex P2, PR #1157 round 5. A catch-only record missed the tab killed
+    // between the commit and the Storage delete settling: the Proof document,
+    // and with it the only discoverable storagePath, was already gone.
+    let queuedWhileDeleting: string[] = [];
+    deleteStorageSpy.mockImplementationOnce(async () => {
+      queuedWhileDeleting = queued();
+    });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(queuedWhileDeleting).toEqual([`proofs/${EVENT_ID}/u1/P.jpg`]);
+    expect(queued()).toEqual([]);
+  });
+
   it('still purges this device’s cache when the revocation rejects', async () => {
     // The commit is what the purge follows, not the blob delete: the Proof is
     // gone from the Feed either way, so this device must stop serving the photo

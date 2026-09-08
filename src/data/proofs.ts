@@ -2,7 +2,11 @@ import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
-import { drainProofMediaRevocations, queueProofMediaRevocation } from './proofMediaRevocations';
+import {
+  clearProofMediaRevocation,
+  drainProofMediaRevocations,
+  queueProofMediaRevocation,
+} from './proofMediaRevocations';
 import { resolveProofMediaUrl } from './proofMediaUrl';
 import { markerDisplayName } from './attribution';
 import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
@@ -657,15 +661,20 @@ export async function deleteProof(
     tx.delete(proofRef);
   });
 
+  // The commit already stood down the Proof, so this object is now an orphan
+  // — which is exactly what `storage.rules` lets its owner delete in any
+  // state. It is RECORDED BEFORE the revocation starts and forgotten only once
+  // the object is provably gone (Codex P2 on PR #1157): a catch-only record
+  // missed the tab closed or killed between the commit and the delete
+  // settling, which left the only discoverable `storagePath` in a document
+  // that no longer existed. Recording first costs one guarded localStorage
+  // write on every media delete and turns that gap into a queued retry.
+  if (storagePath) queueProofMediaRevocation(storagePath, eventId);
   try {
-    if (storagePath) await deleteStoragePath(storagePath);
-  } catch (err) {
-    // The commit already stood down the Proof, so this object is now an orphan
-    // — which is exactly what `storage.rules` lets its owner delete in any
-    // state. Record it before the error leaves, so the next drain can finish
-    // the job the caller is about to be told did not finish here.
-    if (storagePath) queueProofMediaRevocation(storagePath, eventId);
-    throw err;
+    if (storagePath) {
+      await deleteStoragePath(storagePath);
+      clearProofMediaRevocation(storagePath, eventId);
+    }
   } finally {
     // Fire-and-forget, AFTER commit (never inside the retryable transaction
     // callback above — a callback re-run on conflict would fire this on every
