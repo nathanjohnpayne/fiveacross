@@ -26,6 +26,25 @@ type DocSubscriptionState<T> = {
   data: T | null;
   loading: boolean;
   hasServerData: boolean;
+  /**
+   * "The server has answered for this key — or never can." `hasServerData` plus
+   * the ERROR case, latched, exactly as `useDayMetasStatus` resolves an errored
+   * Day for its own `serverLoaded` (#1152, Codex P2 on PR #1139 round 5).
+   *
+   * A caller that must not act on a cache replay needs "the server has spoken"
+   * as a GATE, and the Leaderboard's routing half is that caller: it mounts a
+   * listener fan the archived view promises never to open, so a cached `active`
+   * replay of an Event the server is about to report as archived would open all
+   * of it and tear it down a snapshot later. But a gate an ERRORED subscription
+   * can never open is a surface stuck on a spinner forever — and an error is
+   * terminal for an `onSnapshot` listener, so no server answer is ever coming.
+   * It therefore RESOLVES the wait rather than prolonging it, and the caller
+   * falls back to whatever it would have rendered before this latch existed.
+   *
+   * The distinction from `hasServerData` is the point: a consumer that reads the
+   * DATA still learns, from that flag, that nothing was ever confirmed.
+   */
+  serverResolved: boolean;
   fromCache: boolean;
   hasPendingWrites: boolean;
 };
@@ -35,6 +54,7 @@ const emptyDocState = <T,>(key: string, loading: boolean): DocSubscriptionState<
   data: null,
   loading,
   hasServerData: false,
+  serverResolved: false,
   fromCache: true,
   hasPendingWrites: false,
 });
@@ -70,21 +90,26 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
-        setState((previous) => ({
-          key,
-          data: snap.exists() ? (snap.data() as T) : null,
-          loading: false,
-          hasServerData: previous.key === key && previous.hasServerData
-            ? true
-            : !snap.metadata.fromCache,
-          fromCache: snap.metadata.fromCache,
-          hasPendingWrites: snap.metadata.hasPendingWrites,
-        }));
+        setState((previous) => {
+          const served =
+            previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache;
+          return {
+            key,
+            data: snap.exists() ? (snap.data() as T) : null,
+            loading: false,
+            hasServerData: served,
+            serverResolved: served || (previous.key === key && previous.serverResolved),
+            fromCache: snap.metadata.fromCache,
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+          };
+        });
       },
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key ? { ...previous, loading: false } : emptyDocState(key, false),
+          previous.key === key
+            ? { ...previous, loading: false, serverResolved: true }
+            : { ...emptyDocState<T>(key, false), serverResolved: true },
         );
       },
     );

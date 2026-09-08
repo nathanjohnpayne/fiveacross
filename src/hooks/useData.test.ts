@@ -74,6 +74,34 @@ function captureOnNext(): { fire: (snap: unknown) => void } {
   };
 }
 
+// Capture BOTH callbacks of the latest doc subscription. The error leg is what
+// separates `serverResolved` from `hasServerData` (#1152, Codex P2 on PR #1139
+// round 5): an errored onSnapshot listener is terminal, so it can never deliver
+// a server snapshot, and a gate that waited for one would never open.
+function captureDocSub(): { fire: (snap: unknown) => void; fail: () => void } {
+  const captured: { next: SnapCb | null; error: (() => void) | null } = {
+    next: null,
+    error: null,
+  };
+  H.onSnapshot.mockImplementation(
+    (_target: unknown, _options: unknown, onNext: SnapCb, onError: () => void) => {
+      captured.next = onNext;
+      captured.error = onError;
+      return () => {};
+    },
+  );
+  return {
+    fire: (snap: unknown) => {
+      if (!captured.next) throw new Error('onSnapshot not subscribed');
+      act(() => captured.next!(snap));
+    },
+    fail: () => {
+      if (!captured.error) throw new Error('onSnapshot not subscribed');
+      act(() => captured.error!());
+    },
+  };
+}
+
 const colSnap = (fromCache: boolean) => ({ docs: [], metadata: { fromCache } });
 const docSnap = (fromCache: boolean) => ({
   exists: () => false,
@@ -580,5 +608,57 @@ describe('useLeaderboard — the CURRENT snapshot beside the latch (#1151)', () 
     sub.fire(rosterSnap(false, true));
     expect(result.current.fromCache).toBe(false);
     expect(result.current.hasPendingWrites).toBe(true);
+  });
+});
+
+// #1152 (specs/post-sailing-archive.md § "The surfaces"), Codex P2 on PR #1139
+// round 5. The Leaderboard's routing half decides whether to mount the LIVE
+// listener fan — the whole `players` roster, every Day's meta document and up to
+// 60 Proofs — or the archived view, which opens none of them. That decision must
+// not be taken against a cache replay, so it needs "the server has answered — or
+// never will" as a gate. `hasServerData` alone cannot be that gate: an errored
+// subscription leaves it false forever, which is a surface stuck on a spinner.
+describe('serverResolved — the server has answered, or never can', () => {
+  it('latches on the first server snapshot, exactly like hasServerData', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(true)); // cache-served: delivered, but not answered
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(false));
+    expect(result.current.serverResolved).toBe(true);
+
+    // Latched: a later offline flap does not un-answer it, so a reconnect cannot
+    // bounce an already-routed Leaderboard back through the spinner.
+    sub.fire(docSnap(true));
+    expect(result.current.serverResolved).toBe(true);
+  });
+
+  it('also resolves on an ERRORED subscription, which hasServerData deliberately does not', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+
+    sub.fire(docSnap(true));
+    sub.fail(); // permission-denied, signed out mid-flight — terminal
+    expect(result.current.serverResolved).toBe(true);
+    // The distinction is the point: nothing was ever confirmed BY the server, so
+    // a consumer reading the DATA still knows it is unconfirmed.
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('resolves an error that arrives before any snapshot at all', () => {
+    // The cold permission-denied: no snapshot was ever delivered, so the
+    // previous state is the empty one and the latch has to survive being rebuilt
+    // from it rather than being dropped with it.
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+
+    sub.fail();
+    expect(result.current.serverResolved).toBe(true);
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.data).toBeNull();
   });
 });
