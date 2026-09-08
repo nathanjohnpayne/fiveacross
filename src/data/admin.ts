@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, getDocs, limit, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, limit, query, where, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -7,10 +7,17 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
+import { claimsAwaitingAdmin, isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
+import {
+  archiveSnapshotFingerprint,
+  draftEventArchive,
+  finaleHasRun,
+} from './eventArchive';
+import { migrateClaimMode, migrateDayFields } from './converters';
+import { dayMetaRef, playersCol } from './paths';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
+import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
@@ -809,6 +816,18 @@ export type BeginArchiveOutcome = {
   result: BeginArchiveResult;
   token: number | null;
   created: boolean;
+  /**
+   * The Event this call acted on (#1142 item 7). `EVENT_ID` is a LIVE binding a
+   * hostname change reassigns, and the archive is a SEQUENCE — shut, freeze, and
+   * a cleanup after a refusal — with awaited round trips between each step. A
+   * caller that re-read the binding per step could shut one Event, freeze
+   * another's roster onto it and reopen a third; carrying the id the shut
+   * actually took makes the whole sequence name one Event.
+   *
+   * Reported on every outcome, including the ones that wrote nothing: the id is
+   * what the call LOOKED at, not what it changed.
+   */
+  eventId: string;
 };
 
 /** What abandoning a started-but-uncommitted archive reports back.
@@ -823,17 +842,31 @@ export type AbandonArchiveResult =
 
 /** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
  *  the Admin surface can say what happened instead of inferring it from a
- *  resolved promise. `not-closing` means the quiesce was never taken (or was
- *  abandoned under this call), which the rules refuse to archive from;
- *  `quiesce-changed` means the closing state in force is not the one this call
- *  was bound to — play was reopened and shut AGAIN underneath it (Codex P1, PR
- *  #1139). Both write NOTHING (#134). */
+ *  resolved promise.
+ *
+ *  `not-closing` means the quiesce was never taken (or was abandoned under this
+ *  call), which the rules refuse to archive from; `quiesce-changed` means the
+ *  closing state in force is not the one this call was bound to — play was
+ *  reopened and shut AGAIN underneath it (Codex P1, PR #1139); `config-changed`
+ *  means the Event configuration the record is defined by moved between the
+ *  pre-read and the commit, so the reads and the record would describe different
+ *  Events (Codex P2, PR #1139); `claims-pending` means a Claim was still
+ *  awaiting an Admin when the Event shut, which the freeze would make
+ *  unresolvable; `finale-pending` means the Event's scheduled Standings Freeze
+ *  has not run, so the irreversible flip would forgo the finale beats forever
+ *  (#1151, routed from #1150's review); `too-large` means the record built from
+ *  the server re-read would not fit on the Event document. All of them write
+ *  NOTHING (#1151). */
 export type ArchiveEventResult =
   | 'archived'
   | 'already-archived'
   | 'no-event'
   | 'not-closing'
-  | 'quiesce-changed';
+  | 'quiesce-changed'
+  | 'config-changed'
+  | 'claims-pending'
+  | 'finale-pending'
+  | 'too-large';
 
 /**
  * A usable quiesce generation — the shape `beginArchive` mints and the shape
@@ -921,14 +954,14 @@ function nextArchiveGeneration(stored: unknown): number {
  * reopening it: the token it holds matches, so the conditional reopen would
  * happily succeed at exactly the write the condition exists to refuse.
  */
-export async function beginArchive(): Promise<BeginArchiveOutcome> {
-  const eventRef = evt();
+export async function beginArchive(eventId: string = EVENT_ID): Promise<BeginArchiveOutcome> {
+  const eventRef = evt(eventId);
   return runTransaction(db, async (tx): Promise<BeginArchiveOutcome> => {
     const snap = await tx.get(eventRef);
-    if (!snap.exists()) return { result: 'no-event', token: null, created: false };
+    if (!snap.exists()) return { result: 'no-event', token: null, created: false, eventId };
     const data = snap.data() as Partial<EventDoc>;
     if (data.status === 'archived') {
-      return { result: 'already-archived', token: null, created: false };
+      return { result: 'already-archived', token: null, created: false, eventId };
     }
     // JOINED, not created: the Event was already closing under a generation
     // this build can bind to, so that generation stands and this call owns
@@ -937,7 +970,7 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
     const stored = data.archiveToken;
     if (data.archiving === true && usableArchiveToken(stored)) {
       tx.update(eventRef, { archiving: true, archiveToken: stored });
-      return { result: 'closing', token: stored, created: false };
+      return { result: 'closing', token: stored, created: false, eventId };
     }
     // A closing Event carrying no USABLE generation is not a join — there is no
     // quiesce this build could have bound to, and the rules refuse the flip
@@ -953,7 +986,7 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
     // could only tell it apart from the ONE token still stored.
     const token = nextArchiveGeneration(stored);
     tx.update(eventRef, { archiving: true, archiveToken: token });
-    return { result: 'closing', token, created: true };
+    return { result: 'closing', token, created: true, eventId };
   });
 }
 
@@ -1001,8 +1034,14 @@ export async function beginArchive(): Promise<BeginArchiveOutcome> {
  * `beginArchive` minted (it only preserves a token while the Event is still
  * closing), and the stale caller's comparison fails.
  */
-export async function abandonArchive(expectedToken?: number): Promise<AbandonArchiveResult> {
-  const eventRef = evt();
+export async function abandonArchive(
+  expectedToken?: number,
+  /** The Event to reopen — the one `beginArchive` reported, for the automatic
+   *  cleanup path, so a hostname change between the shut and the cleanup cannot
+   *  reopen a different Event (#1142 item 7). */
+  eventId: string = EVENT_ID,
+): Promise<AbandonArchiveResult> {
+  const eventRef = evt(eventId);
   return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
     const snap = await tx.get(eventRef);
     if (!snap.exists()) return 'no-event';
@@ -1050,52 +1089,259 @@ export async function abandonArchive(expectedToken?: number): Promise<AbandonArc
  * rules refuse the rewrite besides. Un-archiving is deliberately not a client
  * operation at all; see the spec's § Recovery.
  *
- * WHAT IT DOES NOT DO, on this ticket: it takes no snapshot. The durable
- * `EventArchive` record — the frozen final standings and the First-to-BINGO hall
- * of fame, the server re-reads it is built from, the drain gate and the
- * configuration fingerprint that hold its inputs still — is #1151. This is the
- * lifecycle primitive those depend on, and nothing more.
+ * IT PERSISTS THE FROZEN RECORD IN THE SAME UPDATE (#1151). `archive` — the
+ * final standings and the First-to-BINGO hall of fame — is written beside
+ * `status`, `archivedAt` and `archivedUnder`, because the rules deny gameplay on
+ * an archived Event and the archived surfaces render from `archive`: an observer
+ * that could see `status: 'archived'` with no record, or a record with the Event
+ * still live, would see either an empty archive or a writable one.
+ * `specs/path-addressing-and-root.md` § D8 additionally requires the Event's
+ * ROUTING documents to move in that same transaction; that half waits on path
+ * addressing, which ships nothing today.
  *
- * AND IT HAS NO CONSOLE CALLER ON THIS CHILD (Phase 4b P1, PR #1157). It is
- * exported and pinned by `src/data/post-sailing-archive.test.ts`, and the
- * console's **Archive** button arrives with #1151, beside the pending-claim
- * drain gate. An exposed flip without that gate can freeze an Event whose Claim
- * queue still holds an `admin_confirmed` Claim, after which Confirm and Reject
- * both fail — `resolve()` writes the claimant's Board and Player row, and the
- * freeze denies both — with no way to reopen from the console.
+ * THE INPUTS ARE RE-READ FROM THE SERVER, after the quiesce, and that is the
+ * whole point of the ordering (#1151). A passive listener re-delivers only when
+ * its documents CHANGE, so "wait until the roster subscription is
+ * server-confirmed again" would deadlock in precisely the case the quiesce
+ * creates — nothing moving. An explicit server read issued after the closing
+ * write is acknowledged returns the state of a collection that can no longer
+ * change: the strongest form of "confirmed after the close" available to a
+ * client, rather than the weakest.
+ *
+ * That is a READ, not a recompute (ADR 0001). Every number still comes verbatim
+ * off the Player-written `PlayerDoc`, through the same converters the live
+ * Leaderboard reads; only the freshness differs. The Event document is re-read
+ * RAW inside the transaction — the `setDayTheme`/`confirmClaim` discipline — so
+ * the ban roster and schedule the record freezes against are the stored ones.
+ *
+ * EVERY READ NAMES THE EVENT EXPLICITLY (#1142 item 7). `EVENT_ID` is a LIVE
+ * binding that a hostname change reassigns, and this call takes four awaited
+ * reads before it writes — so a path helper resolving the binding after an
+ * A-to-B change would have frozen B's roster and honours onto A, with the
+ * generation and configuration checks validating only A. The Event is captured
+ * once, up front, and threaded through every reference including the caller's
+ * own begin/freeze/cleanup sequence.
+ *
+ * FIVE THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
+ * reports instead of throwing so the console can say what happened and, where
+ * this call is what shut the Event, put play back (Codex P1+P2, PR #1139):
+ *
+ *  - `quiesce-changed` — play was reopened and shut AGAIN under this call, so
+ *    the closing state the reads describe is not the one the write would land
+ *    on. This is the ONE refusal that leaves the Event shut: that closing state
+ *    belongs to whoever took it.
+ *  - `config-changed` — the Event configuration the record is defined by
+ *    (`claimMode`, `days`, the freeze boundary) moved between the pre-read and
+ *    the commit, so the reads and the record would describe different Events.
+ *  - `claims-pending` — a Claim was still awaiting an Admin when the Event shut.
+ *    The freeze never reads that collection, so a Claim left pending there is
+ *    not resolvable at all; the same server-read discipline the roster gets is
+ *    applied to the queue.
+ *  - `finale-pending` — the Event's scheduled Standings Freeze has not run. The
+ *    quiesce only DELAYS the finale beats, but the flip is irreversible, so an
+ *    Event archived first never receives them (#1151, routed from #1150's
+ *    review). Overridable with `beforeFinale`, because an Admin may legitimately
+ *    end an Event that will never reach its finale — but only by saying so.
+ *  - `too-large` — the record built from the server re-read would not fit on the
+ *    Event document. `draftEventArchive` decides that on coerced, bounded inputs
+ *    and against the PROJECTED document — the stored fields this update retains
+ *    plus the ones it writes — because the archive never lands on an empty one:
+ *    an Event whose own `days` / `bannedUids` / `mostLovedPhoto` already fill the
+ *    budget overflows on a perfectly ordinary record.
  */
 export async function archiveEvent(
   token: number,
-  params: { now?: number } = {},
+  params: {
+    now?: number;
+    /** The Event to freeze. Captured by the CALLER from `beginArchive`, so the
+     *  quiesce, the freeze and the cleanup after a refusal all name one Event
+     *  even if the hostname binding moves between them (#1142 item 7). */
+    eventId?: string;
+    /** The Admin has been told the finale has not run and asked for the archive
+     *  anyway (#1151). Without it the freeze refuses with `finale-pending`. */
+    beforeFinale?: boolean;
+  } = {},
 ): Promise<ArchiveEventResult> {
-  const eventRef = evt();
-  // Refused before the transaction opens rather than compared inside it: a
-  // missing, non-integer or non-positive generation is not one this build can
+  // THE EVENT THIS CALL IS ABOUT, resolved ONCE and used for every read and the
+  // write (#1142 item 7). Everything below awaits, and `EVENT_ID` can move.
+  const eventId = params.eventId ?? EVENT_ID;
+  const eventRef = evt(eventId);
+  // Refused before anything is read rather than compared inside the transaction:
+  // a missing, non-integer or non-positive generation is not one this build can
   // bind to, so there is nothing for the stored value to agree WITH — and the
   // rules refuse the flip from an unidentified quiesce besides. `beginArchive`
   // mints one, so reopening and archiving again is the way through.
   if (!usableArchiveToken(token)) return 'quiesce-changed';
+  // The pre-read is FROM THE SERVER: a cache-sourced Event could still report
+  // the pre-quiesce state, and the Day count read off it decides which honour
+  // pins are fetched below.
+  const pre = await getDocFromServer(eventRef);
+  if (!pre.exists()) return 'no-event';
+  const preData = pre.data() as Partial<EventDoc>;
+  if (preData.status === 'archived') return 'already-archived';
+  if (preData.archiving !== true) return 'not-closing';
+  // The binding, checked BEFORE the reads as well as inside the transaction.
+  // Every read below describes the Event as it stands under THIS closing state;
+  // taking them against a generation that has already moved would spend four
+  // round trips to build a record the commit must refuse anyway.
+  if (preData.archiveToken !== token) return 'quiesce-changed';
+  // …and the CONFIGURATION those reads are about to be taken under (Codex P2,
+  // PR #1139). The quiesce shuts gameplay, not administration, so an Admin can
+  // still change the Event between this read and the commit — and the drain gate
+  // below is evaluated against THIS document while the record is built against
+  // the transaction's. A `claimMode` flipped from `honor` afterwards turns a gate
+  // that passed vacuously into a queue full of Claims the freeze has just made
+  // unresolvable; an edited `days` leaves the record built from honour pins
+  // fetched for a schedule that no longer exists. The transaction refuses rather
+  // than combining the two.
+  const configAtRead = archiveSnapshotFingerprint(preData);
+
+  // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
+  // #1139). The console's own gate reads a passive listener, and a Claim can
+  // commit between that listener's last render and the closing write — the exact
+  // window the quiesce exists to have. Nothing downstream would notice: the
+  // freeze never reads the Claim collection, so an `admin_confirmed` Claim left
+  // pending here is pending FOREVER, behind a Confirm/Reject pair whose Board and
+  // Player writes the freeze now denies.
+  //
+  // Re-read the same way the roster is, and for the same reason: this read is
+  // issued after the closing write is acknowledged, so its result is the state of
+  // a collection that can no longer change. Refused rather than fixed — resolving
+  // a Claim from here would be the gameplay write the freeze just denied — and
+  // the console reopens play when it was this call that shut the Event.
+  //
+  // The gate reads a NORMALIZED Claim Mode (Codex P2, PR #1139). This pre-read is
+  // deliberately converter-free — the freeze reads the STORED document, the
+  // `setDayTheme`/`confirmClaim` discipline — but `claimsQueueOpen` compares
+  // against the CURRENT contract, and an Event seeded or written before the
+  // rename persists `'verified'` for what is now `'admin_confirmed'`. The console
+  // gates on the converted document (`eventConverter` runs `migrateClaimMode`),
+  // so on such an Event the two halves of one gate read the same queue and
+  // disagreed: the console counted the pending Claims and refused to arm, while
+  // this take saw a mode that is not `admin_confirmed`, passed vacuously, and
+  // would have frozen the Event over exactly the Claims the gate exists to drain.
+  const preClaimMode = migrateClaimMode(preData.claimMode);
+  const claimsSnap = await getDocsFromServer(claimsRaw(eventId));
+  if (
+    claimsAwaitingAdmin(
+      { claimMode: preClaimMode },
+      claimsSnap.docs.map((d) => d.data() as ClaimDoc),
+    ).length > 0
+  ) {
+    return 'claims-pending';
+  }
+
+  // Everything the record freezes, read after the close. `playersCol()` /
+  // `dayMetaRef()` are the same converter-attached references the live
+  // subscriptions use, so the rows are the identical shape — this is the live
+  // Leaderboard's own data, read once more at the one moment it is guaranteed to
+  // have stopped moving. Both take the captured `eventId` (#1142 item 7).
+  const dayIndexes = (Array.isArray(preData.days) ? preData.days : []).map((d) => d.index);
+  const [rosterSnap, metaSnaps] = await Promise.all([
+    getDocsFromServer(playersCol(eventId)),
+    Promise.all(dayIndexes.map((index) => getDocFromServer(dayMetaRef(index, eventId)))),
+  ]);
+  const players = rosterSnap.docs.map((d) => d.data());
+  const dayMetas = new Map<number, DayMetaDoc>();
+  metaSnaps.forEach((snap, i) => {
+    if (snap.exists()) dayMetas.set(dayIndexes[i], snap.data());
+  });
+
   return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
     const snap = await tx.get(eventRef);
     if (!snap.exists()) return 'no-event';
     const data = snap.data() as Partial<EventDoc>;
     if (data.status === 'archived') return 'already-archived';
     // Re-checked HERE, inside the transaction that writes: an Admin (or another
-    // console) can abandon the archive between the caller's own read and this
-    // commit, and an Event whose gameplay reopened in that window is one that
-    // was never quiesced for this freeze at all.
+    // console) can abandon the archive between the reads above and this commit,
+    // and an Event whose gameplay reopened in that window is one whose roster may
+    // have moved again. Refuse rather than freeze what may already be stale.
     if (data.archiving !== true) return 'not-closing';
-    // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play
-    // can be REOPENED and SHUT AGAIN inside the window this call occupies, and
-    // the document the transaction reads then carries an `archiving: true`
-    // indistinguishable from the one the caller took. Refused, never repaired,
-    // and deliberately WITHOUT reopening play: the closing state in force
-    // belongs to whoever took it.
+    // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play can
+    // be REOPENED and SHUT AGAIN inside the window the reads above occupy:
+    // gameplay resumes, Marks land, Claims are created, and a second quiesce
+    // begins — and the document this transaction reads then carries an
+    // `archiving: true` indistinguishable from the one the reads were taken
+    // under. Committing here would freeze standings that predate the reopened
+    // play, permanently, and the record is what the rules lock. Refused, never
+    // repaired, and deliberately WITHOUT reopening play: the closing state in
+    // force belongs to whoever took it.
     if (data.archiveToken !== token) return 'quiesce-changed';
+    // The snapshot-defining configuration, held across the same window. Every
+    // read above describes the Event under `configAtRead`; this record would be
+    // built under whatever the transaction found. `bannedUids` is deliberately
+    // outside the fingerprint — moderation stays open through the quiesce on
+    // purpose, and a ban is applied to the rows the record keeps rather than
+    // deciding which rows were read (see `archiveSnapshotFingerprint`).
+    if (archiveSnapshotFingerprint(data) !== configAtRead) return 'config-changed';
+    // THE FINALE GATE (#1151, routed here from #1150's review). The quiesce only
+    // DELAYS the finale beats — the freeze stamp, the podium Moment and the
+    // Most-Loved award are withheld while play is shut and land at the scheduled
+    // cutoff once it reopens — but `status: 'archived'` is irreversible, so an
+    // Event flipped before its Standings Freeze never receives them, and the
+    // record it freezes is one the podium never got to settle. Checked against
+    // the TRANSACTIONAL read, which is the state the flip actually lands on; a
+    // finale committing between the pre-read and here moves `frozenAt` and is
+    // caught by the fingerprint above first.
+    if (!params.beforeFinale && !finaleHasRun(data)) return 'finale-pending';
     const archivedAt = params.now ?? Date.now();
+    const draft = draftEventArchive({
+      players,
+      event: {
+        // Frozen INTO the record, from the transactional read, so the archived
+        // Share Card is titled by the Event as it stood at the freeze rather than
+        // by a name an Admin can still edit afterwards (Codex P2, PR #1139).
+        name: data.name,
+        // NORMALIZED for the derivations, while the raw document above and below
+        // stays raw (Codex P2, PR #1139). The frozen honour chip's label comes
+        // from `dayHonorChipLabel`, which resolves the Day's theme emoji out of
+        // `THEMES` — and every LIVE surface hands that helper Days that have
+        // already been through `migrateDayFields` / `normalizeEventTheme`
+        // (`eventConverter`), while this writer holds the stored document. The
+        // two disagree on exactly the Days the freeze has to get right: an
+        // unknown persisted theme renders the Edition's default emoji live and NO
+        // emoji in the record, and an off-Edition theme renders the default live
+        // while the record freezes that other Theme's emoji. Either way the
+        // permanent label is not the one the last live strip showed, which is the
+        // whole promise `dayLabel` was stored to keep. Normalizing here also puts
+        // this writer's Tutorial-Day and freeze-boundary derivations on the same
+        // footing as the console preview's, which reads the converted document.
+        //
+        // Deliberately NOT applied to `archiveSnapshotFingerprint` (which
+        // compares two RAW reads against each other, so normalizing either side
+        // could only invent or hide a change) or to `existing` below (which is
+        // MEASURED, and what the write lands on is the stored document).
+        days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
+        bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
+        frozenAt: data.frozenAt,
+        standingsFreezeAt: data.standingsFreezeAt,
+      },
+      dayMetas,
+      // Every Day's pin was read from the server above, so an absent pin is the
+      // server's answer rather than an unfilled cache — which is the one thing
+      // `dayMetasLoaded` exists to tell apart.
+      dayMetasLoaded: true,
+      archivedAt,
+      // The STORED document, so the size check measures what the write actually
+      // produces rather than the record alone (Codex P2, PR #1139). `data` is the
+      // raw transactional read — the same one this update is about to be applied
+      // to — so `days`, `bannedUids` and `mostLovedPhoto` are counted at the
+      // sizes they will really have.
+      existing: data as Readonly<Record<string, unknown>>,
+    });
+    // The last line of the same defence the Admin console applies BEFORE the
+    // quiesce (Codex P2, PR #1139). The console checks the record it previewed
+    // from the live subscriptions; this checks the one actually built from the
+    // server re-read, which is a different roster and can be a different size.
+    // Refused rather than attempted, because the alternative is a write that
+    // throws on an Event whose gameplay is already shut.
+    if (draft.refusal === 'too-large') return 'too-large';
     tx.update(eventRef, {
       status: 'archived',
       archivedAt,
+      // The frozen record, written in the SAME update as the stamp it agrees
+      // with. `firestore.rules` requires it to be complete and locks it here.
+      archive: draft.archive,
       // The quiesce is over. `status` carries the freeze from here, and unlike
       // this flag it cannot be cleared.
       archiving: false,

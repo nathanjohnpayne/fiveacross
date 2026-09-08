@@ -176,6 +176,66 @@ service cloud.firestore {
         && incoming.get('archivedUnder', 0) is int
         && incoming.get('archivedUnder', 0) == stored.get('archiveToken', 0);
     }
+    // The headline honour and the holder's own kept row, validated TOGETHER
+    // (#1151, Codex P2 on PR #1139 round 4). They are SELECTED together — the
+    // row exists only to carry the honour's holder outside the bounded
+    // `standings` prefix — so the record has exactly two legitimate shapes:
+    // both `null` (nobody got there), or both maps naming the SAME holder.
+    // Type-checking them one at a time accepted the two shapes the pairing
+    // exists to refuse: a map beside a `null`, which is the half-built record
+    // the archived Share Card reads a hole from, and two maps naming DIFFERENT
+    // Players, which puts one name in the hall of fame's headline and another
+    // on the pinned eleventh row of the same card. An ABSENT key still errors
+    // the expression and denies, exactly as it did.
+    //
+    // Its own helper for the reason `completeArchiveRecord` is one: the arm
+    // that calls it sits against Firestore's expression cap (#850/#934), so
+    // the pairing is expressed once here rather than unrolled inline.
+    function firstBingoPairComplete(archive) {
+      return (archive.firstBingo == null && archive.firstBingoRow == null)
+        || (archive.firstBingo is map
+            && archive.firstBingoRow is map
+            && archive.firstBingo.uid is string
+            && archive.firstBingoRow.uid == archive.firstBingo.uid);
+    }
+    // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed
+    // (#1151). The NULLABLE keys are checked as type-or-null, because `null` is
+    // a legitimate stored value for each — the First-BINGO pair is `null` when
+    // nobody got there, `eventName: null` means the Event had no name, and
+    // `freezeAt: null` means it had no Standings Freeze. An ABSENT key needs no
+    // clause of its own: reading a missing key errors the expression, which
+    // denies, and denying is what a record the archived Leaderboard would throw
+    // on deserves. `archivedAt` must equal the document's own stamp, which both
+    // type-checks it and holds the invariant `EventArchive.archivedAt` states —
+    // the two are written from one value in one update, and a record disagreeing
+    // with the stamp beside it would put two answers on screen.
+    //
+    // The record is passed in ALREADY DEREFERENCED, rather than the whole
+    // document: the arm that calls this lives against Firestore's
+    // 1000-expression cap (#850/#934), and re-walking
+    // `request.resource.data.archive` per clause is the kind of cost that
+    // pushed it over.
+    //
+    // Rules cannot iterate a list, so the standings ROWS remain the stated
+    // residual (the same one `bannedUids` carries); what this closes is the
+    // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
+    // at all, or an empty map — which is irreversible and leaves the archived
+    // surfaces on their live fallback while play is frozen (Codex P2, PR #1139).
+    function completeArchiveRecord(archive, stamp) {
+      return archive is map
+        // The Event's own name, frozen with the standings it titles (#1151,
+        // Codex P2 on PR #1139). `EventDoc.name` is outside the write-once
+        // clause on purpose, so the archived Share Card cannot be allowed to
+        // rebuild its title from the live field; `null` is the legitimate
+        // stored value for an Event that had no name.
+        && (archive.eventName == null || archive.eventName is string)
+        && archive.standings is list
+        && archive.playerCount is number
+        && archive.dailyHonors is list
+        && firstBingoPairComplete(archive)
+        && (archive.freezeAt == null || archive.freezeAt is number)
+        && archive.archivedAt == stamp;
+    }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
     // absent means off; adding, removing, or changing the field is therefore a
@@ -1215,41 +1275,49 @@ service cloud.firestore {
       //     1000-expression cap (#850/#934), and `allow` statements
       //     short-circuit — the archive write is decided by the small arm and
       //     never pays for the schedule and freeze-boundary checks below.
-      //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`
-      //     and `archivedAt` are locked to their stored values, so a second
-      //     archive pass cannot restamp the freeze and un-archiving is not a
-      //     client operation. Every OTHER field stays editable, so moderation
-      //     (`bannedUids`) and configuration survive the freeze. The durable
-      //     `archive` RECORD, and the write-once clause that locks it, are
-      //     #1151's — this ticket freezes the Event, not the standings.
+      //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`,
+      //     `archivedAt`, `archivedUnder` and the `archive` RECORD are all
+      //     locked to their stored values. That is what "the final Leaderboard
+      //     and hall of fame persist unchanged" means at the boundary (#1151) —
+      //     a second archive pass cannot overwrite the record with a later
+      //     roster, post-freeze moderation cannot edit it, and un-archiving is
+      //     not a client operation. Every OTHER field stays editable, so
+      //     moderation (`bannedUids`) and configuration survive the freeze.
       //
-      // THE LIFECYCLE FIELDS NEVER MOVE ON THIS ARM (#134; Codex P1 on PR
-      // #1157, round 6). `status`, `archiving`, `archivedAt` and
-      // `archiveToken` are moved only by the dedicated arms BELOW — the shut,
-      // the reopen, the flip and the repair — each of which states the one
-      // transition it performs and the shape it requires. The token is in the
-      // set too (Codex P2, round 7): a closing Event's generation must be
-      // IMMUTABLE here, or a whole-document writer could restore an abandoned
-      // token B beside the current quiesce and a stale `archiveEvent(B)` would
-      // pass `boundToStoredQuiesce` after all. This arm refuses any change to
-      // the four in ONE `affectedKeys` check, which is what keeps the freeze write-once (an
-      // un-archive, a second stamp, a re-shut under the old generation and a
+      // THE LIFECYCLE FIELDS AND THE RECORD NEVER MOVE ON THIS ARM (#134; Codex
+      // P1 on PR #1157, round 6; #1151). `status`, `archiving`, `archivedAt`,
+      // `archiveToken`, `archivedUnder` and `archive` are moved only by the
+      // dedicated arms BELOW — the shut, the reopen, the flip and the repair —
+      // each of which states the one transition it performs and the shape it
+      // requires. The token is in the set (Codex P2, round 7): a closing Event's
+      // generation must be IMMUTABLE here, or a whole-document writer could
+      // restore an abandoned token B beside the current quiesce and a stale
+      // `archiveEvent(B)` would pass `boundToStoredQuiesce` after all. The
+      // RECORD is in it for the write-once guarantee itself: the flip is the one
+      // arm that may introduce `archive`, and nothing may rewrite it afterwards.
+      // This arm refuses any change to the six in ONE `affectedKeys` check,
+      // which is what keeps the freeze write-once (an un-archive, a second
+      // stamp, a re-shut under the old generation, a rewritten record and a
       // stray stamp on a live Event are all a CHANGE to one of them and land
-      // here first), and which is cheaper than the five shape and lock clauses
-      // it replaces: this arm sits at Firestore's 1000-expression cap (#1142
-      // item 1), and the transition check the round-6 finding needed did not
-      // fit beside them. Restating an UNCHANGED value is not a change, so a
-      // partial update that echoes the stored state still passes. A create
-      // has no stored document to diff against, so it is held to the one
-      // shape a new Event may be born in: open, not closing, no stamp.
+      // here first), and which is cheaper than the shape and lock clauses it
+      // replaces: this arm sits at Firestore's 1000-expression cap (#1142 item
+      // 1), and the transition check the round-6 finding needed did not fit
+      // beside them. Adding `archive` to the existing list costs nothing — one
+      // more element in a literal the arm already evaluates once. Restating an
+      // UNCHANGED value is not a change, so a partial update that echoes the
+      // stored state still passes. A create has no stored document to diff
+      // against, so it is held to the one shape a new Event may be born in:
+      // open, not closing, no stamp, no record.
       allow create, update: if isAdmin(eventId)
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
                 && request.resource.data.get('archiving', false) == false
                 && !('archivedAt' in request.resource.data)
-                && !('archivedUnder' in request.resource.data))
+                && !('archivedUnder' in request.resource.data)
+                && !('archive' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
-                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken', 'archivedUnder']))
+                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken',
+                          'archivedUnder', 'archive']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1445,6 +1513,13 @@ service cloud.firestore {
       //   - it must carry a numeric, bounded `archivedAt`, which is what makes
       //     "no reader ever sees an archived Event with no stamp" an enforced
       //     invariant rather than a property of one client's writer;
+      //   - it must carry the COMPLETE record (#1151). Type-checking `archive`
+      //     only when present accepted `{status: 'archived', archivedAt}` on its
+      //     own, and that state is both irreversible and useless: the freeze
+      //     denies every gameplay write while the archived surfaces fall back to
+      //     the LIVE view the record exists to replace. `completeArchiveRecord`
+      //     types every top-level key, validates the First-BINGO pair TOGETHER,
+      //     and requires the record's own stamp to equal the document's;
       //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
       //     this arm skip the configuration validation below without opening a
       //     hole through it: a write that also moved `days`, `bannedUids` or
@@ -1452,16 +1527,17 @@ service cloud.firestore {
       //     arm that checks those fields (where it is denied, because the stored
       //     document is not archived yet).
       //
-      // What this arm deliberately does NOT yet require is a COMPLETE frozen
-      // record. #1149 lands the lifecycle primitive only: the flip carries
-      // `status`, `archivedAt` and the cleared quiesce, and nothing more. The
-      // `archive` record, its whole-record validation and its own write-once
-      // lock arrive with #1151, which widens the `hasOnly` guard below by one
-      // key at the same time.
+      // The `hasOnly` guard names FIVE keys, not four: `archive` joins the three
+      // transition fields and the flip-only binding, because this arm is the one
+      // place the record may be introduced and the general arm above locks it
+      // everywhere else. The record checks stay HERE rather than on that arm on
+      // purpose — it sits at Firestore's 1000-expression cap (#1142 item 1), and
+      // `allow` statements short-circuit, so an ordinary admin write never pays
+      // for a clause that only an archive flip can satisfy.
       //
       // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: a
       // write that reaches this arm has already been refused by the general
-      // arm's `affectedKeys` check, and the three dedicated arms sit AFTER
+      // arm's `affectedKeys` check, and the four dedicated arms sit AFTER
       // that arm so an ordinary admin write never pays for them at all.
       allow update: if resource != null
         && resource.data.get('archiving', false) == true
@@ -1472,12 +1548,16 @@ service cloud.firestore {
         && request.resource.data.archivedAt is number
         && request.resource.data.archivedAt > 0
         && request.resource.data.archivedAt < 4102444800000
+        && completeArchiveRecord(request.resource.data.archive, request.resource.data.archivedAt)
         // The quiesce ends with the freeze. Leaving the flag set would be
         // harmless (`status` denies on its own from here) but it would also be
         // a second, clearable spelling of a state that must not be clearable.
         && request.resource.data.get('archiving', false) == false
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder']);
+             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder', 'archive']);
+      // The standings ROWS inside `archive` stay shape-unchecked: Rules cannot
+      // iterate a list, so per-row validation is not expressible here — the same
+      // stated residual `bannedUids` carries.
       // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
       // Event carrying NO usable generation — a document shut out of band, or
       // by a build that predates the counter — cannot be flipped (the flip is

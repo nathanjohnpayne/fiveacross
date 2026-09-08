@@ -38,8 +38,12 @@ export const dayMetaRef = (dayIndex: number, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex)).withConverter(
     dayMetaConverter,
   );
-export const playersCol = () =>
-  collection(db, 'events', EVENT_ID, 'players').withConverter(playerConverter);
+// The roster. `eventId` is a parameter for the same reason `dayMetaRef`'s is:
+// the archive's freeze writer takes several awaited reads in a row and must
+// address ONE Event across all of them, and `EVENT_ID` is a live binding a
+// hostname change can move underneath it (#1142 item 7).
+export const playersCol = (eventId: string = EVENT_ID) =>
+  collection(db, 'events', eventId, 'players').withConverter(playerConverter);
 export const playerRef = (uid: string) =>
   doc(db, 'events', EVENT_ID, 'players', uid).withConverter(playerConverter);
 export const userRef = (uid: string) => doc(db, 'users', uid).withConverter(userConverter);

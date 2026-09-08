@@ -73,6 +73,44 @@ const PAST = () => NOW() - 3_600_000;
  *  `Date.now()` so the write-once assertions can restate it exactly. */
 const ARCHIVED_AT = 1_700_000_000_000;
 
+/** The frozen record every archive write in this file carries (#1151): one
+ *  well-formed `EventArchive`, so the complete-record clause has a control to be
+ *  measured against and the write-once lock has something to protect. Its own
+ *  `archivedAt` IS `ARCHIVED_AT` — the rules require the record's stamp to equal
+ *  the document's, and the writer produces both from one value in one update. */
+const FROZEN_RECORD = {
+  // The Event's own name, frozen with the standings it titles (#1139) —
+  // `EventDoc.name` is outside the write-once clause, so a card that rebuilt its
+  // title from the live field drifted the moment an Admin renamed the Event.
+  eventName: 'Archive fixture',
+  standings: [
+    {
+      uid: ALICE,
+      displayName: 'Alice',
+      bingoCount: 2,
+      squaresMarked: 14,
+      blackout: false,
+      firstBingoAt: 1000,
+    },
+  ],
+  playerCount: 1,
+  firstBingo: { uid: ALICE, displayName: 'Alice', at: 1000 },
+  firstBingoRow: {
+    uid: ALICE,
+    displayName: 'Alice',
+    bingoCount: 2,
+    squaresMarked: 14,
+    blackout: false,
+    firstBingoAt: 1000,
+    rank: 1,
+  },
+  dailyHonors: [
+    { dayIndex: 0, uid: ALICE, displayName: 'Alice', firstBingoAt: 1000, dayLabel: '🌈 D1' },
+  ],
+  freezeAt: null,
+  archivedAt: ARCHIVED_AT,
+};
+
 let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const unauthDb = () => testEnv.unauthenticatedContext().firestore();
@@ -243,12 +281,17 @@ async function freeze(): Promise<void> {
       status: 'archived',
       archivedAt: ARCHIVED_AT,
       archiving: false,
+      archivedUnder: QUIESCE,
+      // The frozen record lands with the stamp (#1151), so the archived-state
+      // cases exercise the same document the flip actually produces — and the
+      // write-once lock has a record to protect.
+      archive: FROZEN_RECORD,
     });
   });
 }
 
-/** The archive flip as the rules accept it: the three transition keys, and
- *  nothing else. */
+/** The archive flip as the rules accept it: the three transition keys, the
+ *  flip-only binding, the frozen record, and nothing else. */
 const flip = (uid: string, overrides: Record<string, unknown> = {}) =>
   updateDoc(doc(db(uid), eventPath()), {
     status: 'archived',
@@ -257,6 +300,9 @@ const flip = (uid: string, overrides: Record<string, unknown> = {}) =>
     // The flip-only binding (Phase 4b P1, PR #1157 run 3): must be written by
     // the flip and equal the stored generation. `quiesce()` stores QUIESCE.
     archivedUnder: QUIESCE,
+    // The durable record (#1151). `completeArchiveRecord` requires it whole, so
+    // every flip in this file carries it and the cases below vary it.
+    archive: FROZEN_RECORD,
     ...overrides,
   });
 
@@ -310,19 +356,218 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
   });
 
-  it('LOCKS status and archivedAt once archived', async () => {
+  it('LOCKS status, archivedAt and the frozen record once archived', async () => {
     await freeze();
     // Un-archiving is not a client operation at all.
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { status: 'active' }));
     // Nor is re-stamping the freeze.
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedAt: NOW() }));
+    // …nor rewriting the record with a later roster (#1151). This is what "the
+    // final Leaderboard and hall of fame persist unchanged" means at the
+    // boundary: a second archive pass cannot overwrite what the first froze.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        archive: { ...FROZEN_RECORD, standings: [], playerCount: 0 },
+      }),
+    );
+    // Not even a single field of it, and not by removing it either.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        archive: { ...FROZEN_RECORD, eventName: 'Renamed after the fact' },
+      }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: deleteField() }));
+    // Nor the binding the flip wrote.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedUnder: QUIESCE + 1 }));
     // A partial update that does not mention them carries them through
     // unchanged, so the lock never freezes the rest of the document.
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
     // …and echoing the same values back explicitly is still fine.
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { status: 'archived', archivedAt: ARCHIVED_AT }),
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archive: FROZEN_RECORD,
+      }),
     );
+  });
+
+  it('DENIES a stray record on a LIVE Event through the general admin arm', async () => {
+    // `archive` joins the protected set for the same reason `archivedAt` did
+    // (Codex P2, PR #1157): the field exists only on an archived document, and
+    // the quiesced flip arm is the one place it is introduced. An admin write
+    // that dropped a record onto a live Event would leave the archived surfaces
+    // with something to render on an Event still taking Marks.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: FROZEN_RECORD }));
+    // Nor on a CLOSING one, where the flip has not committed yet.
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: FROZEN_RECORD }));
+    // The same admin still edits everything else in both states.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+});
+
+// #1151. The flip is irreversible and the record is what the rules then lock, so
+// a flip that lands `{status: 'archived', archivedAt}` with no record — or a
+// half-built one — is permanent and useless at the same time: the freeze denies
+// every gameplay write while the archived surfaces fall back to the LIVE view
+// the record exists to replace. `completeArchiveRecord` is what makes "an
+// archived Event always carries a whole record" an enforced invariant rather
+// than a property of one client's writer.
+describe('post-sailing-archive — the archive write must carry the whole record', () => {
+  const archiveWith = (record: unknown) => flip(ADMIN, { archive: record });
+
+  beforeEach(async () => {
+    await quiesce();
+  });
+
+  it('DENIES the flip with no record at all, or an empty one', async () => {
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+        archivedUnder: QUIESCE,
+      }),
+    );
+    await assertFails(archiveWith({}));
+  });
+
+  it('DENIES a record missing any top-level key', async () => {
+    for (const key of [
+      'eventName',
+      'standings',
+      'playerCount',
+      'firstBingo',
+      // The headline holder's kept row is part of the whole record: a card that
+      // names a First to BINGO it cannot print a row for is the half-built map
+      // this arm exists to refuse.
+      'firstBingoRow',
+      'dailyHonors',
+      'freezeAt',
+      'archivedAt',
+    ] as const) {
+      const partial: Record<string, unknown> = { ...FROZEN_RECORD };
+      delete partial[key];
+      await assertFails(archiveWith(partial));
+    }
+  });
+
+  it('DENIES a record whose keys carry the wrong types', async () => {
+    for (const wrong of [
+      { eventName: 7 },
+      { standings: 'none' },
+      { playerCount: '1' },
+      { firstBingo: 'Alice' },
+      { firstBingoRow: 'Alice' },
+      { dailyHonors: {} },
+      { freezeAt: 'never' },
+      { archivedAt: 'then' },
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, ...wrong }));
+    }
+  });
+
+  // Codex P2, PR #1139 round 4. `firstBingo` and `firstBingoRow` were typed
+  // INDEPENDENTLY, which accepted the two shapes the pairing exists to refuse:
+  // one present beside the other null (the half-built record the archived Share
+  // Card reads a hole from), and two maps naming DIFFERENT holders (one name in
+  // the hall of fame's headline, another on the pinned eleventh row of the same
+  // card). They are selected together, so they are validated together.
+  it('DENIES a First-BINGO honour and a kept row that do not agree', async () => {
+    // An honour with no row to print for it…
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingoRow: null }));
+    // …and a row belonging to an honour the record does not name.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingo: null }));
+    // Two maps, two different Players: the headline and the pinned row would
+    // disagree on the same card.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, uid: BOB },
+      }),
+    );
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: BOB } }),
+    );
+    // A holder with no usable id on either half is refused for the same reason
+    // the pairing exists: there is nothing to match the two against.
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: 7 } }),
+    );
+  });
+
+  it('ALLOWS the pair when both halves name the same holder', async () => {
+    // The matching control, so the denials above are not vacuous.
+    await assertSucceeds(archiveWith(FROZEN_RECORD));
+  });
+
+  it('DENIES a record whose stamp disagrees with the document stamp', async () => {
+    // Two answers to one question is exactly what the archived surfaces would
+    // then show; both are written from one value in one update.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, archivedAt: ARCHIVED_AT + 1 }));
+    // …and the disagreement is symmetric: moving the DOCUMENT stamp instead is
+    // refused by the same clause.
+    await assertFails(flip(ADMIN, { archivedAt: ARCHIVED_AT + 1 }));
+  });
+
+  it('ALLOWS the complete record, including the legitimately null trio', async () => {
+    // `firstBingo`/`firstBingoRow: null` means nobody got there, `eventName:
+    // null` means the Event had no name, and `freezeAt: null` means it had no
+    // Standings Freeze — all real records, so the check is
+    // presence-then-type-or-null rather than a bare `is map`/`is number`.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        eventName: null,
+        firstBingo: null,
+        firstBingoRow: null,
+        freezeAt: null,
+        dailyHonors: [],
+      }),
+    );
+  });
+
+  // #1142 item 1. The general Event arm sits at Firestore's 1000-expression cap,
+  // and this ticket adds clauses to the FLIP arm behind it — so the write those
+  // clauses exist to validate has to be proved still evaluable. A full record is
+  // the largest one the builder can produce (`MAX_ARCHIVED_STANDING_ROWS` rows at
+  // `MAX_ARCHIVED_DISPLAY_NAME` characters), and the rules cannot iterate a list,
+  // so its SIZE costs nothing here — which is exactly the claim this pins.
+  it('ALLOWS a FULL-sized record through, so the cap is not what the flip meets', async () => {
+    const row = (i: number) => ({
+      uid: `player-uid-${i}`,
+      displayName: 'N'.repeat(100),
+      bingoCount: 20,
+      squaresMarked: 250 - i,
+      blackout: false,
+      firstBingoAt: 1_700_000_000_000 + i,
+    });
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => row(i)),
+        playerCount: 200,
+        firstBingo: { uid: 'player-uid-0', displayName: 'N'.repeat(100), at: 1_700_000_000_000 },
+        firstBingoRow: { ...row(0), rank: 1 },
+        dailyHonors: Array.from({ length: 10 }, (_, i) => ({
+          dayIndex: i,
+          uid: `player-uid-${i}`,
+          displayName: 'N'.repeat(100),
+          firstBingoAt: 1_700_000_000_000 + i,
+          dayLabel: `🌈 D${i + 1}`,
+        })),
+      }),
+    );
+  });
+
+  it('DENIES a flip that smuggles anything else in beside the record', async () => {
+    // The `hasOnly` guard names five keys now, and the fifth is the record — but
+    // it is still five, not "the record plus whatever". A write that also moved
+    // configuration falls through to the general arm, where a not-yet-archived
+    // document is refused.
+    await assertFails(flip(ADMIN, { claimMode: 'proof_required' }));
+    await assertFails(flip(ADMIN, { bannedUids: [BOB] }));
   });
 });
 

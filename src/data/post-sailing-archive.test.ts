@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   archiveInstant,
+  archiveSnapshotFingerprint,
   buildEventArchive,
   draftEventArchive,
   finaleHasRun,
@@ -14,22 +15,30 @@ import {
   MAX_ARCHIVED_STANDING_ROWS,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
+import { migrateDayFields } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
-// specs/post-sailing-archive.md, unit layer (#1149, epic #134). The lifecycle
-// primitive's client half: the quiesce that shuts gameplay, the generation id
-// that says WHICH quiesce, and the flip bound to it.
+// specs/post-sailing-archive.md, unit layer (#1149 and #1151, epic #134). The
+// lifecycle primitive's client half — the quiesce that shuts gameplay, the
+// generation that says WHICH quiesce, and the flip bound to it — plus the
+// durable record that flip now carries.
 //
-// The write path's seam (Codex P2 on PR #1139). Both writes are transactions
-// over ONE document, so the properties that matter are which state each read
-// sees and what each transaction writes — exactly what a fake Firestore surface
-// can hold and an emulator cannot. (The boundary half — that a superseded
-// generation is denied by the RULES too, not only by a client that checks — is
-// pinned in `tests/rules/post-sailing-archive.test.ts`.)
+// The write path's seam (Codex P2 on PR #1139). The freeze is a sequence of
+// server reads followed by a transaction over ONE document, so the properties
+// that matter are which state each read sees, in what order, and what the
+// transaction writes — exactly what a fake Firestore surface can hold and an
+// emulator cannot. (The boundary half — that a superseded generation and an
+// incomplete record are denied by the RULES too, not only by a client that
+// checks — is pinned in `tests/rules/post-sailing-archive.test.ts`.)
 const A = vi.hoisted(() => ({
   event: undefined as Record<string, unknown> | undefined,
+  claims: [] as Record<string, unknown>[],
+  players: [] as Record<string, unknown>[],
+  dayMetas: new Map<number, Record<string, unknown>>(),
   /** Field maps handed to `tx.update` — empty means the call wrote nothing. */
   updates: [] as Record<string, unknown>[],
+  /** Every server-read path, in order, so "after the close" is provable. */
+  serverReads: [] as string[],
   /** Fired as the transaction opens, so a test can move the world underneath a
    *  call that has already decided what it is doing. */
   beforeTx: null as (() => void) | null,
@@ -43,14 +52,33 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     const r: Ref = { path, withConverter: () => r };
     return r;
   };
+  const dayMetaAt = (path: string): Record<string, unknown> | undefined => {
+    const m = /^events\/test-event\/days\/(\d+)\/meta\/\d+$/.exec(path);
+    return m ? A.dayMetas.get(Number(m[1])) : undefined;
+  };
+  const docAt = (path: string) =>
+    path === 'events/test-event' ? A.event : dayMetaAt(path);
   const snapOf = (path: string) => {
-    const data = path === 'events/test-event' ? A.event : undefined;
+    const data = docAt(path);
     return { exists: () => data !== undefined, data: () => data, id: path.split('/').pop() ?? '' };
   };
   return {
     ...actual,
     doc: (_db: unknown, ...segments: string[]) => ref(segments.join('/')),
     collection: (_db: unknown, ...segments: string[]) => ref(segments.join('/')),
+    getDocFromServer: async (r: Ref) => {
+      A.serverReads.push(r.path);
+      return snapOf(r.path);
+    },
+    getDocsFromServer: async (r: Ref) => {
+      A.serverReads.push(r.path);
+      const rows = r.path.endsWith('/claims')
+        ? A.claims
+        : r.path.endsWith('/players')
+          ? A.players
+          : [];
+      return { docs: rows.map((row) => ({ exists: () => true, data: () => row })) };
+    },
     runTransaction: async (_db: unknown, fn: (tx: unknown) => unknown) => {
       A.beforeTx?.();
       return fn({
@@ -144,7 +172,11 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
 
   beforeEach(() => {
     A.event = closingEvent();
+    A.claims = [];
+    A.players = [];
+    A.dayMetas = new Map();
     A.updates = [];
+    A.serverReads = [];
     A.beforeTx = null;
   });
 
@@ -173,7 +205,7 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
     A.event = { status: 'active', archiving: false, archiveToken: 7, days: [], bannedUids: [] };
     const opened = await beginArchive();
     expect(A.updates).toEqual([{ archiving: true, archiveToken: 8 }]);
-    expect(opened).toEqual({ result: 'closing', token: 8, created: true });
+    expect(opened).toEqual({ result: 'closing', token: 8, created: true, eventId: 'test-event' });
   });
 
   it('keeps the generation id when the Event is already closing, and reports it as JOINED', async () => {
@@ -228,14 +260,27 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
   it('reports already-archived, and writes nothing, once the freeze has landed', async () => {
     A.event = { status: 'archived', archivedAt: 5, archiving: false };
     const opened = await beginArchive();
-    expect(opened).toEqual({ result: 'already-archived', token: null, created: false });
+    expect(opened).toEqual({
+      result: 'already-archived',
+      token: null,
+      created: false,
+      eventId: 'test-event',
+    });
     expect(await abandonArchive()).toBe('already-archived');
     expect(A.updates).toEqual([]);
   });
 
   it('reports no-event, and writes nothing, when there is no Event document', async () => {
     A.event = undefined;
-    expect(await beginArchive()).toEqual({ result: 'no-event', token: null, created: false });
+    expect(await beginArchive()).toEqual({
+      result: 'no-event',
+      token: null,
+      created: false,
+      // Reported even where nothing was written: the id is what the call LOOKED
+      // at, and the caller threads it into the freeze and the cleanup (#1142
+      // item 7).
+      eventId: 'test-event',
+    });
     expect(await abandonArchive()).toBe('no-event');
     expect(await archiveEvent(1)).toBe('no-event');
     expect(A.updates).toEqual([]);
@@ -248,10 +293,26 @@ describe('the quiesce is identified, and the flip is bound to the one it took', 
         status: 'archived',
         archivedAt: 5,
         archiving: false,
-        // Restated so the RULES can hold the same binding at the boundary.
-        // Writing the value it already has keeps the field out of
-        // `affectedKeys()`, so the arm's `hasOnly` guard is unaffected.
+        // The BINDING, written to a flip-only field so the RULES can hold the
+        // same check this transaction just made (Phase 4b P1 on PR #1157, run
+        // 3): a field the document does not carry until the flip cannot be
+        // inherited by a write that omits it.
         archivedUnder: 1,
+        // …and the durable record, in the SAME update (#1151). One update on one
+        // document is the whole atomicity requirement: no reader may ever see an
+        // archived Event with no record, or a record on a live one.
+        archive: {
+          eventName: null,
+          standings: [],
+          playerCount: 0,
+          firstBingo: null,
+          firstBingoRow: null,
+          dailyHonors: [],
+          freezeAt: null,
+          // Always equal to the stamp beside it — `firestore.rules` requires the
+          // two to agree, and they are written from one value.
+          archivedAt: 5,
+        },
       },
     ]);
   });
@@ -1149,5 +1210,440 @@ describe('finaleHasRun — the finale gate’s own predicate', () => {
     expect(finaleHasRun({})).toBe(true);
     expect(finaleHasRun(null)).toBe(true);
     expect(finaleHasRun(undefined)).toBe(true);
+  });
+});
+
+// Codex P2, PR #1139 round 4. The quiesce shuts GAMEPLAY, not administration —
+// deliberately, so an Admin can still moderate and still reopen. That leaves the
+// Event's own configuration movable between `archiveEvent`'s pre-read (which the
+// drain gate is evaluated against, and which decides which Day honour pins are
+// fetched) and its transaction (which the record is built against), so a freeze
+// that checked neither would combine reads taken for one configuration with a
+// record built for another.
+describe('archiveEvent — the snapshot configuration is held across the reads', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 1,
+    claimMode: 'honor',
+    days: [mkDay(0), mkDay(1)],
+    bannedUids: [],
+    frozenAt: 50_000,
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.dayMetas = new Map();
+    A.updates = [];
+    A.serverReads = [];
+    A.beforeTx = null;
+  });
+
+  it('freezes when the configuration held (the control)', async () => {
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    expect((A.updates[0].archive as { playerCount: number }).playerCount).toBe(1);
+  });
+
+  it('freezes the Event name off the TRANSACTIONAL read', async () => {
+    // Deliberately not in the fingerprint: `name` decides nothing about which
+    // rows were read, so a rename mid-snapshot must not cost an archive. Taking
+    // it from the transaction's own read is what keeps the record
+    // self-consistent anyway — it is the document the write lands on.
+    A.event = closingEvent({ name: 'Med 2026' });
+    A.beforeTx = () => {
+      A.event = closingEvent({ name: 'Med 2026 — renamed' });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect((A.updates[0].archive as { eventName: string | null }).eventName).toBe(
+      'Med 2026 — renamed',
+    );
+  });
+
+  it('ABORTS when Claim Mode flips mid-snapshot, and writes nothing', async () => {
+    // The drain gate is scoped to `claimsQueueOpen`, so a queue read on an
+    // `honor` Event passes VACUOUSLY. Flipping to `admin_confirmed` afterwards
+    // makes every one of those pending Claims blocking — and unresolvable,
+    // because the freeze denies both writes their resolution consists of.
+    A.claims = [{ status: 'pending' }];
+    A.beforeTx = () => {
+      A.event = closingEvent({ claimMode: 'admin_confirmed' });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when the schedule is edited mid-snapshot, and writes nothing', async () => {
+    // `days` decides which Day honour pins were fetched at all, which Days are
+    // Tutorial, where a missing Standings Freeze is derived from, and the label
+    // each frozen honour chip carries.
+    A.beforeTx = () => {
+      A.event = closingEvent({ days: [mkDay(0, { theme: 'get-sporty' }), mkDay(1)] });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when a Day is added or removed mid-snapshot', async () => {
+    A.beforeTx = () => {
+      A.event = closingEvent({ days: [mkDay(0), mkDay(1), mkDay(2)] });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when the Standings Freeze moves mid-snapshot', async () => {
+    A.beforeTx = () => {
+      A.event = closingEvent({ standingsFreezeAt: 9_999 });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ABORTS when the finale lands mid-snapshot', async () => {
+    // `frozenAt` is in the fingerprint because it resolves the honour cutoff AND
+    // answers the finale gate: a freeze stamped between the pre-read and the
+    // commit would leave the record cut on one answer and gated on another.
+    A.event = closingEvent({ frozenAt: undefined, standingsFreezeAt: 8000 });
+    A.beforeTx = () => {
+      A.event = closingEvent({ frozenAt: 8000, standingsFreezeAt: 8000 });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-changed');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('does NOT abort on a ban landing mid-snapshot — moderation stays open', async () => {
+    // The one administrative action the spec deliberately keeps available across
+    // the quiesce. A ban is applied to the rows the record keeps rather than
+    // deciding which rows were read, so it changes what the record CONTAINS in
+    // exactly the way it should; aborting would make the freeze race a takedown.
+    A.beforeTx = () => {
+      A.event = closingEvent({ bannedUids: ['alice'] });
+    };
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    expect((A.updates[0].archive as { standings: unknown[] }).standings).toEqual([]);
+  });
+
+  it('does not mistake a re-serialized document for a changed one', () => {
+    // The fingerprint sorts object keys, because `JSON.stringify` follows
+    // insertion order and the SDK promises nothing about reproducing it across
+    // two decodes — a comparison that could report a spurious change would abort
+    // archives at random.
+    const a = { claimMode: 'honor', days: [{ index: 0, theme: 'x', unlockAt: 1 }] };
+    const b = { days: [{ unlockAt: 1, theme: 'x', index: 0 }], claimMode: 'honor' };
+    expect(archiveSnapshotFingerprint(a as never)).toBe(archiveSnapshotFingerprint(b as never));
+    // …and a real edit still moves it.
+    expect(archiveSnapshotFingerprint({ ...a, claimMode: 'admin_confirmed' } as never)).not.toBe(
+      archiveSnapshotFingerprint(a as never),
+    );
+  });
+});
+
+// Codex P2, PR #1139. `dayHonorChipLabel` resolves the Day's theme emoji out of
+// `THEMES`, and every LIVE surface hands it Days that have already been through
+// `migrateDayFields` / `normalizeEventTheme` (the Event converter). The WRITER
+// reads the stored document, so on a Day whose persisted theme the Edition does
+// not carry, the live strip and the permanent record disagreed — which is the
+// one thing `dayLabel` was stored to make impossible.
+describe('archiveEvent — the frozen Day label is the one the live strip shows', () => {
+  const rawDay = (theme: string) => ({
+    index: 0,
+    date: '2026-07-15',
+    place: 'Somewhere',
+    placeEmoji: '🏖️',
+    theme,
+    tonight: [],
+    pool: 'main',
+    tutorial: false,
+    unlockAt: 1,
+  });
+  const closingWith = (theme: string) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 1,
+    claimMode: 'honor',
+    days: [rawDay(theme)],
+    bannedUids: [],
+    frozenAt: 50_000,
+  });
+  /** The label the LIVE honours strip renders, which reads the CONVERTED Days. */
+  const liveLabel = (theme: string) => dayHonorChipLabel(0, [migrateDayFields(rawDay(theme))]);
+
+  beforeEach(() => {
+    A.claims = [];
+    A.players = [
+      {
+        uid: 'alice',
+        displayName: 'Alice',
+        bingoCount: 1,
+        squaresMarked: 9,
+        firstBingoAt: 500,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 9, firstBingoAt: 500 } },
+      },
+    ];
+    A.dayMetas = new Map();
+    A.updates = [];
+    A.serverReads = [];
+    A.beforeTx = null;
+  });
+
+  it('freezes the Edition default emoji for a theme this build does not know', async () => {
+    // The live strip shows the Edition's default emoji, because the converter
+    // resolves an unknown theme to it. The raw read resolved to no theme at all,
+    // so the record froze a bare ordinal.
+    A.event = closingWith('not-a-real-theme');
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe(liveLabel('not-a-real-theme'));
+    expect(honors[0].dayLabel).not.toBe('D1');
+  });
+
+  it('freezes the Edition default for an OFF-EDITION theme, not that Theme’s own emoji', async () => {
+    // A real registered Theme, bound to a different Edition. The picker (and so
+    // the converter) resolves it to this Edition's default, while the raw lookup
+    // finds the other Theme's emoji — a DIFFERENT emoji frozen, permanently.
+    A.event = closingWith('the-birds');
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe(liveLabel('the-birds'));
+  });
+
+  it('freezes an on-Edition theme exactly as it always did — the control', async () => {
+    A.event = closingWith('neon-playground');
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const honors = (A.updates[0].archive as { dailyHonors: { dayLabel: string }[] }).dailyHonors;
+    expect(honors[0].dayLabel).toBe('🌈 D1');
+    expect(honors[0].dayLabel).toBe(liveLabel('neon-playground'));
+  });
+});
+
+describe('archiveEvent — the reads are taken from the server AFTER the close', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    // The quiesce's own generation: `archiving` alone cannot say WHICH shut the
+    // record was read against (#1139).
+    archiveToken: 1,
+    claimMode: 'admin_confirmed',
+    days: [mkDay(0), mkDay(1)],
+    bannedUids: [],
+    frozenAt: 50_000,
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.dayMetas = new Map();
+    A.updates = [];
+    A.serverReads = [];
+    A.beforeTx = null;
+  });
+
+  it('freezes when the queue is genuinely empty (the control)', async () => {
+    A.claims = [{ status: 'confirmed' }, { status: 'rejected' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    expect(A.updates[0].status).toBe('archived');
+  });
+
+  it('refuses, and writes nothing, when a Claim is pending after the close', async () => {
+    A.claims = [{ status: 'pending' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('claims-pending');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('takes the queue read AFTER the Event is confirmed shut, and before the roster', async () => {
+    // The order is the guarantee: a queue read before the quiesce is confirmed
+    // proves nothing, because the collection could still move afterwards.
+    await archiveEvent(1, { now: 5 });
+    expect(A.serverReads[0]).toBe('events/test-event');
+    expect(A.serverReads[1]).toBe('events/test-event/claims');
+    expect(A.serverReads).toContain('events/test-event/players');
+  });
+
+  it('names ONE Event on every read, even when the hostname binding moves', async () => {
+    // #1142 item 7. `EVENT_ID` is a live binding, and this call takes four
+    // awaited reads before it writes — so a path helper resolving the binding
+    // per read could freeze one Event's roster onto another. The id is captured
+    // once and threaded, which is what the caller's own begin/freeze/cleanup
+    // sequence relies on too.
+    await archiveEvent(1, { now: 5, eventId: 'test-event' });
+    for (const path of A.serverReads) expect(path.startsWith('events/test-event')).toBe(true);
+    expect(A.updates).toHaveLength(1);
+
+    // An explicit OTHER Event addresses that Event and nothing else — the same
+    // threading, observed from the other side. There is no document there, so
+    // it reports `no-event` without ever reaching the queue or the roster.
+    A.serverReads = [];
+    A.updates = [];
+    expect(await archiveEvent(1, { now: 5, eventId: 'other-event' })).toBe('no-event');
+    expect(A.serverReads).toEqual(['events/other-event']);
+    expect(A.updates).toEqual([]);
+  });
+
+  it('reads each Day’s honour pin from the server and freezes it', async () => {
+    A.dayMetas = new Map([[1, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 1200 } }]]);
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.serverReads).toContain('events/test-event/days/0/meta/0');
+    expect(A.serverReads).toContain('events/test-event/days/1/meta/1');
+    expect((A.updates[0].archive as { dailyHonors: { uid: string }[] }).dailyHonors).toEqual([
+      expect.objectContaining({ dayIndex: 1, uid: 'pin', displayName: 'Pinned' }),
+    ]);
+  });
+
+  it('never reaches the queue when the Event was not shut at all', async () => {
+    // `not-closing` comes first: an Event that was never quiesced has a Claim
+    // queue that is still moving, so reading it would answer nothing.
+    A.event = closingEvent({ archiving: false });
+    expect(await archiveEvent(1, { now: 5 })).toBe('not-closing');
+    expect(A.serverReads).toEqual(['events/test-event']);
+  });
+
+  it('never reaches the queue when the generation in force is not the one it holds', async () => {
+    // The binding is checked before the reads as well as inside the transaction:
+    // four round trips spent building a record the commit must refuse anyway is
+    // exactly what the pre-check saves.
+    A.event = closingEvent({ archiveToken: 2 });
+    expect(await archiveEvent(1, { now: 5 })).toBe('quiesce-changed');
+    expect(A.serverReads).toEqual(['events/test-event']);
+    expect(A.updates).toEqual([]);
+  });
+
+  it('ignores a pending Claim outside admin-confirmed mode, which has no drain path', async () => {
+    // #269's mode gate, unchanged: outside `admin_confirmed` the Review queue
+    // offers no Confirm/Reject, so refusing here would be a dead end rather than
+    // a gate. The same `claimsAwaitingAdmin` the console applies decides it.
+    A.event = closingEvent({ claimMode: 'honor' });
+    A.claims = [{ status: 'pending' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+  });
+
+  it('counts a pending Claim on an Event whose stored Claim Mode is the LEGACY spelling', async () => {
+    // Codex P2, PR #1139. This pre-read is deliberately converter-free, but
+    // `claimsQueueOpen` compares against the CURRENT contract — and an Event
+    // seeded or written before the rename persists `'verified'` for what is now
+    // `'admin_confirmed'`. The console gates on the CONVERTED document, so the
+    // two halves of one gate read the same queue and disagreed: the console
+    // refused to arm while this take passed vacuously and would have frozen the
+    // Event over exactly the Claims the gate exists to drain.
+    A.event = closingEvent({ claimMode: 'verified' });
+    A.claims = [{ status: 'pending' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('claims-pending');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('still freezes a legacy-spelled Event whose queue is genuinely drained', async () => {
+    // The control: the coercion decides which Events HAVE a queue, never that a
+    // legacy spelling blocks archival on its own.
+    A.event = closingEvent({ claimMode: 'verified' });
+    A.claims = [{ status: 'confirmed' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+  });
+
+  it('refuses when the stored Event has no room left for an ordinary record', async () => {
+    // Codex P2, PR #1139 round 4. The record is not written to an empty
+    // document: the check that matters is on the one the update PRODUCES. The
+    // roster here is a single ordinary row — it is the Event's own fields that
+    // have no room left — and the refusal still has to come before the write,
+    // because gameplay is already shut by the time this runs.
+    A.event = closingEvent({
+      days: [
+        {
+          index: 0,
+          theme: 'neon-playground',
+          snapshotItemIds: Array.from({ length: 60_000 }, (_, i) => `item-${i}-padding`),
+        },
+      ],
+    });
+    expect(await archiveEvent(1, { now: 5 })).toBe('too-large');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('refuses a record the server re-read makes too large, and writes nothing', async () => {
+    // The console checked the record it previewed from its live subscriptions;
+    // this is the one built from the roster read after the close, and a Player
+    // row is not validated by any rule on the way in.
+    const dayStats: Record<number, Record<string, number>> = {};
+    for (let i = 0; i < 6_000; i++) {
+      dayStats[i] = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1_000 + i };
+    }
+    A.players = [{ uid: 'whale', displayName: 'Whale', bingoCount: 1, squaresMarked: 1, dayStats }];
+    // An Event with no schedule, so the derived honours flow through
+    // unmatched — one per bucket the Player wrote, and `dayStats` is a
+    // Player-written map with no rules validation on the way in.
+    A.event = closingEvent({ days: [] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('too-large');
+    expect(A.updates).toEqual([]);
+  });
+});
+
+// #1151, routed here from #1150's review. The quiesce WITHHOLDS the finale beats
+// rather than cancelling them — they land at the scheduled cutoff once play
+// reopens — but `status: 'archived'` is irreversible, so an Event archived first
+// never gets them at all and nothing else says so.
+describe('archiveEvent — the finale gate', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 1,
+    claimMode: 'honor',
+    days: [mkDay(0), mkDay(1)],
+    bannedUids: [],
+    standingsFreezeAt: 8000,
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.dayMetas = new Map();
+    A.updates = [];
+    A.serverReads = [];
+    A.beforeTx = null;
+  });
+
+  it('REFUSES, and writes nothing, while the scheduled Standings Freeze has not run', async () => {
+    expect(await archiveEvent(1, { now: 5 })).toBe('finale-pending');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('freezes once the finale has run — the control', async () => {
+    A.event = closingEvent({ frozenAt: 8000 });
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+  });
+
+  it('freezes an Event that has no scheduled finale at all', async () => {
+    // A legacy Event with no ceremonial Day and no stored freeze never freezes
+    // on its own, so gating on one would strand it closed forever.
+    A.event = closingEvent({ standingsFreezeAt: undefined, days: [] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+  });
+
+  it('archives BEFORE the finale only when the Admin says so explicitly', async () => {
+    // The override the console's own acknowledgement carries. It is a decision
+    // an Admin may legitimately take — an Event that will never reach its
+    // finale — but never a default.
+    expect(await archiveEvent(1, { now: 5, beforeFinale: true })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+    // The record still cuts on the resolved freeze, so the standings it keeps
+    // are the ones the finale would have settled.
+    expect((A.updates[0].archive as { freezeAt: number | null }).freezeAt).toBe(8000);
+  });
+
+  it('is decided AFTER the drain gate, so the queue is reported first', async () => {
+    // Both are pre-write refusals, and the Admin can only act on one at a time.
+    // The Claim queue comes first because it is the one the freeze makes
+    // permanently unresolvable.
+    A.event = closingEvent({ claimMode: 'admin_confirmed' });
+    A.claims = [{ status: 'pending' }];
+    expect(await archiveEvent(1, { now: 5 })).toBe('claims-pending');
   });
 });
