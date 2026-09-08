@@ -38,7 +38,18 @@ const { txGet, txSet, txUpdate, txDelete, runTx, getDocMock, getDocsMock, ops } 
   ops: [] as Array<{ op: 'get' | 'set' | 'update' | 'delete'; path: string }>,
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', storage: {} }));
+// attachProof (below, the #1143 create-shape pin) uploads media before its
+// transaction; stub the two Storage calls proofs.ts uses so nothing here touches
+// a bucket. uploadProofMedia itself is exercised for real against the emulator by
+// tests/rules/w0-storage-rules.test.ts.
+vi.mock('./storage', () => ({
+  uploadProofMedia: vi.fn(async (uid: string, proofId: string) => ({
+    path: `proofs/med-2026/${uid}/${proofId}.jpg`,
+    url: `https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2Fmed-2026%2F${uid}%2F${proofId}.jpg?alt=media`,
+  })),
+  deleteStoragePath: vi.fn(),
+}));
 vi.mock('./markAnalytics', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./markAnalytics')>()),
   directMarkAnalyticsRequest: vi.fn(() => ({ id: 'req-1' })),
@@ -51,11 +62,16 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       __kind: 'collection',
       path: segments.join('/'),
     }),
-    doc: (_a: unknown, ...rest: string[]): Ref => ({
-      __kind: 'doc',
-      id: rest[rest.length - 1],
-      path: rest.join('/'),
-    }),
+    doc: (a: unknown, ...rest: string[]): Ref => {
+      // doc(collectionRef) — the auto-id child ref attachProof mints for the
+      // Proof (and its claim) before it writes anything.
+      if (a && (a as Ref).__kind === 'collection' && rest.length === 0) {
+        const col = (a as Ref).path;
+        const id = `auto-${col.split('/').pop()}`;
+        return { __kind: 'doc', id, path: `${col}/${id}` };
+      }
+      return { __kind: 'doc', id: rest[rest.length - 1], path: rest.join('/') };
+    },
     runTransaction: (_db: unknown, fn: (tx: unknown) => unknown) => runTx(_db, fn),
     // The claims-by-proofId lookup restoreProof runs BEFORE its transaction (the
     // web SDK's Transaction.get takes a DocumentReference, never a query).
@@ -77,6 +93,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
 
 import { confirmClaim, hideProof, rejectClaim, restoreProof } from './admin';
 import { safetyHideStands } from './moderation';
+import { attachProof } from './proofs';
 
 /** A dealt board whose Square 4 is the pending claim backed by proof `P`. */
 function boardWithPendingClaim(): Cell[] {
@@ -615,5 +632,89 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     await restoreProof('P');
 
     expect(ops.filter((o) => o.op !== 'get')).toEqual([{ op: 'update', path: 'events/med-2026/proofs/P' }]);
+  });
+});
+
+// --- the Proof document has exactly ONE creator (#1143) ----------------------
+//
+// Codex P1. `moderateProof` is a STORAGE trigger and `attachProof` uploads the
+// media BEFORE the transaction below, so a fast scan can reach a verdict with no
+// Proof document to put it on. While the scanner closed that gap by merge-setting
+// the verdict — which CREATES the doc — this write broke against it: the rules
+// judge a write by whether the document exists, so a Player's create became an
+// UPDATE that `hasOnly(['reportCount'])` denies (the submission fails outright),
+// while an admin uploader's is ALLOWED and the full `set` overwrote `status`,
+// `visionFlag` and `safetyHide` back to a public Proof no arm of the hide trigger
+// could reach again.
+//
+// The fix is on the scanner side (functions/src/visionHide.ts: a verdict that
+// arrives first is parked in the server-only `proofScans` collection), so this
+// write is unchanged — and these cases are the pin that says what it relies on.
+
+describe('attachProof — the Proof write stays a plain CREATE (specs/cloud-vision-moderation.md)', () => {
+  /**
+   * The `create` rule's `hasOnly` allowlist in firestore.rules, verbatim. A
+   * create carrying anything else is denied outright — which is why the scanner
+   * may not pre-create the doc, and why the client carries no server field.
+   */
+  const CREATE_ALLOWLIST = [
+    'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
+    'storagePath', 'mediaURL', 'thumbURL', 'text', 'createdAt',
+    'reportCount', 'status', 'visionFlag', 'source', 'dayIndex',
+  ];
+
+  const attach = (claimMode: 'proof_required' | 'admin_confirmed') =>
+    attachProof({
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      cells: boardWithPendingClaim(),
+      cellIndex: 5,
+      itemId: 'i5',
+      itemText: 'Saw a sailor in Speedos',
+      claimMode,
+      currentFirstBingoAt: null,
+      proof: { type: 'photo', blob: new Blob(['x'], { type: 'image/jpeg' }) },
+    });
+
+  const proofWrite = () => txSet.mock.calls.find((c) => (c[0] as Ref).path.includes('/proofs/'));
+
+  it('writes exactly the create-allowlisted keys, with no merge option and no server field', async () => {
+    await attach('proof_required');
+
+    const call = proofWrite()!;
+    // Two arguments: a whole-document `set`, never `{ merge: true }`. That is only
+    // safe while nothing else can have created the doc — a merge onto an existing
+    // one would be an update touching `status`, which the rules bound to
+    // `reportCount` for every non-admin.
+    expect(call).toHaveLength(2);
+    const payload = call[1] as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual([...CREATE_ALLOWLIST].sort());
+    // The server-owned moderation fields, from the client's side: the verdict is
+    // written as an explicit null, and the marker is absent entirely — a create
+    // carrying either a verdict or the marker is DENIED.
+    expect(payload.visionFlag).toBeNull();
+    expect(payload.status).toBe('active');
+    expect(payload).not.toHaveProperty('safetyHide');
+  });
+
+  it('starts an admin_confirmed Proof pending, and still carries no server field', async () => {
+    await attach('admin_confirmed');
+
+    const payload = proofWrite()![1] as Record<string, unknown>;
+    expect(payload.status).toBe('pending');
+    expect(payload.visionFlag).toBeNull();
+    expect(payload).not.toHaveProperty('safetyHide');
+  });
+
+  it('never READS the Proof, which is exactly why nothing else may create it', async () => {
+    // The transaction reads the board, the player row and the tally marker — and
+    // no Proof. So this write cannot notice a scanner-created doc, let alone carry
+    // its verdict forward; the guarantee has to be that no such doc exists, and
+    // that guarantee lives in `writeVisionVerdict` (functions/src/visionHide.ts).
+    await attach('proof_required');
+
+    expect(ops.filter((o) => o.op === 'get' && o.path.includes('/proofs/'))).toEqual([]);
+    expect(ops.some((o) => o.op === 'set' && o.path.includes('/proofs/'))).toBe(true);
   });
 });

@@ -2,8 +2,10 @@
  * Server-authoritative Vision auto-hide (issue #133, ADR 0004 Phase 1).
  *
  * The CONSUMER half of Cloud Vision. `moderateProof` (the producer, #132)
- * merge-sets `{ status: 'flagged', visionFlag }` onto a Proof whose media
- * SafeSearch scored as extreme/illegal — but nothing acts on that flag: the
+ * writes `{ status: 'flagged', visionFlag }` onto a Proof whose media SafeSearch
+ * scored as extreme/illegal — through `writeVisionVerdict` below, which parks the
+ * verdict rather than creating a Proof that does not exist yet (#1143; see
+ * `PROOF_SCANS_COLLECTION`) — but nothing acts on that flag: the
  * shipped report-count auto-hide (`./autohide`) is deliberately ACTIVE-ONLY and
  * leaves a `'flagged'` doc alone, precisely so a report bump can never downgrade
  * the stronger Vision state to a plain `'hidden'` an admin might restore without
@@ -84,6 +86,62 @@ export interface VisionFlaggedDoc {
   visionFlag?: string | null;
   /** The marker below. Read as well as written, so a stamp is never re-applied. */
   safetyHide?: boolean | null;
+}
+
+/** The Proof document this module hides. */
+export function proofPath(eventId: string, proofId: string): string {
+  return `events/${eventId}/proofs/${proofId}`;
+}
+
+/**
+ * The SERVER-ONLY collection that parks a Vision verdict whose Proof document
+ * does not exist yet — `events/{eventId}/proofScans/{proofId}` — and the reason
+ * the scanner is no longer allowed to touch the Proof at all in that case.
+ *
+ * `moderateProof` is a STORAGE trigger: it fires on the uploaded object, and
+ * `attachProof` (src/data/proofs.ts) uploads the media BEFORE the transaction
+ * that writes the Proof document. So the scan can reach a verdict while there is
+ * no document to put it on — the upload-before-document race the #101 notifier
+ * already names. The scanner used to close that gap by merge-setting the verdict,
+ * which CREATES the Proof, and the created doc broke the submission that was
+ * still on its way (Codex P1 on #1143):
+ *
+ *   - For an ordinary Player, `attachProof`'s `tx.set` is written as a CREATE and
+ *     the rules judge it as one. Against a document the scanner had already
+ *     created it becomes an UPDATE, where a non-admin is bounded to
+ *     `hasOnly(['reportCount'])` — so the whole transaction is denied and the
+ *     Player's submission fails outright, for no reason they could act on.
+ *   - For an admin uploader the `isAdmin` arm ALLOWS that update, and the full
+ *     `set` then overwrites `status`, `visionFlag` and `safetyHide` back to
+ *     `'active'`, `null` and absent. The result matches no arm of
+ *     `visionHideAction` below — not the hide arm (not `'flagged'`), not the
+ *     re-hide arm (no marker), not the backfill arm (no verdict, not `'hidden'`)
+ *     — so extreme/illegal media stays in the Feed with no server-side path left
+ *     to take it down.
+ *
+ * The fix is that the Proof document has exactly ONE creator, `attachProof`. When
+ * the scanner finds no Proof it records the verdict HERE instead, and
+ * `applyPendingVisionScan` (below) applies it the moment the Proof appears, so
+ * the verdict survives the race for every uploader and no submission fails
+ * because the scanner got there first.
+ *
+ * NO CLIENT MAY READ OR WRITE THIS COLLECTION — `firestore.rules` denies every
+ * verb to every client, an admin's included; the Admin SDK bypasses rules, and
+ * the two transactional functions below are its only users. Nothing in `src/`
+ * knows the path exists, which is the point: a Player could otherwise pre-empt
+ * their own scan by writing the record, and an admin console that surfaced it
+ * would be reading a hand-off rather than a decision.
+ */
+export const PROOF_SCANS_COLLECTION = 'proofScans' as const;
+
+export function proofScanPath(eventId: string, proofId: string): string {
+  return `events/${eventId}/${PROOF_SCANS_COLLECTION}/${proofId}`;
+}
+
+/** The parked verdict. `visionFlag` is whatever the producer decided to flag. */
+export interface PendingVisionScan {
+  visionFlag?: unknown;
+  scannedAt?: unknown;
 }
 
 /**
@@ -257,7 +315,7 @@ export async function hideVisionFlaggedIfQualifies(
   eventId: string,
   proofId: string,
 ): Promise<boolean> {
-  const docRef = db.doc(`events/${eventId}/proofs/${proofId}`);
+  const docRef = db.doc(proofPath(eventId, proofId));
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) return false; // deleted since the snapshot — never re-create
@@ -272,9 +330,144 @@ async function defaultHideVisionFlaggedIfQualifies(eventId: string, proofId: str
   return hideVisionFlaggedIfQualifies(await adminFirestore(), eventId, proofId);
 }
 
+/** Where `writeVisionVerdict` put the verdict: onto the Proof, or into the hand-off. */
+export type VisionVerdictTarget = 'proof' | 'scan';
+
+/**
+ * The PRODUCER-side write, and the half of the #1143 fix that lives with the
+ * scanner: record a Vision verdict WITHOUT ever creating the Proof document.
+ *
+ * One transaction, two arms, chosen by whether `attachProof` has committed yet:
+ *
+ *   - the Proof EXISTS → `tx.update` writes `{ status: 'flagged', visionFlag }`
+ *     onto it, exactly what the scanner's merge-set used to write. `update`
+ *     rather than `set` is the guarantee: a Proof deleted since the upload is
+ *     never resurrected as a two-field ghost, the same promise
+ *     `hideVisionFlaggedIfQualifies` already makes.
+ *   - the Proof is ABSENT → `tx.set` parks the verdict in `proofScans` (above),
+ *     and `applyPendingVisionScan` applies it when the Proof arrives.
+ *
+ * The transaction is what makes the hand-off airtight, and this is the whole
+ * argument for it. A Firestore read-write transaction commits only if every
+ * document it READ is unchanged — including one it read as ABSENT. So if
+ * `attachProof` creates the Proof between this read and this commit, this
+ * transaction ABORTS and retries, re-reads, and takes the first arm instead.
+ * "The record was written" therefore implies "the Proof did not exist at commit
+ * time", which implies the Proof's own create is still to come — and that create
+ * is the write `applyVisionFlagHide` consults the record on. There is no
+ * interleaving in which a verdict is parked and nothing ever picks it up.
+ *
+ * `db` is a parameter so the whole decision is unit-testable with a fake
+ * transaction; `now` is one so the stamp is deterministic under test.
+ */
+export async function writeVisionVerdict(
+  db: AdminFirestore,
+  eventId: string,
+  proofId: string,
+  visionFlag: string,
+  now: number = Date.now(),
+): Promise<VisionVerdictTarget> {
+  const proofRef = db.doc(proofPath(eventId, proofId));
+  const scanRef = db.doc(proofScanPath(eventId, proofId));
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(proofRef);
+    if (snap.exists) {
+      tx.update(proofRef, { status: 'flagged', visionFlag });
+      return 'proof';
+    }
+    tx.set(scanRef, { visionFlag, scannedAt: now });
+    return 'scan';
+  });
+}
+
+/**
+ * The CONSUMER side of the same hand-off: apply a parked verdict to the Proof
+ * that has just been created, and consume the record in the same transaction.
+ *
+ * The write is the producer's own — `{ status: 'flagged', visionFlag }`, the
+ * verdict string verbatim — so the Proof reaches exactly the state a scan that
+ * had won the race would have left it in, and the hide it now deserves is
+ * decided where every other hide is: by `visionHideAction` on the write this
+ * makes, which re-fires the trigger and takes the `'flagged'` doc to `'hidden'`
+ * with the marker. NO allowlist is consulted here. The producer decides what is
+ * worth FLAGGING (and a future producer may flag more); this module decides what
+ * is worth HIDING, and the split has to survive the race intact or the race
+ * would quietly become a second, laxer policy.
+ *
+ * Exactly-once by construction: the record is deleted in the same transaction
+ * that applies it, so no later write can re-flag a Proof whose verdict an admin
+ * has since acted on. A record whose Proof is (still, or again) missing is left
+ * alone for the create that will consume it; a malformed one is dropped rather
+ * than written onto the Proof.
+ */
+export async function applyPendingVisionScan(
+  db: AdminFirestore,
+  eventId: string,
+  proofId: string,
+): Promise<boolean> {
+  const proofRef = db.doc(proofPath(eventId, proofId));
+  const scanRef = db.doc(proofScanPath(eventId, proofId));
+  return db.runTransaction(async (tx) => {
+    // Reads before writes, and the cheap one first: the overwhelming majority of
+    // Proof creates have no parked verdict and stop here having read one doc.
+    const scanSnap = await tx.get(scanRef);
+    if (!scanSnap.exists) return false;
+    const proofSnap = await tx.get(proofRef);
+    if (!proofSnap.exists) return false; // deleted again already — leave the record
+    const visionFlag = (scanSnap.data() as PendingVisionScan | undefined)?.visionFlag;
+    if (typeof visionFlag !== 'string' || visionFlag.length === 0) {
+      tx.delete(scanRef); // nothing a producer would have written — drop it
+      return false;
+    }
+    tx.update(proofRef, { status: 'flagged', visionFlag });
+    tx.delete(scanRef);
+    return true;
+  });
+}
+
+async function defaultApplyPendingVisionScan(eventId: string, proofId: string): Promise<boolean> {
+  return applyPendingVisionScan(await adminFirestore(), eventId, proofId);
+}
+
+/**
+ * `moderateProof`'s seam onto `writeVisionVerdict`, resolving the shared
+ * admin-SDK handle the way every other default in this module does. The Storage
+ * trigger calls THIS rather than writing the Proof itself, which is what makes
+ * `attachProof` the Proof document's only creator.
+ */
+export async function recordVisionVerdict(
+  eventId: string,
+  proofId: string,
+  visionFlag: string,
+): Promise<VisionVerdictTarget> {
+  return writeVisionVerdict(await adminFirestore(), eventId, proofId, visionFlag);
+}
+
+/**
+ * The trigger-side gate on the hand-off lookup: is THIS write the Proof's own
+ * creation, arriving without a verdict?
+ *
+ * A parked record exists only because the scanner found no Proof, and the Proof's
+ * create is therefore the write that must consume it (see `writeVisionVerdict`
+ * for why no record can be parked AFTER the create). Gating on the create keeps
+ * every other Proof write — every report bump, every admin action, every write
+ * this trigger makes itself — on the pre-#1143 cost of one predicate and no read.
+ * A create that already carries a verdict cannot be waiting on one: the rules
+ * pin `visionFlag == null` at create, and `attachProof` writes exactly that.
+ */
+export function awaitsPendingVisionScan(
+  before: VisionFlaggedDoc | undefined,
+  after: VisionFlaggedDoc | undefined,
+): boolean {
+  if (before !== undefined || after === undefined) return false;
+  return after.visionFlag === null || after.visionFlag === undefined;
+}
+
 export interface VisionHideDeps {
   /** Transactionally apply the arm the Proof's LIVE state asks for, if any; defaults to `hideVisionFlaggedIfQualifies`. */
   hideIfQualifies?: (eventId: string, proofId: string) => Promise<boolean>;
+  /** Transactionally consume a parked verdict, if one is waiting; defaults to `applyPendingVisionScan`. */
+  applyPendingScan?: (eventId: string, proofId: string) => Promise<boolean>;
 }
 
 /**
@@ -285,18 +478,34 @@ export interface VisionHideDeps {
  * the #101 notifier). Returns whether it wrote.
  *
  * The snapshot predicate runs BEFORE any Firestore access, so the overwhelmingly
- * common write (every create, every report bump, every admin action on an
- * unscreened Proof, and our own writes, which all leave a doc no arm claims)
- * costs one predicate and no read. Nothing here reads the Event doc at all:
- * unlike the report threshold, the Vision verdict is already on the Proof.
+ * common write (every report bump, every admin action on an unscreened Proof, and
+ * our own writes, which all leave a doc no arm claims) costs one predicate and no
+ * read. Nothing here reads the Event doc at all: unlike the report threshold, the
+ * Vision verdict is already on the Proof.
+ *
+ * A Proof's own CREATE is the one write that also consults the scanner hand-off
+ * (`awaitsPendingVisionScan`, #1143), because a verdict reached while the Proof
+ * did not exist is parked in `proofScans` rather than merge-created onto the
+ * Proof, and the create is the write that must pick it up. That costs one read on
+ * the write that already costs a document write, and nothing on any other. When a
+ * verdict IS waiting, applying it leaves the Proof `'flagged'`, and the hide
+ * itself happens on the re-fire through the ordinary arms — this function never
+ * hides and flags in one write, so `visionHideAction` stays the single place a
+ * status moves. The action pass still runs after a lookup that found nothing, so
+ * a create is judged exactly as it was before.
  */
 export async function applyVisionFlagHide(
   eventId: string,
   proofId: string,
+  before: VisionFlaggedDoc | undefined,
   after: VisionFlaggedDoc | undefined,
   deps: VisionHideDeps = {},
 ): Promise<boolean> {
   try {
+    if (awaitsPendingVisionScan(before, after)) {
+      const applied = await (deps.applyPendingScan ?? defaultApplyPendingVisionScan)(eventId, proofId);
+      if (applied) return true; // now 'flagged'; the re-fire hides it through the hide arm
+    }
     if (!visionHideAction(after)) return false;
     return await (deps.hideIfQualifies ?? defaultHideVisionFlaggedIfQualifies)(eventId, proofId);
   } catch (err) {

@@ -1,12 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   AUTO_HIDE_VISION_FLAGS,
+  PROOF_SCANS_COLLECTION,
   SAFETY_HIDE_MARKER,
+  applyPendingVisionScan,
+  awaitsPendingVisionScan,
   isAutoHideVisionFlag,
+  proofScanPath,
   qualifiesForVisionHide,
   visionHideAction,
   hideVisionFlaggedIfQualifies,
   applyVisionFlagHide,
+  writeVisionVerdict,
   type VisionFlaggedDoc,
 } from '../../functions/src/visionHide';
 import {
@@ -79,11 +84,14 @@ describe('qualifiesForVisionHide — flagged AND extreme/illegal, at both gates'
 /**
  * A fake AdminFirestore: an in-memory doc store keyed by path (a missing key ⇒
  * the doc does not exist), and a runTransaction that reads the live store and
- * records updates. Mirrors the fake in
- * tests/functions/w4-server-authoritative-hide.test.ts.
+ * records every write in call order. Mirrors the fake in
+ * tests/functions/w4-server-authoritative-hide.test.ts, plus the `set`/`delete`
+ * the #1143 scanner hand-off needs — `ops` is what lets a case prove the
+ * scanner CREATED nothing, rather than merely that the Proof looks unchanged.
  */
 function fakeDb(store: Record<string, Record<string, unknown> | undefined>) {
   const updates: Array<{ path: string; data: Record<string, unknown> }> = [];
+  const ops: Array<{ op: 'get' | 'update' | 'set' | 'delete'; path: string; data?: Record<string, unknown> }> = [];
   const snapFor = (path: string) => ({
     exists: store[path] !== undefined,
     id: path.split('/').pop() as string,
@@ -97,18 +105,39 @@ function fakeDb(store: Record<string, Record<string, unknown> | undefined>) {
       fn: (tx: {
         get: (r: { __path: string }) => Promise<ReturnType<typeof snapFor>>;
         update: (r: { __path: string }, d: Record<string, unknown>) => void;
+        set: (r: { __path: string }, d: Record<string, unknown>) => void;
+        delete: (r: { __path: string }) => void;
       }) => Promise<T>,
     ) =>
       fn({
-        get: async (r) => snapFor(r.__path),
+        get: async (r) => {
+          ops.push({ op: 'get', path: r.__path });
+          return snapFor(r.__path);
+        },
         update: (r, d) => {
           store[r.__path] = { ...(store[r.__path] ?? {}), ...d };
           updates.push({ path: r.__path, data: d });
+          ops.push({ op: 'update', path: r.__path, data: d });
+        },
+        set: (r, d) => {
+          store[r.__path] = { ...d };
+          ops.push({ op: 'set', path: r.__path, data: d });
+        },
+        delete: (r) => {
+          delete store[r.__path];
+          ops.push({ op: 'delete', path: r.__path });
         },
       }),
   };
-  return { db: db as unknown as AdminFirestore, updates, store };
+  return { db: db as unknown as AdminFirestore, updates, ops, store };
 }
+
+/**
+ * A prior snapshot that makes a write an UPDATE rather than the Proof's own
+ * create — the shape every case below wants unless it is deliberately exercising
+ * the create-time scanner hand-off (#1143).
+ */
+const PRIOR: VisionFlaggedDoc = { status: 'active', visionFlag: null };
 
 describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () => {
   const PROOF = 'events/e/proofs/p1';
@@ -235,7 +264,7 @@ describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1
   it('reaches Firestore for the backfill snapshot, unlike every write no arm claims', async () => {
     const hide = vi.fn(async () => true);
     expect(
-      await applyVisionFlagHide('e', 'p1', { status: 'hidden', visionFlag: 'violence' }, { hideIfQualifies: hide }),
+      await applyVisionFlagHide('e', 'p1', PRIOR, { status: 'hidden', visionFlag: 'violence' }, { hideIfQualifies: hide }),
     ).toBe(true);
     expect(hide).toHaveBeenCalledWith('e', 'p1');
   });
@@ -314,7 +343,7 @@ describe('the re-hide arm — a standing marker outranks an active status (#1143
   it('reaches Firestore for the stale-client snapshot, and stands down on the honest ones', async () => {
     const hide = vi.fn(async () => true);
     expect(
-      await applyVisionFlagHide('e', 'p1', { status: 'active', safetyHide: true }, { hideIfQualifies: hide }),
+      await applyVisionFlagHide('e', 'p1', PRIOR, { status: 'active', safetyHide: true }, { hideIfQualifies: hide }),
     ).toBe(true);
     expect(hide).toHaveBeenCalledWith('e', 'p1');
     hide.mockClear();
@@ -323,9 +352,267 @@ describe('the re-hide arm — a standing marker outranks an active status (#1143
       { status: 'active', visionFlag: 'violence' }, // a pre-marker Restore, already lifted
       { status: 'pending', safetyHide: true }, // held for claim review, admin-only
     ] satisfies VisionFlaggedDoc[]) {
-      expect(await applyVisionFlagHide('e', 'p1', after, { hideIfQualifies: hide })).toBe(false);
+      expect(await applyVisionFlagHide('e', 'p1', PRIOR, after, { hideIfQualifies: hide })).toBe(false);
     }
     expect(hide).not.toHaveBeenCalled();
+  });
+});
+
+// --- the upload-before-document race: the scanner never creates the Proof ----
+//
+// Codex P1 on #1143. `moderateProof` is a STORAGE trigger and `attachProof`
+// (src/data/proofs.ts) uploads the media BEFORE the transaction that writes the
+// Proof document, so a fast scan can reach a verdict with no document to put it
+// on. The scanner used to close that gap by merge-setting the verdict, which
+// CREATES the Proof — and the created doc broke the submission still on its way:
+// an ordinary Player's `attachProof` create becomes a rules-denied UPDATE (a
+// non-admin is bounded to `reportCount`), so the submission fails outright, while
+// an admin uploader's full `set` is ALLOWED and overwrites `status`, `visionFlag`
+// and `safetyHide` back to `'active'`, `null` and absent — a doc no arm of
+// `visionHideAction` claims, so extreme media stays in the Feed with no
+// server-side path left to take it down.
+//
+// The Proof document now has exactly ONE creator, `attachProof`. A verdict that
+// arrives first is parked in the server-only `proofScans` collection and applied
+// on the Proof's own create, through the same arms as every other hide.
+
+describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#1143)', () => {
+  const PROOF = 'events/e/proofs/p1';
+  const SCAN = 'events/e/proofScans/p1';
+
+  it('names the server-only hand-off path both sides agree on', () => {
+    expect(PROOF_SCANS_COLLECTION).toBe('proofScans');
+    expect(proofScanPath('e', 'p1')).toBe(SCAN);
+  });
+
+  it('writes the verdict straight onto a Proof that already exists — the ordinary path', async () => {
+    const { db, updates, ops, store } = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+    });
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('proof');
+    expect(updates).toEqual([{ path: PROOF, data: { status: 'flagged', visionFlag: 'violence' } }]);
+    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'violence', reportCount: 0 });
+    // No hand-off record when there is nothing to hand off to.
+    expect(store[SCAN]).toBeUndefined();
+    expect(ops.filter((o) => o.op === 'set')).toEqual([]);
+  });
+
+  it('parks the verdict instead of CREATING the Proof when the upload beat the document', async () => {
+    const { db, ops, store } = fakeDb({});
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 5)).toBe('scan');
+    // The whole finding, as one assertion: nothing was written to the Proof path,
+    // so the Player's still-in-flight create is still a create.
+    expect(store[PROOF]).toBeUndefined();
+    expect(ops.filter((o) => o.path === PROOF).map((o) => o.op)).toEqual(['get']);
+    expect(store[SCAN]).toEqual({ visionFlag: 'extreme', scannedAt: 5 });
+  });
+
+  it('uses update, never a re-creating set, so a Proof deleted since the upload stays deleted', async () => {
+    // The same promise `hideVisionFlaggedIfQualifies` makes: a two-field ghost
+    // Proof is worse than no Proof, and the parked record is the deleted case's
+    // answer too — it waits for a create that never comes rather than inventing one.
+    const { db, ops } = fakeDb({});
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    expect(ops.some((o) => o.op === 'update' && o.path === PROOF)).toBe(false);
+    expect(ops.some((o) => o.op === 'set' && o.path === PROOF)).toBe(false);
+  });
+});
+
+describe('applyPendingVisionScan — the parked verdict lands when the Proof appears (#1143)', () => {
+  const PROOF = 'events/e/proofs/p1';
+  const SCAN = 'events/e/proofScans/p1';
+  const created = () => ({ uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 });
+
+  it('flags the freshly created Proof with the parked verdict and CONSUMES the record', async () => {
+    const { db, updates, store } = fakeDb({
+      [PROOF]: created(),
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+    });
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
+    expect(updates).toEqual([{ path: PROOF, data: { status: 'flagged', visionFlag: 'violence' } }]);
+    // Exactly the doc the producer's own write would have left, so the hide is
+    // decided where every hide is decided — and the hand-off is gone, so no later
+    // write can re-flag a Proof an admin has since acted on.
+    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'violence', reportCount: 0 });
+    expect(store[SCAN]).toBeUndefined();
+  });
+
+  it('hands the flagged doc to the ordinary hide arm — flag, then hide, then mark', async () => {
+    const { db, updates, store } = fakeDb({
+      [PROOF]: created(),
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+    });
+    await applyPendingVisionScan(db, 'e', 'p1');
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe('hide');
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
+    });
+    expect(updates.map((u) => u.data)).toEqual([
+      { status: 'flagged', visionFlag: 'violence' },
+      { status: 'hidden', safetyHide: true },
+    ]);
+    // And the doc it produces is one the client's confirm-time gate holds.
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(true);
+  });
+
+  it('applies whatever the PRODUCER flagged — the allowlist decides hiding, not flagging', async () => {
+    // A verdict outside AUTO_HIDE_VISION_FLAGS still reaches admins as a
+    // 'flagged' doc and is hidden by nobody, exactly as a scan that had won the
+    // race would leave it. The race must not become a second, laxer policy.
+    const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5 } });
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
+    expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+  });
+
+  it('writes nothing when no verdict is parked — the overwhelmingly common create', async () => {
+    const { db, ops, store } = fakeDb({ [PROOF]: created() });
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(store[PROOF]).toEqual(created());
+    // One read, and it is the cheap one: the absent record short-circuits before
+    // the Proof is read at all.
+    expect(ops).toEqual([{ op: 'get', path: SCAN }]);
+  });
+
+  it('never CREATES the Proof either — a record whose Proof is missing simply waits', async () => {
+    const { db, ops, store } = fakeDb({ [SCAN]: { visionFlag: 'violence', scannedAt: 5 } });
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(store[PROOF]).toBeUndefined();
+    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5 }); // kept for the create to come
+    expect(ops.every((o) => o.op === 'get')).toBe(true);
+  });
+
+  it('drops a malformed record rather than writing it onto the Proof', async () => {
+    for (const visionFlag of [null, '', 7, { flag: 'violence' }]) {
+      const { db, updates, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag, scannedAt: 5 } });
+      expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+      expect(updates).toEqual([]);
+      expect(store[PROOF]).toEqual(created());
+      expect(store[SCAN]).toBeUndefined();
+    }
+  });
+
+  it('is exactly-once: a redelivered trigger finds the record consumed and writes nothing', async () => {
+    const { db, updates, store } = fakeDb({
+      [PROOF]: created(),
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+    });
+    await applyPendingVisionScan(db, 'e', 'p1');
+    // An admin lifts the flag before the duplicate delivery arrives.
+    store[PROOF] = { ...(store[PROOF] as Record<string, unknown>), status: 'active', visionFlag: null };
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(store[PROOF]).toMatchObject({ status: 'active', visionFlag: null });
+  });
+});
+
+describe('awaitsPendingVisionScan — the create is the only write that looks (#1143)', () => {
+  it('is true for the Proof create attachProof writes, and nothing else', () => {
+    expect(awaitsPendingVisionScan(undefined, { status: 'active', visionFlag: null })).toBe(true);
+    expect(awaitsPendingVisionScan(undefined, { status: 'pending', visionFlag: null })).toBe(true);
+    expect(awaitsPendingVisionScan(undefined, { status: 'active' })).toBe(true);
+  });
+
+  it('is false for every write that is not a create, so no read is added to them', () => {
+    // A report bump, an admin hide, an admin Restore, a claim confirm, and this
+    // trigger's own writes re-firing — the pre-#1143 cost, unchanged.
+    expect(awaitsPendingVisionScan({ status: 'active', reportCount: 0 } as VisionFlaggedDoc, { status: 'active' })).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, { status: 'hidden' })).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, { status: 'active', safetyHide: false })).toBe(false);
+    expect(awaitsPendingVisionScan(PRIOR, undefined)).toBe(false); // a delete
+    expect(awaitsPendingVisionScan(undefined, undefined)).toBe(false); // no event data at all
+  });
+
+  it('is false for a create that already carries a verdict — it cannot be waiting for one', () => {
+    // Unreachable through the rules (`visionFlag == null` at create), but the
+    // gate states it rather than assuming it.
+    expect(awaitsPendingVisionScan(undefined, { status: 'flagged', visionFlag: 'violence' })).toBe(false);
+  });
+});
+
+describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
+  it('consults the hand-off on the Proof create, and returns without hiding in the same write', async () => {
+    const applyPendingScan = vi.fn(async () => true);
+    const hide = vi.fn(async () => true);
+    expect(
+      await applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, {
+        applyPendingScan,
+        hideIfQualifies: hide,
+      }),
+    ).toBe(true);
+    expect(applyPendingScan).toHaveBeenCalledWith('e', 'p1');
+    // The flag write re-fires the trigger; the hide happens there, through the
+    // hide arm, so `visionHideAction` stays the only place a status moves.
+    expect(hide).not.toHaveBeenCalled();
+  });
+
+  it('judges an ordinary create exactly as before when nothing is parked', async () => {
+    const applyPendingScan = vi.fn(async () => false);
+    const hide = vi.fn(async () => true);
+    expect(
+      await applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, {
+        applyPendingScan,
+        hideIfQualifies: hide,
+      }),
+    ).toBe(false);
+    expect(applyPendingScan).toHaveBeenCalledOnce();
+    expect(hide).not.toHaveBeenCalled();
+  });
+
+  it('adds NO lookup to any write that is not a create — the cost model is unchanged', async () => {
+    const applyPendingScan = vi.fn(async () => true);
+    const hide = vi.fn(async () => true);
+    for (const [before, after] of [
+      [PRIOR, { status: 'active', visionFlag: null }], // a report bump
+      [PRIOR, { status: 'flagged', visionFlag: 'violence' }], // the scanner's own write
+      [{ status: 'flagged', visionFlag: 'violence' }, { status: 'hidden', safetyHide: true, visionFlag: 'violence' }], // ours, re-firing
+      [PRIOR, undefined], // a delete
+    ] satisfies Array<[VisionFlaggedDoc | undefined, VisionFlaggedDoc | undefined]>) {
+      await applyVisionFlagHide('e', 'p1', before, after, { applyPendingScan, hideIfQualifies: hide });
+    }
+    expect(applyPendingScan).not.toHaveBeenCalled();
+  });
+
+  it('swallows a failing hand-off, so a scan race never crashes the proof pipeline', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('transaction failed');
+    });
+    await expect(
+      applyVisionFlagHide('e', 'p1', undefined, { status: 'active', visionFlag: null }, { applyPendingScan: boom }),
+    ).resolves.toBe(false);
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('drives the whole race end to end: verdict first, Proof second, media hidden', async () => {
+    const PROOF = 'events/e/proofs/p1';
+    const { db, store } = fakeDb({});
+    // 1. The upload finalizes and the scan lands before attachProof commits.
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('scan');
+    // 2. attachProof's create then succeeds as a CREATE — the Proof path is
+    //    untouched, so the rules judge it as one and the submission goes through.
+    expect(store[PROOF]).toBeUndefined();
+    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 };
+    // 3. The create fires the trigger, which consumes the parked verdict...
+    const deps = {
+      applyPendingScan: (e: string, p: string) => applyPendingVisionScan(db, e, p),
+      hideIfQualifies: (e: string, p: string) => hideVisionFlaggedIfQualifies(db, e, p),
+    };
+    expect(await applyVisionFlagHide('e', 'p1', undefined, store[PROOF] as VisionFlaggedDoc, deps)).toBe(true);
+    // 4. ...and the flag write re-fires it, where the hide arm takes over.
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'active' }, store[PROOF] as VisionFlaggedDoc, deps),
+    ).toBe(true);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
+    });
+    expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
+    // 5. And it settles: the next write matches no arm.
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'flagged' }, store[PROOF] as VisionFlaggedDoc, deps),
+    ).toBe(false);
   });
 });
 
@@ -334,7 +621,7 @@ describe('applyVisionFlagHide — the best-effort trigger body', () => {
 
   it('hides on the scanner write (status flagged + extreme verdict)', async () => {
     const hide = vi.fn(async () => true);
-    expect(await applyVisionFlagHide('e', 'p1', flagged('violence'), { hideIfQualifies: hide })).toBe(true);
+    expect(await applyVisionFlagHide('e', 'p1', PRIOR, flagged('violence'), { hideIfQualifies: hide })).toBe(true);
     expect(hide).toHaveBeenCalledWith('e', 'p1');
   });
 
@@ -353,7 +640,7 @@ describe('applyVisionFlagHide — the best-effort trigger body', () => {
       undefined, // a delete
     ];
     for (const after of skipped) {
-      expect(await applyVisionFlagHide('e', 'p1', after, { hideIfQualifies: hide })).toBe(false);
+      expect(await applyVisionFlagHide('e', 'p1', PRIOR, after, { hideIfQualifies: hide })).toBe(false);
     }
     expect(hide).not.toHaveBeenCalled();
   });
@@ -363,7 +650,7 @@ describe('applyVisionFlagHide — the best-effort trigger body', () => {
     const boom = vi.fn(async () => {
       throw new Error('transaction failed');
     });
-    await expect(applyVisionFlagHide('e', 'p1', flagged('violence'), { hideIfQualifies: boom })).resolves.toBe(false);
+    await expect(applyVisionFlagHide('e', 'p1', PRIOR, flagged('violence'), { hideIfQualifies: boom })).resolves.toBe(false);
     expect(err).toHaveBeenCalled();
     err.mockRestore();
   });
@@ -373,8 +660,8 @@ describe('applyVisionFlagHide — the best-effort trigger body', () => {
     // report bump on a still-flagged Proof re-attempts the hide the earlier
     // best-effort failure never landed.
     const hide = vi.fn(async () => true);
-    await applyVisionFlagHide('e', 'p1', flagged('violence'), { hideIfQualifies: hide }); // first attempt
-    expect(await applyVisionFlagHide('e', 'p1', flagged('violence'), { hideIfQualifies: hide })).toBe(true);
+    await applyVisionFlagHide('e', 'p1', PRIOR, flagged('violence'), { hideIfQualifies: hide }); // first attempt
+    expect(await applyVisionFlagHide('e', 'p1', PRIOR, flagged('violence'), { hideIfQualifies: hide })).toBe(true);
     expect(hide).toHaveBeenCalledTimes(2);
   });
 });
@@ -423,7 +710,7 @@ describe('composition with the #43 report-count auto-hide — the two paths neve
     ).toBe(true);
     expect(reportHide).toHaveBeenCalledWith('proofs', 'e', 'p1');
     expect(
-      await applyVisionFlagHide('e', 'p1', { status: 'active', visionFlag: 'violence' }, {
+      await applyVisionFlagHide('e', 'p1', PRIOR, { status: 'active', visionFlag: 'violence' }, {
         hideIfQualifies: visionHide,
       }),
     ).toBe(false);

@@ -7,7 +7,18 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { collection, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  increment,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 
 // specs/cloud-vision-moderation.md — the rules half of the Vision auto-hide
 // (#133, ADR 0004). `hideProofOnVisionFlag` is a SECOND admin-SDK writer of the
@@ -122,6 +133,73 @@ describe('firestore.rules — the Vision hide needs no client write surface (spe
     await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew5')), photoProof('pNew5', { safetyHide: true })));
     await assertFails(setDoc(doc(db(ALICE), at('proofs/pNew6')), photoProof('pNew6', { safetyHide: false })));
     await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/pNew4')), photoProof('pNew4'))); // the ordinary active create still works
+  });
+});
+
+describe('firestore.rules — the scanner hand-off is server-to-server ONLY (#1143)', () => {
+  // `moderateProof` is a STORAGE trigger and `attachProof` uploads the media
+  // before the transaction that writes the Proof, so a fast scan can reach a
+  // verdict with no document to put it on. It parks the verdict in
+  // `events/{eventId}/proofScans/{proofId}` rather than merge-CREATING the Proof
+  // — a scanner-created Proof turns the Player's own create into a rules-denied
+  // update, and lets an admin uploader's full `set` overwrite the verdict and the
+  // safety marker back to a public Proof. The collection is a hand-off between
+  // two admin-SDK writers, so no client gets any verb on it at all.
+  const SCAN = at('proofScans/pPending');
+  const record = { visionFlag: 'violence', scannedAt: 1 };
+
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), SCAN), record);
+    });
+  });
+
+  it('is unreadable by every client — Player, uploader, and ADMIN alike', async () => {
+    // Even the admin console is denied: a readable record would leak a moderation
+    // verdict for a Proof the read rule keeps admin-only, through a path with no
+    // `isAdmin` arm to bound it. The console reads the verdict off the Proof.
+    for (const uid of [BOB, ALICE, ADMIN]) {
+      await assertFails(getDoc(doc(db(uid), SCAN)));
+      await assertFails(getDocs(collection(db(uid), at('proofScans'))));
+    }
+  });
+
+  it('is unwritable by every client, in every verb — no forged, pre-empted, or scrubbed scan', async () => {
+    // A client that could CREATE one would pre-empt its own scan with a harmless
+    // verdict; one that could DELETE one would drop the verdict the create is
+    // about to pick up, which is the whole hide.
+    for (const uid of [BOB, ALICE, ADMIN]) {
+      await assertFails(setDoc(doc(db(uid), at('proofScans/pForged')), record));
+      await assertFails(setDoc(doc(db(uid), SCAN), { visionFlag: 'racy', scannedAt: 1 }));
+      await assertFails(updateDoc(doc(db(uid), SCAN), { visionFlag: 'racy' }));
+      await assertFails(deleteDoc(doc(db(uid), SCAN)));
+    }
+  });
+
+  it('the Function\'s own admin-SDK path still writes, applies, and consumes it', async () => {
+    // The rules deny clients; the admin SDK bypasses them. This is the round trip
+    // `writeVisionVerdict` → `applyPendingVisionScan` performs: park the verdict,
+    // flag the Proof that then appears, delete the record in the same breath.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const s = ctx.firestore();
+      await assertSucceeds(getDoc(doc(s, SCAN)));
+      await assertSucceeds(setDoc(doc(s, at('proofs/pPending')), photoProof('pPending')));
+      await assertSucceeds(
+        updateDoc(doc(s, at('proofs/pPending')), { status: 'flagged', visionFlag: 'violence' }),
+      );
+      await assertSucceeds(deleteDoc(doc(s, SCAN)));
+    });
+    // And the Proof it produced is the ordinary flagged one: admin-only to read,
+    // and the hide trigger's to move.
+    await assertFails(getDoc(doc(db(BOB), at('proofs/pPending'))));
+    await assertSucceeds(getDoc(doc(db(ADMIN), at('proofs/pPending'))));
+  });
+
+  it('a Player\'s ordinary create still SUCCEEDS while a verdict is parked for it', async () => {
+    // The finding, from the Player's side: the parked verdict lives on its own
+    // path, so `attachProof`'s write is still judged as the CREATE it is rather
+    // than as an update the `reportCount` bound denies.
+    await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/pPending')), photoProof('pPending')));
   });
 });
 

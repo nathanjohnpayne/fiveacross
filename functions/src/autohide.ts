@@ -117,10 +117,20 @@ interface DocRef {
 interface QueryRef {
   get(): Promise<{ docs: DocSnapshot[] }>;
 }
-/** The transaction handle: reads (before writes) + a conditional update. */
+/**
+ * The transaction handle: reads (before writes) + a conditional update.
+ *
+ * `set`/`delete` are here for the sibling Vision hand-off (`./visionHide`,
+ * #1143), whose scanner-side record lives in its OWN server-only collection and
+ * is created and consumed rather than updated in place. This module's own
+ * report-count path uses `get` + `update` alone and is unchanged by their
+ * presence: a doc it might have to re-create is a doc it must leave deleted.
+ */
 interface Transaction {
   get(ref: DocRef): Promise<DocSnapshot>;
   update(ref: DocRef, data: Record<string, unknown>): void;
+  set(ref: DocRef, data: Record<string, unknown>): void;
+  delete(ref: DocRef): void;
 }
 /** The minimal admin-SDK Firestore surface the defaults use. */
 export interface AdminFirestore {

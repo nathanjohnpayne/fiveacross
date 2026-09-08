@@ -22,7 +22,7 @@ import {
 } from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
-import { applyVisionFlagHide, type VisionFlaggedDoc } from './visionHide';
+import { applyVisionFlagHide, recordVisionVerdict, type VisionFlaggedDoc } from './visionHide';
 import {
   applyEventAdultContent,
   applyItemAdultContent,
@@ -292,7 +292,19 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
         ? 'extreme'
         : null;
     if (flag) {
-      await db.doc(`events/${eventId}/proofs/${proofId}`).set({ status: 'flagged', visionFlag: flag }, { merge: true });
+      // #1143: record the verdict WITHOUT ever creating the Proof document.
+      // This is a STORAGE trigger, and attachProof uploads the media before the
+      // transaction that writes the Proof — so a fast scan can land here with no
+      // document to write on. The merge-set this replaces created one, and the
+      // created doc turned the Player's still-in-flight `attachProof` create into
+      // a rules-denied UPDATE (a non-admin is bounded to `reportCount`), while an
+      // admin uploader's full `set` overwrote the verdict and the safety marker
+      // back to a public Proof no arm of the hide trigger could reach again.
+      // `recordVisionVerdict` writes the Proof when it exists and parks the
+      // verdict in the server-only `proofScans` collection when it does not;
+      // `hideProofOnVisionFlag` applies a parked verdict on the Proof's create.
+      // See functions/src/visionHide.ts § PROOF_SCANS_COLLECTION.
+      await recordVisionVerdict(eventId, proofId, flag);
     }
   } catch {
     /* Vision optional; reporting still covers moderation */
@@ -334,9 +346,13 @@ export const moderateProof = VISION_ENABLED
  * old one on the next deploy, and there is no behavioural reason to pay that.
  *
  * Uses onDocumentWritten (not onDocumentUpdated) so a proof CREATED already
- * flagged — moderateProof's merge-set can create the doc in the
- * upload-before-doc race (#101 Codex F2) — still alerts; `alertsForWrite`
- * ignores create-into-active and deletes (`after` undefined). `transitionId` is
+ * flagged still alerts (#101 Codex F2); `alertsForWrite` ignores
+ * create-into-active and deletes (`after` undefined). Since #1143 the scanner no
+ * longer produces that shape itself — it never creates the Proof, and a verdict
+ * reached before the document existed is parked in `proofScans` and applied as an
+ * UPDATE on the Proof's create (see moderateProofHandler above). onDocumentWritten
+ * stays because it is the shape that cannot miss a transition, whoever writes it.
+ * `transitionId` is
  * the CloudEvent id, which is stable across platform retries of one delivery
  * and unique per distinct write — it becomes the queue document's id, so a
  * redelivered trigger is a no-op rather than a duplicate row (#101 Codex F3,
@@ -604,6 +620,12 @@ export const hideProofAtThreshold = onDocumentWritten(
  * `applyVisionFlagHide` (./visionHide); this is the thin trigger seam, mirroring
  * the threshold pair above.
  *
+ * It takes `before` as well as `after` for one reason (#1143): a Proof's own
+ * CREATE is where a verdict the scanner had to park — because the upload beat the
+ * document — is applied, and only `before` tells a create from every other write
+ * that leaves the same state. Every non-create write is judged on `after` alone,
+ * exactly as before.
+ *
  * A SECOND trigger on the same document path rather than a branch inside
  * `hideProofAtThreshold`: the two hides share no input (one reads the Event's
  * `reportHideThreshold`, the other reads the Proof's own verdict), no state (one
@@ -624,6 +646,7 @@ export const hideProofOnVisionFlag = onDocumentWritten(
     applyVisionFlagHide(
       event.params.eventId,
       event.params.proofId,
+      event.data?.before.data() as VisionFlaggedDoc | undefined,
       event.data?.after.data() as VisionFlaggedDoc | undefined,
     ),
 );

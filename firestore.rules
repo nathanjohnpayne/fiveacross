@@ -1576,6 +1576,26 @@ service cloud.firestore {
         allow delete: if isOwner(resource.data.uid) || isAdmin(eventId);
       }
 
+      // The Vision scanner's hand-off record (#1143, specs/cloud-vision-moderation.md
+      // § "The scanner never creates the Proof"). moderateProof is a STORAGE trigger
+      // and attachProof uploads the media BEFORE the transaction that writes the
+      // Proof, so a fast scan can reach a verdict with no document to put it on. It
+      // parks the verdict here instead of merge-CREATING the Proof, because a
+      // scanner-created Proof turns the Player's own create into a rules-denied
+      // update (bounded to `reportCount` above) and lets an admin uploader's full
+      // `set` overwrite `status`/`visionFlag`/`safetyHide` back to a public Proof.
+      // hideProofOnVisionFlag consumes and DELETES the record on the Proof's create.
+      //
+      // Server-to-server only: the admin SDK bypasses these rules, and NO client —
+      // Player, uploader, or admin — may read or write this collection in any way.
+      // A readable record would leak a moderation verdict for a Proof the read rule
+      // above keeps admin-only; a writable one would let a Player pre-empt or forge
+      // their own scan result. Nothing in src/ knows the path exists. Pinned by
+      // tests/rules/cloud-vision-moderation.test.ts.
+      match /proofScans/{proofId} {
+        allow read, write: if false;
+      }
+
       // admin_confirmed-mode claims: a player creates a claim for their own square;
       // admins read the queue and resolve (confirm/reject) them.
       match /claims/{claimId} {

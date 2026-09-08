@@ -798,7 +798,10 @@ describe('alertsForWrite', () => {
     const kinds = (before: AlertableDoc | undefined, after: AlertableDoc) =>
       alertsForWrite('proofs', 'p1', before, after).map((a) => a.kind);
     expect(kinds({ status: 'active' }, { status: 'hidden' })).toEqual(['moderation']);
-    // moderateProof's merge-set can create the doc already flagged (#101 Codex F2).
+    // The create-flagged shape moderateProof's merge-set used to produce in the
+    // upload-before-document race (#101 Codex F2). It no longer creates the Proof
+    // at all (#1143); the arm stays because the queue is about transitions, not
+    // about which writer makes them.
     expect(kinds(undefined, { status: 'flagged', visionFlag: 'violence' })).toEqual(['moderation']);
     // A same-status re-write, a restore, and a create into active are all quiet.
     expect(kinds({ status: 'hidden' }, { status: 'hidden' })).toEqual([]);
