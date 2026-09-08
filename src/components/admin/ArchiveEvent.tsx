@@ -49,6 +49,18 @@ const TOO_LARGE_COPY =
 const REOPEN_SUPERSEDED_COPY =
   ' Play was left closed: the Event has been shut again by another archive, and that closing state is not this one to lift. Reopen play below if that archive is not going ahead.';
 
+/** One sentence for all four read refusals, differing only in WHICH read did not
+ *  answer (CodeRabbit Major, PR #1162). Written once and applied per stage
+ *  rather than restated four times: the Admin's remedy is identical—the freeze
+ *  wrote nothing and the archive can simply be taken again—so only the subject
+ *  of the sentence carries information.
+ *
+ *  It names the read in the Admin's own vocabulary, not the writer's: **the
+ *  Review queue** is the surface beside this one, where `claims` is a
+ *  collection path nobody in the console has ever seen. */
+const readFailedCopy = (subject: string) =>
+  `${subject} could not be read back from the server after play closed, so nothing was frozen. Check the connection and archive again.`;
+
 /** An outcome together with the phase the handler's own CLEANUP left the Event
  *  in, for the one path that has a cleanup: an open-phase `runArchive` whose
  *  flip refused and whose automatic reopen then succeeded (Codex P2 on PR
@@ -69,7 +81,7 @@ type ArchiveReport = { outcome: ArchiveOutcome; settledAt?: Phase };
  * is still in force when `archiveEvent` returns.
  *
  * BUT THAT IS NOT ALWAYS WHERE THE EVENT ENDS UP (Codex P2 on PR #1162). An
- * open-phase `runArchive` that CREATED the quiesce reopens play for all four of
+ * open-phase `runArchive` that CREATED the quiesce reopens play for every one of
  * those refusals, so the Event lands back OPEN — and the message was then
  * discarded twice over: the reopen the handler itself performed moved the phase
  * away from `closing`, and `movedDuringActionRef` had already recorded that the
@@ -94,6 +106,14 @@ const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
   'claims-pending': 'closing',
   'finale-pending': 'closing',
   'too-large': 'closing',
+  // A read that did not answer is the same shape of refusal as the four above:
+  // the flip wrote nothing and the quiesce is still in force when it returns
+  // (CodeRabbit Major, PR #1162). Each is listed rather than folded together so
+  // the exhaustive `Record` still has to name every one this union can carry.
+  'read-failed:event': 'closing',
+  'read-failed:claims': 'closing',
+  'read-failed:roster': 'closing',
+  'read-failed:day-meta': 'closing',
 };
 
 const RESULT_COPY: Record<ArchiveOutcome, string> = {
@@ -112,7 +132,44 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
   'finale-pending':
     'The scheduled standings freeze has not run yet, so nothing was frozen. Wait for the finale, or tick the box below to archive without it.',
   'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
+  'read-failed:event': readFailedCopy('The Event'),
+  'read-failed:claims': readFailedCopy('The Review queue'),
+  'read-failed:roster': readFailedCopy('The final standings'),
+  'read-failed:day-meta': readFailedCopy('The daily honours'),
 };
+
+/**
+ * THE AUTOMATIC REOPEN SET — the flip refusals an open-phase **Archive** puts
+ * play back after (Codex P1+P2, PR #1139; CodeRabbit Major, PR #1162).
+ *
+ * Each of them wrote nothing and each leaves a LIVE Event shut to gameplay with
+ * no record to show for it: the state the quiesce's reversibility exists for.
+ * Leaving one closed would strand the Event on a condition the Admin cannot even
+ * clear from there — draining the claim queue writes Boards, which the freeze
+ * denies.
+ *
+ * `quiesce-changed` and `not-closing` are deliberately OUT (Codex P1, PR #1139).
+ * The first means the closing state now in force is a DIFFERENT one, so
+ * reopening would clear somebody else's quiesce out from under their in-flight
+ * freeze; the second means there is no closing state left to lift at all.
+ *
+ * The four read refusals are IN for exactly the reason the other four are
+ * (CodeRabbit Major, PR #1162). Before they existed, an unanswered read threw
+ * out of `archiveEvent`, past this set entirely, and the Admin got the generic
+ * `AsyncButton` failure pill over an Event this handler had just shut and would
+ * now never put back — which is the one outcome the two-write protocol exists to
+ * make impossible.
+ */
+const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
+  'claims-pending',
+  'too-large',
+  'config-changed',
+  'finale-pending',
+  'read-failed:event',
+  'read-failed:claims',
+  'read-failed:roster',
+  'read-failed:day-meta',
+]);
 
 /**
  * The end-of-Event control (#134, specs/post-sailing-archive.md): the admin-only
@@ -373,18 +430,8 @@ export default function ArchiveEvent({
     if (opened !== 'closing') return { outcome: opened };
     const outcome = await archiveEvent(token as number, { eventId, beforeFinale });
     // THIS handler is what shut the Event, so this handler is what puts it back
-    // when the second write refuses (Codex P2, PR #1139). Each of these refusals
-    // wrote nothing and each leaves a LIVE Event shut to gameplay with no record
-    // to show for it — the state the quiesce's reversibility exists for. Leaving
-    // it closed would strand the Event on a condition the Admin cannot even clear
-    // from there: draining the claim queue writes Boards, which the freeze denies.
-    //
-    // `quiesce-changed` and `not-closing` are deliberately NOT in that set (Codex
-    // P1, PR #1139). The first means the closing state now in force is a
-    // DIFFERENT one — play was reopened and shut again underneath this call — so
-    // the Event standing there is not the one this handler shut, and reopening it
-    // would clear someone else's quiesce out from under their own in-flight
-    // freeze. The second means there is no closing state left to lift at all.
+    // when the second write refuses (Codex P2, PR #1139) — for every refusal in
+    // `REOPEN_AFTER`, which is where the reasoning about which ones qualify lives.
     //
     // AND THE REOPEN IS CONDITIONAL ON THAT SAME GENERATION, and on having
     // CREATED it (Codex P2, PR #1139; #1142 item 6). `archiveEvent` checks the
@@ -394,12 +441,7 @@ export default function ArchiveEvent({
     // merely JOINED another Admin's in-flight quiesce comes back holding a token
     // that matches perfectly, and a reopen keyed on the token alone would happily
     // clear a closing state this handler never took.
-    if (
-      outcome === 'claims-pending' ||
-      outcome === 'too-large' ||
-      outcome === 'config-changed' ||
-      outcome === 'finale-pending'
-    ) {
+    if (REOPEN_AFTER.has(outcome)) {
       if (created) {
         const reopened = await abandonArchive(token ?? undefined, eventId);
         setReopenSuperseded(reopened === 'quiesce-changed');

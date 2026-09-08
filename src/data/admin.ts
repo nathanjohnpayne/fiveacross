@@ -840,6 +840,31 @@ export type AbandonArchiveResult =
   | 'no-event'
   | 'quiesce-changed';
 
+/**
+ * WHICH of the freeze's server reads failed (CodeRabbit Major, PR #1162).
+ *
+ * The four are named separately rather than folded into one "a read failed"
+ * because they fail for different reasons and an Admin can act on the
+ * difference: the Event and the roster are the reads a connection drop takes
+ * out, the Claim queue is the one an Admin who has just lost their admin claim
+ * gets `permission-denied` on, and a Day's honour pin is the one an Event with a
+ * hand-edited schedule can point at a path that is not there. A single opaque
+ * refusal would make the console say "something could not be read" about four
+ * genuinely different situations.
+ *
+ * `'event'` covers BOTH Event reads — the pre-read and the transaction's own
+ * re-read — because they are the same document read twice and the remedy is
+ * identical.
+ */
+export type ArchiveReadStage = 'event' | 'claims' | 'roster' | 'day-meta';
+
+/** The typed refusal a failed server read reports (CodeRabbit Major, PR #1162).
+ *  Spelled as a FAMILY over the stages rather than as four unrelated members, so
+ *  a stage added later cannot be forgotten: the console's `Record<ArchiveOutcome,
+ *  …>` maps are exhaustive, and the new member fails the build until its phase
+ *  and its copy are stated. */
+export type ArchiveReadFailure = `read-failed:${ArchiveReadStage}`;
+
 /** What `archiveEvent` reports back — the `unlockDayNow` result-union shape, so
  *  the Admin surface can say what happened instead of inferring it from a
  *  resolved promise.
@@ -855,7 +880,9 @@ export type AbandonArchiveResult =
  *  unresolvable; `finale-pending` means the Event's scheduled Standings Freeze
  *  has not run, so the irreversible flip would forgo the finale beats forever
  *  (#1151, routed from #1150's review); `too-large` means the record built from
- *  the server re-read would not fit on the Event document. All of them write
+ *  the server re-read would not fit on the Event document; and
+ *  `read-failed:<stage>` means one of the server reads the record is built from
+ *  did not answer at all (CodeRabbit Major, PR #1162). All of them write
  *  NOTHING (#1151). */
 export type ArchiveEventResult =
   | 'archived'
@@ -866,7 +893,34 @@ export type ArchiveEventResult =
   | 'config-changed'
   | 'claims-pending'
   | 'finale-pending'
-  | 'too-large';
+  | 'too-large'
+  | ArchiveReadFailure;
+
+/**
+ * One of the freeze's server reads, turned from a REJECTION into an answer
+ * (CodeRabbit Major, PR #1162).
+ *
+ * Every read below is taken after `beginArchive` has already shut the Event, so
+ * a rejection thrown out of `archiveEvent` is not a failed call — it is a LIVE
+ * Event left closed with no record and no refusal for the console to clean up
+ * after. The console's automatic reopen runs off a returned refusal, so a throw
+ * skipped it entirely and left the Admin with a generic failure pill beside an
+ * Event nobody could play on.
+ *
+ * It wraps ONE read and nothing else. Nothing that WRITES ever goes through it,
+ * because a failed commit is a failed archive and must keep surfacing as one —
+ * which is also why the transaction's own re-read is handled differently, at the
+ * call site rather than here.
+ */
+async function archiveRead<T>(
+  read: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  try {
+    return { ok: true, value: await read() };
+  } catch {
+    return { ok: false };
+  }
+}
 
 /**
  * A usable quiesce generation — the shape `beginArchive` mints and the shape
@@ -1122,6 +1176,21 @@ export async function abandonArchive(
  * once, up front, and threaded through every reference including the caller's
  * own begin/freeze/cleanup sequence.
  *
+ * AND A READ THAT DOES NOT ANSWER IS A REFUSAL TOO (CodeRabbit Major, PR
+ * #1162). Those four reads are taken after the Event is already shut, so a
+ * rejection thrown out of here is not a failed call — it is a LIVE Event left
+ * closed with no record. The console's cleanup keys on a RETURNED refusal, so a
+ * throw skipped the automatic reopen and left an Admin looking at a generic
+ * failure pill beside an Event nobody could play on. Each read now reports
+ * `read-failed:<stage>` naming the read that did not answer, which the console
+ * treats exactly as it treats the four refusals below. The transaction's own
+ * Event re-read is covered the same way, but only AFTER `runTransaction` has
+ * exhausted its own retries — the read is re-thrown so the SDK still gets to
+ * retry a transient one, and the classification happens outside, where a
+ * rejected transaction is known to have written nothing. A COMMIT failure is
+ * deliberately NOT swallowed: a failed write is a failed archive and keeps
+ * surfacing as one.
+ *
  * FIVE THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
  * reports instead of throwing so the console can say what happened and, where
  * this call is what shut the Event, put play back (Codex P1+P2, PR #1139):
@@ -1175,7 +1244,14 @@ export async function archiveEvent(
   // The pre-read is FROM THE SERVER: a cache-sourced Event could still report
   // the pre-quiesce state, and the Day count read off it decides which honour
   // pins are fetched below.
-  const pre = await getDocFromServer(eventRef);
+  //
+  // A read that does not answer is REPORTED, not thrown (CodeRabbit Major, PR
+  // #1162): the Event is already shut by the time this runs, and only a returned
+  // refusal reaches the console's reopen. `getDocFromServer` has no cache to fall
+  // back to by design, so an offline tab is exactly the case that lands here.
+  const preRead = await archiveRead(() => getDocFromServer(eventRef));
+  if (!preRead.ok) return 'read-failed:event';
+  const pre = preRead.value;
   if (!pre.exists()) return 'no-event';
   const preData = pre.data() as Partial<EventDoc>;
   if (preData.status === 'archived') return 'already-archived';
@@ -1220,12 +1296,19 @@ export async function archiveEvent(
   // disagreed: the console counted the pending Claims and refused to arm, while
   // this take saw a mode that is not `admin_confirmed`, passed vacuously, and
   // would have frozen the Event over exactly the Claims the gate exists to drain.
+  //
+  // AND A QUEUE THAT WILL NOT ANSWER IS NOT A DRAINED QUEUE (CodeRabbit Major,
+  // PR #1162). This is the read a caller who has just lost their admin claim
+  // gets `permission-denied` on, and the gate reads `.docs` off the result — so
+  // an unanswered read is refused by name rather than allowed to throw past the
+  // console's cleanup.
   const preClaimMode = migrateClaimMode(preData.claimMode);
-  const claimsSnap = await getDocsFromServer(claimsRaw(eventId));
+  const claimsRead = await archiveRead(() => getDocsFromServer(claimsRaw(eventId)));
+  if (!claimsRead.ok) return 'read-failed:claims';
   if (
     claimsAwaitingAdmin(
       { claimMode: preClaimMode },
-      claimsSnap.docs.map((d) => d.data() as ClaimDoc),
+      claimsRead.value.docs.map((d) => d.data() as ClaimDoc),
     ).length > 0
   ) {
     return 'claims-pending';
@@ -1236,19 +1319,51 @@ export async function archiveEvent(
   // subscriptions use, so the rows are the identical shape — this is the live
   // Leaderboard's own data, read once more at the one moment it is guaranteed to
   // have stopped moving. Both take the captured `eventId` (#1142 item 7).
+  //
+  // WRAPPED SEPARATELY, and still issued together (CodeRabbit Major, PR #1162).
+  // Each half is guarded on its own so the refusal can name WHICH one did not
+  // answer — a roster read that fails is a connection problem, a Day pin that
+  // fails can be a schedule pointing at a path that is not there — and because
+  // neither wrapper ever rejects, the `Promise.all` cannot either: the two reads
+  // still overlap on the wire, and neither can leave the other's rejection
+  // unhandled.
   const dayIndexes = (Array.isArray(preData.days) ? preData.days : []).map((d) => d.index);
-  const [rosterSnap, metaSnaps] = await Promise.all([
-    getDocsFromServer(playersCol(eventId)),
-    Promise.all(dayIndexes.map((index) => getDocFromServer(dayMetaRef(index, eventId)))),
+  const [rosterRead, metaRead] = await Promise.all([
+    archiveRead(() => getDocsFromServer(playersCol(eventId))),
+    archiveRead(() =>
+      Promise.all(dayIndexes.map((index) => getDocFromServer(dayMetaRef(index, eventId)))),
+    ),
   ]);
-  const players = rosterSnap.docs.map((d) => d.data());
+  if (!rosterRead.ok) return 'read-failed:roster';
+  if (!metaRead.ok) return 'read-failed:day-meta';
+  const players = rosterRead.value.docs.map((d) => d.data());
   const dayMetas = new Map<number, DayMetaDoc>();
-  metaSnaps.forEach((snap, i) => {
+  metaRead.value.forEach((snap, i) => {
     if (snap.exists()) dayMetas.set(dayIndexes[i], snap.data());
   });
 
+  // THE TRANSACTIONAL EVENT RE-READ, CLASSIFIED WITHOUT COSTING ITS RETRIES
+  // (CodeRabbit Major, PR #1162). `runTransaction` rejects for two quite
+  // different reasons — the read did not answer, or the WRITE did not land — and
+  // only the first may become a refusal: swallowing a failed commit would report
+  // "nothing was frozen" about an archive whose outcome this call does not know.
+  // Catching inside the callback would also spend the SDK's own retry, which is
+  // the thing that gets a transient read through. So the read is flagged and
+  // RE-THROWN — the SDK retries exactly as it did before, the flag is reset at
+  // the top of every attempt so only the LAST one counts — and the classification
+  // happens out here, on a transaction that has already given up and is therefore
+  // known to have written nothing.
+  let lastTxFailureWasTheRead = false;
   return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
-    const snap = await tx.get(eventRef);
+    lastTxFailureWasTheRead = false;
+    // FLAGGED AND RE-THROWN, never swallowed here. The ORIGINAL error is what
+    // leaves the callback, so the SDK still decides its own retry from it; the
+    // flag only records that the last thing to fail in THIS attempt was the read,
+    // and the write below is outside the only `catch` in this transaction.
+    const snap = await tx.get(eventRef).catch((err: unknown) => {
+      lastTxFailureWasTheRead = true;
+      throw err;
+    });
     if (!snap.exists()) return 'no-event';
     const data = snap.data() as Partial<EventDoc>;
     if (data.status === 'archived') return 'already-archived';
@@ -1355,6 +1470,12 @@ export async function archiveEvent(
       archivedUnder: token,
     });
     return 'archived';
+    // Only the READ becomes a refusal. Anything else — the commit, above all —
+    // is the caller's to see, so the console's failure pill still means what it
+    // has always meant.
+  }).catch((err: unknown): ArchiveEventResult => {
+    if (lastTxFailureWasTheRead) return 'read-failed:event';
+    throw err;
   });
 }
 

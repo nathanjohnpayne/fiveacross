@@ -726,3 +726,98 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
     );
   });
 });
+
+// CodeRabbit Major on PR #1162. The writer's server reads are taken after the
+// quiesce, so one that does not answer used to throw straight out of
+// `archiveEvent`: `runArchive` never saw a result, the automatic reopen never
+// ran, and the Admin got "Freeze failed—try again." over an Event this handler
+// had just shut and would now never put back.
+describe('ArchiveEvent — a read that did not answer (#1162)', () => {
+  it('reopens play, and says WHICH read did not answer', async () => {
+    H.archiveEvent.mockResolvedValue('read-failed:roster');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    // The same cleanup the four stated refusals get, conditional on the
+    // generation this handler opened and the Event it opened it on.
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event');
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'The final standings could not be read back from the server after play closed, so nothing was frozen. Check the connection and archive again.',
+    );
+  });
+
+  it('names each of the four reads in the Admin’s own vocabulary', async () => {
+    // One sentence per read, so an Admin can tell a connection problem on the
+    // roster from a Review queue they have lost access to.
+    const subjects = [
+      ['read-failed:event', 'The Event'],
+      ['read-failed:claims', 'The Review queue'],
+      ['read-failed:roster', 'The final standings'],
+      ['read-failed:day-meta', 'The daily honours'],
+    ] as const;
+    for (const [outcome, subject] of subjects) {
+      H.archiveEvent.mockResolvedValue(outcome);
+      const view = renderConsole();
+      await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        `${subject} could not be read back from the server after play closed`,
+      );
+      view.unmount();
+    }
+  });
+
+  it('keeps the explanation on the OPEN controls its own reopen produced', async () => {
+    // The refusal describes where the Event ENDS UP, and the handler's reopen is
+    // what put it there — the same `settledAt` path the four stated refusals take
+    // (Codex P2 on PR #1162), so the message survives the phase move it caused.
+    H.archiveEvent.mockResolvedValue('read-failed:claims');
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    expect(await screen.findByRole('status')).toHaveTextContent(/The Review queue could not be/);
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
+
+  it('leaves a quiesce it only JOINED closed, exactly as the stated refusals do', async () => {
+    // #1142 item 6 applies unchanged: a handler that merely joined another
+    // Admin's in-flight quiesce holds a matching token, and reopening on it would
+    // clear a closing state it never took.
+    H.beginArchive.mockResolvedValue({
+      result: 'closing',
+      token: 7,
+      created: false,
+      eventId: 'test-event',
+    });
+    H.archiveEvent.mockResolvedValue('read-failed:day-meta');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive']));
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(await screen.findByRole('status')).toHaveTextContent(/Play was left closed/);
+  });
+
+  it('does NOT reopen from the closing surface, which never shut the Event', async () => {
+    // **Freeze the record** is pressed on an Event that was already closed when
+    // the Admin arrived, and **Reopen play** sits beside it — so the message is a
+    // sentence about a CLOSING Event and stays with the controls that describe one.
+    H.beginArchive.mockResolvedValue({
+      result: 'closing',
+      token: 4,
+      created: false,
+      eventId: 'test-event',
+    });
+    H.archiveEvent.mockResolvedValue('read-failed:event');
+    H.event = mkEvent({ archiving: true, archiveToken: 4 });
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive']));
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(await screen.findByRole('status')).toHaveTextContent(/The Event could not be read back/);
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
+  });
+});
