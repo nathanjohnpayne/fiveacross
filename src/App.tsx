@@ -16,6 +16,7 @@ import PullToRefresh from './components/PullToRefresh';
 import { TABS, FALLBACK_PATH, type TabId } from './components/tabs';
 import LoadingState from './components/LoadingState';
 import { useEventDoc } from './hooks/useData';
+import { mayDealUnderAdmission } from './auth/admissionCoordinator';
 import { isEventArchived, isEventArchiving } from './data/eventArchive';
 import { editionBrand } from './editions';
 import SetupWizard from './components/setup/SetupWizard';
@@ -79,7 +80,19 @@ function EventApp() {
   // re-routes when the snapshot lands; making the Card tab of every LIVE Event
   // wait on a round trip would be a far worse trade than one late redirect. The
   // write half needs no such wait — `joinAndDeal` asks the server itself.
-  const { data: event } = useEventDoc(!!user);
+  //
+  // GATED ON ADMISSION AS WELL AS AUTHENTICATION (Phase 4b P1 on PR #1157), with
+  // the same `mayDealUnderAdmission` gate `ThemedApp` already puts on the two
+  // subscriptions it opens above App (Codex P1 on #1131). This hook runs before
+  // the admission guards below can return — `EventApp` stays mounted while an
+  // Invitation is held, pending, retryable or blocked, and a hook cannot be
+  // skipped by a branch taken after it — so `!!user` alone opened the Event
+  // listener for a visit whose Invitation was refused. The Event read rule is
+  // signed-in-only, so that listener hands the WHOLE Event document to a browser
+  // the redemption just turned away. `false` subscribes to nothing (`useEventDoc`
+  // passes a null ref), and `event` stays `null`, which the predicate below reads
+  // as OPEN — exactly the cold-visit default described above.
+  const { data: event } = useEventDoc(!!user && mayDealUnderAdmission(admission));
   const eventClosed = isEventArchived(event) || isEventArchiving(event);
   const archivePath = TABS.find((tab) => tab.id === 'ranks')?.path ?? FALLBACK_PATH;
 

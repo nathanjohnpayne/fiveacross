@@ -36,9 +36,18 @@ vi.mock('./auth/AuthContext', () => ({
 // #134: App reads the Event document to decide whether the Card tab still has a
 // card to render. Stubbed to a mutable fixture — the routing decision is what is
 // under test, not the subscription.
-const eventDoc = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }));
+// `enabled` is recorded, not ignored: whether App opens the Event LISTENER at
+// all is itself under test (Phase 4b P1 on PR #1157), and `useEventDoc(false)`
+// subscribes to nothing.
+const eventDoc = vi.hoisted(() => ({
+  value: null as Record<string, unknown> | null,
+  enabled: [] as unknown[],
+}));
 vi.mock('./hooks/useData', () => ({
-  useEventDoc: () => ({ data: eventDoc.value }),
+  useEventDoc: (enabled?: unknown) => {
+    eventDoc.enabled.push(enabled);
+    return { data: eventDoc.value };
+  },
 }));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
 vi.mock('./components/NoticeBanner', () => ({ default: () => null }));
@@ -143,6 +152,7 @@ describe('App — Card route deal-error routing (#434)', () => {
     authState.value = {};
     eventScope.eventId = 'event-a';
     eventDoc.value = null;
+    eventDoc.enabled = [];
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -238,6 +248,34 @@ describe('App — Card route deal-error routing (#434)', () => {
     expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
   });
 
+  // The Event LISTENER, not merely the rendered shell (Phase 4b P1 on PR #1157).
+  // `EventApp` stays mounted through every one of these states, and the
+  // `useEventDoc` call runs BEFORE the guards above can return — a hook cannot
+  // be skipped by a branch taken after it. Gated on `!!user` alone it opened a
+  // subscription for a visit the Invitation redemption had refused, and the
+  // Event read rule is signed-in-only, so the whole document reached the
+  // browser. Asserted on the `enabled` argument because that is what decides
+  // whether `useDocSub` is handed a ref or a null.
+  it.each([
+    ['held', { kind: 'held', captureId: 'c' }],
+    ['pending', { kind: 'pending', captureId: 'c' }],
+    ['retryable', { kind: 'retryable', captureId: 'c', reason: 'unavailable' }],
+    ['blocked', { kind: 'blocked', message: 'This invitation is no longer valid.' }],
+  ] as const)('opens NO Event listener while an Invitation is %s', (_kind, admission) => {
+    authState.value = { admission };
+    renderApp();
+    expect(eventDoc.enabled.length).toBeGreaterThan(0);
+    expect(eventDoc.enabled.every((on) => on === false)).toBe(true);
+  });
+
+  it('opens the Event listener once admission is clear — the control', () => {
+    // Without this the assertion above would pass on an App that never
+    // subscribes at all.
+    renderApp();
+    expect(eventDoc.enabled.length).toBeGreaterThan(0);
+    expect(eventDoc.enabled.every((on) => on === true)).toBe(true);
+  });
+
   it('withholds the routed shell while attestation authority is still settling', () => {
     authState.value = { canRenderEventContent: false, dealError: null };
     renderApp();
@@ -304,6 +342,7 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     authState.value = {};
     eventScope.eventId = 'event-a';
     eventDoc.value = null;
+    eventDoc.enabled = [];
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
