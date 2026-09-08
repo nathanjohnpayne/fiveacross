@@ -1188,81 +1188,28 @@ service cloud.firestore {
       //     `archive` RECORD, and the write-once clause that locks it, are
       //     #1151's — this ticket freezes the Event, not the standings.
       //
-      // THE ARCHIVE FLIP, on its own arm and in its own transaction-shaped
-      // write (#134, Codex P1+P2 on PR #1139). Everything the freeze needs to be
-      // trustworthy is stated here, in one place:
-      //
-      //   - it may only be taken from the QUIESCED state, so a direct SDK write
-      //     cannot skip the window in which gameplay was already shut and the
-      //     roster had stopped moving;
-      //   - and only from the SAME quiesce the record was read against
-      //     (`boundToStoredQuiesce`), because being shut is not the same as
-      //     being the shut the snapshot describes: play reopened and shut again
-      //     underneath a slow read presents an identical flag. The writer
-      //     restates the token it read, so a superseded generation is denied
-      //     here rather than only by the client that checks. Restating an
-      //     UNCHANGED value leaves the field out of `affectedKeys()`, which is
-      //     why the `hasOnly` guard below names only the three transition keys
-      //     — a write that MOVED it is refused by the binding clause first, and
-      //     by that guard after;
-      //   - it must carry a numeric, bounded `archivedAt`, which is what makes
-      //     "no reader ever sees an archived Event with no stamp" an enforced
-      //     invariant rather than a property of one client's writer;
-      //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
-      //     this arm skip the configuration validation below without opening a
-      //     hole through it: a write that also moved `days`, `bannedUids` or
-      //     `standingsFreezeAt` is not an archive flip and falls through to the
-      //     arm that checks those fields (where it is denied, because the stored
-      //     document is not archived yet).
-      //
-      // What this arm deliberately does NOT yet require is a COMPLETE frozen
-      // record. #1149 lands the lifecycle primitive only: the flip carries
-      // `status`, `archivedAt` and the cleared quiesce, and nothing more. The
-      // `archive` record, its whole-record validation and its own write-once
-      // lock arrive with #1151, which widens the `hasOnly` guard below by one
-      // key at the same time.
-      //
-      // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: an
-      // ordinary admin write on a live Event fails this arm in two comparisons
-      // and moves on, rather than paying for the arm's own evaluation.
-      allow update: if resource != null
-        && resource.data.get('archiving', false) == true
-        && resource.data.get('status', 'active') != 'archived'
-        && boundToStoredQuiesce(resource.data, request.resource.data)
-        && isAdmin(eventId)
-        && request.resource.data.status == 'archived'
-        && request.resource.data.archivedAt is number
-        && request.resource.data.archivedAt > 0
-        && request.resource.data.archivedAt < 4102444800000
-        // The quiesce ends with the freeze. Leaving the flag set would be
-        // harmless (`status` denies on its own from here) but it would also be
-        // a second, clearable spelling of a state that must not be clearable.
-        && request.resource.data.get('archiving', false) == false
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['status', 'archivedAt', 'archiving']);
+      // THE LIFECYCLE FIELDS NEVER MOVE ON THIS ARM (#134; Codex P1 on PR
+      // #1157, round 6). `status`, `archiving` and `archivedAt` are moved only
+      // by the three dedicated arms BELOW — the shut, the reopen and the flip —
+      // each of which states the one transition it performs and the shape it
+      // requires. This arm refuses any change to the three in ONE
+      // `affectedKeys` check, which is what keeps the freeze write-once (an
+      // un-archive, a second stamp, a re-shut under the old generation and a
+      // stray stamp on a live Event are all a CHANGE to one of them and land
+      // here first), and which is cheaper than the five shape and lock clauses
+      // it replaces: this arm sits at Firestore's 1000-expression cap (#1142
+      // item 1), and the transition check the round-6 finding needed did not
+      // fit beside them. Restating an UNCHANGED value is not a change, so a
+      // partial update that echoes the stored state still passes. A create
+      // has no stored document to diff against, so it is held to the one
+      // shape a new Event may be born in: open, not closing, no stamp.
       allow create, update: if isAdmin(eventId)
-        && (!('status' in request.resource.data)
-            || request.resource.data.status in ['active', 'archived'])
-        && (!('archiving' in request.resource.data)
-            || request.resource.data.archiving is bool)
-        // `archivedAt` exists only on an archived document (Codex P2 on PR
-        // #1157): this arm may carry it solely when the RESULTING status is
-        // 'archived', which the clause after this one permits only on a document
-        // that was already archived, where the lock below pins it to the stored
-        // value. A live Event therefore can never hold a stray stamp; the flip
-        // arm above is the one place the field is introduced.
-        && (!('archivedAt' in request.resource.data)
-            || (request.resource.data.get('status', 'active') == 'archived'
-                && request.resource.data.archivedAt is number
-                && request.resource.data.archivedAt > 0
-                && request.resource.data.archivedAt < 4102444800000))
-        && (request.resource.data.get('status', 'active') != 'archived'
-            || (resource != null
-                && resource.data.get('status', 'active') == 'archived'))
         && (resource == null
-            || resource.data.get('status', 'active') != 'archived'
-            || (request.resource.data.get('status', 'active') == 'archived'
-                && request.resource.data.get('archivedAt', 0) == resource.data.get('archivedAt', 0)))
+            ? (request.resource.data.get('status', 'active') == 'active'
+                && request.resource.data.get('archiving', false) == false
+                && !('archivedAt' in request.resource.data))
+            : !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['status', 'archiving', 'archivedAt']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1385,6 +1332,101 @@ service cloud.firestore {
                 && ('days' in request.resource.data) == ('days' in resource.data)
                 && (!('days' in request.resource.data)
                     || request.resource.data.days == resource.data.days)));
+      // THE SHUT, on its own arm (Codex P1 on PR #1157). `abandonArchive`
+      // deliberately leaves `archiveToken` in place when it clears `archiving`,
+      // so a write that merely set `archiving: true` again re-shut the Event
+      // under the OLD generation, and a stale `archiveEvent(A)` — one whose
+      // record was read before the reopen — then passed `boundToStoredQuiesce`
+      // and could commit standings from before gameplay resumed. Every
+      // false-to-true transition must therefore install a FRESH, non-empty
+      // token, different from whatever the document still carries, and may
+      // touch nothing else: the general arm ABOVE accepts `archiving` only as
+      // `false`, so this is the only way a live Event is ever shut. It sits
+      // AFTER that arm on purpose — the Event arm is at Firestore's
+      // 1000-expression cap, and an `allow` placed ahead of it is paid for by
+      // every ordinary admin write; placed here it is reached only by a write
+      // the general arm has already refused at its cheap `archiving` check. Reopening
+      // (true to false) stays on the general arm, where the token is left as
+      // it was so a conditional `abandonArchive(expectedToken)` can still tell
+      // its own generation from a newer one.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) != true
+        && resource.data.get('status', 'active') != 'archived'
+        && isAdmin(eventId)
+        && request.resource.data.get('archiving', false) == true
+        && request.resource.data.get('archiveToken', '') is string
+        && request.resource.data.get('archiveToken', '') != ''
+        && request.resource.data.get('archiveToken', '') != resource.data.get('archiveToken', '')
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiving', 'archiveToken']);
+      // THE REOPEN, on its own arm. True to false, touching nothing else, from
+      // the quiescing state only: `abandonArchive` writes exactly this. The
+      // generation token is deliberately LEFT where it is — it only ever means
+      // anything while `archiving` is true, and a conditional
+      // `abandonArchive(expectedToken)` still needs it to tell its own
+      // generation from a newer one. The next shut mints a fresh one, and the
+      // shut arm refuses the old one, so leaving it is harmless (Codex P1 on
+      // PR #1157, round 6).
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && isAdmin(eventId)
+        && request.resource.data.get('archiving', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['archiving']);
+      // THE ARCHIVE FLIP, on its own arm and in its own transaction-shaped
+      // write (#134, Codex P1+P2 on PR #1139). Everything the freeze needs to be
+      // trustworthy is stated here, in one place:
+      //
+      //   - it may only be taken from the QUIESCED state, so a direct SDK write
+      //     cannot skip the window in which gameplay was already shut and the
+      //     roster had stopped moving;
+      //   - and only from the SAME quiesce the record was read against
+      //     (`boundToStoredQuiesce`), because being shut is not the same as
+      //     being the shut the snapshot describes: play reopened and shut again
+      //     underneath a slow read presents an identical flag. The writer
+      //     restates the token it read, so a superseded generation is denied
+      //     here rather than only by the client that checks. Restating an
+      //     UNCHANGED value leaves the field out of `affectedKeys()`, which is
+      //     why the `hasOnly` guard below names only the three transition keys
+      //     — a write that MOVED it is refused by the binding clause first, and
+      //     by that guard after;
+      //   - it must carry a numeric, bounded `archivedAt`, which is what makes
+      //     "no reader ever sees an archived Event with no stamp" an enforced
+      //     invariant rather than a property of one client's writer;
+      //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
+      //     this arm skip the configuration validation below without opening a
+      //     hole through it: a write that also moved `days`, `bannedUids` or
+      //     `standingsFreezeAt` is not an archive flip and falls through to the
+      //     arm that checks those fields (where it is denied, because the stored
+      //     document is not archived yet).
+      //
+      // What this arm deliberately does NOT yet require is a COMPLETE frozen
+      // record. #1149 lands the lifecycle primitive only: the flip carries
+      // `status`, `archivedAt` and the cleared quiesce, and nothing more. The
+      // `archive` record, its whole-record validation and its own write-once
+      // lock arrive with #1151, which widens the `hasOnly` guard below by one
+      // key at the same time.
+      //
+      // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: a
+      // write that reaches this arm has already been refused by the general
+      // arm's `affectedKeys` check, and the three dedicated arms sit AFTER
+      // that arm so an ordinary admin write never pays for them at all.
+      allow update: if resource != null
+        && resource.data.get('archiving', false) == true
+        && resource.data.get('status', 'active') != 'archived'
+        && boundToStoredQuiesce(resource.data, request.resource.data)
+        && isAdmin(eventId)
+        && request.resource.data.status == 'archived'
+        && request.resource.data.archivedAt is number
+        && request.resource.data.archivedAt > 0
+        && request.resource.data.archivedAt < 4102444800000
+        // The quiesce ends with the freeze. Leaving the flag set would be
+        // harmless (`status` denies on its own from here) but it would also be
+        // a second, clearable spelling of a state that must not be clearable.
+        && request.resource.data.get('archiving', false) == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'archivedAt', 'archiving']);
       // The DELETE of the Event document is the ONE admin write the freeze
       // refuses (#134, Phase 4b P1 on PR #1139). Deleting a document does not
       // delete its subcollections, so an admin deleting an archived Event

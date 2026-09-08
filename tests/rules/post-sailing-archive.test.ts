@@ -321,8 +321,51 @@ describe('post-sailing-archive — the quiesce shuts gameplay before the freeze'
     // REVERSIBLE on purpose: the first write shuts gameplay for everyone, so a
     // freeze that failed halfway (or an Admin who changed their mind) must not
     // leave a live Event permanently unplayable.
-    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+    );
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+  });
+
+  // Codex P1, PR #1157 round 6. `abandonArchive` leaves the token in place when
+  // it reopens, so a write that merely set `archiving: true` again re-shut the
+  // Event under the OLD generation — and a stale `archiveEvent(A)` whose record
+  // predates the reopen then passed `boundToStoredQuiesce`. Every shut now has
+  // to mint a fresh generation, and nothing but the shut arm can shut.
+  it('REQUIRES a fresh generation on every shut — the old token cannot be reused', async () => {
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: '' }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+    );
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { archiving: false }));
+    // Reopened, token still 'quiesce-1' on the document: re-shutting under it
+    // is exactly the replay the arm exists to refuse.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-1' }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archiving: true }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { archiving: true, archiveToken: 'quiesce-2' }),
+    );
+  });
+
+  it('DENIES a shut that smuggles configuration with it, and a create born shut', async () => {
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        archiving: true,
+        archiveToken: 'quiesce-1',
+        bannedUids: [BOB],
+      }),
+    );
+    await assertFails(
+      setDoc(doc(db(ADMIN), `events/${LEGACY_EVENT}-born-shut`), {
+        name: 'Born shut',
+        admins: [ADMIN],
+        archiving: true,
+        archiveToken: 'quiesce-1',
+      }),
+    );
   });
 
   it('DENIES a Player shutting the Event, or reopening one', async () => {
