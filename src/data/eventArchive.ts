@@ -203,12 +203,19 @@ function stableJson(value: unknown): string {
  *    missing Standings Freeze is derived from, and the label each frozen honour
  *    chip carries. A schedule edited after the pins were read produces a record
  *    built from pins for a schedule that no longer exists.
- *  - **`frozenAt`.** It resolves the honour cutoff, and it is the finale gate's
- *    own evidence besides (see `finaleHasRun`): a finale landing between the
- *    pre-read and the commit would leave the record cut on one answer and gated
- *    on another.
+ *  - **`frozenAt`.** It resolves the honour cutoff: a freeze stamped between the
+ *    pre-read and the commit would leave the record cut on one answer and built
+ *    against another.
  *
  * `standingsFreezeAt` rides along because it resolves the same cutoff.
+ *
+ * `finaleCompletedAt` is deliberately OUT, even though it is what the finale
+ * gate now reads (#1151, Codex P1 on PR #1162). That gate is evaluated against
+ * the TRANSACTIONAL read — the state the flip actually lands on — and the marker
+ * only ever moves one way, from absent to stamped, so a finale finishing
+ * mid-snapshot can only make the archive MORE permitted and needs no abort. It
+ * changes nothing about which rows were read either, which is the question this
+ * fingerprint exists to ask.
  *
  * `bannedUids` is deliberately OUT. Moderation is not a gameplay write and stays
  * available through the quiesce on purpose; a ban is applied to the rows the
@@ -232,8 +239,8 @@ export function archiveSnapshotFingerprint(
 }
 
 /**
- * Has this Event's scheduled Standings Freeze already RUN? (#1151, routed here
- * from #1150's review.)
+ * Has this Event's finale already RUN — all of it? (#1151, routed here from
+ * #1150's review; Codex P1 on PR #1162.)
  *
  * The quiesce only DELAYS the finale beats — the freeze stamp, the podium
  * Moment and the Most-Loved award are withheld while play is shut and land at
@@ -241,11 +248,24 @@ export function archiveSnapshotFingerprint(
  * irreversible, so an Event flipped BEFORE its finale never receives them at
  * all. Nothing else warns the Admin, and there is no way back.
  *
- * `frozenAt` is the stamp the scheduler writes when the finale runs, so its
- * presence IS the answer. An Event with no resolved Standings Freeze at all has
- * no finale to wait for — the pre-ADR-0011 "legacy Events never freeze" shape —
- * and gating on one would block archiving an Event that can never satisfy the
- * gate.
+ * `finaleCompletedAt` IS THE EVIDENCE, and `frozenAt` is not. The scheduler
+ * writes `frozenAt` in the freeze transaction and posts the podium Moment
+ * AFTERWARDS, as a separate best-effort beat under its own try/catch whose retry
+ * guard is deliberately decoupled from the freeze (`finaleActions.postPodium`,
+ * Codex #228) — so an Event carries the stamp and no podium for as long as that
+ * beat keeps failing, and reading the stamp alone answered "the finale has run"
+ * for the whole of that window. An archive taken there closed the Event over a
+ * podium that, because a closed Event's finale is never retried
+ * (`eventClosedToPlay` in `functions/src/unlockDay.ts`), would then never arrive.
+ * `finaleCompletedAt` is the composite marker `runFinaleBeats` writes only once
+ * it can observe every required beat, so a `frozenAt` without it keeps the
+ * acknowledgement on screen. It is also the only one of the two no client can
+ * write: `firestore.rules` refuses a change to it on every admin arm, where
+ * `frozenAt` beside it stays admin-writable.
+ *
+ * An Event with no resolved Standings Freeze at all has no finale to wait for —
+ * the pre-ADR-0011 "legacy Events never freeze" shape — and gating on one would
+ * block archiving an Event that can never satisfy the gate.
  *
  * It is a WARNING rather than a prohibition, which is why it is a predicate
  * rather than a refusal baked into the builder: an Admin may legitimately end an
@@ -253,9 +273,12 @@ export function archiveSnapshotFingerprint(
  * explicitly (`archiveEvent`'s `beforeFinale`).
  */
 export function finaleHasRun(
-  event: Partial<Pick<EventDoc, 'frozenAt' | 'standingsFreezeAt' | 'days'>> | null | undefined,
+  event:
+    | Partial<Pick<EventDoc, 'finaleCompletedAt' | 'standingsFreezeAt' | 'days'>>
+    | null
+    | undefined,
 ): boolean {
-  if (event?.frozenAt != null) return true;
+  if (event?.finaleCompletedAt != null) return true;
   // PARTIAL on the way in, like every other predicate here, because the freeze
   // writer asks the question of a RAW transactional read. `days` is defaulted
   // rather than asserted: an Event document with no schedule has no ceremonial

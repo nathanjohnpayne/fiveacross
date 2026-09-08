@@ -381,6 +381,22 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
     });
     expect(d.freeze).toBe(false); // already frozen — never re-freeze
     expect(d.postPodium).toBe(true); // but the podium beat is still owed
+    // …and the finale is NOT complete while it is (#1151). The decision only
+    // says the marker is still owed; `markFinaleComplete` re-reads the Event and
+    // the podium Moment before it writes anything.
+    expect(d.markComplete).toBe(true);
+  });
+
+  it('owes the completion marker from the freeze until it is stamped (#1151)', () => {
+    const t = finaleTimes(mainDays())!;
+    const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
+    expect(finaleActions(t, t.standingsFreezeAt - 1, base).markComplete).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, base).markComplete).toBe(true);
+    // Once stamped the quarter-hourly sweep stops asking, for the rest of the
+    // Event's life.
+    expect(
+      finaleActions(t, t.standingsFreezeAt, { ...base, finaleCompleted: true }).markComplete,
+    ).toBe(false);
   });
 
   // #784 — Bodega's tail put the closing Day on the SAME calendar date as the
@@ -882,5 +898,81 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     const lastCall = db.moments().find((m) => m.kind === 'last_call')!;
     expect(lastCall.id).toBe('last_call');
     expect(lastCall.line).toBeUndefined();
+  });
+});
+
+// #1151, Codex P1 on PR #1162. `frozenAt` is stamped by the freeze transaction
+// and the podium is a SEPARATE best-effort beat posted after it, so the stamp
+// alone never meant "the finale finished" — and the post-Event archive, which is
+// irreversible and whose stand-down means a closed Event's finale is never
+// retried, was decided on exactly that. `finaleCompletedAt` is the composite
+// marker: written last, only once every required beat can be observed.
+describe('runFinaleBeats — the finale-complete marker (#1151)', () => {
+  /** A db whose PODIUM Moment write throws, leaving every other write alone.
+   *  The throw is synchronous so `postFinaleMoment`'s transaction rejects into
+   *  the beat's own try/catch, exactly as a transient Firestore failure would. */
+  const withFailingPodium = (db: ReturnType<typeof makeDb>) =>
+    ({
+      ...db,
+      collection: (path: string) => {
+        const col = db.collection(path) as unknown as Record<string, unknown> & {
+          doc(id?: string): { set(data: Record<string, unknown>): Promise<unknown> };
+        };
+        if (!path.endsWith('/moments')) return col;
+        return {
+          ...col,
+          doc: (id?: string) => {
+            const ref = col.doc(id);
+            if (id !== 'podium') return ref;
+            return {
+              ...ref,
+              set: () => {
+                throw new Error('moment write unavailable');
+              },
+            };
+          },
+        };
+      },
+    }) as unknown as ReturnType<typeof makeDb>;
+
+  it('stamps the marker only after the freeze AND the podium have both landed', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() } });
+    const now = D10_UNLOCK + 1000;
+    await runFinaleBeats(db, 'e', { now: () => now });
+    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+    expect(db.moments().some((m) => m.kind === 'podium')).toBe(true);
+    // The RUN clock, not the scheduled cutoff: nothing scores against this
+    // field, and what it records is when the finale was first observed done.
+    expect(db.readEvent().finaleCompletedAt).toBe(now);
+  });
+
+  it('leaves the marker ABSENT when the podium beat fails, and stamps it on the retry', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() } });
+    await runFinaleBeats(withFailingPodium(db), 'e', { now: () => D10_UNLOCK + 1000 });
+    // The freeze landed — which is precisely why `frozenAt` could never answer
+    // the question the archive asks.
+    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+    expect(db.moments().some((m) => m.kind === 'podium')).toBe(false);
+    expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+
+    // The next quarter-hourly sweep: the freeze is never re-taken, the podium
+    // retry is still open on its own guard, and the marker follows it.
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+    expect(db.moments().some((m) => m.kind === 'podium')).toBe(true);
+    expect(db.readEvent().finaleCompletedAt).toBe(D10_UNLOCK + 900_000);
+  });
+
+  it('never re-stamps a marker it has already written', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() } });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+    expect(db.readEvent().finaleCompletedAt).toBe(D10_UNLOCK + 1000);
+  });
+
+  it('stamps nothing before the freeze instant, when the finale has not started', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() } });
+    await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
+    expect(db.readEvent().finaleCompletedAt).toBeUndefined();
   });
 });

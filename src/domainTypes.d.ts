@@ -444,8 +444,35 @@ export interface EventDoc {
    */
   standingsFreezeAt?: number;
   // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
-  // the standings freeze and the podium Moment posts. Absent until the finale.
+  // the standings freeze. Absent until the finale. It records THAT ONE BEAT and
+  // nothing more — the podium Moment is posted afterwards, as a separate
+  // best-effort write with its own retry guard — so it is not evidence the
+  // finale finished; see `finaleCompletedAt` below (#1151).
   frozenAt?: number;
+  /**
+   * The composite FINALE-COMPLETE marker (ms epoch, #1151, Codex P1 on PR
+   * #1162): when every required finale beat had landed — the freeze stamp AND
+   * the podium Moment together. Written by `runFinaleBeats` once it can observe
+   * both, idempotently, and read by `finaleHasRun` (`src/data/eventArchive.ts`),
+   * which is the archive's own pre-flip warning.
+   *
+   * It exists because `frozenAt` cannot answer that question. The freeze
+   * transaction and the podium Moment are separate writes, the podium is
+   * deliberately retryable on its own guard (Codex #228), and an Event can
+   * therefore carry a stamp and no podium indefinitely. Archiving is
+   * irreversible and a closed Event's finale is never retried, so an Admin who
+   * archived in that window lost the podium beat permanently, unwarned.
+   *
+   * SERVER-WRITTEN, and `firestore.rules` refuses any client change to it — no
+   * admin arm may introduce, move or clear it. That is the point of moving the
+   * gate's evidence here: `frozenAt` beside it is admin-writable, so an Admin in
+   * a hurry could always have satisfied the old check by hand.
+   *
+   * Absent on every Event whose finale ran before this shipped; the next
+   * quarter-hourly sweep stamps it, so the acknowledgement the console asks for
+   * in the meantime is asked for at most once per Event.
+   */
+  finaleCompletedAt?: number;
   // The frozen Most-Loved Photo award (#534/#560, specs/most-loved-photo.md):
   // computed and persisted exactly once by the same scheduler sweep that stamps
   // `frozenAt`, as a sibling field because the award is Event-level frozen

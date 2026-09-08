@@ -11,8 +11,9 @@
  *   2. The finale two-beat finish — at 20:00 on Day 9 post exactly one
  *      `last_call` Moment (frozenAt untouched); at 08:00 on Day 10 (the farewell
  *      Day's `unlockAt`) set `EventDoc.frozenAt` and post exactly one `podium`
- *      Moment. The standings / podium CONTENT is #212 / #217; these Moments carry
- *      only the minimal payload those tickets render.
+ *      Moment, and stamp `EventDoc.finaleCompletedAt` once BOTH have landed
+ *      (#1151). The standings / podium CONTENT is #212 / #217; these Moments
+ *      carry only the minimal payload those tickets render.
  *   3. A manual admin "unlock now" fallback (`manualUnlockNow`) that forces the
  *      SAME idempotent snapshot for one Day on demand, so function lag / failure
  *      can never leave a Day dealing from an unfrozen pool — and can never
@@ -69,6 +70,22 @@ export interface EventLike {
    *  falls back to the first ceremonial Day's own `unlockAt`. */
   standingsFreezeAt?: number;
   frozenAt?: number | null;
+  /**
+   * The composite FINALE-COMPLETE marker (#1151, Codex P1 on PR #1162): the
+   * instant every required finale beat had landed — the freeze stamp AND the
+   * podium Moment — written by `runFinaleBeats` once it can observe both, and
+   * never by any client (`firestore.rules` refuses a change to it on the general
+   * Event arm, and no dedicated arm names it).
+   *
+   * It exists because `frozenAt` cannot answer the question the archive asks.
+   * The freeze transaction writes `frozenAt` and the podium Moment is a SEPARATE
+   * best-effort beat posted after it, under its own try/catch — so an Event can
+   * carry a freeze stamp and no podium indefinitely, and a client gating on
+   * `frozenAt` would call the finale done and archive over the missing beat. The
+   * flip is irreversible and child 2's stand-down means a closed Event's finale
+   * is never retried, so that podium would never arrive.
+   */
+  finaleCompletedAt?: number | null;
   admins?: string[];
   /** IANA zone the Day schedule is authored in (#800: the last-call freeze
    *  phrase is formatted in this zone). Optional here because this reads the
@@ -438,6 +455,7 @@ export interface FinaleDecision {
   freeze: boolean;
   postPodium: boolean;
   computeMostLoved: boolean;
+  markComplete: boolean;
 }
 
 /**
@@ -461,6 +479,14 @@ export interface FinaleDecision {
  *     moderation state and the Proof/Heart collections, then writes both frozen
  *     fields together. A retry therefore cannot rebuild an award from a later ban
  *     roster, report threshold, or Proof visibility state.
+ *   - `markComplete` (#1151): `now` has reached the farewell unlock and no
+ *     completion marker is stored yet. It says only that the marker is still
+ *     OWED — whether it is actually written is `markFinaleComplete`'s decision,
+ *     taken inside its own transaction against a FRESH read of the Event and the
+ *     podium Moment, because the beats above may have just landed (or just
+ *     failed) in this very run. Skipping the transaction once the marker exists
+ *     is what keeps the quarter-hourly sweep from re-asking the question for the
+ *     rest of the Event's life.
  */
 export function finaleActions(
   times: FinaleTimes,
@@ -470,6 +496,10 @@ export function finaleActions(
     lastCallPosted: boolean;
     podiumPosted: boolean;
     mostLovedComputed: boolean;
+    /** Optional so a caller that predates the marker still typechecks: absent
+     *  reads as "not yet marked", which is the state every Event was in before
+     *  #1151 and the state that makes the sweep ask. */
+    finaleCompleted?: boolean;
   },
 ): FinaleDecision {
   const atFreeze = now >= times.standingsFreezeAt;
@@ -478,6 +508,7 @@ export function finaleActions(
     freeze: atFreeze && state.frozenAt == null,
     postPodium: atFreeze && !state.podiumPosted,
     computeMostLoved: atFreeze && state.frozenAt == null && !state.mostLovedComputed,
+    markComplete: atFreeze && !state.finaleCompleted,
   };
 }
 
@@ -963,6 +994,66 @@ async function freezeStandingsAndPersistMostLovedAward(
   });
 }
 
+/**
+ * THE FINALE IS FINISHED — say so durably (#1151, Codex P1 on PR #1162).
+ *
+ * `frozenAt` records that the freeze transaction committed. It does NOT record
+ * that the finale finished. The podium is a SEPARATE best-effort beat posted
+ * after that transaction under its own try/catch, and `postPodium` is
+ * deliberately decoupled from the freeze guard so a transient failure stays
+ * retryable on a later sweep (Codex #228) — so the two are ordinarily seconds
+ * apart, can be a quarter of an hour apart, and can be permanently apart.
+ *
+ * The post-Event archive is decided on that difference, and cannot see it.
+ * `finaleHasRun` (src/data/eventArchive.ts) is what warns an Admin that the
+ * irreversible flip forgoes the finale beats, and reading `frozenAt` for that
+ * answer said "the finale has run" from the instant the stamp landed — so an
+ * Admin archiving in the window between the stamp and the podium was never
+ * warned, the flip closed the Event, and child 2's stand-down means
+ * `runFinaleBeats` never retries the podium on a closed Event. The beat is lost
+ * for good, on the one record that can never be amended.
+ *
+ * So the marker is COMPOSITE and written LAST: this transaction re-reads the
+ * Event and asks for the podium Moment by the same predicate `postPodium` is
+ * guarded by, and writes `finaleCompletedAt` only when both are there. Its value
+ * is the RUN clock rather than the scheduled cutoff, unlike `frozenAt`: nothing
+ * scores against it, and what it records is when the finale was first observed
+ * finished.
+ *
+ * THE MOST-LOVED AWARD IS DELIBERATELY NOT A THIRD CONDITION. It has no retry
+ * path of its own — `freezeStandingsAndPersistMostLovedAward` writes it in the
+ * SAME transaction as `frozenAt`, and the compat branch below only runs when an
+ * award is already persisted — so it cannot land later than the freeze, and
+ * requiring it would hold the marker back for an Event whose award came out
+ * empty rather than for anything that is still owed.
+ *
+ * Idempotent (an Event already carrying the marker is never re-stamped, so the
+ * instant recorded is the first run that could see the finale finished) and
+ * guarded on the freeze like every other write in this module: a closed Event
+ * has no finale to complete, and the check is INSIDE the transaction, so an
+ * archive committing beside it aborts the attempt rather than moving a field on
+ * a record that has already been taken.
+ */
+async function markFinaleComplete(
+  db: AdminFirestore,
+  eventId: string,
+  completedAt: number,
+): Promise<boolean> {
+  const eventRef = db.doc(`events/${eventId}`);
+  // The same query `hasMoment` asks, so the marker and the podium beat's own
+  // guard can never disagree about whether the Moment is there.
+  const podium = db.collection(`events/${eventId}/moments`).where('kind', '==', 'podium');
+  return db.runTransaction(async (tx) => {
+    const event = (await tx.get(eventRef)).data() as EventLike | undefined;
+    if (!event || event.finaleCompletedAt != null) return false;
+    if (eventClosedToPlay(event)) return false;
+    if (event.frozenAt == null) return false;
+    if ((await tx.get(podium)).docs.length === 0) return false;
+    tx.update(eventRef, { finaleCompletedAt: completedAt });
+    return true;
+  });
+}
+
 // --- Finale beats ---------------------------------------------------------------
 
 /**
@@ -987,12 +1078,17 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
     hasMoment(db, eventId, 'last_call'),
     hasMoment(db, eventId, 'podium'),
   ]);
-  const { postLastCall, freeze, postPodium, computeMostLoved } = finaleActions(times, now, {
-    frozenAt: event.frozenAt,
-    lastCallPosted,
-    podiumPosted,
-    mostLovedComputed: event.mostLovedPhoto != null,
-  });
+  const { postLastCall, freeze, postPodium, computeMostLoved, markComplete } = finaleActions(
+    times,
+    now,
+    {
+      frozenAt: event.frozenAt,
+      lastCallPosted,
+      podiumPosted,
+      mostLovedComputed: event.mostLovedPhoto != null,
+      finaleCompleted: event.finaleCompletedAt != null,
+    },
+  );
 
   if (postLastCall) {
     try {
@@ -1085,6 +1181,19 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       await postFinaleMoment(db, eventId, 'podium', times.podiumDayIndex, now, extra);
     } catch (err) {
       console.error('runFinaleBeats: podium post failed', eventId, err);
+    }
+  }
+  // LAST, because it is a statement about everything above it (#1151, Codex P1
+  // on PR #1162). `frozenAt` says the freeze stamp landed; only this says the
+  // finale FINISHED, which is the question the irreversible post-Event archive
+  // is decided on. Best-effort like every other beat — a failure here leaves the
+  // marker absent, which is the honest answer and which the next sweep retries,
+  // exactly as a failed podium is retried.
+  if (markComplete) {
+    try {
+      await markFinaleComplete(db, eventId, now);
+    } catch (err) {
+      console.error('runFinaleBeats: finale completion marker failed', eventId, err);
     }
   }
 }

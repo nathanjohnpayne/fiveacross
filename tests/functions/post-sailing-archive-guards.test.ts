@@ -76,6 +76,10 @@ function makeDb(seed: {
   items?: Array<Record<string, unknown>>;
   players?: Array<Record<string, unknown>>;
   boards?: Array<Record<string, unknown>>;
+  /** Moments already on the Feed — the seam for an Event whose podium beat has
+   *  ALREADY landed, which is the only state the finale-complete marker (#1151)
+   *  can be written from. */
+  moments?: StoredMoment[];
   /** Runs once, immediately before the transaction body's first read. */
   onTransaction?: (db: { archiveNow(patch?: Partial<EventLike>): void }) => void;
 }): Fake {
@@ -86,7 +90,7 @@ function makeDb(seed: {
   const items = [...(seed.items ?? [])];
   const players = [...(seed.players ?? [])];
   const boards = [...(seed.boards ?? [])];
-  const moments: StoredMoment[] = [];
+  const moments: StoredMoment[] = [...(seed.moments ?? [])];
   let transactionHookFired = false;
   let eventReads = 0;
   const queried: string[] = [];
@@ -549,5 +553,58 @@ describe('runFinaleBeats — no finale state lands on a frozen Event', () => {
     });
     await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK });
     expect(db.readEvent().frozenAt).toBeUndefined();
+  });
+
+  // The FINALE-COMPLETE MARKER (#1151, Codex P1 on PR #1162) is the last write
+  // the finale makes, and it is the field the console's pre-flip acknowledgement
+  // is decided on — so it needs the same two guards every other write here has.
+  // An Event whose beats have already landed is the only state it can be written
+  // from, which is what the seeded podium Moment supplies.
+  const finaleFinished = () => ({
+    days: mainDays(),
+    timezone: 'Europe/Rome',
+    frozenAt: D10_UNLOCK,
+    mostLovedPhoto: { winners: [], winnerCount: 0, heartCount: 0 },
+  });
+  const PODIUM_POSTED = [{ id: 'podium', kind: 'podium', uid: 'system', createdAt: D10_UNLOCK }];
+
+  it('stamps the completion marker on an open Event whose beats have all landed (the control)', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: finaleFinished(),
+      players: roster(),
+      moments: PODIUM_POSTED,
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 60_000 });
+    expect(db.readEvent().finaleCompletedAt).toBe(D10_UNLOCK + 60_000);
+  });
+
+  it('stamps no completion marker on an archived Event, nor on a closing one', async () => {
+    for (const closed of [{ status: 'archived' }, { archiving: true }]) {
+      const db = makeDb({
+        eventId: 'e',
+        event: { ...finaleFinished(), ...closed },
+        players: roster(),
+        moments: PODIUM_POSTED,
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 60_000 });
+      expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+    }
+  });
+
+  it('withholds the marker when the archive lands inside its own transaction', async () => {
+    // With the freeze stamped and the podium already posted, the marker's own
+    // transaction is the FIRST one this run opens — so the hook lands the
+    // archive in exactly the window the in-transaction re-check exists for. The
+    // run's outer guard cannot answer this one: it read an open Event.
+    const db = makeDb({
+      eventId: 'e',
+      event: finaleFinished(),
+      players: roster(),
+      moments: PODIUM_POSTED,
+      onTransaction: (d) => d.archiveNow({ archiving: true }),
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 60_000 });
+    expect(db.readEvent().finaleCompletedAt).toBeUndefined();
   });
 });

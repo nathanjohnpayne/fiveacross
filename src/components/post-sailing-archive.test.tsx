@@ -71,9 +71,17 @@ vi.mock('../data/admin', () => ({
 import ArchiveEvent from './admin/ArchiveEvent';
 
 function mkEvent(over: Partial<EventDoc> = {}): EventDoc {
-  // `frozenAt` present by default, so the FINALE gate is satisfied and every
-  // case that is not about it reads as an ordinary post-finale archive.
-  return { name: 'Test Event', status: 'active', frozenAt: 8_000, ...over } as EventDoc;
+  // `finaleCompletedAt` present by default, so the FINALE gate is satisfied and
+  // every case that is not about it reads as an ordinary post-finale archive.
+  // It is the MARKER rather than the freeze stamp beside it, because the stamp
+  // alone never proved the podium landed (#1151, Codex P1 on PR #1162).
+  return {
+    name: 'Test Event',
+    status: 'active',
+    frozenAt: 8_000,
+    finaleCompletedAt: 8_100,
+    ...over,
+  } as EventDoc;
 }
 
 function mkPlayer(uid: string, over: Partial<PlayerDoc> = {}): PlayerDoc {
@@ -594,11 +602,23 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
   });
 
   it('asks nothing once the finale has run — the control', async () => {
-    H.event = mkEvent({ frozenAt: 8_000 });
+    H.event = mkEvent({ frozenAt: 8_000, finaleCompletedAt: 8_100 });
     renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('still asks when the freeze is stamped but the podium has not landed', async () => {
+    // #1151, Codex P1 on PR #1162. `frozenAt` records the freeze transaction and
+    // nothing else; the podium is a separate best-effort beat with its own retry
+    // guard, so this is a real state an Event sits in — and the flip would forgo
+    // that podium permanently, because a closed Event's finale is never retried.
+    H.event = preFinale({ frozenAt: 8_000 });
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByRole('checkbox')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
   });
 
   it('asks nothing on an Event with no scheduled finale at all', async () => {
