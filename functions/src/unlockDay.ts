@@ -34,48 +34,99 @@
  * mirrors `autohide.ts` / `notify.ts`).
  */
 
-// --- Minimal domain shapes (local, so this module stays decoupled from the app
-// package — mirrors autohide.ts's ReportableDoc approach). --------------------
+// --- The raw-read domain shapes, DERIVED from the shared contract -------------
+//
+// Declaration-only shared contract (the `dailyEmailContent.ts` /
+// `finaleContent.ts` precedent): the separately-rooted Functions compiler can
+// consume `src/domainTypes.d.ts` without emitting an app file, so this package
+// stays decoupled at RUNTIME — it imports no app module — while the field names
+// and value types it reads have exactly ONE definition.
+//
+// They were local redeclarations, and `finaleCompletedAt` is why that stopped
+// being tenable (Codex P1 on PR #1162): the marker that gates the IRREVERSIBLE
+// archive was declared here AND in `EventDoc`, so a later type or optionality
+// change could compile independently on either side and leave the scheduler and
+// the client disagreeing about whether the finale had finished. The repo's own
+// rule is that both compiler roots consume `src/domainTypes.d.ts` rather than
+// restating domain shapes (docs/agents/code-modification-rules.md).
+//
+// What is stated locally is a WIRE-FORMAT REFINEMENT and nothing else: this
+// package reads RAW Firestore maps, with no converter between it and the
+// document, so every field is optional here and the few whose stored values are
+// looser than the contract's (`pool`/`scoring`'s legacy vocabularies,
+// `status`'s free-form value, a persisted `null` where the contract says
+// absent) are widened at this boundary alone. The pins below make that widening
+// checkable: a canonical document must remain assignable to its raw view, so a
+// rename or an incompatible retype on the contract side fails `tsc` HERE.
+import type { DayDef, EventDoc } from '../../src/domainTypes';
 
 /** The subset of a `DayDef` the scheduler reads/writes. */
-export interface DayLike {
-  index: number;
-  pool: string; // canonical 'main' | 'easy' | 'closing'; legacy docs persist 'embark' | 'farewell' (normalizePool)
-  /** The Day's Scoring Policy (ADR 0011), absent on every doc written before
-   *  the field existed. Loosely typed because this package reads RAW Firestore
-   *  maps; resolve through `scoringForDay`/`isCeremonialDay` (scoringVocab.ts),
-   *  never by direct comparison. */
-  scoring?: string;
-  unlockAt: number; // ms epoch
-  snapshotItemIds?: string[];
-  snapshotEasyMixRatio?: number;
-}
+export type DayLike = Pick<DayDef, 'index' | 'unlockAt'> &
+  Partial<Pick<DayDef, 'snapshotItemIds' | 'snapshotEasyMixRatio'>> & {
+    /** Widened from `DayDef['pool']`: canonical 'main' | 'easy' | 'closing',
+     *  but legacy docs persist 'embark' | 'farewell' (normalizePool). */
+    pool: string;
+    /** The Day's Scoring Policy (ADR 0011), absent on every doc written before
+     *  the field existed. Widened from `DayDef['scoring']` because this package
+     *  reads RAW Firestore maps; resolve through `scoringForDay`/
+     *  `isCeremonialDay` (scoringVocab.ts), never by direct comparison. */
+    scoring?: string;
+  };
 
-/** The subset of an `EventDoc` the scheduler reads. */
-export interface EventLike {
+/**
+ * The subset of an `EventDoc` the scheduler reads.
+ *
+ * Every field is OPTIONAL because the read is raw: a legacy document may carry
+ * none of them, and the module already treats each absence as its documented
+ * default. The value types come from `EventDoc` wherever the stored value and
+ * the contract agree; the four that follow the derived block are the only
+ * widenings, each stated with the stored shape that forces it.
+ */
+export type EventLike = Partial<
+  Pick<
+    EventDoc,
+    /** IANA zone the Day schedule is authored in (#800: the last-call freeze
+     *  phrase is formatted in this zone). Optional here because this reads the
+     *  raw Firestore doc directly rather than through `eventConverter` —
+     *  `freezePhraseForUnlock` runs it through `normalizeTimezone`, which
+     *  resolves a missing/malformed value to the SAME legacy default
+     *  ('Europe/Rome') `eventConverter` applies client-side. */
+    | 'timezone'
+    | 'admins'
+    /** ADR 0004 Phase 0 event-scoped ban roster (#108; mirrors the live deal pool). */
+    | 'bannedUids'
+    /** The archive's QUIESCING phase (#134): gameplay is shut but the record has
+     *  not been taken yet. Server-side gameplay writes must stop here too, not
+     *  only at `status`, or the very window the quiesce exists to create is the
+     *  window a scheduler run writes into. */
+    | 'archiving'
+    /** The CONFIGURED Standings Freeze (ADR 0011) — the moment scoring stops.
+     *  Distinct from `frozenAt`, the stamp recording that it happened. Absent on
+     *  every doc written before the field existed, in which case `finaleTimes`
+     *  falls back to the first ceremonial Day's own `unlockAt`. */
+    | 'standingsFreezeAt'
+  >
+> & {
+  /** `EventDoc['days']` under the raw Day view above — the two fields `DayLike`
+   *  widens are the whole difference. */
   days?: DayLike[];
   /** The post-Event archive state (#134, specs/post-sailing-archive.md).
    *  `'archived'` means this Event is frozen; every other value (including an
    *  absent field, which is every doc written before the field was consumed)
-   *  means open. Loosely typed because this package reads RAW Firestore maps. */
+   *  means open. Widened from `EventDoc['status']` because this package reads
+   *  RAW Firestore maps, where the stored value is any string. */
   status?: string;
-  /** The archive's QUIESCING phase (#134): gameplay is shut but the record has
-   *  not been taken yet. Server-side gameplay writes must stop here too, not
-   *  only at `status`, or the very window the quiesce exists to create is the
-   *  window a scheduler run writes into. */
-  archiving?: boolean;
-  /** The CONFIGURED Standings Freeze (ADR 0011) — the moment scoring stops.
-   *  Distinct from `frozenAt`, the stamp recording that it happened. Absent on
-   *  every doc written before the field existed, in which case `finaleTimes`
-   *  falls back to the first ceremonial Day's own `unlockAt`. */
-  standingsFreezeAt?: number;
-  frozenAt?: number | null;
+  /** `EventDoc['frozenAt']`, plus the `null` a raw read can find where the
+   *  contract says absent. */
+  frozenAt?: EventDoc['frozenAt'] | null;
   /**
-   * The composite FINALE-COMPLETE marker (#1151, Codex P1 on PR #1162): the
-   * instant every required finale beat had landed — the freeze stamp AND the
-   * podium Moment — written by `runFinaleBeats` once it can observe both, and
-   * never by any client (`firestore.rules` refuses a change to it on the general
-   * Event arm, and no dedicated arm names it).
+   * The composite FINALE-COMPLETE marker (#1151, Codex P1 on PR #1162):
+   * `EventDoc['finaleCompletedAt']` — declared THERE, not here — plus the `null`
+   * a raw read can find where the contract says absent. The instant every
+   * required finale beat had landed, the freeze stamp AND the podium Moment,
+   * written by `runFinaleBeats` once it can observe both, and never by any
+   * client (`firestore.rules` refuses a change to it on the general Event arm,
+   * and no dedicated arm names it).
    *
    * It exists because `frozenAt` cannot answer the question the archive asks.
    * The freeze transaction writes `frozenAt` and the podium Moment is a SEPARATE
@@ -84,25 +135,45 @@ export interface EventLike {
    * `frozenAt` would call the finale done and archive over the missing beat. The
    * flip is irreversible and child 2's stand-down means a closed Event's finale
    * is never retried, so that podium would never arrive.
+   *
+   * It is also the field that made these shapes derive from the contract rather
+   * than restate it: two definitions of the gate on an irreversible write are
+   * two chances to disagree about it.
    */
-  finaleCompletedAt?: number | null;
-  admins?: string[];
-  /** IANA zone the Day schedule is authored in (#800: the last-call freeze
-   *  phrase is formatted in this zone). Optional here because this reads the
-   *  raw Firestore doc directly rather than through `eventConverter` —
-   *  `freezePhraseForUnlock` runs it through `normalizeTimezone`, which
-   *  resolves a missing/malformed value to the SAME legacy default
-   *  ('Europe/Rome') `eventConverter` applies client-side. */
-  timezone?: string;
-  /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal pool). */
-  settings?: { reportHideThreshold?: number; easyMixRatio?: number };
-  /** ADR 0004 Phase 0 event-scoped ban roster (#108; mirrors the live deal pool). */
-  bannedUids?: string[];
+  finaleCompletedAt?: EventDoc['finaleCompletedAt'] | null;
+  /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal
+   *  pool). `EventDoc['settings']`'s own members, each made optional: the
+   *  contract requires `reportHideThreshold`, and a raw document written before
+   *  it existed carries no key at all. */
+  settings?: Partial<EventDoc['settings']>;
   /** The frozen Most-Loved Photo award (#560) — the guard reads presence only
    *  (`!= null` = already computed, the beat's idempotence key), so the type
    *  stays `unknown` rather than restating the shared shape here. */
   mostLovedPhoto?: unknown;
-}
+};
+
+/**
+ * THE COMPILE-TIME PINS for the two views above (Codex P1 on PR #1162).
+ *
+ * `MustExtend<Sub, Super>` is an alias whose own type parameter is constrained,
+ * so instantiating it with a `Sub` that is no longer assignable to `Super` is a
+ * `tsc` ERROR at this line rather than a silent divergence discovered in
+ * production. Deriving the fields from `EventDoc` already gives each of them one
+ * definition; these pin the WIDENINGS too — the handful of places this file
+ * still states a type of its own — so a contract change that makes a canonical
+ * document unreadable through the raw view (a rename, a narrowing, a field that
+ * stops being a string) cannot land unnoticed.
+ *
+ * They live in this module rather than in a spec file because
+ * `tests/functions/**` is in no `tsconfig` program: the Functions compiler root
+ * is `functions/tsconfig.json` (`include: ["src"]`), so `cd functions && npm run
+ * build` is the gate that evaluates them.
+ */
+type MustExtend<Sub extends Super, Super> = Sub;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- a type-level assertion IS the use.
+type _DayLikeReadsADayDef = MustExtend<DayDef, DayLike>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- a type-level assertion IS the use.
+type _EventLikeReadsAnEventDoc = MustExtend<EventDoc, EventLike>;
 
 /** The finale Moment kinds this ticket posts. */
 import {
