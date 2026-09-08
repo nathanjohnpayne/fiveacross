@@ -687,7 +687,17 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
 };
 
 /** What `unlockDayNow` reports back — mirrors `SnapshotResult` in `functions/src/unlockDay.ts`. */
-export type UnlockDayNowResult = 'stamped' | 'already-stamped' | 'not-due' | 'no-event' | 'no-day';
+export type UnlockDayNowResult =
+  | 'stamped'
+  | 'already-stamped'
+  | 'not-due'
+  | 'no-event'
+  | 'no-day'
+  // The Event is closed to play — archived, or closing — and the server stood
+  // down (specs/post-sailing-archive.md § "The server-side half"; Codex P2 on
+  // PR #1161). `httpsCallable` trusts this generic, so the value has to be
+  // here for an exhaustive handler or a mock to see it.
+  | 'archived';
 
 /** What the guarded re-snapshot reports back — mirrors `ResnapshotResult` in
  *  `functions/src/unlockDay.ts` (specs/easy-mix.md § "Deploy race"). */
@@ -697,7 +707,9 @@ export type ResnapshotDayResult =
   | 'not-recoverable'
   | 'not-due'
   | 'no-event'
-  | 'no-day';
+  | 'no-day'
+  // The Event is closed to play; the server stood down (Codex P2 on PR #1161).
+  | 'archived';
 
 /**
  * The Admin console's manual "unlock now" fallback (daily-cards-spec §
