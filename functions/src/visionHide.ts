@@ -654,7 +654,7 @@ export interface VisionHideDeps {
  * place a status moves. The action pass still runs after a lookup that found
  * nothing, so a create is judged exactly as it was before.
  *
- * THE ONE FAILURE THAT IS NOT SWALLOWED is the hand-off (Phase 4b runs 2 and 3).
+ * TWO FAILURES ARE NOT SWALLOWED. The first is the hand-off (Phase 4b runs 2 and 3).
  * Swallowing it acknowledged the event successfully while the verdict was still
  * parked, so the platform never redelivered and — because the gate accepted only
  * creates — nothing ever looked again: extreme/illegal media public, with the
@@ -665,13 +665,22 @@ export interface VisionHideDeps {
  * reconciliation arm of `awaitsPendingVisionScan` — which outlives the budget by
  * construction — is what catches the exhausted case on the Proof's next write.
  *
- * Every OTHER failure keeps the never-throw contract unchanged: a failing hide,
- * backfill, or re-hide is swallowed (`console.error`, return `false`) so the
- * trigger never crashes the proof pipeline, and the state predicate re-attempts
- * on any later write that leaves the doc `'flagged'` (ADR 0001; mirrors
- * `applyThresholdHide`, `moderateProof`, and the #101 notifier). The hide arm
- * recovers on its own and therefore needs no redelivery; the hand-off, gated on
- * one write, could not.
+ * The second is the RE-HIDE (Phase 4b run 4), under the same budget. Its input
+ * — `'active'` with the marker set — is the one state in this module the read
+ * rules expose to Players, and no later write is guaranteed to re-fire it: a
+ * hide of an already-`'flagged'` Proof fails into an admin-only state and is
+ * re-attempted by the next report bump or admin action, but a re-hide that
+ * fails leaves safety-held media public until something else happens to touch
+ * the document. So a transient transaction failure there is worth a redelivery
+ * exactly as the hand-off's is, and past the budget it is logged and swallowed.
+ *
+ * Every OTHER failure keeps the never-throw contract unchanged: a failing hide
+ * or backfill is swallowed (`console.error`, return `false`) so the trigger
+ * never crashes the proof pipeline, and the state predicate re-attempts on any
+ * later write that leaves the doc `'flagged'` (ADR 0001; mirrors
+ * `applyThresholdHide`, `moderateProof`, and the #101 notifier). Both fail
+ * into states no Player can read, which is what makes them safe to leave to
+ * the next write.
  */
 export async function applyVisionFlagHide(
   eventId: string,
@@ -697,10 +706,21 @@ export async function applyVisionFlagHide(
     }
     if (applied) return true; // now 'flagged'; the re-fire hides it through the hide arm
   }
+  const action = visionHideAction(after);
+  if (!action) return false;
   try {
-    if (!visionHideAction(after)) return false;
     return await (deps.hideIfQualifies ?? defaultHideVisionFlaggedIfQualifies)(eventId, proofId);
   } catch (err) {
+    if (action === 'rehide' && redeliverPendingVisionScan(deps.eventTime, now)) {
+      // PROPAGATE (Phase 4b run 4). The re-hide is the one action whose failure
+      // leaves a PUBLIC state: `'active'` with the marker set is exactly what
+      // the read rules expose to Players, and — unlike the hide arm, whose
+      // `'flagged'` input is already admin-only and re-attempted by any later
+      // write — nothing guarantees this Proof is ever written again. Same
+      // budget as the hand-off, for the same reason.
+      console.error('applyVisionFlagHide re-hide failed; requesting redelivery', err);
+      throw err;
+    }
     console.error('applyVisionFlagHide failed', err);
     return false;
   }

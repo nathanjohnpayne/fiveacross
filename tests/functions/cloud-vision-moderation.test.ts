@@ -772,7 +772,60 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
     err.mockRestore();
   });
 
-  it('still swallows a failing HIDE — only the hand-off is worth a redelivery', async () => {
+  it('PROPAGATES a failing RE-HIDE inside the budget — the one action whose failure is public', async () => {
+    // Phase 4b run 4. A re-hide's input is `'active'` with the marker set, which
+    // the read rules expose to Players; swallowing its failure acknowledged the
+    // event while safety-held media stayed public, with no later write
+    // guaranteed to re-fire the arm.
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('transaction failed');
+    });
+    await expect(
+      applyVisionFlagHide('e', 'p1', PRIOR, { status: 'active', safetyHide: true, visionFlag: 'violence' }, {
+        hideIfQualifies: boom,
+        eventTime: 1_000,
+        now: 1_000 + PENDING_SCAN_REDELIVERY_WINDOW_MS,
+      }),
+    ).rejects.toThrow('transaction failed');
+    expect(boom).toHaveBeenCalledWith('e', 'p1');
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('stops redelivering a failing re-hide once the budget is spent — logged and swallowed', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('transaction failed');
+    });
+    await expect(
+      applyVisionFlagHide('e', 'p1', PRIOR, { status: 'active', safetyHide: true, visionFlag: 'violence' }, {
+        hideIfQualifies: boom,
+        eventTime: 1_000,
+        now: 1_000 + PENDING_SCAN_REDELIVERY_WINDOW_MS + 1,
+      }),
+    ).resolves.toBe(false);
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('still swallows a failing BACKFILL — it fails into a state no Player can read', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const boom = vi.fn(async () => {
+      throw new Error('backfill failed');
+    });
+    await expect(
+      applyVisionFlagHide('e', 'p1', PRIOR, { status: 'hidden', visionFlag: 'violence' }, {
+        hideIfQualifies: boom,
+        eventTime: 1_000,
+        now: 1_000,
+      }),
+    ).resolves.toBe(false);
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('still swallows a failing HIDE — its input is already admin-only', async () => {
     // The hide arm recovers on its own: its STATE predicate re-attempts on any
     // later write that leaves the doc `'flagged'`. The hand-off, gated on one
     // write, could not — which is the whole asymmetry.
