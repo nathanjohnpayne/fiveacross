@@ -346,15 +346,14 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
 }
 
 /**
- * `loaded` vs `serverLoaded`. `loaded` means every Day's subscription has
- * DELIVERED something — a cache snapshot counts, which is what the honours strip
- * wants (it paints the pins it has and repaints when better ones land).
- * `serverLoaded` is the stricter latch: every Day has been answered by the
- * SERVER at least once (or by an error, which is terminal for that subscription
- * — see below). A surface that PERSISTS what it read needs the strict one,
- * because a cache-only "no pin here" is indistinguishable from "the server says
- * there is no pin" and freezing the wrong one is permanent (#1151, Codex P1:
- * `ArchiveEvent`'s preview is what an Admin decides to freeze from).
+ * `loaded` vs `serverLoaded` vs `failed`. `loaded` means every Day's
+ * subscription has RESOLVED — delivered a snapshot, or died — which is what the
+ * honours strip wants (it paints the pins it has and repaints when better ones
+ * land). `serverLoaded` is the stricter latch: every Day has been answered by
+ * the SERVER at least once. A surface that PERSISTS what it read needs the
+ * strict one, because a cache-only "no pin here" is indistinguishable from "the
+ * server says there is no pin" and freezing the wrong one is permanent (#1151,
+ * Codex P1: `ArchiveEvent`'s preview is what an Admin decides to freeze from).
  *
  * The fan subscribes with `{ includeMetadataChanges: true }` for the same reason
  * `useDocSub`/`useColSub` do: without metadata events Firestore never re-notifies
@@ -363,16 +362,30 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
  * are write-once per-Day honour docs, so the extra notifications are a handful
  * per session, not a stream.
  *
- * An ERRORED subscription (permission-denied, signed out mid-flight) resolves the
- * Day for BOTH flags. It can never deliver a server snapshot, so counting it as
- * unresolved would disable the archive control forever; and a Day whose meta
- * cannot be read has no pin on the live Leaderboard either, so the record still
- * freezes what the Admin was looking at.
+ * AN ERRORED SUBSCRIPTION (permission-denied, signed out mid-flight) RESOLVES
+ * THE DAY, AND CONFIRMS NOTHING (Codex P2 on PR #1162). It used to satisfy
+ * `serverLoaded` as well, which made the strict latch a lie in exactly the case
+ * it exists for: the listener died before any server snapshot, so the honour was
+ * never confirmed, yet the archive gate read the Day as confirmed and armed —
+ * over a preview that fell back to a DERIVED honour, or to none, while
+ * `archiveEvent`'s later `getDocFromServer` could recover and freeze the PINNED
+ * one. A different record from the one the Admin approved, permanently.
+ *
+ * It resolves `loaded` because it is terminal: the live honours strip must not
+ * hang on a Day whose listener is dead, and it renders the same derived fallback
+ * it always did. It stays out of `serverSeen` because a dead listener has
+ * confirmed nothing. And it is reported on `failed`, because a latch that can
+ * now never complete has to say WHY — otherwise the archive control sits
+ * disabled behind a "loading" message that will never resolve, which is the
+ * deadlock the old behaviour was avoiding by the wrong means.
  */
 export function useDayMetasStatus(dayCount: number): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
   serverLoaded: boolean;
+  /** At least one Day's subscription DIED (terminal `onSnapshot` error), so
+   *  `serverLoaded` can never complete for this key. */
+  failed: boolean;
 } {
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'day-metas', dayCount);
@@ -381,8 +394,18 @@ export function useDayMetasStatus(dayCount: number): {
     metas: ReadonlyMap<number, DayMetaDoc>;
     seen: ReadonlySet<number>;
     serverSeen: ReadonlySet<number>;
+    /** Days whose subscription DIED. Disjoint from `serverSeen` by construction
+     *  — a dead listener confirmed nothing — and the reason `serverLoaded` can
+     *  be permanently unreachable for this key. */
+    errored: ReadonlySet<number>;
   };
-  const empty = (): State => ({ key, metas: new Map(), seen: new Set(), serverSeen: new Set() });
+  const empty = (): State => ({
+    key,
+    metas: new Map(),
+    seen: new Set(),
+    serverSeen: new Set(),
+    errored: new Set(),
+  });
   const [state, setState] = useState<State>(empty);
   useEffect(() => {
     let active = true;
@@ -409,19 +432,24 @@ export function useDayMetasStatus(dayCount: number): {
             // Day it has spoken, whatever a later cache-sourced snapshot says.
             const serverSeen = new Set(current.serverSeen);
             if (!snap.metadata.fromCache) serverSeen.add(dayIndex);
-            return { key, metas, seen, serverSeen };
+            return { ...current, key, metas, seen, serverSeen };
           });
         },
         () => {
           if (!active) return;
-          /* permission-denied (signed out mid-flight) — leave the day absent */
+          /* permission-denied (signed out mid-flight) — leave the day absent.
+             RESOLVED for `loaded`, because the listener is dead and the live
+             strip must not hang on it; NOT server-seen, because a dead listener
+             confirmed nothing; and RECORDED as a failure, so a caller that
+             needs the strict latch can say why it will never arrive (Codex P2
+             on PR #1162). */
           setState((previous) => {
             const current = previous.key === key ? previous : empty();
             const seen = new Set(current.seen);
             seen.add(dayIndex);
-            const serverSeen = new Set(current.serverSeen);
-            serverSeen.add(dayIndex);
-            return { ...current, seen, serverSeen };
+            const errored = new Set(current.errored);
+            errored.add(dayIndex);
+            return { ...current, seen, errored };
           });
         },
       ),
@@ -438,6 +466,7 @@ export function useDayMetasStatus(dayCount: number): {
     metas: current.metas,
     loaded: dayCount <= 0 || current.seen.size >= dayCount,
     serverLoaded: dayCount <= 0 || current.serverSeen.size >= dayCount,
+    failed: current.errored.size > 0,
   };
 }
 

@@ -43,10 +43,14 @@ const H = vi.hoisted(() => {
       loading: false,
       hasServerData: state.rosterConfirmed,
     })),
+    /** At least one Day's honour subscription DIED, so `serverLoaded` can never
+     *  complete for this key (Codex P2 on PR #1162). */
+    dayMetasFailed: false,
     useDayMetasStatus: vi.fn(() => ({
       metas: new Map(),
       loaded: true,
       serverLoaded: state.dayMetasServerLoaded,
+      failed: state.dayMetasFailed,
     })),
   };
   return state;
@@ -123,6 +127,7 @@ beforeEach(() => {
   H.players = [mkPlayer('alice'), mkPlayer('bob', { squaresMarked: 3 })];
   H.rosterConfirmed = true;
   H.dayMetasServerLoaded = true;
+  H.dayMetasFailed = false;
   H.pendingClaims = [];
   H.pendingClaimsLoaded = true;
   H.writes = [];
@@ -600,6 +605,35 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  // Codex P2 on PR #1162. A day-meta listener that dies before any server
+  // snapshot can never satisfy `serverLoaded`, so "loading" would be a message
+  // that never resolves — and the preview beside it is showing the roster-DERIVED
+  // honour, or none, where the freeze's own server re-read may find the PINNED
+  // holder and keep them instead.
+  it('says the honours could not be READ when a Day subscription failed, not "loading"', () => {
+    H.dayMetasFailed = true;
+    H.dayMetasServerLoaded = false;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /The daily honours could not be read from the server/,
+    );
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Loading the final standings/);
+    expect(screen.getByRole('status')).toHaveTextContent(/Nothing has been closed\./);
+  });
+
+  it('holds the CLOSING-state freeze shut on unreadable honours, and says nothing was frozen', () => {
+    H.dayMetasFailed = true;
+    H.dayMetasServerLoaded = false;
+    H.event = mkEvent({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /The daily honours could not be read from the server.*Play is already closed—nothing has been frozen\./,
+    );
   });
 });
 

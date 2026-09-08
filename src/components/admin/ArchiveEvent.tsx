@@ -42,6 +42,23 @@ type Phase = 'open' | 'closing' | 'archived';
 const TOO_LARGE_COPY =
   'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. That is almost always a Player row carrying far more text than a name, and banning that Player drops their row from the record.';
 
+/** Why the archive will not open when a Day's honour listener has DIED (Codex P2
+ *  on PR #1162).
+ *
+ *  It says the honours could not be READ rather than showing what the fallback
+ *  derived, because those are different records and only one of them is the one
+ *  the freeze would take: a Day whose meta subscription errored before any
+ *  server snapshot has no confirmed pin, the preview falls back to the
+ *  roster-derived honour (or to none), and `archiveEvent`'s own
+ *  `getDocFromServer` may then recover the PINNED holder and freeze them
+ *  instead — permanently, and differently from what the Admin approved.
+ *
+ *  It also names the remedy, because unlike the loading state this one never
+ *  clears itself: an `onSnapshot` error is terminal for that listener, so the
+ *  fan only recovers when it is rebuilt. */
+const HONORS_UNREADABLE_COPY =
+  'The daily honours could not be read from the server, so the archive cannot tell a Day that had no First to BINGO from one whose honour never arrived. Reload the console and try again.';
+
 /** Appended to a refusal's own copy when the automatic reopen DECLINED — the
  *  closing state in force is a later Admin's, so this handler left it alone
  *  (Codex P2, PR #1139). Stated rather than silent: play is still shut, and the
@@ -292,6 +309,7 @@ export default function ArchiveEvent({
     metas: dayMetas,
     loaded: dayMetasLoaded,
     serverLoaded: dayMetasConfirmed,
+    failed: dayMetasFailed,
   } = useDayMetasStatus(event?.days?.length ?? 0);
   const [arming, setArming] = useState(false);
   const [beforeFinale, setBeforeFinale] = useState(false);
@@ -409,8 +427,18 @@ export default function ArchiveEvent({
   const ready = previewConfirmed && drained && fits && (finaleDone || beforeFinale);
   // Why the door is shut, in the order the Admin can act on it: nothing to do
   // about a loading roster but wait, whereas a pending claim names its own fix.
+  //
+  // A DEAD honours listener comes FIRST, ahead of the loading sentence (Codex P2
+  // on PR #1162). `serverLoaded` can never complete once a Day's subscription
+  // has died, so "loading" would be a message that never resolves — and the
+  // Admin would be left waiting on a control that is not going to open. It is
+  // stated as what it is: the honours could not be read, and the preview beside
+  // it is showing whatever the roster derives rather than the pins the freeze
+  // would find.
   const blockedReason =
-    !previewConfirmed || !pendingClaimsLoaded
+    dayMetasFailed
+      ? `${HONORS_UNREADABLE_COPY}${closing ? ' Play is already closed—nothing has been frozen.' : ' Nothing has been closed.'}`
+      : !previewConfirmed || !pendingClaimsLoaded
       ? 'Loading the final standings—the archive stays closed until every one of them is confirmed by the server.'
       : blockingClaims.length > 0
         ? `Resolve the ${blockingClaims.length} pending claim${blockingClaims.length === 1 ? '' : 's'} in the Review queue first. Confirming or rejecting a claim writes to a Board, which the freeze denies—so a claim left pending here stays pending forever.${closing ? ' Reopen play to drain the queue, then archive again.' : ''}`
