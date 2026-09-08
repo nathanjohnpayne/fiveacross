@@ -45,7 +45,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard, useMyUser } from './useData';
+import { useItems, useBoard, useDayMetasStatus, useMyUser } from './useData';
 
 beforeEach(() => {
   H.eventId = 'event-a';
@@ -245,5 +245,92 @@ describe('hasServerData latch (Codex P2, round 4 — persistent-cache cold start
 
     sub.fire(docSnap(false)); // server agrees — now it is truth
     expect(result.current.hasServerData).toBe(true);
+  });
+});
+
+// Codex P2 on PR #1162. `useDayMetasStatus` fans one subscription per Day, and
+// `serverLoaded` is the strict latch the post-Event archive gates on (#1151):
+// "every Day's honour has been answered by the SERVER". An errored subscription
+// used to satisfy it, which made the strict latch a lie in exactly the case it
+// exists for — a listener that died before any server snapshot confirmed
+// nothing, yet the archive read the Day as confirmed and armed over a preview
+// that had fallen back to a DERIVED honour, or to none, while `archiveEvent`'s
+// own server re-read could recover the PINNED one and freeze it instead.
+describe('useDayMetasStatus — a failed honour subscription confirms nothing (#1151)', () => {
+  /** Captures every per-Day subscription's `onNext`/`onError` pair, in fan
+   *  order. The real hook calls onSnapshot(ref, options, onNext, onError). */
+  function captureFan(): {
+    next: (i: number, snap: unknown) => void;
+    error: (i: number, err?: unknown) => void;
+  } {
+    const subs: Array<{ onNext: (s: unknown) => void; onError: (e: unknown) => void }> = [];
+    H.onSnapshot.mockImplementation(
+      (
+        _target: unknown,
+        _options: unknown,
+        onNext: (s: unknown) => void,
+        onError: (e: unknown) => void,
+      ) => {
+        subs.push({ onNext, onError });
+        return () => {};
+      },
+    );
+    return {
+      next: (i, snap) => act(() => subs[i].onNext(snap)),
+      error: (i, err) => act(() => subs[i].onError(err ?? new Error('permission-denied'))),
+    };
+  }
+
+  const metaSnap = (fromCache: boolean) => ({
+    exists: () => false,
+    data: () => undefined,
+    metadata: { fromCache },
+  });
+
+  it('resolves `loaded` but NOT `serverLoaded` when a Day subscription dies', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(2));
+
+    fan.next(0, metaSnap(false)); // Day 0 answered by the server
+    fan.error(1); // Day 1's listener dies before any snapshot
+
+    // The live honours strip must not hang on a dead listener, so the Day is
+    // RESOLVED…
+    expect(result.current.loaded).toBe(true);
+    // …but nothing about its honour was confirmed, so the archive gate stays
+    // shut — and says why, because this latch can now never complete.
+    expect(result.current.serverLoaded).toBe(false);
+    expect(result.current.failed).toBe(true);
+  });
+
+  it('reports no failure, and the strict latch, when every Day is server-answered', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(2));
+
+    fan.next(0, metaSnap(true)); // cold persistent cache — resolved, not confirmed
+    fan.next(1, metaSnap(true));
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.serverLoaded).toBe(false);
+    expect(result.current.failed).toBe(false);
+
+    fan.next(0, metaSnap(false));
+    fan.next(1, metaSnap(false));
+    expect(result.current.serverLoaded).toBe(true);
+    expect(result.current.failed).toBe(false);
+  });
+
+  it('does not unlatch a Day the server already confirmed when its listener later dies', () => {
+    // The latch is per Day and for life. A subscription torn down after the
+    // server has spoken has still spoken — but the failure is reported, because
+    // the console should not present a dead fan as healthy.
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus(1));
+
+    fan.next(0, metaSnap(false));
+    expect(result.current.serverLoaded).toBe(true);
+
+    fan.error(0);
+    expect(result.current.serverLoaded).toBe(true);
+    expect(result.current.failed).toBe(true);
   });
 });
