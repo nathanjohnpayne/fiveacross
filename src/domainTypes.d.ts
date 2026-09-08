@@ -423,7 +423,8 @@ export interface EventDoc {
    * (calls, not distinct paths), and the membership check itself spends one.
    * A switch on any third document would be unreadable from Storage, so the
    * only reachable home is a document the Storage predicate already fetches —
-   * this one, which `isEventAdmin()` (`storage.rules:7-10`) already reads.
+   * this one, which both proof-media arms already read (`storage.rules`:
+   * `eventClosedToPlay` on upload, `mayDeleteProofMedia` on delete).
    *
    * NOT CLIENT-WRITABLE, and that is not yet true: the `events/{eventId}`
    * update rule has no key whitelist, so until #804 adds an immutability

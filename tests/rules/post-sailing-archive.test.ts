@@ -722,6 +722,33 @@ describe.each([
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), photoPath)));
   });
 
+  it('FREEZES the OWNER media delete while the Admin takedown stays open', async () => {
+    // Phase 4b P1, PR #1157. The owner's Storage delete arm was unconditional,
+    // so a direct `deleteObject` stripped an archived Proof's media although
+    // `firestore.rules` refuses the owner's DOCUMENT delete on a closed Event —
+    // leaving a Feed entry whose image can never load, on the one Event where
+    // nothing can be re-posted. The ADMIN takedown is deliberately untouched:
+    // a frozen record that locks out its own Admin is #808's incident again.
+    const ownerBlob = `proofs/${EVENT}/${ALICE}/owner-delete.jpg`;
+    const adminBlob = `proofs/${EVENT}/${ALICE}/admin-takedown.jpg`;
+    // Live controls: BOTH deletes work while the Event is open to play, so the
+    // denial below is a claim about the freeze rather than about the arm.
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
+    // Re-seeded before the shut, because the upload arm closes with it.
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
+    await close();
+    await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
+    // The owner's blob survived its own denial, and the Admin can still take it
+    // down — which is also the proof that the admin arm did not simply run out
+    // of Firestore accesses and fail closed.
+    await assertSucceeds(deleteObject(ref(storageOf(ADMIN), ownerBlob)));
+  });
+
   it('DENIES deleting the Event document itself', async () => {
     // Phase 4b P1, PR #1139. Deleting a document leaves its subcollections in
     // place, and a MISSING Event document reads as open (the pre-freeze default
@@ -882,5 +909,29 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
         reshufflesUsed: 0,
       }),
     );
+  });
+
+  it('keeps the OWNER media delete open where the Event says nothing (#1157)', async () => {
+    // The new delete arm reads the Event, so it inherits the absence-means-open
+    // obligation the upload arm already carries — and failing closed here would
+    // be worse than the hole it fixes: an owner could not clear their own media
+    // from a legacy Event, or from a path whose Event document does not exist at
+    // all (where `exists()` is false and no `get()` is spent).
+    const legacyBlob = `proofs/${LEGACY_EVENT}/${BOB}/legacy.jpg`;
+    const orphanBlob = `proofs/no-such-event/${BOB}/orphan.jpg`;
+    await assertSucceeds(uploadBytes(ref(storageOf(BOB), legacyBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(BOB), orphanBlob), TINY, IMAGE));
+    await assertSucceeds(deleteObject(ref(storageOf(BOB), legacyBlob)));
+    await assertSucceeds(deleteObject(ref(storageOf(BOB), orphanBlob)));
+  });
+
+  it('never lets a STRANGER delete somebody else\u2019s media, live or frozen', async () => {
+    // The control that keeps the case above from reading as "the arm opened up".
+    // Bob is neither the path owner nor an admin of this Event.
+    const blob = `proofs/${EVENT}/${ALICE}/stranger.jpg`;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), blob), TINY, IMAGE));
+    await assertFails(deleteObject(ref(storageOf(BOB), blob)));
+    await freeze();
+    await assertFails(deleteObject(ref(storageOf(BOB), blob)));
   });
 });

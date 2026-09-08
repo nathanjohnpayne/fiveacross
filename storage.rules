@@ -4,10 +4,6 @@ service firebase.storage {
 
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
-    function isEventAdmin(eventId) {
-      return signedIn()
-        && request.auth.uid in firestore.get(/databases/(default)/documents/events/$(eventId)).data.admins;
-    }
     // The Storage half of the post-Event freeze (#134,
     // specs/post-sailing-archive.md). `firestore.rules` denies the Proof
     // DOCUMENT on a closing or archived Event; this denies its MEDIA, because a
@@ -21,17 +17,17 @@ service firebase.storage {
     // through it would be media the record never sees (Codex P1, PR #1139).
     //
     // Two Firestore accesses, which is the whole per-evaluation budget Storage
-    // Rules allow — affordable only because the create/update arm below spends
-    // none today. Reading the document ONCE and passing its data to
+    // Rules allow. Reading the document ONCE and passing its data to
     // `closedToPlay` is what keeps it at two: unlike `firestore.rules`, Storage
     // Rules make no promise of deduplicating a repeated `firestore.get()` on the
     // same path, so a second inline read of the same document could spend the
-    // budget and fail the upload closed. The `exists()` half is not decoration
+    // budget and fail the write closed. The `exists()` half is not decoration
     // either: without it a missing Event document would error the `get()` and
-    // newly deny an upload that succeeds today, and the `'active'` / `false`
-    // defaults keep an Event document carrying neither key OPEN. Deletes
-    // deliberately keep their single `isEventAdmin()` access and are NOT gated:
-    // an Admin must still be able to take media down out of a frozen record.
+    // newly deny a write that succeeds today, and the `'active'` / `false`
+    // defaults keep an Event document carrying neither key OPEN.
+    //
+    // Each arm is evaluated on its own, for its own method, so the budget is
+    // spent per operation rather than shared across the two arms below.
     function closedToPlay(event) {
       return event.get('status', 'active') == 'archived'
         || event.get('archiving', false) == true;
@@ -39,6 +35,46 @@ service firebase.storage {
     function eventClosedToPlay(eventId) {
       return firestore.exists(/databases/(default)/documents/events/$(eventId))
         && closedToPlay(firestore.get(/databases/(default)/documents/events/$(eventId)).data);
+    }
+
+    // WHO MAY DELETE PROOF MEDIA, from ONE Event read (Phase 4b P1, PR #1157).
+    // The owner's arm used to be unconditional, so a direct `deleteObject` still
+    // stripped an archived Proof's media although `firestore.rules` refuses the
+    // owner's DOCUMENT delete on a closed Event — leaving a Feed entry whose
+    // image can never load, on the one Event where nothing can be re-posted. The
+    // freeze therefore reaches the owner's media delete as well, on both halves
+    // of it, exactly as it reaches the upload.
+    //
+    // THE ADMIN TAKEDOWN STAYS OPEN in every state, which is the whole point of
+    // the asymmetry: a permanent record that locks out its own Admin is #808's
+    // support incident in a new place. An Admin must be able to take a reported
+    // photo down out of a frozen Event.
+    //
+    // ONE `get()`, ANSWERING BOTH QUESTIONS. Asking `isEventAdmin()` and then
+    // `eventClosedToPlay()` would read the same document twice — three accesses
+    // against a two-access budget — and Storage Rules make no promise of
+    // deduplicating that, so every legitimate delete could fail closed. So the
+    // document is fetched once, here, and `proofMediaDeleteOk` answers the admin
+    // check and the closed check from the same map. `admins` is read through
+    // `get('admins', [])` rather than `.admins` so an Event document missing the
+    // field denies cleanly instead of erroring the evaluation.
+    //
+    // A MISSING Event document reads as OPEN, matching the upload arm and the
+    // `firestore.rules` default: `exists()` is false, no `get()` is spent, and
+    // the owner keeps the unconditional delete they have today. (#806 will thread
+    // its membership check through this same fetch; it must drop the `exists()`
+    // when it does, the way its own membership `get()` already relies on
+    // error-to-deny — see `specs/event-membership.md` § "Storage has zero
+    // headroom".)
+    function proofMediaDeleteOk(event, uid) {
+      return (signedIn() && request.auth.uid in event.get('admins', []))
+        || (isOwner(uid) && !closedToPlay(event));
+    }
+    function mayDeleteProofMedia(eventId, uid) {
+      return firestore.exists(/databases/(default)/documents/events/$(eventId))
+        ? proofMediaDeleteOk(
+            firestore.get(/databases/(default)/documents/events/$(eventId)).data, uid)
+        : isOwner(uid);
     }
     function okImage() {
       return request.resource.contentType.matches('image/.*')
@@ -63,11 +99,12 @@ service firebase.storage {
       // Content-validate uploads, but keep delete separate: a delete carries no
       // request.resource, so okImage()/okAudio() would reject it and leave the
       // blob orphaned when deleteProof() removes the doc. Owners delete their own
-      // media; admins delete reported/flagged media during moderation.
+      // media while the Event is open to play; admins delete reported/flagged
+      // media during moderation, in every state including the frozen one.
       allow create, update: if isOwner(uid)
         && !eventClosedToPlay(eventId)
         && (okImage() || okAudio());
-      allow delete: if isOwner(uid) || isEventAdmin(eventId);
+      allow delete: if mayDeleteProofMedia(eventId, uid);
     }
 
     // Private server-written bug-report evidence. The submitBugReport callable

@@ -65,7 +65,7 @@ const put = (
 
 beforeAll(async () => {
   // Under `firebase emulators:exec` the emulator hosts + the active project are
-  // exported here. The Storage isEventAdmin() rule does a cross-service
+  // exported here. The Storage proof-media rules do a cross-service
   // firestore.get(), which the Storage emulator resolves against the project the
   // emulator was booted with (GCLOUD_PROJECT, from .firebaserc), NOT the
   // client-supplied projectId — so bind this env to that same project, letting
