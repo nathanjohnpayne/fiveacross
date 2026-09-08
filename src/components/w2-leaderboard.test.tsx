@@ -37,7 +37,7 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: H.players, loading: H.loading }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  useEventDoc: () => ({ data: H.event, loading: false, serverResolved: true }),
   // #218: no Proofs fixtured in this suite — an empty map keeps every row
   // chip-less, which is orthogonal to the pin/filter/tie-break assertions here.
   useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),

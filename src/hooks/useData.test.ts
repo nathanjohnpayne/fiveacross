@@ -73,6 +73,34 @@ function captureOnNext(): { fire: (snap: unknown) => void } {
   };
 }
 
+// Capture BOTH callbacks of the latest doc subscription. The error leg is what
+// separates `serverResolved` from `hasServerData` (#134, Codex P2 on PR #1139
+// round 5): an errored onSnapshot listener is terminal, so it can never deliver
+// a server snapshot, and a gate that waited for one would never open.
+function captureDocSub(): { fire: (snap: unknown) => void; fail: () => void } {
+  const captured: { next: SnapCb | null; error: (() => void) | null } = {
+    next: null,
+    error: null,
+  };
+  H.onSnapshot.mockImplementation(
+    (_target: unknown, _options: unknown, onNext: SnapCb, onError: () => void) => {
+      captured.next = onNext;
+      captured.error = onError;
+      return () => {};
+    },
+  );
+  return {
+    fire: (snap: unknown) => {
+      if (!captured.next) throw new Error('onSnapshot not subscribed');
+      act(() => captured.next!(snap));
+    },
+    fail: () => {
+      if (!captured.error) throw new Error('onSnapshot not subscribed');
+      act(() => captured.error!());
+    },
+  };
+}
+
 const colSnap = (fromCache: boolean) => ({ docs: [], metadata: { fromCache } });
 const docSnap = (fromCache: boolean) => ({
   exists: () => false,
@@ -245,5 +273,41 @@ describe('hasServerData latch (Codex P2, round 4 — persistent-cache cold start
 
     sub.fire(docSnap(false)); // server agrees — now it is truth
     expect(result.current.hasServerData).toBe(true);
+  });
+});
+
+// #134, Codex P2 on PR #1139 round 5. The Leaderboard's routing half must not
+// mount the live listener fan against a cache replay, so it needs "the server
+// has answered — or never will" as a GATE. `hasServerData` alone cannot be that
+// gate: an errored subscription leaves it false forever, which is a surface
+// stuck on a spinner.
+describe('serverResolved — the server has answered, or never can', () => {
+  it('latches on the first server snapshot, exactly like hasServerData', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(true)); // cache-served: delivered, but not answered
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(false));
+    expect(result.current.serverResolved).toBe(true);
+
+    // Latched: a later offline flap does not un-answer it.
+    sub.fire(docSnap(true));
+    expect(result.current.serverResolved).toBe(true);
+  });
+
+  it('also resolves on an ERRORED subscription, which hasServerData deliberately does not', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+
+    sub.fire(docSnap(true));
+    sub.fail(); // permission-denied, signed out mid-flight — terminal
+    expect(result.current.serverResolved).toBe(true);
+    // The distinction is the point: nothing was ever confirmed BY the server,
+    // so a consumer reading data still knows it is unconfirmed.
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.loading).toBe(false);
   });
 });

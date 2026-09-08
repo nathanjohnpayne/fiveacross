@@ -61,7 +61,7 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, serverResolved: true }),
     usePendingClaims: () => ({ claims: H.claims }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: H.items, loading: false }),

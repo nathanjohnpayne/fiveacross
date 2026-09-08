@@ -86,7 +86,7 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => H.dayMetas,
   useDayMetasStatus: () => ({ metas: H.dayMetas, loaded: H.dayMetasLoaded }),
   useLeaderboard: () => ({ players: H.players, loading: false }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  useEventDoc: () => ({ data: H.event, loading: false, serverResolved: true }),
   // #218: no Proofs fixtured in this scoring-aggregates suite — an empty map
   // keeps every row chip-less, which is exactly what these tests assert on.
   useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),

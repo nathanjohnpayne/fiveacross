@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
 import type { ProofKindFlags } from '../hooks/useData';
+import { useOnline } from '../hooks/useOnline';
 import {
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
@@ -161,6 +162,30 @@ function buildShareStandings(
  * returning a DIFFERENT component unmounts the live one and its listeners with
  * it, and each component's own hook sequence stays fixed.
  *
+ * AND THE BRANCH WAITS FOR THE SERVER (Codex P2, PR #1139 round 5). The split
+ * decides nothing on a cold visit, where `useEventDoc` starts at `data: null`
+ * and the ADR 0006 persistent cache can then replay the Event as it stood when
+ * the tab last saw it — `active`, because it was. Falling through to the live
+ * child on either of those mounts the whole listener fan the archived page
+ * exists not to open, and the archived branch then arrives a snapshot later and
+ * tears it down again. The listeners were open; "it subscribes to NOTHING" was
+ * false for exactly as long as the roster, every Day's meta and 60 Proofs took
+ * to answer.
+ *
+ * So an UNRESOLVED status renders the live view's own loading state — the same
+ * label, so there is no visible seam between this wait and the roster's — and
+ * only a resolved one routes. Two things resolve it short of a server snapshot,
+ * because a spinner nobody can get past is worse than the listeners:
+ *
+ *  - a cached `archived` record, which needs no confirmation at all. The flip is
+ *    write-once at the rules boundary, so an Event that has been archived can
+ *    never be un-archived — the archive renders immediately, as it always did.
+ *  - a subscription that ERRORED, or a client the browser says is OFFLINE.
+ *    Neither can ever be answered by the server (`useOnline`'s `false` is the
+ *    trustworthy half of that hook), and this app is offline-durable by design
+ *    (ADR 0006) — so the wait ends and the Leaderboard renders from the cache,
+ *    which is what it did before this gate existed.
+ *
  * An Event marked archived with NO record is not a state this app produces —
  * `archiveEvent` writes status, stamp and record in one update — so the live
  * view is left as the fallback for a hand-edited document. It is still
@@ -168,10 +193,21 @@ function buildShareStandings(
  * writes on the `status` field alone.
  */
 export default function Leaderboard() {
-  const { data: event } = useEventDoc();
+  const { data: event, serverResolved } = useEventDoc();
+  const online = useOnline();
+  // A MONOTONE latch, held here rather than in the hook because only half of it
+  // is the hook's business. Without it a reconnect (`online` false → true, with
+  // the server snapshot still a round trip away) would bounce an already-
+  // rendered live view back through the spinner — unmounting `LiveLeaderboard`,
+  // dropping its listeners and resetting the Player's filter. Writing `true`
+  // over `true` is idempotent, so a double-invoked render cannot change it.
+  const statusSettled = useRef(false);
+  if (serverResolved || !online) statusSettled.current = true;
+
   if (isEventArchived(event) && event?.archive) {
     return <ArchivedLeaderboard event={event} archive={event.archive} />;
   }
+  if (!statusSettled.current) return <LoadingState label="Tallying the leaderboard…" />;
   return <LiveLeaderboard event={event} />;
 }
 

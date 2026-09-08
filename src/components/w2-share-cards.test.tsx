@@ -73,7 +73,7 @@ vi.mock('../hooks/useData', () => ({
   // passing because the mock happened to have real data queued.
   useBoard: () => ({ data: null, loading: true, hasServerData: false }),
   useMyPlayer: () => ({ data: null, loading: true, hasServerData: false }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  useEventDoc: () => ({ data: H.event, loading: false, serverResolved: true }),
   useLeaderboard: () => ({ players: H.players, loading: H.leaderboardLoading }),
   // #561: the Most-Loved award's display join reads the Feed's own filtered
   // proofs; the hero tests below fixture them.

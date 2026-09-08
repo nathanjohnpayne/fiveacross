@@ -33,6 +33,13 @@ const H = vi.hoisted(() => {
     pendingClaims: [] as ClaimDoc[],
     pendingClaimsLoaded: true,
     event: null as EventDoc | null,
+    /** `useEventDoc`'s server-resolution latch. `false` is the COLD VISIT: the
+     *  Event document has not been answered by the server yet, so whatever the
+     *  ADR 0006 cache replayed cannot decide whether this Event is archived. */
+    eventServerResolved: true,
+    /** `useOnline`. A client the browser says is offline can never BE answered
+     *  by the server, so the routing gate stops waiting on one. */
+    online: true,
     /** The order the two archive writes were issued in, so the quiesce-first
      *  contract is asserted on the SEQUENCE rather than on each call alone. */
     writes: [] as string[],
@@ -61,10 +68,18 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: H.useDayMetasStatus,
   useLeaderboard: H.useLeaderboard,
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  useEventDoc: () => ({
+    data: H.event,
+    loading: false,
+    serverResolved: H.eventServerResolved,
+  }),
   useProofKindsByUid: H.useProofKindsByUid,
   isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
     !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),
+}));
+vi.mock('../hooks/useOnline', () => ({
+  useOnline: () => H.online,
+  readOnline: () => H.online,
 }));
 vi.mock('../data/admin', () => ({
   beginArchive: H.beginArchive,
@@ -218,6 +233,8 @@ beforeEach(() => {
   H.pendingClaims = [];
   H.pendingClaimsLoaded = true;
   H.event = archivedEvent();
+  H.eventServerResolved = true;
+  H.online = true;
   H.writes = [];
   H.beginArchive.mockClear();
   H.beginArchive.mockImplementation(async () => {
@@ -352,6 +369,12 @@ describe('the archived Leaderboard renders the frozen record', () => {
   });
 });
 
+/** The names in the rendered standings list, scoped to the mount: the frozen
+ *  names also appear in the hall of fame and in the offscreen Share Card host
+ *  the archived surface rasterizes into `document.body`. */
+const frozenNames = (container: HTMLElement): (string | null | undefined)[] =>
+  [...container.querySelectorAll('.list .row .name')].map((n) => n.textContent);
+
 describe('the archived Leaderboard opens no live subscription', () => {
   // specs/post-sailing-archive.md: "It subscribes to NOTHING." Asserting on the
   // rendered output cannot prove that — a component can ignore a hook's value
@@ -370,6 +393,78 @@ describe('the archived Leaderboard opens no live subscription', () => {
     expect(H.useLeaderboard).toHaveBeenCalled();
     expect(H.useDayMetasStatus).toHaveBeenCalled();
     expect(H.useProofKindsByUid).toHaveBeenCalled();
+  });
+
+  // Codex P2, PR #1139 round 5. The split only helps if the BRANCH is taken
+  // against a status the server has confirmed. On a cold visit `useEventDoc`
+  // starts at `data: null` and the ADR 0006 cache can then replay the Event as
+  // `active` — so a routing half that fell through on either mounted the whole
+  // listener fan on an archived Event and tore it down a snapshot later.
+  it('opens nothing while the Event status is still unconfirmed by the server', () => {
+    H.eventServerResolved = false;
+    // The worst shape: a cached replay that says ACTIVE on an Event the server
+    // is about to report as archived. Rendering it would open all three.
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toHaveTextContent('Tallying the leaderboard…');
+  });
+
+  it('renders the archive as soon as the server snapshot says archived', () => {
+    // The same visit, one snapshot later. No live hook was ever called.
+    H.eventServerResolved = false;
+    H.event = liveEvent();
+    const { container, rerender } = renderLeaderboard();
+    H.eventServerResolved = true;
+    H.event = archivedEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    // Read off the standings rows rather than by text: the frozen names also
+    // appear in the hall of fame and in the offscreen Share Card host.
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('mounts the live view once the server confirms the Event is not archived', () => {
+    // The control: the wait ENDS, so the assertions above are about the gate
+    // rather than about a Leaderboard that never renders anything.
+    H.eventServerResolved = true;
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  it('renders a cached archive without waiting for the server', () => {
+    // `status: 'archived'` is write-once at the rules boundary, so a cached one
+    // can never be contradicted — the archive is the one answer that needs no
+    // confirmation, and making it wait would slow the surface the gate exists
+    // to protect.
+    H.eventServerResolved = false;
+    H.event = archivedEvent();
+    const { container } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+  });
+
+  it('stops waiting when the browser says the client is offline', () => {
+    // ADR 0006: this app is offline-durable, and an offline client's Event
+    // subscription is answered by the cache forever. A gate that waited for a
+    // server snapshot anyway would leave the Leaderboard on a spinner for the
+    // whole crossing, which is worse than the listeners it is avoiding.
+    H.eventServerResolved = false;
+    H.online = false;
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
   });
 
   it('tears the live subscriptions down when the Event flips to archived', () => {

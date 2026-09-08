@@ -30,7 +30,7 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: H.players, loading: false }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  useEventDoc: () => ({ data: H.event, loading: false, serverResolved: true }),
   useProofKindsByUid: () => ({ kindsByUid: H.kindsByUid, loading: false }),
   isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
     !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),
