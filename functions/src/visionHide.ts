@@ -19,7 +19,12 @@
  *     unchanged by this module — no predicate, no write, no invariant of it is
  *     touched (this file adds a second writer; it does not widen the first).
  *   - THIS module owns `'flagged'` docs carrying an extreme/illegal `visionFlag`,
- *     and reads no threshold at all.
+ *     and reads no threshold at all. It additionally BACKFILLS its own marker
+ *     onto an extreme/illegal Proof that reached `'hidden'` without one (see
+ *     `visionHideAction`), because the marker — not the status — is what holds
+ *     the media through a claim confirm, and an admin who hides a flagged row
+ *     before the trigger reaches it must not thereby demote a safety hide to a
+ *     plain one.
  *
  * Extreme/illegal ONLY (ADR 0004). The app is intentionally racy, so the trigger
  * is an ALLOWLIST of the producer's extreme verdicts (`violence`, `extreme`) —
@@ -74,6 +79,8 @@ export function isAutoHideVisionFlag(flag: unknown): flag is AutoHideVisionFlag 
 export interface VisionFlaggedDoc {
   status?: string;
   visionFlag?: string | null;
+  /** The marker below. Read as well as written, so a stamp is never re-applied. */
+  safetyHide?: boolean | null;
 }
 
 /**
@@ -131,17 +138,74 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
 }
 
 /**
- * Transactionally flip one Vision-flagged Proof to `'hidden'` ONLY if its LIVE
- * state still qualifies — the same write-time re-confirmation `hideIfQualifies`
- * gives the report path (#43 round 2 F1), so a delayed or retried trigger can
- * never act on a stale event snapshot:
+ * What this trigger owes one Proof, given the state a write left it in. `null` —
+ * the overwhelmingly common answer — is "nothing", and the three named arms are
+ * the three ways a Proof can be out of step with the server's own safety record.
+ *
+ *   - `'hide'` — the hide itself: `'flagged'` with an extreme/illegal verdict,
+ *     exactly `qualifiesForVisionHide` above.
+ *   - `'backfill'` — a `'hidden'` Proof carrying an extreme/illegal verdict but
+ *     NO boolean marker. The hold is real and the record of it is missing, which
+ *     happens whenever something OTHER than this trigger performed the hide: an
+ *     admin's own Hide on a row the trigger had not reached yet (the console
+ *     offers Hide on a `'flagged'` row, and the trigger is not instantaneous), or
+ *     a hide whose marker write was lost to a swallowed best-effort failure.
+ *     Left unstamped, `confirmClaim` reads that Proof as a PLAIN hide and
+ *     publishes it, which is the hole this arm closes.
+ *
+ * Absent-or-non-boolean, never `false`, is the whole precision of the backfill
+ * test. `false` is the warned console Restore's explicit override (`restoreProof`
+ * writes it beside the status), and re-stamping `true` over it would let the
+ * server silently overrule the one decision ADR 0004 reserves for a human. A
+ * Proof an admin Restored and then hand-Hid keeps that `false` and stays a plain
+ * hide — liftable by Restore, publishable by a confirm — because the admin has
+ * already seen the verdict and overridden it.
+ */
+export type VisionHideAction = 'hide' | 'backfill';
+
+export function visionHideAction(doc: VisionFlaggedDoc | undefined): VisionHideAction | null {
+  if (!doc) return null; // delete — nothing to write
+  if (qualifiesForVisionHide(doc)) return 'hide';
+  if (
+    doc.status === 'hidden' &&
+    isAutoHideVisionFlag(doc.visionFlag) &&
+    typeof doc[SAFETY_HIDE_MARKER] !== 'boolean'
+  ) {
+    return 'backfill';
+  }
+  return null;
+}
+
+/**
+ * The update each action writes, and nothing beyond it. `visionFlag` survives
+ * every arm — the hide has to stay legible as a Vision hide — and so does an
+ * existing `status` the arm is not there to change.
+ */
+export function visionHideWrite(action: VisionHideAction): Record<string, unknown> {
+  switch (action) {
+    case 'hide':
+      return { status: 'hidden', [SAFETY_HIDE_MARKER]: true };
+    case 'backfill':
+      // The status is ALREADY `'hidden'` — this arm supplies only the missing
+      // record of why, so it re-asserts nothing it did not decide.
+      return { [SAFETY_HIDE_MARKER]: true };
+  }
+}
+
+/**
+ * Transactionally apply whatever `visionHideAction` asks of the Proof's LIVE
+ * state — the same write-time re-confirmation `hideIfQualifies` gives the report
+ * path (#43 round 2 F1), so a delayed or retried trigger can never act on a stale
+ * event snapshot:
  *
  *   - an admin who Restored (`'active'`) or Hid the Proof by hand since the
  *     trigger fired → no-op, so the admin's decision is not silently reverted
  *     and no marker is stamped on a hide the admin owns;
  *   - a Proof DELETED since the snapshot → no-op via `tx.update` on a missing
  *     doc, never a re-creating `set`;
- *   - a `visionFlag` no longer in the allowlist → no-op.
+ *   - a `visionFlag` no longer in the allowlist → no-op;
+ *   - a marker that landed between the snapshot and the write → no-op, because
+ *     the backfill arm reads the live boolean rather than the stale one.
  *
  * It writes `status` and the `safetyHide` marker, and NOTHING else. Leaving
  * `visionFlag` intact is the point of the whole ticket: the resulting doc is
@@ -149,10 +213,10 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  * hide from a report-count one and what `notify.ts` `deriveReason` already labels
  * with the flag rather than `(reports >= threshold)`.
  *
- * The marker rides the SAME update, so there is no window in which a Proof is
- * hidden without the server's record of why, and no second write for a client to
- * observe half of. See `SAFETY_HIDE_MARKER` for why the client reads that boolean
- * rather than re-deciding the verdict for itself.
+ * On the hide arm the marker rides the SAME update, so there is no window in
+ * which a Proof is hidden without the server's record of why, and no second write
+ * for a client to observe half of. See `SAFETY_HIDE_MARKER` for why the client
+ * reads that boolean rather than re-deciding the verdict for itself.
  *
  * `db` is a parameter so the read-then-conditional-write is unit-testable with a
  * fake transaction. Returns whether it wrote.
@@ -166,8 +230,9 @@ export async function hideVisionFlaggedIfQualifies(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) return false; // deleted since the snapshot — never re-create
-    if (!qualifiesForVisionHide(snap.data() as VisionFlaggedDoc | undefined)) return false;
-    tx.update(docRef, { status: 'hidden', [SAFETY_HIDE_MARKER]: true });
+    const action = visionHideAction(snap.data() as VisionFlaggedDoc | undefined);
+    if (!action) return false;
+    tx.update(docRef, visionHideWrite(action));
     return true;
   });
 }
@@ -177,7 +242,7 @@ async function defaultHideVisionFlaggedIfQualifies(eventId: string, proofId: str
 }
 
 export interface VisionHideDeps {
-  /** Transactionally hide the Proof iff its live state still qualifies; defaults to `hideVisionFlaggedIfQualifies`. */
+  /** Transactionally apply the arm the Proof's LIVE state asks for, if any; defaults to `hideVisionFlaggedIfQualifies`. */
   hideIfQualifies?: (eventId: string, proofId: string) => Promise<boolean>;
 }
 
@@ -186,13 +251,13 @@ export interface VisionHideDeps {
  * `hideVisionFlaggedIfQualifies`, which re-confirms live state before writing.
  * Never throws — a write failure is swallowed so the trigger never crashes the
  * proof pipeline (ADR 0001; mirrors `applyThresholdHide`, `moderateProof`, and
- * the #101 notifier). Returns whether it hid the Proof.
+ * the #101 notifier). Returns whether it wrote.
  *
  * The snapshot predicate runs BEFORE any Firestore access, so the overwhelmingly
- * common write (any Proof that is not `'flagged'` with an extreme flag — every
- * create, every report bump, every admin action, and our own hide write) costs
- * one predicate and no read. Nothing here reads the Event doc at all: unlike the
- * report threshold, the Vision verdict is already on the Proof.
+ * common write (every create, every report bump, every admin action on an
+ * unscreened Proof, and our own writes, which all leave a doc no arm claims)
+ * costs one predicate and no read. Nothing here reads the Event doc at all:
+ * unlike the report threshold, the Vision verdict is already on the Proof.
  */
 export async function applyVisionFlagHide(
   eventId: string,
@@ -201,7 +266,7 @@ export async function applyVisionFlagHide(
   deps: VisionHideDeps = {},
 ): Promise<boolean> {
   try {
-    if (!qualifiesForVisionHide(after)) return false;
+    if (!visionHideAction(after)) return false;
     return await (deps.hideIfQualifies ?? defaultHideVisionFlaggedIfQualifies)(eventId, proofId);
   } catch (err) {
     console.error('applyVisionFlagHide failed', err);

@@ -252,9 +252,10 @@ spec_test_map:
     - scripts/og/og-commit-lock.test.mjs
     - scripts/og/og-commit-lock-atomicity.test.mjs
   # cloud-vision-moderation spans five layers — the hide decision (functions,
-  # plus the client/functions parity block for the mirrored allowlist), the rules
-  # pin that adding a second server writer needed no client surface, the
-  # confirm-time gate that stops a claim approval from lifting a safety hide, the
+  # plus the block pinning that the client acts on the server-owned marker rather
+  # than on the verdict), the rules pin that adding a second server writer needed
+  # no client surface, the client writes that must not undo a safety hide (the
+  # confirm-time gate, the claim-aware Restore, and the hold-preserving Hide), the
   # queue row's reason/restore treatment, and the queue-membership arm that keeps
   # a restored Proof reachable. Only the first shares the spec basename's
   # discovery path, so map them all explicitly.

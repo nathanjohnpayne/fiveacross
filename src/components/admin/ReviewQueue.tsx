@@ -200,6 +200,11 @@ function ProofQueueRow({
           Restore
         </AsyncButton>
       ) : (
+        // Offered on a 'flagged' row too — the row renders the moment the verdict
+        // lands, and the trigger's hide is not instantaneous. Clicking there is
+        // agreement with the AI screen, not an override, so `hideProof` carries
+        // the standing safety hold onto the hidden doc rather than demoting it to
+        // a plain hide a later Confirm would publish (src/data/admin.ts).
         <AsyncButton onAction={() => hideProof(p.id)}>
           Hide
         </AsyncButton>

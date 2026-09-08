@@ -4,6 +4,7 @@ import {
   SAFETY_HIDE_MARKER,
   isAutoHideVisionFlag,
   qualifiesForVisionHide,
+  visionHideAction,
   hideVisionFlaggedIfQualifies,
   applyVisionFlagHide,
   type VisionFlaggedDoc,
@@ -165,6 +166,81 @@ describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () =
   });
 });
 
+// --- the backfill arm: a hide that reached 'hidden' without the marker --------
+//
+// Codex P1 on #1143. The console offers Hide on a 'flagged' row — the row renders
+// the moment moderateProof writes the verdict, and this trigger is neither
+// instantaneous nor guaranteed (its write is best-effort and a failure is
+// swallowed). An admin who clicks it there agrees WITH the AI screen, but the
+// resulting doc is 'hidden' with no marker, which is exactly the shape
+// `safetyHideStands` reads as a PLAIN hide — so a later Confirm on the same Proof
+// publishes the media the admin had just taken down, and the trigger's hide arm
+// (flagged-only) can never fire on it again. The backfill arm supplies the
+// missing record instead.
+
+describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1143)', () => {
+  const PROOF = 'events/e/proofs/p1';
+
+  it('names the backfill only where the hold is real and its record is missing', () => {
+    // Absent OR non-boolean, never `false`: the console Restore writes `false` as
+    // the admin's explicit override, and re-stamping over it would let the server
+    // silently overrule the one decision ADR 0004 reserves for a human.
+    expect(visionHideAction({ status: 'hidden', visionFlag: 'violence' })).toBe('backfill');
+    expect(visionHideAction({ status: 'hidden', visionFlag: 'extreme', safetyHide: null })).toBe('backfill');
+    expect(visionHideAction({ status: 'hidden', visionFlag: 'violence', safetyHide: false })).toBe(null);
+    expect(visionHideAction({ status: 'hidden', visionFlag: 'violence', safetyHide: true })).toBe(null);
+    // Raciness never gains a marker any more than it gains a hide (ADR 0004),
+    // and a hide with no verdict at all is a plain one.
+    expect(visionHideAction({ status: 'hidden', visionFlag: 'racy' })).toBe(null);
+    expect(visionHideAction({ status: 'hidden' })).toBe(null);
+    // The hide arm is unchanged, and still the only one that moves a status.
+    expect(visionHideAction({ status: 'flagged', visionFlag: 'violence' })).toBe('hide');
+    expect(visionHideAction({ status: 'active', visionFlag: 'violence' })).toBe(null);
+    expect(visionHideAction(undefined)).toBe(null);
+  });
+
+  it('stamps the marker and NOTHING else — the status it did not decide is left alone', async () => {
+    const { db, updates, store } = fakeDb({
+      [PROOF]: { status: 'hidden', visionFlag: 'violence', reportCount: 1 },
+    });
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
+    expect(updates).toEqual([{ path: PROOF, data: { safetyHide: true } }]);
+    expect(store[PROOF]).toEqual({ status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 1 });
+  });
+
+  it('never re-applies the marker over an admin lift, whatever the doc then does', async () => {
+    // restoreProof writes `false`; an admin who then hand-Hides the Proof keeps
+    // it, so the result is a plain hide — liftable by Restore, publishable by a
+    // confirm — because the admin has already seen the verdict and overridden it.
+    const lifted = fakeDb({ [PROOF]: { status: 'hidden', safetyHide: false, visionFlag: 'violence' } });
+    expect(await hideVisionFlaggedIfQualifies(lifted.db, 'e', 'p1')).toBe(false);
+    expect(lifted.updates).toEqual([]);
+    expect(lifted.store[PROOF]).toMatchObject({ safetyHide: false });
+  });
+
+  it('is idempotent: the stamped doc re-fires the trigger and takes no second write', async () => {
+    const { db, updates } = fakeDb({ [PROOF]: { status: 'hidden', visionFlag: 'violence' } });
+    await hideVisionFlaggedIfQualifies(db, 'e', 'p1');
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(false);
+    expect(updates).toHaveLength(1); // the backfill, and no loop after it
+  });
+
+  it('the stamped doc is one the confirm-time gate holds — which is the whole point', async () => {
+    const { db, store } = fakeDb({ [PROOF]: { status: 'hidden', visionFlag: 'violence' } });
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(false);
+    await hideVisionFlaggedIfQualifies(db, 'e', 'p1');
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(true);
+  });
+
+  it('reaches Firestore for the backfill snapshot, unlike every write no arm claims', async () => {
+    const hide = vi.fn(async () => true);
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'hidden', visionFlag: 'violence' }, { hideIfQualifies: hide }),
+    ).toBe(true);
+    expect(hide).toHaveBeenCalledWith('e', 'p1');
+  });
+});
+
 describe('applyVisionFlagHide — the best-effort trigger body', () => {
   const flagged = (visionFlag: string | null): VisionFlaggedDoc => ({ status: 'flagged', visionFlag });
 
@@ -181,7 +257,9 @@ describe('applyVisionFlagHide — the best-effort trigger body', () => {
       flagged('adult'),
       flagged(null), // flagged by an admin path with no verdict
       { status: 'active', visionFlag: 'violence' }, // the admin Restore write
-      { status: 'hidden', visionFlag: 'violence' }, // our own hide write re-firing
+      { status: 'hidden', safetyHide: true, visionFlag: 'violence' }, // our own hide write re-firing
+      { status: 'hidden', safetyHide: false, visionFlag: 'violence' }, // Restored, then hand-Hidden
+      { status: 'hidden', visionFlag: 'racy' }, // hidden by an admin; nothing to back-fill
       { status: 'active', visionFlag: null }, // an ordinary report bump on an unflagged Proof
       { status: 'pending', visionFlag: 'violence' }, // an unresolved admin_confirmed claim
       undefined, // a delete

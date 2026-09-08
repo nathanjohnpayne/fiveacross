@@ -71,7 +71,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { confirmClaim, rejectClaim, restoreProof } from './admin';
+import { confirmClaim, hideProof, rejectClaim, restoreProof } from './admin';
 import { safetyHideStands } from './moderation';
 
 /** A dealt board whose Square 4 is the pending claim backed by proof `P`. */
@@ -327,6 +327,74 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 
 // --- Restore returns the Proof to the state it came from ---------------------
 //
+// The console's Hide is offered on a 'flagged' row — the row renders the moment
+// moderateProof writes the verdict, and hideProofOnVisionFlag is neither
+// instantaneous nor guaranteed (best-effort; a failed write is swallowed and
+// retried on the next write). An admin clicking Hide there AGREES with the AI
+// screen. A bare `status: 'hidden'` would nonetheless move the doc out of the
+// state the trigger's hide arm looks for while leaving no marker behind, and
+// `safetyHideStands` reads that as a PLAIN hide — so a later Confirm would
+// publish the media the admin had just taken down (Codex P1 on #1143).
+
+describe('hideProof — an admin Hide preserves a standing safety hold (#1143)', () => {
+  it('carries the hold onto the hidden doc when one stands on the Proof', async () => {
+    liveProof = { status: 'flagged', visionFlag: 'violence' };
+
+    await hideProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'hidden', safetyHide: true });
+    // Which is the doc the confirm-time gate holds — the point of the write.
+    expect(safetyHideStands({ status: 'hidden', safetyHide: true })).toBe(true);
+  });
+
+  it('stays byte-for-byte the write it always was on an ordinary moderation hide', async () => {
+    // No hold: a plain reported Proof. Hiding it must not mint a safety hide an
+    // admin never made — this one is liftable by Restore and publishable by a
+    // confirm, exactly as before.
+    liveProof = { status: 'active', reportCount: 4 };
+
+    await hideProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'hidden' });
+  });
+
+  it('reads the LIVE doc, so a row that moved since it rendered is not misjudged', async () => {
+    // The trigger may have hidden and marked the Proof already, or an admin at
+    // another console may have Restored it. Both read live inside the transaction.
+    liveProof = { status: 'active', safetyHide: false, visionFlag: 'violence' };
+
+    await hideProof('P');
+
+    expect(ops).toEqual([
+      { op: 'get', path: 'events/med-2026/proofs/P' },
+      { op: 'update', path: 'events/med-2026/proofs/P' },
+    ]);
+    expect(updatePayload('/proofs/')).toEqual({ status: 'hidden' }); // the lift is not re-applied
+  });
+
+  it('reads no verdict at all, so a stale bundle can only ever UNDER-stamp', async () => {
+    // A verdict this build has never heard of still holds, because the gate reads
+    // the server's own facts. And where the client does miss a hold, the trigger's
+    // backfill arm stamps the marker on the hidden doc anyway
+    // (functions/src/visionHide.ts § visionHideAction).
+    liveProof = { status: 'flagged', visionFlag: 'gore' };
+
+    await hideProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'hidden', safetyHide: true });
+  });
+
+  it('hides a Proof that is missing through the same failing update, not a silent no-op', async () => {
+    liveProof = undefined;
+
+    await hideProof('P');
+
+    // `tx.update` on a doc that does not exist rejects at commit exactly as the
+    // previous `updateDoc` did; the payload carries no invented marker.
+    expect(updatePayload('/proofs/')).toEqual({ status: 'hidden' });
+  });
+});
+
 // Restore is the one control that may override an AI verdict, and #133 gave it a
 // warning that says so. It also has to say WHERE the photo goes. In
 // admin_confirmed mode a Proof is created 'pending' and stays admin-only readable

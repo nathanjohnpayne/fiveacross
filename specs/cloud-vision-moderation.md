@@ -17,7 +17,7 @@ So the fix is a second writer rather than a wider first one, and the split is th
 
 | | `functions/src/autohide.ts` (#43) | `functions/src/visionHide.ts` (#133) |
 |---|---|---|
-| Owns | `'active'` docs | `'flagged'` docs |
+| Owns | `'active'` docs | `'flagged'` docs, plus its own marker on the `'hidden'` ones |
 | Reads | the Event's `settings.reportHideThreshold` | the Proof's own `visionFlag` |
 | Applies to | Prompts and Proofs | Proofs |
 | Lifted by | `Clear reports` (zero the counter) | `Restore` (there is no counter) |
@@ -42,7 +42,7 @@ Neither predicate can fire on a doc the other owns, so the two paths cannot cont
 
 ### The write is conditional on LIVE state, in a transaction
 
-`applyVisionFlagHide` decides on the event snapshot and hands off to `hideVisionFlaggedIfQualifies`, which inside a Firestore transaction re-reads the Proof and writes `status: 'hidden'` (via `tx.update`, never a re-creating `set`) only if it still qualifies — the same guard `hideIfQualifies` gives the report path. So an admin who Restored or hand-Hid the Proof since the trigger fired is not silently reverted, a Proof deleted since the snapshot is never re-created, and a verdict no longer in the allowlist writes nothing.
+`applyVisionFlagHide` decides on the event snapshot and hands off to `hideVisionFlaggedIfQualifies`, which inside a Firestore transaction re-reads the Proof and applies whichever arm of `visionHideAction` its LIVE state still asks for (via `tx.update`, never a re-creating `set`) — the same guard `hideIfQualifies` gives the report path. So an admin who Restored or hand-Hid the Proof since the trigger fired is not silently reverted, a Proof deleted since the snapshot is never re-created, and a verdict no longer in the allowlist writes nothing.
 
 It writes `status`, the `safetyHide` marker below, and **nothing else**. Leaving `visionFlag` on the doc is the point of the whole ticket: the result is `hidden` *with its reason attached*, which is what lets the console tell a Vision hide from a report-count one, and what `notify.ts` `deriveReason` already labels with the verdict rather than `(reports >= threshold)`.
 
@@ -59,7 +59,21 @@ Both fields ride the same rules bound, so this needed no `firestore.rules` chang
 - **Given** the hide fires **then** `status: 'hidden'` and `safetyHide: true` are written in ONE `tx.update`, so there is no window in which the Proof is hidden without the server's record of why. (Tests: the "STAMPING the safety marker" and "NOTHING else" cases.)
 - **Given** a non-admin **then** forging, flipping, or scrubbing `safetyHide` is DENIED on update — alone or smuggled onto a report bump — and a create carrying it in either direction is DENIED. (Tests: the `safetyHide` rules cases.)
 
-`applyVisionFlagHide` is best-effort and never throws: a write failure is swallowed (`console.error`, return `false`) so the trigger never crashes the proof pipeline, mirroring `applyThresholdHide`, `moderateProof`, and the #101 notifier. The snapshot predicate runs before any Firestore access, so every write that is not a flagged-and-extreme Proof — every create, every report bump, every admin action, and the hide's own re-fire — costs one predicate and no read. Nothing here reads the Event doc at all.
+`applyVisionFlagHide` is best-effort and never throws: a write failure is swallowed (`console.error`, return `false`) so the trigger never crashes the proof pipeline, mirroring `applyThresholdHide`, `moderateProof`, and the #101 notifier. The snapshot predicate runs before any Firestore access, so every write no arm claims — every create, every report bump, every admin action on an unscreened Proof, and the trigger's own writes re-firing — costs one predicate and no read. Nothing here reads the Event doc at all.
+
+### An admin Hide on a flagged row must not demote the hold
+
+The console offers **Hide** on a `'flagged'` row, and correctly so: the row renders the moment `moderateProof` writes the verdict, and the trigger is neither instantaneous nor guaranteed — its write is best-effort, and a swallowed failure is retried only on the Proof's next write. An admin who clicks Hide there is agreeing with the AI screen, not overriding it.
+
+A bare `status: 'hidden'` nonetheless loses the hold. It moves the doc out of the `'flagged'` state the hide arm looks for, so the trigger stands down and never stamps the marker, and `safetyHideStands` reads the result as a **plain** hide — so a later Confirm on the same Proof publishes the media the admin had just taken down, from the one control that is emphatically not the warned Restore. Both ends are closed, in the safe direction on each:
+
+- **The client carries the hold forward.** `hideProof` (`src/data/admin.ts`) reads the live Proof inside a transaction — the row may have moved since it rendered — and writes `safetyHide: true` beside the status when `safetyHideStands` is already true of it. That is the **same predicate** `confirmClaim` gates on, so the console can never hide a Proof into a state its own confirm would then publish. It reads no verdict, for the deployment-skew reason above: a stale bundle can only ever under-stamp, never over-stamp. Where no hold stands, the write is byte-for-byte the one it always was, so an ordinary moderation hide stays liftable by `Restore` and publishable by a confirm.
+- **The trigger backfills what the client missed.** `visionHideAction` gains a second arm: a `'hidden'` Proof carrying an allowlisted verdict and **no boolean** marker is stamped `safetyHide: true` in the same transactional re-read, writing the marker alone because it did not decide the status. Absent-or-non-boolean, never `false`, is the precision that matters — `false` is the warned Restore's explicit override, and re-stamping over it would let the server silently overrule the one decision ADR 0004 reserves for a human. So a Proof an admin Restored and then hand-Hid keeps its `false` and stays a plain hide.
+
+The arms compose without looping: the hide arm's own output carries `true`, the backfill arm's output carries `true`, and neither state matches any arm on the re-fire.
+
+- **Given** an admin Hides a Proof on which a safety hold stands — `'flagged'`, or already carrying the marker — **then** `hideProof` writes `status: 'hidden'` and `safetyHide: true` in one update, having read the Proof LIVE inside its transaction; **given** an ordinary hide with no hold **then** it writes `status: 'hidden'` alone. (Tests: the "hideProof — an admin Hide preserves a standing safety hold" cases in `src/data/cloud-vision-moderation.test.ts`.)
+- **Given** a `'hidden'` Proof with an allowlisted verdict and no boolean marker **then** the trigger stamps `safetyHide: true` and nothing else, and the stamped doc is one the confirm-time gate holds; **given** the marker already `true` or `false`, a non-allowlisted verdict, or no verdict **then** it writes nothing. (Tests: the "backfill arm" cases in `tests/functions/cloud-vision-moderation.test.ts`.)
 
 ### It deploys independently of the producer
 

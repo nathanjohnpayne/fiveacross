@@ -7,7 +7,7 @@ import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isSystemAuthor, safetyHideStands } from './moderation';
+import { isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
 import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { normalizePool } from '../game/pool';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
@@ -398,7 +398,45 @@ export function bulkApproveItems(
 ): Promise<ApprovalPlacement[]> {
   return approveItems(items, adminUid, eventId);
 }
-export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
+/**
+ * The console's Hide — and, when a safety hold is already standing on the Proof,
+ * the write that PRESERVES it (Codex P1 on #1143).
+ *
+ * The queue offers Hide on a `'flagged'` row, because the row is visible the
+ * moment `moderateProof` writes the verdict and `hideProofOnVisionFlag` is not
+ * instantaneous (and, being best-effort, may have swallowed a failure it will
+ * retry). An admin who clicks it there is agreeing with the AI screen, not
+ * overriding it — but a bare `status: 'hidden'` moves the doc OUT of the state
+ * the trigger's hide arm looks for while leaving no marker behind, and
+ * `safetyHideStands` then reads the result as a PLAIN hide: a later Confirm on
+ * the same Proof publishes the media the admin had just taken down.
+ *
+ * So the hide carries the hold forward. `safetyHideStands` (./moderation) is the
+ * same predicate `confirmClaim` gates on, read here against the LIVE doc inside a
+ * transaction because the row may have moved since it rendered — the trigger may
+ * have hidden and marked it already, or an admin at another console may have
+ * Restored it. When a hold stands, the marker rides the same update; when none
+ * does, this is byte-for-byte the write it always was, so an ordinary moderation
+ * hide is untouched and stays liftable by `Restore` and publishable by a confirm.
+ *
+ * It deliberately reads no verdict. The verdict strings live in the Functions
+ * allowlist (`AUTO_HIDE_VISION_FLAGS`) and Functions and this bundle deploy
+ * separately, so a client that re-derived them could only ever UNDER-stamp — and
+ * the trigger's own backfill arm covers exactly that gap, stamping the marker on
+ * any extreme/illegal Proof that reached `'hidden'` without one. The two halves
+ * compose in the safe direction: the client can be stale, and the server is still
+ * authoritative.
+ */
+export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+  return runTransaction(db, async (tx) => {
+    const ref = proof(id, eventId);
+    const snap = await tx.get(ref);
+    const held = snap.exists() && safetyHideStands(snap.data() as SafetyHideState);
+    // `tx.update` on a missing doc still rejects, exactly as the previous
+    // `updateDoc` did — a Hide on a deleted Proof is an error, not a silent no-op.
+    tx.update(ref, held ? { status: 'hidden', safetyHide: true } : { status: 'hidden' });
+  });
+}
 
 /**
  * The console's Restore — the ONE place an admin may override an AI verdict, and
