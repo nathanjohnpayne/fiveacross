@@ -69,6 +69,10 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/components/w2-leaderboard.test.ts
 - Filters change only the visible subset, never the order—`src/components/w2-leaderboard.test.tsx` ("With BINGO" / "Blackout" narrow while preserving the remaining rows' relative order; see "Design decisions" above for what "order" means when rank numbers are renumbered for the visible subset).
 - Stats stay client-authoritative; no anti-cheat recompute is added (ADR 0001)—`src/game/logic.ts` and `src/hooks/useData.ts` are unmodified; `Leaderboard.tsx` reads Player-written stats exactly as before.
 
+## Superseded once the Event is archived (#1152)
+
+Everything above describes the LIVE Leaderboard. Once the Event is archived, `Leaderboard` becomes a routing component that renders `ArchivedLeaderboard` from the frozen `EventDoc.archive` record instead—same ranked rows and same First-to-BINGO pin, but read from a stored snapshot rather than re-derived, and with the presentational filters gone (a frozen record has one shape). The freeze COPIES what this surface showed; it never recomputes it. The live view moves into a `LiveLeaderboard` child so an archived visit never mounts `useLeaderboard`, `useDayMetasStatus` or `useProofKindsByUid` at all, and the routing branch waits for a server-resolved Event before choosing between them. Two rules from this spec carry over unchanged into the frozen surface: the pin tracks earliest-bingo rather than rank, and a banned Player is hidden without anyone being promoted into the vacancy. See [`post-sailing-archive`](post-sailing-archive.md) § "The surfaces".
+
 ## Out of scope
 
 - No new Firestore query or index: filters are entirely client-side over `useLeaderboard`'s existing subscription.

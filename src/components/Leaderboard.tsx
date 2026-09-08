@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
 import type { ProofKindFlags } from '../hooks/useData';
+import { useOnline } from '../hooks/useOnline';
 import {
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
@@ -9,6 +10,8 @@ import {
   tutorialDayIndexSet,
 } from '../game/logic';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from '../data/finale';
+import { isEventArchived } from '../data/eventArchive';
+import ArchivedLeaderboard from './ArchivedLeaderboard';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
@@ -136,9 +139,96 @@ function buildShareStandings(
   return top;
 }
 
+/**
+ * The Leaderboard's routing half, and the ONLY hook it owns is the Event doc
+ * every Player already subscribes to.
+ *
+ * #1152: once the Event is archived, the FROZEN record supersedes the live
+ * roster entirely — `ArchivedLeaderboard` renders `EventDoc.archive`, so the
+ * standings a returning Player sees are the ones the archive stamped, not a
+ * re-derivation over rows that may since have been moderated.
+ *
+ * THE SPLIT IS WHAT MAKES THAT TRUE, not just what it renders. The live view's
+ * three subscriptions — the whole `players` roster, every Day's meta document,
+ * and up to 60 live Proofs — belong to `LiveLeaderboard` below, so an archived
+ * visit never opens them. With the branch inside one component the hooks had
+ * already run by the time it was reached: the archived page rendered from the
+ * snapshot while a listener fan stayed open behind it, which is the opposite of
+ * the spec's "it subscribes to NOTHING".
+ *
+ * A component boundary is also the only way to do this without breaking the #280
+ * hook-order rule. Conditioning the hooks in place is illegal in React; returning
+ * a DIFFERENT component unmounts the live one and its listeners with it, and each
+ * component's own hook sequence stays fixed.
+ *
+ * AND THE LIVE BRANCH WAITS FOR THE SERVER (Codex P2, PR #1139 round 5). The
+ * split decides nothing on a cold visit, where `useEventDoc` starts at
+ * `data: null` and the ADR 0006 persistent cache can then replay the Event as it
+ * stood when the tab last saw it — `active`, because it was. Falling through to
+ * the live child on either of those mounts the whole listener fan the archived
+ * page exists not to open, and the archived branch then arrives a snapshot later
+ * and tears it down again. The listeners were open; "it subscribes to NOTHING"
+ * was false for exactly as long as the roster, every Day's meta and 60 Proofs
+ * took to answer.
+ *
+ * So an UNRESOLVED status renders the live view's own loading state — the same
+ * label, so there is no visible seam between this wait and the roster's — and
+ * only a resolved one routes. Two things resolve it short of a server snapshot,
+ * because a spinner nobody can get past is worse than the listeners:
+ *
+ *  - a cached `archived` record, which needs no confirmation at all. The flip is
+ *    write-once at the rules boundary, so an Event that has been archived can
+ *    never be un-archived — the archive renders immediately, offline included.
+ *  - a subscription that ERRORED, or a client the browser says is OFFLINE.
+ *    Neither can ever be answered by the server (`useOnline`'s `false` is the
+ *    trustworthy half of that hook, and it is read here to stop waiting, never to
+ *    authorize anything), and this app is offline-durable by design (ADR 0006) —
+ *    so the wait ends and the Leaderboard renders from the cache, which is what
+ *    it did before this gate existed.
+ *
+ * A PENDING archive is the one closed state this gate declines to believe, the
+ * `App.tsx` Card-redirect rule applied to the surface that redirect points AT
+ * (Codex P2 on PR #1157, round 9). `status: 'archived'` written by an Admin on
+ * THIS device is emitted optimistically before the rules decide it, and a refused
+ * flip rolls back to open — so a record the server may never accept would
+ * otherwise tear down the live listeners and print itself as final. `fromCache`
+ * is deliberately NOT required alongside it: unlike the reversible `archiving`
+ * the redirect guards, an accepted `archived` can never be contradicted later, so
+ * demanding a fresh server snapshot would only break the offline archive read.
+ *
+ * An Event marked archived with NO record is not a state this app produces —
+ * `archiveEvent` writes status, stamp and record in one update — so the live view
+ * is left as the fallback for a hand-edited document. It is still read-only in the
+ * only place that counts: `firestore.rules` deny its gameplay writes on the
+ * `status` field alone.
+ */
 export default function Leaderboard() {
+  const { data: event, serverResolved, hasPendingWrites } = useEventDoc();
+  const online = useOnline();
+  // MONOTONE, and latched in STATE rather than in a ref — the adjust-during-
+  // render idiom `Board`'s dangling-sheet close already uses, and deliberately
+  // not the ref write CodeRabbit rejected on #452: React discards state updates
+  // from an abandoned render, whereas a ref written during one would keep a
+  // conclusion that never committed.
+  //
+  // The latch exists because only ONE of its two inputs is monotone. A reconnect
+  // (`online` false → true, with the server snapshot still a round trip away)
+  // would otherwise bounce an already-rendered live view back through the
+  // spinner, unmounting `LiveLeaderboard`, dropping its listeners and resetting
+  // the Player's filter with them.
+  const [statusLatched, setStatusLatched] = useState(false);
+  const statusSettled = statusLatched || serverResolved || !online;
+  if (statusSettled && !statusLatched) setStatusLatched(true);
+
+  if (!hasPendingWrites && isEventArchived(event) && event?.archive) {
+    return <ArchivedLeaderboard event={event} archive={event.archive} />;
+  }
+  if (!statusSettled) return <LoadingState label="Tallying the leaderboard…" />;
+  return <LiveLeaderboard event={event} />;
+}
+
+function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   const { players, loading } = useLeaderboard();
-  const { data: event } = useEventDoc();
   // #264: the pinned day-meta honors. Called HERE, with the other hooks —
   // never below the loading/empty early returns, where a later non-empty
   // render would change the hook order and crash (Codex P1 on #280).

@@ -73,7 +73,15 @@ vi.mock('../hooks/useData', () => ({
   // passing because the mock happened to have real data queued.
   useBoard: () => ({ data: null, loading: true, hasServerData: false }),
   useMyPlayer: () => ({ data: null, loading: true, hasServerData: false }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  // `serverResolved` is Leaderboard's ROUTING gate (#1152): the live view mounts
+  // only once the Event's status has been answered by the server, and the archived
+  // branch declines an Admin's own not-yet-acked flip.
+  useEventDoc: () => ({
+    data: H.event,
+    loading: false,
+    serverResolved: true,
+    hasPendingWrites: false,
+  }),
   useLeaderboard: () => ({ players: H.players, loading: H.leaderboardLoading }),
   // #561: the Most-Loved award's display join reads the Feed's own filtered
   // proofs; the hero tests below fixture them.
@@ -104,6 +112,10 @@ import {
 // Real module, never mocked here: the #607 entry-origin tests below install a
 // resolved analytics-canonical host and prove the share `url` ignores it.
 import { applyResolvedCanonicalHost } from '../canonicalHost';
+// Also real: the archived card's truncation fixture is built by the SAME
+// serializer the freeze writes with, so "the pinned row survives the cap" is
+// asserted against the real bound rather than a hand-shaped record (#1152).
+import { buildEventArchive, MAX_ARCHIVED_STANDING_ROWS } from '../data/eventArchive';
 
 // Same shape/rationale as w2-feed-moments.test.tsx's dealtWith: a dealt board
 // with the free center (index 12) always on, plus whichever indices are
@@ -2455,6 +2467,213 @@ describe('Leaderboard — share affordance', () => {
     const shareArg = shareMock.mock.calls[0][0];
     expect(shareArg.url).toBe(window.location.origin);
     expect(shareArg.url).not.toBe('https://bodega-bay.vacaybingo.com');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ArchivedLeaderboard — share affordance (#1152, epic #134)
+// ---------------------------------------------------------------------------
+
+describe('ArchivedLeaderboard — share affordance', () => {
+  // Reached through `Leaderboard`'s routing component, which mounts the archived
+  // surface instead of the live one — the same path a returning Player takes, so
+  // the frozen card is rendered by the real component tree.
+  const FROZEN_ARCHIVE = {
+    // The Event's own name, frozen with the standings it titles (#1151). The live
+    // Event is renamed underneath it below, so the card's title is proved to come
+    // out of the record rather than off the editable document.
+    eventName: 'Allure of the Seas',
+    standings: [
+      {
+        uid: 'early-bird',
+        displayName: 'Early Bird',
+        bingoCount: 4,
+        squaresMarked: 18,
+        blackout: false,
+        firstBingoAt: 1000,
+      },
+      {
+        uid: 'top-dog',
+        displayName: 'Top Dog',
+        bingoCount: 2,
+        squaresMarked: 12,
+        blackout: false,
+        firstBingoAt: 9000,
+      },
+    ],
+    playerCount: 2,
+    firstBingo: { uid: 'early-bird', displayName: 'Early Bird', at: 1000 },
+    firstBingoRow: {
+      uid: 'early-bird',
+      displayName: 'Early Bird',
+      bingoCount: 4,
+      squaresMarked: 18,
+      blackout: false,
+      firstBingoAt: 1000,
+      rank: 1,
+    },
+    dailyHonors: [],
+    freezeAt: null,
+    archivedAt: 1_700_000_000_000,
+  };
+
+  beforeEach(() => {
+    // Empty, deliberately: the archived surface opens no roster listener at all,
+    // so a fixture here could only ever prove the wrong thing.
+    H.players = [];
+    H.event = {
+      name: 'Allure of the Seas',
+      status: 'archived',
+      archivedAt: FROZEN_ARCHIVE.archivedAt,
+      archive: FROZEN_ARCHIVE,
+      days: [],
+      bannedUids: [],
+    } as unknown as EventDoc;
+  });
+
+  // The archive is IMMUTABLE — `EventDoc.archive` is write-once at the rules
+  // boundary — so this takes the FarewellPodium treatment rather than the live
+  // Leaderboard's warm-on-intent-only one: pre-rendering cannot bake in anything a
+  // later snapshot would change, and it is what lets the no-wait tap below still
+  // carry the image on a cold mobile press.
+  it('renders the frozen card eagerly on mount; hover and the tap both reuse it — exactly one rasterization', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1)); // eager, not tap-time
+
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    expect(toBlobMock).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    expect(toBlobMock).toHaveBeenCalledTimes(1); // the tap reused the eager render
+    expect(shareMock.mock.calls[0][0].files).toHaveLength(1);
+    // The frozen rows, not the (empty) live roster the archived view never reads.
+    expect(latestToBlobNode().textContent).toContain('Early Bird');
+  });
+
+  // The bug this closes (Codex P2, PR #1139): the tap AWAITED a full
+  // rasterization, so on a slow phone the render outlived the transient user
+  // activation and `navigator.share` was skipped entirely. The fix is structural,
+  // not a shorter wait — the handler takes the render only if it has ALREADY
+  // settled, so `shareCardBlob` runs in the same turn as the gesture.
+  it('a tap on a stalled render shares in the same turn as the gesture — no wait to outlive the activation', async () => {
+    toBlobMock.mockReturnValue(new Promise(() => {})); // a render that never settles
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+
+    // No await, no timer advance: the share call has ALREADY happened by the time
+    // the click handler returns, which is the whole guarantee.
+    expect(shareMock).toHaveBeenCalledTimes(1);
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.files).toBeUndefined(); // no image — the documented degrade
+    expect(shareArg.title).toBe(`${shareCardAppName()}—Final standings`);
+    expect(shareArg.url).toBe(window.location.origin);
+  });
+
+  it('re-renders when a ban changes what the card shows, rather than sharing the stale one', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(latestToBlobNode().textContent).toContain('Early Bird');
+
+    // Moderation is the archive's ONE live input: the stored record is unchanged,
+    // but a banned Player must leave the shared card too. The eager render is
+    // deliberately once-only, so warm-on-intent is what re-renders the invalidated
+    // card.
+    H.event = { ...(H.event as EventDoc), bannedUids: ['early-bird'] } as EventDoc;
+    rerender(<Leaderboard />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+    expect(latestToBlobNode().textContent).not.toContain('Early Bird');
+    expect(latestToBlobNode().textContent).toContain('Top Dog');
+  });
+
+  // Codex P2, PR #1139. `EventDoc.name` sits OUTSIDE the write-once clause — which
+  // protects `status`, `archivedAt`, `archivedUnder` and `archive` and nothing
+  // else — so an Admin renaming the Event after the freeze silently re-titled the
+  // archived card, and two people sharing the same frozen standings a week apart
+  // got two different images of them. The name is frozen into the record for the
+  // same reason each honour chip's label is.
+  it('keeps the frozen Event name on the card when the live Event is renamed afterwards', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(latestToBlobNode().textContent).toContain('Allure of the Seas');
+
+    // The Admin renames the Event. The record is untouched — it is write-once —
+    // and so is the card.
+    H.event = { ...(H.event as EventDoc), name: 'Renamed After The Fact' } as EventDoc;
+    rerender(<Leaderboard />);
+    // A ban is the one input that re-renders the card, so use it to force a fresh
+    // rasterization and prove the NEW one still reads the record.
+    H.event = { ...(H.event as EventDoc), bannedUids: ['top-dog'] } as EventDoc;
+    rerender(<Leaderboard />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+
+    expect(latestToBlobNode().textContent).toContain('Allure of the Seas');
+    expect(latestToBlobNode().textContent).not.toContain('Renamed After The Fact');
+  });
+
+  // Codex P2, PR #1139. The record's two bounds are independent: `standings` keeps
+  // 200 rows in RANK order, while the headline honour goes to whoever bingoed
+  // EARLIEST — so on a roster past the cap the holder this card names in its own
+  // headline can sit outside the retained rows entirely. Searching only
+  // `standings` for the pinned row then found nothing and the eleventh row
+  // vanished from exactly the Event large enough to have truncated.
+  it('still prints the pinned First-BINGO row when its holder ranks past the retained 200', async () => {
+    // 260 Players: rank falls with the index, and the EARLIEST bingo belongs to
+    // the LAST-ranked one, which is the shape the bug needs.
+    const roster = Array.from({ length: 260 }, (_, i) =>
+      mkPlayer({
+        uid: `p${String(i).padStart(3, '0')}`,
+        displayName: `Player ${i}`,
+        bingoCount: 300 - i,
+        squaresMarked: 300 - i,
+        firstBingoAt: 1_000_000 - i,
+      }),
+    );
+    const archive = buildEventArchive({
+      players: roster,
+      event: { days: [], bannedUids: [] } as unknown as EventDoc,
+      archivedAt: 1_700_000_000_000,
+    });
+    // The fixture is only interesting if the holder really is outside the prefix.
+    expect(archive.standings).toHaveLength(MAX_ARCHIVED_STANDING_ROWS);
+    expect(archive.playerCount).toBe(260);
+    expect(archive.firstBingo?.uid).toBe('p259');
+    expect(archive.standings.some((r) => r.uid === 'p259')).toBe(false);
+    expect(archive.firstBingoRow).toMatchObject({ uid: 'p259', rank: 260 });
+
+    H.event = {
+      ...(H.event as EventDoc),
+      archive,
+      archivedAt: archive.archivedAt,
+    } as unknown as EventDoc;
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+
+    const node = latestToBlobNode();
+    // Three podium columns plus eight compact rows: the top ten and the pin.
+    expect(node.querySelectorAll('.share-card-col')).toHaveLength(3);
+    expect(node.querySelectorAll('.share-card-row')).toHaveLength(8);
+    const pinned = node.querySelectorAll('.share-card-row.pinned');
+    expect(pinned).toHaveLength(1);
+    expect(pinned[0].textContent).toContain('Player 259');
+    // The rank printed is the one the COMPLETE standings held at the freeze, not a
+    // position invented inside the truncated prefix.
+    expect(pinned[0].querySelector('.share-card-rank')?.textContent).toBe('260');
   });
 });
 

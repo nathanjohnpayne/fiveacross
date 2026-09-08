@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ClaimDoc, DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
+import { MemoryRouter } from 'react-router';
+import type { ClaimDoc, DayDef, DayMetaDoc, EventArchive, EventDoc, PlayerDoc } from '../types';
 // The freeze's OWN schedule predicate, used by the honour-fan stub below so the
 // console gate under test is asked the same question `archiveEvent` asks (Codex
 // P2 on PR #1162). Referenced only from inside the stub's closure, which runs at
@@ -9,12 +10,22 @@ import type { ClaimDoc, DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types
 import { usableDayIndexes } from '../data/eventArchive';
 import { MAX_DAYS } from '../data/eventLimits';
 
-// specs/post-sailing-archive.md, RTL layer (#1149 and #1151, epic #134). The
-// Admin console's three actions and the states they move between:
+// specs/post-sailing-archive.md, RTL layer (#1149, #1151 and #1152, epic #134).
+// Two surfaces:
 //
-//   Close play → the quiesce (reversible, gameplay shut, nothing permanent)
-//   Reopen play → lifting it, unconditionally, on the Event in front of the Admin
-//   Archive → BOTH writes in order, behind the drain gate and a second tap
+//   1. The Admin console's three actions and the states they move between:
+//
+//        Close play → the quiesce (reversible, gameplay shut, nothing permanent)
+//        Reopen play → lifting it, unconditionally, on the Event in front of the Admin
+//        Archive → BOTH writes in order, behind the drain gate and a second tap
+//
+//   2. The archived Leaderboard, which renders the FROZEN record and nothing
+//      else. The fixtures deliberately make the live roster DISAGREE with the
+//      archive, so "reads from the snapshot" is proved rather than assumed — a
+//      component that quietly kept deriving from `useLeaderboard` would show the
+//      live numbers and fail here. The live hooks are `vi.fn()`s so the archived
+//      render can assert it never CALLED them, not merely that it ignored what
+//      they returned: "it subscribes to nothing" is a claim about listeners.
 //
 // The write functions are `vi.fn()`s because what is under test is the console's
 // own behaviour, not Firestore: `src/data/post-sailing-archive.test.ts` pins what
@@ -22,8 +33,9 @@ import { MAX_DAYS } from '../data/eventLimits';
 // boundary accepts. The read hooks are stubbed (the `w2-leaderboard.test.tsx`
 // precedent for isolating a presentational surface), but `../data/moderation` and
 // `../data/eventArchive` deliberately are NOT: they own the drain gate
-// (`claimsAwaitingAdmin`), the size refusal and the finale predicate this file is
-// about, and a stubbed gate would prove nothing about the gate.
+// (`claimsAwaitingAdmin`), the ban predicate, the size refusal and the finale
+// predicate this file is about, and a stubbed gate would prove nothing about the
+// gate.
 
 const H = vi.hoisted(() => {
   const state = {
@@ -52,6 +64,16 @@ const H = vi.hoisted(() => {
     dayMetas: new Map<number, DayMetaDoc>(),
     pendingClaims: [] as ClaimDoc[],
     pendingClaimsLoaded: true,
+    /** `useEventDoc`'s server-resolution latch. `false` is the COLD VISIT: the
+     *  Event document has not been answered by the server yet, so whatever the
+     *  ADR 0006 cache replayed cannot decide whether this Event is archived. */
+    eventServerResolved: true,
+    /** That snapshot's own optimistic-write flag. An Admin's archive flip is
+     *  emitted locally before the rules decide it, and a refusal rolls it back. */
+    eventPendingWrites: false,
+    /** `useOnline`. A client the browser says is offline can never BE answered by
+     *  the server, so the routing gate stops waiting on one. */
+    online: true,
     /** The order the writes were issued in, so the quiesce-first contract is
      *  asserted on the SEQUENCE rather than on each spy alone. */
     writes: [] as string[],
@@ -91,14 +113,39 @@ const H = vi.hoisted(() => {
       // independently of the schedule it rendered.
       scheduleUnusable: !usableDayIndexes(dayIndexes),
     })),
+    useProofKindsByUid: vi.fn(() => ({ kindsByUid: {}, loading: false })),
   };
   return state;
 });
 
+vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
+// The archived surface pre-renders its Share Card on mount, and the real
+// rasteriser walks pseudo-elements jsdom has never implemented. What the CARD
+// contains is pinned in `w2-share-cards.test.tsx` § "ArchivedLeaderboard — share
+// affordance", against the same component through the same routing gate; this
+// file is about the page, so the rasteriser is a stub here.
+vi.mock('html-to-image', () => ({
+  toBlob: vi.fn(async () => new Blob(['fake-png-bytes'], { type: 'image/png' })),
+}));
 vi.mock('../hooks/useData', () => ({
+  useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),
+  useDayMetas: () => new Map(),
   useDayMetasStatus: H.useDayMetasStatus,
   useLeaderboard: H.useLeaderboard,
+  useEventDoc: () => ({
+    data: H.event,
+    loading: false,
+    serverResolved: H.eventServerResolved,
+    hasPendingWrites: H.eventPendingWrites,
+  }),
+  useProofKindsByUid: H.useProofKindsByUid,
+  isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
+    !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),
+}));
+vi.mock('../hooks/useOnline', () => ({
+  useOnline: () => H.online,
+  readOnline: () => H.online,
 }));
 vi.mock('../data/admin', () => ({
   beginArchive: (...args: unknown[]) => {
@@ -115,8 +162,10 @@ vi.mock('../data/admin', () => ({
   },
 }));
 
-// eslint-disable-next-line import/first -- the component must load AFTER the mocks above.
+// eslint-disable-next-line import/first -- the components must load AFTER the mocks above.
 import ArchiveEvent from './admin/ArchiveEvent';
+// eslint-disable-next-line import/first -- same.
+import Leaderboard from './Leaderboard';
 
 function mkEvent(over: Partial<EventDoc> = {}): EventDoc {
   // `finaleCompletedAt` present by default, so the FINALE gate is satisfied and
@@ -174,6 +223,91 @@ function mkDay(index: number, over: Partial<DayDef> = {}): DayDef {
   } as DayDef;
 }
 
+// The LIVE roster says Late Riser is on top with 9 bingos. The FROZEN record says
+// Early Bird won with 3. Every archived assertion below reads the frozen numbers.
+const liveRoster: PlayerDoc[] = [
+  mkPlayer('late-riser', {
+    displayName: 'Late Riser',
+    bingoCount: 9,
+    squaresMarked: 24,
+    firstBingoAt: 90_000,
+  }),
+  mkPlayer('early-bird', {
+    displayName: 'Early Bird',
+    bingoCount: 3,
+    squaresMarked: 18,
+    firstBingoAt: 1_000,
+  }),
+];
+
+const FROZEN: EventArchive = {
+  // The frozen Event name (#1151): the Share Card's title comes out of the
+  // record, never off the still-editable live document.
+  eventName: 'Med 2026',
+  standings: [
+    {
+      uid: 'early-bird',
+      displayName: 'Early Bird',
+      bingoCount: 3,
+      squaresMarked: 18,
+      blackout: true,
+      firstBingoAt: 1_000,
+    },
+    {
+      uid: 'steady',
+      displayName: 'Steady Eddie',
+      bingoCount: 1,
+      squaresMarked: 12,
+      blackout: false,
+      firstBingoAt: 4_000,
+    },
+  ],
+  playerCount: 2,
+  firstBingo: { uid: 'early-bird', displayName: 'Early Bird', at: 1_000 },
+  firstBingoRow: {
+    uid: 'early-bird',
+    displayName: 'Early Bird',
+    bingoCount: 3,
+    squaresMarked: 18,
+    blackout: true,
+    firstBingoAt: 1_000,
+    rank: 1,
+  },
+  dailyHonors: [
+    // The chip LABEL is part of the frozen record (#1151): the archived strip
+    // renders it rather than looking the Day's theme up in the live schedule,
+    // which the freeze deliberately leaves editable.
+    {
+      dayIndex: 0,
+      uid: 'early-bird',
+      displayName: 'Early Bird',
+      firstBingoAt: 1_000,
+      dayLabel: '🌈 D1',
+    },
+    {
+      dayIndex: 1,
+      uid: 'steady',
+      displayName: 'Steady Eddie',
+      firstBingoAt: 4_000,
+      dayLabel: '🏋️ D2',
+    },
+  ],
+  freezeAt: null,
+  archivedAt: Date.UTC(2026, 6, 24, 12),
+};
+
+function archivedEvent(over: Partial<EventDoc> = {}): EventDoc {
+  return mkEvent({
+    name: 'Med 2026',
+    status: 'archived',
+    archivedAt: FROZEN.archivedAt,
+    archive: FROZEN,
+    days: [],
+    bannedUids: [],
+    ...over,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   H.event = mkEvent();
@@ -187,6 +321,9 @@ beforeEach(() => {
   H.dayMetas = new Map();
   H.pendingClaims = [];
   H.pendingClaimsLoaded = true;
+  H.eventServerResolved = true;
+  H.eventPendingWrites = false;
+  H.online = true;
   H.writes = [];
   H.beginArchive.mockResolvedValue({
     result: 'closing',
@@ -196,6 +333,11 @@ beforeEach(() => {
   });
   H.abandonArchive.mockResolvedValue('reopened');
   H.archiveEvent.mockResolvedValue('archived');
+  // The archived Leaderboard pre-renders its Share Card on mount (#1152), and the
+  // rasteriser only tears that offscreen host down when the render settles —
+  // which is after a synchronous test has finished. Clear any host left behind so
+  // a leaked card's text cannot answer the NEXT test's `screen` query.
+  document.querySelectorAll('.share-card-host').forEach((host) => host.remove());
 });
 
 const props = (event: EventDoc | null = H.event) => ({
@@ -205,6 +347,12 @@ const props = (event: EventDoc | null = H.event) => ({
   pendingClaimsLoaded: H.pendingClaimsLoaded,
 });
 const renderConsole = () => render(<ArchiveEvent {...props()} />);
+const renderLeaderboard = () =>
+  render(
+    <MemoryRouter>
+      <Leaderboard />
+    </MemoryRouter>,
+  );
 
 describe('ArchiveEvent — the two reversible lifecycle actions (#1149)', () => {
   it('offers Close play on a LIVE Event, and no way back yet', () => {
@@ -1228,5 +1376,363 @@ describe('ArchiveEvent — a read that did not answer (#1162)', () => {
     expect(H.abandonArchive).not.toHaveBeenCalled();
     expect(await screen.findByRole('status')).toHaveTextContent(/The Event could not be read back/);
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The archived presentation (#1152)
+// ---------------------------------------------------------------------------
+
+/** An Event still open for play, carrying no record. */
+const liveEvent = (over: Partial<EventDoc> = {}): EventDoc =>
+  archivedEvent({ status: 'active', archivedAt: undefined, archive: undefined, ...over });
+
+/** The names in the rendered standings list, scoped to the mount: the frozen
+ *  names also appear in the hall of fame and in the offscreen Share Card host the
+ *  archived surface rasterizes into `document.body`. */
+const frozenNames = (container: HTMLElement): (string | null | undefined)[] =>
+  [...container.querySelectorAll('.list .row .name')].map((n) => n.textContent);
+
+describe('the archived Leaderboard renders the frozen record (#1152)', () => {
+  beforeEach(() => {
+    H.players = liveRoster;
+    H.event = archivedEvent();
+  });
+
+  it('shows the frozen standings, not the live roster', () => {
+    const { container } = renderLeaderboard();
+    // Early Bird is rank 1 in the record even though the live roster ranks Late
+    // Riser first — and Late Riser, who is on the live roster but not in the
+    // record, does not appear at all.
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(screen.queryByText('Late Riser')).not.toBeInTheDocument();
+    expect(screen.getByText(/3 bingos · 18 squares · BLACKOUT/)).toBeInTheDocument();
+  });
+
+  it('announces the archive and pins the hall of fame', () => {
+    const { container } = renderLeaderboard();
+    const banner = container.querySelector('.lb-archived-banner');
+    expect(banner).toHaveTextContent('Final standings');
+    expect(banner).toHaveTextContent(/is archived/i);
+    const hall = screen.getByLabelText('Hall of fame');
+    expect(hall).toHaveTextContent(/First to BINGO/);
+    expect(hall).toHaveTextContent(/Early Bird · /);
+    // The frozen daily honours render as their own chips, under the LABEL the
+    // record carries — theme emoji and all.
+    expect(hall).toHaveTextContent('🌈 D1');
+    expect(hall).toHaveTextContent('🏋️ D2');
+    // The badge on the standings row names the same holder.
+    expect(container.querySelector('.list .row.leader .name')).toHaveTextContent('Early Bird');
+  });
+
+  // Codex P2, PR #1139 round 4. The strip used to resolve each Day's theme emoji
+  // out of the LIVE `EventDoc.days`, which the freeze deliberately leaves editable
+  // (the write-once clause covers `status`/`archivedAt`/`archivedUnder`/`archive`
+  // and nothing else) — so an Admin re-theming a Day after the archive changed a
+  // frozen honour's chip. The label is stored on the honour instead.
+  it('keeps a frozen honour chip when the live Day theme is edited afterwards', () => {
+    // The live schedule now says Day 1 is Get Sporty and Day 2 is Neon
+    // Playground — the exact swap of the labels the record froze.
+    H.event = archivedEvent({
+      days: [
+        { index: 0, theme: 'get-sporty' },
+        { index: 1, theme: 'neon-playground' },
+      ],
+    } as unknown as Partial<EventDoc>);
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    expect(hall).toHaveTextContent('🌈 D1');
+    expect(hall).toHaveTextContent('🏋️ D2');
+    // …and it is not merely showing the live labels by coincidence.
+    expect(hall).not.toHaveTextContent('🏋️ D1');
+    expect(hall).not.toHaveTextContent('🌈 D2');
+  });
+
+  it('labels a frozen honour by its ordinal when the record carries no label', () => {
+    // A record written by hand rather than by the serializer — `eventConverter`
+    // validates no field of a stored archive, so the absent `dayLabel` is
+    // reachable whatever the contract declares. The fallback stays frozen-safe,
+    // derived from the honour's own index, rather than reaching back into the live
+    // schedule the way the bug did.
+    H.event = archivedEvent({
+      days: [{ index: 0, theme: 'get-sporty' }],
+      archive: {
+        ...FROZEN,
+        dailyHonors: [
+          { dayIndex: 0, uid: 'early-bird', displayName: 'Early Bird', firstBingoAt: 1_000 },
+        ],
+      },
+    } as unknown as Partial<EventDoc>);
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    expect(hall).toHaveTextContent('D1');
+    expect(hall).not.toHaveTextContent('🏋️ D1');
+  });
+
+  it('offers no live controls — the archive is read-only', () => {
+    renderLeaderboard();
+    // The presentational filters belong to a live Leaderboard; a frozen record has
+    // one shape.
+    expect(screen.queryByRole('group', { name: 'Filter leaderboard' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'With BINGO' })).not.toBeInTheDocument();
+    // The Share Card survives: a frozen leaderboard is the most shareable thing
+    // the Event ever produced (#36, ADR 0005 — on-device, no crawler page).
+    expect(screen.getByRole('button', { name: 'Share final standings' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Share leaderboard' })).not.toBeInTheDocument();
+  });
+
+  it('says so when the record retained only a prefix of a large roster', () => {
+    H.event = archivedEvent({ archive: { ...FROZEN, playerCount: 240 } });
+    renderLeaderboard();
+    expect(screen.getByText(/Showing the top 2 of 240 players/)).toBeInTheDocument();
+  });
+
+  it('falls back to the live Leaderboard when an archived Event carries no record', () => {
+    // Not a state this app can produce — `archiveEvent` writes status, stamp and
+    // record in one update — so a hand-edited document keeps rendering the live
+    // view, which the rules have already made read-only on `status` alone.
+    H.event = archivedEvent({ archive: undefined });
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Filter leaderboard' })).toBeInTheDocument();
+  });
+
+  it('renders the live Leaderboard while the Event is still active', () => {
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(screen.queryByText('Steady Eddie')).not.toBeInTheDocument();
+  });
+});
+
+describe('the archived Leaderboard opens no live subscription (#1152)', () => {
+  // specs/post-sailing-archive.md: "It subscribes to NOTHING." Asserting on the
+  // rendered output cannot prove that — a component can ignore a hook's value and
+  // still have opened its listener. These assert the hooks were never CALLED,
+  // which is the only place the listener could come from.
+  beforeEach(() => {
+    H.players = liveRoster;
+    H.event = archivedEvent();
+  });
+
+  it('never calls useLeaderboard, useDayMetasStatus or useProofKindsByUid', () => {
+    renderLeaderboard();
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('opens all three for a live Event, so the assertion above is not vacuous', () => {
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+    expect(H.useDayMetasStatus).toHaveBeenCalled();
+    expect(H.useProofKindsByUid).toHaveBeenCalled();
+  });
+
+  // Codex P2, PR #1139 round 5. The split only helps if the BRANCH is taken
+  // against a status the server has confirmed. On a cold visit `useEventDoc`
+  // starts at `data: null` and the ADR 0006 cache can then replay the Event as
+  // `active` — so a routing half that fell through on either mounted the whole
+  // listener fan on an archived Event and tore it down a snapshot later.
+  it('opens nothing while the Event status is still unconfirmed by the server', () => {
+    H.eventServerResolved = false;
+    // The worst shape: a cached replay that says ACTIVE on an Event the server is
+    // about to report as archived. Rendering it would open all three.
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toHaveTextContent('Tallying the leaderboard…');
+  });
+
+  it('renders the archive as soon as the server snapshot says archived', () => {
+    // The same visit, one snapshot later. No live hook was ever called.
+    H.eventServerResolved = false;
+    H.event = liveEvent();
+    const { container, rerender } = renderLeaderboard();
+    H.eventServerResolved = true;
+    H.event = archivedEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    // Read off the standings rows rather than by text: the frozen names also
+    // appear in the hall of fame and in the offscreen Share Card host.
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('mounts the live view once the server confirms the Event is not archived', () => {
+    // The control: the wait ENDS, so the assertions above are about the gate
+    // rather than about a Leaderboard that never renders anything.
+    H.eventServerResolved = true;
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  it('renders a cached archive without waiting for the server', () => {
+    // `status: 'archived'` is write-once at the rules boundary, so a cached one
+    // can never be contradicted — the archive is the one answer that needs no
+    // confirmation, and making it wait would slow the surface the gate exists to
+    // protect.
+    H.eventServerResolved = false;
+    H.event = archivedEvent();
+    const { container } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+  });
+
+  // The `App.tsx` Card-redirect rule (Codex P2 on PR #1157, round 9) applied to
+  // the surface that redirect points AT: an Admin's own flip is emitted locally
+  // before the rules decide it, and a refusal rolls it back to open.
+  it('declines an archive this device has written but the server has not acked', () => {
+    H.eventPendingWrites = true;
+    H.event = archivedEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(screen.queryByText('Steady Eddie')).not.toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  it('renders the archive the moment that write is acked', () => {
+    H.eventPendingWrites = true;
+    H.event = archivedEvent();
+    const { container, rerender } = renderLeaderboard();
+    H.eventPendingWrites = false;
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+  });
+
+  it('stops waiting when the browser says the client is offline', () => {
+    // ADR 0006: this app is offline-durable, and an offline client's Event
+    // subscription is answered by the cache forever. A gate that waited for a
+    // server snapshot anyway would leave the Leaderboard on a spinner for the
+    // whole crossing, which is worse than the listeners it is avoiding.
+    H.eventServerResolved = false;
+    H.online = false;
+    H.event = liveEvent();
+    renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  it('does not bounce an already-routed live view back through the spinner on a reconnect', () => {
+    // The latch is MONOTONE: unmounting `LiveLeaderboard` would drop its three
+    // listeners and reset the Player's filter with them.
+    H.eventServerResolved = false;
+    H.online = false;
+    H.event = liveEvent();
+    const { rerender } = renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+
+    H.online = true; // reconnected; the server snapshot is still a round trip away
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(screen.queryByText('Tallying the leaderboard…')).not.toBeInTheDocument();
+  });
+
+  it('tears the live subscriptions down when the Event flips to archived', () => {
+    H.event = liveEvent();
+    const { rerender } = renderLeaderboard();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+    H.useLeaderboard.mockClear();
+    H.useDayMetasStatus.mockClear();
+    H.useProofKindsByUid.mockClear();
+    H.event = archivedEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    // The live child unmounts, taking its listeners with it — no further call.
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+});
+
+describe('a ban still hides a Player after the freeze (#1152)', () => {
+  // specs/w2-ban-console.md § Leaderboard, made permanent: every public
+  // Leaderboard view hides a banned Player, and moderation deliberately stays
+  // available after the freeze (`bannedUids` is outside the write-once clause).
+  beforeEach(() => {
+    H.players = liveRoster;
+  });
+
+  it('drops the banned row from the standings without promoting anyone', () => {
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    const { container } = renderLeaderboard();
+    const rows = [...container.querySelectorAll('.list .row')];
+    expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Steady Eddie']);
+    // The list closes the gap exactly as the LIVE Leaderboard does when it hides a
+    // banned row — leaving a hole at #1 would advertise that a row was removed,
+    // which is the opposite of what hiding is for. What must NOT move is the
+    // HONOUR: the runner-up is renumbered, never promoted into the star.
+    expect(rows[0]?.querySelector('.rank')?.textContent).toBe('1');
+    expect(rows[0]?.classList.contains('leader')).toBe(false);
+    expect(screen.queryByText('⭐ First BINGO')).not.toBeInTheDocument();
+    // And the stored record is untouched underneath: an unban restores the row
+    // with its own numbers intact.
+    expect(FROZEN.standings.map((r) => r.uid)).toEqual(['early-bird', 'steady']);
+  });
+
+  it('vacates the headline honour and the banned Player’s daily chip', () => {
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    renderLeaderboard();
+    const hall = screen.getByLabelText('Hall of fame');
+    // Vacated, never reassigned — Steady Eddie does not inherit the star.
+    expect(hall).toHaveTextContent('No one got there.');
+    expect(hall).not.toHaveTextContent('Early Bird');
+    expect(hall).toHaveTextContent('D2');
+    expect(hall).not.toHaveTextContent('D1');
+  });
+
+  it('keeps the truncation footnote keyed on the STORED pair, not on who is hidden', () => {
+    // A ban is not a truncation: an un-truncated archive must not start claiming
+    // it was cut short just because one row is currently hidden.
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    const { container } = renderLeaderboard();
+    // The ban really did hide a row, so the absent footnote below is about the
+    // stored pair rather than about an archive that never rendered.
+    expect(frozenNames(container)).toEqual(['Steady Eddie']);
+    expect(container.querySelector('.lb-footnote')).toHaveTextContent(/nothing here changes again/);
+    expect(screen.queryByText(/Showing the top/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the whole record when nobody is banned', () => {
+    H.event = archivedEvent({ bannedUids: ['someone-else'] });
+    const { container } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(screen.getByLabelText('Hall of fame')).toHaveTextContent('Early Bird');
+  });
+
+  it('brings the row back on an unban, exactly as it was', () => {
+    H.event = archivedEvent({ bannedUids: ['early-bird'] });
+    const { container, rerender } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Steady Eddie']);
+
+    H.event = archivedEvent({ bannedUids: [] });
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(container.querySelector('.list .row.leader .name')).toHaveTextContent('Early Bird');
   });
 });

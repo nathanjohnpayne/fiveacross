@@ -1325,6 +1325,27 @@ a {
   font-weight: 700;
 }
 
+/* ---------- archived Event banner (#1152, specs/post-sailing-archive.md) ----------
+   The read-only header above the frozen standings. Quiet on purpose: the
+   archive is a keepsake, not an error state, so it borrows the panel chrome
+   the honors strip above already uses rather than an alert colour. */
+.lb-archived-banner {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin: 2px 0 12px;
+}
+.lb-archived-banner .name {
+  font-weight: 700;
+  color: var(--ink);
+}
+.lb-archived-banner .sub {
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
 /* ---------- lists (leaderboard + items) ---------- */
 .list {
   display: flex;
