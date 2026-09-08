@@ -101,8 +101,18 @@ function EventApp() {
   // cannot undo. `hasServerData` is the latch `useDocSub` sets once the server
   // has answered for this Event, the same signal the join and the profile
   // mirror already require before they treat a closed state as real.
-  const { data: event, hasServerData } = useEventDoc(!!user && mayDealUnderAdmission(admission));
-  const eventClosed = hasServerData && (isEventArchived(event) || isEventArchiving(event));
+  //
+  // And the CURRENT snapshot has to be the server's, not only some earlier one
+  // (Codex P2 on PR #1157, round 8): `hasServerData` is a lifetime latch, so a
+  // device that once saw `archiving: true`, then went offline while another
+  // Admin reopened play, would navigate back to `/card` on a cached closed
+  // value with the latch still true. `fromCache` is per snapshot; both must
+  // agree before the replace navigation fires.
+  const { data: event, hasServerData, fromCache } = useEventDoc(
+    !!user && mayDealUnderAdmission(admission),
+  );
+  const eventClosed =
+    hasServerData && !fromCache && (isEventArchived(event) || isEventArchiving(event));
   const archivePath = TABS.find((tab) => tab.id === 'ranks')?.path ?? FALLBACK_PATH;
 
   // The one pre-auth label the Edition owns (#608): this renders before the

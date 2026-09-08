@@ -46,11 +46,14 @@ const eventDoc = vi.hoisted(() => ({
   // waits for it (Codex P2, PR #1157). Defaults to true so every other case
   // reads as a server-backed snapshot.
   hasServerData: true,
+  // Per-snapshot cache flag; the redirect needs the CURRENT snapshot to be the
+  // server's, not only the latch (Codex P2, PR #1157 round 8).
+  fromCache: false,
 }));
 vi.mock('./hooks/useData', () => ({
   useEventDoc: (enabled?: unknown) => {
     eventDoc.enabled.push(enabled);
-    return { data: eventDoc.value, hasServerData: eventDoc.hasServerData };
+    return { data: eventDoc.value, hasServerData: eventDoc.hasServerData, fromCache: eventDoc.fromCache };
   },
 }));
 vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
@@ -348,6 +351,7 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     eventDoc.value = null;
     eventDoc.enabled = [];
     eventDoc.hasServerData = true;
+    eventDoc.fromCache = false;
     authMocks.retryDeal.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -357,6 +361,18 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     renderApp();
     expect(screen.getByTestId('ranks')).toBeInTheDocument();
     expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Board when the CURRENT snapshot is cached, even after the server once answered', () => {
+    // Codex P2, PR #1157 round 8. `hasServerData` is a lifetime latch: a device
+    // that once saw the quiesce, then went offline while another Admin reopened
+    // play, must not be redirected off its Card by the cached closed value.
+    eventDoc.hasServerData = true;
+    eventDoc.fromCache = true;
+    eventDoc.value = { status: 'active', archiving: true };
+    renderApp();
+    expect(screen.getByTestId('board')).toBeInTheDocument();
+    expect(screen.queryByTestId('ranks')).not.toBeInTheDocument();
   });
 
   it('keeps the Board until the closed state is SERVER-BACKED — a cached quiesce cannot redirect', () => {
