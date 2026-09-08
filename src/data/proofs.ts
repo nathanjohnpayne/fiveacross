@@ -432,11 +432,33 @@ export async function deleteProof(
   },
 ): Promise<void> {
   const eventId = EVENT_ID;
+  // STORAGE FIRST (ordering preserved): if the blob delete throws we keep the
+  // doc so the media isn't orphaned.
+  //
+  // #1149 moved this AFTER the transaction, so that a rejected commit could no
+  // longer leave a surviving Proof pointing at media that was already gone. It
+  // is back where main has it (Phase 4b P1, PR #1157), because "commit first"
+  // is only safe once the retry it depends on is DURABLE. Without a tombstone,
+  // a Storage delete that throws after the commit — or a tab closed in the same
+  // window — leaves the blob reachable with nothing recording it: the commit has
+  // already removed the Proof, its `storagePath` and the only control that could
+  // re-run the delete, and a non-admin owner cannot retry at all, because
+  // `storage.rules` resolves the owner arm from the path's `{uid}` while the
+  // Firestore document that named the media is gone. That regresses live-Event
+  // takedowns, not only archived ones. The reordering ships with the durable
+  // media-revocation tombstone and its server-side sweeper in
+  // [#1153](https://github.com/nathanjohnpayne/fiveacross/issues/1153), which is
+  // what makes the failure it inverts recoverable.
+  //
+  // The closed-Event skip below is unaffected: it is inside the transaction,
+  // where the freeze has to be read anyway.
+  if (storagePath) await deleteStoragePath(storagePath);
+
   // Captured from the proof doc the transaction reads, so the post-commit
-  // purge below (#373) targets the SAME media the Storage delete revokes.
-  // Declared outside the callback because a Firestore transaction can retry:
-  // each attempt reassigns it, so only the committed attempt's value survives
-  // to the purge call.
+  // purge below (#373) targets the SAME media the Storage delete above just
+  // revoked. Declared outside the callback because a Firestore transaction
+  // can retry: each attempt reassigns it, so only the committed attempt's
+  // value survives to the purge call.
   let mediaURL: string | null | undefined;
 
   await runTransaction(db, async (tx) => {
@@ -598,23 +620,6 @@ export async function deleteProof(
 
     tx.delete(proofRef);
   });
-
-  // THE STORAGE DELETE FOLLOWS THE FIRESTORE COMMIT (#134, Codex P2 on PR
-  // #1139). It used to run first, on the reasoning that a failed blob delete
-  // should leave the document behind rather than orphan the media. The freeze
-  // showed the cost of that ordering: when the transaction is rejected, the
-  // media is already gone and the Proof document survives pointing at it — a
-  // Feed tile whose image can never load, on the one Event where nothing can be
-  // re-posted. Committing first inverts the failure into the harmless
-  // direction: a Storage delete that throws leaves a blob nobody can reach
-  // through any surface, and re-running the delete retries it, while a rejected
-  // transaction now leaves the Proof and its media exactly as they were.
-  //
-  // It stays AWAITED and its rejection still propagates, so a caller is told the
-  // media was not revoked rather than being shown a clean takedown. Making that
-  // retry durable — a tombstone that survives the commit removing the Proof's
-  // only reference, and the server-side sweeper that discharges it — is #1153.
-  if (storagePath) await deleteStoragePath(storagePath);
 
   // Fire-and-forget, AFTER commit (never inside the retryable transaction
   // callback above — a callback re-run on conflict would fire this on every

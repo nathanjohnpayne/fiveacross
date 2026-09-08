@@ -912,9 +912,7 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
-    // The media is revoked, after the commit — a Storage delete that throws
-    // leaves an unreachable blob rather than a document pointing at deleted
-    // media (#134).
+    // Storage first so a doc is never left referencing deleted media.
     expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
     // The backing cell — resolved by the proof's cellIndex — is unmarked +
     // unlinked, and carries the SAME echoOptOut a manual unmark persists
@@ -1066,18 +1064,42 @@ describe('deleteProof — the moderation delete survives the freeze (#134)', () 
     expect(txGet.mock.calls.some(([ref]) => (ref as Ref).path === `events/${EVENT_ID}`)).toBe(true);
   });
 
-  it('leaves the media in place when the transaction is rejected, rather than deleting it first', async () => {
-    // The ordering half. The Storage delete used to run BEFORE the transaction,
-    // so a rejected transaction left the Proof document pointing at media that
-    // was already gone — a Feed tile whose image can never load.
+  it('keeps the Proof document when the media revocation throws — Storage runs FIRST', async () => {
+    // The ordering half, and it is main's ordering (Phase 4b P1 on PR #1157).
+    // #1149 put the Storage delete after the commit so a rejected transaction
+    // could not leave a surviving Proof pointing at media that was already
+    // gone; that inversion is only safe once the retry it depends on is
+    // DURABLE. Without a tombstone, a blob delete that throws AFTER the commit
+    // leaves the media reachable with nothing recording it — the Proof, its
+    // `storagePath` and the retry control all left with the commit, and a
+    // non-admin owner cannot retry because `storage.rules` no longer has a
+    // document to resolve them from. So the revocation runs first again, and
+    // the reordering rides with the tombstone and its sweeper in #1153.
     withBackingCell();
-    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+    eventReads({ status: 'active' });
+    deleteStorageSpy.mockRejectedValueOnce(new Error('storage/retry-limit-exceeded'));
 
     await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
-      'permission-denied',
+      'storage/retry-limit-exceeded',
     );
 
-    expect(deleteStorageSpy).not.toHaveBeenCalled();
+    // The document survives, so the delete is re-runnable from the same
+    // surface that offered it: the transaction never opened at all.
+    expect(runTx).not.toHaveBeenCalled();
+    expect(txDelete).not.toHaveBeenCalled();
+  });
+
+  it('orders the revocation ahead of the commit on the freeze path too', async () => {
+    // The skip lives INSIDE the transaction, so restoring the ordering leaves
+    // the closed-Event behaviour above untouched — this pins both at once.
+    withBackingCell();
+    eventReads({ status: 'archived' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(Math.max(...deleteStorageSpy.mock.invocationCallOrder)).toBeLessThan(
+      Math.min(...runTx.mock.invocationCallOrder),
+    );
   });
 });
 
