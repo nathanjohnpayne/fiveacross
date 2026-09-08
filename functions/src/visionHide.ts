@@ -19,12 +19,15 @@
  *     unchanged by this module — no predicate, no write, no invariant of it is
  *     touched (this file adds a second writer; it does not widen the first).
  *   - THIS module owns `'flagged'` docs carrying an extreme/illegal `visionFlag`,
- *     and reads no threshold at all. It additionally BACKFILLS its own marker
- *     onto an extreme/illegal Proof that reached `'hidden'` without one (see
- *     `visionHideAction`), because the marker — not the status — is what holds
- *     the media through a claim confirm, and an admin who hides a flagged row
- *     before the trigger reaches it must not thereby demote a safety hide to a
- *     plain one.
+ *     and reads no threshold at all. It additionally owns its own MARKER wherever
+ *     that marker and the status have come apart (see `visionHideAction`): it
+ *     backfills the marker onto an extreme/illegal Proof that reached `'hidden'`
+ *     without one, and re-hides an `'active'` Proof whose marker still stands.
+ *     The marker — not the status — is what holds the media through a claim
+ *     confirm, so an admin who hides a flagged row before the trigger reaches it
+ *     must not thereby demote a safety hide to a plain one, and no client, however
+ *     stale its cached bundle, may publish a Proof whose hold the server still
+ *     records.
  *
  * Extreme/illegal ONLY (ADR 0004). The app is intentionally racy, so the trigger
  * is an ALLOWLIST of the producer's extreme verdicts (`violence`, `extreme`) —
@@ -117,14 +120,16 @@ export const SAFETY_HIDE_MARKER = 'safetyHide' as const;
  * re-confirm:
  *
  *   - Loop guard. Our own write makes the doc `'hidden'`, not `'flagged'`, so
- *     the re-fired `onDocumentWritten` no-ops. No infinite loop.
+ *     the re-fired `onDocumentWritten` no-ops — and it carries the marker, so
+ *     neither does any other arm of `visionHideAction` below. No infinite loop.
  *   - Admin Restore is preserved. `restoreProof` (src/data/admin.ts) clears the
  *     `safetyHide` marker and leaves `visionFlag` in place as the audit record of
  *     what the admin overrode. That doc is no longer `'flagged'`, so this path
  *     never re-hides it and the restore sticks — the same shape as the report
- *     path's restore, which survives because it leaves `reportCount` un-raised. A
- *     restored Proof is re-hidden only by a fresh scan (a re-upload re-flags it)
- *     or by an admin.
+ *     path's restore, which survives because it leaves `reportCount` un-raised.
+ *     The explicit `false` it writes is equally load-bearing: it is what keeps the
+ *     re-hide arm off a genuinely restored Proof. A restored Proof is re-hidden
+ *     only by a fresh scan (a re-upload re-flags it) or by an admin.
  *   - Retry-safe. Because it reads state rather than a transition, ANY later
  *     write that leaves the doc `'flagged'` with an extreme flag (a report bump,
  *     an admin Clear reports) re-attempts a hide that an earlier swallowed
@@ -152,6 +157,19 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     a hide whose marker write was lost to a swallowed best-effort failure.
  *     Left unstamped, `confirmClaim` reads that Proof as a PLAIN hide and
  *     publishes it, which is the hole this arm closes.
+ *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
+ *     combination is not reachable from any current client: every legitimate lift
+ *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,
+ *     src/data/admin.ts), and `confirmClaim` declines to publish at all while
+ *     `safetyHideStands`. It IS reachable from a CACHED one — a PWA bundle built
+ *     before either gate shipped, still open in an admin's tab, running the old
+ *     unconditional `confirmClaim` publish or the old marker-less `restoreProof`.
+ *     Enforcement therefore cannot live only on the client: the read rule exposes
+ *     `'active'` Proofs to every Player, so a stale tab would put extreme/illegal
+ *     media back in the Feed with no server-side path to take it down again —
+ *     the hide arm sees `'active'`, not `'flagged'`, and stands down forever.
+ *     This arm is that path. The marker is kept, so the re-hidden doc still
+ *     carries the record the confirm gate reads.
  *
  * Absent-or-non-boolean, never `false`, is the whole precision of the backfill
  * test. `false` is the warned console Restore's explicit override (`restoreProof`
@@ -159,13 +177,22 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  * server silently overrule the one decision ADR 0004 reserves for a human. A
  * Proof an admin Restored and then hand-Hid keeps that `false` and stays a plain
  * hide — liftable by Restore, publishable by a confirm — because the admin has
- * already seen the verdict and overridden it.
+ * already seen the verdict and overridden it. The same `false` is what makes the
+ * re-hide arm safe to state as broadly as it is: it fires on the marker alone,
+ * with no verdict test, because an override records itself in the same write it
+ * overrides with, and a Restore that has already happened is never contested.
+ *
+ * `'pending'` is deliberately NOT re-hidden. It is admin-only readable, so a
+ * standing marker there exposes nothing to Players; it is also where the
+ * claim-aware Restore deliberately parks a Proof whose claim is undecided, and
+ * re-hiding that would fight the console rather than a stale tab.
  */
-export type VisionHideAction = 'hide' | 'backfill';
+export type VisionHideAction = 'hide' | 'backfill' | 'rehide';
 
 export function visionHideAction(doc: VisionFlaggedDoc | undefined): VisionHideAction | null {
   if (!doc) return null; // delete — nothing to write
   if (qualifiesForVisionHide(doc)) return 'hide';
+  if (doc.status === 'active' && doc[SAFETY_HIDE_MARKER] === true) return 'rehide';
   if (
     doc.status === 'hidden' &&
     isAutoHideVisionFlag(doc.visionFlag) &&
@@ -189,6 +216,10 @@ export function visionHideWrite(action: VisionHideAction): Record<string, unknow
       // The status is ALREADY `'hidden'` — this arm supplies only the missing
       // record of why, so it re-asserts nothing it did not decide.
       return { [SAFETY_HIDE_MARKER]: true };
+    case 'rehide':
+      // The marker is ALREADY `true` and is deliberately left standing: the
+      // hold was never lifted, only ignored by a client too old to read it.
+      return { status: 'hidden' };
   }
 }
 

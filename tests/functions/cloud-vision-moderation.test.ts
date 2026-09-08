@@ -241,6 +241,94 @@ describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1
   });
 });
 
+// --- the re-hide arm: an active Proof whose marker still stands ---------------
+//
+// Codex P1 on #1143. Both client-side gates ship in the SAME bundle, and a bundle
+// is cached: an admin tab opened before this work landed still runs the old
+// unconditional `confirmClaim` publish, or the old `restoreProof` that wrote no
+// marker, either of which leaves `status: 'active'` with `safetyHide: true`. The
+// read rule exposes active Proofs to every Player, and the hide arm sees
+// 'active', not 'flagged', so it would stand down forever — extreme/illegal media
+// back in the Feed with no server-side path to take it down. The marker is
+// server-owned and every legitimate lift clears it in the same write as the
+// status, so that combination is diagnostic of a stale client and of nothing
+// else.
+
+describe('the re-hide arm — a standing marker outranks an active status (#1143)', () => {
+  const PROOF = 'events/e/proofs/p1';
+
+  it('names the re-hide on the marker alone, and only where the status exposes media', () => {
+    expect(visionHideAction({ status: 'active', safetyHide: true })).toBe('rehide');
+    // No verdict test: the marker is the server's own record, and a lift records
+    // itself in the same write it lifts with, so there is nothing to re-derive.
+    expect(visionHideAction({ status: 'active', safetyHide: true, visionFlag: 'gore' })).toBe('rehide');
+    expect(visionHideAction({ status: 'active', safetyHide: true, visionFlag: null })).toBe('rehide');
+    // The warned Restore's explicit `false`, and a Proof this trigger never
+    // touched, are both left exactly where the admin (or nobody) put them.
+    expect(visionHideAction({ status: 'active', safetyHide: false, visionFlag: 'violence' })).toBe(null);
+    expect(visionHideAction({ status: 'active', visionFlag: 'violence' })).toBe(null);
+    // Only a literal `true` counts — a truthy value is not the server's record.
+    for (const marker of [1, 'true', {}, []]) {
+      expect(visionHideAction({ status: 'active', safetyHide: marker as never })).toBe(null);
+    }
+    // 'pending' is admin-only readable, and is where the claim-aware Restore
+    // deliberately parks an undecided Proof: nothing to re-hide, nobody exposed.
+    expect(visionHideAction({ status: 'pending', safetyHide: true })).toBe(null);
+  });
+
+  it('re-hides the stale-client publish, KEEPING the marker the hold is recorded in', async () => {
+    // The exact doc an old confirmClaim leaves behind: published, still marked.
+    const { db, updates, store } = fakeDb({
+      [PROOF]: { status: 'active', safetyHide: true, visionFlag: 'violence' },
+    });
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
+    expect(updates).toEqual([{ path: PROOF, data: { status: 'hidden' } }]);
+    expect(store[PROOF]).toEqual({ status: 'hidden', safetyHide: true, visionFlag: 'violence' });
+    // And the doc it produces is one the current client's own gate holds, so the
+    // two agree again rather than fighting.
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(true);
+  });
+
+  it('leaves the warned Restore alone — the lift writes `false` in the same update', async () => {
+    const { db, updates, store } = fakeDb({
+      [PROOF]: { status: 'active', safetyHide: false, visionFlag: 'violence' },
+    });
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(false);
+    expect(updates).toEqual([]);
+    expect(store[PROOF]).toMatchObject({ status: 'active', safetyHide: false });
+  });
+
+  it('leaves an active Proof with no marker alone — this path never wrote one', async () => {
+    const { db, updates } = fakeDb({ [PROOF]: { status: 'active', visionFlag: 'violence' } });
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(false);
+    expect(updates).toEqual([]);
+  });
+
+  it('does not loop: the re-hidden doc matches no arm on the write it re-fires', async () => {
+    const { db, updates } = fakeDb({ [PROOF]: { status: 'active', safetyHide: true, visionFlag: 'violence' } });
+    await hideVisionFlaggedIfQualifies(db, 'e', 'p1');
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(false);
+    expect(updates).toHaveLength(1);
+  });
+
+  it('reaches Firestore for the stale-client snapshot, and stands down on the honest ones', async () => {
+    const hide = vi.fn(async () => true);
+    expect(
+      await applyVisionFlagHide('e', 'p1', { status: 'active', safetyHide: true }, { hideIfQualifies: hide }),
+    ).toBe(true);
+    expect(hide).toHaveBeenCalledWith('e', 'p1');
+    hide.mockClear();
+    for (const after of [
+      { status: 'active', safetyHide: false, visionFlag: 'violence' }, // the Restore
+      { status: 'active', visionFlag: 'violence' }, // a pre-marker Restore, already lifted
+      { status: 'pending', safetyHide: true }, // held for claim review, admin-only
+    ] satisfies VisionFlaggedDoc[]) {
+      expect(await applyVisionFlagHide('e', 'p1', after, { hideIfQualifies: hide })).toBe(false);
+    }
+    expect(hide).not.toHaveBeenCalled();
+  });
+});
+
 describe('applyVisionFlagHide — the best-effort trigger body', () => {
   const flagged = (visionFlag: string | null): VisionFlaggedDoc => ({ status: 'flagged', visionFlag });
 
