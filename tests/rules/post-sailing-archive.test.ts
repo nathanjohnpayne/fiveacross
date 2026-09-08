@@ -271,6 +271,19 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     }
   });
 
+  it('DENIES a stray archivedAt on a live Event through the general admin arm', async () => {
+    // Codex P2, PR #1157. The general arm type-checked the stamp but not the
+    // state it belongs to, so an admin write of `archivedAt` alone left an
+    // ACTIVE Event carrying a false archive audit stamp. The field exists only
+    // on an archived document; the quiesced flip arm is where it is introduced.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedAt: NOW() }));
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { status: 'active', archivedAt: NOW() }),
+    );
+    // The same admin still edits everything else on the live Event.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+
   it('LOCKS status and archivedAt once archived', async () => {
     await freeze();
     // Un-archiving is not a client operation at all.

@@ -1245,8 +1245,15 @@ service cloud.firestore {
             || request.resource.data.status in ['active', 'archived'])
         && (!('archiving' in request.resource.data)
             || request.resource.data.archiving is bool)
+        // `archivedAt` exists only on an archived document (Codex P2 on PR
+        // #1157): this arm may carry it solely when the RESULTING status is
+        // 'archived', which the clause after this one permits only on a document
+        // that was already archived, where the lock below pins it to the stored
+        // value. A live Event therefore can never hold a stray stamp; the flip
+        // arm above is the one place the field is introduced.
         && (!('archivedAt' in request.resource.data)
-            || (request.resource.data.archivedAt is number
+            || (request.resource.data.get('status', 'active') == 'archived'
+                && request.resource.data.archivedAt is number
                 && request.resource.data.archivedAt > 0
                 && request.resource.data.archivedAt < 4102444800000))
         && (request.resource.data.get('status', 'active') != 'archived'

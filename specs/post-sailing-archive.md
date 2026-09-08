@@ -83,7 +83,7 @@ The complete-record requirement #1139 carried on this arm is deliberately NOT he
 
 1. `status`, now that something finally reads it, must be `'active'` or `'archived'`. A typo'd status reads as OPEN through `eventOpenForPlay`'s default, so an Event an organiser believed was frozen would silently keep taking Marks.
 2. `archiving` must be a BOOLEAN. A truthy string would read as closed through one reader and open through another, on the flag that decides whether every gameplay write is denied. It is deliberately NOT write-once: an abandoned archive must be reversible. `archiveToken` deliberately gets NO clause here—this arm sits against Firestore's 1000-expression cap, and every property the token needs is decided on the flip arm above, where a malformed one can only fail the flip closed rather than open a hole.
-3. `archivedAt`, when present, must be a numeric, bounded stamp.
+3. `archivedAt` may be present only when the resulting `status` is `'archived'` (which this arm permits only on a document that was already archived, where the lock in point 5 pins it to the stored value), and then must be a numeric, bounded stamp. A live Event can therefore never carry a stray stamp; the flip arm is the one place the field is introduced (Codex P2, PR #1157).
 4. This arm may only produce `status: 'archived'` on a document that was ALREADY archived, which is what keeps moderation and configuration working after the freeze while leaving the flip to the arm above. And the freeze is WRITE-ONCE: once `status` is `'archived'`, `status` and `archivedAt` are locked to their stored values. Every OTHER field stays editable, so moderation (`bannedUids`) and configuration survive the freeze.
 
 ### Moderation is not a gameplay write
