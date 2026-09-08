@@ -2562,6 +2562,62 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
+  // A Hosting config written with `source` rather than `public` is a WEB
+  // FRAMEWORK deploy, and `deploy/index.js` handles it at the very top of the
+  // deploy: `prepareFrameworks("deploy", …)` runs ahead of `hasPinnedFunctions`,
+  // ahead of the `--public` override above, and ahead of the first predeploy
+  // hook. It runs the app's own framework build, sets `hosting.public` to the
+  // generated directory and, for an SSR framework, appends a Functions codebase
+  // to the deploy's config. So the hooks rehearsed here are not the hooks the
+  // deploy runs, the `$RESOURCE_DIR` a Hosting hook would get is not the one it
+  // will get, and a Functions artifact can have been rewritten before any of it
+  // starts. None of that is reproducible, so the whole project is refused
+  // (Codex P1, round 26 on #1107).
+  const webFrameworkFixture = (hosting) => ({
+    functionsConfig: { predeploy: [] },
+    config: { hosting },
+    files: {
+      "web/package.json": JSON.stringify({ name: "web", private: true }),
+      "public/index.html": "",
+      "functions/lib/index.js": artifact("exports.daily = endpoint();"),
+    },
+  });
+
+  it("refuses the whole project when a selected Hosting config builds from source", async () => {
+    await withFunctionsProject(webFrameworkFixture({ source: "web" }), async (configPath) => {
+      const { result, reasons } = await withRefusalReasons(() =>
+        classify(["--only", "functions:daily,hosting"], configPath),
+      );
+      expect(result).toMatchObject({ hostingAttempted: true, ...ALL_INVOKERS_CONSERVATIVE });
+      expect(reasons).toContain("prepareFrameworks");
+    });
+  });
+
+  it("leaves a plain public Hosting config exempt", async () => {
+    // The control, and the reason the refusal above is attributable to the
+    // framework shape: the same fixture and the same selector with a `public`
+    // directory instead runs no framework build, so nothing about the hooks
+    // moves and the single endpoint is still provable.
+    await withFunctionsProject(webFrameworkFixture({ public: "public" }), async (configPath) => {
+      expect(
+        await classify(["--only", "functions:daily,hosting"], configPath),
+      ).toMatchObject({ hostingAttempted: true, ...EXEMPT });
+    });
+  });
+
+  it("ignores a framework Hosting config this request does not deploy", async () => {
+    // The CLI's own scoping, mirrored: `isDeployingWebFramework` is consulted
+    // only behind `targetNames.includes("hosting")`, so a Functions-only scope
+    // never reaches `prepareFrameworks` and must not be refused for a config it
+    // will not touch.
+    await withFunctionsProject(webFrameworkFixture({ source: "web" }), async (configPath) => {
+      expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject({
+        hostingAttempted: false,
+        ...EXEMPT,
+      });
+    });
+  });
+
   it("answers a git branch lookup the way the deployment will", async () => {
     // A build that selects its exports with `git rev-parse --abbrev-ref HEAD`
     // is an ordinary build. Omitting `.git` from the overlay did not withhold

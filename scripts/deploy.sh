@@ -246,6 +246,12 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # while every later comparison matched the post-edit baseline, so the exemption
 # could be granted for a checkout that is no longer the one the clean-tree guard
 # above approved.
+# A Hosting config that names a `source` rather than a `public` directory is
+# refused outright, project-wide. `deploy/index.js` runs the app's own framework
+# build BEFORE it chains a single predeploy hook, and that build replaces
+# `hosting.public` and can write a Functions artifact — so the request the
+# adapter would rehearse is not the request the deploy runs, and no rehearsal of
+# the hooks can be made to speak for it.
 # Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
 # codebase this request loads cannot be vouched for — it consulted a value the
 # preflight cannot supply, it left work running outside its process group, it

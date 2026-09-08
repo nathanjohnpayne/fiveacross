@@ -2823,7 +2823,14 @@ fi
 init_admin_options_repo() {
   local repo="$1"
   local branch_body="$2"
+  # The whole firebase.json, so a case about the HOSTING shape (31a/31b below)
+  # reuses this fixture rather than a near-copy of it. Default: one site served
+  # from a plain public directory.
+  local firebase_json="${3:-}"
   local entry
+  if [ -z "$firebase_json" ]; then
+    firebase_json='{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":[]}}'
+  fi
   mkdir -p "$repo/functions/src" "$repo/functions/lib" "$repo/functions/node_modules" "$repo/dist"
   for entry in "$FUNCTIONS_TOOLCHAIN"/* "$FUNCTIONS_TOOLCHAIN"/.[!.]*; do
     [ -e "$entry" ] || continue
@@ -2854,7 +2861,7 @@ init_admin_options_repo() {
       printf '%s\n' '}'
       printf '%s\n' "$branch_body"
     } > functions/lib/index.js
-    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions","predeploy":[]}}' > firebase.json
+    printf '%s\n' "$firebase_json" > firebase.json
     git add -A
     git commit --quiet -m "initial"
   )
@@ -3042,6 +3049,70 @@ elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-30.log"; then
   cat "$WORKDIR/gcloud-calls-30.log" >&2
 else
   pass "admin-options-location: reading a project locationId this preflight cannot supply forfeits the exemption (rc=$RC30)."
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 31a-31b (#547 — Codex P1, round 26): a Hosting config that builds from
+# `source` refuses the exemption for the whole project.
+#
+# `deploy/index.js` runs `prepareFrameworks("deploy", …)` at the very top of the
+# deploy — ahead of the pinned-functions handling, ahead of the `--public`
+# override cases 27a/27b are about, and ahead of the first predeploy hook. It
+# runs the app's own framework build, replaces `hosting.public` with the
+# generated directory and, for an SSR framework, appends a Functions codebase.
+# So the hooks a rehearsal runs are not the hooks the deploy runs and the
+# artifact it inventories can already have been rewritten. 31a is that shape and
+# must reconcile submitbugreport; 31b is the control — the same fixture with a
+# plain `public` directory, which runs no framework build and stays exempt.
+# ---------------------------------------------------------------------------
+FRAMEWORK_SINGLE_BRANCH='exports.daily = endpoint();'
+
+REPO31A="$WORKDIR/case31a-hosting-source"
+init_admin_options_repo "$REPO31A" "$FRAMEWORK_SINGLE_BRANCH" \
+  '{"hosting":{"site":"gaycruisebingo","source":"web"},"functions":{"source":"functions","predeploy":[]}}'
+: >"$WORKDIR/ofd-calls-31a.log"
+: >"$WORKDIR/gcloud-calls-31a.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-31a.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-31a.log" \
+  bash -c "cd '$REPO31A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+  >"$WORKDIR/case31a.out" 2>"$WORKDIR/case31a.err"
+RC31A=$?
+set -e
+if [[ $RC31A -ne 0 ]]; then
+  fail "hosting-source: deploy.sh returned $RC31A. stderr was:"
+  cat "$WORKDIR/case31a.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31a.log"; then
+  fail "hosting-source: a request whose Hosting config the pinned CLI would build as a web framework was still exempted, so a surface that framework build can rewrite was released with no invoker reconciliation. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-31a.log" >&2
+else
+  pass "hosting-source: a selected Hosting source forfeits the exemption for every codebase in the project (rc=$RC31A)."
+fi
+
+REPO31B="$WORKDIR/case31b-hosting-public"
+init_admin_options_repo "$REPO31B" "$FRAMEWORK_SINGLE_BRANCH" \
+  '{"hosting":{"site":"gaycruisebingo","public":"dist"},"functions":{"source":"functions","predeploy":[]}}'
+: >"$WORKDIR/ofd-calls-31b.log"
+: >"$WORKDIR/gcloud-calls-31b.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-31b.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-31b.log" \
+  bash -c "cd '$REPO31B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+  >"$WORKDIR/case31b.out" 2>"$WORKDIR/case31b.err"
+RC31B=$?
+set -e
+if [[ $RC31B -ne 0 ]]; then
+  fail "hosting-public: the same request against a plain public directory returned $RC31B. stderr was:"
+  cat "$WORKDIR/case31b.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-31b.log" ]]; then
+  fail "hosting-public: the deploy never published, so 31a's reconciliation is not attributable to the Hosting source."
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31b.log"; then
+  fail "hosting-public: a Hosting config the CLI would not build as a framework still forfeited the exemption. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-31b.log" >&2
+else
+  pass "hosting-public: a plain public directory runs no framework build and keeps the single-endpoint scope exact (rc=$RC31B)."
 fi
 # ---------------------------------------------------------------------------
 # Summary

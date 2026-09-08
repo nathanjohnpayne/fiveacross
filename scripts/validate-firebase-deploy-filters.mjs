@@ -34,7 +34,10 @@ const {
   checkValidTargetFilters,
 } = require("firebase-tools/lib/checkValidTargetFilters");
 const { Config } = require("firebase-tools/lib/config");
-const { VALID_DEPLOY_TARGETS } = require("firebase-tools/lib/deploy");
+const {
+  VALID_DEPLOY_TARGETS,
+  isDeployingWebFramework,
+} = require("firebase-tools/lib/deploy");
 const { filterTargets } = require("firebase-tools/lib/filterTargets");
 const {
   extract,
@@ -2120,6 +2123,47 @@ function relevantTargetConfigs(target, only, configSource) {
  * shape like an EXTERNALISED `"hosting": "hosting.config.json"` ends up with is
  * whatever the CLI ends up with, rather than this classifier's reading of it.
  */
+/**
+ * Why an exact classification is refused when the pinned CLI would PREPARE A
+ * WEB FRAMEWORK, or null when it would not.
+ *
+ * `deploy/index.js` runs `prepareFrameworks("deploy", …)` at the very top of the
+ * deploy — before `hasPinnedFunctions`, before the `--public` override, and
+ * before it chains a single `predeploy` hook. That is not a publishing detail:
+ * `frameworks/index.js` runs the app's OWN framework build, then sets
+ * `config.public` to the generated `.firebase/<site>/hosting` directory and, for
+ * an SSR framework, appends a generated Functions codebase to `options.config`.
+ * So by the time the first hook runs, the deploy has already built code this
+ * rehearsal never ran, moved the `$RESOURCE_DIR` a Hosting hook is handed, and
+ * possibly added a Functions artifact to the surface being classified (Codex P1,
+ * round 26 on #1107).
+ *
+ * Modelling that is not on the table — it is an arbitrary framework build with
+ * its own toolchain — so the whole project is refused instead, before anything
+ * is staged and before any hook runs. The condition is the pinned CLI's OWN
+ * `isDeployingWebFramework`, imported rather than paraphrased, under the same
+ * `targetNames.includes("hosting")` guard it is called behind: a Hosting config
+ * with a `source`, selected by this request. A plain `public` Hosting config is
+ * not a framework deploy and is exempt exactly as before.
+ *
+ * THE EXPERIMENT FLAG IS DELIBERATELY NOT CONSULTED. The CLI does not branch on
+ * `webframeworks`; it calls `experiments.assertEnabled`, which THROWS. So the
+ * two states behind this condition are "the framework build runs before the
+ * hooks" and "the deploy fails before it starts" — and an exact classification
+ * is meaningless in both. Reading the flag would only pick which of them to be
+ * wrong about, and it lives in a configstore this classifier would then have to
+ * resolve the same way the CLI does.
+ */
+function frameworkPreparationRefusal(deployTargets, deployConfig, only) {
+  if (!deployTargets.includes("hosting")) return null;
+  if (!isDeployingWebFramework({ config: deployConfig, only })) return null;
+  return (
+    "a selected Hosting config deploys a web framework from `source`, so the pinned CLI runs " +
+    "prepareFrameworks() — the framework's own build, which replaces hosting.public and can write a " +
+    "Functions artifact — before the first predeploy hook"
+  );
+}
+
 function applyPublicDirectoryOverride(config, publicDir, deployTargets) {
   if (!publicDir) return;
   if (!deployTargets.includes("hosting")) return;
@@ -2246,6 +2290,12 @@ class RehearsalExit {
  * for a checkout that is no longer the tree `deploy.sh`'s clean-tree guard
  * approved (Codex P1, round 25 on #1107).
  *
+ * WHAT THE DEPLOY DOES BEFORE THE FIRST HOOK IS PART OF THE REQUEST. A selected
+ * Hosting config with a `source` makes the pinned CLI run the app's own
+ * framework build ahead of every lifecycle hook, replacing `hosting.public` and
+ * possibly writing a Functions artifact; the whole project is refused rather
+ * than rehearsed (`frameworkPreparationRefusal`).
+ *
  * WHAT THE EXEMPTION REQUIRES OF THE LAYOUT. `firebase.json` at the CHECKOUT
  * ROOT. The staging and the fingerprint both start from the configured project
  * directory, so with the config below a repository root the deploy's inputs are
@@ -2264,7 +2314,7 @@ class RehearsalExit {
  * hooks at all.
  *
  * FAILS CLOSED on every uncertainty: a config directory below a repository root,
- * a containment this machine cannot prove,
+ * a Hosting config the CLI would build as a web framework, a containment this machine cannot prove,
  * an unmirrorable source path, a staging failure, a
  * symlink out of the staged tree, a non-zero or timed-out hook, a write into
  * the repository metadata, a discovery manifest, an artifact that will not
@@ -2293,6 +2343,7 @@ async function buildAndInventoryProject({
   discoveryTimeoutMs,
   writeContainment,
   onStaged,
+  frameworkPreparation,
   configs,
   codebaseNames,
   deployTargets,
@@ -2326,6 +2377,12 @@ async function buildAndInventoryProject({
     existsSync(join(projectDir, ".git")) ? null : nearestAncestorGit(projectDir),
   );
   if (nested) return refuseAll(nested);
+
+  // The framework build the pinned CLI runs BEFORE the first hook is a step
+  // this rehearsal cannot reproduce, so the whole project is refused here —
+  // ahead of the staging and ahead of every child process, for the same reason
+  // the nested-config refusal is. See `frameworkPreparationRefusal`.
+  if (frameworkPreparation) return refuseAll(frameworkPreparation);
 
   const relevant = relevantFunctionsConfigs(only, configs);
   const unstageable = relevant.find((config) => !config.sourceRel);
@@ -3936,6 +3993,15 @@ export async function classifyFirebaseDeployRequest(
   // in this order, and the raw config those non-Functions hooks come from.
   // `targetNames.unshift("functions")`: Hosting with a pinned rewrite deploys
   // Functions whether or not the request named it.
+  // Asked BEFORE the unshift and before the `--public` override, because that
+  // is where `deploy/index.js` asks it: `prepareFrameworks` runs ahead of both.
+  // Only the `functions` target is ever added below, so the Hosting guard reads
+  // the same either way. See `frameworkPreparationRefusal`.
+  singleEndpointExports.staging.frameworkPreparation = frameworkPreparationRefusal(
+    deployTargets,
+    deployConfig,
+    only,
+  );
   if (pinned.functionsReAdded && !deployTargets.includes("functions")) deployTargets.unshift("functions");
   singleEndpointExports.staging.deployTargets = deployTargets;
   // `-p, --public <path>` lands in the config BEFORE the plan is taken from it,
