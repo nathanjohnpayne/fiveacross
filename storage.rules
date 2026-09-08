@@ -74,8 +74,12 @@ service firebase.storage {
     // `{file}` is `<proofId>.<ext>` — `uploadProofMedia` writes that shape and
     // only that shape (`src/data/storage.ts`), and `firestore.rules` pins the
     // Proof document's `storagePath` to it — so the Proof id is the basename.
-    // `split('[.]')` is an RE2 split on a LITERAL dot (the class escapes it);
-    // a Firestore auto-id carries none, so `[0]` is the id.
+    // Only the FINAL extension is stripped (Phase 4b P1 on PR #1157): Firestore
+    // permits a Proof id that itself carries a dot (`p.q`, media `p.q.jpg`),
+    // and a split on the first dot looked that up as `proofs/p` — absent, so
+    // the orphan branch released media a surviving document still pointed at.
+    // `replace('[.][^.]*$', '')` is an RE2 replace of the last dot and what
+    // follows it, which is the extension `uploadProofMedia` appended.
     //
     // THE BUDGET, SPENT PRECISELY. Storage Rules allow two Firestore accesses
     // per evaluation. The orphan clause is FIRST and short-circuiting, so the
@@ -100,7 +104,7 @@ service firebase.storage {
     }
     function proofDocMissing(eventId, file) {
       return !firestore.exists(
-        /databases/(default)/documents/events/$(eventId)/proofs/$(file.split('[.]')[0]));
+        /databases/(default)/documents/events/$(eventId)/proofs/$(file.replace('[.][^.]*$', '')));
     }
     function mayDeleteProofMedia(eventId, uid, file) {
       return signedIn()

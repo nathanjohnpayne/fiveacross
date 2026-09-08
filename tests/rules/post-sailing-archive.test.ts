@@ -866,6 +866,44 @@ describe.each([
     await assertSucceeds(deleteObject(ref(storageOf(ALICE), orphan)));
   });
 
+  it('keeps a DOTTED Proof id whole when it asks whether the media is orphaned', async () => {
+    // Phase 4b P1, PR #1157 run 2. Firestore permits a Proof named `p.q`, and
+    // `firestore.rules` accepts its `proofs/{event}/{uid}/p.q.jpg` path; a
+    // split on the FIRST dot looked up `proofs/p` — absent — and the orphan
+    // branch then released media a surviving document still pointed at.
+    const dotted = `proofs/${EVENT}/${ALICE}/p.q.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/proofs/p.q`), {
+        uid: ALICE,
+        displayName: 'Alice',
+        photoURL: null,
+        type: 'photo',
+        cellIndex: 6,
+        itemText: 'Something happens',
+        storagePath: dotted,
+        mediaURL: 'https://example.test/p.q.jpg',
+        thumbURL: null,
+        text: '',
+        createdAt: NOW(),
+        reportCount: 0,
+        status: 'active',
+        visionFlag: null,
+        source: null,
+        dayIndex: 0,
+      });
+    });
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), dotted), TINY, IMAGE));
+    await close();
+    // Its document exists, so the freeze holds — this is NOT an orphan.
+    await assertFails(deleteObject(ref(storageOf(ALICE), dotted)));
+    // A genuinely orphaned dotted name is still the owner's to clear.
+    const orphan = `proofs/${EVENT}/${ALICE}/x.y.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), orphan), TINY, IMAGE);
+    });
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), orphan)));
+  });
+
   it('DENIES deleting the Event document itself', async () => {
     // Phase 4b P1, PR #1139. Deleting a document leaves its subcollections in
     // place, and a MISSING Event document reads as open (the pre-freeze default
