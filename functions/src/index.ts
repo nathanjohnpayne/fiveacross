@@ -369,6 +369,14 @@ export const revokeDeletedProofMedia = onDocumentCreated(
     await revokeProofMedia(
       {
         // Strongly consistent, and read at SWEEP time rather than trusted from
+        // the event snapshot: `event.data` is the row as it was CREATED, this is
+        // whether it is still standing (#1153, Phase 4b P2). A delivery can
+        // arrive long after the deleting client retired the row — the ordinary
+        // case, since the client's own Storage delete usually wins — and the
+        // rules free the Proof id the moment it does.
+        tombstoneExists: async () =>
+          (await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get()).exists,
+        // Strongly consistent, and read at SWEEP time rather than trusted from
         // the row: the tombstone says a Proof was deleted, this says whether one
         // is there now (#1153, Phase 4b P1).
         proofExists: async () =>

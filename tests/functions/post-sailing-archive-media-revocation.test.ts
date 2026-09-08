@@ -27,6 +27,9 @@ function makeDeps(
   // is what a standing tombstone is supposed to mean; the cases that matter set
   // it true, or reject, on purpose.
   proofExists: () => Promise<boolean> = async () => false,
+  // Whether the row that triggered this delivery is still standing. Default
+  // TRUE — the ordinary delivery, arriving while the revocation is still owed.
+  tombstoneExists: () => Promise<boolean> = async () => true,
 ): RevokeProofMediaDeps & {
   objectDeletes: Array<{ storagePath: string; generation: string | null }>;
   tombstoneDeletes: number;
@@ -38,6 +41,7 @@ function makeDeps(
     objectDeletes,
     tombstoneDeletes: 0,
     warnings,
+    tombstoneExists,
     proofExists,
     deleteObject: async (storagePath: string, generation: string | null) => {
       objectDeletes.push({ storagePath, generation });
@@ -151,6 +155,91 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.tombstoneDeletes).toBe(1);
   });
 
+  it('ABANDONS a delivery whose tombstone has already been retired — bucket untouched, nothing deleted', async () => {
+    // The stale-delivery hazard (#1153, Phase 4b P2). The event snapshot
+    // describes the row as it was CREATED; `retry: true` and ordinary delivery
+    // latency both let this run long after the deleting client discharged the
+    // revocation and cleared the row — which is the ORDINARY outcome, since the
+    // client's own Storage delete usually wins the race.
+    //
+    // The moment that row goes, `firestore.rules` frees the Proof id for reuse.
+    // A permitted re-post uploads its replacement media BEFORE it creates its
+    // Proof document, so the Proof read below is still false, and a row whose
+    // metadata read had failed carries no generation to protect the object — the
+    // delayed delivery would delete the REPLACEMENT and leave the new Feed entry
+    // pointing at nothing.
+    //
+    // So a missing row ends the delivery outright. `deleteTombstone` is NOT
+    // called either: there is nothing of ours left to retire, and a blind delete
+    // at that path could only take a LATER revocation's row with it.
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket must not be reached');
+      },
+      async () => false,
+      async () => false,
+    );
+
+    await revokeProofMedia(deps, TARGET);
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(0);
+    expect(deps.warnings).toHaveLength(1);
+  });
+
+  it('REDELIVERS rather than deleting when it cannot tell whether the tombstone still stands', async () => {
+    // Same rule as the Proof read: "I could not tell" must never resolve to
+    // "delete it". The failure propagates with the row intact and `retry: true`
+    // brings the sweep back.
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket must not be reached');
+      },
+      async () => false,
+      async () => {
+        throw new Error('firestore unavailable');
+      },
+    );
+
+    await expect(revokeProofMedia(deps, TARGET)).rejects.toThrow('firestore unavailable');
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(0);
+  });
+
+  it('asks whether the debt is still owed BEFORE the Proof and BEFORE the bucket', async () => {
+    // Order is the claim, not merely presence: the row is re-read on EVERY
+    // delivery and ahead of everything else, because a retired row makes every
+    // later question one about somebody else's object. The ordinary delivery is
+    // otherwise unchanged — object first, tombstone after.
+    const order: string[] = [];
+    const deps = makeDeps(
+      async () => {
+        order.push('object');
+      },
+      async () => {
+        order.push('proof');
+        return false;
+      },
+      async () => {
+        order.push('tombstone-read');
+        return true;
+      },
+    );
+    const wrapped: RevokeProofMediaDeps = {
+      ...deps,
+      deleteTombstone: async () => {
+        order.push('tombstone-delete');
+        await deps.deleteTombstone();
+      },
+    };
+
+    await revokeProofMedia(wrapped, TARGET);
+
+    expect(order).toEqual(['tombstone-read', 'proof', 'object', 'tombstone-delete']);
+    expect(paths(deps.objectDeletes)).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
+  });
+
   it('SKIPS the bucket entirely when a Proof document holds this id again', async () => {
     // The reuse hazard (#1153, Phase 4b P1). A standing tombstone is supposed to
     // mean a Proof that is already gone — `firestore.rules` admits the row only
@@ -238,6 +327,7 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     try {
       await revokeProofMedia(
         {
+          tombstoneExists: async () => true,
           proofExists: async () => false,
           deleteObject: async () => {
             throw new Error('the bucket must not be reached');

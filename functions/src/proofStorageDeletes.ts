@@ -41,6 +41,19 @@ export interface ProofStorageDeleteDoc {
 
 export interface RevokeProofMediaDeps {
   /**
+   * Whether `events/{eventId}/proofStorageDeletes/{proofId}` — the row that
+   * TRIGGERED this delivery — is still standing, read with the Admin SDK.
+   *
+   * The event snapshot is a statement about the past, and a delivery can arrive
+   * arbitrarily late: `retry: true` keeps a failed one coming back for days, and
+   * even a first delivery is not instantaneous. By the time it runs, the
+   * revocation may already be discharged and the row retired — by the deleting
+   * client, or by an earlier delivery of this very event — at which point the
+   * rules deliberately FREE the Proof id for reuse. This is the sweeper asking
+   * whether the debt it is about to collect is still owed.
+   */
+  tombstoneExists(): Promise<boolean>;
+  /**
    * Whether `events/{eventId}/proofs/{proofId}` still exists, read with the
    * Admin SDK. A standing tombstone is supposed to mean a Proof that is gone;
    * this is the sweeper asking rather than assuming.
@@ -150,19 +163,43 @@ export function isGenerationMismatch(err: unknown): boolean {
  * buys an immortal poison row. It is logged, because the only way one exists is
  * a write that did not come through `firestore.rules`.
  *
- * TWO CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a promise
- * about the past and this runs in the future (#1153, Phase 4b P1). A tombstone
- * is admitted only alongside its own Proof's deletion and the Proof create arm
- * now refuses to bring that id back while the row stands, so a live Proof under
- * a pending revocation should be unreachable — but the Admin SDK bypasses those
- * rules entirely and this handler holds a bucket-wide delete, so "should be
- * unreachable" is not a safe premise for revoking media. The Proof is therefore
- * read: if it is THERE, the revocation is abandoned rather than performed,
- * because whatever the row was owed for, it is not this Feed entry's media.
- * And the object is deleted by GENERATION when the row recorded one, so even a
- * name re-occupied by a blob with no document pointing at it is left alone
- * instead of swept. Both retire the row: neither condition can improve on
- * redelivery, and a row that cannot be discharged is a poison row.
+ * THREE CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
+ * promise about the past and this runs in the future (#1153, Phase 4b P1 and
+ * P2). A tombstone is admitted only alongside its own Proof's deletion and the
+ * Proof create arm now refuses to bring that id back while the row stands, so a
+ * live Proof under a pending revocation should be unreachable — but the Admin
+ * SDK bypasses those rules entirely and this handler holds a bucket-wide
+ * delete, so "should be unreachable" is not a safe premise for revoking media.
+ *
+ * FIRST, IS THE DEBT STILL OWED. The triggering row is re-read on EVERY
+ * delivery, not only when the path is unbound: the ordinary case is precisely
+ * the retired one — the deleting client's own Storage delete usually wins the
+ * race and clears the row before this ever runs — and the moment it is cleared
+ * the rules FREE the Proof id for reuse. A delayed delivery that skipped this
+ * check would still be holding a generation-less row (a metadata read that
+ * failed) and would delete whatever now answers to that path: a permitted
+ * re-post can have uploaded its replacement media BEFORE creating its Proof
+ * document, so the Proof read below is still false and the object taken is the
+ * NEW one, leaving a live Feed entry pointing at media that is gone. A missing
+ * row therefore ends the delivery outright — no bucket call, and no tombstone
+ * delete either, because there is nothing left to retire and a blind delete
+ * could only take a LATER revocation's row with it.
+ *
+ * SECOND, IS THE PROOF BACK. If it is THERE, the revocation is abandoned rather
+ * than performed, because whatever the row was owed for, it is not this Feed
+ * entry's media.
+ *
+ * THIRD, IS IT THE SAME OBJECT. The object is deleted by GENERATION when the
+ * row recorded one, so even a name re-occupied by a blob with no document
+ * pointing at it is left alone instead of swept.
+ *
+ * The last two retire the row: neither condition can improve on redelivery, and
+ * a row that cannot be discharged is a poison row. The first retires nothing,
+ * because the row it would retire is already gone.
+ *
+ * A read failure in either Firestore check PROPAGATES rather than resolving to
+ * a delete: "I could not tell" must never become "delete it", and `retry: true`
+ * brings the sweep back.
  */
 export async function revokeProofMedia(
   deps: RevokeProofMediaDeps,
@@ -177,6 +214,23 @@ export async function revokeProofMedia(
       storagePath: tombstone.storagePath,
     });
     await deps.deleteTombstone();
+    return;
+  }
+
+  // THE ROW MUST STILL BE STANDING. One strongly consistent read, taken on
+  // every delivery before anything else is asked, because a retired row means
+  // the revocation is already discharged AND the Proof id is free again — so
+  // every later question in this function would be answered about somebody
+  // else's object. Nothing is deleted here, the tombstone least of all: there is
+  // no row of ours left to retire, and a blind delete would take a LATER
+  // revocation's row with it. A read failure propagates, for the same reason the
+  // Proof read's does.
+  if (!(await deps.tombstoneExists())) {
+    warn('proof media revocation skipped: the tombstone was already retired', {
+      eventId,
+      proofId,
+      storagePath,
+    });
     return;
   }
 
