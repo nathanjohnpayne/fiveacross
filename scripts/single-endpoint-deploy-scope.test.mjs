@@ -1164,6 +1164,31 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
+  it("refuses a branch on a firebase-admin app's locationId", async () => {
+    // Codex P1, round 26 on #1107. `adminSdkConfig` carries `locationId`, and
+    // it was the one field the watched set forgot — which makes it the exact
+    // shape the differential probe cannot settle on its own: the minimal probe
+    // supplies none and the populated probe invents `us-central1`, so a
+    // condition that matches the REAL project passes under neither. Both probes
+    // report the single endpoint, agree, and exempt a group the deploy exports.
+    // Reading a value this classifier cannot supply is the consultation; the
+    // agreement is not evidence.
+    await withPrewrittenArtifact(
+      [
+        'const admin = require("firebase-admin");',
+        "admin.initializeApp();",
+        "const options = admin.app().options;",
+        'const grouped = options.locationId === "nam5";',
+        "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
+      ].join("\n"),
+      async (configPath) => {
+        expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(
+          ALL_INVOKERS_CONSERVATIVE,
+        );
+      },
+    );
+  });
+
   it("reads an artifact's mutated options snapshot the way the real SDK does", async () => {
     // Codex P1, round 25 on #1107. `FirebaseApp`'s own `get options()` returns
     // `deepCopy(this.options_)`, so a write to one result is invisible to the

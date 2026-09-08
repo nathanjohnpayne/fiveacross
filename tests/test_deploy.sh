@@ -3002,6 +3002,47 @@ run_dir_mtime_case() {
 
 run_dir_mtime_case 29a functions published
 run_dir_mtime_case 29b shared/stamp stopped
+
+# ---------------------------------------------------------------------------
+# Case 30 (#547 — Codex P1, round 26): `locationId` is one of the firebase-admin
+# app options this classifier cannot supply, so reading it forfeits the
+# exemption.
+#
+# `adminSdkConfig` carries `locationId`, and it is the exact shape the
+# differential probe cannot settle on its own: the minimal probe supplies none
+# and the populated probe invents `us-central1`, so a condition that matches the
+# REAL project is false under both rehearsals. The two probes agree, the scope is
+# exempted, and the deploy exports the other branch with its invoker
+# reconciliation switched off. The artifact below is that condition, so the
+# deployment-safety property asserted here is the reconciliation: submitbugreport
+# must still be reconciled. Case 28b is its control — the same fixture shape,
+# reading app.options without consulting a value this classifier cannot supply,
+# which really is exempted.
+# ---------------------------------------------------------------------------
+ADMIN_OPTIONS_LOCATION_BRANCH='const options = admin.app().options;
+exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
+
+REPO30="$WORKDIR/case30-admin-options-location"
+init_admin_options_repo "$REPO30" "$ADMIN_OPTIONS_LOCATION_BRANCH"
+: >"$WORKDIR/ofd-calls-30.log"
+: >"$WORKDIR/gcloud-calls-30.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-30.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-30.log" \
+  bash -c "cd '$REPO30' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case30.out" 2>"$WORKDIR/case30.err"
+RC30=$?
+set -e
+if [[ $RC30 -ne 0 ]]; then
+  fail "admin-options-location: deploy.sh returned $RC30. stderr was:"
+  cat "$WORKDIR/case30.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-30.log"; then
+  fail "admin-options-location: an artifact branching on adminSdkConfig's locationId was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-30.log" >&2
+else
+  pass "admin-options-location: reading a project locationId this preflight cannot supply forfeits the exemption (rc=$RC30)."
+fi
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

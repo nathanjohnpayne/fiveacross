@@ -335,13 +335,26 @@ const PROJECT_CONFIG_VARS = new Set(["FIREBASE_CONFIG"]);
  * The firebase-admin app options this classifier cannot supply.
  *
  * The same line as above, drawn through the object `initializeApp()` builds:
- * `storageBucket` and `databaseURL` are exactly the `FIREBASE_CONFIG` fields
- * `CONFIG_PROBES` has to invent, and `credential` is the ADC document, which an
- * offline preflight can only shape rather than mint. `projectId` is left out for
- * the reason its environment spelling is: it is the pinned project, correct in
- * both probes.
+ * `storageBucket`, `databaseURL` and `locationId` are exactly the
+ * `FIREBASE_CONFIG` fields `CONFIG_PROBES` has to invent, and `credential` is
+ * the ADC document, which this classifier gets from the wrapper or not at all.
+ * `projectId` is left out for the reason its environment spelling is: it is the
+ * pinned project, correct in both probes.
+ *
+ * `locationId` was the field the list forgot (Codex P1, round 26 on #1107), and
+ * it is the exact shape the differential probe cannot answer on its own:
+ * `adminSdkConfig` carries it, the minimal probe supplies none and the populated
+ * probe invents `us-central1`, so a branch such as `options.locationId ===
+ * "nam5"` is FALSE under both rehearsals and TRUE for the real project. The two
+ * probes agree, the exemption is granted, and the deploy exports the other
+ * branch. Watching the read is what turns that agreement back into a refusal.
  */
-const ADMIN_OPTION_KEYS = new Set(["storageBucket", "databaseURL", "credential"]);
+const ADMIN_OPTION_KEYS = new Set([
+  "storageBucket",
+  "databaseURL",
+  "locationId",
+  "credential",
+]);
 
 /** The module requests whose exports hand out a firebase-admin app. */
 const ADMIN_ENTRYPOINTS = new Set(["firebase-admin", "firebase-admin/app"]);
