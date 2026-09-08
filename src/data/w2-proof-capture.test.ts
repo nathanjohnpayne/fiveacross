@@ -1377,6 +1377,53 @@ describe('deleteProof — the media revocation outlives the commit that removes 
     expect(call?.[1]).toMatchObject({ uid: 'u1', storagePath: `proofs/${EVENT_ID}/u1/p.q.jpg` });
   });
 
+  it('takes the object from the PROOF DOCUMENT, not the caller’s argument (#1153)', async () => {
+    // Both call sites read `storagePath` off a Feed/queue snapshot that can be
+    // stale, and an authorized caller could construct the batch by hand. The
+    // Proof document is the only thing that ever recorded which object was its
+    // own, and the commit destroys it — so a takedown that trusted the argument
+    // could revoke a name this Proof never used while its real media stayed
+    // reachable, with nothing left to notice. `firestore.rules` binds the row to
+    // the stored path for the same reason, so a disagreement would be DENIED and
+    // the denial would fail the whole takedown.
+    //
+    // `.webm` under the same owner and the same Proof id is the shape that
+    // passes every OTHER check the rules make.
+    const stored = `proofs/${EVENT_ID}/u1/P.jpg`;
+    const stale = `proofs/${EVENT_ID}/u1/P.webm`;
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: stored };
+
+    await deleteProof('P', stale);
+
+    expect(setPayload('/proofStorageDeletes/')).toEqual({
+      storagePath: stored,
+      uid: 'u1',
+      requestedAt: 1000,
+      // NO generation. The metadata read aims at the argument, because that is
+      // the only path in hand before the transaction opens — so when the two
+      // disagree the value it returned describes some other blob, and binding
+      // the sweep to it would answer 412 against the RIGHT object and retire the
+      // row with the media still in place. The key is optional exactly so this
+      // can be dropped rather than written wrong.
+    });
+    expect(generationSpy).toHaveBeenCalledWith(stale);
+    // The fast path follows the row, so the two can never target different blobs.
+    expect(deleteStorageSpy).toHaveBeenCalledWith(stored);
+    expect(deleteStorageSpy).not.toHaveBeenCalledWith(stale);
+  });
+
+  it('revokes NOTHING for a TEXT Proof, whatever object the caller names', async () => {
+    // A Proof that stored no object owns none, and an argument cannot conjure
+    // one: the row would be refused by the rules and the Storage delete would be
+    // aimed at a blob this Proof never referenced.
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: null };
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(tombstoneSet()).toBe(-1);
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+
   it('writes NO tombstone for a text Proof, an already-deleted Proof, or an unparseable path', async () => {
     // Each still behaves exactly as it did before the tombstone existed. A text
     // Proof has no object; an already-deleted Proof has nothing to record (and

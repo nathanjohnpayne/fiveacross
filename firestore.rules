@@ -2096,7 +2096,24 @@ service cloud.firestore {
           // sweeper to notice.
           && (request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.jpg'
               || request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.webm'
-              || request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.m4a');
+              || request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.resource.data.uid + '/' + proofId + '.m4a')
+          // …AND THE OBJECT THAT PROOF ACTUALLY NAMED (#1153, Phase 4b P2). The
+          // shape pin above and the owner binding together still admit a row
+          // for the WRONG object: a `.jpg` Proof can be deleted alongside a
+          // tombstone naming the same owner's `{proofId}.webm`, because every
+          // clause so far is satisfied by any of the three extensions. The
+          // client and the sweeper then revoke a name the Proof never used
+          // while its real media stays reachable — with the Proof document, the
+          // only thing that recorded which object it was, already gone.
+          //
+          // So the row must name what the live Proof stores. Same `get()` the
+          // owner check above performs, served from the per-request access
+          // cache rather than counted twice, so the arm's budget is unchanged.
+          //
+          // A Proof with no stored `storagePath` — a text Proof — is therefore
+          // refused a tombstone outright, which is correct: it owes no
+          // revocation, and `deleteProof` writes no row for one anyway.
+          && get(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId)).data.storagePath == request.resource.data.storagePath;
         // Retiring a discharged revocation. The Admin SDK sweeper bypasses these
         // rules; this arm is for the client that just watched its own Storage
         // delete succeed. Ungated by the freeze on purpose — a tombstone that

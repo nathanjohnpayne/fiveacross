@@ -531,6 +531,23 @@ export class ProofBacksMarkWhileClosingError extends Error {
 
 export async function deleteProof(
   id: string,
+  // A HINT, NOT THE ANSWER (#1153, Phase 4b P2). Both call sites read it off a
+  // Feed/queue snapshot that can be stale, and an authorized caller could pass
+  // anything at all; the row and the Storage delete are both bound to the Proof
+  // document READ INSIDE THE TRANSACTION instead, so a wrong argument can no
+  // longer point a revocation at an object this Proof never owned. When the two
+  // disagree, the STORED path wins.
+  //
+  // Kept in the signature rather than dropped, because it is the only path in
+  // hand BEFORE the transaction opens, and the object's Storage `generation`
+  // has to be read there: the transaction callback must not be doing unrelated
+  // network I/O on every retry, and the value has to exist by the time the
+  // tombstone is written inside it. So the argument buys the metadata read a
+  // path to aim at — and when it turns out to disagree with the stored one, the
+  // generation it produced is about the wrong object and is dropped rather than
+  // written (the key is optional exactly so this can happen). It also remains
+  // the only path available when the Proof document is already gone, which is
+  // the re-run of a takedown whose Storage half failed.
   storagePath?: string | null,
   // Daily-cards mode (#246): unmark the backing cell on the DAY-SCOPED board for
   // the Proof's OWN `dayIndex` and fold the owner's stats into that Day's bucket,
@@ -593,6 +610,24 @@ export async function deleteProof(
   // post-commit half.
   let tombstoned = false;
 
+  // THE OBJECT THIS TAKEDOWN ACTUALLY REVOKES, taken from the Proof document
+  // the transaction read rather than from the caller's argument (#1153, Phase
+  // 4b P2). The Proof is the only thing that ever recorded which object was
+  // its own, and the commit destroys it — so a stale or simply wrong argument
+  // would desynchronise the tombstone from the Proof at precisely the moment
+  // nothing is left to correct it, and the client and the sweeper would then
+  // revoke a name this Proof never used while its real media stayed reachable.
+  // `firestore.rules` now binds the row to the stored path for the same reason,
+  // so a disagreement would be DENIED — and a denial inside this transaction
+  // fails the whole takedown.
+  //
+  // Assigned per attempt, like `mediaURL` and `tombstoned`: only the committed
+  // attempt's value may drive the post-commit half. `null` for a text Proof,
+  // which owns no object at all; the caller's argument ONLY when the Proof
+  // document could not be read, where there is no stored value to prefer and
+  // the argument is all a retried takedown has left.
+  let revokePath: string | null = null;
+
   // THE GENERATION OF THE OBJECT THIS TAKEDOWN IS ABOUT (#1153, Phase 4b P1).
   // `storagePath` names a slot rather than a blob, and the sweeper below may run
   // long after this delete: something else can legitimately occupy that name by
@@ -654,6 +689,14 @@ export async function deleteProof(
     const proofSnap = await tx.get(proofRef);
     const proof = proofSnap.data() as ProofDoc | undefined;
     mediaURL = proof?.mediaURL;
+    // The stored path WINS over the argument. A Proof that was read and stores
+    // nothing owns no object, so nothing is revoked for it — passing an
+    // argument cannot conjure one. Only an unreadable Proof falls back.
+    revokePath = proof
+      ? typeof proof.storagePath === 'string'
+        ? proof.storagePath
+        : null
+      : (storagePath ?? null);
 
     // `!archived` rather than "not closed": an archived Event needs none of
     // this and reads nothing, while a CLOSING one still has to learn whether
@@ -818,8 +861,8 @@ export async function deleteProof(
     // revocation cannot be re-pointed). The first attempt's tombstone is still
     // standing in that case, so the revocation is still owed either way.
     tombstoned = false;
-    if (proof && storagePath) {
-      const ownerUid = proofMediaOwnerUid(storagePath, eventId, id);
+    if (proof && revokePath) {
+      const ownerUid = proofMediaOwnerUid(revokePath, eventId, id);
       // Both halves the rule will check, checked here first: the path parses to
       // a canonical object, and the uid it names is the Proof's own owner (the
       // rule binds the row to the live Proof document, so a disagreement would
@@ -834,18 +877,24 @@ export async function deleteProof(
       // below and this write is never made without it.
       if (ownerUid && ownerUid === proof.uid) {
         tx.set(rawProofStorageDelete(id, eventId), {
-          storagePath,
+          storagePath: revokePath,
           uid: ownerUid,
           // Operational only — how long a revocation has been pending. It is
           // deliberately NOT bounded to `request.time` in the rules: a wrong
           // clock could then deny the write, and a denial here fails the whole
           // takedown, while a lie about the stamp cannot redirect the delete.
           requestedAt: Date.now(),
-          // Present only when it could be read. The rules arm accepts the key as
-          // optional for exactly this reason, and OMITTING it is what keeps a
-          // metadata failure from turning into a denied write inside the
-          // takedown's own transaction.
-          ...(generation === null ? {} : { generation }),
+          // Present only when it could be read — AND only when it is about THIS
+          // object. The metadata read above aimed at the caller's argument
+          // because that is the only path in hand before the transaction opens;
+          // if the stored path turns out to disagree, the generation describes
+          // some other blob and binding the sweep to it would answer 412 against
+          // the right object and retire the row with the media still in place.
+          // The rules arm accepts the key as optional for exactly this reason,
+          // and OMITTING it is what keeps a metadata failure — or a disagreeing
+          // argument — from turning into a denied write inside the takedown's
+          // own transaction.
+          ...(generation === null || storagePath !== revokePath ? {} : { generation }),
         });
         tombstoned = true;
       }
@@ -864,8 +913,11 @@ export async function deleteProof(
   // is never reported as clean — and it no longer has to carry the retry with
   // it, because the sweeper does.
   try {
-    if (storagePath) {
-      await deleteStoragePath(storagePath);
+    // The SAME object the tombstone names (#1153, Phase 4b P2) — the stored one
+    // wherever the transaction could read the Proof, so the fast path and the
+    // durable record can never target different blobs.
+    if (revokePath) {
+      await deleteStoragePath(revokePath);
       // The object is gone (`deleteStoragePath` swallows only "already gone"
       // and rethrows every real failure), so the pending revocation has been
       // discharged and the tombstone is retired. Failures HERE are swallowed on

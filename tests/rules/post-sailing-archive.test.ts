@@ -1274,6 +1274,23 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
   const mintAlone = (uid: string, tombstone: Record<string, unknown> = TOMBSTONE(), proofId = PROOF) =>
     setDoc(doc(db(uid), tombstonePath(proofId)), tombstone);
 
+  // THE PROOF THIS SUITE TOMBSTONES ACTUALLY CARRIES MEDIA (#1153, Phase 4b P2).
+  // The shared fixture seeds every Proof as a TEXT one — `storagePath: null` —
+  // which the arm now refuses a tombstone outright, and rightly: a Proof that
+  // stored no object owes no revocation. Every case here is about a Proof that
+  // DOES own media, so it is re-seeded to store exactly the `.jpg` the rows
+  // below name. (That mismatch is what let the original suite accept a `.jpg`
+  // row for a text Proof and miss the binding this arm now makes.)
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`),
+        { type: 'photo', storagePath: photoPath, mediaURL: 'https://example.test/p.jpg' },
+        { merge: true },
+      );
+    });
+  });
+
   /** Seed one out-of-band, for the arms that need an existing document. */
   async function seedTombstone(): Promise<void> {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
@@ -1323,6 +1340,9 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
         cellIndex: 3,
         status: 'active',
         createdAt: NOW(),
+        // The object the row names — the arm binds the two together, so a
+        // re-seed that dropped it would fail this case for the wrong reason.
+        storagePath: photoPath,
       });
     });
     await freeze();
@@ -1419,6 +1439,47 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
       takedown(ADMIN, TOMBSTONE({ storagePath: `proofs/${LEGACY_EVENT}/${ALICE}/${PROOF}.jpg` })),
     );
     await assertFails(takedown(ADMIN, TOMBSTONE({ storagePath: `avatars/${ALICE}.jpg` })));
+  });
+
+  it('DENIES a row naming an object the live Proof never stored (#1153)', async () => {
+    // The gap the shape pin alone left. `{proofId}.webm` satisfies every clause
+    // this arm had — the Event prefix, the Proof id, the owner the row declares
+    // and the owner the Proof carries — while naming an object this `.jpg`
+    // Proof never had. Admitting it lets the client and the sweeper revoke the
+    // wrong name, and the Proof document, the only record of which object was
+    // really its own, is gone by the time anyone could notice.
+    //
+    // Both callers are bound: this is a statement about the row, not about
+    // permission.
+    const wrongObject = `proofs/${EVENT}/${ALICE}/${PROOF}.webm`;
+    await assertFails(takedown(ADMIN, TOMBSTONE({ storagePath: wrongObject })));
+    await assertFails(takedown(ALICE, TOMBSTONE({ storagePath: wrongObject })));
+    // …and the row that names what the Proof actually stores still lands, so
+    // the denial above is about the object and not about the arm.
+    await assertSucceeds(takedown(ADMIN));
+  });
+
+  it('DENIES a tombstone for a TEXT Proof, which stored no object to revoke', async () => {
+    // `PROOF_MEDIA` keeps the shared fixture's shape: `type: 'text'`,
+    // `storagePath: null`. A Proof that never uploaded anything owes no
+    // revocation, so the well-formed `.jpg` row its id would accept on shape
+    // alone is refused — `deleteProof` writes none for a text Proof either, and
+    // a row that could be minted here would authorize a delete against a name
+    // no Proof in this Event ever used.
+    await assertFails(
+      takedown(
+        ADMIN,
+        TOMBSTONE({ storagePath: mediaProofPath }),
+        PROOF_MEDIA,
+      ),
+    );
+    await assertFails(
+      takedown(
+        ALICE,
+        TOMBSTONE({ storagePath: mediaProofPath }),
+        PROOF_MEDIA,
+      ),
+    );
   });
 
   it('DENIES every client READ and every UPDATE, the admin’s included', async () => {
@@ -1574,6 +1635,66 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
       dayIndex: 0,
     });
     await assertSucceeds(batch.commit());
+  });
+
+  it('pins the tombstone arm’s access budget: 6 distinct-Event takedowns pass and 7 deny', async () => {
+    // The measurement the storagePath binding has to answer for (#1153, Phase
+    // 4b P2). It reads the Proof with a `get()` the arm ALREADY performs for the
+    // owner check, and the rules engine serves a repeated access to the same
+    // document from its per-request cache — so the clause is free. This is what
+    // says so out loud rather than leaving it inferred: Firestore allows 20
+    // document access calls per multi-document request and the arm spends THREE
+    // per Event, so six takedowns cost 18 and pass while seven cost 21 and deny
+    // — the SAME boundary as before the binding was added. A future edit that
+    // reached for a second distinct document, or that read the Proof by some
+    // other path, would move this number.
+    //
+    // Distinct EVENTS, because the cache is per document: repeating one Event
+    // would measure the cache rather than the arm. The real production shape is
+    // the single live takedown pinned below.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(6, 'tombstone-budget-pass');
+    const deny = events(7, 'tombstone-budget-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+        await setDoc(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          type: 'photo',
+          cellIndex: 3,
+          status: 'active',
+          createdAt: NOW(),
+          storagePath: `proofs/${eventId}/${ALICE}/${PROOF}.jpg`,
+        });
+      }
+    });
+
+    const takedowns = (ids: string[]) => {
+      const fs = db(ADMIN);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofStorageDeletes/${PROOF}`), {
+          storagePath: `proofs/${eventId}/${ALICE}/${PROOF}.jpg`,
+          uid: ALICE,
+          requestedAt: NOW(),
+        });
+        batch.delete(doc(fs, `events/${eventId}/proofs/${PROOF}`));
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(takedowns(pass));
+    await assertFails(takedowns(deny));
   });
 
   it('ALLOWS the WHOLE live-Event takedown in ONE commit — Board, stats, Tally marker, Proof and tombstone', async () => {
