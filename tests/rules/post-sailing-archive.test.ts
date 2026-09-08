@@ -961,6 +961,19 @@ describe.each([
     await assertSucceeds(deleteObject(ref(storageOf(ALICE), orphan)));
   });
 
+  it('lets a signed-in user read a MISSING Proof as not-found, while a hidden one stays denied', async () => {
+    // Codex P2, PR #1157. The revocation drain has to observe that a Proof
+    // document is GONE before it retries a Storage delete; `resource.data` on a
+    // null resource errored into a denial, so an owner could never see absence.
+    await assertSucceeds(getDoc(doc(db(BOB), `${eventPath()}/proofs/no-such-proof`)));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`), { status: 'hidden' });
+    });
+    await assertFails(getDoc(doc(db(BOB), `${eventPath()}/proofs/${PROOF}`)));
+    await assertSucceeds(getDoc(doc(db(ADMIN), `${eventPath()}/proofs/${PROOF}`)));
+    await assertFails(getDoc(doc(unauthDb(), `${eventPath()}/proofs/no-such-proof`)));
+  });
+
   it('keeps a DOTTED Proof id whole when it asks whether the media is orphaned', async () => {
     // Phase 4b P1, PR #1157 run 2. Firestore permits a Proof named `p.q`, and
     // `firestore.rules` accepts its `proofs/{event}/{uid}/p.q.jpg` path; a

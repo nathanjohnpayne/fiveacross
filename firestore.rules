@@ -1839,7 +1839,16 @@ service cloud.firestore {
       match /proofs/{proofId} {
         // Non-admins can read only visible ('active') proofs; hidden/flagged
         // proofs are moderation-only and readable by admins.
-        allow read: if signedIn() && (isAdmin(eventId) || resource.data.status == 'active');
+        // A MISSING Proof document reads as not-found for any signed-in user
+        // (Codex P2 on PR #1157): `resource` is null for a get of a document
+        // that does not exist, and `resource.data.status` on it errored into a
+        // denial, so an owner's media-revocation drain could never observe the
+        // absence it needs before retrying a Storage delete. The cost is an
+        // existence oracle by id — a signed-in user can tell "no such Proof"
+        // from "a Proof you may not read" — on random document ids, which the
+        // spec records as a residual. Lists never see a null resource.
+        allow read: if signedIn()
+          && (resource == null || isAdmin(eventId) || resource.data.status == 'active');
         // Constrain the payload like /items: the uploader owns the doc, only the
         // known fields are allowed, the proof starts visible + unreported, and
         // moderation fields (visionFlag, thumbURL) must be server-set, not client.
