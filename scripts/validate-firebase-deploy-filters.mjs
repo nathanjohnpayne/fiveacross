@@ -2033,6 +2033,20 @@ async function buildAndInventoryProject({
     if (metadataAfterDiscovery) {
       throw new RepositoryMetadataDriftError(metadataAfterDiscovery, "loaded codebase");
     }
+
+    // Last, and over the whole selected set: one codebase this run could not
+    // vouch for makes every other selected codebase's inventory unusable too.
+    // See `firstUnprovableCodebase` for why the answer cannot be per-codebase.
+    const unprovable = firstUnprovableCodebase(
+      selected.map((config) => config.codebase),
+      inventories,
+    );
+    if (unprovable) {
+      return refuseAll(
+        `codebase ${unprovable.codebase} could not be inventoried, and this deploy loads it in the ` +
+          `same sequence as the rest — ${unprovable.reason}`,
+      );
+    }
     return inventories;
   } finally {
     // Unlink the borrowed `node_modules` explicitly before the recursive
@@ -2296,6 +2310,35 @@ async function discoverCodebaseInProbe({
     timeout: discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
     rehearsalMarker,
   });
+}
+
+/**
+ * The first SELECTED codebase whose inventory this run could not vouch for.
+ *
+ * A decision rather than a walk, and exported so it can be put directly:
+ * `loadCodebases` discovers the selected codebases IN SEQUENCE against one
+ * project, so a codebase whose own discovery was refused — it consulted a value
+ * this classifier cannot supply, it left work running, it would not load — is a
+ * codebase whose real behaviour is unknown, and one of the things an unknown
+ * codebase does at module initialisation is rewrite ANOTHER selected codebase's
+ * artifact before that one is discovered. The inventories that did come back
+ * therefore describe a project this deploy may never produce, so uncertainty in
+ * any one selected codebase is uncertainty in all of them (Phase 4b, runs 6 and
+ * 7 on #1107). It has to be decided here, over the whole selected set, because
+ * the explicit protected-callable branches in `classifyInvokerScope` answer
+ * from the selector alone and never consult another codebase's inventory.
+ *
+ * Only SELECTED codebases count. A codebase this deploy does not load runs no
+ * code and can rewrite nothing, which is why `endpointMatchesFilter`'s
+ * per-codebase keying stays correct for it.
+ */
+export function firstUnprovableCodebase(selectedCodebases, inventories) {
+  for (const codebase of selectedCodebases) {
+    const inventory = inventories.get(codebase);
+    if (inventory && inventory.authoritative) continue;
+    return { codebase, reason: inventory?.reason ?? "no inventory was produced" };
+  }
+  return null;
 }
 
 /**

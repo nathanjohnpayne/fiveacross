@@ -211,6 +211,12 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # in sequence inside each), and only for that selector shape: `--only hosting`,
 # a whole-codebase `--only functions`, and every protected callable classify
 # without building anything (about 1s).
+# Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
+# codebase this request loads cannot be vouched for — it consulted a value the
+# preflight cannot supply, it left work running outside its process group, it
+# would not load — then no codebase in the request is judged exact, because the
+# codebases are loaded in one sequence and any of them can rewrite another's
+# artifact before that one is read.
 # Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
 # refused the exemption.
 #

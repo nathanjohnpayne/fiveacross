@@ -13,6 +13,7 @@ import {
   pinnedRewriteWidening,
   targetCodebases,
   classifyInvokerScope,
+  firstUnprovableCodebase,
   gitAnswerFingerprint,
 } from "./validate-firebase-deploy-filters.mjs";
 
@@ -2956,6 +2957,114 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
       expect(
         await classify(
           ["--only", "functions:default:daily,functions:beta:betaOnly"],
+          resolve(fixture, "firebase.json"),
+        ),
+      ).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("uncertainty in one selected codebase is uncertainty in all of them", () => {
+  // The decision itself, put directly: no build, no probes, just the rule that
+  // a selected codebase without an authoritative inventory forfeits the whole
+  // project's (Phase 4b, runs 6 and 7 on #1107).
+  const inventories = new Map([
+    ["alpha", { authoritative: true, endpoints: ["daily"] }],
+    [
+      "beta",
+      {
+        authoritative: false,
+        endpoints: [],
+        reason: "the codebase consulted CLOUD_RUNTIME_CONFIG",
+      },
+    ],
+  ]);
+
+  it("names the first selected codebase whose inventory was refused", () => {
+    expect(firstUnprovableCodebase(["alpha", "beta"], inventories)).toMatchObject({
+      codebase: "beta",
+      reason: "the codebase consulted CLOUD_RUNTIME_CONFIG",
+    });
+  });
+
+  it("treats a codebase with no inventory at all as unprovable", () => {
+    expect(firstUnprovableCodebase(["gamma"], inventories)).toMatchObject({ codebase: "gamma" });
+  });
+
+  it("says nothing about codebases this deploy does not load", () => {
+    // `beta` is refused, but a request that does not select it never runs its
+    // code, so it cannot rewrite what `alpha` deploys.
+    expect(firstUnprovableCodebase(["alpha"], inventories)).toBeNull();
+  });
+});
+
+describe("a refused codebase forfeits its peers' exemptions", RUNS_A_BUILD, () => {
+  it("refuses an exact selector when another SELECTED codebase is unprovable", async () => {
+    // Phase 4b, runs 6 and 7 on #1107. `--only functions:beta:submitBugReport,
+    // functions:alpha:daily` loads both codebases against ONE project, beta
+    // first. Beta consults the legacy runtime config, so what beta does during
+    // the real deploy is unknown — and one of the things it does under a
+    // namespace neither probe can supply is rewrite alpha's artifact into a
+    // group. Beta's own inventory was duly refused, but `submitBugReport` takes
+    // the explicit protected-callable branch, which never reads an inventory,
+    // so nothing carried beta's uncertainty across and alpha went on being
+    // proved exact from two probes in which beta happened to leave it alone.
+    const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-crosstalk-"));
+    try {
+      for (const [dir, name] of [
+        ["functions-beta", "submitBugReport"],
+        ["functions-alpha", "daily"],
+      ]) {
+        const codebaseDir = resolve(fixture, dir);
+        await mkdir(resolve(codebaseDir, "src"), { recursive: true });
+        await installToolchain(codebaseDir);
+        await writeUnder(codebaseDir, "package.json", JSON.stringify(DEFAULT_PACKAGE));
+        await writeUnder(codebaseDir, "tsconfig.json", JSON.stringify(DEFAULT_TSCONFIG));
+        await writeUnder(codebaseDir, "src/index.ts", endpoint(name));
+      }
+      await writeUnder(
+        fixture,
+        "functions-beta/lib/index.js",
+        artifact(
+          [
+            'const fs = require("node:fs");',
+            'const path = require("node:path");',
+            'const runtime = JSON.parse(process.env.CLOUD_RUNTIME_CONFIG || "{}");',
+            "if (runtime.someLegacyNamespace) {",
+            "  fs.writeFileSync(",
+            '    path.join(__dirname, "..", "..", "functions-alpha", "lib", "index.js"),',
+            '    fs.readFileSync(path.join(__dirname, "..", "..", "grouped-alpha.js"), "utf8"),',
+            "  );",
+            "}",
+            "exports.submitBugReport = endpoint();",
+          ].join("\n"),
+        ),
+      );
+      await writeUnder(
+        fixture,
+        "functions-alpha/lib/index.js",
+        artifact("exports.daily = endpoint();"),
+      );
+      await writeUnder(
+        fixture,
+        "grouped-alpha.js",
+        artifact("exports.daily = { submitBugReport: endpoint() };"),
+      );
+      await writeUnder(
+        fixture,
+        "firebase.json",
+        JSON.stringify({
+          functions: [
+            { source: "functions-beta", codebase: "beta", predeploy: [] },
+            { source: "functions-alpha", codebase: "alpha", predeploy: [] },
+          ],
+        }),
+      );
+      expect(
+        await classify(
+          ["--only", "functions:beta:submitBugReport,functions:alpha:daily"],
           resolve(fixture, "firebase.json"),
         ),
       ).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
