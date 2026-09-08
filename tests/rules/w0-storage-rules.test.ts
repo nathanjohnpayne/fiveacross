@@ -227,12 +227,37 @@ describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/a
     await assertSucceeds(put(owner, avatarPath(OWNER), TINY, IMAGE));
   });
 
-  it('allows the owner to delete their own proof object', async () => {
+  it('allows the owner to delete their own proof object once no Proof document points at it', async () => {
+    // No Proof document is seeded here, so this is the ORPHAN branch — which is
+    // the owner's whole delete permission since #1153 (see the case below).
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await put(ctx, photoPath, TINY, IMAGE);
     });
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(deleteObject(ref(owner.storage(), photoPath)));
+  });
+
+  it('DENIES the owner deleting media a LIVE Proof document still points at (#1153)', async () => {
+    // Codex round 4 P2. `resource == null` refuses an overwrite and welcomes a
+    // RECREATE, so an owner able to delete a live Proof's object could delete it
+    // and upload a replacement to the now-empty path inside the window where
+    // `deleteProof` has read the object's generation and not yet committed —
+    // binding the media-revocation tombstone to a blob the path no longer holds.
+    // The object is therefore not the owner's to remove while its document
+    // stands, in ANY Event state; the frozen halves are in
+    // `tests/rules/post-sailing-archive.test.ts`.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await put(ctx, photoPath, TINY, IMAGE);
+      // An OPEN Event, so the denial is about the standing Proof and not the freeze.
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { status: 'active', admins: [] });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}`), {
+        uid: OWNER,
+        cellIndex: 1,
+        storagePath: photoPath,
+      });
+    });
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertFails(deleteObject(ref(owner.storage(), photoPath)));
   });
 
   it('allows an Event admin to delete the proof object', async () => {

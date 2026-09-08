@@ -923,32 +923,40 @@ describe.each([
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), photoPath)));
   });
 
-  it('FREEZES the OWNER media delete while the Admin takedown stays open', async () => {
-    // Phase 4b P1, PR #1157. The owner's Storage delete arm was unconditional,
-    // so a direct `deleteObject` stripped an archived Proof's media although
-    // `firestore.rules` refuses the owner's DOCUMENT delete on a closed Event —
-    // leaving a Feed entry whose image can never load, on the one Event where
-    // nothing can be re-posted. The ADMIN takedown is deliberately untouched:
-    // a frozen record that locks out its own Admin is #808's incident again.
+  it('DENIES the OWNER media delete for a LIVE Proof in EVERY state, while the Admin takedown stays open', async () => {
+    // Phase 4b P1, PR #1157 shut this on the freeze; Codex round 4 P2 on PR
+    // #1163 shut it outright. The owner's arm was unconditional, so a direct
+    // `deleteObject` stripped an archived Proof's media although
+    // `firestore.rules` refuses the owner's DOCUMENT delete on a closed Event.
+    // Binding it to the freeze left the OPEN Event's delete-and-recreate window:
+    // `resource == null` refuses an overwrite and welcomes a RECREATE, so an
+    // owner could take their live Proof's object down and immediately upload a
+    // replacement between `proofMediaGeneration()`'s read and `deleteProof`'s
+    // commit — a tombstone bound to the OLD blob with the new one in the path.
+    // So the owner's permission is now the ORPHAN branch and nothing else.
+    //
+    // The ADMIN takedown is deliberately untouched: a frozen record that locks
+    // out its own Admin is #808's incident again.
     //
     // BOTH blobs are backed by a seeded Proof DOCUMENT, which is what puts them
-    // inside the freeze at all: the carve-out below releases only media nothing
-    // points at, so a case built on orphans would prove the opposite of this one.
+    // outside the owner's reach at all: the carve-out below releases only media
+    // nothing points at, so a case built on orphans would prove the opposite.
     const ownerBlob = photoPath;
     const adminBlob = mediaProofPath;
-    // Live controls: BOTH deletes work while the Event is open to play, so the
-    // denial below is a claim about the freeze rather than about the arm.
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
-    await assertSucceeds(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    // LIVE Event, open to play, and the owner is refused anyway — the denial is
+    // now a claim about the standing Proof document, not about the freeze.
+    await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    // The Admin's is not: the live control that keeps the case above from
+    // reading as "the arm closed for everybody".
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
     // Re-seeded before the shut, because the upload arm closes with it.
-    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
     await close();
     await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
-    // The owner's blob survived its own denial, and the Admin can still take it
+    // The owner's blob survived both denials, and the Admin can still take it
     // down — which is also the proof that the admin arm did not simply run out
     // of Firestore accesses and fail closed.
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), ownerBlob)));
@@ -1194,6 +1202,34 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertSucceeds(uploadBytes(ref(storageOf(BOB), orphanBlob), TINY, IMAGE));
     await assertSucceeds(deleteObject(ref(storageOf(BOB), legacyBlob)));
     await assertSucceeds(deleteObject(ref(storageOf(BOB), orphanBlob)));
+  });
+
+  it('CLOSES the delete-and-recreate window: the OWNER cannot take a LIVE Proof’s object down (#1153)', async () => {
+    // Codex round 4 P2. Immutability (`resource == null`) refuses an OVERWRITE
+    // and welcomes a RECREATE, so an owner able to delete a live Proof's object
+    // could delete it and immediately upload a replacement to the now-empty
+    // path. Land that between `proofMediaGeneration()`'s read and `deleteProof`'s
+    // commit and the tombstone describes the OLD blob while the path holds the
+    // new one: the inline delete fails, the sweeper takes `412`, retires the row
+    // as a post-delete replacement, and the deleted Proof's media stays
+    // reachable — the outcome immutability was supposed to have closed.
+    //
+    // The half that closes it is the DELETE arm. With the object unremovable
+    // while its document stands, there is nothing to recreate inside the window.
+    const blob = photoPath;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), blob), TINY, IMAGE));
+    await assertFails(deleteObject(ref(storageOf(ALICE), blob)));
+    // The object is STILL THERE, which is the point — a recreate needs an empty
+    // path, and the denial is what keeps the path occupied. A second upload is
+    // refused as the overwrite immutability already denied.
+    await assertFails(uploadBytes(ref(storageOf(ALICE), blob), TINY, IMAGE));
+    // …and the moment the Proof document is gone — which is the order
+    // `deleteProof` actually runs in, commit first — the same delete is the
+    // owner's again.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`));
+    });
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), blob)));
   });
 
   it('keeps an ORPHANED blob the owner’s to clear on a LIVE Event too (#1157)', async () => {
