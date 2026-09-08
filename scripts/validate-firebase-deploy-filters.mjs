@@ -1180,14 +1180,16 @@ function nestedProjectRefusal(projectDir, ancestorGit) {
  * repository is now reachable, which is what makes `gitAnswerFingerprint` run
  * at all.
  */
-async function exposeGitMetadata(from, to, links, metadataDirs) {
+async function exposeGitMetadata(from, to, links, metadataDirs, plan) {
   if ((await lstat(from)).isDirectory()) {
-    await symlink(from, to, "junction");
-    links.push(to);
+    if (!plan) {
+      await symlink(from, to, "junction");
+      links.push(to);
+    }
     metadataDirs.push(from);
     return;
   }
-  await cp(from, to, { dereference: true, preserveTimestamps: true });
+  if (!plan) await cp(from, to, { dereference: true, preserveTimestamps: true });
   const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(from, "utf8"));
   if (!pointer) return;
   const gitDir = resolve(dirname(from), pointer[1]);
@@ -1235,6 +1237,15 @@ async function exposeGitMetadata(from, to, links, metadataDirs) {
  * `liveTreeFingerprint` watches the lot: a write there does not corrupt the
  * answer, it ends the deploy (Codex P2, round 17; made fatal in round 18 — see
  * `LiveCheckoutDriftError`).
+ *
+ * `plan: true` runs the same walk and CREATES NOTHING: it fills the four live
+ * sets and returns, so the caller can fingerprint the watched tree BEFORE the
+ * first byte is copied. That is the only way to have a before-snapshot whose
+ * keys match the after-snapshot's, because which paths are watched is decided
+ * by this walk. It costs one `readdir` per project directory the overlay
+ * traverses — the source dirs are not entered at all, since the copy is what
+ * would enter them — against a copy that can run for seconds. See
+ * `buildAndInventoryProject` for what the bracket catches.
  */
 async function stageProjectOverlay({
   projectDir,
@@ -1245,8 +1256,10 @@ async function stageProjectOverlay({
   liveFiles,
   liveEntryDirs,
   metadataDirs,
+  plan = false,
 }) {
   const linkTo = async (from, to) => {
+    if (plan) return;
     const type = (await lstat(from)).isDirectory() ? "junction" : "file";
     await symlink(from, to, type);
     links.push(to);
@@ -1321,7 +1334,7 @@ async function stageProjectOverlay({
   };
 
   const overlay = async (realDir, scratchDir, remaining) => {
-    await mkdir(scratchDir, { recursive: true });
+    if (!plan) await mkdir(scratchDir, { recursive: true });
     // Every directory the overlay traverses to place a nested source
     // (`packages` for `packages/functions`) has its ENTRY SET watched, not just
     // its existing children (Phase 4b P1, run 4): a hook creating
@@ -1333,7 +1346,7 @@ async function stageProjectOverlay({
       const from = join(realDir, entry);
       const to = join(scratchDir, entry);
       if (entry === ".git") {
-        await exposeGitMetadata(from, to, links, metadataDirs);
+        await exposeGitMetadata(from, to, links, metadataDirs, plan);
         continue;
       }
       // FILES are copied, directories symlinked. A symlinked `firebase.json`
@@ -1351,7 +1364,7 @@ async function stageProjectOverlay({
         // Timestamps travel with the copy for the same reason they do in the
         // source copy (Codex P1, round 19): an incremental hook comparing a
         // source file against a root stamp must answer here as it does live.
-        await cp(from, to, { dereference: true, preserveTimestamps: true });
+        if (!plan) await cp(from, to, { dereference: true, preserveTimestamps: true });
         // Copied, not linked — and STILL watched (Codex P1, round 15 on
         // #1107). The overlay closes the relative route to this file, but a
         // hook launched through npm inherits `INIT_CWD` pointing at the live
@@ -1370,7 +1383,7 @@ async function stageProjectOverlay({
       // A source dir that also CONTAINS another source dir is copied whole,
       // which places the nested one too.
       if (deeper.some((segments) => segments.length === 0)) {
-        await copySourceDir(nextReal, nextScratch);
+        if (!plan) await copySourceDir(nextReal, nextScratch);
         // The copied source directory's live original is watched for the same
         // reason the copied root files are: a hook can write through an
         // absolute path into `functions/lib` of the checkout the deploy will
@@ -2142,6 +2155,18 @@ class RehearsalExit {
  * project in which every Functions source dir is a copy and everything else is
  * a symlink to the original.
  *
+ * THE STAGING IS BRACKETED BY FINGERPRINTS. The overlay is planned first
+ * (`plan: true`, which creates nothing), the watched tree is fingerprinted, the
+ * copy runs, and the post-staging baseline every later check compares against
+ * is required to equal that pre-staging one. Taking the baseline only after the
+ * copy meant a write that landed WHILE it was copying — another process editing
+ * a Functions source between the moment `cp` read it and the moment the
+ * fingerprint was taken — was recorded as the unchanged starting state, while
+ * the scratch project held the pre-edit bytes. Every later fingerprint then
+ * matched, nothing looked like drift, and the inventory could exempt a selector
+ * for a checkout that is no longer the tree `deploy.sh`'s clean-tree guard
+ * approved (Codex P1, round 25 on #1107).
+ *
  * WHAT THE EXEMPTION REQUIRES OF THE LAYOUT. `firebase.json` at the CHECKOUT
  * ROOT. The staging and the fingerprint both start from the configured project
  * directory, so with the config below a repository root the deploy's inputs are
@@ -2171,7 +2196,8 @@ class RehearsalExit {
  * A write that reached the WORKING TREE is the one outcome that is not a
  * refusal at all: it THROWS `LiveCheckoutDriftError`, which aborts the deploy.
  * See that class for why continuing with a conservative classification was
- * wrong.
+ * wrong. A write that landed during the staging throws the same error for the
+ * same reason, though nothing this rehearsal started could have made it.
  *
  * EVERY refusal leaves through one exit. The hooks and the probes run inside
  * `rehearse`, which can only return a `RehearsalExit`; `settleRehearsal` then
@@ -2187,6 +2213,7 @@ async function buildAndInventoryProject({
   predeployTimeoutMs,
   discoveryTimeoutMs,
   writeContainment,
+  onStaged,
   configs,
   codebaseNames,
   deployTargets,
@@ -2327,6 +2354,39 @@ async function buildAndInventoryProject({
     });
     if (!containment.ok) return refuseAll(containment.reason);
 
+    // The watched set as the staging will compute it, without staging anything,
+    // so the tree can be fingerprinted BEFORE the copy starts. `plan: true`
+    // creates no file and no link; the throwaway sets it fills are the same
+    // paths the real walk below will register, which is what makes the two
+    // fingerprints comparable key for key.
+    const plannedDirs = [];
+    const plannedFiles = [];
+    const plannedEntryDirs = [];
+    let preStagingBaseline;
+    try {
+      await stageProjectOverlay({
+        projectDir,
+        scratchProject,
+        sourceRels: staged.map((config) => config.sourceRel),
+        links: [],
+        liveDirs: plannedDirs,
+        liveFiles: plannedFiles,
+        liveEntryDirs: plannedEntryDirs,
+        metadataDirs: [],
+        plan: true,
+      });
+      preStagingBaseline = await liveTreeFingerprint(
+        plannedDirs,
+        projectDir,
+        plannedFiles,
+        plannedEntryDirs,
+      );
+    } catch (error) {
+      return refuseAll(
+        `could not fingerprint the live checkout before staging — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     try {
       await stageProjectOverlay({
         projectDir,
@@ -2343,6 +2403,13 @@ async function buildAndInventoryProject({
         `could not stage the Functions sources — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+
+    // A test's window into the interval between the copy and the baseline below,
+    // and nothing else: an ARGUMENT, like `writeContainment` and the two
+    // timeouts, so that `main()` never passes it and no shell can reach it. It
+    // can only make this classifier answer more conservatively, because
+    // everything it can do is something the guard below is there to catch.
+    if (onStaged) await onStaged({ projectDir, scratchProject });
 
     let deployEnv;
     try {
@@ -2366,6 +2433,24 @@ async function buildAndInventoryProject({
         `could not fingerprint the live checkout — ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // THE BASELINE HAS TO BE THE TREE THE COPY READ. Staging reads the checkout
+    // file by file and the baseline is taken when it finishes, so anything that
+    // edited a Functions source in between was recorded as the unchanged
+    // starting state while the scratch project kept the pre-edit bytes. Every
+    // later fingerprint then matched that baseline, the drift checks reported
+    // nothing, and an artifact built from stale source could prove a selector
+    // exact for a checkout that is no longer the one `deploy.sh`'s clean-tree
+    // guard approved — the deploy would build and publish the edit with invoker
+    // reconciliation switched off (Codex P1, round 25 on #1107).
+    //
+    // Nothing this rehearsal does writes into the live tree, so the two
+    // fingerprints are identical unless something else on this machine wrote
+    // during the copy. That is the same condition as a hook writing there, and
+    // it is answered the same way: fatal, because the tree the deploy is about
+    // to build from has changed since it was approved, and a conservative
+    // classification would leave `deploy.sh` to publish it anyway.
+    const duringStaging = firstLiveTreeDrift(preStagingBaseline, liveBaseline);
+    if (duringStaging) throw new LiveCheckoutDriftError(duringStaging, "concurrent writer");
     /**
      * Whether anything reached the WORKING TREE through the overlay's symlinks
      * since the baseline. Fatal: the deploy is about to build and publish from
@@ -3079,6 +3164,7 @@ async function singleEndpointInventory(
   predeployTimeoutMs,
   discoveryTimeoutMs,
   writeContainment,
+  onStaged,
 ) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -3229,6 +3315,7 @@ async function singleEndpointInventory(
       predeployTimeoutMs,
       discoveryTimeoutMs,
       writeContainment,
+      onStaged,
       codebaseNames,
       configs,
     },
@@ -3689,6 +3776,12 @@ export async function classifyFirebaseDeployRequest(
     // passes it, so no shell can reach it, and a test that does cannot widen
     // anything by doing so.
     writeContainment = "auto",
+    // Awaited between the staging copy and the post-staging baseline, and an
+    // argument for the same reasons as the three above: `main()` never passes
+    // it, so no shell can reach it, and what it exists to reach is a window
+    // this classifier can otherwise only lose a race in. A test uses it to be
+    // the concurrent writer the bracket around the staging refuses.
+    onStaged = null,
   } = {},
 ) {
   if (rejectDestinationOverrides && hasNamedDestinationOverride(args)) {
@@ -3737,6 +3830,7 @@ export async function classifyFirebaseDeployRequest(
     predeployTimeoutMs,
     discoveryTimeoutMs,
     writeContainment,
+    onStaged,
   );
   // deploy's before-chain runs this target reduction before
   // checkValidTargetFilters. It is the pinned rejection boundary for an

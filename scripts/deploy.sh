@@ -238,6 +238,14 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # path such as `$INIT_CWD` would change what this deploy publishes without
 # moving a single fingerprint. That layout is refused outright, before any hook
 # or discovery probe runs, rather than watched at unbounded cost.
+# The tree the adapter watches has to be the tree it staged, so the staging is
+# BRACKETED by fingerprints: one before the first file is copied, one after, and
+# the deploy stops unless they are identical. Taking the baseline only after the
+# copy accepted whatever the checkout had become while the copy was running — an
+# edit landing in that window left the scratch project holding the pre-edit bytes
+# while every later comparison matched the post-edit baseline, so the exemption
+# could be granted for a checkout that is no longer the one the clean-tree guard
+# above approved.
 # Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
 # codebase this request loads cannot be vouched for — it consulted a value the
 # preflight cannot supply, it left work running outside its process group, it
@@ -272,11 +280,13 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # refused the exemption.
 #
 # Exit status 3 is its own outcome, not an invalid request: the classifier
-# detected that running the config's own predeploy hooks CHANGED the live
-# checkout — tracked source the clean-tree guard above had already approved. The
-# tree is no longer the tree that guard passed, so this deploy stops here rather
-# than building and publishing it, and nothing is restored: which of those
-# writes belong in the tree is a question for a human, not for a preflight.
+# detected that the live checkout CHANGED while it worked — tracked source the
+# clean-tree guard above had already approved, rewritten either by one of the
+# config's own predeploy hooks or by something else on this machine while the
+# staging was copying. The tree is no longer the tree that guard passed, so this
+# deploy stops here rather than building and publishing it, and nothing is
+# restored: which of those writes belong in the tree is a question for a human,
+# not for a preflight.
 echo ">> Validating and classifying Firebase deploy request (local)"
 FIREBASE_REQUEST_CLASSIFICATION=""
 CLASSIFIER_STATUS=0
@@ -290,7 +300,7 @@ FIREBASE_REQUEST_CLASSIFICATION="$(
 )" || CLASSIFIER_STATUS=$?
 if [[ "$CLASSIFIER_STATUS" -ne 0 ]]; then
   if [[ "$CLASSIFIER_STATUS" -eq 3 ]]; then
-    echo "✗ A predeploy hook mutated this checkout during classification." >&2
+    echo "✗ A predeploy hook or a concurrent writer mutated this checkout during classification." >&2
     echo "  The working tree is no longer the one the clean-tree guard approved, and nothing has been restored." >&2
     echo "  Inspect it with 'git status', decide what belongs in it, then deploy again." >&2
     echo "  NOTHING HAS BEEN BUILT OR PUBLISHED." >&2

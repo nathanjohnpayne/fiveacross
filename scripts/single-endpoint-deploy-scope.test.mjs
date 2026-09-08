@@ -2955,6 +2955,48 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
+  it("ABORTS when a Functions source is edited while the staging is copying", async () => {
+    // Codex P1, round 25 on #1107. The post-staging baseline is what every
+    // later drift check compares against, so an edit landing between the copy
+    // reading a file and that baseline being taken was accepted AS the
+    // unchanged starting state — while the scratch project still held the
+    // pre-edit bytes. Every later fingerprint then matched, nothing looked like
+    // drift, and the inventory could prove a selector exact for a checkout that
+    // is no longer the tree `deploy.sh`'s clean-tree guard approved. The
+    // staging is therefore bracketed: the watched tree is fingerprinted before
+    // the copy as well as after, and the two must be identical.
+    //
+    // `onStaged` is that window, reached the way `writeContainment` is — an
+    // argument `main()` never passes, so no shell can be the writer here — and
+    // it can only ever make this classifier answer more conservatively.
+    await withFunctionsProject({}, async (configPath) => {
+      const { dirname: dir, join: under } = await import("node:path");
+      const { appendFile } = await import("node:fs/promises");
+      const failure = await classify(["--only", "functions:daily"], configPath, {
+        onStaged: () =>
+          appendFile(under(dir(configPath), "functions", "src", "index.ts"), "\n// edited\n"),
+      }).then(
+        () => null,
+        (error) => error,
+      );
+      expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+      expect(failure.message).toContain("index.ts");
+      expect(failure.message).toContain("Nothing has been restored");
+    });
+  });
+
+  it("proves the same scope when nothing writes while the staging is copying", async () => {
+    // The control for the case above, and for the bracket generally: a checkout
+    // that simply holds still must still be provable, and the `onStaged` seam
+    // itself must change nothing when it writes nothing. Without this, the
+    // refusal above would pass for a bracket that refused every deploy.
+    await withFunctionsProject({}, async (configPath) => {
+      expect(
+        await classify(["--only", "functions:daily"], configPath, { onStaged: () => {} }),
+      ).toMatchObject(EXEMPT);
+    });
+  });
+
   it("ABORTS when a hook writes THROUGH a copied root file that is a symlink", async () => {
     // Codex P1, round 16: a copied root file can itself be a link — a shared
     // build input outside the repository, say — and fingerprinting only the
