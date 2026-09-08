@@ -48,6 +48,18 @@ const A = vi.hoisted(() => ({
   /** Fired as the transaction opens, so a test can move the world underneath a
    *  call that has already decided what it is doing. */
   beforeTx: null as (() => void) | null,
+  /** Which SERVER read paths reject, so the freeze can be observed against a read
+   *  that does not answer at all (CodeRabbit Major on PR #1162). Every one of them
+   *  is taken after the Event is already shut, so the difference between a typed
+   *  refusal and a throw is the difference between a console that puts play back
+   *  and one that leaves a live Event closed forever. */
+  failServerRead: null as ((path: string) => boolean) | null,
+  /** The TRANSACTION's own Event read, failed separately: it is the one read whose
+   *  rejection has to be told apart from a failed COMMIT, which must keep
+   *  surfacing. */
+  failTxRead: false,
+  /** The COMMIT failing — the control for the line above. */
+  failTxWrite: false,
 }));
 
 vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'test-event' }));
@@ -80,10 +92,12 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     collection: (_db: unknown, ...segments: string[]) => ref(segments.join('/')),
     getDocFromServer: async (r: Ref) => {
       A.serverReads.push(r.path);
+      if (A.failServerRead?.(r.path)) throw new Error(`read failed: ${r.path}`);
       return snapOf(r.path);
     },
     getDocsFromServer: async (r: Ref) => {
       A.serverReads.push(r.path);
+      if (A.failServerRead?.(r.path)) throw new Error(`read failed: ${r.path}`);
       if (r.path.endsWith('/players')) {
         return {
           docs: A.players.map(({ id, ...stored }) => {
@@ -102,8 +116,12 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     runTransaction: async (_db: unknown, fn: (tx: unknown) => unknown) => {
       A.beforeTx?.();
       return fn({
-        get: async (r: Ref) => snapOf(r.path),
+        get: async (r: Ref) => {
+          if (A.failTxRead) throw new Error(`transactional read failed: ${r.path}`);
+          return snapOf(r.path);
+        },
         update: (_r: Ref, data: Record<string, unknown>) => {
+          if (A.failTxWrite) throw new Error('commit failed');
           A.updates.push(data);
         },
       });
@@ -113,6 +131,15 @@ vi.mock('firebase/firestore', async (importOriginal) => {
 
 // Imported AFTER the mocks above, which vitest hoists.
 import { abandonArchive, archiveEvent, beginArchive } from './admin';
+
+// The failure knobs are cleared for EVERY case in this file, not just the block
+// that uses them: a read left rejecting would fail the next suite somewhere far
+// from the line that armed it (CodeRabbit Major on PR #1162).
+beforeEach(() => {
+  A.failServerRead = null;
+  A.failTxRead = false;
+  A.failTxWrite = false;
+});
 
 function mkPlayer(
   over: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid' | 'displayName'>,
@@ -1800,5 +1827,97 @@ describe('archiveEvent — the finale gate', () => {
     A.event = closingEvent({ claimMode: 'admin_confirmed' });
     A.claims = [{ status: 'pending' }];
     expect(await archiveEvent(1, { now: 5 })).toBe('claims-pending');
+  });
+});
+
+// CodeRabbit Major on PR #1162. Every read below is taken AFTER `beginArchive`
+// has shut the Event, so a read that does not answer is not a failed call — it is
+// a live Event left closed with no record and nothing for the console to clean up
+// after. Thrown, it went past every branch of `runArchive` and surfaced as the
+// generic `AsyncButton` failure pill; returned, it is the same shape of refusal
+// as `claims-pending`, and the automatic reopen puts play back.
+describe('archiveEvent — a server read that does not answer is a REFUSAL, not a throw', () => {
+  const closingEvent = (over: Record<string, unknown> = {}) => ({
+    status: 'active',
+    archiving: true,
+    archiveToken: 1,
+    claimMode: 'admin_confirmed',
+    days: [mkDay(0), mkDay(1)],
+    bannedUids: [],
+    frozenAt: 50_000,
+    finaleCompletedAt: 50_100,
+    ...over,
+  });
+
+  beforeEach(() => {
+    A.event = closingEvent();
+    A.claims = [];
+    A.players = [{ uid: 'alice', displayName: 'Alice', bingoCount: 1, squaresMarked: 9 }];
+    A.dayMetas = new Map();
+    A.updates = [];
+    A.serverReads = [];
+    A.beforeTx = null;
+  });
+
+  it('freezes when every read answers — the control', async () => {
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.updates).toHaveLength(1);
+  });
+
+  it('names the EVENT pre-read, and never reaches the queue behind it', async () => {
+    // The first read of the four. Nothing after it can be decided — the Day count
+    // that says which honour pins to fetch comes off this document — so it refuses
+    // here rather than proceeding on a schedule it never saw.
+    A.failServerRead = (path) => path === 'events/test-event';
+    expect(await archiveEvent(1, { now: 5 })).toBe('read-failed:event');
+    expect(A.updates).toEqual([]);
+    expect(A.serverReads).toEqual(['events/test-event']);
+  });
+
+  it('names the CLAIM QUEUE read, rather than passing a queue it could not see', async () => {
+    // The drain gate reads `.docs` off this result, so an unanswered read is the
+    // one shape that must never be mistaken for a drained queue: the freeze it
+    // would let through makes every Claim in that queue unresolvable forever.
+    A.failServerRead = (path) => path.endsWith('/claims');
+    expect(await archiveEvent(1, { now: 5 })).toBe('read-failed:claims');
+    expect(A.updates).toEqual([]);
+    // Refused at the queue, before the roster and the honour pins are asked for.
+    expect(A.serverReads).toEqual(['events/test-event', 'events/test-event/claims']);
+  });
+
+  it('names the ROSTER read', async () => {
+    A.failServerRead = (path) => path.endsWith('/players');
+    expect(await archiveEvent(1, { now: 5 })).toBe('read-failed:roster');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('names the DAY-META read, and is not mistaken for the roster beside it', async () => {
+    // The two are issued together, and each is guarded on its own precisely so
+    // the refusal can say which of them did not answer.
+    A.failServerRead = (path) => path.includes('/days/');
+    expect(await archiveEvent(1, { now: 5 })).toBe('read-failed:day-meta');
+    expect(A.updates).toEqual([]);
+    // The roster was still read — the pair overlaps on the wire, and one wrapper
+    // failing must not leave the other's rejection unhandled either.
+    expect(A.serverReads).toContain('events/test-event/players');
+  });
+
+  it('names the TRANSACTION’s own Event re-read once the transaction gives up', async () => {
+    // The one read whose rejection arrives as a rejected `runTransaction`, which
+    // is also how a failed COMMIT arrives. It is flagged and RE-THROWN so the SDK
+    // still gets to retry it, and classified only out here, where a transaction
+    // that has already given up is known to have written nothing.
+    A.failTxRead = true;
+    expect(await archiveEvent(1, { now: 5 })).toBe('read-failed:event');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('still THROWS when the write itself fails — the refusal is not a catch-all', async () => {
+    // The control for the line above, and the boundary of this whole change: a
+    // failed commit is a failed archive, and reporting "nothing was frozen" about
+    // one would be a claim this call cannot make.
+    A.failTxWrite = true;
+    await expect(archiveEvent(1, { now: 5 })).rejects.toThrow('commit failed');
+    expect(A.updates).toEqual([]);
   });
 });
