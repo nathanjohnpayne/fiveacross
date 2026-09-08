@@ -123,6 +123,7 @@ beforeEach(() => {
     url: `https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2F${EVENT_ID}%2Fu1%2FUPLOADED.jpg?alt=media`,
   });
   purgeCacheSpy.mockResolvedValue(undefined);
+  deleteStorageSpy.mockResolvedValue(undefined);
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({ get: txGet, set: txSet, delete: txDelete }),
   );
@@ -894,7 +895,12 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
       .map(([ref]) => (ref as Ref).path)
       .filter((path) => path.startsWith('events/'));
     expect(eventPaths.length).toBeGreaterThan(0);
-    expect(eventPaths.every((path) => path.startsWith('events/event-a/'))).toBe(true);
+    // The Event DOCUMENT itself is one of those refs since #134 — the freeze
+    // check the transaction reads — so it is matched exactly rather than under
+    // the subtree prefix. Same claim either way: every ref stays under Event A.
+    expect(
+      eventPaths.every((path) => path === 'events/event-a' || path.startsWith('events/event-a/')),
+    ).toBe(true);
   });
 
   it('deletes the storage object + doc and unmarks the cell the proof backs (found via cellIndex)', async () => {
@@ -906,7 +912,9 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
-    // Storage first so a doc is never left referencing deleted media.
+    // The media is revoked, after the commit — a Storage delete that throws
+    // leaves an unreachable blob rather than a document pointing at deleted
+    // media (#134).
     expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
     // The backing cell — resolved by the proof's cellIndex — is unmarked +
     // unlinked, and carries the SAME echoOptOut a manual unmark persists
@@ -980,6 +988,99 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
 // in the `proof-media` service-worker cache. deleteProof purges that local copy
 // AFTER the transaction commits — never from inside the retryable callback,
 // and never in a way a purge rejection could fail the delete.
+// #134 (specs/post-sailing-archive.md § "Moderation is not a gameplay write"):
+// the admin takedown outlives the Event, and the Board unmark it used to carry
+// does not. `eventOpenForPlay` denies the Board, Player and Tally writes on both
+// halves of the freeze, and they shared ONE transaction with the delete — so the
+// advertised moderation path failed outright on exactly the Event whose play can
+// never resume, with the media already gone.
+describe('deleteProof — the moderation delete survives the freeze (#134)', () => {
+  // A Proof whose backing cell is genuinely marked BY IT, so the cleanup is what
+  // the open-Event control below actually performs.
+  function withBackingCell(): void {
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
+    const board = dealt();
+    board[5] = { ...board[5], marked: true, markedAt: 9, proofId: 'P', status: 'confirmed' };
+    boardState = { cells: board };
+    playerState = { firstBingoAt: null };
+  }
+  function eventReads(event: Record<string, unknown> | undefined): void {
+    txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path === `events/${EVENT_ID}`) return Promise.resolve({ data: () => event });
+      if (ref.path.includes('/boards/')) return Promise.resolve({ data: () => boardState });
+      if (ref.path.includes('/players/')) return Promise.resolve({ data: () => playerState });
+      if (ref.path.includes('/proofs/')) return Promise.resolve({ data: () => proofState });
+      return Promise.resolve({ data: () => undefined });
+    });
+  }
+
+  it('completes on an ARCHIVED Event, skipping the gameplay cleanup the freeze denies', async () => {
+    withBackingCell();
+    eventReads({ status: 'archived' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    // The takedown itself: the document leaves the Feed and the media leaves
+    // Storage.
+    expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/proofs/P'))).toBeDefined();
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+    // …and none of the three writes the freeze denies is attempted, which is
+    // what used to take the delete down with it.
+    expect(setPayload('/boards/')).toBeUndefined();
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/tally/'))).toBeUndefined();
+  });
+
+  it('completes on a CLOSING Event the same way — the quiesce denies the same writes', async () => {
+    withBackingCell();
+    eventReads({ status: 'active', archiving: true });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/proofs/P'))).toBeDefined();
+    expect(setPayload('/boards/')).toBeUndefined();
+    expect(setPayload('/players/')).toBeUndefined();
+  });
+
+  it('still unmarks the backing cell on an OPEN Event — the control', async () => {
+    withBackingCell();
+    eventReads({ status: 'active' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    const written = setPayload('/boards/') as { cells: Cell[] };
+    expect(written.cells[5]).toMatchObject({ marked: false, proofId: null });
+    expect(setPayload('/players/')).toMatchObject({ squaresMarked: 0 });
+    expect(txDelete.mock.calls.find((c) => (c[0] as Ref).path.includes('/tally/'))).toBeDefined();
+  });
+
+  it('reads the Event INSIDE the transaction, so a quiesce landing in the window aborts the attempt', async () => {
+    // A transaction serializes against the documents it READS, and the quiesce
+    // writes this one — so the freeze check has to be part of the read set, not
+    // a decision taken before the transaction opens.
+    withBackingCell();
+    eventReads({ status: 'active' });
+
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
+
+    expect(txGet.mock.calls.some(([ref]) => (ref as Ref).path === `events/${EVENT_ID}`)).toBe(true);
+  });
+
+  it('leaves the media in place when the transaction is rejected, rather than deleting it first', async () => {
+    // The ordering half. The Storage delete used to run BEFORE the transaction,
+    // so a rejected transaction left the Proof document pointing at media that
+    // was already gone — a Feed tile whose image can never load.
+    withBackingCell();
+    runTx.mockRejectedValueOnce(new Error('permission-denied'));
+
+    await expect(deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`)).rejects.toThrow(
+      'permission-denied',
+    );
+
+    expect(deleteStorageSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('deleteProof — purges the deleting device’s own cached copy after commit (#373)', () => {
   it('calls the purge helper with the proof doc’s own mediaURL, after the transaction commits', async () => {
     const mediaURL = `https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2F${EVENT_ID}%2Fu1%2FP.jpg?alt=media&token=t`;

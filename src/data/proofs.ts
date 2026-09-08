@@ -8,8 +8,10 @@ import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
-import type { Cell, ClaimMode, ProofDoc, ProofType } from '../types';
+import { isEventArchived, isEventArchiving } from './eventArchive';
+import type { Cell, ClaimMode, EventDoc, ProofDoc, ProofType } from '../types';
 
+const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 const rawProofs = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'proofs');
 const rawProof = (id: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'proofs', id);
@@ -430,24 +432,42 @@ export async function deleteProof(
   },
 ): Promise<void> {
   const eventId = EVENT_ID;
-  // Storage first (ordering preserved): if the blob delete throws we keep the
-  // doc so the media isn't orphaned.
-  if (storagePath) await deleteStoragePath(storagePath);
-
   // Captured from the proof doc the transaction reads, so the post-commit
-  // purge below (#373) targets the SAME media the Storage delete above just
-  // revoked. Declared outside the callback because a Firestore transaction
-  // can retry: each attempt reassigns it, so only the committed attempt's
-  // value survives to the purge call.
+  // purge below (#373) targets the SAME media the Storage delete revokes.
+  // Declared outside the callback because a Firestore transaction can retry:
+  // each attempt reassigns it, so only the committed attempt's value survives
+  // to the purge call.
   let mediaURL: string | null | undefined;
 
   await runTransaction(db, async (tx) => {
     const proofRef = rawProof(id, eventId);
+    // THE EVENT, READ INSIDE THE TRANSACTION THAT WRITES (#134, Codex P2 on PR
+    // #1139). The moderation delete is an admin path the freeze deliberately
+    // leaves open — a permanent record needs a takedown route (#808) — but the
+    // GAMEPLAY cleanup below is not: unmarking the backing cell writes a Board,
+    // a Player row and a Tally marker, and `eventOpenForPlay` denies all three.
+    // One transaction, so the denial would take the DELETE down with it and the
+    // advertised takedown would fail outright on exactly the Event whose play
+    // can never resume.
+    //
+    // So the cleanup is SKIPPED on a closed Event rather than attempted: there
+    // is nothing for it to repair. Marks cannot move again in either half of
+    // the freeze, so the cell the deleted Proof backed is exactly as frozen as
+    // everything around it. What the delete still does is what a takedown is
+    // for: the document leaves the Feed and the media leaves Storage.
+    //
+    // Read inside the transaction, not before it: a transaction serializes
+    // against the documents it READS, and the quiesce writes this one — so a
+    // close committing in the window aborts this attempt and the retry re-reads
+    // the closed state, instead of a cleanup landing on a Board the freeze has
+    // already shut.
+    const eventData = (await tx.get(rawEvent(eventId))).data() as Partial<EventDoc> | undefined;
+    const closed = isEventArchived(eventData) || isEventArchiving(eventData);
     const proofSnap = await tx.get(proofRef);
     const proof = proofSnap.data() as ProofDoc | undefined;
     mediaURL = proof?.mediaURL;
 
-    if (proof) {
+    if (proof && !closed) {
       // A deleted proof must not leave its square marked-but-uncredited (in
       // proof_required mode a marked cell is backed by this proof). Unmark the
       // backing cell and recompute the owner's derived stats in the same txn.
@@ -578,6 +598,23 @@ export async function deleteProof(
 
     tx.delete(proofRef);
   });
+
+  // THE STORAGE DELETE FOLLOWS THE FIRESTORE COMMIT (#134, Codex P2 on PR
+  // #1139). It used to run first, on the reasoning that a failed blob delete
+  // should leave the document behind rather than orphan the media. The freeze
+  // showed the cost of that ordering: when the transaction is rejected, the
+  // media is already gone and the Proof document survives pointing at it — a
+  // Feed tile whose image can never load, on the one Event where nothing can be
+  // re-posted. Committing first inverts the failure into the harmless
+  // direction: a Storage delete that throws leaves a blob nobody can reach
+  // through any surface, and re-running the delete retries it, while a rejected
+  // transaction now leaves the Proof and its media exactly as they were.
+  //
+  // It stays AWAITED and its rejection still propagates, so a caller is told the
+  // media was not revoked rather than being shown a clean takedown. Making that
+  // retry durable — a tombstone that survives the commit removing the Proof's
+  // only reference, and the server-side sweeper that discharges it — is #1153.
+  if (storagePath) await deleteStoragePath(storagePath);
 
   // Fire-and-forget, AFTER commit (never inside the retryable transaction
   // callback above — a callback re-run on conflict would fire this on every

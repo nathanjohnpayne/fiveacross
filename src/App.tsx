@@ -15,6 +15,8 @@ import { BugReportProvider } from './components/BugReport';
 import PullToRefresh from './components/PullToRefresh';
 import { TABS, FALLBACK_PATH, type TabId } from './components/tabs';
 import LoadingState from './components/LoadingState';
+import { useEventDoc } from './hooks/useData';
+import { isEventArchived, isEventArchiving } from './data/eventArchive';
 import { editionBrand } from './editions';
 import SetupWizard from './components/setup/SetupWizard';
 import { EVENT_ID } from './firebase';
@@ -59,6 +61,27 @@ function EventApp() {
   // re-animates the page it is already on.
   const location = useLocation();
   const section = location.pathname.split('/')[1] || 'card';
+  // THE CLOSED EVENT'S OWN ROUTING (#134, Codex P1 on PR #1139). Once the Event
+  // is shut there is no card to play: `joinAndDeal` declines the join, `Board`'s
+  // own Day-Card deal is a write the rules deny, and what the visit came for is
+  // the standings. So the Card tab routes to them instead of mounting the Board
+  // — a redirect rather than a second copy of the surface, so the Event keeps
+  // ONE mount point for its final standings and the tab bar names where the
+  // Player actually is.
+  //
+  // Decided here rather than inside `Board`: a branch taken after the hooks have
+  // run still mounts the component and opens its listeners, and `Board`'s mount
+  // is what deals a Day Card. Returning a different element from the route table
+  // is what keeps it unmounted.
+  //
+  // It does NOT wait for the server. `useEventDoc` starts at `null`, which reads
+  // as open, so a cold visit renders the Board exactly as it does today and
+  // re-routes when the snapshot lands; making the Card tab of every LIVE Event
+  // wait on a round trip would be a far worse trade than one late redirect. The
+  // write half needs no such wait — `joinAndDeal` asks the server itself.
+  const { data: event } = useEventDoc(!!user);
+  const eventClosed = isEventArchived(event) || isEventArchiving(event);
+  const archivePath = TABS.find((tab) => tab.id === 'ranks')?.path ?? FALLBACK_PATH;
 
   // The one pre-auth label the Edition owns (#608): this renders before the
   // Event doc exists, so the resolved Edition is the only vocabulary available.
@@ -158,7 +181,12 @@ function EventApp() {
     // urgent admin message is for. The banner self-gates to nothing when none is
     // pinned or this device already dismissed it, so each card state is otherwise
     // unchanged. Mounted once, outside the deal-state conditional.
-    card: (
+    card: eventClosed ? (
+      // Ahead of the deal-error branch below on purpose: a `dealError` left over
+      // from an attempt that ran while the Event was still open must not strand
+      // a returning Player on a retry surface for an Event that has since shut.
+      <Navigate to={archivePath} replace />
+    ) : (
       <>
         <NoticeBanner />
         {dealError ? (

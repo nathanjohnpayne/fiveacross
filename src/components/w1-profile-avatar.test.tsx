@@ -19,7 +19,27 @@ const { docMock, setDocMock, updateDocMock } = vi.hoisted(() => ({
   }),
 }));
 const eventScope = vi.hoisted(() => ({ eventId: 'test-event' }));
-vi.mock('firebase/firestore', () => ({ doc: docMock, setDoc: setDocMock, updateDoc: updateDocMock }));
+// #134: the Player-row mirror reads the Event's freeze status before writing, so
+// a global profile save is never reported as failed because its Event-local
+// mirror is frozen. The fixture defaults to an OPEN Event; the archived cases
+// below set it.
+const { eventState, getDocMock } = vi.hoisted(() => {
+  const state = { value: { status: 'active' } as Record<string, unknown> | undefined };
+  return {
+    eventState: state,
+    getDocMock: vi.fn(async (ref: { path: string }) =>
+      ref.path.startsWith('events/')
+        ? { exists: () => state.value !== undefined, data: () => state.value }
+        : { exists: () => false, data: () => undefined },
+    ),
+  };
+});
+vi.mock('firebase/firestore', () => ({
+  doc: docMock,
+  getDoc: getDocMock,
+  setDoc: setDocMock,
+  updateDoc: updateDocMock,
+}));
 
 const { refMock, uploadBytesMock } = vi.hoisted(() => ({
   refMock: vi.fn((_storage: unknown, path: string) => ({ path })),
@@ -117,7 +137,9 @@ vi.mock('../hooks/useData', async () => {
 
 function resetMocks() {
   eventScope.eventId = 'test-event';
+  eventState.value = { status: 'active' };
   docMock.mockClear();
+  getDocMock.mockClear();
   setDocMock.mockClear();
   updateDocMock.mockClear();
   refMock.mockClear();
@@ -231,6 +253,64 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
       { photoURL: url },
     );
     expect(url).toBe('https://cdn.example/avatars/u1.jpg');
+  });
+
+  // #134 (specs/post-sailing-archive.md). `eventOpenForPlay` denies every
+  // `players/{uid}` write on both halves of the freeze — the Player row IS the
+  // standings — and the global write has already committed by the time the
+  // mirror runs. Reporting the mirror's denial as a failed save told a Player
+  // their profile had not saved when their global identity had plainly changed.
+  it('skips the Player mirror on an ARCHIVED Event, and still saves the global profile', async () => {
+    eventState.value = { status: 'archived' };
+
+    await expect(updateDisplayName('u1', 'New Name')).resolves.toBeUndefined();
+
+    expect(setDocMock).toHaveBeenCalledWith({ path: 'users/u1' }, { displayName: 'New Name' }, { merge: true });
+    expect(updateDocMock).not.toHaveBeenCalled();
+  });
+
+  it('skips the mirror on a CLOSING Event too — the quiesce denies the same write', async () => {
+    eventState.value = { status: 'active', archiving: true };
+
+    await expect(updateAvatar('u1', new Blob(['x'], { type: 'image/png' }))).resolves.toBe(
+      'https://cdn.example/avatars/u1.jpg',
+    );
+
+    expect(setDocMock).toHaveBeenCalledWith(
+      { path: 'users/u1' },
+      { photoURL: 'https://cdn.example/avatars/u1.jpg', customPhoto: true },
+      { merge: true },
+    );
+    expect(updateDocMock).not.toHaveBeenCalled();
+  });
+
+  it('swallows a mirror denial from an Event that closed between the read and the write', async () => {
+    // The read cannot be atomic with the write, so the freeze can land in
+    // between. Same skip, one round trip later — never a failed save.
+    eventState.value = { status: 'active' };
+    updateDocMock.mockRejectedValueOnce(
+      Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }),
+    );
+
+    await expect(updateDisplayName('u1', 'New Name')).resolves.toBeUndefined();
+
+    expect(updateDocMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still writes the mirror when the Event status is unreadable — the read never blocks a save', async () => {
+    // An unreadable Event reads as open and the write is attempted, exactly as
+    // it was before the read existed: the status decides whether to SKIP a
+    // write, never whether the save may proceed.
+    eventState.value = undefined;
+    getDocMock.mockRejectedValueOnce(new Error('offline'));
+    updateDocMock.mockResolvedValueOnce(undefined);
+
+    await expect(updateDisplayName('u1', 'New Name')).resolves.toBeUndefined();
+
+    expect(updateDocMock).toHaveBeenCalledWith(
+      { path: 'events/test-event/players/u1' },
+      { displayName: 'New Name' },
+    );
   });
 
   it('keeps a delayed Event A avatar mirror under A after B activates', async () => {
