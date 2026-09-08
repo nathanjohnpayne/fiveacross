@@ -2616,6 +2616,27 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
+  it("ABORTS when a hook changes a watched directory's own permissions", async () => {
+    // Codex P1, round 25: the walk recorded only a root's children, so a hook
+    // that flips a linked directory's mode through the scratch symlink moved
+    // nothing the fingerprint compared. Each watched directory's own signature
+    // is part of the fingerprint now.
+    await withFunctionsProject(
+      {
+        functionsConfig: { predeploy: [...PREDEPLOY, "chmod 700 shared"] },
+        files: { "shared/.keep": "" },
+      },
+      async (configPath) => {
+        const failure = await classify(["--only", "functions:daily"], configPath).then(
+          () => null,
+          (error) => error,
+        );
+        expect(failure).toBeInstanceOf(LiveCheckoutDriftError);
+        expect(failure.message).toContain("shared");
+      },
+    );
+  });
+
   it("ABORTS when a hook writes through the overlay and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the

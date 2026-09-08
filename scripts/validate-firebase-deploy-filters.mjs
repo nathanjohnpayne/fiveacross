@@ -943,6 +943,19 @@ async function liveTreeFingerprint(liveDirs, projectDir, liveFiles = [], liveEnt
     }
     if (visited.has(real)) return;
     visited.add(real);
+    // The directory's OWN signature as well as its children's (Codex P1,
+    // round 25 on #1107): a hook can branch on a linked directory's
+    // permission bits and change them through the scratch symlink, which
+    // moves nothing beneath it.
+    try {
+      const own = await lstat(dir, { bigint: true });
+      fingerprint.set(
+        `${dir} (self)`,
+        `${own.mode} ${own.ino} ${own.size} ${own.mtimeNs} ${own.ctimeNs}`,
+      );
+    } catch (error) {
+      fingerprint.set(`${dir} (self)`, `absent ${error?.code ?? "?"}`);
+    }
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
