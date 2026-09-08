@@ -1240,18 +1240,31 @@ describe('deleteProof — a failed revocation is QUEUED, not lost (#134, #1157)'
     expect(purgeCacheSpy).toHaveBeenCalledWith('https://firebasestorage.googleapis.com/x');
   });
 
-  it('DRAINS the queue before the next delete, and drops what it clears', async () => {
+  it('DRAINS the queue beside the next delete, without blocking it, and drops what it clears', async () => {
     localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/OLD.jpg`]));
 
     await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`);
 
-    // The queued path was retried, and it was retried FIRST — the drain runs at
-    // the top of the delete, before the transaction this call opens.
-    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/OLD.jpg`);
-    expect(deleteStorageSpy.mock.invocationCallOrder[0]).toBeLessThan(
-      Math.min(...runTx.mock.invocationCallOrder),
+    // The queued path was retried by the drain this delete kicked off…
+    await vi.waitFor(() => expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/OLD.jpg`));
+    await vi.waitFor(() => expect(queued()).toEqual([]));
+  });
+
+  it('does NOT let a stalled historical retry hold up a new takedown (Phase 4b P2, run 2)', async () => {
+    // Fifty queued Storage failures against an unavailable Storage must not
+    // stall a delete that only needs Firestore: the drain is independent.
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([`proofs/${EVENT_ID}/u1/STUCK.jpg`]));
+    let releaseStuck: () => void = () => {};
+    deleteStorageSpy.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseStuck = resolve; }),
     );
-    expect(queued()).toEqual([]);
+
+    await deleteProof('P', null);
+
+    expect(runTx).toHaveBeenCalled();
+    expect(queued()).toEqual([`proofs/${EVENT_ID}/u1/STUCK.jpg`]);
+    releaseStuck();
+    await vi.waitFor(() => expect(queued()).toEqual([]));
   });
 
   it('drops a queued path whose object is ALREADY GONE', async () => {

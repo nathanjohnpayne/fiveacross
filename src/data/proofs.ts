@@ -492,7 +492,11 @@ export async function deleteProof(
   // Drain first, so a delete taken on this device is also the moment a previous
   // one gets its retry. Never throws, so it cannot become a new way for a
   // takedown to fail.
-  await drainProofMediaRevocations(eventId);
+  // Kicked off, NOT awaited (Phase 4b P2 on PR #1157 run 2): the queue can hold
+  // up to fifty historical Storage retries, and a Storage outage must not stall
+  // a new takedown that only needs Firestore. The drain runs independently
+  // beside this delete; it also runs on every sign-in.
+  void drainProofMediaRevocations(eventId).catch(() => undefined);
 
   // Captured from the proof doc the transaction reads, so the post-commit
   // purge below (#373) targets the SAME media the Storage delete revokes.
