@@ -7,6 +7,23 @@ service cloud.firestore {
     function eventData(eventId) {
       return get(/databases/$(database)/documents/events/$(eventId)).data;
     }
+    // The Event this REQUEST will leave behind, for the one clause that has to
+    // ask about the resulting state rather than the stored one (#1151,
+    // CodeRabbit on PR #1162 — the Claims requeue arm, far below). `get()` reads
+    // the PRE-write document, so a batched write that changes the Event and
+    // something that depends on the Event is decided against an Event neither
+    // write leaves standing; `getAfter()` is the projection that closes it, the
+    // same way `reshuffleCounterPaired` uses it to require a paired counter
+    // write. It names the SAME document `isAdmin` has already read, which is
+    // what keeps it affordable — measured against the emulator, the projection
+    // costs the arm that calls it no additional access — but it is still asked
+    // only where the pre-write reading would be wrong. A batch that DELETES the
+    // Event makes it an evaluation error, which denies: the conservative
+    // direction, and the same fail-closed default every other `getAfter` here
+    // carries.
+    function eventDataAfter(eventId) {
+      return getAfter(/databases/$(database)/documents/events/$(eventId)).data;
+    }
     // Admin uids listed in the already-read event doc's `admins` array.
     function isAdminWithEvent(event) {
       return signedIn() && request.auth.uid in event.admins;
@@ -175,6 +192,260 @@ service cloud.firestore {
         && !('archivedUnder' in stored)
         && incoming.get('archivedUnder', 0) is int
         && incoming.get('archivedUnder', 0) == stored.get('archiveToken', 0);
+    }
+    // The headline honour and the holder's own kept row, validated TOGETHER
+    // (#1151, Codex P2 on PR #1139 round 4). They are SELECTED together — the
+    // row exists only to carry the honour's holder outside the bounded
+    // `standings` prefix — so the record has exactly two legitimate shapes:
+    // both `null` (nobody got there), or both maps naming the SAME holder.
+    // Type-checking them one at a time accepted the two shapes the pairing
+    // exists to refuse: a map beside a `null`, which is the half-built record
+    // the archived Share Card reads a hole from, and two maps naming DIFFERENT
+    // Players, which puts one name in the hall of fame's headline and another
+    // on the pinned eleventh row of the same card. An ABSENT key still errors
+    // the expression and denies, exactly as it did.
+    //
+    // Its own helper for the reason `completeArchiveRecord` is one: the arm
+    // that calls it sits against Firestore's expression cap (#850/#934), so
+    // the pairing is expressed once here rather than unrolled inline.
+    //
+    // AND EACH HALF IS VALIDATED WHOLE, not only matched (#1151, Codex P2 on
+    // PR #1162). Two maps carrying nothing but the same `uid` satisfied the
+    // pairing, so a direct admin write could flip an Event whose `firstBingo`
+    // had no `displayName` or `at` and whose `firstBingoRow` had none of the
+    // standings fields and no `rank` — and the flip is irreversible, so the
+    // archived Leaderboard and Share Card the record exists to feed would then
+    // read a hole out of a record the rules had already locked. Matching uids
+    // prove the two halves agree about WHO; they say nothing about whether
+    // either half can be rendered.
+    //
+    // The fields and types are exactly what `src/data/eventArchive.ts` writes:
+    // `archiveName` always yields a string, `archiveCount` a number,
+    // `archiveInstant` a number or `null`, `blackout` a coerced bool, and `rank`
+    // the holder's 1-based place in the complete ban-filtered standings. An
+    // ABSENT key needs no clause of its own, exactly as in
+    // `completeArchiveRecord`: reading a missing key errors the expression,
+    // which denies.
+    //
+    // Type checks only, deliberately — no `size()` bound on the two strings,
+    // matching the rest of `completeArchiveRecord`. The record's own length
+    // ceiling is bytes, measured twice before the quiesce and again inside the
+    // transaction (`MAX_ARCHIVE_BYTES` / `MAX_ARCHIVED_EVENT_BYTES`), and a
+    // character bound here would be a SECOND, differently-counted ceiling on a
+    // value the writer clamps in JS UTF-16 units: an emoji-heavy name inside
+    // the writer's clamp could fail it, and this arm is reached only after the
+    // Event has already been shut.
+    // AND `is number` IS NOT ENOUGH FOR A NUMBER (CodeRabbit, PR #1162). It
+    // admits `NaN` and both infinities, which are Firestore doubles like any
+    // other — so the irreversible flip could persist a headline instant of
+    // `NaN` or a count of `Infinity`, and the archived Leaderboard and Share
+    // Card the record exists to feed would render exactly that, forever.
+    //
+    // Rules have no `isFinite()`, so the estate's own idiom stands in for it: a
+    // magnitude bound, 4102444800000 (2100-01-01T00:00:00Z), already used that
+    // way for `standingsFreezeAt` and for the flip's own `archivedAt`. Every
+    // comparison against `NaN` is false and each infinity fails one side, so a
+    // two-sided bound is the whole check. The magnitude is doing ONE job here —
+    // rejecting the three values `is number` should never have admitted — and is
+    // not a semantic ceiling on either a count or an instant. The record's real
+    // ceiling is bytes, measured twice before the quiesce and again inside the
+    // transaction.
+    //
+    // IT IS TWO-SIDED, not the `> 0` those two fields carry, and that is
+    // deliberate. This arm may only require what the WRITER guarantees, or it
+    // denies after the Event has already been shut — the same trade the string
+    // bound above declines. `players/{uid}` validates no field at all (ADR 0001,
+    // honour system), so a Player can self-write `bingoCount: -1` or
+    // `firstBingoAt: -5` on their own row, and `archiveCount`/`archiveInstant`
+    // COPY those through: the builder coerces what is unreadable, it does not
+    // adjudicate what is merely odd. A non-negative bound would therefore refuse
+    // a legitimate record on a Player row no Admin can edit, on the one write
+    // that cannot be retried. Finiteness is exactly what the writer's own
+    // coercions do promise, so it is exactly what is required here.
+    function finiteArchiveNumber(value) {
+      return value is number && value > -4102444800000 && value < 4102444800000;
+    }
+    function firstBingoHonorComplete(honor) {
+      return honor.uid is string
+        && honor.displayName is string
+        && finiteArchiveNumber(honor.at);
+    }
+    // The holder's own kept row: `ArchivedStandingRow` plus the `rank` that is
+    // the whole reason it is carried outside the bounded `standings` prefix.
+    //
+    // `rank` is the one field held to more than finiteness, because it is the
+    // one the writer computes rather than copies: `holderAt + 1` over a
+    // non-negative index, so a POSITIVE INTEGER by construction. The JS SDK
+    // stores an integral number as a Firestore integer, which is what lets `is
+    // int` be asked of it at all — the same footing `usableArchiveToken` already
+    // stands on. A rank of 0, a negative one or a fractional one names a place
+    // in the standings that does not exist, and the pinned row is carried
+    // outside the bounded prefix precisely so that place can be printed.
+    function firstBingoRowComplete(row) {
+      return row.uid is string
+        && row.displayName is string
+        && finiteArchiveNumber(row.bingoCount)
+        && finiteArchiveNumber(row.squaresMarked)
+        && row.blackout is bool
+        && (row.firstBingoAt == null || finiteArchiveNumber(row.firstBingoAt))
+        && row.rank is int
+        && row.rank > 0;
+    }
+    // …AND THAT PLACE HAS TO EXIST IN THE ROSTER THE RECORD DECLARES (#1151,
+    // Codex P2 on PR #1162, round 9).
+    //
+    // `rank > 0` says the place is a real ordinal; it says nothing about whether
+    // the standings it indexes are that long. So a direct admin flip could
+    // freeze `playerCount: 0` beside `standings: []` — which `standingsSizeMatches`
+    // is perfectly happy with, the two agreeing that the roster is empty — and a
+    // First-BINGO pair whose row claims `rank: 1`. The record then says in one
+    // breath that nobody played and that somebody came first, permanently, on the
+    // write that can never be amended, and the archived Share Card prints the
+    // pinned row's place out of a roster it also reports as having none.
+    //
+    // Asked HERE rather than in `firstBingoRowComplete`, which is handed the row
+    // alone and cannot see the count. The comparison is against `playerCount`
+    // rather than `standings.size()` because `playerCount` is the COMPLETE
+    // ban-filtered cardinality while `standings` is only its bounded prefix — the
+    // holder's row is carried outside that prefix precisely so a rank past 200
+    // can still be printed, and asking the prefix would refuse exactly the record
+    // that pairing exists for. `playerCount` has already been held to a
+    // non-negative int by the time this is reached, and `firstBingoRowComplete`
+    // has already required `rank is int` — so the two are comparable numbers
+    // here, and `rank > 0` combined with this bound is what forbids a non-null
+    // pair beside a roster of zero.
+    //
+    // The writer produces exactly this: `holderAt + 1` over an index into
+    // `ranked`, beside `ranked.length`, so the bound holds by construction for
+    // every record `draftEventArchive` can build — including the boundary case
+    // where the holder is last.
+    function firstBingoPairComplete(archive) {
+      return (archive.firstBingo == null && archive.firstBingoRow == null)
+        || (archive.firstBingo is map
+            && archive.firstBingoRow is map
+            && firstBingoHonorComplete(archive.firstBingo)
+            && firstBingoRowComplete(archive.firstBingoRow)
+            && archive.firstBingoRow.uid == archive.firstBingo.uid
+            && archive.firstBingoRow.rank <= archive.playerCount);
+    }
+    // THE RETAINED ROWS AND THE ROSTER CARDINALITY, BOUND TO EACH OTHER (#1151,
+    // Codex P2 on PR #1162).
+    //
+    // Rules cannot walk a list, so the rows themselves stay the stated residual
+    // — but the list's SIZE is one expression, and the record's whole contract
+    // for these two fields is a relationship between them: `standings` is the
+    // bounded prefix of the complete ban-filtered order and `playerCount` is
+    // that order's true cardinality, the `MostLovedPhotoAward` `winners` /
+    // `winnerCount` pairing. Typed one at a time they said nothing about each
+    // other, so an authorized admin flipping directly rather than through
+    // `draftEventArchive` could freeze `playerCount: 0` beside a non-empty list,
+    // or a list past the bound the Event document's 1 MiB budget depends on —
+    // permanently, because the flip is irreversible and locks `archive`, and
+    // silently, because every archived surface reads the count as the roster
+    // size and the list as its prefix.
+    //
+    // 200 is `MAX_ARCHIVED_STANDING_ROWS` in `src/data/eventArchive.ts`,
+    // restated here because the writer and this arm have to agree about it —
+    // the same shared-contract discipline `finiteArchiveNumber` and
+    // `MAX_ARCHIVE_NUMBER` already carry. The writer produces exactly this:
+    // `ranked.slice(0, 200)` beside `ranked.length`, so the equality holds by
+    // construction for every record it can build, and `writableArchiveRecord`
+    // asks it on the near side of the quiesce.
+    //
+    // `playerCount` has already been held to a non-negative int by the time
+    // this is reached, so the conditional is `min(playerCount, 200)` and the
+    // full-sized record is the boundary case rather than an exception.
+    function standingsSizeMatches(archive) {
+      return archive.standings.size()
+        == (archive.playerCount <= 200 ? archive.playerCount : 200);
+    }
+    // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed
+    // (#1151). The NULLABLE keys are checked as type-or-null, because `null` is
+    // a legitimate stored value for each — the First-BINGO pair is `null` when
+    // nobody got there, `eventName: null` means the Event had no name, and
+    // `freezeAt: null` means it had no Standings Freeze. An ABSENT key needs no
+    // clause of its own: reading a missing key errors the expression, which
+    // denies, and denying is what a record the archived Leaderboard would throw
+    // on deserves. `archivedAt` must equal the document's own stamp, which both
+    // type-checks it and holds the invariant `EventArchive.archivedAt` states —
+    // the two are written from one value in one update, and a record disagreeing
+    // with the stamp beside it would put two answers on screen.
+    //
+    // The record is passed in ALREADY DEREFERENCED, rather than the whole
+    // document: the arm that calls this lives against Firestore's
+    // 1000-expression cap (#850/#934), and re-walking
+    // `request.resource.data.archive` per clause is the kind of cost that
+    // pushed it over.
+    //
+    // Rules cannot iterate a list, so the standings ROWS remain the stated
+    // residual (the same one `bannedUids` carries); what this closes is the
+    // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
+    // at all, or an empty map — which is irreversible and leaves the archived
+    // surfaces on their live fallback while play is frozen (Codex P2, PR #1139).
+    // The list's SIZE is not a walk, though, and it is what ties `standings` to
+    // `playerCount` (`standingsSizeMatches`, Codex P2 on PR #1162): the rows
+    // stay unchecked, the COUNT of them no longer is.
+    //
+    // AND `is number` IS NOT ENOUGH FOR THE TOP-LEVEL NUMBERS EITHER (Codex P2
+    // on PR #1162). The pairing above stopped admitting `NaN` and the infinities
+    // inside the First-BINGO halves and left the record's own two numbers still
+    // admitting them, so a direct admin flip could persist `playerCount: NaN` or
+    // `freezeAt: Infinity` — and the flip is irreversible and locks `archive`,
+    // so the archived-state summary this console already renders would read
+    // "NaN players" for the life of the Event.
+    //
+    //   - `playerCount` is a non-negative INT, which is more than finiteness and
+    //     is exactly what the writer guarantees: it is `ranked.length`, a count
+    //     the builder COMPUTES rather than copies off a Player row, so it stands
+    //     on the same footing as `rank` above rather than on the deliberately
+    //     permissive one the copied counts stand on. The JS SDK stores an
+    //     integral number as a Firestore integer, which is what lets `is int` be
+    //     asked of it at all.
+    //   - `freezeAt` is `finiteArchiveNumber` or null, the same bound the pair's
+    //     instants carry — `null` stays legitimate (an Event with no Standings
+    //     Freeze). It is the one number in the record that needs no Player to
+    //     misbehave: it resolves from `frozenAt`, which the Admin SDK writes and
+    //     no arm here constrains, so `src/data/eventArchive.ts` clamps it for
+    //     the same reason it clamps the copied stats.
+    //
+    // `archivedAt` needs no clause of its own: `== stamp` below ties it to the
+    // document's own stamp, and the arm that calls this has already required
+    // THAT to be a bounded, positive number. `eventName` is a string-or-null,
+    // `standings` and `dailyHonors` are lists whose contents Rules cannot walk.
+    // Those are every top-level key `EventArchive` declares.
+    function completeArchiveRecord(archive, stamp) {
+      return archive is map
+        // The Event's own name, frozen with the standings it titles (#1151,
+        // Codex P2 on PR #1139). `EventDoc.name` is outside the write-once
+        // clause on purpose, so the archived Share Card cannot be allowed to
+        // rebuild its title from the live field; `null` is the legitimate
+        // stored value for an Event that had no name.
+        && (archive.eventName == null || archive.eventName is string)
+        && archive.standings is list
+        && archive.playerCount is int
+        && archive.playerCount >= 0
+        // …and the two are bound to each other, not merely typed apart
+        // (`standingsSizeMatches`, Codex P2 on PR #1162).
+        && standingsSizeMatches(archive)
+        && archive.dailyHonors is list
+        // …and the honours list is bounded too (Codex P2 on PR #1162, round 9).
+        // Rules cannot walk a list, so what is IN it stays the stated residual —
+        // but its SIZE is one expression, exactly as `standingsSizeMatches`
+        // spends one, and `dailyHonors` had no bound at all. An Event supports at
+        // most ten Days and the archive contract is at most one honour per Day,
+        // so a direct admin flip carrying thousands of scalar or duplicate
+        // entries was a record no builder can produce, frozen permanently on the
+        // write that locks `archive`, and unrepairable by any client.
+        //
+        // 10 is `MAX_DAYS` in `src/data/eventLimits.ts`, restated here because
+        // the writer and this arm have to agree about it — the same
+        // shared-contract discipline the 200 above and `finiteArchiveNumber`
+        // already carry, and the same number `daysThemeLockOk` already unrolls
+        // its schedule lock over.
+        && archive.dailyHonors.size() <= 10
+        && firstBingoPairComplete(archive)
+        && (archive.freezeAt == null || finiteArchiveNumber(archive.freezeAt))
+        && archive.archivedAt == stamp;
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
     // allow arm consults admission. Presence is part of the invariant because
@@ -1215,41 +1486,68 @@ service cloud.firestore {
       //     1000-expression cap (#850/#934), and `allow` statements
       //     short-circuit — the archive write is decided by the small arm and
       //     never pays for the schedule and freeze-boundary checks below.
-      //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`
-      //     and `archivedAt` are locked to their stored values, so a second
-      //     archive pass cannot restamp the freeze and un-archiving is not a
-      //     client operation. Every OTHER field stays editable, so moderation
-      //     (`bannedUids`) and configuration survive the freeze. The durable
-      //     `archive` RECORD, and the write-once clause that locks it, are
-      //     #1151's — this ticket freezes the Event, not the standings.
+      //   - the freeze is WRITE-ONCE: once `status` is 'archived', `status`,
+      //     `archivedAt`, `archivedUnder` and the `archive` RECORD are all
+      //     locked to their stored values. That is what "the final Leaderboard
+      //     and hall of fame persist unchanged" means at the boundary (#1151) —
+      //     a second archive pass cannot overwrite the record with a later
+      //     roster, post-freeze moderation cannot edit it, and un-archiving is
+      //     not a client operation. Every OTHER field stays editable, so
+      //     moderation (`bannedUids`) and configuration survive the freeze.
       //
-      // THE LIFECYCLE FIELDS NEVER MOVE ON THIS ARM (#134; Codex P1 on PR
-      // #1157, round 6). `status`, `archiving`, `archivedAt` and
-      // `archiveToken` are moved only by the dedicated arms BELOW — the shut,
-      // the reopen, the flip and the repair — each of which states the one
-      // transition it performs and the shape it requires. The token is in the
-      // set too (Codex P2, round 7): a closing Event's generation must be
-      // IMMUTABLE here, or a whole-document writer could restore an abandoned
-      // token B beside the current quiesce and a stale `archiveEvent(B)` would
-      // pass `boundToStoredQuiesce` after all. This arm refuses any change to
-      // the four in ONE `affectedKeys` check, which is what keeps the freeze write-once (an
-      // un-archive, a second stamp, a re-shut under the old generation and a
+      // THE LIFECYCLE FIELDS AND THE RECORD NEVER MOVE ON THIS ARM (#134; Codex
+      // P1 on PR #1157, round 6; #1151). `status`, `archiving`, `archivedAt`,
+      // `archiveToken`, `archivedUnder` and `archive` are moved only by the
+      // dedicated arms BELOW — the shut, the reopen, the flip and the repair —
+      // each of which states the one transition it performs and the shape it
+      // requires. The token is in the set (Codex P2, round 7): a closing Event's
+      // generation must be IMMUTABLE here, or a whole-document writer could
+      // restore an abandoned token B beside the current quiesce and a stale
+      // `archiveEvent(B)` would pass `boundToStoredQuiesce` after all. The
+      // RECORD is in it for the write-once guarantee itself: the flip is the one
+      // arm that may introduce `archive`, and nothing may rewrite it afterwards.
+      // This arm refuses any change to the six in ONE `affectedKeys` check,
+      // which is what keeps the freeze write-once (an un-archive, a second
+      // stamp, a re-shut under the old generation, a rewritten record and a
       // stray stamp on a live Event are all a CHANGE to one of them and land
-      // here first), and which is cheaper than the five shape and lock clauses
-      // it replaces: this arm sits at Firestore's 1000-expression cap (#1142
-      // item 1), and the transition check the round-6 finding needed did not
-      // fit beside them. Restating an UNCHANGED value is not a change, so a
-      // partial update that echoes the stored state still passes. A create
-      // has no stored document to diff against, so it is held to the one
-      // shape a new Event may be born in: open, not closing, no stamp.
+      // here first), and which is cheaper than the shape and lock clauses it
+      // replaces: this arm sits at Firestore's 1000-expression cap (#1142 item
+      // 1), and the transition check the round-6 finding needed did not fit
+      // beside them. Adding `archive` to the existing list costs nothing — one
+      // more element in a literal the arm already evaluates once. Restating an
+      // UNCHANGED value is not a change, so a partial update that echoes the
+      // stored state still passes. A create has no stored document to diff
+      // against, so it is held to the one shape a new Event may be born in:
+      // open, not closing, no stamp, no record.
+      //
+      // `finaleCompletedAt` IS IN THE SET TOO, and it is the one entry that is
+      // not a lifecycle field (#1151, Codex P1 on PR #1162). It is the composite
+      // marker `runFinaleBeats` stamps once every required finale beat has
+      // landed — the freeze stamp AND the podium Moment — and it is what the
+      // console's pre-flip acknowledgement is decided on, so an admin able to
+      // write it could clear the one warning standing between a slow podium and
+      // an irreversible archive that forgoes it. The Admin SDK bypasses these
+      // rules, so the scheduler still writes it; NO client arm may, and none of
+      // the four dedicated arms below names it in its `hasOnly` guard either.
+      // It carries no shape check on purpose: a field no client may write needs
+      // no type validation, and an unwritable field is cheaper to enforce than a
+      // validated one on an arm at the expression cap. `frozenAt` beside it
+      // stays admin-writable exactly as it always was, which is precisely why
+      // the gate's evidence moved off it. The CREATE half names it for symmetry
+      // with the four fields beside it rather than for reach: no client create
+      // of an Event document can succeed at all, because `isAdmin(eventId)`
+      // reads the very document being created and a missing `get()` denies.
       allow create, update: if isAdmin(eventId)
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
                 && request.resource.data.get('archiving', false) == false
                 && !('archivedAt' in request.resource.data)
-                && !('archivedUnder' in request.resource.data))
+                && !('archivedUnder' in request.resource.data)
+                && !('archive' in request.resource.data)
+                && !('finaleCompletedAt' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
-                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken', 'archivedUnder']))
+                 .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken',
+                          'archivedUnder', 'archive', 'finaleCompletedAt']))
         // #804 deploy 1 freezes only the rollout switch. Keep this create-safe:
         // a client create still fails at isAdmin(eventId), while the null guard
         // prevents this update-only comparison from reading prior data.
@@ -1445,6 +1743,16 @@ service cloud.firestore {
       //   - it must carry a numeric, bounded `archivedAt`, which is what makes
       //     "no reader ever sees an archived Event with no stamp" an enforced
       //     invariant rather than a property of one client's writer;
+      //   - it must carry the COMPLETE record (#1151). Type-checking `archive`
+      //     only when present accepted `{status: 'archived', archivedAt}` on its
+      //     own, and that state is both irreversible and useless: the freeze
+      //     denies every gameplay write while the archived surfaces fall back to
+      //     the LIVE view the record exists to replace. `completeArchiveRecord`
+      //     types every top-level key, validates the First-BINGO pair TOGETHER
+      //     and each half WHOLE — every scalar `ArchivedFirstBingo` and
+      //     `ArchivedFirstBingoRow` declare, not just the matching uids (Codex
+      //     P2 on PR #1162) — and requires the record's own stamp to equal the
+      //     document's;
       //   - it must touch NOTHING ELSE. `affectedKeys().hasOnly` is what lets
       //     this arm skip the configuration validation below without opening a
       //     hole through it: a write that also moved `days`, `bannedUids` or
@@ -1452,16 +1760,17 @@ service cloud.firestore {
       //     arm that checks those fields (where it is denied, because the stored
       //     document is not archived yet).
       //
-      // What this arm deliberately does NOT yet require is a COMPLETE frozen
-      // record. #1149 lands the lifecycle primitive only: the flip carries
-      // `status`, `archivedAt` and the cleared quiesce, and nothing more. The
-      // `archive` record, its whole-record validation and its own write-once
-      // lock arrive with #1151, which widens the `hasOnly` guard below by one
-      // key at the same time.
+      // The `hasOnly` guard names FIVE keys, not four: `archive` joins the three
+      // transition fields and the flip-only binding, because this arm is the one
+      // place the record may be introduced and the general arm above locks it
+      // everywhere else. The record checks stay HERE rather than on that arm on
+      // purpose — it sits at Firestore's 1000-expression cap (#1142 item 1), and
+      // `allow` statements short-circuit, so an ordinary admin write never pays
+      // for a clause that only an archive flip can satisfy.
       //
       // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: a
       // write that reaches this arm has already been refused by the general
-      // arm's `affectedKeys` check, and the three dedicated arms sit AFTER
+      // arm's `affectedKeys` check, and the four dedicated arms sit AFTER
       // that arm so an ordinary admin write never pays for them at all.
       allow update: if resource != null
         && resource.data.get('archiving', false) == true
@@ -1472,12 +1781,16 @@ service cloud.firestore {
         && request.resource.data.archivedAt is number
         && request.resource.data.archivedAt > 0
         && request.resource.data.archivedAt < 4102444800000
+        && completeArchiveRecord(request.resource.data.archive, request.resource.data.archivedAt)
         // The quiesce ends with the freeze. Leaving the flag set would be
         // harmless (`status` denies on its own from here) but it would also be
         // a second, clearable spelling of a state that must not be clearable.
         && request.resource.data.get('archiving', false) == false
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder']);
+             .hasOnly(['status', 'archivedAt', 'archiving', 'archivedUnder', 'archive']);
+      // The standings ROWS inside `archive` stay shape-unchecked: Rules cannot
+      // iterate a list, so per-row validation is not expressible here — the same
+      // stated residual `bannedUids` carries.
       // THE REPAIR, on its own arm (Codex P2 on PR #1157, round 7). A closing
       // Event carrying NO usable generation — a document shut out of band, or
       // by a build that predates the counter — cannot be flipped (the flip is
@@ -2196,7 +2509,70 @@ service cloud.firestore {
         allow create: if signedIn()
           && eventOpenForPlay(eventId)
           && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isAdmin(eventId);
+        // …AND NO UPDATE MAY PUT ONE BACK INTO THE QUEUE (#1151, Codex P2 on PR
+        // #1162). The drain gate is what makes the freeze safe to take: a Claim
+        // still pending at the flip is pending FOREVER, behind a Confirm/Reject
+        // pair whose Board and Player writes the freeze denies. `archiveEvent`
+        // re-reads the queue from the SERVER after the closing write, which
+        // closes the window between the console's last render and the quiesce —
+        // but not the one after that read. The flip's transaction reads only the
+        // Event document, so an admin client moving a terminal Claim back to
+        // `pending` in between neither conflicts with it nor retries it, and the
+        // archive commits permanently over exactly the state the gate exists to
+        // refuse. Rules cannot query a collection, so the drain itself cannot be
+        // a condition of the flip; what CAN be held here is the transition that
+        // creates the state, and that is enough — a Claim that was terminal when
+        // the drain read saw it cannot become pending afterwards.
+        //
+        // Scoped to the RESULTING status, and only while play is closed: a
+        // pending Claim may still be confirmed or rejected from the closing
+        // state, because finishing the drain is the whole point of the window
+        // (`allow update` is the paper half of that resolution — the Board and
+        // Player writes beside it are denied, which is why the console drains
+        // BEFORE it shuts the Event). Restating a stored `pending` is not a
+        // transition and is left alone. On a live Event nothing changes at all.
+        //
+        // AND THE EVENT IT ASKS ABOUT IS THE ONE THIS REQUEST LEAVES BEHIND
+        // (CodeRabbit on PR #1162). `get()` reads the PRE-write Event, and rules
+        // decide every document in a batch independently — so ONE atomic admin
+        // batch that set `archiving: true` and moved a terminal Claim to
+        // `pending` was judged against an Event that was still open, and both
+        // writes committed. What they committed together is exactly the state
+        // this clause exists to refuse: an Event closed to play with a Claim
+        // back in a queue whose Confirm/Reject pair can now only fail, which the
+        // flip is then free to make permanent (its transaction reads only the
+        // Event document, so a Claim in another collection neither conflicts
+        // with it nor retries it). `getAfter` asks the question of the RESULTING
+        // Event, which no single write and no batch can slip past.
+        //
+        // It answers the opposite direction honestly too: a batch that REOPENS
+        // play and requeues in one write is now allowed, because the Event it
+        // leaves behind is open and an open Event's queue may legitimately
+        // refill. Nothing downstream leans on that being barred — a reopen
+        // breaks the quiesce, and any flip still bound to it is refused by the
+        // flip arm's own stored-`archiving` and generation checks.
+        //
+        // The `getAfter` stays confined to THIS branch, exactly as the `get()`
+        // it replaces did: the disjunction is ordered so an ordinary resolution
+        // and an unchanged restatement both short-circuit before the Event is
+        // consulted at all, and only a Claim being made pending again pays for
+        // it. And beside the `isAdmin` read it costs nothing measurable — the
+        // two name the SAME document. Measured against the emulator on the
+        // branch that actually reaches the read (a terminal Claim moved to
+        // `pending` on a LIVE Event), the arm's aggregate access boundary is
+        // UNCHANGED: 20 distinct Events pass in one batch and 21 deny, with the
+        // pre-write read and with the projection alike.
+        //
+        // The projection replaces the pre-write read rather than joining it, so
+        // no `exists()` is spent either: `getAfter` on a missing or deleted
+        // Event errors and denies, which is the same fail-closed default
+        // `isAdmin` already gives this arm.
+        allow update: if isAdmin(eventId)
+          && (request.resource.data.get('status', '') != 'pending'
+              || resource.data.get('status', '') == 'pending'
+              || (eventDataAfter(eventId).get('status', 'active') != 'archived'
+                  && eventDataAfter(eventId).get('archiving', false) != true));
+        allow delete: if isAdmin(eventId);
       }
 
       // Per-Prompt Tally (ADR 0002). A Mark is PRIVATE on the Board but PUBLIC as an

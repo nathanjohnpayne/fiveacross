@@ -6,6 +6,8 @@ import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '..
 import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
+import { usableDayIndexes } from '../data/eventArchive';
+import { supportedDayIndex } from '../data/eventLimits';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -339,24 +341,196 @@ export function useDayMeta(dayIndex: number | undefined): { data: DayMetaDoc | n
  * EVERY Day's meta doc, as a `Map<dayIndex, DayMetaDoc>` (#264 — the
  * Leaderboard honors strip reads the PINNED honors, with the roster-derived
  * `perDayHonors` as its fallback). Same bounded one-effect fan as
- * `useMyDayBoards` below.
+ * `useMyDayBoards` below, and it takes the same argument: the schedule's own
+ * `days.map(d => d.index)`, not its length (Codex P2 on PR #1162).
  */
-export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
-  return useDayMetasStatus(dayCount).metas;
+export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, DayMetaDoc> {
+  return useDayMetasStatus(dayIndexes).metas;
 }
 
-export function useDayMetasStatus(dayCount: number): {
+/**
+ * The Day indexes a honour fan may address, from a caller's raw
+ * `days.map(d => d.index)` (#1151, Codex P2 on PR #1162).
+ *
+ * Two normalisations, both of which the old `dayCount` argument got for free by
+ * construction and neither of which survives taking real indexes:
+ *
+ *  - **Indexes that name no Day are dropped.** `EventDoc.days` is admin-written
+ *    with no per-entry validation in its rules arm, and `eventConverter`
+ *    tolerates an entry it cannot read (`migrateDayFields` treats a nullish one
+ *    as `{}`), so an index can be `undefined` or fractional. `dayMetaRef` would
+ *    then address `days/undefined/meta/undefined` — a document that is not
+ *    there, delivered as a perfectly ordinary "no pin here". `-1`, `10` and an
+ *    unsafe large integer are dropped by the same clause and for a sharper
+ *    reason (Codex P2 on PR #1162, round 7): each is a REAL path this fan would
+ *    otherwise subscribe to, on a Day the `DayDef` contract does not have, so
+ *    the question is the shared `supportedDayIndex` rather than
+ *    `Number.isInteger`.
+ *  - **Duplicates are collapsed.** The completion tests below count DISTINCT
+ *    Days answered against the list's length, so a schedule naming one index
+ *    twice could never reach `seen.size >= length` and the archive control would
+ *    sit disabled behind a message that never resolves.
+ *
+ * NORMALISING IS NOT THE SAME AS ACCEPTING (#1151, Codex P2 on PR #1162). Both
+ * shapes above are ones `archiveEvent` REFUSES as `schedule-unusable` — a
+ * non-integer index it cannot address, a repeated one it would freeze twice —
+ * and normalising them away silently is exactly what let the console arm over a
+ * schedule the freeze was going to turn down: the fan completed, every latch
+ * went true, the Admin closed play, and the flip refused and reopened it. So the
+ * normalisation stays (the fan still has to address SOMETHING, and a list it
+ * cannot complete would hang every gate on this hook) and the fact that it was
+ * needed is REPORTED beside it, through `useDayMetasStatus`' `scheduleUnusable`.
+ * The question itself is the freeze's own `usableDayIndexes`, asked rather than
+ * restated, so the two halves cannot drift.
+ *
+ * Order is preserved, because the fan's own key is the list's content and a
+ * stable order keeps that key stable across renders.
+ */
+function canonicalDayIndexes(dayIndexes: readonly number[]): number[] {
+  return Array.from(new Set(dayIndexes.filter(supportedDayIndex)));
+}
+
+/**
+ * `loaded` vs `serverLoaded` vs `serverConfirmed` vs `failed`. `loaded` means
+ * every Day's subscription has RESOLVED — delivered a snapshot, or died — which
+ * is what the honours strip wants (it paints the pins it has and repaints when
+ * better ones land). `serverLoaded` is the stricter LATCH: every Day has been
+ * answered by the SERVER at least once. A surface that PERSISTS what it read
+ * needs a strict one, because a cache-only "no pin here" is indistinguishable
+ * from "the server says there is no pin" and freezing the wrong one is permanent
+ * (#1151, Codex P1: `ArchiveEvent`'s preview is what an Admin decides to freeze
+ * from).
+ *
+ * AND A LATCH IS NOT ENOUGH FOR THAT SURFACE (Codex P2 on PR #1162).
+ * `serverLoaded` says the server HAS spoken; it cannot say the honours on screen
+ * right now are what the server said. It never clears, so a console that
+ * confirmed every Day and then went offline keeps reporting `true` while the fan
+ * re-delivers each Day from the ADR 0006 persistent cache — and the archive
+ * would arm over exactly the cached preview the latch exists to refuse. A local
+ * write pending on a Day meta is the same hole from the other side: emitted
+ * server-backed but undecided, and rolled back if it is refused.
+ *
+ * `serverConfirmed` is therefore the per-render test, not a latch: every Day's
+ * LATEST snapshot is fully server-committed (`!fromCache && !hasPendingWrites`),
+ * exactly the three-flag test `src/App.tsx` applies before it moves a Player off
+ * their Card and `Admin.tsx` applies to the Event document. It can go false
+ * again, which is the point. It implies `serverLoaded` by construction — a
+ * server-committed snapshot is a server snapshot — so the archive gate needs
+ * only this one, while the latch stays for the "seen once" question other
+ * surfaces ask.
+ *
+ * The fan subscribes with `{ includeMetadataChanges: true }` for the same reason
+ * `useDocSub`/`useColSub` do: without metadata events Firestore never re-notifies
+ * when the server confirms data the cache already held byte-for-byte, so a
+ * `!fromCache` latch would deadlock on exactly the docs that were cached. These
+ * are write-once per-Day honour docs, so the extra notifications are a handful
+ * per session, not a stream.
+ *
+ * AN ERRORED SUBSCRIPTION (permission-denied, signed out mid-flight) RESOLVES
+ * THE DAY, AND CONFIRMS NOTHING (Codex P2 on PR #1162). It used to satisfy
+ * `serverLoaded` as well, which made the strict latch a lie in exactly the case
+ * it exists for: the listener died before any server snapshot, so the honour was
+ * never confirmed, yet the archive gate read the Day as confirmed and armed —
+ * over a preview that fell back to a DERIVED honour, or to none, while
+ * `archiveEvent`'s later `getDocFromServer` could recover and freeze the PINNED
+ * one. A different record from the one the Admin approved, permanently.
+ *
+ * It resolves `loaded` because it is terminal: the live honours strip must not
+ * hang on a Day whose listener is dead, and it renders the same derived fallback
+ * it always did. It stays out of `serverSeen` because a dead listener has
+ * confirmed nothing. And it is reported on `failed`, because a latch that can
+ * now never complete has to say WHY — otherwise the archive control sits
+ * disabled behind a "loading" message that will never resolve, which is the
+ * deadlock the old behaviour was avoiding by the wrong means.
+ *
+ * `failed` is NOT the complement of either confirmation, and its consumers have
+ * to treat it as such (CodeRabbit, PR #1162). A Day the server answered before
+ * its listener died is already latched and still current, so `failed` can be
+ * true beside a true `serverLoaded` AND a true `serverConfirmed` — which is why
+ * the archive console reports unreadable honours only when the confirmation is
+ * actually missing, rather than showing a terminal message beside an armed
+ * control.
+ *
+ * IT TAKES THE SCHEDULE'S OWN `DayDef.index` VALUES, NOT ITS LENGTH (Codex P2 on
+ * PR #1162). It used to take a count and subscribe to `days/0 … days/n-1`, which
+ * is the same fan only while the schedule is contiguous from zero — a property
+ * `EventDraft` validation enforces at AUTHORING time (`dayCompletenessIssues`
+ * requires `days[position].index === position`) and nothing enforces on a stored
+ * Event: `EventDoc.days` is admin-written with no per-entry rules validation,
+ * legacy and seeded Events were never put through the wizard, and every
+ * day-scoped path in the estate keys on `DayDef.index` rather than on array
+ * position (the #447 Phase 4b precedent, which `useMyDayBoards` below already
+ * follows).
+ *
+ * On a schedule the two disagree about, the divergence was silent and permanent.
+ * A one-Day schedule at `index: 4` had this fan confirm `days/0/meta/0` — a
+ * document that does not exist, which the server answers as an ordinary "no pin
+ * here" — so every gate passed, the console previewed the roster-DERIVED honour
+ * (or none), and the Admin armed and archived. `archiveEvent` then re-read
+ * `days/4/meta/4`, found the real pin, and froze a DIFFERENT honour from the one
+ * on the screen the Admin approved. Irreversibly, because the record is
+ * write-once.
+ *
+ * The fan therefore subscribes to exactly the indexes it is given, and `loaded`,
+ * `serverLoaded`, `serverConfirmed` and `failed` all key on those same indexes.
+ * `canonicalDayIndexes` is what the list is normalised through first.
+ */
+export function useDayMetasStatus(dayIndexes: readonly number[]): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
+  serverLoaded: boolean;
+  /** Every Day's LATEST snapshot is fully server-committed — not a latch, so it
+   *  falls false again when the fan re-delivers a Day from the persistent cache
+   *  or a local write is pending on one (Codex P2 on PR #1162). */
+  serverConfirmed: boolean;
+  /** At least one Day's subscription DIED (terminal `onSnapshot` error). It does
+   *  NOT imply either confirmation is false: a Day answered by the server before
+   *  its listener died stays latched and stays current. What it means is that a
+   *  Day still MISSING one can never acquire it for this key. */
+  failed: boolean;
+  /** The SUPPLIED list is one `archiveEvent` would refuse as `schedule-unusable`
+   *  — an index that is not an integer, or the same Day named twice (Codex P2 on
+   *  PR #1162). The fan still runs, over the normalised list; this is what stops
+   *  a surface that PERSISTS what it read from arming over a schedule the freeze
+   *  is going to turn down after it has already shut the Event. */
+  scheduleUnusable: boolean;
 } {
   const eventId = EVENT_ID;
-  const key = eventScopeKey(eventId, 'day-metas', dayCount);
+  // The DAYS this fan addresses, normalised (see `canonicalDayIndexes`). Derived
+  // per render because callers rebuild `days.map(d => d.index)` every render;
+  // the effect keys on its CONTENT, exactly as `useMyDayBoards` does.
+  const indexes = canonicalDayIndexes(dayIndexes);
+  // …and whether normalising it was NECESSARY, which is a different fact and the
+  // one the archive gate needs. Asked through the freeze's own predicate so the
+  // console and `archiveEvent` cannot disagree about which schedules are usable.
+  const scheduleUnusable = !usableDayIndexes(dayIndexes);
+  const dayCount = indexes.length;
+  const key = eventScopeKey(eventId, 'day-metas', indexes.join(','));
   type State = {
     key: string;
     metas: ReadonlyMap<number, DayMetaDoc>;
     seen: ReadonlySet<number>;
+    serverSeen: ReadonlySet<number>;
+    /** Days whose LATEST snapshot was fully server-committed. Unlike `serverSeen`
+     *  this is not a latch: a Day leaves it again the moment the fan re-delivers
+     *  it from the persistent cache, or with a local write pending (Codex P2 on
+     *  PR #1162). */
+    serverCurrent: ReadonlySet<number>;
+    /** Days whose subscription DIED. NOT disjoint from `serverSeen` or
+     *  `serverCurrent` (CodeRabbit, PR #1162): a Day the server answered before
+     *  its listener died is in both, and nothing here removes it — the error
+     *  callback only records the failure. What the set means is that any Day
+     *  still absent from those two can never join them for this key. */
+    errored: ReadonlySet<number>;
   };
-  const empty = (): State => ({ key, metas: new Map(), seen: new Set() });
+  const empty = (): State => ({
+    key,
+    metas: new Map(),
+    seen: new Set(),
+    serverSeen: new Set(),
+    serverCurrent: new Set(),
+    errored: new Set(),
+  });
   const [state, setState] = useState<State>(empty);
   useEffect(() => {
     let active = true;
@@ -366,9 +540,10 @@ export function useDayMetasStatus(dayCount: number): {
         active = false;
       };
     }
-    const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
+    const unsubs = indexes.map((dayIndex) =>
       onSnapshot(
         dayMetaRef(dayIndex, eventId),
+        { includeMetadataChanges: true },
         (snap) => {
           if (!active) return;
           setState((previous) => {
@@ -378,17 +553,41 @@ export function useDayMetasStatus(dayCount: number): {
             else metas.delete(dayIndex);
             const seen = new Set(current.seen);
             seen.add(dayIndex);
-            return { key, metas, seen };
+            // A LATCH, like `hasServerData`: once the server has spoken for this
+            // Day it has spoken, whatever a later cache-sourced snapshot says.
+            const serverSeen = new Set(current.serverSeen);
+            if (!snap.metadata.fromCache) serverSeen.add(dayIndex);
+            // …and the CURRENT answer beside it, which is not a latch: this
+            // snapshot is server-committed, or this Day is no longer confirmed
+            // (Codex P2 on PR #1162). `hasPendingWrites` joins `fromCache` for
+            // the reason it does everywhere else — an optimistic local write is
+            // emitted server-backed but undecided, and rolls back if refused.
+            const serverCurrent = new Set(current.serverCurrent);
+            if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
+              serverCurrent.add(dayIndex);
+            } else {
+              serverCurrent.delete(dayIndex);
+            }
+            return { ...current, key, metas, seen, serverSeen, serverCurrent };
           });
         },
         () => {
           if (!active) return;
-          /* permission-denied (signed out mid-flight) — leave the day absent */
+          /* permission-denied (signed out mid-flight) — leave the day absent.
+             RESOLVED for `loaded`, because the listener is dead and the live
+             strip must not hang on it; NOT server-seen and NOT server-current,
+             because a dead listener confirmed nothing; and RECORDED as a
+             failure, so a caller that needs a strict answer can say why it will
+             never arrive (Codex P2 on PR #1162). A Day already in either set
+             is deliberately left there — the server did answer it, and this
+             callback removes nothing. */
           setState((previous) => {
             const current = previous.key === key ? previous : empty();
             const seen = new Set(current.seen);
             seen.add(dayIndex);
-            return { ...current, seen };
+            const errored = new Set(current.errored);
+            errored.add(dayIndex);
+            return { ...current, seen, errored };
           });
         },
       ),
@@ -397,11 +596,22 @@ export function useDayMetasStatus(dayCount: number): {
       active = false;
       unsubs.forEach((u) => u());
     };
-    // `key` carries both Event identity and dayCount.
+    // `key` carries both Event identity and the CONTENT of the index list, so a
+    // schedule whose Days move re-keys the fan and a caller that merely rebuilt
+    // the same array does not (Codex P2 on PR #1162).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const current = state.key === key ? state : empty();
-  return { metas: current.metas, loaded: dayCount <= 0 || current.seen.size >= dayCount };
+  // Every completion test counts the DISTINCT Days this fan actually addressed,
+  // which is what makes them true of `days/4` on a schedule that has no `days/0`.
+  return {
+    metas: current.metas,
+    loaded: dayCount <= 0 || current.seen.size >= dayCount,
+    serverLoaded: dayCount <= 0 || current.serverSeen.size >= dayCount,
+    serverConfirmed: dayCount <= 0 || current.serverCurrent.size >= dayCount,
+    failed: current.errored.size > 0,
+    scheduleUnusable,
+  };
 }
 
 /**
@@ -569,11 +779,23 @@ export function useLeaderboard() {
   // is a PRESENTATIONAL filter applied by the Leaderboard COMPONENT for display only
   // (src/components/Leaderboard.tsx, via `isBanned`), while this hook stays raw so
   // Board's ceremony reads the true roster. See specs/w2-ban-console.md § Leaderboard.
-  const { data, loading, hasServerData } = useColSub<PlayerDoc>(
+  //
+  // `fromCache` and `hasPendingWrites` are the CURRENT snapshot's own metadata,
+  // passed through beside the latch (Codex P2 on PR #1162). `useColSub` already
+  // carries them; this hook used to discard them, which left every consumer with
+  // "the server has spoken at least once" and no way to ask whether the rows on
+  // screen right now are what it said. The archive gate is the caller that needs
+  // the stricter question — it PERSISTS the roster it was shown, permanently —
+  // so a confirmed Admin who then goes offline, or who has an optimistic local
+  // write in flight, must not arm it over cached or undecided rows. Board and
+  // ConfirmWinMoments keep reading the latch alone and are unchanged: their
+  // ceremonial First-to-BINGO edge is a claim about a moment that has already
+  // happened, not a record it freezes.
+  const { data, loading, hasServerData, fromCache, hasPendingWrites } = useColSub<PlayerDoc>(
     playersCol(),
     eventSubscriptionKey('players'),
   );
-  return { players: sortPlayers(data), loading, hasServerData };
+  return { players: sortPlayers(data), loading, hasServerData, fromCache, hasPendingWrites };
 }
 
 /** A caller-owned, already-loaded moderation snapshot. Supplying this avoids a
@@ -973,10 +1195,19 @@ export function useFeed(max = 60) {
   };
 }
 
+/**
+ * The admin-confirmed claim queue, oldest first. `hasServerData` rides along
+ * (#1151, Codex P2) because the archive control gates on this queue being EMPTY:
+ * a cache-only (or not-yet-arrived) snapshot reads as zero pending claims, and a
+ * gate that passes vacuously is no gate at all.
+ */
 export function usePendingClaims() {
-  const { data, loading } = useColSub<ClaimDoc>(claimsCol(), eventSubscriptionKey('claims'));
+  const { data, loading, hasServerData } = useColSub<ClaimDoc>(
+    claimsCol(),
+    eventSubscriptionKey('claims'),
+  );
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
-  return { claims, loading };
+  return { claims, loading, hasServerData };
 }
 
 /**

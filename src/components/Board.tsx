@@ -735,7 +735,12 @@ function EventBoard({ eventId }: { eventId: string }) {
   // below inert and Board's single-Board rendering byte-identical to pre-1.5.
   const days: DayDef[] = event?.days ?? [];
   const hasDays = days.length > 0;
-  const { metas: dayMetas, loaded: dayMetasLoaded } = useDayMetasStatus(hasDays ? days.length : 0);
+  // The schedule's own indexes rather than its length (Codex P2 on PR #1162):
+  // the honour pins live at `days/{d.index}/meta/{d.index}`, which is only the
+  // same fan as `0..length-1` while the schedule is contiguous from zero.
+  const { metas: dayMetas, loaded: dayMetasLoaded } = useDayMetasStatus(
+    hasDays ? days.map((d) => d.index) : [],
+  );
   // The Day switcher's viewed-Day index (daily-cards-spec § "Day switcher"). Held
   // up here (before the day-scoped Board subscription that keys on it) so switching
   // a chip re-subscribes to that Day's own Board. Defaults to 0 and is adopted to

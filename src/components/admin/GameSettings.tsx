@@ -13,7 +13,7 @@ import ArchiveEvent from './ArchiveEvent';
 import { themesForEditionIncluding } from '../../theme/themes';
 import { useAdultContent } from '../../hooks/useAdultContent';
 import { useAdultContentFlipConfirm } from './AdultContentConfirm';
-import type { ClaimMode, EventDoc } from '../../types';
+import type { ClaimDoc, ClaimMode, EventDoc } from '../../types';
 
 // A −/+ stepper for `settings.reportHideThreshold` (#222), floored at 1 on
 // EVERY step (not just decrement) — `isReportHidden` treats a non-positive
@@ -167,7 +167,24 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
  * setting (#268): a deployed scanner consults it per upload — the deploy-time
  * env flag remains the master kill-switch for whether the scanner exists at all.
  */
-export default function GameSettings({ event }: { event: EventDoc | null | undefined }) {
+export default function GameSettings({
+  event,
+  eventConfirmed,
+  pendingClaims,
+  pendingClaimsLoaded,
+}: {
+  event: EventDoc | null | undefined;
+  /** Threaded straight through to `ArchiveEvent`, whose arming gate (#1151)
+   *  needs to know the Event it previews came from the SERVER and not the
+   *  ADR 0006 persistent cache. */
+  eventConfirmed: boolean;
+  /** Threaded straight through to `ArchiveEvent`, whose drain gate (#1151) needs
+   *  the console's already-subscribed claim queue rather than a second listener:
+   *  a gate that disagreed with the Review queue it points at would name a fix
+   *  the Admin cannot perform. */
+  pendingClaims: readonly ClaimDoc[];
+  pendingClaimsLoaded: boolean;
+}) {
   const modes: ClaimMode[] = ['honor', 'proof_required', 'admin_confirmed'];
   const modeLabel: Record<ClaimMode, string> = { honor: 'Honor', proof_required: 'Proof-to-mark', admin_confirmed: 'Admin-confirmed' };
   const photoSource = event?.settings?.photoProofSource ?? 'camera_or_library';
@@ -330,10 +347,14 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
         </div>
       </div>
 
-      {/* Last, because it is the one control here that ends PLAY rather than
-          tuning it (#134, specs/post-sailing-archive.md). The irreversible
-          archive flip joins it from #1151, with its drain gate. */}
-      <ArchiveEvent event={event} />
+      {/* Last, because it is the one control here that ends the Event rather
+          than tuning it (#134, specs/post-sailing-archive.md). */}
+      <ArchiveEvent
+        event={event}
+        eventConfirmed={eventConfirmed}
+        pendingClaims={pendingClaims}
+        pendingClaimsLoaded={pendingClaimsLoaded}
+      />
       {dialog}
     </>
   );

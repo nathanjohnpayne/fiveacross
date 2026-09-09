@@ -10,6 +10,13 @@ import {
 import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
 import { clearStorageDeep } from '../support/storage-emulator';
+// The WRITER's half of the representable-number contract this arm enforces
+// (#1151, Codex P1 on PR #1162). Imported rather than restated so the two cannot
+// drift: `src/data/eventArchive.ts` clamps every number it copies to this value,
+// and the cases below prove it is exactly the largest one `finiteArchiveNumber`
+// accepts. (`src/data/eventLimits.ts` is already imported this way by
+// `tests/rules/membership-mark-batch-budget.test.ts`.)
+import { MAX_ARCHIVE_NUMBER } from '../../src/data/eventArchive';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
 // proved in pairs so none can pass vacuously:
@@ -72,6 +79,44 @@ const PAST = () => NOW() - 3_600_000;
 /** The freeze stamp every archive write in this file carries. Fixed rather than
  *  `Date.now()` so the write-once assertions can restate it exactly. */
 const ARCHIVED_AT = 1_700_000_000_000;
+
+/** The frozen record every archive write in this file carries (#1151): one
+ *  well-formed `EventArchive`, so the complete-record clause has a control to be
+ *  measured against and the write-once lock has something to protect. Its own
+ *  `archivedAt` IS `ARCHIVED_AT` — the rules require the record's stamp to equal
+ *  the document's, and the writer produces both from one value in one update. */
+const FROZEN_RECORD = {
+  // The Event's own name, frozen with the standings it titles (#1139) —
+  // `EventDoc.name` is outside the write-once clause, so a card that rebuilt its
+  // title from the live field drifted the moment an Admin renamed the Event.
+  eventName: 'Archive fixture',
+  standings: [
+    {
+      uid: ALICE,
+      displayName: 'Alice',
+      bingoCount: 2,
+      squaresMarked: 14,
+      blackout: false,
+      firstBingoAt: 1000,
+    },
+  ],
+  playerCount: 1,
+  firstBingo: { uid: ALICE, displayName: 'Alice', at: 1000 },
+  firstBingoRow: {
+    uid: ALICE,
+    displayName: 'Alice',
+    bingoCount: 2,
+    squaresMarked: 14,
+    blackout: false,
+    firstBingoAt: 1000,
+    rank: 1,
+  },
+  dailyHonors: [
+    { dayIndex: 0, uid: ALICE, displayName: 'Alice', firstBingoAt: 1000, dayLabel: '🌈 D1' },
+  ],
+  freezeAt: null,
+  archivedAt: ARCHIVED_AT,
+};
 
 let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
@@ -243,12 +288,17 @@ async function freeze(): Promise<void> {
       status: 'archived',
       archivedAt: ARCHIVED_AT,
       archiving: false,
+      archivedUnder: QUIESCE,
+      // The frozen record lands with the stamp (#1151), so the archived-state
+      // cases exercise the same document the flip actually produces — and the
+      // write-once lock has a record to protect.
+      archive: FROZEN_RECORD,
     });
   });
 }
 
-/** The archive flip as the rules accept it: the three transition keys, and
- *  nothing else. */
+/** The archive flip as the rules accept it: the three transition keys, the
+ *  flip-only binding, the frozen record, and nothing else. */
 const flip = (uid: string, overrides: Record<string, unknown> = {}) =>
   updateDoc(doc(db(uid), eventPath()), {
     status: 'archived',
@@ -257,6 +307,9 @@ const flip = (uid: string, overrides: Record<string, unknown> = {}) =>
     // The flip-only binding (Phase 4b P1, PR #1157 run 3): must be written by
     // the flip and equal the stored generation. `quiesce()` stores QUIESCE.
     archivedUnder: QUIESCE,
+    // The durable record (#1151). `completeArchiveRecord` requires it whole, so
+    // every flip in this file carries it and the cases below vary it.
+    archive: FROZEN_RECORD,
     ...overrides,
   });
 
@@ -310,19 +363,648 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
   });
 
-  it('LOCKS status and archivedAt once archived', async () => {
+  it('LOCKS status, archivedAt and the frozen record once archived', async () => {
     await freeze();
     // Un-archiving is not a client operation at all.
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { status: 'active' }));
     // Nor is re-stamping the freeze.
     await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedAt: NOW() }));
+    // …nor rewriting the record with a later roster (#1151). This is what "the
+    // final Leaderboard and hall of fame persist unchanged" means at the
+    // boundary: a second archive pass cannot overwrite what the first froze.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        archive: { ...FROZEN_RECORD, standings: [], playerCount: 0 },
+      }),
+    );
+    // Not even a single field of it, and not by removing it either.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        archive: { ...FROZEN_RECORD, eventName: 'Renamed after the fact' },
+      }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: deleteField() }));
+    // Nor the binding the flip wrote.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archivedUnder: QUIESCE + 1 }));
     // A partial update that does not mention them carries them through
     // unchanged, so the lock never freezes the rest of the document.
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
     // …and echoing the same values back explicitly is still fine.
     await assertSucceeds(
-      updateDoc(doc(db(ADMIN), eventPath()), { status: 'archived', archivedAt: ARCHIVED_AT }),
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archive: FROZEN_RECORD,
+      }),
     );
+  });
+
+  it('DENIES a stray record on a LIVE Event through the general admin arm', async () => {
+    // `archive` joins the protected set for the same reason `archivedAt` did
+    // (Codex P2, PR #1157): the field exists only on an archived document, and
+    // the quiesced flip arm is the one place it is introduced. An admin write
+    // that dropped a record onto a live Event would leave the archived surfaces
+    // with something to render on an Event still taking Marks.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: FROZEN_RECORD }));
+    // Nor on a CLOSING one, where the flip has not committed yet.
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { archive: FROZEN_RECORD }));
+    // The same admin still edits everything else in both states.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+
+  it('DENIES an admin writing the finale-completion marker, in every state', async () => {
+    // #1151, Codex P1 on PR #1162. `finaleCompletedAt` is the composite marker
+    // the scheduler stamps once the freeze stamp AND the podium Moment have both
+    // landed, and it is what the console's pre-flip acknowledgement is decided
+    // on. An admin who could write it could clear the one warning standing
+    // between a podium that has not posted yet and an irreversible archive that
+    // forgoes it — so it is server-written only. The Admin SDK bypasses these
+    // rules; no client arm may name it.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // …nor while the Event is closing, where the flip is one tap away.
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // The flip itself may not smuggle it either — the arm's `hasOnly` guard
+    // names five keys and this is not one of them.
+    await assertFails(flip(ADMIN, { finaleCompletedAt: NOW() }));
+    // …and it is still refused once archived, where nothing about the finale
+    // can be true any more.
+    await freeze();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: NOW() }));
+    // The same admin still edits everything else in every one of those states.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+
+  it('leaves the SERVER’s own marker alone on an ordinary admin write', async () => {
+    // Restating an unchanged value is not a change, so a whole-document admin
+    // write still passes on an Event the scheduler has already marked — the
+    // field is unwritable, not a tripwire on every write beside it.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), {
+        frozenAt: 1_700_000_000_000,
+        finaleCompletedAt: 1_700_000_060_000,
+      });
+    });
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: 1_700_000_060_000 }),
+    );
+    // Moving it by one millisecond, or clearing it, is refused.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: 1_700_000_060_001 }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { finaleCompletedAt: deleteField() }));
+  });
+});
+
+// #1151. The flip is irreversible and the record is what the rules then lock, so
+// a flip that lands `{status: 'archived', archivedAt}` with no record — or a
+// half-built one — is permanent and useless at the same time: the freeze denies
+// every gameplay write while the archived surfaces fall back to the LIVE view
+// the record exists to replace. `completeArchiveRecord` is what makes "an
+// archived Event always carries a whole record" an enforced invariant rather
+// than a property of one client's writer.
+describe('post-sailing-archive — the archive write must carry the whole record', () => {
+  const archiveWith = (record: unknown) => flip(ADMIN, { archive: record });
+
+  beforeEach(async () => {
+    await quiesce();
+  });
+
+  it('DENIES the flip with no record at all, or an empty one', async () => {
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+        archivedUnder: QUIESCE,
+      }),
+    );
+    await assertFails(archiveWith({}));
+  });
+
+  it('DENIES a record missing any top-level key', async () => {
+    for (const key of [
+      'eventName',
+      'standings',
+      'playerCount',
+      'firstBingo',
+      // The headline holder's kept row is part of the whole record: a card that
+      // names a First to BINGO it cannot print a row for is the half-built map
+      // this arm exists to refuse.
+      'firstBingoRow',
+      'dailyHonors',
+      'freezeAt',
+      'archivedAt',
+    ] as const) {
+      const partial: Record<string, unknown> = { ...FROZEN_RECORD };
+      delete partial[key];
+      await assertFails(archiveWith(partial));
+    }
+  });
+
+  it('DENIES a record whose keys carry the wrong types', async () => {
+    for (const wrong of [
+      { eventName: 7 },
+      { standings: 'none' },
+      { playerCount: '1' },
+      { firstBingo: 'Alice' },
+      { firstBingoRow: 'Alice' },
+      { dailyHonors: {} },
+      { freezeAt: 'never' },
+      { archivedAt: 'then' },
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, ...wrong }));
+    }
+  });
+
+  // Codex P2, PR #1139 round 4. `firstBingo` and `firstBingoRow` were typed
+  // INDEPENDENTLY, which accepted the two shapes the pairing exists to refuse:
+  // one present beside the other null (the half-built record the archived Share
+  // Card reads a hole from), and two maps naming DIFFERENT holders (one name in
+  // the hall of fame's headline, another on the pinned eleventh row of the same
+  // card). They are selected together, so they are validated together.
+  it('DENIES a First-BINGO honour and a kept row that do not agree', async () => {
+    // An honour with no row to print for it…
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingoRow: null }));
+    // …and a row belonging to an honour the record does not name.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingo: null }));
+    // Two maps, two different Players: the headline and the pinned row would
+    // disagree on the same card.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, uid: BOB },
+      }),
+    );
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: BOB } }),
+    );
+    // A holder with no usable id on either half is refused for the same reason
+    // the pairing exists: there is nothing to match the two against.
+    await assertFails(
+      archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, uid: 7 } }),
+    );
+  });
+
+  // Codex P2 on PR #1162. Matching uids prove the two halves agree about WHO;
+  // they say nothing about whether either half can be RENDERED. Two uid-only
+  // maps satisfied the pairing, so a direct admin write could flip an Event
+  // whose headline honour had no name and no instant and whose kept row had
+  // none of the standings fields and no rank — irreversibly, into the record
+  // the archived Leaderboard and Share Card read from.
+  it('DENIES a uid-only First-BINGO pair, which names a holder nothing can render', async () => {
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingo: { uid: ALICE },
+        firstBingoRow: { uid: ALICE },
+      }),
+    );
+  });
+
+  it('DENIES a half-built honour or kept row, field by field', async () => {
+    // Each scalar `ArchivedFirstBingo` declares, dropped one at a time. An
+    // absent key errors the expression and denies, exactly as a missing
+    // top-level key does.
+    for (const key of ['uid', 'displayName', 'at'] as const) {
+      const honor: Record<string, unknown> = { ...FROZEN_RECORD.firstBingo };
+      delete honor[key];
+      await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingo: honor }));
+    }
+    // …and each scalar `ArchivedFirstBingoRow` declares, `rank` included: it is
+    // the whole reason the row is carried outside the bounded prefix, so a row
+    // without it cannot print the pinned eleventh line it exists for.
+    for (const key of [
+      'uid',
+      'displayName',
+      'bingoCount',
+      'squaresMarked',
+      'blackout',
+      'firstBingoAt',
+      'rank',
+    ] as const) {
+      const row: Record<string, unknown> = { ...FROZEN_RECORD.firstBingoRow };
+      delete row[key];
+      await assertFails(archiveWith({ ...FROZEN_RECORD, firstBingoRow: row }));
+    }
+  });
+
+  it('DENIES an honour or kept row whose fields carry the wrong types', async () => {
+    for (const wrong of [{ displayName: 7 }, { at: 'first thing' }]) {
+      await assertFails(
+        archiveWith({ ...FROZEN_RECORD, firstBingo: { ...FROZEN_RECORD.firstBingo, ...wrong } }),
+      );
+    }
+    for (const wrong of [
+      { displayName: 7 },
+      { bingoCount: '2' },
+      { squaresMarked: '14' },
+      { blackout: 'no' },
+      { firstBingoAt: 'first thing' },
+      { rank: '1' },
+    ]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, ...wrong },
+        }),
+      );
+    }
+  });
+
+  // CodeRabbit, PR #1162. `is number` admits `NaN` and both infinities — they
+  // are Firestore doubles like any other — so the irreversible flip could
+  // persist them, and the archived Leaderboard and Share Card the record exists
+  // to feed would render exactly that, forever. Rules have no `isFinite()`, so
+  // the estate's own magnitude idiom stands in for it.
+  it('DENIES a non-finite number anywhere in the First-BINGO pair', async () => {
+    // Firestore's wire format carries these as doubles, so they reach the rules
+    // as numbers — which is the whole point of the finding.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingo: { ...FROZEN_RECORD.firstBingo, at: bad },
+        }),
+      );
+      for (const field of ['bingoCount', 'squaresMarked', 'firstBingoAt'] as const) {
+        await assertFails(
+          archiveWith({
+            ...FROZEN_RECORD,
+            firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, [field]: bad },
+          }),
+        );
+      }
+    }
+  });
+
+  it('DENIES a rank that names no place in the standings', async () => {
+    // The one field the writer COMPUTES rather than copies (`holderAt + 1` over
+    // a non-negative index), so it can be held to more than finiteness: a
+    // positive integer. A fractional rank is stored as a double and fails
+    // `is int`; 0 and a negative one name a place that does not exist.
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assertFails(
+        archiveWith({
+          ...FROZEN_RECORD,
+          firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, rank: bad },
+        }),
+      );
+    }
+  });
+
+  it('ALLOWS the counts and instants the WRITER can actually produce', async () => {
+    // The bound is TWO-SIDED rather than the `> 0` the Event's own instants
+    // carry, because this arm may only require what the writer guarantees — it
+    // is reached after the Event is already shut. `players/{uid}` validates no
+    // field (ADR 0001), and `archiveCount`/`archiveInstant` COPY a Player's own
+    // odd-but-readable numbers through, so 0 and negatives are legitimate
+    // records and a non-negative bound would refuse one permanently.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingo: { ...FROZEN_RECORD.firstBingo, at: 0 },
+        firstBingoRow: {
+          ...FROZEN_RECORD.firstBingoRow,
+          bingoCount: 0,
+          squaresMarked: -3,
+          firstBingoAt: -5,
+        },
+      }),
+    );
+  });
+
+  // Codex P2 on PR #1162. The First-BINGO pair stopped admitting `NaN` and the
+  // infinities while the record's OWN two numbers still did, and the flip is
+  // irreversible and locks `archive` — so `playerCount: NaN` would have been
+  // permanent, and the archived-state summary renders it verbatim.
+  it('DENIES a non-finite or non-integer playerCount', async () => {
+    for (const bad of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      // More than finiteness, because `playerCount` is a count the WRITER
+      // computes (`ranked.length`) rather than one it copies off a Player row:
+      // a fractional or negative roster size names no roster at all.
+      1.5,
+      -1,
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: bad }));
+    }
+    // The empty roster is a real record and stays writable — the bound is
+    // non-negative, not positive.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: [],
+        playerCount: 0,
+        firstBingo: null,
+        firstBingoRow: null,
+        dailyHonors: [],
+      }),
+    );
+  });
+
+  // Codex P2 on PR #1162. `standings` and `playerCount` were typed one at a time
+  // and said nothing about each other, so an authorized admin flipping DIRECTLY
+  // rather than through `draftEventArchive` could freeze a count that contradicts
+  // the list it describes, or a list past the bound the Event document's 1 MiB
+  // budget depends on — permanently, since the flip is irreversible and locks
+  // `archive`, and silently, since every archived surface reads the count as the
+  // roster size and the list as its rank-ordered prefix.
+  const standingsRow = (i: number) => ({
+    uid: `player-uid-${i}`,
+    displayName: `P${i}`,
+    bingoCount: 1,
+    squaresMarked: 250 - i,
+    blackout: false,
+    firstBingoAt: 1000 + i,
+  });
+
+  it('DENIES standings that do not match playerCount', async () => {
+    // The count undercounting its own list: `playerCount: 0` beside a row.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: 0 }));
+    // …and overcounting it, while still under the bound, where the count is
+    // supposed to BE the list's length.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: 2 }));
+    // …and a list past the bounded prefix, in either pairing.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 201 }, (_, i) => standingsRow(i)),
+        playerCount: 201,
+      }),
+    );
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 201 }, (_, i) => standingsRow(i)),
+        playerCount: 500,
+      }),
+    );
+  });
+
+  it('ALLOWS a short roster whose count IS its list', async () => {
+    // Under the bound the two are equal, which is what `draftEventArchive`
+    // produces for every real Event (both live ones have two-figure rosters).
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 5 }, (_, i) => standingsRow(i)),
+        playerCount: 5,
+      }),
+    );
+  });
+
+  it('ALLOWS the bounded prefix of a roster past the bound', async () => {
+    // The pairing's whole reason for existing: 200 retained rows beside the
+    // complete cardinality of 250, exactly `ranked.slice(0, 200)` beside
+    // `ranked.length`.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => standingsRow(i)),
+        playerCount: 250,
+      }),
+    );
+  });
+
+  // Codex P2 on PR #1162, round 9. `rank > 0` says the holder's place is a real
+  // ordinal and says nothing about whether the roster is that long, so the two
+  // clauses beside each other still admitted a record that claims in one breath
+  // that nobody played and that somebody came first — permanently, because the
+  // flip is irreversible and locks `archive`, and visibly, because the archived
+  // Share Card prints that place out of a roster it also reports as empty.
+  it('DENIES a First-BINGO rank that overruns the roster the record declares', async () => {
+    // The shape the finding names: `playerCount: 0` beside `standings: []`,
+    // which `standingsSizeMatches` is perfectly happy with — the two agree the
+    // roster is empty — and an otherwise valid pair whose row ranks first.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, standings: [], playerCount: 0 }));
+    // …and any rank past the count, on a roster that does exist. The fixture
+    // carries one Player, so second place names nobody.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, rank: 2 },
+      }),
+    );
+  });
+
+  it('ALLOWS a holder ranked LAST', async () => {
+    // `rank == playerCount` is the boundary case rather than an exception: the
+    // Player who got there first can be last in the standings, and the fixture's
+    // own `rank: 1` beside `playerCount: 1` is that same equality.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 3 }, (_, i) => standingsRow(i)),
+        playerCount: 3,
+        firstBingo: { uid: 'player-uid-2', displayName: 'P2', at: 1002 },
+        firstBingoRow: { ...standingsRow(2), rank: 3 },
+      }),
+    );
+  });
+
+  it('ALLOWS a holder ranked past the retained prefix', async () => {
+    // The bound is `playerCount`, not `standings.size()`: the holder's row is
+    // carried OUTSIDE the bounded prefix precisely so a place past it can still
+    // be printed, so asking the prefix would refuse the very record the pairing
+    // exists for.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => standingsRow(i)),
+        playerCount: 250,
+        firstBingo: { uid: 'player-uid-249', displayName: 'P249', at: 1249 },
+        firstBingoRow: { ...standingsRow(249), rank: 250 },
+      }),
+    );
+  });
+
+  // Codex P2 on PR #1162, round 9. `dailyHonors is list` accepted a list of ANY
+  // length, so a direct admin flip could freeze thousands of entries into a field
+  // whose contract is at most one honour per Day on an Event that supports at
+  // most ten — permanently, because the flip locks `archive`, and unrepairably,
+  // because no client can amend it. Rules cannot walk a list, so what is IN it
+  // stays the stated residual; its SIZE is one expression, the same one
+  // `standingsSizeMatches` already spends.
+  const honor = (i: number) => ({
+    dayIndex: i,
+    uid: `player-uid-${i}`,
+    displayName: `P${i}`,
+    firstBingoAt: 1000 + i,
+    dayLabel: `🌈 D${i + 1}`,
+  });
+
+  it('DENIES more archived honours than an Event has Days', async () => {
+    // Eleven, which is `MAX_DAYS + 1` — the eleventh Day sits outside the
+    // schedule lock `daysThemeLockOk` unrolls, so it is unsupported rather than
+    // merely undesirable.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        dailyHonors: Array.from({ length: 11 }, (_, i) => honor(i)),
+      }),
+    );
+  });
+
+  it('ALLOWS an honour for every Day the Event can have', async () => {
+    // Ten is the boundary case rather than an exception: a full schedule with a
+    // pinned holder on every Day is exactly what `draftEventArchive` produces.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        dailyHonors: Array.from({ length: 10 }, (_, i) => honor(i)),
+      }),
+    );
+  });
+
+  it('DENIES a non-finite or out-of-range freezeAt', async () => {
+    // The Standings Freeze the whole record cut on, held to the same bound as
+    // the pair's own instants. It is the one number here that needs no Player to
+    // misbehave: it resolves from `frozenAt`, which the Admin SDK writes and no
+    // arm constrains.
+    for (const bad of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      MAX_ARCHIVE_NUMBER + 1,
+      -(MAX_ARCHIVE_NUMBER + 1),
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, freezeAt: bad }));
+    }
+    // A real freeze instant still goes through, and so does the `null` that
+    // means the Event never had one.
+    await assertSucceeds(archiveWith({ ...FROZEN_RECORD, freezeAt: 1_700_000_000_000 }));
+  });
+
+  // #1151, Codex P1 on PR #1162. The writer and this arm must share ONE
+  // representable-number contract, or a value the writer happily copies is
+  // refused HERE — on the flip, after `beginArchive` has already shut the Event,
+  // as a rejected write that goes past every typed refusal and the console's
+  // automatic reopen alike. `src/data/eventArchive.ts` clamps to
+  // `MAX_ARCHIVE_NUMBER`; this proves that value is exactly the largest one this
+  // helper accepts, from both sides of the boundary.
+  it('ALLOWS the WRITER’s own clamp, and denies the value it clamped from', async () => {
+    const clamped = {
+      ...FROZEN_RECORD,
+      firstBingo: { ...FROZEN_RECORD.firstBingo, at: MAX_ARCHIVE_NUMBER },
+      firstBingoRow: {
+        ...FROZEN_RECORD.firstBingoRow,
+        bingoCount: MAX_ARCHIVE_NUMBER,
+        // The negative side too: `archiveCount` copies a Player's own negative
+        // count through, so the clamp is two-sided and so is this bound.
+        squaresMarked: -MAX_ARCHIVE_NUMBER,
+        firstBingoAt: MAX_ARCHIVE_NUMBER,
+      },
+      freezeAt: MAX_ARCHIVE_NUMBER,
+    };
+    // ONE past the clamp is refused in either direction, which is what makes the
+    // constant the boundary rather than merely a value inside it. Asserted
+    // BEFORE the accepted control, because that control archives the Event.
+    await assertFails(
+      archiveWith({
+        ...clamped,
+        firstBingo: { ...FROZEN_RECORD.firstBingo, at: MAX_ARCHIVE_NUMBER + 1 },
+      }),
+    );
+    await assertFails(
+      archiveWith({
+        ...clamped,
+        firstBingoRow: { ...clamped.firstBingoRow, squaresMarked: -(MAX_ARCHIVE_NUMBER + 1) },
+      }),
+    );
+    // …and the clamped record itself goes through, so a `bingoCount: 5e12` on a
+    // self-written Player row freezes instead of stranding a shut Event.
+    await assertSucceeds(archiveWith(clamped));
+  });
+
+  it('ALLOWS a kept row whose holder never bingoed on a scored Day', async () => {
+    // `firstBingoAt` is the one nullable scalar on the row (`archiveInstant`
+    // yields `number | null`), so the check is type-or-null there and a bare
+    // type check everywhere else. Present so the denials above cannot be
+    // mistaken for "any null is refused".
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, firstBingoAt: null },
+      }),
+    );
+  });
+
+  it('ALLOWS the pair when both halves name the same holder', async () => {
+    // The matching control, so the denials above are not vacuous.
+    await assertSucceeds(archiveWith(FROZEN_RECORD));
+  });
+
+  it('DENIES a record whose stamp disagrees with the document stamp', async () => {
+    // Two answers to one question is exactly what the archived surfaces would
+    // then show; both are written from one value in one update.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, archivedAt: ARCHIVED_AT + 1 }));
+    // …and the disagreement is symmetric: moving the DOCUMENT stamp instead is
+    // refused by the same clause.
+    await assertFails(flip(ADMIN, { archivedAt: ARCHIVED_AT + 1 }));
+  });
+
+  it('ALLOWS the complete record, including the legitimately null trio', async () => {
+    // `firstBingo`/`firstBingoRow: null` means nobody got there, `eventName:
+    // null` means the Event had no name, and `freezeAt: null` means it had no
+    // Standings Freeze — all real records, so the check is
+    // presence-then-type-or-null rather than a bare `is map`/`is number`.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        eventName: null,
+        firstBingo: null,
+        firstBingoRow: null,
+        freezeAt: null,
+        dailyHonors: [],
+      }),
+    );
+  });
+
+  // #1142 item 1. The general Event arm sits at Firestore's 1000-expression cap,
+  // and this ticket adds clauses to the FLIP arm behind it — so the write those
+  // clauses exist to validate has to be proved still evaluable. A full record is
+  // the largest one the builder can produce (`MAX_ARCHIVED_STANDING_ROWS` rows at
+  // `MAX_ARCHIVED_DISPLAY_NAME` characters), and the rules cannot iterate a list,
+  // so its SIZE costs nothing here — which is exactly the claim this pins.
+  it('ALLOWS a FULL-sized record through, so the cap is not what the flip meets', async () => {
+    const row = (i: number) => ({
+      uid: `player-uid-${i}`,
+      displayName: 'N'.repeat(100),
+      bingoCount: 20,
+      squaresMarked: 250 - i,
+      blackout: false,
+      firstBingoAt: 1_700_000_000_000 + i,
+    });
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => row(i)),
+        playerCount: 200,
+        firstBingo: { uid: 'player-uid-0', displayName: 'N'.repeat(100), at: 1_700_000_000_000 },
+        firstBingoRow: { ...row(0), rank: 1 },
+        dailyHonors: Array.from({ length: 10 }, (_, i) => ({
+          dayIndex: i,
+          uid: `player-uid-${i}`,
+          displayName: 'N'.repeat(100),
+          firstBingoAt: 1_700_000_000_000 + i,
+          dayLabel: `🌈 D${i + 1}`,
+        })),
+      }),
+    );
+  });
+
+  it('DENIES a flip that smuggles anything else in beside the record', async () => {
+    // The `hasOnly` guard names five keys now, and the fifth is the record — but
+    // it is still five, not "the record plus whatever". A write that also moved
+    // configuration falls through to the general arm, where a not-yet-archived
+    // document is refused.
+    await assertFails(flip(ADMIN, { claimMode: 'proof_required' }));
+    await assertFails(flip(ADMIN, { bannedUids: [BOB] }));
   });
 });
 
@@ -1250,6 +1932,185 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     // …and every write that would make it mean anything is denied.
     await assertFails(resolveBoard([3, 4]));
     await assertFails(resolveStats(2));
+  });
+
+  // #1151, Codex P2 on PR #1162. The drain gate is what makes the freeze safe to
+  // take, and `archiveEvent` re-takes it from the SERVER after the closing write
+  // — but the flip's transaction reads only the Event document, so a Claim moved
+  // back to `pending` between that read and the commit neither conflicts with it
+  // nor retries it. The archive would then be permanent over exactly the state
+  // the gate exists to refuse, with a Confirm/Reject pair that can only fail.
+  // Rules cannot query a collection, so the drain cannot be a condition of the
+  // flip; the TRANSITION that creates the state can be held here instead.
+  describe('a Claim cannot go back into the queue once play is closed', () => {
+    const claimPath = `${eventPath()}/claims/claim-drained`;
+    const seedClaim = (status: string) =>
+      testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), claimPath), {
+          uid: ALICE,
+          displayName: 'Alice',
+          cellIndex: 3,
+          itemText: 'Something happens',
+          status,
+          createdAt: NOW(),
+          dayIndex: 0,
+          resolvedBy: status === 'pending' ? null : ADMIN,
+        });
+      });
+    const reopenClaim = () =>
+      updateDoc(doc(db(ADMIN), claimPath), { status: 'pending', resolvedBy: null });
+
+    it('DENIES a terminal Claim being made pending again while the Event is CLOSING', async () => {
+      await seedClaim('confirmed');
+      // Live, this is an ordinary admin correction and still works — the control
+      // that keeps the denial below about the freeze and nothing else.
+      await assertSucceeds(reopenClaim());
+      await seedClaim('rejected');
+      await assertSucceeds(reopenClaim());
+
+      await seedClaim('confirmed');
+      await quiesce();
+      await assertFails(reopenClaim());
+      await seedClaim('rejected');
+      await assertFails(reopenClaim());
+    });
+
+    it('DENIES it on the ARCHIVED half of the freeze too', async () => {
+      await seedClaim('confirmed');
+      await freeze();
+      await assertFails(reopenClaim());
+    });
+
+    // …AND IT MAY NOT RIDE ALONG WITH THE CLOSE ITSELF (#1151, CodeRabbit on
+    // PR #1162). `get()` reads the PRE-write Event, so one atomic admin batch
+    // that shuts the Event and requeues a terminal Claim was decided against an
+    // Event that was still open — both writes committed, and the state they
+    // committed together is precisely the one the gate exists to refuse: closed
+    // to play, with a Claim back in a queue whose Confirm/Reject pair can now
+    // only fail. `getAfter` asks the question of the Event this request will
+    // LEAVE behind, which is the only reading a single write cannot slip past.
+    it('DENIES an atomic batch that closes the Event and requeues the Claim', async () => {
+      await seedClaim('confirmed');
+      const database = db(ADMIN);
+      const closeAndRequeue = writeBatch(database);
+      closeAndRequeue.update(doc(database, eventPath()), {
+        archiving: true,
+        archiveToken: QUIESCE,
+      });
+      closeAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertFails(closeAndRequeue.commit());
+
+      // The control that keeps the denial about the Claim riding along rather
+      // than about the shut: the very same close, alone, still lands.
+      const closeAlone = writeBatch(database);
+      closeAlone.update(doc(database, eventPath()), { archiving: true, archiveToken: QUIESCE });
+      await assertSucceeds(closeAlone.commit());
+    });
+
+    it('DENIES an atomic batch that FLIPS the Event and requeues the Claim', async () => {
+      // The flip's own arm is reachable only from an ALREADY-quiescing Event, so
+      // this batch was denied before the `getAfter` read as well — the stored
+      // Event the old clause read was already closing. Pinned anyway, because
+      // the two arms are independent and nothing else states that the record's
+      // own write cannot carry a requeue beside it.
+      await seedClaim('confirmed');
+      await quiesce();
+      const database = db(ADMIN);
+      const flipPayload = {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+        archivedUnder: QUIESCE,
+        archive: FROZEN_RECORD,
+      };
+      const flipAndRequeue = writeBatch(database);
+      flipAndRequeue.update(doc(database, eventPath()), flipPayload);
+      flipAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertFails(flipAndRequeue.commit());
+
+      const flipAlone = writeBatch(database);
+      flipAlone.update(doc(database, eventPath()), flipPayload);
+      await assertSucceeds(flipAlone.commit());
+    });
+
+    it('still lets the drain FINISH inside the closing batch', async () => {
+      // The resulting status is terminal, so the branch never reaches the Event
+      // at all: an Admin may empty the queue and shut the Event in one write.
+      await seedClaim('pending');
+      const database = db(ADMIN);
+      const drainAndClose = writeBatch(database);
+      drainAndClose.update(doc(database, eventPath()), {
+        archiving: true,
+        archiveToken: QUIESCE,
+      });
+      drainAndClose.update(doc(database, claimPath), { status: 'confirmed', resolvedBy: ADMIN });
+      await assertSucceeds(drainAndClose.commit());
+    });
+
+    it('leaves the requeue alone in a batch whose Event stays OPEN', async () => {
+      // An ordinary admin config write beside the correction: the Event this
+      // request leaves behind is open, so the correction is the same ordinary
+      // one the live case above already allows.
+      await seedClaim('confirmed');
+      const database = db(ADMIN);
+      const renameAndRequeue = writeBatch(database);
+      renameAndRequeue.update(doc(database, eventPath()), { name: 'Archive fixture (renamed)' });
+      renameAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertSucceeds(renameAndRequeue.commit());
+    });
+
+    it('accepts the requeue in a batch that REOPENS play', async () => {
+      // The other half of asking about the RESULTING Event, and the one the
+      // pre-write read got wrong in the opposite direction: a batch that puts
+      // play back leaves an OPEN Event, and a queue an Admin may legitimately
+      // refill. Any flip still bound to the quiesce this reopen breaks is
+      // refused by the flip arm's own stored-state and generation checks, so
+      // nothing downstream depends on the correction being barred here.
+      await seedClaim('confirmed');
+      await quiesce();
+      const database = db(ADMIN);
+      const reopenAndRequeue = writeBatch(database);
+      reopenAndRequeue.update(doc(database, eventPath()), { archiving: false });
+      reopenAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertSucceeds(reopenAndRequeue.commit());
+    });
+
+    it('still lets the drain FINISH from the closing state', async () => {
+      // The window exists so the queue can be emptied. A pending Claim must
+      // still reach a terminal status from here, or the gate would bar the very
+      // remedy it points the Admin at.
+      await seedClaim('pending');
+      await quiesce();
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'confirmed', resolvedBy: ADMIN }),
+      );
+      await seedClaim('pending');
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'rejected', resolvedBy: ADMIN }),
+      );
+    });
+
+    it('leaves an unchanged restatement, other fields, and the DELETE alone while closed', async () => {
+      // Restating a stored `pending` is not a transition into it, so a partial
+      // update that echoes the status still passes…
+      await seedClaim('pending');
+      await quiesce();
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), claimPath), { status: 'pending', resolvedBy: null }),
+      );
+      // …an update that never names `status` at all is untouched…
+      await assertSucceeds(updateDoc(doc(db(ADMIN), claimPath), { resolvedBy: ADMIN }));
+      // …and the admin's clear-it-away delete is the moderation path the freeze
+      // deliberately leaves open (#808).
+      await assertSucceeds(deleteDoc(doc(db(ADMIN), claimPath)));
+    });
+
+    it('keeps the arm admin-only, closed or not', async () => {
+      await seedClaim('confirmed');
+      await assertFails(updateDoc(doc(db(BOB), claimPath), { status: 'pending' }));
+      await quiesce();
+      await assertFails(updateDoc(doc(db(BOB), claimPath), { status: 'pending' }));
+    });
   });
 
   it('keeps the admin Event delete open on a LIVE Event (the control)', async () => {

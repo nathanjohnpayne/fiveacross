@@ -243,12 +243,29 @@ export const boardConverter: FirestoreDataConverter<BoardDoc> = {
 // wrongly (`undefined < 3` is false, silently hiding the chip from every existing
 // Player). Mirrors `boardConverter.dayIndex` above: a `typeof` guard, not `??`,
 // so a persisted null/string reads as 0 too. Writes only ever emit a real number.
+//
+// AND `uid` IS THE DOCUMENT ID, never the stored field (#1151, Codex P1 on PR
+// #1162). `players/{uid}` is keyed by the Player's own auth uid and its rules
+// arm binds the PATH — `isOwner(uid)` — while validating nothing at all inside
+// the document (ADR 0001: the row is self-written). So the stored `uid` is
+// unbounded, untyped Player input that happens to share a name with the row's
+// real identity, and every reader that trusts it is trusting a field its author
+// could have set to anything: `isBanned(p.uid, bannedUids)` would miss a ban,
+// an honour would match the wrong holder, and the post-Event archive would copy
+// a megabyte-long string into a record with a 256 KiB ceiling and refuse to
+// freeze the Event forever. Pinning it here is the same thing `itemConverter`,
+// `proofConverter`, `claimConverter` and `momentConverter` already do for their
+// own ids, and it is stated ONCE so no reader has to remember to distrust the
+// field. For a legitimate row the two are identical — `joinAndDeal` and the
+// profile mirror both write `uid: user.uid` at `playerRef(user.uid)` — so this
+// changes nothing an honest client ever sees.
 export const playerConverter: FirestoreDataConverter<PlayerDoc> = {
   toFirestore: (data) => data as DocumentData,
   fromFirestore: (snap: QueryDocumentSnapshot) => {
     const data = snap.data() as PlayerDoc;
     return {
       ...data,
+      uid: snap.id,
       reshufflesUsed: typeof data.reshufflesUsed === 'number' ? data.reshufflesUsed : 0,
     };
   },

@@ -125,6 +125,75 @@ describe('Leaderboard cruise-wide honors (#212)', () => {
     expect(strip).toHaveTextContent('—');
   });
 
+  it('shows no LEGACY chip for a `dayStats` key outside the supported Day range', () => {
+    // #1151, Codex P2 on PR #1162 round 7. An Event with NO schedule renders the
+    // roster-derived strip straight through, and `dayStats` is Player-written
+    // with a rules arm that validates nothing inside it — so a row naming Day
+    // 4000 put a `D4001` chip on the live strip. The frozen record refuses such
+    // an honour, and the archive's whole promise is that it says what the last
+    // live Leaderboard said, so this strip has to refuse it too: it reads the
+    // same `pinnedOrDerivedDailyHonors` selection the record does rather than
+    // deriving its own.
+    H.event = { ...event, days: [] };
+    H.players = [
+      mkPlayer({
+        uid: 'odd',
+        displayName: 'Odd',
+        bingoCount: 1,
+        squaresMarked: 6,
+        firstBingoAt: 500,
+        dayStats: {
+          2: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 500 },
+          4_000: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 600 },
+        } as PlayerDoc['dayStats'],
+      }),
+    ];
+    render(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+
+    const strip = screen.getByLabelText('Daily First to BINGO');
+    // The Day the contract has, and only it.
+    expect(strip).toHaveTextContent('D3');
+    expect(strip).not.toHaveTextContent('D4001');
+  });
+
+  it('orders the chips by Day INDEX, whatever order the schedule lists its Days in', () => {
+    // #1151, Codex P2 on PR #1162 round 9. A stored schedule listing
+    // `[{index: 4}, {index: 1}]` is a legitimate one — the indexes are unique,
+    // the freeze's own `usableDayIndexes` accepts it, and `DayDef.index` is what
+    // names a Day — but this strip mapped over `EventDoc.days` in ARRAY order, so
+    // it put D5's chip ahead of D2's while `draftEventArchive` froze `[1, 4]`.
+    // The archive's whole promise is that it says what the last live display
+    // said, so the strip has to be ordered by the same key the record is.
+    H.event = { ...event, days: [days[4], days[1]] };
+    H.players = [embarker, champ];
+    H.dayMetas = new Map([
+      [1, { firstBingo: { uid: 'champ', displayName: 'Champ', at: 900 } }],
+      [4, { firstBingo: { uid: 'embarker', displayName: 'Embarker', at: 800 } }],
+    ]);
+    render(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+
+    const chips = within(screen.getByLabelText('Daily First to BINGO')).getAllByRole('listitem');
+    // Chronological, not as listed. Ordered rather than reassigned: each Day
+    // still carries the holder its own pin names and the label its own schedule
+    // entry gives it.
+    expect(chips.map((li) => li.querySelector('.lb-honor-day')?.textContent)).toEqual([
+      '🌈 D2',
+      '🌈 D5',
+    ]);
+    expect(chips.map((li) => li.querySelector('.lb-honor-name')?.textContent)).toEqual([
+      'Champ',
+      'Embarker',
+    ]);
+  });
+
   it('never lands the cruise "1st BINGO" pin on an embark/farewell-only first bingo', () => {
     H.players = [embarker, champ];
     H.event = event;

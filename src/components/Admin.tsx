@@ -49,7 +49,17 @@ const SECTION_TITLES: Record<AdminSection, string> = {
  */
 export default function Admin() {
   const { user } = useAuth();
-  const { data: event } = useEventDoc();
+  // The Event's own SERVER-CONFIRMED flag rides along for #1151's archive gate
+  // (Codex P2 on PR #1162). `data` alone cannot answer "has the server spoken
+  // about this Event?": the ADR 0006 persistent cache delivers a document
+  // before any server snapshot, so a non-null `event` is not evidence the
+  // schedule, name or ban list about to be frozen are the current ones. It is
+  // the same fully-server-committed test `src/App.tsx` applies to the Card
+  // redirect — the `hasServerData` LATCH, plus this snapshot's own `fromCache`
+  // and `hasPendingWrites` — because an Admin's own optimistic `archiving: true`
+  // is emitted server-backed but undecided, and a refusal rolls it back.
+  const { data: event, hasServerData, fromCache, hasPendingWrites } = useEventDoc();
+  const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
   const navigate = useNavigate();
 
   const isAdmin = !!(user && event?.admins?.includes(user.uid));
@@ -60,11 +70,23 @@ export default function Admin() {
       </AdminSheet>
     );
   }
-  return <AdminConsole userUid={user.uid} event={event} />;
+  return <AdminConsole userUid={user.uid} event={event} eventConfirmed={eventConfirmed} />;
 }
 
-function AdminConsole({ userUid, event }: { userUid: string; event: ReturnType<typeof useEventDoc>['data'] }) {
-  const { claims } = usePendingClaims();
+function AdminConsole({
+  userUid,
+  event,
+  eventConfirmed,
+}: {
+  userUid: string;
+  event: ReturnType<typeof useEventDoc>['data'];
+  /** Whether THIS Event snapshot is fully server-committed — threaded straight
+   *  through to `ArchiveEvent`, whose arming gate (#1151) needs it. */
+  eventConfirmed: boolean;
+}) {
+  // `hasServerData` rides along for #1151's drain gate: a not-yet-arrived queue
+  // reads as zero pending Claims, and a gate that passes vacuously is no gate.
+  const { claims, hasServerData: claimsLoaded } = usePendingClaims();
   const { flagged } = useReportedProofs();
   const { items } = useAllItems();
   const { items: pendingItems } = usePendingItems();
@@ -163,7 +185,14 @@ function AdminConsole({ userUid, event }: { userUid: string; event: ReturnType<t
           adminUid={userUid}
         />
       )}
-      {section === 'settings' && <GameSettings event={event} />}
+      {section === 'settings' && (
+        <GameSettings
+          event={event}
+          eventConfirmed={eventConfirmed}
+          pendingClaims={claims}
+          pendingClaimsLoaded={claimsLoaded}
+        />
+      )}
       {section === 'schedule' && <SchedulePanel days={event?.days ?? []} />}
       {section === 'pool' && (
         <PromptPool
