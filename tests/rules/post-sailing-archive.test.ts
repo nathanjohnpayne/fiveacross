@@ -664,6 +664,56 @@ describe('post-sailing-archive — the archive write must carry the whole record
     );
   });
 
+  // Codex P2 on PR #1162. The First-BINGO pair stopped admitting `NaN` and the
+  // infinities while the record's OWN two numbers still did, and the flip is
+  // irreversible and locks `archive` — so `playerCount: NaN` would have been
+  // permanent, and the archived-state summary renders it verbatim.
+  it('DENIES a non-finite or non-integer playerCount', async () => {
+    for (const bad of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      // More than finiteness, because `playerCount` is a count the WRITER
+      // computes (`ranked.length`) rather than one it copies off a Player row:
+      // a fractional or negative roster size names no roster at all.
+      1.5,
+      -1,
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: bad }));
+    }
+    // The empty roster is a real record and stays writable — the bound is
+    // non-negative, not positive.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: [],
+        playerCount: 0,
+        firstBingo: null,
+        firstBingoRow: null,
+        dailyHonors: [],
+      }),
+    );
+  });
+
+  it('DENIES a non-finite or out-of-range freezeAt', async () => {
+    // The Standings Freeze the whole record cut on, held to the same bound as
+    // the pair's own instants. It is the one number here that needs no Player to
+    // misbehave: it resolves from `frozenAt`, which the Admin SDK writes and no
+    // arm constrains.
+    for (const bad of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      MAX_ARCHIVE_NUMBER + 1,
+      -(MAX_ARCHIVE_NUMBER + 1),
+    ]) {
+      await assertFails(archiveWith({ ...FROZEN_RECORD, freezeAt: bad }));
+    }
+    // A real freeze instant still goes through, and so does the `null` that
+    // means the Event never had one.
+    await assertSucceeds(archiveWith({ ...FROZEN_RECORD, freezeAt: 1_700_000_000_000 }));
+  });
+
   // #1151, Codex P1 on PR #1162. The writer and this arm must share ONE
   // representable-number contract, or a value the writer happily copies is
   // refused HERE — on the flip, after `beginArchive` has already shut the Event,
