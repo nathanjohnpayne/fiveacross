@@ -668,6 +668,34 @@ function writableDayHonor(honor: ArchivedDayHonor): boolean {
 }
 
 /**
+ * `firestore.rules`' `standingsSizeMatches`, restated (#1151, Codex P2 on PR
+ * #1162).
+ *
+ * The two fields are ONE contract, not two: `standings` is the bounded prefix of
+ * the complete ban-filtered order and `playerCount` is that order's true
+ * cardinality — the `MostLovedPhotoAward` `winners`/`winnerCount` pairing. Typed
+ * apart they said nothing about each other, so a direct admin flip could freeze
+ * `playerCount: 0` beside a non-empty list, or a list longer than the bound the
+ * Event document's 1 MiB budget depends on.
+ *
+ * `draftEventArchive` produces exactly this — `ranked.slice(0, maxRows)` beside
+ * `ranked.length` — so the equality holds by construction for every record the
+ * writer builds at the SHIPPED bound. `MAX_ARCHIVED_STANDING_ROWS` is asked here
+ * rather than the caller's own `maxRows`, because the question is the boundary's
+ * (which knows only the constant), not the builder's: a caller passing a smaller
+ * prefix is producing a record the rules would refuse, and this is where it is
+ * told so — before the quiesce rather than after it.
+ */
+function writableStandingsSize(archive: EventArchive): boolean {
+  return (
+    archive.standings.length
+    === (archive.playerCount <= MAX_ARCHIVED_STANDING_ROWS
+      ? archive.playerCount
+      : MAX_ARCHIVED_STANDING_ROWS)
+  );
+}
+
+/**
  * Would `firestore.rules` accept this record? (#1151, Codex P1 on PR #1162.)
  *
  * THE LAST DEFENCE AGAINST THE ONE FAILURE THIS WHOLE MODULE IS SHAPED AROUND.
@@ -695,7 +723,12 @@ function writableDayHonor(honor: ArchivedDayHonor): boolean {
  *
  * `standings`' rows stay unchecked, for the original reason unchanged: every one
  * of them is built by `toStandingRow` from a row `usableUid` has already
- * accepted, so there is no unvalidated value left in them to ask about.
+ * accepted, so there is no unvalidated value left in them to ask about. How MANY
+ * of them there are is a different question and it is asked
+ * (`writableStandingsSize`, Codex P2 on PR #1162), because the count is a
+ * relationship with `playerCount` rather than a property of any row — and the
+ * boundary asks it too, where a list's size costs one expression and walking it
+ * is not expressible at all.
  *
  * `archivedAt` is asked only for FINITENESS, not for the flip arm's `> 0`: the
  * console builds its preview at `archivedAt: 0` deliberately (it is a preview,
@@ -715,6 +748,7 @@ export function writableArchiveRecord(archive: EventArchive): boolean {
     && Array.isArray(archive.standings)
     && Number.isInteger(archive.playerCount)
     && archive.playerCount >= 0
+    && writableStandingsSize(archive)
     && Array.isArray(archive.dailyHonors)
     && archive.dailyHonors.every(writableDayHonor)
     && ((archive.firstBingo === null && archive.firstBingoRow === null)
@@ -872,6 +906,14 @@ export function draftEventArchive(params: {
    * alone, which is right only for a caller with no document in hand.
    */
   existing?: Readonly<Record<string, unknown>> | null;
+  /**
+   * The retained prefix's own bound, defaulting to `MAX_ARCHIVED_STANDING_ROWS`.
+   * A TEST SEAM rather than a production knob, and since #1162 an honest one:
+   * `firestore.rules` binds `standings.size()` to `min(playerCount, 200)`, so a
+   * caller passing a smaller bound over a longer roster builds a record the
+   * boundary would refuse — and `writableArchiveRecord` says so, as
+   * `record-unwritable`, on the near side of the quiesce (Codex P2 on PR #1162).
+   */
   maxRows?: number;
   maxBytes?: number;
   maxEventBytes?: number;

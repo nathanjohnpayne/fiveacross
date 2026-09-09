@@ -707,6 +707,70 @@ describe('post-sailing-archive — the archive write must carry the whole record
     );
   });
 
+  // Codex P2 on PR #1162. `standings` and `playerCount` were typed one at a time
+  // and said nothing about each other, so an authorized admin flipping DIRECTLY
+  // rather than through `draftEventArchive` could freeze a count that contradicts
+  // the list it describes, or a list past the bound the Event document's 1 MiB
+  // budget depends on — permanently, since the flip is irreversible and locks
+  // `archive`, and silently, since every archived surface reads the count as the
+  // roster size and the list as its rank-ordered prefix.
+  const standingsRow = (i: number) => ({
+    uid: `player-uid-${i}`,
+    displayName: `P${i}`,
+    bingoCount: 1,
+    squaresMarked: 250 - i,
+    blackout: false,
+    firstBingoAt: 1000 + i,
+  });
+
+  it('DENIES standings that do not match playerCount', async () => {
+    // The count undercounting its own list: `playerCount: 0` beside a row.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: 0 }));
+    // …and overcounting it, while still under the bound, where the count is
+    // supposed to BE the list's length.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, playerCount: 2 }));
+    // …and a list past the bounded prefix, in either pairing.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 201 }, (_, i) => standingsRow(i)),
+        playerCount: 201,
+      }),
+    );
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 201 }, (_, i) => standingsRow(i)),
+        playerCount: 500,
+      }),
+    );
+  });
+
+  it('ALLOWS a short roster whose count IS its list', async () => {
+    // Under the bound the two are equal, which is what `draftEventArchive`
+    // produces for every real Event (both live ones have two-figure rosters).
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 5 }, (_, i) => standingsRow(i)),
+        playerCount: 5,
+      }),
+    );
+  });
+
+  it('ALLOWS the bounded prefix of a roster past the bound', async () => {
+    // The pairing's whole reason for existing: 200 retained rows beside the
+    // complete cardinality of 250, exactly `ranked.slice(0, 200)` beside
+    // `ranked.length`.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => standingsRow(i)),
+        playerCount: 250,
+      }),
+    );
+  });
+
   it('DENIES a non-finite or out-of-range freezeAt', async () => {
     // The Standings Freeze the whole record cut on, held to the same bound as
     // the pair's own instants. It is the one number here that needs no Player to

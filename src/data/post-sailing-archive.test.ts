@@ -1456,6 +1456,51 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     }
   });
 
+  // Codex P2 on PR #1162. `standings` and `playerCount` are ONE contract — the
+  // bounded prefix in rank order, and the complete ban-filtered cardinality it is
+  // a prefix OF — and typing them apart said nothing about each other. An
+  // authorized admin flipping directly rather than through this builder could
+  // therefore freeze `playerCount: 0` beside a non-empty list, or a list past the
+  // bound the Event document's 1 MiB budget depends on; both are permanent, and
+  // both are read by every archived surface as if they agreed.
+  // `firestore.rules`' `standingsSizeMatches` is the boundary's half of the same
+  // clause, and `writableArchiveRecord` is where the writer asks it BEFORE the
+  // quiesce.
+  it('binds the retained rows to playerCount, and builds exactly that pairing', () => {
+    const roster = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        mkPlayer({ uid: `p${i}`, displayName: `P${i}`, squaresMarked: n - i }),
+      );
+    const build = (n: number) =>
+      draftEventArchive({
+        players: roster(n),
+        event: { days: DAYS, bannedUids: [] },
+        archivedAt: 1,
+      }).archive;
+
+    // UNDER the bound, every row is retained, so the two are simply equal.
+    const small = build(5);
+    expect(small.standings).toHaveLength(5);
+    expect(small.playerCount).toBe(5);
+    expect(writableArchiveRecord(small)).toBe(true);
+
+    // PAST it, the prefix is exactly the bound while the count stays the whole
+    // roster — which is the pairing's entire reason for existing.
+    const big = build(MAX_ARCHIVED_STANDING_ROWS + 50);
+    expect(big.standings).toHaveLength(MAX_ARCHIVED_STANDING_ROWS);
+    expect(big.playerCount).toBe(MAX_ARCHIVED_STANDING_ROWS + 50);
+    expect(writableArchiveRecord(big)).toBe(true);
+
+    // …and the three shapes a direct flip could otherwise carry, none of which
+    // this builder can produce: a count that undercounts its own list, a list
+    // that undercounts its own count, and a list past the bound.
+    expect(writableArchiveRecord({ ...small, playerCount: 0 })).toBe(false);
+    expect(writableArchiveRecord({ ...small, standings: [] })).toBe(false);
+    expect(
+      writableArchiveRecord({ ...big, standings: [...big.standings, big.standings[0]] }),
+    ).toBe(false);
+  });
+
   it('bounds a name at the cap the rest of the estate already enforces', () => {
     const draft = draftEventArchive({
       players: [mkPlayer({ uid: 'shouty', displayName: 'A'.repeat(50_000), squaresMarked: 1 })],

@@ -299,6 +299,37 @@ service cloud.firestore {
             && firstBingoRowComplete(archive.firstBingoRow)
             && archive.firstBingoRow.uid == archive.firstBingo.uid);
     }
+    // THE RETAINED ROWS AND THE ROSTER CARDINALITY, BOUND TO EACH OTHER (#1151,
+    // Codex P2 on PR #1162).
+    //
+    // Rules cannot walk a list, so the rows themselves stay the stated residual
+    // — but the list's SIZE is one expression, and the record's whole contract
+    // for these two fields is a relationship between them: `standings` is the
+    // bounded prefix of the complete ban-filtered order and `playerCount` is
+    // that order's true cardinality, the `MostLovedPhotoAward` `winners` /
+    // `winnerCount` pairing. Typed one at a time they said nothing about each
+    // other, so an authorized admin flipping directly rather than through
+    // `draftEventArchive` could freeze `playerCount: 0` beside a non-empty list,
+    // or a list past the bound the Event document's 1 MiB budget depends on —
+    // permanently, because the flip is irreversible and locks `archive`, and
+    // silently, because every archived surface reads the count as the roster
+    // size and the list as its prefix.
+    //
+    // 200 is `MAX_ARCHIVED_STANDING_ROWS` in `src/data/eventArchive.ts`,
+    // restated here because the writer and this arm have to agree about it —
+    // the same shared-contract discipline `finiteArchiveNumber` and
+    // `MAX_ARCHIVE_NUMBER` already carry. The writer produces exactly this:
+    // `ranked.slice(0, 200)` beside `ranked.length`, so the equality holds by
+    // construction for every record it can build, and `writableArchiveRecord`
+    // asks it on the near side of the quiesce.
+    //
+    // `playerCount` has already been held to a non-negative int by the time
+    // this is reached, so the conditional is `min(playerCount, 200)` and the
+    // full-sized record is the boundary case rather than an exception.
+    function standingsSizeMatches(archive) {
+      return archive.standings.size()
+        == (archive.playerCount <= 200 ? archive.playerCount : 200);
+    }
     // Every top-level key of `EventArchive` (src/domainTypes.d.ts), typed
     // (#1151). The NULLABLE keys are checked as type-or-null, because `null` is
     // a legitimate stored value for each — the First-BINGO pair is `null` when
@@ -322,6 +353,9 @@ service cloud.firestore {
     // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
     // at all, or an empty map — which is irreversible and leaves the archived
     // surfaces on their live fallback while play is frozen (Codex P2, PR #1139).
+    // The list's SIZE is not a walk, though, and it is what ties `standings` to
+    // `playerCount` (`standingsSizeMatches`, Codex P2 on PR #1162): the rows
+    // stay unchecked, the COUNT of them no longer is.
     //
     // AND `is number` IS NOT ENOUGH FOR THE TOP-LEVEL NUMBERS EITHER (Codex P2
     // on PR #1162). The pairing above stopped admitting `NaN` and the infinities
@@ -361,6 +395,9 @@ service cloud.firestore {
         && archive.standings is list
         && archive.playerCount is int
         && archive.playerCount >= 0
+        // …and the two are bound to each other, not merely typed apart
+        // (`standingsSizeMatches`, Codex P2 on PR #1162).
+        && standingsSizeMatches(archive)
         && archive.dailyHonors is list
         && firstBingoPairComplete(archive)
         && (archive.freezeAt == null || finiteArchiveNumber(archive.freezeAt))
