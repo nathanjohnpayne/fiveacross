@@ -111,7 +111,7 @@ describe('manual Event-scoped listener lifecycles (#807)', () => {
   });
 
   it('clears and rebuilds the all-Day metadata fan for the new Event', () => {
-    const view = renderHook(() => useDayMetasStatus(1));
+    const view = renderHook(() => useDayMetasStatus([0]));
     const a = H.subscriptions[0];
     act(() => a.listener(docSnapshot({ dayIndex: 0, source: 'A' })));
     expect(view.result.current.metas.get(0)).toMatchObject({ source: 'A' });

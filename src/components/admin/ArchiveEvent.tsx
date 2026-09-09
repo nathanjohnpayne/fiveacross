@@ -398,12 +398,26 @@ export default function ArchiveEvent({
     hasPendingWrites: rosterPending,
   } = useLeaderboard();
   const rosterConfirmed = rosterSeen && !rosterFromCache && !rosterPending;
+  // THE SCHEDULE'S OWN DAY INDEXES, NOT ITS LENGTH (Codex P2 on PR #1162).
+  // Passing a count subscribed this fan to `days/0 … days/n-1`, while
+  // `archiveEvent` reads `days/{d.index}/meta/{d.index}` — the same set only
+  // while the schedule is contiguous from zero. That is a property the setup
+  // wizard's own draft validation enforces at authoring time and nothing
+  // enforces on a STORED Event, and every day-scoped path in the estate keys on
+  // `DayDef.index` (the #447 precedent).
+  //
+  // On a schedule where the two disagree the console lied, permanently. A
+  // one-Day schedule at `index: 4` had this fan confirm `days/0/meta/0` — absent,
+  // so the server answers an ordinary "no pin here" — every gate passed, the
+  // preview showed the roster-DERIVED honour or none, and the Admin armed and
+  // archived. The freeze then read `days/4/meta/4`, found the real pin, and
+  // froze a different honour from the one on the screen that was approved.
   const {
     metas: dayMetas,
     loaded: dayMetasLoaded,
     serverConfirmed: dayMetasConfirmed,
     failed: dayMetasFailed,
-  } = useDayMetasStatus(event?.days?.length ?? 0);
+  } = useDayMetasStatus(event?.days?.map((d) => d.index) ?? []);
   const [arming, setArming] = useState(false);
   const [beforeFinale, setBeforeFinale] = useState(false);
   // `from` is the state the action was taken in; once the outcome's target state

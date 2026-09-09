@@ -63,8 +63,16 @@ const H = vi.hoisted(() => {
      *  `dayMetasServerConfirmed` — a Day answered before its listener died stays
      *  confirmed (Codex P2 and CodeRabbit on PR #1162). */
     dayMetasFailed: false,
-    useDayMetasStatus: vi.fn(() => ({
-      metas: state.dayMetas,
+    /** Stubbed, but FAITHFUL about which Days it was asked for (Codex P2 on PR
+     *  #1162): it hands back only the pins for the indexes the console
+     *  subscribed to. A stub that ignored its argument would render the same
+     *  preview whatever the console asked for, which is exactly the property
+     *  under test — the console used to ask for `days/0 … days/n-1` while the
+     *  freeze reads `days/{d.index}`. */
+    useDayMetasStatus: vi.fn((dayIndexes: readonly number[]) => ({
+      metas: new Map(
+        [...state.dayMetas].filter(([dayIndex]) => dayIndexes.includes(dayIndex)),
+      ),
       loaded: true,
       // The latch is still on the hook for the consumers that ask "has the
       // server ever spoken"; the archive gate reads the current answer below.
@@ -352,6 +360,29 @@ describe('ArchiveEvent — the Archive action (#1151)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Archived. The final standings are frozen.',
     );
+  });
+
+  // #1151, Codex P2 on PR #1162. The console subscribed to `days/0 … days/n-1`
+  // while `archiveEvent` reads `days/{d.index}/meta/{d.index}`, which is the same
+  // fan only while the schedule is contiguous from zero — a property the setup
+  // wizard enforces on a DRAFT and nothing enforces on a stored Event. On one
+  // where they disagree the console confirmed a Day that does not exist, showed
+  // the roster-derived honour (or none), and the freeze then froze the real pin:
+  // a different record from the one the Admin approved, permanently.
+  it('subscribes to the schedule’s own Day indexes, and previews the pin it finds there', async () => {
+    H.event = mkEvent({ days: [mkDay(4)] });
+    H.dayMetas = new Map<number, DayMetaDoc>([
+      [4, { firstBingo: { uid: 'alice', displayName: 'Alice', at: 1_200 } }],
+    ]);
+    renderConsole();
+    // The Day the schedule actually names — never `days/0`, which this Event has
+    // no entry for at all.
+    expect(H.useDayMetasStatus).toHaveBeenCalledWith([4]);
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    // One honour, and it is the PINNED one: the roster's own Day-4 evidence
+    // would derive nothing here, so a fan pointed at `days/0` previews none.
+    expect(screen.getByText(/Freezing 2 players and 1 daily honor\b/)).toBeInTheDocument();
+    expect(screen.queryByText(/unreadable daily honor/)).not.toBeInTheDocument();
   });
 
   // #1151, Codex P2 on PR #1162. A Day honour pinned by an Admin — or by the

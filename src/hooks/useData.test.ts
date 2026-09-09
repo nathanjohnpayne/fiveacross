@@ -291,7 +291,7 @@ describe('useDayMetasStatus — a failed honour subscription confirms nothing (#
 
   it('resolves `loaded` but NOT `serverLoaded` when a Day subscription dies', () => {
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(2));
+    const { result } = renderHook(() => useDayMetasStatus([0, 1]));
 
     fan.next(0, metaSnap(false)); // Day 0 answered by the server
     fan.error(1); // Day 1's listener dies before any snapshot
@@ -307,7 +307,7 @@ describe('useDayMetasStatus — a failed honour subscription confirms nothing (#
 
   it('reports no failure, and the strict latch, when every Day is server-answered', () => {
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(2));
+    const { result } = renderHook(() => useDayMetasStatus([0, 1]));
 
     fan.next(0, metaSnap(true)); // cold persistent cache — resolved, not confirmed
     fan.next(1, metaSnap(true));
@@ -326,7 +326,7 @@ describe('useDayMetasStatus — a failed honour subscription confirms nothing (#
     // server has spoken has still spoken — but the failure is reported, because
     // the console should not present a dead fan as healthy.
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(1));
+    const { result } = renderHook(() => useDayMetasStatus([0]));
 
     fan.next(0, metaSnap(false));
     expect(result.current.serverLoaded).toBe(true);
@@ -338,6 +338,76 @@ describe('useDayMetasStatus — a failed honour subscription confirms nothing (#
     // PR #1162): the last snapshot this Day delivered was server-committed and
     // the error callback removes nothing, so a consumer that read `failed` as
     // "not confirmed" would show a terminal message beside an armed control.
+    expect(result.current.serverConfirmed).toBe(true);
+  });
+});
+
+// Codex P2 on PR #1162. The fan used to take the schedule's LENGTH and subscribe
+// to `days/0 … days/n-1`, which is the same set of documents only while the
+// schedule is contiguous from zero — a property the setup wizard's draft
+// validation enforces at authoring time and nothing enforces on a stored Event,
+// while every day-scoped path in the estate keys on `DayDef.index` (the #447
+// precedent). On a schedule the two disagree about, the archive console
+// confirmed one Day's honour and the freeze then froze another's, permanently.
+describe('useDayMetasStatus — the fan addresses the schedule’s own Day indexes (#1151)', () => {
+  function captureFan(): { next: (i: number, snap: unknown) => void } {
+    const subs: Array<{ onNext: (s: unknown) => void }> = [];
+    H.onSnapshot.mockImplementation(
+      (_target: unknown, _options: unknown, onNext: (s: unknown) => void) => {
+        subs.push({ onNext });
+        return () => {};
+      },
+    );
+    return { next: (i, snap) => act(() => subs[i].onNext(snap)) };
+  }
+
+  /** The document paths this fan opened, in fan order. `paths.ts` builds every
+   *  ref through the mocked `doc(db, …)`, so the segments after `db` ARE the
+   *  path — which is the whole question here. */
+  const subscribedPaths = () =>
+    H.onSnapshot.mock.calls.map((call) =>
+      ((call[0] as { args: unknown[] }).args.slice(1) as string[]).join('/'),
+    );
+
+  const pinSnap = (uid: string) => ({
+    exists: () => true,
+    data: () => ({ firstBingo: { uid, displayName: uid, at: 1_500 } }),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+
+  it('subscribes to days/4/meta/4 for a one-Day schedule at index 4, never to days/0', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() => useDayMetasStatus([4]));
+
+    expect(subscribedPaths()).toEqual(['events/event-a/days/4/meta/4']);
+    expect(subscribedPaths().some((path) => path.includes('/days/0/'))).toBe(false);
+
+    // …and the confirmation keys on that Day too, so the archive gate cannot be
+    // satisfied by a Day the schedule does not have.
+    expect(result.current.serverConfirmed).toBe(false);
+    fan.next(0, pinSnap('pinned'));
+    expect(result.current.serverConfirmed).toBe(true);
+    expect(result.current.metas.get(4)).toMatchObject({ firstBingo: { uid: 'pinned' } });
+    expect(result.current.metas.has(0)).toBe(false);
+  });
+
+  it('collapses a repeated Day and addresses none with an unusable index', () => {
+    const fan = captureFan();
+    const { result } = renderHook(() =>
+      // What a stored `EventDoc.days` can actually hold: the rules arm validates
+      // no entry, and `migrateDayFields` reads a nullish one as `{}`, so an index
+      // can be missing or fractional. `days/undefined/meta/undefined` is a
+      // document that is not there, answered as an ordinary "no pin here".
+      useDayMetasStatus([2, 2, Number.NaN, undefined as unknown as number, 1.5]),
+    );
+    expect(subscribedPaths()).toEqual(['events/event-a/days/2/meta/2']);
+
+    // One distinct Day, so one answer completes the fan. Counting the raw list
+    // instead would leave every latch permanently short and the archive control
+    // disabled behind a message that never resolves.
+    fan.next(0, pinSnap('pinned'));
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.serverLoaded).toBe(true);
     expect(result.current.serverConfirmed).toBe(true);
   });
 });
@@ -368,7 +438,7 @@ describe('useDayMetasStatus — serverConfirmed is the CURRENT snapshot, not a l
 
   it('falls FALSE again when a confirmed Day re-delivers from the cache', () => {
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(2));
+    const { result } = renderHook(() => useDayMetasStatus([0, 1]));
 
     fan.next(0, metaSnap(false));
     fan.next(1, metaSnap(false));
@@ -389,7 +459,7 @@ describe('useDayMetasStatus — serverConfirmed is the CURRENT snapshot, not a l
 
   it('is FALSE while a local write on a Day meta is still pending', () => {
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(1));
+    const { result } = renderHook(() => useDayMetasStatus([0]));
 
     // Emitted server-backed but UNDECIDED: `fromCache` is false and the write
     // has not been acked, so it can still roll back.
@@ -403,7 +473,7 @@ describe('useDayMetasStatus — serverConfirmed is the CURRENT snapshot, not a l
 
   it('needs EVERY Day, and is vacuously true for a schedule with none', () => {
     const fan = captureFan();
-    const { result } = renderHook(() => useDayMetasStatus(2));
+    const { result } = renderHook(() => useDayMetasStatus([0, 1]));
 
     fan.next(0, metaSnap(false));
     expect(result.current.serverConfirmed).toBe(false);
@@ -412,7 +482,7 @@ describe('useDayMetasStatus — serverConfirmed is the CURRENT snapshot, not a l
 
     // No Days to confirm: the same vacuous answer `loaded`/`serverLoaded` give,
     // which is why the console gates the Event document separately.
-    const { result: none } = renderHook(() => useDayMetasStatus(0));
+    const { result: none } = renderHook(() => useDayMetasStatus([]));
     expect(none.current.serverConfirmed).toBe(true);
   });
 });

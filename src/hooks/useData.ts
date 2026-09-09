@@ -339,10 +339,38 @@ export function useDayMeta(dayIndex: number | undefined): { data: DayMetaDoc | n
  * EVERY Day's meta doc, as a `Map<dayIndex, DayMetaDoc>` (#264 — the
  * Leaderboard honors strip reads the PINNED honors, with the roster-derived
  * `perDayHonors` as its fallback). Same bounded one-effect fan as
- * `useMyDayBoards` below.
+ * `useMyDayBoards` below, and it takes the same argument: the schedule's own
+ * `days.map(d => d.index)`, not its length (Codex P2 on PR #1162).
  */
-export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
-  return useDayMetasStatus(dayCount).metas;
+export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, DayMetaDoc> {
+  return useDayMetasStatus(dayIndexes).metas;
+}
+
+/**
+ * The Day indexes a honour fan may address, from a caller's raw
+ * `days.map(d => d.index)` (#1151, Codex P2 on PR #1162).
+ *
+ * Two normalisations, both of which the old `dayCount` argument got for free by
+ * construction and neither of which survives taking real indexes:
+ *
+ *  - **Non-integers are dropped.** `EventDoc.days` is admin-written with no
+ *    per-entry validation in its rules arm, and `eventConverter` tolerates an
+ *    entry it cannot read (`migrateDayFields` treats a nullish one as `{}`), so
+ *    an index can be `undefined` or fractional. `dayMetaRef` would then address
+ *    `days/undefined/meta/undefined` — a document that is not there, delivered
+ *    as a perfectly ordinary "no pin here". The freeze refuses such a schedule
+ *    outright (`archiveEvent`'s `schedule-unusable`), so nothing downstream is
+ *    made worse by the fan simply not addressing it.
+ *  - **Duplicates are collapsed.** The completion tests below count DISTINCT
+ *    Days answered against the list's length, so a schedule naming one index
+ *    twice could never reach `seen.size >= length` and the archive control would
+ *    sit disabled behind a message that never resolves.
+ *
+ * Order is preserved, because the fan's own key is the list's content and a
+ * stable order keeps that key stable across renders.
+ */
+function canonicalDayIndexes(dayIndexes: readonly number[]): number[] {
+  return Array.from(new Set(dayIndexes.filter((i) => Number.isInteger(i))));
 }
 
 /**
@@ -405,8 +433,32 @@ export function useDayMetas(dayCount: number): ReadonlyMap<number, DayMetaDoc> {
  * the archive console reports unreadable honours only when the confirmation is
  * actually missing, rather than showing a terminal message beside an armed
  * control.
+ *
+ * IT TAKES THE SCHEDULE'S OWN `DayDef.index` VALUES, NOT ITS LENGTH (Codex P2 on
+ * PR #1162). It used to take a count and subscribe to `days/0 … days/n-1`, which
+ * is the same fan only while the schedule is contiguous from zero — a property
+ * `EventDraft` validation enforces at AUTHORING time (`dayCompletenessIssues`
+ * requires `days[position].index === position`) and nothing enforces on a stored
+ * Event: `EventDoc.days` is admin-written with no per-entry rules validation,
+ * legacy and seeded Events were never put through the wizard, and every
+ * day-scoped path in the estate keys on `DayDef.index` rather than on array
+ * position (the #447 Phase 4b precedent, which `useMyDayBoards` below already
+ * follows).
+ *
+ * On a schedule the two disagree about, the divergence was silent and permanent.
+ * A one-Day schedule at `index: 4` had this fan confirm `days/0/meta/0` — a
+ * document that does not exist, which the server answers as an ordinary "no pin
+ * here" — so every gate passed, the console previewed the roster-DERIVED honour
+ * (or none), and the Admin armed and archived. `archiveEvent` then re-read
+ * `days/4/meta/4`, found the real pin, and froze a DIFFERENT honour from the one
+ * on the screen the Admin approved. Irreversibly, because the record is
+ * write-once.
+ *
+ * The fan therefore subscribes to exactly the indexes it is given, and `loaded`,
+ * `serverLoaded`, `serverConfirmed` and `failed` all key on those same indexes.
+ * `canonicalDayIndexes` is what the list is normalised through first.
  */
-export function useDayMetasStatus(dayCount: number): {
+export function useDayMetasStatus(dayIndexes: readonly number[]): {
   metas: ReadonlyMap<number, DayMetaDoc>;
   loaded: boolean;
   serverLoaded: boolean;
@@ -421,7 +473,12 @@ export function useDayMetasStatus(dayCount: number): {
   failed: boolean;
 } {
   const eventId = EVENT_ID;
-  const key = eventScopeKey(eventId, 'day-metas', dayCount);
+  // The DAYS this fan addresses, normalised (see `canonicalDayIndexes`). Derived
+  // per render because callers rebuild `days.map(d => d.index)` every render;
+  // the effect keys on its CONTENT, exactly as `useMyDayBoards` does.
+  const indexes = canonicalDayIndexes(dayIndexes);
+  const dayCount = indexes.length;
+  const key = eventScopeKey(eventId, 'day-metas', indexes.join(','));
   type State = {
     key: string;
     metas: ReadonlyMap<number, DayMetaDoc>;
@@ -456,7 +513,7 @@ export function useDayMetasStatus(dayCount: number): {
         active = false;
       };
     }
-    const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
+    const unsubs = indexes.map((dayIndex) =>
       onSnapshot(
         dayMetaRef(dayIndex, eventId),
         { includeMetadataChanges: true },
@@ -512,10 +569,14 @@ export function useDayMetasStatus(dayCount: number): {
       active = false;
       unsubs.forEach((u) => u());
     };
-    // `key` carries both Event identity and dayCount.
+    // `key` carries both Event identity and the CONTENT of the index list, so a
+    // schedule whose Days move re-keys the fan and a caller that merely rebuilt
+    // the same array does not (Codex P2 on PR #1162).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const current = state.key === key ? state : empty();
+  // Every completion test counts the DISTINCT Days this fan actually addressed,
+  // which is what makes them true of `days/4` on a schedule that has no `days/0`.
   return {
     metas: current.metas,
     loaded: dayCount <= 0 || current.seen.size >= dayCount,

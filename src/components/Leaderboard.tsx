@@ -143,7 +143,13 @@ export default function Leaderboard() {
   // #264: the pinned day-meta honors. Called HERE, with the other hooks —
   // never below the loading/empty early returns, where a later non-empty
   // render would change the hook order and crash (Codex P1 on #280).
-  const { metas: dayMetas, loaded: dayMetasLoaded } = useDayMetasStatus(event?.days?.length ?? 0);
+  // The schedule's own `DayDef.index` values, not its length: every day-scoped
+  // path keys on the index, so a non-contiguous schedule would otherwise have
+  // the strip reading a different Day's pin from the one it labels (Codex P2 on
+  // PR #1162, the #447 precedent).
+  const { metas: dayMetas, loaded: dayMetasLoaded } = useDayMetasStatus(
+    event?.days?.map((d) => d.index) ?? [],
+  );
   const { kindsByUid } = useProofKindsByUid();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<LeaderboardFilter>('all');
