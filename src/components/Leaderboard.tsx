@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
 import type { ProofKindFlags } from '../hooks/useData';
@@ -39,6 +39,30 @@ const FILTERS: Array<{ id: LeaderboardFilter; label: string }> = [
   { id: 'bingo', label: 'With BINGO' },
   { id: 'blackout', label: 'Blackout' },
 ];
+
+/**
+ * How long the routing gate below waits for a SERVER-committed Event once the
+ * ADR 0006 persistent cache has already answered, before it settles on what the
+ * cache said (Codex P1 on PR #1165).
+ *
+ * The wait exists because `onSnapshot` has no "the server is unreachable"
+ * signal. Behind a captive or partially routed Wi-Fi portal — the ship's normal
+ * network, and this app's whole operating context — Firestore serves the cached
+ * document with `fromCache: true` and RETRIES indefinitely: it never calls the
+ * error callback, so `serverResolved` stays false, and `navigator.onLine` reads
+ * TRUE, so the offline escape never fires either. Neither of the two things that
+ * end the wait short of a server snapshot could happen, and the Leaderboard sat
+ * on its spinner for the whole crossing.
+ *
+ * A few seconds rather than a round-trip estimate: it is not measuring the
+ * network, it is bounding how long a Player stares at a spinner before being
+ * shown the record their own device already has. Long enough that an ordinary
+ * slow answer still WINS the race (a server snapshot inside the window resolves
+ * the wait immediately and routes on the truth), short enough that a portal is
+ * not the rest of the sailing. Exported so the tests drive the real constant
+ * rather than a number that can drift away from it.
+ */
+export const CACHED_EVENT_SETTLE_MS = 4_000;
 
 /**
  * Presentational-only predicate (ADR 0001: the Leaderboard is a for-fun tally,
@@ -193,6 +217,19 @@ function buildShareStandings(
  *    exists to close, reached through the escape hatch instead. So the offline
  *    arm also requires `loading` to have cleared, which is exactly "this
  *    subscription has produced its cache result, or failed".
+ *  - a CACHE-SERVED snapshot the server has not contradicted within
+ *    `CACHED_EVENT_SETTLE_MS` (Codex P1 on PR #1165). Neither arm above can fire
+ *    behind a captive or partially routed portal, which is this app's normal
+ *    network: Firestore answers from the cache with `fromCache: true` and retries
+ *    forever rather than calling its terminal error callback, so `serverResolved`
+ *    stays false — and `navigator.onLine` reports TRUE, so `useOnline` says
+ *    nothing either. `navigator.onLine === false` cannot be the only non-error
+ *    escape. The bounded wait is the real settle signal: once the subscription
+ *    has answered from anywhere, the gate gives a server-committed snapshot a few
+ *    seconds to arrive and then settles on the cached Event, exactly as the
+ *    offline arm does. A server snapshot inside the window still WINS — it
+ *    resolves the wait outright, and the timer is cancelled with it — so nothing
+ *    about the answering case changes.
  *
  * A PENDING archive is the one closed state this gate declines to believe, the
  * `App.tsx` Card-redirect rule applied to the surface that redirect points AT
@@ -252,8 +289,31 @@ export default function Leaderboard() {
   // included, and on an error (which also resolves `serverResolved`, the other
   // arm here). So offline stops the wait once the cache has spoken, and never
   // before it.
+  //
+  // AND `!online` IS NOT THE ONLY NON-ERROR ESCAPE (Codex P1 on PR #1165).
+  // Behind a captive or partially routed portal — the ship's ordinary Wi-Fi, and
+  // this app's whole operating context — Firestore cannot reach the server while
+  // the browser still reports ONLINE: the subscription serves the cached Event
+  // with `fromCache: true` and keeps retrying, never invoking the terminal error
+  // callback, so `serverResolved` stays false and `online` stays true and this
+  // expression never settled at all. A cached ACTIVE Event's Leaderboard then
+  // held its spinner indefinitely. `onSnapshot` exposes no reachability signal to
+  // read instead, so the settle signal is a BOUNDED WAIT, started once the
+  // subscription has answered from anywhere: `CACHED_EVENT_SETTLE_MS` after the
+  // cache result the gate settles on what the cache said, which is exactly what
+  // the offline arm already does one render earlier. The timer is cancelled the
+  // moment the server answers, so a snapshot inside the window still wins and
+  // the answering case is untouched.
+  const cacheAnswered = !eventLoading && !serverResolved;
+  const [cacheSettled, setCacheSettled] = useState(false);
+  useEffect(() => {
+    if (!cacheAnswered || cacheSettled) return;
+    const timer = window.setTimeout(() => setCacheSettled(true), CACHED_EVENT_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [cacheAnswered, cacheSettled]);
   const [statusLatched, setStatusLatched] = useState(false);
-  const statusSettled = statusLatched || serverResolved || (!online && !eventLoading);
+  const statusSettled =
+    statusLatched || serverResolved || (!eventLoading && (!online || cacheSettled));
   if (statusSettled && !statusLatched) setStatusLatched(true);
 
   // The archive's own latch, monotone and adjusted during render by the same

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import type { ClaimDoc, DayDef, DayMetaDoc, EventArchive, EventDoc, PlayerDoc } from '../types';
@@ -175,7 +175,7 @@ vi.mock('../data/admin', () => ({
 // eslint-disable-next-line import/first -- the components must load AFTER the mocks above.
 import ArchiveEvent from './admin/ArchiveEvent';
 // eslint-disable-next-line import/first -- same.
-import Leaderboard from './Leaderboard';
+import Leaderboard, { CACHED_EVENT_SETTLE_MS } from './Leaderboard';
 
 function mkEvent(over: Partial<EventDoc> = {}): EventDoc {
   // `finaleCompletedAt` present by default, so the FINALE gate is satisfied and
@@ -1803,6 +1803,108 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
     );
     expect(screen.getByText('Late Riser')).toBeInTheDocument();
     expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  // Codex P1 on PR #1165. Behind a captive or partially routed portal — the
+  // ship's ordinary Wi-Fi — Firestore cannot reach the server while the browser
+  // still reports ONLINE: the cached Event arrives with `fromCache: true`, the
+  // subscription retries rather than erroring, and neither `serverResolved` nor
+  // `useOnline` ever moves. Both escapes above are shut, and the gate held its
+  // spinner for the whole crossing. The bounded wait is the third escape.
+  it('settles on a cached ACTIVE Event when the server never answers behind a portal', () => {
+    vi.useFakeTimers();
+    try {
+      H.eventServerResolved = false; // the server has said nothing…
+      H.eventFromCache = true; // …and the cache is what answered
+      H.online = true; // …while the portal reports a perfectly good link
+      H.event = liveEvent();
+      renderLeaderboard();
+      expect(screen.getByRole('status')).toHaveTextContent('Tallying the leaderboard…');
+      expect(H.useLeaderboard).not.toHaveBeenCalled();
+
+      // BOUNDED, not immediate: a slow server answer must still get its window.
+      act(() => {
+        vi.advanceTimersByTime(CACHED_EVENT_SETTLE_MS - 1);
+      });
+      expect(screen.getByRole('status')).toHaveTextContent('Tallying the leaderboard…');
+      expect(H.useLeaderboard).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.getByText('Late Riser')).toBeInTheDocument();
+      expect(H.useLeaderboard).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles on a cached ARCHIVED Event in that same state, and opens nothing', () => {
+    // The other half of what "settle on the cached Event" means, and the guard
+    // that the wait above cannot route a frozen Event to the live child. The
+    // archived branch already sits ahead of the wait, so this passes with the
+    // bounded wait removed too — it is here to keep it that way.
+    vi.useFakeTimers();
+    try {
+      H.eventServerResolved = false;
+      H.eventFromCache = true;
+      H.online = true;
+      H.event = archivedEvent();
+      const { container } = renderLeaderboard();
+      expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+
+      act(() => {
+        vi.advanceTimersByTime(CACHED_EVENT_SETTLE_MS * 2);
+      });
+      expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+      expect(H.useLeaderboard).not.toHaveBeenCalled();
+      expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+      expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a server snapshot inside the window win over the cached one', () => {
+    // The wait is a floor on how long a Player stares at a spinner, never a
+    // deadline the truth has to beat: an answer inside the window resolves the
+    // status outright and cancels the timer with it, so the cached `active`
+    // replay never gets to settle anything. Also unchanged by the bounded wait —
+    // it is what must stay true once the wait exists.
+    vi.useFakeTimers();
+    try {
+      H.eventServerResolved = false;
+      H.eventFromCache = true;
+      H.online = true;
+      H.event = liveEvent();
+      const { container, rerender } = renderLeaderboard();
+      expect(H.useLeaderboard).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(Math.floor(CACHED_EVENT_SETTLE_MS / 2));
+      });
+      // The server answers, and it contradicts the cache.
+      H.eventServerResolved = true;
+      H.eventFromCache = false;
+      H.event = archivedEvent();
+      rerender(
+        <MemoryRouter>
+          <Leaderboard />
+        </MemoryRouter>,
+      );
+      expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+
+      // …and the cancelled timer cannot fire the cached `active` back on later.
+      act(() => {
+        vi.advanceTimersByTime(CACHED_EVENT_SETTLE_MS * 2);
+      });
+      expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+      expect(H.useLeaderboard).not.toHaveBeenCalled();
+      expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+      expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not bounce an already-routed live view back through the spinner on a reconnect', () => {
