@@ -372,6 +372,18 @@ init_main_fixture_with_origin() {
   local repo="$1"
   local remote="$2"
   git init --quiet --bare "$remote"
+  # PINNED, not inherited. `git init` names the initial branch from
+  # `init.defaultBranch`, which Apple's git sets to `main` in its system
+  # gitconfig and a stock Linux git leaves at `master` — so this bare repo's
+  # HEAD pointed at a branch that never exists on `ubuntu-latest`. Every case
+  # that only pushes to it was unaffected, but `git clone` of such a remote
+  # checks out NOTHING ("remote HEAD refers to nonexistent ref"), leaving the
+  # clone on an unborn `master`: case 33a's commit then landed on a branch its
+  # `git push origin main` could not name, the push failed into `|| true`, the
+  # remote never moved, and the guard that case exists to prove was never given
+  # anything to catch. `symbolic-ref` rather than `git init -b`, so this holds
+  # on any git old enough to run the rest of this file.
+  git -C "$remote" symbolic-ref HEAD refs/heads/main
   mkdir -p "$repo"
   (
     cd "$repo"
@@ -3382,6 +3394,12 @@ run_post_classification_guard_case() {
     git add LATER.md
     git commit --quiet -m "landed while the classifier ran"
   )
+  # What the remote must be carrying by the time the run is over. Checked first
+  # below, because a push that silently did not land leaves the remote where it
+  # was — and a deploy that then completes looks exactly like a guard that did
+  # not fire, which is how a fixture defect reads as a product defect.
+  local landed
+  landed="$(git -C "$other" rev-parse HEAD)"
   mkdir -p "$stub_dir"
   {
     printf '%s\n' '#!/usr/bin/env bash'
@@ -3411,7 +3429,9 @@ run_post_classification_guard_case() {
   local rc=$?
   set -e
   if [[ "$advance" == "advance" ]]; then
-    if [[ $rc -eq 0 ]]; then
+    if [[ "$(git -C "$remote" rev-parse main)" != "$landed" ]]; then
+      fail "postclassify-guard ($case_id): the shim's push never reached the remote, so nothing moved during classification and this case exercised no guard."
+    elif [[ $rc -eq 0 ]]; then
       fail "postclassify-guard ($case_id): deploy returned 0 though origin/main moved while the classifier ran."
     elif [[ -s "$WORKDIR/npm-calls-${case_id}.log" ]]; then
       fail "postclassify-guard ($case_id): BUILD_CMD ran on a checkout the freshness guard no longer covers. npm log was:"
