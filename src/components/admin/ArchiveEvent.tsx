@@ -718,8 +718,11 @@ export default function ArchiveEvent({
    *  against the controls the Admin is actually looking at (Codex P2 on PR
    *  #1162).
    *
-   *  `isCurrent` is this invocation's own liveness check — the reopen's outcome is
-   *  a second fact about the same action, so a superseded one drops it too. */
+   *  `isCurrent` is this invocation's own liveness check, and it gates the
+   *  CLEANUP ITSELF and not only what is reported about it (Codex P2 on PR
+   *  #1165): a superseded action's reopen is a write that would clear the quiesce
+   *  a newer freeze is committing against, so it is dropped on exactly the terms
+   *  its outcome is. */
   const runArchive = async (isCurrent: () => boolean): Promise<ArchiveReport> => {
     // The quiesce this handler took, and the Event it took it on (#1142 item 7):
     // `EVENT_ID` is a live binding, so the freeze and the cleanup name the Event
@@ -739,7 +742,20 @@ export default function ArchiveEvent({
     // merely JOINED another Admin's in-flight quiesce comes back holding a token
     // that matches perfectly, and a reopen keyed on the token alone would happily
     // clear a closing state this handler never took.
-    if (REOPEN_AFTER.has(outcome)) {
+    //
+    // AND A SUPERSEDED ACTION DOES NOT REOPEN AT ALL (Codex P2 on PR #1165). The
+    // liveness check used to guard only the state updates BELOW, which left the
+    // reopen itself unconditional — and the reopen is a WRITE, not a report.
+    // While this Archive is still reading the snapshot its own closing state puts
+    // **Freeze the record** on screen, so the Admin can start a newer freeze
+    // against the same token; a refusal such as `config-changed` arriving after
+    // that would then clear the very quiesce the newer freeze is committing
+    // against, failing it with `not-closing` and overriding the intent the Admin
+    // most recently expressed. The token and `created` guards cannot see this:
+    // the generation still matches and this handler really did create it. So the
+    // whole cleanup — write included — is skipped for an invocation the Admin has
+    // already replaced, and its refusal is dropped exactly as its outcome is.
+    if (REOPEN_AFTER.has(outcome) && isCurrent()) {
       if (created) {
         const reopened = await abandonArchive(token ?? undefined, eventId);
         if (isCurrent()) setReopenSuperseded(reopened === 'quiesce-changed');
@@ -751,7 +767,7 @@ export default function ArchiveEvent({
         // superseded or already-archived one wrote nothing and the Event is
         // wherever it already was.
         if (reopened === 'reopened') return { outcome, settledAt: 'open' };
-      } else if (isCurrent()) {
+      } else {
         // Joined, not created: the closing state belongs to whoever opened it,
         // and it is left exactly as found. Reported for the same reason a
         // superseded generation is — play is still shut, deliberately.

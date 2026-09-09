@@ -857,6 +857,70 @@ describe('ArchiveEvent — the pending-claim drain gate (#1151)', () => {
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
   });
 
+  it('does not reopen the token a NEWER freeze is committing against', async () => {
+    // Codex P2 on PR #1165. The liveness check guarded only what a superseded
+    // action REPORTED, leaving the automatic reopen — a write — unconditional.
+    // While the first Archive is still reading the snapshot, its own closing
+    // state puts **Freeze the record** on screen and the Admin starts a newer
+    // freeze against the same token; the first action's refusal would then clear
+    // exactly the quiesce that newer freeze is committing against, failing it
+    // with `not-closing`. Neither the token nor the `created` guard can see it:
+    // the generation matches, and this handler really did create it.
+    let settleFirst: (value: unknown) => void = () => {};
+    let settleSecond: (value: unknown) => void = () => {};
+    H.archiveEvent
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settleFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settleSecond = resolve;
+          }),
+      );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+
+    // The quiesce this action took lands, and the Admin presses the control it
+    // put on screen — a second action over the first.
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    void userEvent.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(2));
+
+    // …and only now does the superseded Archive refuse.
+    settleFirst('config-changed');
+    settleSecond('archived');
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Archived. The final standings are frozen.',
+    );
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(H.writes).toEqual(['begin', 'archive', 'begin', 'archive']);
+  });
+
+  it('still reopens for the action that is CURRENT — the control', async () => {
+    // The same shape without the supersession, so the assertion above is about
+    // the liveness check rather than about a refusal that never reopens.
+    let settle: (value: unknown) => void = () => {};
+    H.archiveEvent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    settle('config-changed');
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event'));
+  });
+
   it('leaves the Event shut when the quiesce it read was taken over by another', async () => {
     // `quiesce-changed` is deliberately outside the reopen set: the closing state
     // now in force is a DIFFERENT one, so clearing it would reopen an Event
