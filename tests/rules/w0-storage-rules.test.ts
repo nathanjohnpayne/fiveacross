@@ -9,7 +9,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
-import { doc, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { clearStorageDeep } from '../support/storage-emulator';
 
 // Storage security-rules coverage for storage.rules (ADR 0004): the okImage()
@@ -167,7 +167,7 @@ describe('storage.rules — avatars/{uid}.jpg (owner + filename pinned)', () => 
   });
 });
 
-describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/admin delete)', () => {
+describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/admin ORPHAN delete)', () => {
   it('allows the owning uploader to create their proof object', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, photoPath, TINY, IMAGE));
@@ -260,7 +260,12 @@ describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/a
     await assertFails(deleteObject(ref(owner.storage(), photoPath)));
   });
 
-  it('allows an Event admin to delete the proof object', async () => {
+  it('allows an Event admin to delete an ORPHANED proof object', async () => {
+    // No Proof document is seeded, which is the state every client takedown
+    // reaches this arm in: `deleteProof` COMMITS the document's removal before
+    // it revokes the object, and it is the same function for the owner's delete
+    // and the Admin's. Since #1153 (Codex round 5 P2) that is a requirement
+    // rather than an accident of the fixture — see the case below.
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await put(ctx, photoPath, TINY, IMAGE);
       await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { admins: [ADMIN] });
@@ -269,7 +274,56 @@ describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/a
     await assertSucceeds(deleteObject(ref(admin.storage(), photoPath)));
   });
 
-  it('denies deleting the proof object when the caller is signed in but neither the owner nor an Event admin', async () => {
+  it('DENIES an ADMIN — and an ADMIN who OWNS the media — deleting a LIVE Proof’s object (#1153)', async () => {
+    // Codex round 5 P2. Round 4 put `proofDocMissing` on the OWNER's branch
+    // alone, so the admin branch still admitted a delete while the Proof
+    // document stood — and the two rosters OVERLAP: an organiser who plays their
+    // own Event is the media's owner AND an entry in `admins`, so they passed
+    // the admin branch and the upload arm then welcomed their RECREATE of the
+    // emptied path as its owner. That is the delete-and-recreate window round 4
+    // was closing, reopened by the other branch: a delete-then-reupload landing
+    // between `proofMediaGeneration()`'s read and `deleteProof`'s commit binds
+    // the media-revocation tombstone to the OLD blob while the path holds the
+    // replacement.
+    //
+    // So `proofDocMissing` gates the WHOLE arm. Both objects here are backed by
+    // a live Proof document; the Event is open, so neither denial is the freeze.
+    const adminOwnedPath = `proofs/${EVENT}/${ADMIN}/${PROOF}-admin.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await put(ctx, photoPath, TINY, IMAGE);
+      await put(ctx, adminOwnedPath, TINY, IMAGE);
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { status: 'active', admins: [ADMIN] });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}`), {
+        uid: OWNER,
+        cellIndex: 1,
+        storagePath: photoPath,
+      });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}-admin`), {
+        uid: ADMIN,
+        cellIndex: 2,
+        storagePath: adminOwnedPath,
+      });
+    });
+    const admin = testEnv.authenticatedContext(ADMIN);
+    // Somebody else's live media: the plain admin branch.
+    await assertFails(deleteObject(ref(admin.storage(), photoPath)));
+    // Their OWN live media, as an admin-owner: the overlapping-role case.
+    await assertFails(deleteObject(ref(admin.storage(), adminOwnedPath)));
+    // And the takedown is not lost — the moment the document is gone, which is
+    // the order `deleteProof` actually runs in, the same delete is allowed.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}`));
+      await deleteDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}-admin`));
+    });
+    await assertSucceeds(deleteObject(ref(admin.storage(), photoPath)));
+    await assertSucceeds(deleteObject(ref(admin.storage(), adminOwnedPath)));
+  });
+
+  it('denies deleting an ORPHANED proof object when the caller is signed in but neither the owner nor an Event admin', async () => {
+    // No Proof document, so `proofDocMissing` passes and the IDENTITY check is
+    // the only thing left standing between a signed-in stranger and somebody
+    // else's blob. That is why the Event `get()` stays on the arm even though
+    // `proofDocMissing` now carries the delete-and-recreate safety on its own.
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await put(ctx, photoPath, TINY, IMAGE);
       // Seed an admins list that does NOT include OTHER, so the denial proves
