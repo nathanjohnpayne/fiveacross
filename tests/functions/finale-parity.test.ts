@@ -3,6 +3,7 @@ import {
   tutorialDayIndexes,
   ceremonialDayIndexes,
   buildPodiumPayload,
+  sanitizeFinaleDayStats,
   standingsFreezeAtFor as fnsStandingsFreezeAtFor,
   withReadableFinaleRanking,
   clampArchiveNumber as fnsClampArchiveNumber,
@@ -504,6 +505,17 @@ const asLiveRoster = (players: readonly PlayerDoc[]): PlayerDoc[] =>
 const asNormalisedFinalePlayers = (players: readonly PlayerDoc[]): FinalePlayer[] =>
   asFinalePlayers(players).map(withReadableFinaleRanking);
 
+/** The Functions READ BOUNDARY in one expression: the shared `dayStats`
+ *  sanitiser, then the shared normaliser — what `readFinaleRoster`
+ *  (`unlockDay.ts`) and `readEmailRosterPage` (`dailyEmail.ts`) each apply to
+ *  every row they hand their content builders (#1152). The distinction from
+ *  `asNormalisedFinalePlayers` above is the point: the sanitiser is the half a
+ *  malformed BUCKET has to survive. */
+const asReadFinalePlayers = (players: readonly PlayerDoc[]): FinalePlayer[] =>
+  asFinalePlayers(players).map((p) =>
+    withReadableFinaleRanking({ ...p, dayStats: sanitizeFinaleDayStats(p.dayStats) }),
+  );
+
 describe('client/functions parity — the archive bound the podium ranks by (#1152)', () => {
   it('mirrors the bound constants exactly', () => {
     expect(FNS_ARCHIVE_NUMBER_BOUND).toBe(ARCHIVE_NUMBER_BOUND);
@@ -681,6 +693,78 @@ describe('client/functions parity — the archive bound the podium ranks by (#11
       expect(normalised).toEqual(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(shape)));
       expect(normalised.champion).toEqual(buildPodium(asLiveRoster(players), shape as DayDef[]).champion);
     }
+  });
+
+  // #1152, CodeRabbit on PR #1165. The SANITISER half of the read boundary. It
+  // dropped a bucket outright when either count was non-finite — BEFORE the
+  // normaliser could coerce it — while `withReadableDayStats` keeps the bucket,
+  // reads each invalid count as 0 and leaves `firstBingoAt` usable. A row whose
+  // only bucket was malformed therefore reached both Functions rankers as a row
+  // with NO breakdown, and `effectiveFirstBingoAt` falls back to the ROOT for
+  // exactly those rows — so the scheduler's podium Moment and the morning email
+  // could lose an Event-wide First to BINGO the client still shows.
+  it('keeps a malformed BUCKET on both sides, so neither side loses its honour', () => {
+    const holderStats = {
+      1: { bingoCount: 'lots', squaresMarked: 3, firstBingoAt: 700 },
+    } as unknown as PlayerDoc['dayStats'];
+    const players = [
+      // No root stamp at all: the bucket is this row's only evidence.
+      oversized('holder', 'Holder', {
+        bingoCount: 1,
+        squaresMarked: 3,
+        firstBingoAt: null,
+        dayStats: holderStats,
+      }),
+      oversized('later', 'Later', {
+        bingoCount: 1,
+        squaresMarked: 5,
+        firstBingoAt: 900,
+        dayStats: { 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+      }),
+    ];
+    const client = asLiveRoster(players);
+    const fns = asReadFinalePlayers(players);
+
+    // The bucket rule, field for field.
+    expect(fns[0].dayStats).toEqual(client[0].dayStats);
+    expect(client[0].dayStats).toEqual({ 1: { bingoCount: 0, squaresMarked: 3, firstBingoAt: 700 } });
+
+    // …and the answer it decides.
+    const clientPodium = buildPodium(client, PLAIN_SCHEDULE as DayDef[]);
+    expect(buildPodiumPayload(fns, asFinaleDays(PLAIN_SCHEDULE)).firstBingo).toEqual(
+      clientPodium.firstBingo,
+    );
+    expect(clientPodium.firstBingo).toEqual({ uid: 'holder', displayName: 'Holder', at: 700 });
+
+    // The CHAMPION too, on a schedule that re-aggregates. `podiumStandingRow`
+    // passes the roots through only for a row carrying NO breakdown, so a row
+    // whose only bucket was dropped answered from roots the client had already
+    // stopped reading.
+    const ceremonialClose: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'>> = [
+      { index: 0, pool: 'main', tutorial: false },
+      { index: 1, pool: 'farewell', tutorial: false },
+    ];
+    expect(buildPodiumPayload(fns, asFinaleDays(ceremonialClose)).champion).toEqual(
+      buildPodium(client, ceremonialClose as DayDef[]).champion,
+    );
+    expect(buildPodium(client, ceremonialClose as DayDef[]).champion).toBeNull();
+
+    // Pin what the DROP produced, so restoring it fails here rather than passing
+    // symmetrically: the row loses its only evidence, the honour moves, and the
+    // roots it no longer has a breakdown for crown it champion.
+    const dropped = asFinalePlayers(players).map((p) =>
+      withReadableFinaleRanking(p.uid === 'holder' ? { ...p, dayStats: undefined } : p),
+    );
+    expect(buildPodiumPayload(dropped, asFinaleDays(PLAIN_SCHEDULE)).firstBingo).toEqual({
+      uid: 'later',
+      displayName: 'Later',
+      at: 900,
+    });
+    expect(buildPodiumPayload(dropped, asFinaleDays(ceremonialClose)).champion).toMatchObject({
+      uid: 'holder',
+      bingoCount: 1,
+      squaresMarked: 3,
+    });
   });
 });
 
@@ -955,6 +1039,88 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
       'ace',
     ]);
     expect(buildPodium(tied, emailClientDays(), undefined, true, EMAIL_FREEZE).champion?.uid).toBe('zed');
+  });
+
+  // #1152, Codex P2 on PR #1165. The email was the ONE ranking path still reading
+  // raw Player-written numbers: `useLeaderboard` and `draftEventArchive` clamp
+  // before they rank, `readFinaleRoster` was fixed to, and `standingsThrough` /
+  // `headlineFirstBingoAt` still accepted anything FINITE. `players/{uid}`
+  // validates no field (ADR 0001), so that is a reachable roster — and sent mail
+  // is irreversible. `readEmailRosterPage` now maps every row through the same
+  // normaliser, which is what these two compare.
+  //
+  // The marks sit on Day 2 alone — the ordinary competitive Day — with each row's
+  // roots matching its bucket, so the email's summed WINDOW and the podium's
+  // root passthrough are answering the same question about the same numbers.
+  const OVERSIZED: PlayerDoc[] = [
+    emailPlayer('zed', 'Zed', MAX_ARCHIVE_NUMBER + 2_000, 20, -(MAX_ARCHIVE_NUMBER + 2_000), {
+      2: {
+        bingoCount: MAX_ARCHIVE_NUMBER + 2_000,
+        squaresMarked: 20,
+        firstBingoAt: -(MAX_ARCHIVE_NUMBER + 2_000),
+      },
+    }),
+    emailPlayer('ace', 'Ace', MAX_ARCHIVE_NUMBER + 1_000, 30, -(MAX_ARCHIVE_NUMBER + 1_000), {
+      2: {
+        bingoCount: MAX_ARCHIVE_NUMBER + 1_000,
+        squaresMarked: 30,
+        firstBingoAt: -(MAX_ARCHIVE_NUMBER + 1_000),
+      },
+    }),
+  ];
+
+  it('ranks an oversized roster in the email exactly as both podiums rank it', () => {
+    const read = asReadFinalePlayers(OVERSIZED);
+    const rows = standingsThrough(read, 3, tutorial, ceremonial);
+    const clientPodium = buildPodium(
+      asLiveRoster(OVERSIZED),
+      emailClientDays(),
+      undefined,
+      true,
+      EMAIL_FREEZE,
+    );
+
+    // Both counts clamp to the bound, so the bingos tie and squares decide.
+    expect(rows.map((r) => `${r.uid}:${r.bingoCount}/${r.squaresMarked}`)).toEqual([
+      `ace:${MAX_ARCHIVE_NUMBER}/30`,
+      `zed:${MAX_ARCHIVE_NUMBER}/20`,
+    ]);
+    expect(clientPodium.champion).toEqual({
+      uid: 'ace',
+      displayName: 'Ace',
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 30,
+    });
+    expect(rows[0].uid).toBe(clientPodium.champion?.uid);
+
+    // Pin the UNNORMALISED answer, so removing the map at the read boundary fails
+    // here rather than passing symmetrically: raw, the bigger count simply wins
+    // and the email leads with the row every other surface ranks second.
+    expect(
+      standingsThrough(asEmailPlayers(OVERSIZED), 3, tutorial, ceremonial).map((r) => r.uid),
+    ).toEqual(['zed', 'ace']);
+  });
+
+  it('stars the same Player as the client when both first-bingo stamps are out of bounds', () => {
+    const read = asReadFinalePlayers(OVERSIZED);
+    const pin = cruiseFirstBingoUid(asLiveRoster(OVERSIZED), (i) => tutorial.has(i), EMAIL_FREEZE);
+
+    // Both stamps clamp to the bound, so the honour ties on the instant and the
+    // shared uid key (ascending) decides — on every surface at once.
+    expect(eventFirstBingoUid(read, 3, tutorial, freezeAt)).toBe('ace');
+    expect(eventFirstBingoUid(read, 3, tutorial, freezeAt)).toBe(pin);
+    expect(
+      buildPodiumPayload(
+        asReadFinalePlayers(OVERSIZED),
+        emailDays() as unknown as FinaleDay[],
+        [],
+        EMAIL_FREEZE,
+      ).firstBingo,
+    ).toEqual({ uid: 'ace', displayName: 'Ace', at: -MAX_ARCHIVE_NUMBER });
+
+    // Raw, Zed's more-negative stamp reads as "earlier" and the email stars a
+    // Player no other surface does.
+    expect(eventFirstBingoUid(asEmailPlayers(OVERSIZED), 3, tutorial, freezeAt)).toBe('zed');
   });
 
   it('keeps the ⭐ holder in the email snapshot at her true rank', () => {

@@ -883,7 +883,20 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
       podium?: { champion?: { displayName?: string; bingoCount?: number; squaresMarked?: number } | null };
     };
-    expect(podium.podium?.champion).toMatchObject({ displayName: 'Jess', bingoCount: 3, squaresMarked: 40 });
+    // The beat still POSTS, which is what this case is for: `dayStats` is
+    // self-written (ADR 0001) and can be any shape, so one malformed row must
+    // never take the whole finale down.
+    expect(podium).toBeTruthy();
+    // Bucket 8 is not an object and is dropped. Bucket 9 IS one, so it survives
+    // with its counts read as 0 — the client's own bucket rule (#1152,
+    // CodeRabbit on PR #1165). Day 9 is the ceremonial farewell, so
+    // `podiumStandingRow` re-aggregates this row to nothing and crowns nobody:
+    // the roots are passed through only for a row carrying NO breakdown, and
+    // this row has one. Dropping the bucket instead made the scheduler the one
+    // surface that answered from the roots here, which is the divergence
+    // `tests/functions/finale-parity.test.ts` § "keeps a malformed BUCKET on
+    // both sides, so neither side loses its honour" now pins against the client.
+    expect(podium.podium?.champion).toBeNull();
   });
 
   // #1152, Codex P2 on PR #1165. `readFinaleRoster` only asked whether a value
@@ -962,6 +975,49 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       uid: 'ada',
       displayName: 'Ada',
       at: -MAX_ARCHIVE_NUMBER,
+    });
+  });
+
+  // #1152, CodeRabbit on PR #1165. The roster read used to DROP a per-Day bucket
+  // whose count was non-finite, before the normaliser could coerce it — while the
+  // live board and the frozen record keep the bucket, read the invalid count as 0
+  // and leave `firstBingoAt` usable. A row whose only bucket was malformed
+  // therefore reached `buildPodiumPayload` with no breakdown at all, and
+  // `effectiveFirstBingoAt` falls back to the ROOT for exactly those rows — so
+  // this beat posted a permanent Moment naming a holder the client never named.
+  it('keeps a bucket whose count is malformed, rather than losing the honour with it', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: { days: mainDays() },
+      players: [
+        {
+          uid: 'holder',
+          displayName: 'Holder',
+          bingoCount: 1,
+          squaresMarked: 3,
+          // No root stamp: the Day-8 bucket is this row's only evidence, and its
+          // count is the shape `players/{uid}` freely admits (ADR 0001).
+          firstBingoAt: null,
+          dayStats: { 8: { bingoCount: 'lots', squaresMarked: 3, firstBingoAt: 700 } },
+        },
+        {
+          uid: 'later',
+          displayName: 'Later',
+          bingoCount: 1,
+          squaresMarked: 5,
+          firstBingoAt: 900,
+          dayStats: { 8: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+        },
+      ],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
+      podium?: { firstBingo?: Record<string, unknown> | null };
+    };
+    expect(podium.podium?.firstBingo).toEqual({
+      uid: 'holder',
+      displayName: 'Holder',
+      at: 700,
     });
   });
 

@@ -143,7 +143,7 @@ function readableRankingInstant(value: unknown): number | null {
  * A well-formed row is returned by IDENTITY, buckets included, and no count is
  * recomputed: this decides nothing about who won, it only makes the row read the
  * same on every surface. Bucket KEYS are already canonical integers by the time
- * this runs — `sanitizeDayStats` (`unlockDay.ts`) rebuilds the map through
+ * this runs — `sanitizeFinaleDayStats` below rebuilds the map through
  * `Number(key)` before this sees it — so re-keying them here is a round-trip,
  * not a merge.
  */
@@ -186,6 +186,52 @@ export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
     };
   }
   return changed ? { ...rooted, dayStats: readable } : rooted;
+}
+
+/**
+ * A Player-written `dayStats` map read into the finale's own shape — the READ
+ * BOUNDARY every Functions roster reader shares (#1152).
+ *
+ * `players/{uid}` is self-writable by design (ADR 0001 — stats are
+ * client-authoritative), so `dayStats` is untrusted runtime shape rather than a
+ * contract: a row carrying `{ dayStats: { 0: null } }` is reachable by any
+ * participant, deliberately or by a client bug, and one such row throwing while
+ * a model is built would take a whole Event's finale beat or morning send down
+ * with it. So the map is rebuilt: non-integer keys and non-object buckets are
+ * dropped, and a map left with nothing reads as absent.
+ *
+ * THE BUCKET RULE IS `withReadableDayStats`'s, EXACTLY (#1152, CodeRabbit on PR
+ * #1165). The two roster readers used to drop a bucket whose count was
+ * non-finite, BEFORE `withReadableFinaleRanking` could coerce it — while the
+ * live board and the frozen record RETAIN that bucket, read each invalid count
+ * as `0`, and keep its `firstBingoAt` usable. A row whose only bucket carried a
+ * malformed count therefore reached the scheduler and the email as a row with
+ * NO breakdown at all, and `effectiveFirstBingoAt` falls back to the root for
+ * exactly those rows — so the Event-wide First to BINGO the client shows could
+ * be a holder the podium Moment and the morning email had already lost. The
+ * bucket survives; only its fields are coerced, by the same two functions the
+ * root three go through.
+ *
+ * ONE function rather than the two byte-identical copies `unlockDay.ts` and
+ * `dailyEmail.ts` each kept: the drop above was one defect written twice, which
+ * is what a second copy of a normalisation buys.
+ */
+export function sanitizeFinaleDayStats(value: unknown): Record<number, FinaleDayStat> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<number, FinaleDayStat> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const dayIndex = Number(key);
+    if (!Number.isInteger(dayIndex) || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      continue;
+    }
+    const stat = raw as Record<string, unknown>;
+    out[dayIndex] = {
+      bingoCount: readableRankingCount(stat.bingoCount),
+      squaresMarked: readableRankingCount(stat.squaresMarked),
+      firstBingoAt: readableRankingInstant(stat.firstBingoAt),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** The Tutorial Day indexes from an Event's schedule. The Event-wide First to
