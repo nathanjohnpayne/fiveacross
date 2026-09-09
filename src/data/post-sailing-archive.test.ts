@@ -17,7 +17,8 @@ import {
   MAX_ARCHIVED_UID,
   writableArchiveRecord,
 } from './eventArchive';
-import { dayHonorChipLabel } from './finale';
+import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
+import { MAX_DAYS } from './eventLimits';
 import { comparePlayers } from '../game/logic';
 import { migrateDayFields, playerConverter } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
@@ -1321,13 +1322,12 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(draft.skippedRows).toBe(0);
   });
 
-  it('drops a daily honour whose Day index is not one', () => {
+  it('derives no daily honour for a `dayStats` key that is not a Day', () => {
     // A derived honour reads its `dayIndex` off a `dayStats` KEY, and `dayStats`
     // is a Player-written map with no rules validation — so a junk key becomes
-    // `Number('abc')`, a chip nothing could label. The live honours strip drops
-    // it by matching against the schedule; the record has to drop it itself,
-    // because the record is permanent and an Event with no schedule at all
-    // renders the derived list straight through.
+    // `Number('abc')`, a chip nothing could label. An Event with no schedule at
+    // all renders the derived list straight through, so the record is permanent
+    // proof of whatever the derivation produced.
     const draft = draftEventArchive({
       players: [
         {
@@ -1344,9 +1344,88 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
       archivedAt: 1,
     });
     expect(draft.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([1]);
-    // The count the console states beside the roster's own skipped rows: the
-    // honour was selected and then could not be carried, so the Admin is told.
+    // …and it is refused at DERIVATION now, not carried and then dropped (Codex
+    // P2 on PR #1162, round 7). `skippedHonors` exists to remove a SURPRISE — an
+    // honour the Admin can see on the preview strip that the record will not
+    // keep — and `pinnedOrDerivedDailyHonors` no longer puts this one on the
+    // strip either, so there is no discrepancy left to report. The record's own
+    // contents are unchanged.
+    expect(draft.skippedHonors).toBe(0);
+  });
+
+  it('derives no honour for a `dayStats` key OUTSIDE the supported Day range', () => {
+    // #1151, Codex P2 on PR #1162 round 7. `Number.isInteger` was the old test,
+    // and `-1`, `10` and an unsafe large integer all pass it while naming no Day
+    // the `DayDef` contract has (`0 … MAX_DAYS - 1`). On an Event with no
+    // schedule the derived list flows straight into `dailyHonors`, so each would
+    // have frozen an honour chipped `D0` or `D11` into a list `firestore.rules`
+    // cannot look inside to refuse.
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'odd', displayName: 'Odd', bingoCount: 1, squaresMarked: 1 }),
+          dayStats: {
+            '-1': { bingoCount: 1, squaresMarked: 1, firstBingoAt: 400 },
+            4: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 500 },
+            [MAX_DAYS]: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 600 },
+            [Number.MAX_SAFE_INTEGER + 2]: {
+              bingoCount: 1,
+              squaresMarked: 1,
+              firstBingoAt: 700,
+            },
+          },
+        } as unknown as PlayerDoc,
+      ],
+      event: { days: [], bannedUids: [] },
+      archivedAt: 1,
+    });
+    // THE CONTROL rides in the same fixture: Day 4 is a Day, and a gap below it
+    // is not a defect — the whole reason every path keys on `DayDef.index`.
+    expect(draft.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([4]);
+    // And the live strip agrees, because it is the same selection: the record's
+    // promise is that it says what the last live Leaderboard said.
+    expect(
+      pinnedOrDerivedDailyHonors(
+        [
+          {
+            ...mkPlayer({ uid: 'odd', displayName: 'Odd', bingoCount: 1, squaresMarked: 1 }),
+            dayStats: {
+              '-1': { bingoCount: 1, squaresMarked: 1, firstBingoAt: 400 },
+              4: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 500 },
+            },
+          } as unknown as PlayerDoc,
+        ],
+        undefined,
+        undefined,
+        true,
+      ).map((h) => h.dayIndex),
+    ).toEqual([4]);
+  });
+
+  it('discards a PINNED honour on a Day outside the supported range', () => {
+    // The other side of the same predicate (Codex P2 on PR #1162, round 7). A
+    // pin arrives off `days/{i}/meta/{i}` rather than off a roster row, so it
+    // never goes through the derived filter — and `archiveEvent` refuses such a
+    // schedule outright, which makes this the defence in depth for every caller
+    // that reaches the builder without the freeze's gate (the console's own
+    // preview among them).
+    const holder = mkPlayer({ uid: 'pin', displayName: 'Pinned', bingoCount: 1, squaresMarked: 5 });
+    const draft = draftEventArchive({
+      players: [holder],
+      event: { days: [mkDay(0), { ...mkDay(1), index: MAX_DAYS }], bannedUids: [] },
+      dayMetas: new Map([
+        [0, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 800 } }],
+        [MAX_DAYS, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 900 } }],
+      ]),
+      dayMetasLoaded: true,
+      archivedAt: 1,
+    });
+    expect(draft.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([0]);
+    // Selected and then not carried, which is exactly the case the count exists
+    // for: the preview strip showed it, the record leaves it out, the Admin is
+    // told before anything is closed.
     expect(draft.skippedHonors).toBe(1);
+    expect(writableArchiveRecord(draft.archive)).toBe(true);
   });
 
   // Codex P2 on PR #1162. DEFENCE IN DEPTH beside `archiveEvent`'s own refusal:
@@ -2118,6 +2197,41 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     expect(A.serverReads).toContain('events/test-event/days/1/meta/1');
   });
 
+  it('refuses a Day index OUTSIDE the supported range, and reads no pin from it', async () => {
+    // #1151, Codex P2 on PR #1162 round 7. `Number.isInteger` was the old gate,
+    // and these three all pass it. Each is worse than the unreadable index above
+    // rather than milder: `days/-1/meta/-1` is a perfectly addressable path, so
+    // the pin fetch SUCCEEDS and the freeze could permanently carry an honour on
+    // a Day the `DayDef` contract does not have — chipped `D0` or `D11`, inside
+    // a `dailyHonors` list the rules cannot walk.
+    for (const index of [-1, MAX_DAYS, Number.MAX_SAFE_INTEGER + 2]) {
+      A.updates = [];
+      A.serverReads = [];
+      A.dayMetas = new Map([
+        [index, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 1200 } }],
+      ]);
+      A.event = closingEvent({ days: [mkDay(0), { ...mkDay(1), index }] });
+      expect(await archiveEvent(1, { now: 5 })).toBe('schedule-unusable');
+      expect(A.updates).toEqual([]);
+      // Refused BEFORE any pin is addressed, exactly as the repeated index is:
+      // the refusal is about the schedule, not about what is stored under it.
+      expect(A.serverReads.some((p) => p.includes('/meta/'))).toBe(false);
+    }
+
+    // THE CONTROL, at both ends of the range the contract does support.
+    A.updates = [];
+    A.serverReads = [];
+    A.dayMetas = new Map([
+      [MAX_DAYS - 1, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 1200 } }],
+    ]);
+    A.event = closingEvent({ days: [mkDay(0), { ...mkDay(1), index: MAX_DAYS - 1 }] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.serverReads).toContain(`events/test-event/days/${MAX_DAYS - 1}/meta/${MAX_DAYS - 1}`);
+    expect((A.updates[0].archive as { dailyHonors: { dayIndex: number }[] }).dailyHonors).toEqual([
+      expect.objectContaining({ dayIndex: MAX_DAYS - 1, uid: 'pin' }),
+    ]);
+  });
+
   it('refuses a schedule that names one Day TWICE, and still takes a non-contiguous one', async () => {
     // Codex P2 on PR #1162. A repeated integer index is perfectly READABLE —
     // both entries address a real document — which is why the unusable-index
@@ -2251,21 +2365,28 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     expect(A.updates).toEqual([]);
   });
 
-  it('refuses a record the server re-read makes too large, and writes nothing', async () => {
-    // The console checked the record it previewed from its live subscriptions;
-    // this is the one built from the roster read after the close, and a Player
-    // row is not validated by any rule on the way in.
+  it('freezes a scheduleless Event whose roster names thousands of Days', async () => {
+    // #1151, Codex P2 on PR #1162 round 7. This used to be the `too-large`
+    // fixture, and it no longer is: `dayStats` is a Player-written map with no
+    // rules validation, an Event with no schedule renders the derived list
+    // straight through, and one such row therefore minted one honour per bucket
+    // — six thousand of them, past the record's own quarter of the budget. The
+    // supported-range filter is what closes it at the source, so the freeze now
+    // completes and the record carries at most one honour per Day the contract
+    // has.
     const dayStats: Record<number, Record<string, number>> = {};
     for (let i = 0; i < 6_000; i++) {
       dayStats[i] = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1_000 + i };
     }
     A.players = [{ uid: 'whale', displayName: 'Whale', bingoCount: 1, squaresMarked: 1, dayStats }];
-    // An Event with no schedule, so the derived honours flow through
-    // unmatched — one per bucket the Player wrote, and `dayStats` is a
-    // Player-written map with no rules validation on the way in.
     A.event = closingEvent({ days: [] });
-    expect(await archiveEvent(1, { now: 5 })).toBe('too-large');
-    expect(A.updates).toEqual([]);
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const record = A.updates[0].archive as { dailyHonors: { dayIndex: number }[] };
+    expect(record.dailyHonors.map((h) => h.dayIndex)).toEqual([
+      ...Array.from({ length: MAX_DAYS }, (_, i) => i),
+    ]);
+    // …and the ceiling itself is unchanged: the refusal above it, taken over the
+    // stored Event's own oversized fields, is the route that is still reachable.
   });
 
   it('freezes a roster whose counts the rules would refuse, because the writer clamps them', async () => {

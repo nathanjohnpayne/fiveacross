@@ -1235,8 +1235,10 @@ export async function abandonArchive(
  *    that unreachable for any value a Player can write; asking the boundary's own
  *    question here is what keeps a cause nobody anticipated from arriving as a
  *    rejected write on an Event this call has already shut.
- *  - `schedule-unusable` — the stored `days` carry an entry with no usable Day
- *    index, or name the same Day twice (Codex P2 on PR #1162). `eventConverter`
+ *  - `schedule-unusable` — the stored `days` carry an entry whose index names no
+ *    Day the `DayDef` contract has (missing, fractional, negative, past
+ *    `MAX_DAYS - 1`, or unsafe), or name the same Day twice (Codex P2 on PR
+ *    #1162). `eventConverter`
  *    tolerates both, so the console renders over them; this raw read cannot
  *    address a Day's honour pin without an index, and dereferencing one threw
  *    outside every `archiveRead` wrapper — past the console's cleanup, on an
@@ -1397,6 +1399,15 @@ export async function archiveEvent(
   // freeze whatever it found (or did not) as that Day's honour. A typed refusal
   // is what the console's cleanup keys on, so this reopens play exactly as the
   // read refusals do.
+  //
+  // AN INTEGER OUTSIDE THE SUPPORTED RANGE IS THE SAME REFUSAL, and the more
+  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `10` and an unsafe
+  // large integer read a document that genuinely EXISTS as a path — the honour
+  // pin fetch below succeeds, quietly, at `days/-1/meta/-1` — while naming no Day
+  // the `DayDef` contract has, so a hand-edited or legacy schedule could freeze
+  // an `ArchivedDayHonor` labelled `D0` or `D11` into a `dailyHonors` list the
+  // rules cannot look inside. `usableDayIndexes` asks `supportedDayIndex` of every
+  // entry, which is the one place the range is stated.
   //
   // A REPEATED index is refused by the same clause (Codex P2 on PR #1162). It is
   // readable — both entries address a real document — but the two reads are not

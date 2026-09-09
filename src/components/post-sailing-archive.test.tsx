@@ -7,6 +7,7 @@ import type { ClaimDoc, DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types
 // P2 on PR #1162). Referenced only from inside the stub's closure, which runs at
 // render time, so the hoisted factory never touches it before this import lands.
 import { usableDayIndexes } from '../data/eventArchive';
+import { MAX_DAYS } from '../data/eventLimits';
 
 // specs/post-sailing-archive.md, RTL layer (#1149 and #1151, epic #134). The
 // Admin console's three actions and the states they move between:
@@ -803,6 +804,24 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
     );
   });
 
+  it('does NOT arm over a Day index outside the supported range', () => {
+    // Codex P2 on PR #1162, round 7. `-1` and `MAX_DAYS` pass the integer test
+    // the gate used to ask, and each addresses a REAL meta path — so the console
+    // armed, the Admin closed play, and the freeze then refused a schedule that
+    // was on screen the whole time. Same predicate on both sides now, so the
+    // control is shut on exactly the schedules `archiveEvent` turns down.
+    for (const index of [-1, MAX_DAYS, Number.MAX_SAFE_INTEGER + 2]) {
+      H.event = mkEvent({ days: [mkDay(0), mkDay(1, { index })] });
+      const { unmount } = renderConsole();
+      expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /is not a day this Event can have/,
+      );
+      expect(screen.getByRole('status')).toHaveTextContent(/Fix or re-save that day/);
+      unmount();
+    }
+  });
+
   it('arms over a UNIQUE non-contiguous schedule — the control', () => {
     // The reason every day-scoped path keys on `DayDef.index`: a one-Day Event at
     // index 4 is a schedule the freeze reads correctly, not a broken one, and
@@ -874,8 +893,20 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
       ),
     } as Partial<PlayerDoc>);
 
+  /** An Event whose OWN retained fields have already spent the document budget —
+   *  the reachable route to the ceiling, and since round 7 the only one (Codex P2
+   *  on PR #1162). The record's own quarter cannot be filled by any roster the
+   *  builder will carry: 200 bounded rows plus at most one honour per supported
+   *  Day is ~74 KiB against a 256 KiB share, which `src/data/post-sailing-archive.test.ts`
+   *  measures directly. */
+  const bloatedEvent = (over: Partial<EventDoc> = {}) =>
+    mkEvent({
+      bannedUids: Array.from({ length: 25_000 }, (_, i) => `banned-uid-${i}`.padEnd(40, 'x')),
+      ...over,
+    } as Partial<EventDoc>);
+
   it('will not arm, and says so before anything is closed', () => {
-    H.players = [whale()];
+    H.event = bloatedEvent();
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent(/too large to freeze onto the Event/);
@@ -889,7 +920,7 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
   // the one remedy that can make the DOCUMENT bigger, because `bannedUids` is
   // stored on the very Event the record has to fit beside.
   it('names the levers that actually move the size, and does not recommend a ban', () => {
-    H.players = [whale()];
+    H.event = bloatedEvent();
     renderConsole();
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent(
@@ -903,26 +934,28 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     expect(status).not.toHaveTextContent(/ban that Player/);
   });
 
-  it('says WHICH ceiling refused it — the record’s own share', () => {
-    // This roster's `dayStats` mention 6,000 Day indexes, and with no schedule
-    // on the Event the honours fall back to one derived honour per index — so
-    // the RECORD is over its own quarter of the budget before the Event data is
-    // counted at all.
+  it('ARMS over a roster naming thousands of Days — the record ceiling is not that lever', () => {
+    // Codex P2 on PR #1162, round 7. This roster's `dayStats` mention 6,000 Day
+    // indexes, and with no schedule on the Event the honours used to fall back to
+    // one derived honour per index — which put the RECORD over its own quarter of
+    // the budget, and made banning the one remedy the copy said would not help.
+    // The supported-range filter closes that at the source: at most one honour
+    // per Day the `DayDef` contract has, so a single Player can no longer move
+    // the record's own size at all and the console arms exactly as it would over
+    // an ordinary roster.
+    H.event = mkEvent({ days: [] } as Partial<EventDoc>);
     H.players = [whale()];
     renderConsole();
-    expect(screen.getByRole('status')).toHaveTextContent(
-      /The record is over its own share of the budget on its own, before the Event data is counted\./,
-    );
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('says WHICH ceiling refused it — the Event document, on an ordinary record', () => {
-    // The other, and the commoner one: two ordinary Players, a record of a few
-    // hundred bytes, and an Event whose own retained ban list has already spent
-    // the document's budget. Naming the record here would send the Admin after
-    // the wrong thing entirely.
-    H.event = mkEvent({
-      bannedUids: Array.from({ length: 25_000 }, (_, i) => `banned-uid-${i}`.padEnd(40, 'x')),
-    } as Partial<EventDoc>);
+    // The reachable ceiling, and since round 7 the only one: two ordinary
+    // Players, a record of a few hundred bytes, and an Event whose own retained
+    // ban list has already spent the document's budget. Naming the record here
+    // would send the Admin after the wrong thing entirely.
+    H.event = bloatedEvent();
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
     const status = screen.getByRole('status');
@@ -933,8 +966,7 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
   });
 
   it('holds the closing-state freeze shut too, and says nothing was frozen', () => {
-    H.players = [whale()];
-    H.event = mkEvent({ archiving: true, archiveToken: 1 });
+    H.event = bloatedEvent({ archiving: true, archiveToken: 1 });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
@@ -976,8 +1008,11 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
     await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
     expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event');
+    // …and it names WHY the day is unusable (Codex P2 on PR #1162, round 7):
+    // "could not be read" was false of `-1` and `${MAX_DAYS}`, which read
+    // perfectly well and simply are not days this Event can have.
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'One of the days in the schedule above could not be read, so the daily honours could not be looked up and nothing was frozen. Fix or re-save that day, then archive again.',
+      `One of the days in the schedule above is not a day this Event can have—its number is missing, or outside the ${MAX_DAYS} a schedule holds—or the same day is listed twice, so the daily honours could not be looked up one per day and nothing was frozen. Fix or re-save that day, then archive again.`,
     );
   });
 

@@ -5,7 +5,6 @@ import type { ProofKindFlags } from '../hooks/useData';
 import {
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
-  perDayHonors,
   resolvedStandingsFreezeAt,
   tutorialDayIndexSet,
 } from '../game/logic';
@@ -206,14 +205,6 @@ export default function Leaderboard() {
   const bannedUids = event?.bannedUids ?? [];
   const roster = players.filter((p) => !isBanned(p.uid, bannedUids));
 
-  // The per-Day First to BINGO honors strip (daily-cards-spec § "Scoring and
-  // social surfaces"): each Day's OWN earliest bingo, derived from the roster's
-  // `dayStats`. Every Day gets its own daily honor — tutorial Days included (their
-  // exclusion is only from the cruise-wide headline pin above). Derived from the
-  // ban-filtered `roster` so a banned Player's honor never displays, and only
-  // renders once a Player has bingoed on some Day (empty on a pre-Day-Cards
-  // roster, so the strip is absent there).
-  const derivedHonors = perDayHonors(roster);
   // #264: the PINNED day-meta honors merge with the roster-derived fallback.
   // Precedence (Codex P2s on #280): a banned Player's pin renders as "—" —
   // hidden, never promoted (the ban policy hides content; it never reassigns
@@ -250,7 +241,17 @@ export default function Leaderboard() {
     dayIndex: d.index,
     displayName: honorByDay.get(d.index)?.displayName ?? null,
   }));
-  const legacyHonors = event?.days?.length ? [] : derivedHonors;
+  // The LEGACY strip, for an Event with no schedule at all: the same selection,
+  // read out of the map above rather than derived a second time (#1151, Codex P2
+  // on PR #1162, round 7). It used to call `perDayHonors` itself, which is the
+  // one derivation in this file that did NOT go through
+  // `pinnedOrDerivedDailyHonors` — so once that helper stopped deriving an
+  // honour for a `dayStats` key outside the supported Day range, this strip would
+  // have gone on rendering a `D0` or `D4001` chip the frozen record then dropped,
+  // and the record's whole promise is that it says what the last live strip said.
+  // On a scheduleless Event the map IS the derived list, in `perDayHonors`' own
+  // Day order, so nothing else about this strip changes.
+  const legacyHonors = event?.days?.length ? [] : [...honorByDay.values()];
   const dayChipLabel = (dayIndex: number): string => dayHonorChipLabel(dayIndex, event?.days);
 
   // Filters narrow this render's visible subset of the already-ranked,

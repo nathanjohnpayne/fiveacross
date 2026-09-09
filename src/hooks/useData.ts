@@ -7,6 +7,7 @@ import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
 import { usableDayIndexes } from '../data/eventArchive';
+import { supportedDayIndex } from '../data/eventLimits';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -354,12 +355,17 @@ export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, 
  * Two normalisations, both of which the old `dayCount` argument got for free by
  * construction and neither of which survives taking real indexes:
  *
- *  - **Non-integers are dropped.** `EventDoc.days` is admin-written with no
- *    per-entry validation in its rules arm, and `eventConverter` tolerates an
- *    entry it cannot read (`migrateDayFields` treats a nullish one as `{}`), so
- *    an index can be `undefined` or fractional. `dayMetaRef` would then address
- *    `days/undefined/meta/undefined` — a document that is not there, delivered
- *    as a perfectly ordinary "no pin here".
+ *  - **Indexes that name no Day are dropped.** `EventDoc.days` is admin-written
+ *    with no per-entry validation in its rules arm, and `eventConverter`
+ *    tolerates an entry it cannot read (`migrateDayFields` treats a nullish one
+ *    as `{}`), so an index can be `undefined` or fractional. `dayMetaRef` would
+ *    then address `days/undefined/meta/undefined` — a document that is not
+ *    there, delivered as a perfectly ordinary "no pin here". `-1`, `10` and an
+ *    unsafe large integer are dropped by the same clause and for a sharper
+ *    reason (Codex P2 on PR #1162, round 7): each is a REAL path this fan would
+ *    otherwise subscribe to, on a Day the `DayDef` contract does not have, so
+ *    the question is the shared `supportedDayIndex` rather than
+ *    `Number.isInteger`.
  *  - **Duplicates are collapsed.** The completion tests below count DISTINCT
  *    Days answered against the list's length, so a schedule naming one index
  *    twice could never reach `seen.size >= length` and the archive control would
@@ -381,7 +387,7 @@ export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, 
  * stable order keeps that key stable across renders.
  */
 function canonicalDayIndexes(dayIndexes: readonly number[]): number[] {
-  return Array.from(new Set(dayIndexes.filter((i) => Number.isInteger(i))));
+  return Array.from(new Set(dayIndexes.filter(supportedDayIndex)));
 }
 
 /**

@@ -5,6 +5,7 @@
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
 import { isBanned } from './moderation';
+import { supportedDayIndex } from './eventLimits';
 import { THEMES } from '../theme/themes';
 import {
   ceremonialDayIndexSet,
@@ -124,6 +125,29 @@ function podiumStandingRow(
  * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and callers
  * that have already ban-filtered their roster pass the same list again — the
  * derived fallback reads the roster, the pin reads the list.
+ *
+ * AND AN HONOUR IS ONLY EVER DERIVED FOR A DAY THE CONTRACT HAS (#1151, Codex P2
+ * on PR #1162, round 7). `perDayHonors` reads its `dayIndex` off a `dayStats`
+ * KEY, and that map is Player-written under ADR 0001 with a rules arm that
+ * validates nothing inside it — so a row can name Day `-1`, Day `10` or Day
+ * `4000`, and on an Event with NO schedule this function returned that list
+ * straight through. The honour then rode onto the live strip as a chip labelled
+ * `D0` or `D4001`, and into the frozen record's `dailyHonors`, where
+ * `firestore.rules` cannot look inside a list to refuse it. `supportedDayIndex`
+ * is the shared question `usableDayIndexes` asks of a stored schedule, asked here
+ * of a derived key, so the two sides of the same contract cannot disagree.
+ *
+ * The filter is applied to the DERIVED list rather than to the schedule's own
+ * entries, and that covers both routes a derived honour can arrive by: the
+ * scheduleless list is the derived list itself, and the per-Day fallback below
+ * finds its honour IN that list, so an out-of-range `day.index` now matches
+ * nothing. A PIN on such a Day is deliberately left alone here — the live strip
+ * renders a chip for every Day the schedule names, and hiding only its holder
+ * would be the ban rule applied to a Day that was never banned. The record is
+ * where that one is refused, by the same predicate, in `draftEventArchive`'s
+ * carried-honour filter: `archiveEvent` will not freeze such a schedule at all
+ * (`usableDayIndexes` → `schedule-unusable`), and the builder is what stands
+ * between the ungated callers and a permanent record.
  */
 export function pinnedOrDerivedDailyHonors(
   players: readonly PlayerDoc[],
@@ -132,7 +156,7 @@ export function pinnedOrDerivedDailyHonors(
   dayMetasLoaded: boolean,
   bannedUids: readonly string[] = [],
 ): DayHonor[] {
-  const derivedHonors = perDayHonors(players);
+  const derivedHonors = perDayHonors(players).filter((h) => supportedDayIndex(h.dayIndex));
   if (!days?.length || !dayMetas) return derivedHonors;
   return days.flatMap((day) => {
     const pinned = dayMetas.get(day.index)?.firstBingo;

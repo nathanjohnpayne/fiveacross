@@ -12,6 +12,7 @@
 // selectors the live Leaderboard already renders with, reused rather than
 // restated: the frozen record must say what the last live Leaderboard said.
 import { isBanned } from './moderation';
+import { supportedDayIndex } from './eventLimits';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import {
   eventFirstBingoWinner,
@@ -478,11 +479,17 @@ function usableUid(uid: unknown): uid is string {
  * (`migrateDayFields` treats a nullish one as `{}`), so a stored schedule can
  * carry either shape this refuses:
  *
- *  - **An index that is not an integer.** It is the `days/{dayIndex}` path
- *    segment every honour pin is addressed by, so a missing or fractional one
- *    reads `days/undefined/meta/undefined` — a document that is not there,
- *    delivered as a perfectly ordinary "no pin here" — and the record would
- *    freeze that absence as the Day's honour.
+ *  - **An index that names no Day.** It is the `days/{dayIndex}` path segment
+ *    every honour pin is addressed by, so a missing or fractional one reads
+ *    `days/undefined/meta/undefined` — a document that is not there, delivered
+ *    as a perfectly ordinary "no pin here" — and the record would freeze that
+ *    absence as the Day's honour. `-1`, `10` and an unsafe large integer are the
+ *    same defect wearing an integer's clothes: each addresses a real, arbitrary
+ *    meta path, and each can freeze an `ArchivedDayHonor` labelled `D0` or `D11`
+ *    into `dailyHonors`, where the rules cannot look inside a list to refuse it.
+ *    The question is therefore the shared `supportedDayIndex` — a safe integer
+ *    inside the `DayDef` contract's own `0 … MAX_DAYS - 1` — not
+ *    `Number.isInteger` (Codex P2 on PR #1162, round 7).
  *  - **The same index TWICE.** Every Day-keyed structure downstream is keyed by
  *    index rather than by position, so the two entries are not two Days: the
  *    freeze's own `Map<number, DayMetaDoc>` collapses both reads onto one entry,
@@ -502,11 +509,12 @@ function usableUid(uid: unknown): uid is string {
  * is what the setup wizard's draft validation enforces at AUTHORING time and
  * nothing enforces on a stored Event; every day-scoped path in the estate keys
  * on `DayDef.index` (the #447 precedent), so a one-Day schedule at index 4 is a
- * schedule this reads and freezes correctly, not a broken one.
+ * schedule this reads and freezes correctly, not a broken one — a GAP is not an
+ * out-of-range index, and only the second is refused here.
  */
 export function usableDayIndexes(dayIndexes: readonly number[]): boolean {
   return (
-    dayIndexes.every((index) => Number.isInteger(index))
+    dayIndexes.every(supportedDayIndex)
     && new Set(dayIndexes).size === dayIndexes.length
   );
 }
@@ -1162,11 +1170,21 @@ export function draftEventArchive(params: {
     dayMetasLoaded,
     bannedUids,
   );
-  // A non-integer `dayIndex` is dropped rather than coerced — a derived honour
-  // reads it off a `dayStats` KEY, which is a Player-written map, and a Day the
-  // schedule does not have is a chip nothing could ever label. The live strip
-  // already drops it by matching against the schedule; the record has to,
+  // A `dayIndex` that names no Day is dropped rather than coerced — a derived
+  // honour reads it off a `dayStats` KEY, which is a Player-written map, and a
+  // Day the schedule does not have is a chip nothing could ever label. The live
+  // strip already drops it by matching against the schedule; the record has to,
   // because the record is permanent.
+  //
+  // ASKED AS `supportedDayIndex`, not as `Number.isInteger` (Codex P2 on PR
+  // #1162, round 7). `-1`, `10` and an unsafe large integer all pass the integer
+  // test while naming no Day the `DayDef` contract has, and a record carrying one
+  // freezes an honour labelled `D0` or `D11` that no schedule can ever label and
+  // no rules arm can look inside `dailyHonors` to refuse. `pinnedOrDerivedDailyHonors`
+  // now refuses to DERIVE one, so the derived side is closed at its source; this
+  // is the same question asked of the PINNED side, which arrives off
+  // `days/{i}/meta/{i}` rather than off a roster row and therefore never went
+  // through it.
   //
   // AND SO IS AN HONOUR WHOSE HOLDER HAS NO USABLE `uid` (#1151, Codex P2 on PR
   // #1162). Every OTHER uid the record carries has already been through
@@ -1214,7 +1232,7 @@ export function draftEventArchive(params: {
   // schedule naming that Day once would have produced.
   const seenHonorDays = new Set<number>();
   const carriedHonors = selectedHonors.filter((h) => {
-    if (!Number.isInteger(h.dayIndex) || !usableUid(h.uid)) return false;
+    if (!supportedDayIndex(h.dayIndex) || !usableUid(h.uid)) return false;
     if (seenHonorDays.has(h.dayIndex)) return false;
     seenHonorDays.add(h.dayIndex);
     return true;

@@ -15,6 +15,7 @@ import {
   isEventArchiving,
   MAX_ARCHIVE_BYTES,
 } from '../../data/eventArchive';
+import { MAX_DAYS } from '../../data/eventLimits';
 import { useDayMetasStatus, useLeaderboard } from '../../hooks/useData';
 import { editionLexicon } from '../../editions';
 import AsyncButton from './AsyncButton';
@@ -107,19 +108,24 @@ const HONORS_UNREADABLE_COPY =
 /** Why the archive will not open over a schedule the FREEZE would refuse (#1151,
  *  Codex P2 on PR #1162).
  *
- *  `archiveEvent` turns down a stored schedule carrying an unreadable Day index
- *  or naming one Day twice (`usableDayIndexes` → `schedule-unusable`), and until
- *  this the console could not see that coming: the honour fan normalised both
- *  shapes away, every latch went true, and the Archive control armed. The Admin
- *  then closed play, the flip refused, and the handler reopened it — a round trip
- *  through a shut Event for a condition that was visible on screen the whole
- *  time.
+ *  `archiveEvent` turns down a stored schedule carrying a Day index that names no
+ *  Day, or naming one Day twice (`usableDayIndexes` → `schedule-unusable`), and
+ *  until this the console could not see that coming: the honour fan normalised
+ *  both shapes away, every latch went true, and the Archive control armed. The
+ *  Admin then closed play, the flip refused, and the handler reopened it — a
+ *  round trip through a shut Event for a condition that was visible on screen the
+ *  whole time.
+ *
+ *  "Names no Day" is the `DayDef` contract's own range, not merely readability
+ *  (Codex P2 on PR #1162, round 7). `-1` and `MAX_DAYS` are integers that address
+ *  real meta paths, so an Admin told the day "could not be read" would go looking
+ *  for a broken entry and find one that looks perfectly fine — the copy names the
+ *  actual defect instead.
  *
  *  It names the same repair the post-flip copy does, in the same words and at the
  *  same surface—the day schedule in Game settings, directly above this control—
  *  because it is the same defect caught earlier. */
-const SCHEDULE_UNUSABLE_BLOCKED_COPY =
-  'One of the days in the schedule above cannot be read, or the same day is listed twice, so the daily honours cannot be looked up one per day. Fix or re-save that day, then archive.';
+const SCHEDULE_UNUSABLE_BLOCKED_COPY = `One of the days in the schedule above is not a day this Event can have—its number is missing, or outside the ${MAX_DAYS} a schedule holds—or the same day is listed twice, so the daily honours cannot be looked up one per day. Fix or re-save that day, then archive.`;
 
 /** Appended to a refusal's own copy when the automatic reopen DECLINED — the
  *  closing state in force is a later Admin's, so this handler left it alone
@@ -227,8 +233,12 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
   // this control sits at the bottom of—rather than as `EventDoc.days`. It is the
   // one refusal here with a repair the Admin can actually make from the console
   // they are already looking at.
-  'schedule-unusable':
-    'One of the days in the schedule above could not be read, so the daily honours could not be looked up and nothing was frozen. Fix or re-save that day, then archive again.',
+  // …and it names WHY the day is unusable rather than only that it is (Codex P2
+  // on PR #1162, round 7). "Could not be read" was true of a missing or
+  // fractional index and false of the ones that matter most: `-1` and `10` read
+  // perfectly well, they simply are not days this Event can have — so an Admin
+  // sent looking for an unreadable day would have found one that looks fine.
+  'schedule-unusable': `One of the days in the schedule above is not a day this Event can have—its number is missing, or outside the ${MAX_DAYS} a schedule holds—or the same day is listed twice, so the daily honours could not be looked up one per day and nothing was frozen. Fix or re-save that day, then archive again.`,
   // No lever to name, like `record-unwritable`: the defect is a value stored on
   // the Event document itself that nothing in the console can reach, and a
   // second identical attempt would meet it again (Codex P2 on PR #1162).

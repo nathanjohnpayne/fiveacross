@@ -46,6 +46,7 @@ vi.mock('firebase/firestore', () => {
 
 // Real module under test — imported after the mocks are declared.
 import { useItems, useBoard, useDayMetasStatus, useLeaderboard, useMyUser } from './useData';
+import { MAX_DAYS } from '../data/eventLimits';
 
 beforeEach(() => {
   H.eventId = 'event-a';
@@ -398,7 +399,21 @@ describe('useDayMetasStatus — the fan addresses the schedule’s own Day index
       // no entry, and `migrateDayFields` reads a nullish one as `{}`, so an index
       // can be missing or fractional. `days/undefined/meta/undefined` is a
       // document that is not there, answered as an ordinary "no pin here".
-      useDayMetasStatus([2, 2, Number.NaN, undefined as unknown as number, 1.5]),
+      // …and an integer OUTSIDE the supported range is dropped by the same
+      // clause (Codex P2 on PR #1162, round 7). Unlike the shapes above,
+      // `days/-1/meta/-1` and `days/10/meta/10` are perfectly addressable — so
+      // without this the fan opened real subscriptions on Days the `DayDef`
+      // contract does not have, and confirmed the archive gate on them.
+      useDayMetasStatus([
+        2,
+        2,
+        Number.NaN,
+        undefined as unknown as number,
+        1.5,
+        -1,
+        MAX_DAYS,
+        Number.MAX_SAFE_INTEGER + 2,
+      ]),
     );
     expect(subscribedPaths()).toEqual(['events/event-a/days/2/meta/2']);
 
@@ -431,12 +446,25 @@ describe('useDayMetasStatus — the fan addresses the schedule’s own Day index
       renderHook(() => useDayMetasStatus([0, undefined as unknown as number])).result.current
         .scheduleUnusable,
     ).toBe(true);
+    // …and an INTEGER that names no Day either (Codex P2 on PR #1162, round 7).
+    // `-1`, `MAX_DAYS` and an unsafe large integer pass `Number.isInteger`, and
+    // each is a real path this fan would otherwise subscribe to — on a Day the
+    // `DayDef` contract does not have, and one the freeze refuses.
+    for (const index of [-1, MAX_DAYS, Number.MAX_SAFE_INTEGER + 2]) {
+      expect(
+        renderHook(() => useDayMetasStatus([0, index])).result.current.scheduleUnusable,
+      ).toBe(true);
+    }
     // THE CONTROLS, and the reason the fan keys on `DayDef.index` at all: a
-    // unique non-contiguous schedule is a schedule the freeze reads correctly.
+    // unique non-contiguous schedule is a schedule the freeze reads correctly,
+    // and both ends of the supported range are Days.
     expect(renderHook(() => useDayMetasStatus([4])).result.current.scheduleUnusable).toBe(false);
     expect(renderHook(() => useDayMetasStatus([0, 3, 7])).result.current.scheduleUnusable).toBe(
       false,
     );
+    expect(
+      renderHook(() => useDayMetasStatus([0, MAX_DAYS - 1])).result.current.scheduleUnusable,
+    ).toBe(false);
     // An Event with no schedule at all is not an unusable one — it is an Event
     // with nothing to fan over, which the completion tests already read as
     // vacuously satisfied.
