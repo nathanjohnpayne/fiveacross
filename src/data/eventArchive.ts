@@ -20,6 +20,7 @@ import {
   tutorialDayIndexSet,
 } from '../game/logic';
 import type {
+  ArchivedFirstBingo,
   ArchivedFirstBingoRow,
   ArchivedStandingRow,
   DayMetaDoc,
@@ -378,17 +379,62 @@ function archiveEventName(value: unknown): string | null {
   return text ? text.slice(0, MAX_ARCHIVED_EVENT_NAME) : null;
 }
 
+/**
+ * The magnitude `firestore.rules`' `finiteArchiveNumber` bounds every number in
+ * the frozen record by, EXCLUSIVELY:
+ * `value is number && value > -4102444800000 && value < 4102444800000`.
+ *
+ * 4102444800000 is 2100-01-01T00:00:00Z, the estate's stand-in for an
+ * `isFinite()` Rules does not have — already used that way for
+ * `standingsFreezeAt` and for the flip's own `archivedAt`. Restated here rather
+ * than left implicit because the WRITER and the RULES have to agree about it:
+ * see `MAX_ARCHIVE_NUMBER`.
+ */
+const ARCHIVE_NUMBER_BOUND = 4_102_444_800_000;
+
+/**
+ * The largest magnitude a number in the frozen record may carry (#1151, Codex P1
+ * on PR #1162) — one below `firestore.rules`' exclusive bound, because the rules'
+ * comparison is `<` rather than `<=`.
+ *
+ * THE WRITER AND THE RULES MUST SHARE ONE REPRESENTABLE-NUMBER CONTRACT, and
+ * before this they did not. The coercions below kept ANY finite value, while
+ * `finiteArchiveNumber` accepts only the bounded ones — so a Player self-writing
+ * `bingoCount: 5e12` on their own row (`players/{uid}` validates no field at all,
+ * ADR 0001) produced a record the rules REFUSED. That refusal lands on the flip,
+ * which runs after `beginArchive` has already shut the Event, and a rejected
+ * write throws past the refusal cleanup rather than returning one — so play was
+ * closed, nothing was frozen, no automatic reopen ran, and every retry failed
+ * identically until an admin found and repaired, banned or deleted that one row.
+ *
+ * Clamping rather than refusing, for the reason every other coercion here
+ * clamps: the record has to be expressible, and a value 40 times the age of the
+ * universe in milliseconds is not a stat anybody is going to lose. It decides
+ * nothing about who won (ADR 0001) — no real count or instant is within nine
+ * orders of magnitude of this — it only keeps the row writable.
+ */
+export const MAX_ARCHIVE_NUMBER = ARCHIVE_NUMBER_BOUND - 1;
+
+/** A finite number brought inside `MAX_ARCHIVE_NUMBER` in both directions, so
+ *  the value the writer produces is one `finiteArchiveNumber` accepts. */
+function clampArchiveNumber(value: number): number {
+  return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
+}
+
 /** A count the record can carry. A non-finite or non-numeric stat reads as 0 —
- *  which is what the live Leaderboard already renders for the same row. */
+ *  which is what the live Leaderboard already renders for the same row — and a
+ *  finite one is CLAMPED into the range the rules accept (`MAX_ARCHIVE_NUMBER`),
+ *  because a value the flip cannot write is worse than one it rounds. */
 function archiveCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : 0;
 }
 
 /** An instant the record can carry, or `null`. Exported because it is also the
  *  coercion the ROOT `firstBingoAt` gets before the headline selection runs
- *  (#1142 item 9), which is a property worth pinning on its own. */
+ *  (#1142 item 9), which is a property worth pinning on its own. Bounded like
+ *  every other number the record carries. */
 export function archiveInstant(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : null;
 }
 
 /**
@@ -555,6 +601,83 @@ function projectedEventBytes(
   });
 }
 
+/** A number `firestore.rules`' `finiteArchiveNumber` would accept — the same
+ *  two-sided magnitude bound, asked in JS. */
+function writableArchiveNumber(value: unknown): boolean {
+  return (
+    typeof value === 'number'
+    && value > -ARCHIVE_NUMBER_BOUND
+    && value < ARCHIVE_NUMBER_BOUND
+  );
+}
+
+/** `firestore.rules`' `firstBingoHonorComplete`, restated. */
+function writableFirstBingo(honor: ArchivedFirstBingo): boolean {
+  return (
+    typeof honor.uid === 'string'
+    && typeof honor.displayName === 'string'
+    && writableArchiveNumber(honor.at)
+  );
+}
+
+/** `firestore.rules`' `firstBingoRowComplete`, restated — `rank` included, the
+ *  one field held to a positive integer because it is the one the builder
+ *  computes rather than copies. */
+function writableFirstBingoRow(row: ArchivedFirstBingoRow): boolean {
+  return (
+    typeof row.uid === 'string'
+    && typeof row.displayName === 'string'
+    && writableArchiveNumber(row.bingoCount)
+    && writableArchiveNumber(row.squaresMarked)
+    && typeof row.blackout === 'boolean'
+    && (row.firstBingoAt === null || writableArchiveNumber(row.firstBingoAt))
+    && Number.isInteger(row.rank)
+    && row.rank > 0
+  );
+}
+
+/**
+ * Would `firestore.rules` accept this record? (#1151, Codex P1 on PR #1162.)
+ *
+ * THE LAST DEFENCE AGAINST THE ONE FAILURE THIS WHOLE MODULE IS SHAPED AROUND.
+ * The flip is the archive's SECOND write, so a record the rules refuse is
+ * refused after `beginArchive` has already shut the Event — and a rejected write
+ * REJECTS rather than returning, so it goes past `archiveEvent`'s typed refusals
+ * and past the console's automatic reopen alike, leaving a live Event closed
+ * with nothing frozen and every retry failing the same way. Every other check
+ * here exists to keep that from happening for a known cause; this one asks the
+ * question the boundary will actually ask, so a cause nobody anticipated is
+ * caught on the same side of the quiesce as the ones that were.
+ *
+ * It mirrors `completeArchiveRecord` and its two helpers CLAUSE FOR CLAUSE and
+ * claims nothing beyond them: the rows inside `standings` and `dailyHonors` are
+ * unchecked here because Rules cannot iterate a list and so does not check them
+ * either (the stated residual). Keeping the two the same shape is the point — a
+ * stricter check here would refuse records the flip would have taken.
+ *
+ * `archivedAt` is asked only for FINITENESS, not for the flip arm's `> 0`: the
+ * console builds its preview at `archivedAt: 0` deliberately (it is a preview,
+ * with no clock), and refusing that would disarm the control on every Event. The
+ * stamp's own bounds are the caller's, checked where the caller supplies them.
+ */
+function writableArchiveRecord(archive: EventArchive): boolean {
+  return (
+    (archive.eventName === null || typeof archive.eventName === 'string')
+    && Array.isArray(archive.standings)
+    && Number.isInteger(archive.playerCount)
+    && archive.playerCount >= 0
+    && Array.isArray(archive.dailyHonors)
+    && ((archive.firstBingo === null && archive.firstBingoRow === null)
+      || (!!archive.firstBingo
+        && !!archive.firstBingoRow
+        && writableFirstBingo(archive.firstBingo)
+        && writableFirstBingoRow(archive.firstBingoRow)
+        && archive.firstBingoRow.uid === archive.firstBingo.uid))
+    && (archive.freezeAt === null || writableArchiveNumber(archive.freezeAt))
+    && Number.isFinite(archive.archivedAt)
+  );
+}
+
 /**
  * A record built but NOT yet committed, with everything the caller needs to
  * decide whether committing it is safe (#1151, Codex P2 on PR #1139).
@@ -587,8 +710,15 @@ export interface EventArchiveDraft {
    *  coerced, bounded record STILL exceeds `MAX_ARCHIVE_BYTES`, or the Event
    *  document it would sit on exceeds `MAX_ARCHIVED_EVENT_BYTES` with it —
    *  neither of which a clamp here can fix, so the Admin has to be told rather
-   *  than left with a shut Event. */
-  refusal: 'too-large' | null;
+   *  than left with a shut Event. `'record-unwritable'` means the record is a
+   *  shape `firestore.rules` would REFUSE (`writableArchiveRecord`), which is the
+   *  same failure arriving at the boundary instead of the ceiling: refused here,
+   *  before the quiesce, rather than thrown after it (#1151, Codex P1 on PR
+   *  #1162).
+   *
+   *  Both members are `ArchiveEventResult` members too, so the writer's own
+   *  post-quiesce re-check can report the draft's answer verbatim. */
+  refusal: 'too-large' | 'record-unwritable' | null;
 }
 
 /**
@@ -692,7 +822,17 @@ export function draftEventArchive(params: {
   } = params;
   const bannedUids = event?.bannedUids ?? [];
   const days = event?.days;
-  const freezeAt = resolvedStandingsFreezeAt(event ?? null);
+  // COERCED like every other instant the record carries (#1151, Codex P1 on PR
+  // #1162), and coerced ONCE so the cutoff the selections apply and the
+  // `freezeAt` the record stores are the same number — the discipline the root
+  // counts already follow. `frozenAt` is the field it resolves from first, and
+  // that one is written by the Admin SDK, which no rules arm constrains: a
+  // hand-repaired or scheduler-written stamp outside `MAX_ARCHIVE_NUMBER` would
+  // otherwise be copied straight into a record the flip's own rules then refuse.
+  // A stamp that cannot be read at all resolves to `null`, which is exactly how
+  // `standingsFreezeAtFor` already treats a non-finite configured value: no
+  // cutoff rather than a cutoff nothing can satisfy.
+  const freezeAt = archiveInstant(resolvedStandingsFreezeAt(event ?? null));
   const tutorialDays = tutorialDayIndexSet(days);
   const isTutorialDay = (i: number): boolean => tutorialDays.has(i);
 
@@ -785,7 +925,17 @@ export function draftEventArchive(params: {
     skippedRows,
     bytes,
     projectedBytes,
-    refusal: bytes > maxBytes || projectedBytes > maxEventBytes ? 'too-large' : null,
+    // The size ceilings first, because they are the refusal an Admin can act on:
+    // a record the rules would refuse is a shape the coercions above are
+    // supposed to make impossible, so it is the backstop rather than the
+    // expected answer, and stating the ceiling where both hold is the more
+    // useful sentence.
+    refusal:
+      bytes > maxBytes || projectedBytes > maxEventBytes
+        ? 'too-large'
+        : writableArchiveRecord(archive)
+          ? null
+          : 'record-unwritable',
   };
 }
 

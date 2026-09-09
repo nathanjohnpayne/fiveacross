@@ -8,6 +8,7 @@ import {
   isEventArchived,
   isEventArchiving,
   withReadableDayStats,
+  MAX_ARCHIVE_NUMBER,
   MAX_ARCHIVED_DISPLAY_NAME,
   MAX_ARCHIVED_EVENT_NAME,
   MAX_ARCHIVE_BYTES,
@@ -1211,6 +1212,90 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(withReadableDayStats(scored)).toBe(scored);
   });
 
+  it('CLAMPS a finite number the rules would refuse, rather than freezing one the flip cannot write', () => {
+    // Codex P1 on PR #1162. `players/{uid}` validates no field at all (ADR
+    // 0001), so a Player can self-write `bingoCount: 5e12` on their own row —
+    // FINITE, so every coercion here kept it, and outside `finiteArchiveNumber`,
+    // so `firestore.rules` refused the record carrying it. That refusal lands on
+    // the FLIP, which runs after `beginArchive` has already shut the Event, and
+    // a rejected write rejects rather than returning: past `archiveEvent`'s
+    // typed refusals, past the console's automatic reopen, and identically on
+    // every retry until an admin found and repaired that one row.
+    const draft = draftEventArchive({
+      players: [
+        mkPlayer({
+          uid: 'huge',
+          displayName: 'Huge',
+          bingoCount: 5e12,
+          squaresMarked: -5e12,
+          firstBingoAt: 5e12,
+          dayStats: { 1: { bingoCount: 5e12, squaresMarked: 1, firstBingoAt: 5e12 } },
+        }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    const row = draft.archive.standings[0];
+    expect(row.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(row.squaresMarked).toBe(-MAX_ARCHIVE_NUMBER);
+    expect(row.firstBingoAt).toBe(MAX_ARCHIVE_NUMBER);
+    // The First-BINGO pair the rules validate WHOLE carries the same clamped
+    // numbers — the holder is exactly the row a `5e12` count strands the archive
+    // on, because the honour is what pulls their row into the record twice.
+    expect(draft.archive.firstBingo).toEqual({
+      uid: 'huge',
+      displayName: 'Huge',
+      at: MAX_ARCHIVE_NUMBER,
+    });
+    expect(draft.archive.firstBingoRow?.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(draft.archive.firstBingoRow?.firstBingoAt).toBe(MAX_ARCHIVE_NUMBER);
+    // …and the finished record is one the boundary would take, which is the
+    // whole claim: the freeze completes instead of throwing.
+    expect(draft.refusal).toBeNull();
+  });
+
+  it('CLAMPS the resolved Standings Freeze it stores beside the standings', () => {
+    // `freezeAt` resolves from `frozenAt` first, and that field is written by
+    // the Admin SDK, which no rules arm constrains — so it is the one instant in
+    // the record that can be out of range without any Player doing anything.
+    const draft = draftEventArchive({
+      players: [mkPlayer({ uid: 'a', displayName: 'A' })],
+      event: { days: DAYS, bannedUids: [], frozenAt: 5e12 },
+      archivedAt: 1,
+    });
+    expect(draft.archive.freezeAt).toBe(MAX_ARCHIVE_NUMBER);
+    expect(draft.refusal).toBeNull();
+    // A stamp that cannot be read at all is NO cutoff, exactly as
+    // `standingsFreezeAtFor` already treats a non-finite configured value —
+    // rather than a `NaN` cutoff nothing can satisfy and the rules refuse.
+    expect(
+      draftEventArchive({
+        players: [mkPlayer({ uid: 'a', displayName: 'A' })],
+        event: { days: DAYS, bannedUids: [], frozenAt: Number.NaN },
+        archivedAt: 1,
+      }).archive.freezeAt,
+    ).toBeNull();
+  });
+
+  it('REFUSES a record firestore.rules would not accept, on THIS side of the quiesce', () => {
+    // The backstop the clamps above are supposed to make unreachable: the flip
+    // is the archive's SECOND write, so a record the boundary refuses is refused
+    // with the Event already shut and nothing to show for it. `refusal` asks the
+    // boundary's own question here instead, where the caller can still decline.
+    const players = [mkPlayer({ uid: 'a', displayName: 'A' })];
+    const event = { days: DAYS, bannedUids: [] };
+    // The control, at the console preview's own clockless stamp: an ordinary
+    // record is writable, and `archivedAt: 0` must not be what refuses it.
+    expect(draftEventArchive({ players, event, archivedAt: 0 }).refusal).toBeNull();
+    // The stamp is the one number the builder is HANDED rather than coerces, so
+    // it is the one a caller can still make unwritable.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(draftEventArchive({ players, event, archivedAt: bad }).refusal).toBe(
+        'record-unwritable',
+      );
+    }
+  });
+
   it('coerces a missing name and missing counts to safe defaults', () => {
     const draft = draftEventArchive({
       players: [
@@ -1797,6 +1882,35 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     // Player-written map with no rules validation on the way in.
     A.event = closingEvent({ days: [] });
     expect(await archiveEvent(1, { now: 5 })).toBe('too-large');
+    expect(A.updates).toEqual([]);
+  });
+
+  it('freezes a roster whose counts the rules would refuse, because the writer clamps them', async () => {
+    // #1151, Codex P1 on PR #1162. The end-to-end shape of the finding: a Player
+    // self-writes a finite count far outside `finiteArchiveNumber` and holds the
+    // headline honour, so their row reaches the flip TWICE — in `standings` and
+    // as `firstBingoRow`, the half the rules validate whole. The freeze
+    // completes, with every copy of that number inside the range the boundary
+    // accepts.
+    A.players = [
+      { uid: 'huge', displayName: 'Huge', bingoCount: 5e12, squaresMarked: 5e12, firstBingoAt: 900 },
+    ];
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    const record = A.updates[0].archive as {
+      standings: { bingoCount: number }[];
+      firstBingoRow: { bingoCount: number; squaresMarked: number } | null;
+    };
+    expect(record.standings[0].bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(record.firstBingoRow?.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(record.firstBingoRow?.squaresMarked).toBe(MAX_ARCHIVE_NUMBER);
+  });
+
+  it('REFUSES a record the boundary would not accept, rather than letting the flip be rejected', async () => {
+    // The backstop reported as a refusal like every other one: it writes
+    // nothing, and the console reopens play behind it. The stamp is the one
+    // number the builder is handed rather than coerces, so it is the one a
+    // caller can still make unwritable.
+    expect(await archiveEvent(1, { now: Number.NaN })).toBe('record-unwritable');
     expect(A.updates).toEqual([]);
   });
 

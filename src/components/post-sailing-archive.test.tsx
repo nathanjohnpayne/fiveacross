@@ -799,6 +799,24 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     expect(screen.getByRole('status')).not.toHaveTextContent(/ban that Player/);
   });
 
+  it('reopens play when the record’s SHAPE is refused, and says so in its own words', async () => {
+    // #1151, Codex P1 on PR #1162. The third precondition now has two refusals
+    // behind it, and they send an Admin after entirely different things: the
+    // ceiling names the Event data to trim, while a record the BOUNDARY would
+    // refuse has nothing to trim at all. Folding them into one sentence would
+    // give whichever fired the other one's advice.
+    H.archiveEvent.mockResolvedValue('record-unwritable');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    // The same automatic cleanup the other flip refusals get, so a live Event is
+    // never left shut over one.
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent(/did not produce a record the Event will accept/);
+    expect(status).not.toHaveTextContent(/too large to freeze onto the Event/);
+  });
+
   it('still renders Game settings when a Player row is unreadable to the selectors', () => {
     // #1142 item 10's neighbour: the draft is built during RENDER, so a row that
     // threw out of the builder took the whole surface — and the Reopen play

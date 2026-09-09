@@ -10,6 +10,13 @@ import {
 import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
 import { clearStorageDeep } from '../support/storage-emulator';
+// The WRITER's half of the representable-number contract this arm enforces
+// (#1151, Codex P1 on PR #1162). Imported rather than restated so the two cannot
+// drift: `src/data/eventArchive.ts` clamps every number it copies to this value,
+// and the cases below prove it is exactly the largest one `finiteArchiveNumber`
+// accepts. (`src/data/eventLimits.ts` is already imported this way by
+// `tests/rules/membership-mark-batch-budget.test.ts`.)
+import { MAX_ARCHIVE_NUMBER } from '../../src/data/eventArchive';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
 // proved in pairs so none can pass vacuously:
@@ -667,6 +674,47 @@ describe('post-sailing-archive — the archive write must carry the whole record
         },
       }),
     );
+  });
+
+  // #1151, Codex P1 on PR #1162. The writer and this arm must share ONE
+  // representable-number contract, or a value the writer happily copies is
+  // refused HERE — on the flip, after `beginArchive` has already shut the Event,
+  // as a rejected write that goes past every typed refusal and the console's
+  // automatic reopen alike. `src/data/eventArchive.ts` clamps to
+  // `MAX_ARCHIVE_NUMBER`; this proves that value is exactly the largest one this
+  // helper accepts, from both sides of the boundary.
+  it('ALLOWS the WRITER’s own clamp, and denies the value it clamped from', async () => {
+    const clamped = {
+      ...FROZEN_RECORD,
+      firstBingo: { ...FROZEN_RECORD.firstBingo, at: MAX_ARCHIVE_NUMBER },
+      firstBingoRow: {
+        ...FROZEN_RECORD.firstBingoRow,
+        bingoCount: MAX_ARCHIVE_NUMBER,
+        // The negative side too: `archiveCount` copies a Player's own negative
+        // count through, so the clamp is two-sided and so is this bound.
+        squaresMarked: -MAX_ARCHIVE_NUMBER,
+        firstBingoAt: MAX_ARCHIVE_NUMBER,
+      },
+      freezeAt: MAX_ARCHIVE_NUMBER,
+    };
+    // ONE past the clamp is refused in either direction, which is what makes the
+    // constant the boundary rather than merely a value inside it. Asserted
+    // BEFORE the accepted control, because that control archives the Event.
+    await assertFails(
+      archiveWith({
+        ...clamped,
+        firstBingo: { ...FROZEN_RECORD.firstBingo, at: MAX_ARCHIVE_NUMBER + 1 },
+      }),
+    );
+    await assertFails(
+      archiveWith({
+        ...clamped,
+        firstBingoRow: { ...clamped.firstBingoRow, squaresMarked: -(MAX_ARCHIVE_NUMBER + 1) },
+      }),
+    );
+    // …and the clamped record itself goes through, so a `bingoCount: 5e12` on a
+    // self-written Player row freezes instead of stranding a shut Event.
+    await assertSucceeds(archiveWith(clamped));
   });
 
   it('ALLOWS a kept row whose holder never bingoed on a scored Day', async () => {
