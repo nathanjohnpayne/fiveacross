@@ -131,9 +131,9 @@ export default function ArchivedLeaderboard({
   // THE CHIP LABEL COMES OUT OF THE RECORD (#1151, Codex P2 on PR #1139). It used
   // to be looked up in the LIVE `EventDoc.days` — the one Event field the freeze
   // deliberately leaves editable — so an Admin re-theming a Day after the archive
-  // silently re-labelled a frozen honour, which is exactly what "nothing here
-  // changes again" promises it cannot. The label is resolved once, at the freeze,
-  // by the live strip's own `dayHonorChipLabel`.
+  // silently re-labelled a frozen honour, which is exactly what "the stored
+  // record never changes again" promises it cannot. The label is resolved once,
+  // at the freeze, by the live strip's own `dayHonorChipLabel`.
   //
   // The ordinal fallback is for a record written by hand rather than by the
   // serializer: `eventConverter` validates no field of a stored archive, so
@@ -166,6 +166,28 @@ export default function ArchivedLeaderboard({
     archive.playerCount > 0
       ? `${archive.playerCount} player${archive.playerCount === 1 ? ' was' : 's were'} on the board—every row this record carries is hidden by moderation.`
       : 'No players were on the board.';
+
+  // THE RETAINED PREFIX IS THE STORED ONE, NOT WHAT IS CURRENTLY VISIBLE (#1152,
+  // Codex P3 on PR #1165). "The top N of M" is a claim about the frozen RANK
+  // CUTOFF — the prefix `buildEventArchive` kept — and `standings.length` is the
+  // stored rows minus whoever is banned right now, which is a different number
+  // and a different fact. Hiding rank 1 of a 200-of-300 record made this say
+  // "the top 199 of 300" while the rows on screen still included the originally
+  // ranked #200: not the top 199 of anything. So the cutoff is reported from
+  // `archive.standings.length`, which a ban never moves, and the rows moderation
+  // removed are counted SEPARATELY rather than silently deducted from it.
+  //
+  // Whether the note appears at all still keys on the STORED pair alone, so
+  // moderating one Player cannot make an un-truncated archive claim it was cut
+  // short — and an untruncated record with hidden rows says nothing here, because
+  // the empty state and the rows themselves already carry that.
+  const hiddenFromPrefix = archive.standings.length - standings.length;
+  const truncationNote =
+    archive.playerCount > archive.standings.length
+      ? hiddenFromPrefix > 0
+        ? `Showing the top ${archive.standings.length} of ${archive.playerCount} players, ${hiddenFromPrefix} hidden by moderation. `
+        : `Showing the top ${archive.standings.length} of ${archive.playerCount} players. `
+      : '';
 
   // The Share Card prints the VISIBLE rows, so a banned Player never appears on a
   // shared card (#108's rule, same as the live Leaderboard's).
@@ -364,10 +386,19 @@ export default function ArchivedLeaderboard({
             retained a prefix — never on how many rows a ban currently hides, so
             moderating one Player does not make an un-truncated archive claim it
             was cut short. */}
-        {archive.playerCount > archive.standings.length
-          ? `Showing the top ${standings.length} of ${archive.playerCount} players. `
-          : ''}
-        Frozen when the {editionLexicon().occasion} was archived—nothing here changes again.
+        {truncationNote}
+        {/* THE PERMANENCE CLAIM IS SCOPED TO THE STORED RECORD (#1152, Codex P2
+            on PR #1165). It used to say "nothing here changes again", which this
+            page then contradicts on purpose: `standings`, `dailyHonors`, the
+            headline and the Share Card are all narrowed by the CURRENT
+            `bannedUids`, because the freeze deliberately leaves moderation live
+            ("Moderation is the one live input", above, and the archive spec's
+            own rule). What is frozen is the RECORD — every stored row, number and
+            honour, restored exactly as it was on an unban — and what moderation
+            can still move is which of them are shown. The em dash takes no
+            surrounding spaces, as the rest of this surface's copy does. */}
+        Frozen when the {editionLexicon().occasion} was archived—the stored record never
+        changes again, though moderation can still hide rows from view.
       </p>
       <div className="lb-actions">
         {/* Warm-on-intent as well as mount-eager (the live Leaderboard's three

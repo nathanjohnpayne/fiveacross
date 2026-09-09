@@ -1816,8 +1816,31 @@ describe('the archived Leaderboard renders the frozen record (#1152)', () => {
 
   it('says so when the record retained only a prefix of a large roster', () => {
     H.event = archivedEvent({ archive: { ...FROZEN, playerCount: 240 } });
-    renderLeaderboard();
+    const { container } = renderLeaderboard();
     expect(screen.getByText(/Showing the top 2 of 240 players/)).toBeInTheDocument();
+    // With nothing hidden the sentence stays plain: the moderation clause is for
+    // a record whose retained prefix is actually being narrowed, not a standing
+    // "0 hidden" disclaimer on every truncated archive (#1152, Codex P3 on PR
+    // #1165).
+    expect(container.querySelector('.lb-footnote')).not.toHaveTextContent(
+      /hidden by moderation/,
+    );
+  });
+
+  // #1152, Codex P2 on PR #1165. The footnote used to promise that "nothing here
+  // changes again" — which this page then contradicts on purpose, because the
+  // freeze deliberately leaves `bannedUids` editable and the rows, honours,
+  // headline and Share Card are all narrowed from the CURRENT roster. What is
+  // permanent is the stored RECORD; what moderation can still move is which of
+  // it is shown.
+  it('scopes the permanence claim to the stored record, not to what is displayed', () => {
+    const { container } = renderLeaderboard();
+    expect(container.querySelector('.lb-footnote')).toHaveTextContent(
+      'Frozen when the cruise was archived—the stored record never changes again, though moderation can still hide rows from view.',
+    );
+    expect(container.querySelector('.lb-footnote')).not.toHaveTextContent(
+      /nothing here changes again/,
+    );
   });
 
   it('falls back to the live Leaderboard when an archived Event carries no record', () => {
@@ -2356,8 +2379,38 @@ describe('a ban still hides a Player after the freeze (#1152)', () => {
     // The ban really did hide a row, so the absent footnote below is about the
     // stored pair rather than about an archive that never rendered.
     expect(frozenNames(container)).toEqual(['Steady Eddie']);
-    expect(container.querySelector('.lb-footnote')).toHaveTextContent(/nothing here changes again/);
+    expect(container.querySelector('.lb-footnote')).toHaveTextContent(
+      /the stored record never changes again/,
+    );
     expect(screen.queryByText(/Showing the top/)).not.toBeInTheDocument();
+  });
+
+  // Codex P3 on PR #1165 round 7. "The top N of M" is a claim about the frozen
+  // RANK CUTOFF, and `standings.length` is the stored rows minus whoever is
+  // banned right now — a different number and a different fact. Hiding rank 1 of
+  // a 200-of-300 record made the note say "the top 199 of 300" while the rows on
+  // screen still included the originally ranked #200, which is not the top 199 of
+  // anything.
+  it('reports the STORED prefix and counts the moderated rows separately', () => {
+    // A truncated record — two stored rows standing in for the retained prefix of
+    // a 240-Player roster — with rank 1 hidden after the freeze.
+    H.event = archivedEvent({
+      bannedUids: ['early-bird'],
+      archive: { ...FROZEN, playerCount: 240 },
+    });
+    const { container } = renderLeaderboard();
+
+    // The ban really did hide a row, so the cutoff below is the stored one rather
+    // than a record nothing was removed from.
+    expect(frozenNames(container)).toEqual(['Steady Eddie']);
+    expect(container.querySelector('.lb-footnote')).toHaveTextContent(
+      'Showing the top 2 of 240 players, 1 hidden by moderation.',
+    );
+    // The visible-row count is what the old sentence reported, and it is not the
+    // cutoff: the one row still on screen was ranked #2 in the frozen record.
+    expect(container.querySelector('.lb-footnote')).not.toHaveTextContent(
+      /Showing the top 1 of 240/,
+    );
   });
 
   it('keeps the whole record when nobody is banned', () => {
