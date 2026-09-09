@@ -705,7 +705,7 @@ describe('useLeaderboard makes the roster READABLE before it ranks it', () => {
     expect(broken?.displayName).toBe('Broken');
   });
 
-  it('reads a NaN stat as 0 and a NaN instant as null, so the comparator stays total', () => {
+  it('reads a NaN stat as 0 and a NaN instant as null, so the sort order is never unspecified', () => {
     const sub = captureOnNext();
     const { result } = renderHook(() => useLeaderboard());
 

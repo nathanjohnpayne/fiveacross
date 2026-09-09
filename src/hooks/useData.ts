@@ -825,10 +825,17 @@ export function useLeaderboard() {
   // (say) `bingoCount: { toString: null }` threw a TypeError out of `sortPlayers`
   // — taking down every consumer of this roster, the Admin console's Game settings
   // and its Reopen play control with them, on an Event that may already be shut.
-  // `withReadableRanking` returns a well-formed row by IDENTITY, so this costs one
-  // array and changes nothing for the rosters that were always fine; it decides
-  // nothing about who won, and the frozen record is unaffected because
-  // `toStandingRow` applies the identical coercion on the server re-read.
+  //
+  // The guard goes HERE, before the sort, rather than inside the comparator — the
+  // same mechanism `draftEventArchive` applies through `withReadableDayStats` on
+  // the roster it re-reads (#1151, Codex P1 on PR #1162). One pass over the rows
+  // about to be ranked keeps the ORDER and the row that is PRINTED reading the
+  // same numbers, and the printing is the half no comparator guard reaches:
+  // `Leaderboard` renders `{p.bingoCount}` into the DOM, where React throws on an
+  // object child. `withReadableRanking` returns a well-formed row by IDENTITY, so
+  // this costs one array and changes nothing for the rosters that were always
+  // fine; it decides nothing about who won, and the frozen record is unaffected
+  // because `toStandingRow` applies the identical coercion on the server re-read.
   return {
     players: sortPlayers(data.map((p) => withReadableRanking(p))),
     loading,
