@@ -1661,6 +1661,103 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(MAX_ARCHIVE_BYTES).toBeLessThan(1024 * 1024);
   });
 
+  // #1151, Codex P2 on PR #1162 round 7. THE MEASUREMENT the console's
+  // oversized-record copy now rests on, and the tripwire that fires if one of the
+  // bounds it depends on moves.
+  //
+  // The copy tells an Admin that banning a Player cannot help, and until the
+  // supported-range filter there was one honest exception to that: on an Event
+  // with NO schedule the derived fallback yielded one honour per Day index any
+  // Player's `dayStats` mentioned, `players/{uid}` validates nothing inside the
+  // document, and one row filled to Firestore's own limit therefore minted tens of
+  // thousands of honours — pushing the record past its OWN share, where banning
+  // that Player really was the lever. Both halves are pinned here rather than
+  // argued: the finding's own fixture, and the largest record the builder can
+  // produce at all.
+  describe('the record’s own share cannot be filled', () => {
+    it('by one Player carrying the maximal `dayStats` the rules admit, with no schedule', () => {
+      // `players/{uid}` binds the PATH and validates nothing inside, so the only
+      // ceiling on this map is Firestore's 1 MiB document limit. Sixteen thousand
+      // buckets clears it.
+      const dayStats: Record<string, unknown> = {};
+      for (let i = 0; i < 16_000; i++) {
+        dayStats[String(i)] = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1_000 + i };
+      }
+      expect(JSON.stringify(dayStats).length).toBeGreaterThan(1_000_000);
+
+      const draft = draftEventArchive({
+        players: [
+          {
+            ...mkPlayer({
+              uid: 'w'.repeat(MAX_ARCHIVED_UID),
+              displayName: 'W'.repeat(MAX_ARCHIVED_DISPLAY_NAME),
+              bingoCount: 1,
+              squaresMarked: 1,
+            }),
+            dayStats,
+          } as unknown as PlayerDoc,
+        ],
+        // No schedule: the derived list is what the record carries.
+        event: { days: [], bannedUids: [] },
+        archivedAt: 1,
+      });
+
+      // At most one honour per Day the contract has, so a megabyte of buckets
+      // costs a few kilobytes rather than a few hundred.
+      expect(draft.archive.dailyHonors).toHaveLength(MAX_DAYS);
+      expect(draft.bytes).toBeLessThan(MAX_ARCHIVE_BYTES / 10);
+      expect(draft.refusal).toBeNull();
+    });
+
+    it('by the largest record the builder can produce at all', () => {
+      // Every bound at its maximum simultaneously: more rows than the prefix
+      // keeps, each uid at `MAX_ARCHIVED_UID` and each name at
+      // `MAX_ARCHIVED_DISPLAY_NAME`, every count and instant at the clamp, an
+      // Event name past its own bound, and a full honours strip — plus, on each
+      // row, its OWN Day nobody has: a `dayStats` key past the supported range,
+      // distinct per Player, which is how a roster of this size would have minted
+      // one extra honour per row.
+      const players = Array.from({ length: MAX_ARCHIVED_STANDING_ROWS + 50 }, (_, n) => {
+        const dayStats: Record<string, unknown> = {};
+        for (let d = 0; d < MAX_DAYS; d++) {
+          dayStats[String(d)] = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1_000 + n };
+        }
+        dayStats[String(MAX_DAYS + n)] = {
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: 1_000 + n,
+        };
+        return {
+          ...mkPlayer({
+            uid: `${String(n).padStart(4, '0')}${'u'.repeat(MAX_ARCHIVED_UID - 4)}`,
+            displayName: 'N'.repeat(MAX_ARCHIVED_DISPLAY_NAME),
+            bingoCount: MAX_ARCHIVE_NUMBER,
+            squaresMarked: MAX_ARCHIVE_NUMBER,
+            blackout: true,
+            firstBingoAt: MAX_ARCHIVE_NUMBER,
+          }),
+          dayStats,
+        } as unknown as PlayerDoc;
+      });
+
+      const draft = draftEventArchive({
+        players,
+        event: { days: [], bannedUids: [], name: 'E'.repeat(500) },
+        archivedAt: MAX_ARCHIVE_NUMBER,
+      });
+
+      expect(draft.archive.standings).toHaveLength(MAX_ARCHIVED_STANDING_ROWS);
+      expect(draft.archive.dailyHonors).toHaveLength(MAX_DAYS);
+      // ~74 KiB against a 256 KiB share. The assertion is deliberately a wide
+      // margin rather than an exact byte count — what it pins is the CONCLUSION
+      // the console's copy states, that no roster can fill the record's own
+      // quarter of the budget, so `tooLargeCeiling`'s first sentence is
+      // unreachable and "banning does not help" is true without qualification.
+      expect(draft.bytes).toBeLessThan(MAX_ARCHIVE_BYTES / 2);
+      expect(draft.refusal).toBeNull();
+    });
+  });
+
   // Codex P2, PR #1139 round 4. The ceiling above measures the RECORD, and the
   // record is never written to an empty document: `days` carries per-Day
   // snapshot id lists, `bannedUids` holds up to 1000 entries, `mostLovedPhoto`

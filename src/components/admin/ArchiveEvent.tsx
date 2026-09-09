@@ -52,20 +52,43 @@ type Phase = 'open' | 'closing' | 'archived';
  * What is left, and what this now names: the Event's own retained fields, which
  * the projected-document check measures and which are the only unbounded things
  * in the sum — `days` with each Day's frozen Prompt list, `bannedUids` at up to
- * 1000 entries, and `mostLovedPhoto` at up to 100 winners. The one honest
- * exception is the honours count on an Event with NO schedule, where the derived
- * fallback yields one honour per Day index any Player's `dayStats` mentions; the
- * ceiling sentence below is what tells those two cases apart.
+ * 1000 entries, and `mostLovedPhoto` at up to 100 winners.
+ *
+ * THE ONE EXCEPTION THIS USED TO CARRY IS CLOSED (Codex P2 on PR #1162, round 7).
+ * It said the honours count on an Event with NO schedule was the honest exception,
+ * because the derived fallback then yielded one honour per Day index any Player's
+ * `dayStats` mentioned — a Player-written map with no rules validation — so one
+ * near-1-MiB row really could push the record past its OWN share, and banning that
+ * Player really was the remedy the sentence below denied. The supported-range
+ * filter is what removed it: an honour is derived only for a Day the `DayDef`
+ * contract has, so a Player contributes at most one bounded standings row, the
+ * bounded headline pair, and at most `MAX_DAYS` bounded honours. Measured rather
+ * than asserted — `src/data/post-sailing-archive.test.ts` § "the record's own
+ * share cannot be filled" builds the largest record this builder can produce (200
+ * rows at the uid and name bounds, every honour, a clipped Event name) and pins it
+ * at ~74 KiB against the 256 KiB share, with the finding's own fixture (one row
+ * carrying the maximal `dayStats` the rules admit, no schedule) at ~4 KiB. So the
+ * "banning does not help" sentence is now true without qualification, and the
+ * ceiling sentence below is what tells the Admin which measurement refused them.
  */
 const TOO_LARGE_COPY =
-  'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. The record itself is bounded: 200 standings rows, one honour per Day, and names clipped at 100 characters, copied field by field from each row. So the room is almost always taken by what the Event already carries—the Day schedule with each Day’s frozen Prompt list, the ban list, and the Most-Loved award—and trimming one of those is what helps. Banning a Player does not: it drops one bounded row and adds a uid to the ban list stored on the same document.';
+  'These standings are too large to freeze onto the Event—the record and the Event data it would sit beside do not fit in one document. The record itself is bounded: 200 standings rows, at most one honour for each day the Event can have, and names clipped at 100 characters, copied field by field from each row. So the room is taken by what the Event already carries—the Day schedule with each Day’s frozen Prompt list, the ban list, and the Most-Loved award—and trimming one of those is what helps. Banning a Player does not: it drops one bounded row and adds a uid to the ban list stored on the same document.';
 
 /** WHICH ceiling the draft met, appended wherever the draft is in hand (Codex P2
  *  on PR #1162). Two are measured and they mean different things: the record's
  *  own quarter of the budget, and the whole document it would land on. Only the
  *  console's pre-quiesce check can say — the flip's own `too-large` is decided
  *  server-side over a roster this surface never saw — so this is stated beside
- *  the shared copy rather than folded into it. */
+ *  the shared copy rather than folded into it.
+ *
+ *  THE FIRST BRANCH IS UNREACHABLE WITH THE BOUNDS AS SHIPPED, and is kept for
+ *  exactly that reason (Codex P2 on PR #1162, round 7). Once honours are capped
+ *  at the supported Day range the largest record `draftEventArchive` can build is
+ *  ~74 KiB against `MAX_ARCHIVE_BYTES`, so nothing an Admin can reach through this
+ *  console fires it — but `MAX_ARCHIVED_STANDING_ROWS`, `MAX_ARCHIVED_UID` and
+ *  `MAX_ARCHIVE_BYTES` are independent constants, and folding the two sentences
+ *  into one would hand the Admin the Event-data advice on the day one of them
+ *  moves. The size test named above is the tripwire that would fail first. */
 const tooLargeCeiling = (draft: { bytes: number; projectedBytes: number }): string =>
   draft.bytes > MAX_ARCHIVE_BYTES
     ? ' The record is over its own share of the budget on its own, before the Event data is counted.'

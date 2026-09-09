@@ -924,7 +924,7 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     renderConsole();
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent(
-      /The record itself is bounded: 200 standings rows, one honour per Day, and names clipped at 100 characters/,
+      /The record itself is bounded: 200 standings rows, at most one honour for each day the Event can have, and names clipped at 100 characters/,
     );
     expect(status).toHaveTextContent(
       /the Day schedule with each Day’s frozen Prompt list, the ban list, and the Most-Loved award/,
