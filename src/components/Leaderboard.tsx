@@ -196,6 +196,22 @@ function buildShareStandings(
  * the redirect guards, an accepted `archived` can never be contradicted later, so
  * demanding a fresh server snapshot would only break the offline archive read.
  *
+ * THAT GUARD IS ABOUT THE TRANSITION, NOT ABOUT THE STATE (Codex P2 on PR #1165).
+ * `hasPendingWrites` is a flag on the WHOLE Event snapshot rather than on the
+ * field that moved, so an Admin's ban or unban after the freeze raises it over an
+ * archive the server settled long ago. Read as "this archive is unconfirmed" it
+ * put the page back on `LiveLeaderboard` — reopening every gameplay listener the
+ * archived surface exists not to open, and printing re-derived live standings
+ * over a frozen record — for as long as the moderation write stayed in flight,
+ * which offline is until the client reconnects. So a CONFIRMED archive is
+ * latched: the first snapshot that is `archived`, server-backed and free of local
+ * writes (`!fromCache && !hasPendingWrites`) is the flip committing, and the
+ * routing half stops asking after that. Monotone for the same reason the status
+ * latch above is, and safe for the same one the paragraph above gives — the flip
+ * is write-once at the rules boundary, so nothing can un-archive the Event
+ * underneath the latch. Every snapshot before that one still meets the
+ * pending-write guard in full.
+ *
  * An Event marked archived with NO record is not a state this app produces —
  * `archiveEvent` writes status, stamp and record in one update — so the live view
  * is left as the fallback for a hand-edited document. It is still read-only in the
@@ -203,7 +219,7 @@ function buildShareStandings(
  * `status` field alone.
  */
 export default function Leaderboard() {
-  const { data: event, serverResolved, hasPendingWrites } = useEventDoc();
+  const { data: event, serverResolved, fromCache, hasPendingWrites } = useEventDoc();
   const online = useOnline();
   // MONOTONE, and latched in STATE rather than in a ref — the adjust-during-
   // render idiom `Board`'s dangling-sheet close already uses, and deliberately
@@ -220,7 +236,18 @@ export default function Leaderboard() {
   const statusSettled = statusLatched || serverResolved || !online;
   if (statusSettled && !statusLatched) setStatusLatched(true);
 
-  if (!hasPendingWrites && isEventArchived(event) && event?.archive) {
+  // The archive's own latch, monotone and adjusted during render by the same
+  // idiom, because the two answer different questions: that one is "may this
+  // render decide anything at all", this one is "has the flip COMMITTED". A
+  // server-backed `archived` snapshot carrying no local write is the commit, and
+  // once it has been seen the pending-write guard below has nothing left to
+  // protect — every later `hasPendingWrites` on this Event belongs to some other
+  // field, a moderation ban being the one that actually happens.
+  const [archiveConfirmed, setArchiveConfirmed] = useState(false);
+  const archiveCommitted = !fromCache && !hasPendingWrites && isEventArchived(event);
+  if (archiveCommitted && !archiveConfirmed) setArchiveConfirmed(true);
+
+  if ((archiveConfirmed || !hasPendingWrites) && isEventArchived(event) && event?.archive) {
     return <ArchivedLeaderboard event={event} archive={event.archive} />;
   }
   if (!statusSettled) return <LoadingState label="Tallying the leaderboard…" />;

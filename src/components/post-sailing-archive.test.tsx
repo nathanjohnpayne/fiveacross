@@ -71,6 +71,10 @@ const H = vi.hoisted(() => {
     /** That snapshot's own optimistic-write flag. An Admin's archive flip is
      *  emitted locally before the rules decide it, and a refusal rolls it back. */
     eventPendingWrites: false,
+    /** That snapshot's own ORIGIN. `false` is server-backed; with
+     *  `eventPendingWrites` false beside it that is a fully committed snapshot,
+     *  which is what confirms an archive for good (Codex P2 on PR #1165). */
+    eventFromCache: false,
     /** `useOnline`. A client the browser says is offline can never BE answered by
      *  the server, so the routing gate stops waiting on one. */
     online: true,
@@ -137,6 +141,7 @@ vi.mock('../hooks/useData', () => ({
     data: H.event,
     loading: false,
     serverResolved: H.eventServerResolved,
+    fromCache: H.eventFromCache,
     hasPendingWrites: H.eventPendingWrites,
   }),
   useProofKindsByUid: H.useProofKindsByUid,
@@ -323,6 +328,7 @@ beforeEach(() => {
   H.pendingClaimsLoaded = true;
   H.eventServerResolved = true;
   H.eventPendingWrites = false;
+  H.eventFromCache = false;
   H.online = true;
   H.writes = [];
   H.beginArchive.mockResolvedValue({
@@ -1653,6 +1659,7 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
     // confirmation, and making it wait would slow the surface the gate exists to
     // protect.
     H.eventServerResolved = false;
+    H.eventFromCache = true;
     H.event = archivedEvent();
     const { container } = renderLeaderboard();
     expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
@@ -1682,6 +1689,48 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
       </MemoryRouter>,
     );
     expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+  });
+
+  // Codex P2 on PR #1165. `hasPendingWrites` is a flag on the WHOLE snapshot, so
+  // a ban lands on it as loudly as the archive flip does — and the guard above
+  // read that as "this archive is unconfirmed", dropped back to the live view and
+  // reopened the three listeners over a record the server settled long ago.
+  it('keeps the frozen surface mounted while a later moderation write is pending', () => {
+    H.event = archivedEvent(); // server-backed, no local write: the flip is committed
+    const { container, rerender } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+
+    // The Admin bans someone. Firestore marks the Event snapshot pending even
+    // though only `bannedUids` moved, and offline it stays pending indefinitely.
+    H.eventPendingWrites = true;
+    H.event = archivedEvent({ bannedUids: ['steady'] });
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    // Still the frozen record, minus the banned row — never the live standings.
+    expect(frozenNames(container)).toEqual(['Early Bird']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('latches only a SERVER-COMMITTED archive, never the optimistic flip itself', () => {
+    // The non-vacuity guard for the latch above: an Admin's own unacked flip must
+    // still be declined however many times it re-renders, because a refusal rolls
+    // it back to open.
+    H.eventPendingWrites = true;
+    H.event = archivedEvent();
+    const { rerender } = renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
   });
 
   it('stops waiting when the browser says the client is offline', () => {
