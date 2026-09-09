@@ -15,6 +15,7 @@ import {
   MAX_ARCHIVED_EVENT_BYTES,
   MAX_ARCHIVED_STANDING_ROWS,
   MAX_ARCHIVED_UID,
+  writableArchiveRecord,
 } from './eventArchive';
 import { dayHonorChipLabel } from './finale';
 import { comparePlayers } from '../game/logic';
@@ -1343,6 +1344,116 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
       archivedAt: 1,
     });
     expect(draft.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([1]);
+    // The count the console states beside the roster's own skipped rows: the
+    // honour was selected and then could not be carried, so the Admin is told.
+    expect(draft.skippedHonors).toBe(1);
+  });
+
+  // #1151, Codex P2 on PR #1162. The Day-meta arm validates `displayName` and
+  // `at` on a pin but NOT `uid` on its ADMIN branch (firestore.rules, the
+  // `meta/{metaId}` create), and the Admin SDK beside it is constrained by no arm
+  // at all — so a pinned holder is the one uid in the whole record that reaches
+  // the builder unvalidated by anything. `completeArchiveRecord` cannot look
+  // inside a list, so the flip SUCCEEDED and froze an `ArchivedDayHonor` that
+  // violates its own declared shape, permanently.
+  it('DISCARDS a pinned honour whose holder has no usable uid, and counts it', () => {
+    const holder = mkPlayer({
+      uid: 'holder',
+      displayName: 'Holder',
+      bingoCount: 1,
+      squaresMarked: 4,
+      firstBingoAt: 1500,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 1500 } },
+    });
+    const draft = draftEventArchive({
+      players: [holder],
+      event: { days: DAYS, bannedUids: [] },
+      dayMetas: new Map<number, DayMetaDoc>([
+        // What an admin-written pin can actually carry: a `uid` that is not a
+        // string. The rules took the create because that branch never asked.
+        [1, { firstBingo: { uid: 42, displayName: 'Pinned', at: 1500 } }],
+      ] as unknown as Iterable<[number, DayMetaDoc]>),
+      archivedAt: 1,
+    });
+    // The Day is recorded as having NO honour — the pin is hidden, never
+    // reassigned. Derivation is what an UNPINNED Day gets; this Day is pinned,
+    // and handing its honour to the roster's runner-up (`holder`, who bingoed on
+    // Day 1) would be the one adjudication the archive must never make.
+    expect(draft.archive.dailyHonors).toEqual([]);
+    expect(draft.skippedHonors).toBe(1);
+    // And the record is still writable, so the archive can go ahead: the discard
+    // is what keeps the backstop below unreached.
+    expect(draft.refusal).toBeNull();
+    expect(writableArchiveRecord(draft.archive)).toBe(true);
+  });
+
+  it('bounds a pinned holder’s uid exactly as it bounds a roster row’s', () => {
+    const pinned = (uid: unknown) =>
+      draftEventArchive({
+        players: [],
+        event: { days: DAYS, bannedUids: [] },
+        dayMetas: new Map([
+          [1, { firstBingo: { uid, displayName: 'Pinned', at: 1500 } }],
+        ] as unknown as Iterable<[number, DayMetaDoc]>),
+        archivedAt: 1,
+      });
+    // The same three questions `usableUid` asks of a Player row's document id.
+    for (const bad of [42, null, undefined, {}, '', '   ', 'x'.repeat(MAX_ARCHIVED_UID + 1)]) {
+      const draft = pinned(bad);
+      expect(draft.archive.dailyHonors).toEqual([]);
+      expect(draft.skippedHonors).toBe(1);
+    }
+    // A legitimate pin is untouched, and counted as nothing — the control. Its
+    // holder needs no Player row (#1146), so this is the pin at its thinnest.
+    const kept = pinned('x'.repeat(MAX_ARCHIVED_UID));
+    expect(kept.skippedHonors).toBe(0);
+    expect(kept.archive.dailyHonors).toEqual([
+      {
+        dayIndex: 1,
+        uid: 'x'.repeat(MAX_ARCHIVED_UID),
+        displayName: 'Pinned',
+        firstBingoAt: 1500,
+        dayLabel: '🌈 D2',
+      },
+    ]);
+    expect(kept.refusal).toBeNull();
+  });
+
+  // The backstop behind the discard above. It is deliberately UNREACHABLE
+  // through the builder — every value in a frozen honour is either filtered
+  // (`dayIndex`, `uid`) or coerced (`displayName`, `firstBingoAt`, `dayLabel`) —
+  // so it is asked of the predicate directly. A record the flip would take, and
+  // whose honours nonetheless violate `ArchivedDayHonor`, is the one shape
+  // `completeArchiveRecord` cannot refuse for us: Rules cannot iterate a list.
+  it('REFUSES a record whose daily honour violates its own declared shape', () => {
+    const wellFormed = draftEventArchive({
+      players: [mkPlayer({ uid: 'a', displayName: 'A', bingoCount: 1, squaresMarked: 1 })],
+      event: { days: DAYS, bannedUids: [] },
+      dayMetas: new Map<number, DayMetaDoc>([
+        [1, { firstBingo: { uid: 'pinned', displayName: 'Pinned', at: 1500 } }],
+      ]),
+      archivedAt: 1,
+    }).archive;
+    // The control: a record built by the builder is accepted, honours included.
+    expect(wellFormed.dailyHonors).toHaveLength(1);
+    expect(writableArchiveRecord(wellFormed)).toBe(true);
+
+    const withHonor = (over: Record<string, unknown>) => ({
+      ...wellFormed,
+      dailyHonors: [{ ...wellFormed.dailyHonors[0], ...over }],
+    });
+    for (const bad of [
+      { uid: 42 },
+      { uid: '' },
+      { displayName: null },
+      { dayIndex: 1.5 },
+      { dayIndex: Number.NaN },
+      { firstBingoAt: Number.POSITIVE_INFINITY },
+      { firstBingoAt: MAX_ARCHIVE_NUMBER + 1 },
+      { dayLabel: undefined },
+    ]) {
+      expect(writableArchiveRecord(withHonor(bad) as typeof wellFormed)).toBe(false);
+    }
   });
 
   it('bounds a name at the cap the rest of the estate already enforces', () => {

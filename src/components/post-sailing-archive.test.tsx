@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ClaimDoc, EventDoc, PlayerDoc } from '../types';
+import type { ClaimDoc, DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 
 // specs/post-sailing-archive.md, RTL layer (#1149 and #1151, epic #134). The
 // Admin console's three actions and the states they move between:
@@ -39,6 +39,11 @@ const H = vi.hoisted(() => {
     /** `useDayMetasStatus`'s CURRENT answer: every Day's latest snapshot is
      *  fully server-committed. Not a latch, for the same reason. */
     dayMetasServerConfirmed: true,
+    /** The Day honour pins the fan delivered, so the preview the Admin approves
+     *  is built from real pins rather than an empty map (#1151, Codex P2 on PR
+     *  #1162). `../data/eventArchive` is deliberately NOT stubbed in this file,
+     *  so what the console renders here is what the freeze would carry. */
+    dayMetas: new Map<number, DayMetaDoc>(),
     pendingClaims: [] as ClaimDoc[],
     pendingClaimsLoaded: true,
     /** The order the writes were issued in, so the quiesce-first contract is
@@ -59,7 +64,7 @@ const H = vi.hoisted(() => {
      *  confirmed (Codex P2 and CodeRabbit on PR #1162). */
     dayMetasFailed: false,
     useDayMetasStatus: vi.fn(() => ({
-      metas: new Map(),
+      metas: state.dayMetas,
       loaded: true,
       // The latch is still on the hook for the consumers that ask "has the
       // server ever spoken"; the archive gate reads the current answer below.
@@ -135,6 +140,21 @@ function mkClaim(over: Partial<ClaimDoc> = {}): ClaimDoc {
   } as ClaimDoc;
 }
 
+function mkDay(index: number, over: Partial<DayDef> = {}): DayDef {
+  return {
+    index,
+    date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+    place: 'Somewhere',
+    placeEmoji: '🏖️',
+    theme: 'neon-playground',
+    tonight: [],
+    pool: 'main',
+    tutorial: false,
+    unlockAt: 1_000 * (index + 1),
+    ...over,
+  } as DayDef;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   H.event = mkEvent();
@@ -145,6 +165,7 @@ beforeEach(() => {
   H.rosterPending = false;
   H.dayMetasServerConfirmed = true;
   H.dayMetasFailed = false;
+  H.dayMetas = new Map();
   H.pendingClaims = [];
   H.pendingClaimsLoaded = true;
   H.writes = [];
@@ -331,6 +352,29 @@ describe('ArchiveEvent — the Archive action (#1151)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Archived. The final standings are frozen.',
     );
+  });
+
+  // #1151, Codex P2 on PR #1162. A Day honour pinned by an Admin — or by the
+  // Admin SDK — can carry a `uid` the Day-meta rules arm never type-checked, and
+  // the record cannot express it. The builder discards that pin and leaves the
+  // Day with NO honour rather than handing it to the roster's runner-up, so the
+  // strip the Admin approves is one honour shorter than the live one: the count
+  // is what stops that being a discovery made after an irreversible write.
+  it('states a daily honour the record cannot carry, beside the unreadable rows', async () => {
+    H.event = mkEvent({ days: [mkDay(0), mkDay(1)] });
+    H.dayMetas = new Map([
+      [0, { firstBingo: { uid: 'alice', displayName: 'Alice', at: 1_200 } }],
+      // The shape the admin branch admits: `uid` is not a string at all.
+      [1, { firstBingo: { uid: 42, displayName: 'Nobody', at: 1_300 } }],
+    ] as unknown as Iterable<[number, DayMetaDoc]>);
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(/Freezing 2 players and 1 daily honor\b/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 unreadable daily honor will not be included\./),
+    ).toBeInTheDocument();
+    // The control beside it: an Event whose pins are all usable says nothing.
+    expect(screen.queryByText(/unreadable row/)).not.toBeInTheDocument();
   });
 
   // Codex P1, PR #1139. The flip reads ONE document and writes ONE document, so

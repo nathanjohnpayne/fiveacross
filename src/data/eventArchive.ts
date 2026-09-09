@@ -20,6 +20,7 @@ import {
   tutorialDayIndexSet,
 } from '../game/logic';
 import type {
+  ArchivedDayHonor,
   ArchivedFirstBingo,
   ArchivedFirstBingoRow,
   ArchivedStandingRow,
@@ -637,6 +638,36 @@ function writableFirstBingoRow(row: ArchivedFirstBingoRow): boolean {
 }
 
 /**
+ * Is this a frozen Day honour the record can actually carry? (#1151, Codex P2 on
+ * PR #1162.)
+ *
+ * `ArchivedDayHonor`'s own declared shape, asked in JS, and the one entry check
+ * in `writableArchiveRecord` that goes BEYOND what Rules asks. It is deliberate:
+ * the Day-meta arm this honour is pinned by validates `displayName` and `at` but
+ * NOT `uid` on its admin branch (`firestore.rules`, the `meta/{metaId}` create),
+ * so a pin written by an Admin — or by the Admin SDK, which no arm constrains at
+ * all — can carry a `uid` that is not a string, and the flip's own
+ * `completeArchiveRecord` cannot look inside a list to notice. The rules would
+ * take that record; the record would then violate the shape every archived
+ * surface renders it through, permanently. So this half of the check answers a
+ * question the boundary does not ask, and says so.
+ *
+ * `dayIndex` is held to an INTEGER, and `firstBingoAt` to the same magnitude
+ * bound every other number in the record carries, because both are what the
+ * builder itself guarantees one line earlier.
+ */
+function writableDayHonor(honor: ArchivedDayHonor): boolean {
+  return (
+    Number.isInteger(honor.dayIndex)
+    && typeof honor.uid === 'string'
+    && honor.uid.length > 0
+    && typeof honor.displayName === 'string'
+    && typeof honor.dayLabel === 'string'
+    && writableArchiveNumber(honor.firstBingoAt)
+  );
+}
+
+/**
  * Would `firestore.rules` accept this record? (#1151, Codex P1 on PR #1162.)
  *
  * THE LAST DEFENCE AGAINST THE ONE FAILURE THIS WHOLE MODULE IS SHAPED AROUND.
@@ -649,24 +680,43 @@ function writableFirstBingoRow(row: ArchivedFirstBingoRow): boolean {
  * question the boundary will actually ask, so a cause nobody anticipated is
  * caught on the same side of the quiesce as the ones that were.
  *
- * It mirrors `completeArchiveRecord` and its two helpers CLAUSE FOR CLAUSE and
- * claims nothing beyond them: the rows inside `standings` and `dailyHonors` are
- * unchecked here because Rules cannot iterate a list and so does not check them
- * either (the stated residual). Keeping the two the same shape is the point — a
- * stricter check here would refuse records the flip would have taken.
+ * It mirrors `completeArchiveRecord` and its two helpers CLAUSE FOR CLAUSE, with
+ * ONE deliberate exception: `dailyHonors`' entries are checked
+ * (`writableDayHonor`). Rules cannot iterate a list, so the boundary does not
+ * look inside either list — but the Day-meta arm that admits a pin does not
+ * type-check its `uid` on the ADMIN branch, so an admin-written pin is the one
+ * value in the record that reaches here unvalidated by anything. The rules would
+ * accept such a record and the archived surfaces would then render an
+ * `ArchivedDayHonor` that violates its own declared shape, permanently. A
+ * stricter check is worth taking there BECAUSE the builder itself now guarantees
+ * the clause it asserts — the discard below drops exactly the pins that would
+ * fail it — so this refuses no record the writer can legitimately produce, only
+ * one a later regression could.
+ *
+ * `standings`' rows stay unchecked, for the original reason unchanged: every one
+ * of them is built by `toStandingRow` from a row `usableUid` has already
+ * accepted, so there is no unvalidated value left in them to ask about.
  *
  * `archivedAt` is asked only for FINITENESS, not for the flip arm's `> 0`: the
  * console builds its preview at `archivedAt: 0` deliberately (it is a preview,
  * with no clock), and refusing that would disarm the control on every Event. The
  * stamp's own bounds are the caller's, checked where the caller supplies them.
+ *
+ * EXPORTED so the backstop can be pinned on its own (#1151, Codex P2 on PR
+ * #1162), the reason `archiveInstant` above is. Every clause here is meant to be
+ * unreachable through `draftEventArchive`, whose coercions and discards are what
+ * make it so — which is precisely why asserting it through the builder would
+ * assert nothing. A predicate no test can address is a predicate a later change
+ * can quietly weaken.
  */
-function writableArchiveRecord(archive: EventArchive): boolean {
+export function writableArchiveRecord(archive: EventArchive): boolean {
   return (
     (archive.eventName === null || typeof archive.eventName === 'string')
     && Array.isArray(archive.standings)
     && Number.isInteger(archive.playerCount)
     && archive.playerCount >= 0
     && Array.isArray(archive.dailyHonors)
+    && archive.dailyHonors.every(writableDayHonor)
     && ((archive.firstBingo === null && archive.firstBingoRow === null)
       || (!!archive.firstBingo
         && !!archive.firstBingoRow
@@ -697,6 +747,23 @@ export interface EventArchiveDraft {
    *  in the record: the frozen shape is what the archived surfaces render, not a
    *  place to keep diagnostics. */
   skippedRows: number;
+  /**
+   * Daily honours the record could not carry, and therefore did not (#1151,
+   * Codex P2 on PR #1162). Two causes, counted together because the Admin's
+   * remedy is the same for both — there is none, and the sentence they get is
+   * about what the record will not contain:
+   *
+   *  - a PINNED holder whose `uid` is unusable (`usableUid`). The Day-meta arm
+   *    does not type-check `uid` on its admin branch, so an admin-written or
+   *    Admin-SDK-written pin can carry one that is not a string at all;
+   *  - an honour whose `dayIndex` is not a Day index (the pre-existing filter) —
+   *    a derived honour reads it off a Player-written `dayStats` KEY.
+   *
+   * Reported beside `skippedRows` and for the same reason: an Admin told the
+   * count up front is not left comparing honours strips afterwards. Deliberately
+   * NOT stored in the record, like `skippedRows`.
+   */
+  skippedHonors: number;
   /** The record's own size in bytes, reported so the refusal below can quote it. */
   bytes: number;
   /** How big the Event DOCUMENT would be once this record lands on it: the
@@ -877,6 +944,56 @@ export function draftEventArchive(params: {
   const firstBingoRow: ArchivedFirstBingoRow | null =
     holderAt >= 0 ? { ...toStandingRow(ranked[holderAt]), rank: holderAt + 1 } : null;
 
+  // THE HONOUR SELECTION, TAKEN ONCE SO WHAT IT DROPS CAN BE COUNTED (#1151,
+  // Codex P2 on PR #1162). See `carriedHonors` for what the filter refuses and
+  // why a discarded pin leaves the Day with no honour at all.
+  const selectedHonors = pinnedOrDerivedDailyHonors(
+    ranked,
+    days,
+    dayMetas,
+    dayMetasLoaded,
+    bannedUids,
+  );
+  // A non-integer `dayIndex` is dropped rather than coerced — a derived honour
+  // reads it off a `dayStats` KEY, which is a Player-written map, and a Day the
+  // schedule does not have is a chip nothing could ever label. The live strip
+  // already drops it by matching against the schedule; the record has to,
+  // because the record is permanent.
+  //
+  // AND SO IS AN HONOUR WHOSE HOLDER HAS NO USABLE `uid` (#1151, Codex P2 on PR
+  // #1162). Every OTHER uid the record carries has already been through
+  // `usableUid`: the standings rows are filtered by it and the headline pair is
+  // selected from those same rows. A PINNED daily honour is the one that has
+  // not, because it comes off `days/{i}/meta/{i}` rather than off a Player row —
+  // and that document's rules arm type-checks `displayName` and `at` but NOT
+  // `uid` on its ADMIN branch, while the Admin SDK beside it is constrained by
+  // no arm at all. So a pin can arrive carrying a `uid` that is not a string,
+  // and `completeArchiveRecord` cannot see inside a list to refuse it: the flip
+  // SUCCEEDED and froze an `ArchivedDayHonor` violating its own declared shape,
+  // permanently, on the one write that can never be amended.
+  //
+  // DISCARDED, AND THE DAY IS THEN RECORDED AS HAVING NO HONOUR — the pin is not
+  // replaced by the roster-derived fallback. That is the BAN rule, deliberately,
+  // not the missing-pin rule: derivation is what an UNPINNED Day gets, and this
+  // Day is pinned. The pin is write-once and says an honour was claimed; the
+  // only thing wrong with it is that the record cannot express who holds it. So
+  // it is hidden, never reassigned — the same clause `pinnedOrDerivedDailyHonors`
+  // already applies to a pin whose holder is banned, and the same reason:
+  // handing a Day's honour to somebody the pin does not name would be the one
+  // adjudication this module must never make (ADR 0001).
+  //
+  // The honour's other copied scalars need no filter, because they are already
+  // COERCED on the way out exactly as the standings rows are: `displayName`
+  // through `archiveName` (trimmed, defaulted to `'Anonymous'`, bounded at
+  // `MAX_ARCHIVED_DISPLAY_NAME`) and `firstBingoAt` through `archiveCount`
+  // (non-finite reads `0`, finite is clamped into `MAX_ARCHIVE_NUMBER`). `uid` is
+  // the only one that cannot be coerced — there is nothing to default an
+  // identity to, which is the argument `usableUid` already won for a roster row.
+  const carriedHonors = selectedHonors.filter(
+    (h) => Number.isInteger(h.dayIndex) && usableUid(h.uid),
+  );
+  const skippedHonors = selectedHonors.length - carriedHonors.length;
+
   const archive: EventArchive = {
     // The Event's own copy, frozen with the standings it titles. `dayLabel` came
     // off the archived surface for this reason and `name` follows it: the freeze
@@ -888,27 +1005,22 @@ export function draftEventArchive(params: {
     firstBingoRow,
     // Coerced on the way out for the same reason the rows are: a derived honour
     // carries the Player's own `displayName`, and a pinned one carries whatever
-    // the day-meta document holds. A non-integer `dayIndex` is dropped rather
-    // than coerced — a derived honour reads it off a `dayStats` KEY, which is a
-    // Player-written map, and a Day the schedule does not have is a chip nothing
-    // could ever label. The live strip already drops it by matching against the
-    // schedule; the record has to, because the record is permanent.
-    dailyHonors: pinnedOrDerivedDailyHonors(ranked, days, dayMetas, dayMetasLoaded, bannedUids)
-      .filter((h) => Number.isInteger(h.dayIndex))
-      .map((h) => ({
-        dayIndex: h.dayIndex,
-        uid: h.uid,
-        displayName: archiveName(h.displayName),
-        firstBingoAt: archiveCount(h.firstBingoAt),
-        // The chip LABEL, resolved here and stored (Codex P2, PR #1139). The
-        // archived strip would otherwise look the Day's theme emoji up in the
-        // LIVE `EventDoc.days`, which the freeze deliberately leaves editable —
-        // so an Admin re-theming a Day after the archive would re-label a frozen
-        // honour. `dayHonorChipLabel` is the live strip's own derivation, shared
-        // rather than restated, so the frozen label is by construction the one
-        // the last live strip rendered.
-        dayLabel: dayHonorChipLabel(h.dayIndex, days),
-      })),
+    // the day-meta document holds. What the record cannot carry at all has
+    // already been discarded above (`carriedHonors`).
+    dailyHonors: carriedHonors.map((h) => ({
+      dayIndex: h.dayIndex,
+      uid: h.uid,
+      displayName: archiveName(h.displayName),
+      firstBingoAt: archiveCount(h.firstBingoAt),
+      // The chip LABEL, resolved here and stored (Codex P2, PR #1139). The
+      // archived strip would otherwise look the Day's theme emoji up in the LIVE
+      // `EventDoc.days`, which the freeze deliberately leaves editable — so an
+      // Admin re-theming a Day after the archive would re-label a frozen honour.
+      // `dayHonorChipLabel` is the live strip's own derivation, shared rather
+      // than restated, so the frozen label is by construction the one the last
+      // live strip rendered.
+      dayLabel: dayHonorChipLabel(h.dayIndex, days),
+    })),
     freezeAt,
     archivedAt,
   };
@@ -923,6 +1035,7 @@ export function draftEventArchive(params: {
   return {
     archive,
     skippedRows,
+    skippedHonors,
     bytes,
     projectedBytes,
     // The size ceilings first, because they are the refusal an Admin can act on:

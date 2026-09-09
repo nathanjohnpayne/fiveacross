@@ -730,6 +730,16 @@ export default function ArchiveEvent({
                       count up front is not left comparing rosters afterwards. */}
                   {draft.skippedRows > 0 &&
                     ` ${draft.skippedRows} unreadable row${draft.skippedRows === 1 ? '' : 's'} will not be included.`}
+                  {/* And the same sentence for a HONOUR the record cannot carry
+                      (#1151, Codex P2 on PR #1162): a pinned holder whose id is
+                      not one the record can express, or an honour on a Day the
+                      schedule does not have. A discarded pin leaves its Day with
+                      no honour at all rather than handing it to the roster's
+                      runner-up, so the strip the Admin approves is shorter than
+                      the one on screen — which is exactly the surprise this
+                      count exists to remove. */}
+                  {draft.skippedHonors > 0 &&
+                    ` ${draft.skippedHonors} unreadable daily honor${draft.skippedHonors === 1 ? '' : 's'} will not be included.`}
                 </div>
                 {/* The finale acknowledgement (#1151). The quiesce only DELAYS
                     the finale beats; the flip forgoes them for good, so the
