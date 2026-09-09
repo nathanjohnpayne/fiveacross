@@ -9,6 +9,11 @@ import type { ClaimDoc, DayDef, DayMetaDoc, EventArchive, EventDoc, PlayerDoc } 
 // P2 on PR #1162). Referenced only from inside the stub's closure, which runs at
 // render time, so the hoisted factory never touches it before this import lands.
 import { usableDayIndexes } from '../data/eventArchive';
+// The SHARED subscription's archive writer (#1152, Codex P2 on PR #1165). The
+// persisted-confirmation cases below seed the record by calling the very
+// function `useEventDoc` calls, so the writer and the Leaderboard's reader are
+// pinned to one key rather than to two hand-written copies of it.
+import { recordArchiveConfirmation } from '../data/archiveConfirmation';
 import { MAX_DAYS } from '../data/eventLimits';
 
 // specs/post-sailing-archive.md, RTL layer (#1149, #1151 and #1152, epic #134).
@@ -1943,7 +1948,16 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
   const confirmedKey = 'gcb.archive.test-event.confirmedUnder';
 
   it('keeps a cached archive frozen on a FRESH mount with a moderation write pending', () => {
-    window.localStorage.setItem(confirmedKey, '3'); // a previous visit saw the server commit it
+    // Seeded through the SHARED subscription's own writer rather than by hand
+    // (Codex P2 on PR #1165): the route that observed the committed flip is
+    // whichever one held `useEventDoc` at the time — the Admin console, here —
+    // and driving `recordArchiveConfirmation` is what pins the writer and this
+    // reader to one spelling of the key now that they live in different modules.
+    recordArchiveConfirmation('test-event', archivedEvent({ archivedUnder: 3 }), {
+      fromCache: false,
+      hasPendingWrites: false,
+    });
+    expect(window.localStorage.getItem(confirmedKey)).toBe('3');
     H.eventPendingWrites = true; // the queued ban, not the flip
     H.eventFromCache = true;
     H.eventServerResolved = false;
@@ -1999,12 +2013,22 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
     }
   });
 
-  it('writes the confirmation when it observes the server-committed flip', () => {
-    // The other end of the round trip: this is the visit that leaves the record
-    // the three tests above read back.
+  it('leaves the WRITE to the shared Event subscription, and records nothing itself', () => {
+    // Codex P2 on PR #1165. The other end of the round trip is no longer this
+    // component's: `useEventDoc` records a server-committed archive on whatever
+    // route observes it, because the visit that NEEDS the record is exactly the
+    // one where another route saw the commit — an Admin who receives it on the
+    // console, queues an offline ban there, and only then opens the standings.
+    // A Leaderboard that wrote its own record could never help that mount.
+    //
+    // `../hooks/useData` is stubbed in this file, so the shared writer is not
+    // running here: a mount over a fully committed archive must leave the slot
+    // untouched. (The subscription's own write is pinned against the real hook
+    // in `src/hooks/useData.test.ts` § "useEventDoc records a server-committed
+    // archive for every route (#1152)".)
     H.event = archivedEvent({ archivedUnder: 3 });
     renderLeaderboard();
-    expect(window.localStorage.getItem(confirmedKey)).toBe('3');
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
   });
 
   it('stops waiting when the browser says the client is offline', () => {

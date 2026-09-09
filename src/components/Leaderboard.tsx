@@ -11,6 +11,7 @@ import {
 } from '../game/logic';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from '../data/finale';
 import { isEventArchived } from '../data/eventArchive';
+import { confirmedArchiveGeneration } from '../data/archiveConfirmation';
 import ArchivedLeaderboard from './ArchivedLeaderboard';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
@@ -63,44 +64,6 @@ const FILTERS: Array<{ id: LeaderboardFilter; label: string }> = [
  * rather than a number that can drift away from it.
  */
 export const CACHED_EVENT_SETTLE_MS = 4_000;
-
-/**
- * localStorage slot recording that this device has SEEN a server-committed
- * archive for an Event, holding the generation the flip was bound to
- * (`EventDoc.archivedUnder`) as its value (Codex P2 on PR #1165).
- *
- * Per generation, not a bare "this Event is archived" flag, because the two
- * things it has to tell apart are a committed archive and an Admin's OPTIMISTIC
- * flip — and both write `status: 'archived'` on the local snapshot. The
- * generation is what the flip is bound to at the rules boundary, so it is the
- * one value that identifies WHICH archive was confirmed; an unconfirmed flip
- * under a different generation cannot match a record left by a confirmed one.
- *
- * `gcb.*`-namespaced and fail-open on throw, the pattern the rest of the app's
- * persisted UI state already uses: storage throws in some privacy modes and is
- * absent under SSR. Reached through `window` for the reason `FarewellPodium`
- * does — recent Node runtimes ship a bare `localStorage` global that is present
- * but non-functional and can shadow the DOM's. And it is trusted for ROUTING and
- * for nothing else: no number, name or honour is read from it, and the record
- * the page prints still comes off the Event document.
- */
-const archiveConfirmedKey = (eventId: string): string => `gcb.archive.${eventId}.confirmedUnder`;
-
-function confirmedArchiveGeneration(eventId: string): string | null {
-  try {
-    return window.localStorage.getItem(archiveConfirmedKey(eventId));
-  } catch {
-    return null;
-  }
-}
-
-function rememberConfirmedArchive(eventId: string, generation: number): void {
-  try {
-    window.localStorage.setItem(archiveConfirmedKey(eventId), String(generation));
-  } catch {
-    /* storage refused — the in-session latch still holds for this mount */
-  }
-}
 
 /**
  * Presentational-only predicate (ADR 0001: the Leaderboard is a for-fun tally,
@@ -308,6 +271,19 @@ function buildShareStandings(
  * nothing ever confirmed, so it is still declined — which is precisely what a
  * bare "this Event is archived" flag could not distinguish.
  *
+ * AND THE RECORD IS WRITTEN BY THE SHARED SUBSCRIPTION, NOT BY THIS COMPONENT
+ * (Codex P2 on PR #1165). Persisting it from the Leaderboard's own effect left
+ * it useless in the case it was built for: only a mounted Leaderboard ever wrote
+ * it, and the visit that needs it is the one where some OTHER route saw the
+ * commit. An Admin receives the committed archive on the console, queues an
+ * offline ban there, and then opens the standings — whose first snapshot is the
+ * cached archive carrying that pending write, with both latches false and
+ * nothing persisted, so the gate mounted `LiveLeaderboard` after its settle
+ * escape and reopened every gameplay listener until the ban synced. The
+ * observation is a fact about the DEVICE, so `useEventDoc` records it from the
+ * `onSnapshot` callback every route already holds (`../data/archiveConfirmation`)
+ * and this component only reads it back.
+ *
  * An Event marked archived with NO record is not a state this app produces —
  * `archiveEvent` writes status, stamp and record in one update — so the live view
  * is left as the fallback for a hand-edited document. It is still read-only in the
@@ -397,14 +373,20 @@ export default function Leaderboard() {
   // is archived" flag could not express. The store is read ONCE, at mount, and
   // is trusted for routing alone; every number the page prints still comes off
   // the Event document.
+  //
+  // AND THIS COMPONENT ONLY READS IT (Codex P2 on PR #1165). The write belongs to
+  // the SHARED Event subscription — `useEventDoc` hands `useDocSub` an observer
+  // that records a server-committed archive on whatever route observes it
+  // (`../data/archiveConfirmation`). While the write lived here it could only
+  // ever be made by a mounted Leaderboard, which is the one route the record is
+  // not needed on: an Admin receives the committed archive on the console, queues
+  // an offline ban THERE, and the Leaderboard's first snapshot is then a cached
+  // archive with `hasPendingWrites: true` and nothing persisted behind it — both
+  // latches false, and the live child mounted after the settle escape.
   const [persistedGeneration] = useState(() => confirmedArchiveGeneration(EVENT_ID));
   const archivedUnder = event?.archivedUnder;
   const generationConfirmed =
     typeof archivedUnder === 'number' && persistedGeneration === String(archivedUnder);
-  useEffect(() => {
-    if (!archiveCommitted || typeof archivedUnder !== 'number') return;
-    rememberConfirmedArchive(EVENT_ID, archivedUnder);
-  }, [archiveCommitted, archivedUnder]);
 
   if (
     (archiveConfirmed || generationConfirmed || !hasPendingWrites) &&

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 // Codex P3 on PR #66: Board must not keep a live listener on the whole
@@ -45,7 +45,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard, useDayMetasStatus, useLeaderboard, useMyUser } from './useData';
+import { useItems, useBoard, useDayMetasStatus, useEventDoc, useLeaderboard, useMyUser } from './useData';
 import { MAX_DAYS } from '../data/eventLimits';
 
 beforeEach(() => {
@@ -660,6 +660,143 @@ describe('serverResolved — the server has answered, or never can', () => {
     expect(result.current.serverResolved).toBe(true);
     expect(result.current.hasServerData).toBe(false);
     expect(result.current.data).toBeNull();
+  });
+});
+
+// #1152, Codex P2 on PR #1165. The Leaderboard's routing half reads a persisted
+// per-generation record of a server-committed archive so a REMOUNT with an
+// unrelated moderation write still queued reaches the frozen surface. Only a
+// mounted Leaderboard used to WRITE that record, which made it useless in the
+// case it exists for: an Admin receives the committed archive on the console,
+// queues an offline ban there, and the Leaderboard's first snapshot is then a
+// cached archive with `hasPendingWrites: true` and nothing persisted behind it —
+// both latches false, and the live child mounted with every gameplay listener.
+//
+// The observation is a fact about the DEVICE, so the SHARED subscription every
+// route holds records it, from the `onSnapshot` callback rather than from a
+// render or an effect. These drive the real `useEventDoc` against hand-delivered
+// snapshots; `EVENT_ID` is `'event-a'` (the `../firebase` stub above).
+describe('useEventDoc records a server-committed archive for every route (#1152)', () => {
+  const confirmedKey = 'gcb.archive.event-a.confirmedUnder';
+
+  // jsdom leaves `window.localStorage` unset in this project (the `App.test.tsx`
+  // / `useTextSize.test.ts` note), and recent Node runtimes ship a built-in
+  // global of the same name that is present but non-functional. Bring our own.
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+      clear: () => store.clear(),
+      key: (index: number) => Array.from(store.keys())[index] ?? null,
+      get length() {
+        return store.size;
+      },
+    } as Storage;
+  }
+
+  const eventSnap = (
+    event: Record<string, unknown>,
+    metadata: { fromCache: boolean; hasPendingWrites: boolean },
+  ) => ({ exists: () => true, data: () => event, metadata });
+
+  // The freeze writes `status`, the stamp, the generation and the record in one
+  // update, so this is the shape a committed archive really arrives in.
+  const archived = (over: Record<string, unknown> = {}) => ({
+    name: 'Med 2026',
+    status: 'archived',
+    archivedAt: 9_000,
+    archivedUnder: 4,
+    archive: { standings: [], dailyHonors: [], freezeAt: null, archivedAt: 9_000 },
+    ...over,
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', createStorageStub());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('writes the generation when the snapshot is server-backed and free of local writes', () => {
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for a CACHE-served archived snapshot', () => {
+    // The ADR 0006 persistent cache replaying the flip is not the server having
+    // committed it — that is the whole distinction the record carries.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: true, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // …and the SAME document lands the moment the server serves it, so the
+    // decline above is about the origin and not about the fixture.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing while the flip is still an unacked local write', () => {
+    // An Admin's own optimistic `status: 'archived'` rolls back if the rules
+    // refuse it, so vouching for it would confirm an archive that never was.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: true }));
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // …and it lands the moment that write is acked, so the decline above is
+    // about the pending write and not about the fixture.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for a committed snapshot of a LIVE Event, and then the flip', () => {
+    // The subscription is on every route for the whole sailing, so the ordinary
+    // case is an open Event: it records nothing until the freeze actually lands.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(
+      eventSnap({ name: 'Med 2026', status: 'active' }, { fromCache: false, hasPendingWrites: false }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for an archived Event carrying no record, or no generation', () => {
+    // Neither shape is one `archiveEvent` produces — both are hand-edited
+    // documents — and the routing gate the record serves declines them anyway,
+    // so a confirmation for either could only ever vouch for a page nobody can
+    // reach.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(
+      eventSnap(archived({ archive: undefined }), { fromCache: false, hasPendingWrites: false }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    sub.fire(
+      eventSnap(archived({ archivedUnder: undefined }), {
+        fromCache: false,
+        hasPendingWrites: false,
+      }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // The complete document — status, generation and record together, which is
+    // the one update the freeze writes — is what the two above are missing.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
   });
 });
 

@@ -6,6 +6,7 @@ import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '..
 import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
+import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
 import { usableDayIndexes } from '../data/eventArchive';
 import { supportedDayIndex } from '../data/eventLimits';
 import { sortPlayers, withReadableRanking, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
@@ -62,7 +63,27 @@ const emptyDocState = <T,>(key: string, loading: boolean): DocSubscriptionState<
   hasPendingWrites: false,
 });
 
-function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
+function useDocSub<T>(
+  ref: DocumentReference<T> | null,
+  key: string,
+  /**
+   * A side effect to run on every snapshot this subscription delivers, given the
+   * document and that snapshot's own origin flags — the seam `useEventDoc` uses
+   * to record a server-committed archive on whatever route observes it first
+   * (Codex P2 on PR #1165, `../data/archiveConfirmation`).
+   *
+   * It runs inside the `onSnapshot` callback rather than in a render or an
+   * effect, so the observation does not depend on the holding component
+   * re-rendering or staying mounted — a route that subscribes to the Event and
+   * shows nothing about it still records what it saw.
+   *
+   * MUST be a module-scope constant. The subscription effect below is keyed on
+   * `key` alone (deliberately, see its own dependency note), so a callback whose
+   * identity changed per render would be captured stale; every caller passes a
+   * function defined once at module load.
+   */
+  observe?: (data: T | null, origin: SnapshotOrigin) => void,
+) {
   const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
   // discipline `useColSub` below already exposes, and for the same reason:
@@ -93,12 +114,22 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
+        const data = snap.exists() ? (snap.data() as T) : null;
+        // Fail-open, on the same principle the persisted-state helpers it calls
+        // already use: an observer is a passenger on this subscription, and a
+        // throw from one must never stop the snapshot from reaching `setState`
+        // — that would strand every consumer of this document on stale data.
+        try {
+          observe?.(data, snap.metadata);
+        } catch {
+          /* an observation is never worth the subscription */
+        }
         setState((previous) => {
           const served =
             previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache;
           return {
             key,
-            data: snap.exists() ? (snap.data() as T) : null,
+            data,
             loading: false,
             hasServerData: served,
             serverResolved: served || (previous.key === key && previous.serverResolved),
@@ -213,14 +244,31 @@ function useColSub<T>(q: Query<T> | null, key: string) {
 const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
   eventScopeKey(EVENT_ID, ...parts);
 
+/**
+ * The Event's archive observer, module-scope so `useDocSub` can capture it once
+ * (Codex P2 on PR #1165). `EVENT_ID` is read at CALL time, not at module load,
+ * so a build whose Event id resolves later still records under the right one.
+ */
+const observeEventArchive = (event: EventDoc | null, origin: SnapshotOrigin): void =>
+  recordArchiveConfirmation(EVENT_ID, event, origin);
+
 export function useEventDoc(enabled = true) {
   // `enabled` lets a pre-auth caller (main.tsx) skip the subscription: events
   // require sign-in, so subscribing while signed out only yields a
   // permission-denied error. Toggle the key (not just the ref) so the effect
   // re-runs and subscribes once auth arrives — useDocSub is keyed on `key`.
+  //
+  // This is the SHARED Event subscription — every route mounts it, and the
+  // Admin console is routinely the first surface to receive a committed archive
+  // — so it is where the device's archive confirmation is recorded (Codex P2 on
+  // PR #1165). The Leaderboard's routing half only READS that record; leaving
+  // the write on the one surface that reads it meant the case it exists for —
+  // an archive first seen on another route, with a moderation write queued
+  // behind it — had nothing persisted when the Leaderboard finally mounted.
   return useDocSub<EventDoc>(
     enabled ? eventRef() : null,
     eventSubscriptionKey(enabled ? 'event' : 'event:disabled'),
+    observeEventArchive,
   );
 }
 
