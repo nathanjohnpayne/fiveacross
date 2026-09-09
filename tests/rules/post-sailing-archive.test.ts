@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -8,7 +8,8 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
-import { deleteObject, ref, uploadBytes } from 'firebase/storage';
+import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
+import { clearStorageDeep } from '../support/storage-emulator';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
 // proved in pairs so none can pass vacuously:
@@ -28,10 +29,14 @@ import { deleteObject, ref, uploadBytes } from 'firebase/storage';
 //      WRITE-ONCE once taken.
 //
 // WHAT IS NOT HERE, deliberately: the durable `EventArchive` record and its
-// whole-record validation (#1151), and the pending media-revocation tombstone
-// (#1153). This ticket freezes the Event; it does not yet snapshot the
-// standings, so the flip arm carries `status`, `archivedAt` and the cleared
-// quiesce and nothing else.
+// whole-record validation (#1151). The lifecycle work freezes the Event; it does
+// not yet snapshot the standings, so the flip arm carries `status`, `archivedAt`
+// and the cleared quiesce and nothing else.
+//
+// The LAST describe below is #1153's media-revocation tombstone, which is not a
+// freeze arm at all: it is what makes the reordered takedown durable, and it
+// belongs here because the property that matters most about it is that it can
+// never become a new way for the takedown to fail on a frozen Event.
 //
 // The PERMISSION_DENIED lines the SDK logs to stderr are the expected
 // assertFails denials, not test failures.
@@ -56,6 +61,11 @@ const PROOF = 'proof-1';
  *  objects a live Proof still points at — the shape the freeze protects, as
  *  opposed to the ORPHANED blob the delete arm's carve-out releases (#1157). */
 const PROOF_MEDIA = 'proof-media';
+/** A Proof owned by the ADMIN, so one identity is BOTH the media's owner and an
+ *  entry in the Event's `admins` roster — the overlapping-role case the round-4
+ *  delete tests missed, where a per-branch `proofDocMissing` still let the admin
+ *  branch empty a live Proof's path (#1153, Codex round 5 P2). */
+const ADMIN_PROOF = 'proof-admin';
 const NOW = () => Date.now();
 const PAST = () => NOW() - 3_600_000;
 
@@ -126,7 +136,9 @@ let proofCreatedAt = 0;
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
-  await testEnv.clearStorage();
+  // Deep, because `testEnv.clearStorage()` lists only the bucket root and every
+  // object here lives under a prefix — see tests/support/storage-emulator.ts.
+  await clearStorageDeep(testEnv);
   proofCreatedAt = NOW();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const fs = ctx.firestore();
@@ -913,38 +925,125 @@ describe.each([
     await assertFails(
       uploadBytes(ref(storageOf(ALICE), `proofs/${EVENT}/${ALICE}/proof-9.jpg`), TINY, IMAGE),
     );
+    // The takedown, IN THE ORDER `deleteProof` PERFORMS IT (#1153, Codex round 5
+    // P2): the Proof document's removal COMMITS first and the object is revoked
+    // afterwards, so by the time the Storage delete is issued the media is an
+    // orphan. Every client delete on this arm now requires that — the Admin's as
+    // much as the owner's — because an admin-owner who could empty a live Proof's
+    // path could refill it inside the generation-capture window.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`));
+    });
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), photoPath)));
   });
 
-  it('FREEZES the OWNER media delete while the Admin takedown stays open', async () => {
-    // Phase 4b P1, PR #1157. The owner's Storage delete arm was unconditional,
-    // so a direct `deleteObject` stripped an archived Proof's media although
-    // `firestore.rules` refuses the owner's DOCUMENT delete on a closed Event —
-    // leaving a Feed entry whose image can never load, on the one Event where
-    // nothing can be re-posted. The ADMIN takedown is deliberately untouched:
-    // a frozen record that locks out its own Admin is #808's incident again.
+  it('DENIES the media delete for a LIVE Proof in EVERY state — OWNER, ADMIN and ADMIN-OWNER alike', async () => {
+    // Phase 4b P1, PR #1157 shut this on the freeze; Codex round 4 P2 on PR
+    // #1163 shut the OWNER's arm outright; Codex round 5 P2 shut the ADMIN's
+    // with it. The owner's arm was unconditional, so a direct `deleteObject`
+    // stripped an archived Proof's media although `firestore.rules` refuses the
+    // owner's DOCUMENT delete on a closed Event. Binding it to the freeze left
+    // the OPEN Event's delete-and-recreate window: `resource == null` refuses an
+    // overwrite and welcomes a RECREATE, so a caller who can take a live Proof's
+    // object down can immediately upload a replacement between
+    // `proofMediaGeneration()`'s read and `deleteProof`'s commit — a tombstone
+    // bound to the OLD blob with the new one in the path.
     //
-    // BOTH blobs are backed by a seeded Proof DOCUMENT, which is what puts them
-    // inside the freeze at all: the carve-out below releases only media nothing
-    // points at, so a case built on orphans would prove the opposite of this one.
+    // Binding only the OWNER's branch left that same window open through the
+    // ADMIN branch, because the two rosters OVERLAP: an organiser who plays
+    // their own Event is a media owner AND an entry in `admins`, so they passed
+    // the admin branch while their Proof stood, and the upload arm then welcomed
+    // their recreate as owner. So the condition is on the ARM now — no client
+    // delete reaches media a Proof document still points at, whoever they are.
+    //
+    // EVERY blob here is backed by a seeded Proof DOCUMENT, which is what puts
+    // it out of reach at all: the carve-out releases only media nothing points
+    // at, so a case built on orphans would prove the opposite.
     const ownerBlob = photoPath;
     const adminBlob = mediaProofPath;
-    // Live controls: BOTH deletes work while the Event is open to play, so the
-    // denial below is a claim about the freeze rather than about the arm.
+    // The overlapping-role case: ADMIN owns this path AND sits in `admins`.
+    const adminOwnedBlob = `proofs/${EVENT}/${ADMIN}/${ADMIN_PROOF}.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${ADMIN_PROOF}`), {
+        uid: ADMIN,
+        cellIndex: 5,
+        storagePath: adminOwnedBlob,
+      });
+    });
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
     await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
-    await assertSucceeds(deleteObject(ref(storageOf(ALICE), ownerBlob)));
-    await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
-    // Re-seeded before the shut, because the upload arm closes with it.
-    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
-    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(ADMIN), adminOwnedBlob), TINY, IMAGE));
+    // LIVE Event, open to play, and all three are refused anyway — the denial is
+    // a claim about the standing Proof document, not about the freeze.
+    await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    await assertFails(deleteObject(ref(storageOf(ADMIN), adminBlob)));
+    await assertFails(deleteObject(ref(storageOf(ADMIN), adminOwnedBlob)));
     await close();
     await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    await assertFails(deleteObject(ref(storageOf(ADMIN), adminBlob)));
+    await assertFails(deleteObject(ref(storageOf(ADMIN), adminOwnedBlob)));
+    // And every object is STILL THERE after every denial, which is the point: a
+    // recreate needs an empty path, and the denial is what keeps it occupied.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      for (const path of [ownerBlob, adminBlob, adminOwnedBlob]) {
+        await getMetadata(ref(ctx.storage(), path));
+      }
+    });
+  });
+
+  it('lets the ADMIN take media down the moment its Proof document is gone, in EVERY state', async () => {
+    // The live control the case above needs, and the reason making
+    // `proofDocMissing` the WHOLE arm's condition costs the takedown nothing
+    // (#1153, Codex round 5 P2). `deleteProof` — one function for the owner's
+    // delete and the Admin's — COMMITS the Proof document's removal before it
+    // revokes the object, so an Admin takedown always issues its Storage delete
+    // against an orphan. A frozen record that locks out its own Admin is #808's
+    // support incident in a new place, and this is what proves that has not
+    // happened: the same Admin refused above succeeds here, in the closed state,
+    // with nothing changed but the Proof document.
+    const adminBlob = mediaProofPath;
+    const ownerBlob = photoPath;
+    const adminOwnedBlob = `proofs/${EVENT}/${ADMIN}/${ADMIN_PROOF}.jpg`;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${ADMIN_PROOF}`), {
+        uid: ADMIN,
+        cellIndex: 5,
+        storagePath: adminOwnedBlob,
+      });
+    });
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), adminBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
+    await assertSucceeds(uploadBytes(ref(storageOf(ADMIN), adminOwnedBlob), TINY, IMAGE));
+    await close();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF_MEDIA}`));
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`));
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${ADMIN_PROOF}`));
+    });
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminBlob)));
-    // The owner's blob survived its own denial, and the Admin can still take it
-    // down — which is also the proof that the admin arm did not simply run out
-    // of Firestore accesses and fail closed.
+    // Somebody else's media, once orphaned, is still the Admin's to take down —
+    // which is also the proof that the admin branch did not simply run out of
+    // Firestore accesses and fail closed.
     await assertSucceeds(deleteObject(ref(storageOf(ADMIN), ownerBlob)));
+    // And the ADMIN-OWNER, refused above while their Proof stood, is allowed the
+    // moment it is gone — the overlapping role is not a lockout either.
+    await assertSucceeds(deleteObject(ref(storageOf(ADMIN), adminOwnedBlob)));
+  });
+
+  it('lets the OWNER clear their own media the moment its Proof document is gone, in EVERY state', async () => {
+    // The owner half of the same order, so the carve-out is not held up by the
+    // Admin case alone: `deleteProof`'s commit lands first and `attachProof`'s
+    // rollback deletes an object no document was ever written for, so both
+    // client paths reach this arm as orphan deletes — in the closed state as
+    // much as the open one, which is what keeps the quiesce recoverable.
+    const ownerBlob = photoPath;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), ownerBlob), TINY, IMAGE));
+    await close();
+    await assertFails(deleteObject(ref(storageOf(ALICE), ownerBlob)));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`));
+    });
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), ownerBlob)));
   });
 
   it('RELEASES an ORPHANED blob to its owner even while closed — nothing points at it', async () => {
@@ -1189,6 +1288,34 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertSucceeds(deleteObject(ref(storageOf(BOB), orphanBlob)));
   });
 
+  it('CLOSES the delete-and-recreate window: the OWNER cannot take a LIVE Proof’s object down (#1153)', async () => {
+    // Codex round 4 P2. Immutability (`resource == null`) refuses an OVERWRITE
+    // and welcomes a RECREATE, so an owner able to delete a live Proof's object
+    // could delete it and immediately upload a replacement to the now-empty
+    // path. Land that between `proofMediaGeneration()`'s read and `deleteProof`'s
+    // commit and the tombstone describes the OLD blob while the path holds the
+    // new one: the inline delete fails, the sweeper takes `412`, retires the row
+    // as a post-delete replacement, and the deleted Proof's media stays
+    // reachable — the outcome immutability was supposed to have closed.
+    //
+    // The half that closes it is the DELETE arm. With the object unremovable
+    // while its document stands, there is nothing to recreate inside the window.
+    const blob = photoPath;
+    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), blob), TINY, IMAGE));
+    await assertFails(deleteObject(ref(storageOf(ALICE), blob)));
+    // The object is STILL THERE, which is the point — a recreate needs an empty
+    // path, and the denial is what keeps the path occupied. A second upload is
+    // refused as the overwrite immutability already denied.
+    await assertFails(uploadBytes(ref(storageOf(ALICE), blob), TINY, IMAGE));
+    // …and the moment the Proof document is gone — which is the order
+    // `deleteProof` actually runs in, commit first — the same delete is the
+    // owner's again.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`));
+    });
+    await assertSucceeds(deleteObject(ref(storageOf(ALICE), blob)));
+  });
+
   it('keeps an ORPHANED blob the owner’s to clear on a LIVE Event too (#1157)', async () => {
     // The live half of the carve-out, so the closed-Event case above is not the
     // only thing holding it up: an owner may always clear media no Proof
@@ -1199,13 +1326,20 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
   });
 
   it('DENIES media whose Proof exists under an Event document that does not (#1157)', async () => {
-    // The cost of spending the arm's `exists()` on the Proof rather than the
-    // Event: the existing-Proof branch's `firestore.get()` on a missing Event
-    // errors, and an errored access denies. Reachable only for a Proof document
-    // living under an Event document that was never written (or was deleted out
-    // from under it), and denying is the conservative direction — the blob stays
-    // and an Admin-SDK cleanup takes it, rather than the arm falling open on a
-    // shape it cannot read.
+    // Reachable only for a Proof document living under an Event document that
+    // was never written (or was deleted out from under it), and denying is the
+    // conservative direction — the blob stays and an Admin-SDK cleanup takes it,
+    // rather than the arm falling open on a shape it cannot read.
+    //
+    // The REASON moved with the arm (#1153, Codex round 5 P2). It used to be the
+    // cost of spending the `exists()` on the Proof rather than the Event: the
+    // existing-Proof branch's `firestore.get()` on a missing Event errored, and
+    // an errored access denies. `proofDocMissing` now gates the whole arm, so
+    // this is refused one step earlier and for the plainer reason — a Proof
+    // document points at the media. A missing Event document still denies, but
+    // now only on the NON-OWNER orphan branch, where the `get()` is the one
+    // access left; the OWNER's orphan delete never reads the Event at all, which
+    // is what the legacy and Event-less case above proves.
     const strayEvent = 'no-event-document';
     const strayBlob = `proofs/${strayEvent}/${BOB}/stray.jpg`;
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
@@ -1226,5 +1360,549 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     await assertFails(deleteObject(ref(storageOf(BOB), blob)));
     await freeze();
     await assertFails(deleteObject(ref(storageOf(BOB), blob)));
+  });
+});
+
+// The pending media-revocation tombstone (#134 child 5, #1153). `deleteProof`
+// commits the Proof document's removal BEFORE it revokes the media, which fixed
+// one failure and opened another: the commit destroys the Proof row, its
+// `storagePath` and the retry control at once, so a Storage delete that then
+// fails leaves media reachable with nothing recording that it was meant to go.
+// `deleteProof` therefore writes the pending revocation in the SAME transaction
+// as the Proof delete. These are the arms that make that write safe — and, just
+// as importantly, make it POSSIBLE on a frozen Event, since a denial inside that
+// transaction would fail the whole takedown, which is the failure this epic
+// already fixed once on the Board unmark.
+describe('post-sailing-archive — the media-revocation tombstone accompanies its own Proof delete (#1153, #1147)', () => {
+  const tombstonePath = (proofId = PROOF, eventId = EVENT) =>
+    `events/${eventId}/proofStorageDeletes/${proofId}`;
+  const TOMBSTONE = (over: Record<string, unknown> = {}) => ({
+    storagePath: photoPath,
+    uid: ALICE,
+    requestedAt: NOW(),
+    ...over,
+  });
+
+  /** The takedown in the shape `deleteProof` actually commits it: the tombstone
+   *  and its own Proof's delete in ONE request. Both halves must be allowed
+   *  together — one denial rejects the whole thing. ONE Firestore instance for
+   *  the batch, because `db()` mints a fresh context per call and mixing two
+   *  throws before the rules are ever consulted. */
+  function takedown(
+    uid: string,
+    tombstone: Record<string, unknown> = TOMBSTONE(),
+    proofId = PROOF,
+  ): Promise<void> {
+    const fs = db(uid);
+    const batch = writeBatch(fs);
+    batch.set(doc(fs, tombstonePath(proofId)), tombstone);
+    batch.delete(doc(fs, `${eventPath()}/proofs/${proofId}`));
+    return batch.commit();
+  }
+
+  /** The SAME row, minted ALONE — the squat #1147 is about. */
+  const mintAlone = (uid: string, tombstone: Record<string, unknown> = TOMBSTONE(), proofId = PROOF) =>
+    setDoc(doc(db(uid), tombstonePath(proofId)), tombstone);
+
+  // THE PROOF THIS SUITE TOMBSTONES ACTUALLY CARRIES MEDIA (#1153, Phase 4b P2).
+  // The shared fixture seeds every Proof as a TEXT one — `storagePath: null` —
+  // which the arm now refuses a tombstone outright, and rightly: a Proof that
+  // stored no object owes no revocation. Every case here is about a Proof that
+  // DOES own media, so it is re-seeded to store exactly the `.jpg` the rows
+  // below name. (That mismatch is what let the original suite accept a `.jpg`
+  // row for a text Proof and miss the binding this arm now makes.)
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`),
+        { type: 'photo', storagePath: photoPath, mediaURL: 'https://example.test/p.jpg' },
+        { merge: true },
+      );
+    });
+  });
+
+  /** Seed one out-of-band, for the arms that need an existing document. */
+  async function seedTombstone(): Promise<void> {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), tombstonePath()), TOMBSTONE());
+    });
+  }
+
+  /** A Proof create in the shape `attachProof` posts one, under any id. */
+  const createProof = (id: string, uid = ALICE, eventId = EVENT) =>
+    setDoc(doc(db(uid), `events/${eventId}/proofs/${id}`), {
+      uid,
+      displayName: 'Alice',
+      photoURL: null,
+      type: 'text',
+      cellIndex: 4,
+      itemText: 'Something happens',
+      storagePath: null,
+      mediaURL: null,
+      thumbURL: null,
+      text: 'again',
+      createdAt: NOW(),
+      reportCount: 0,
+      status: 'active',
+      visionFlag: null,
+      source: null,
+      dayIndex: 0,
+    });
+
+  it('ALLOWS the admin to delete the Proof and record its media IN ONE COMMIT on an ARCHIVED Event', async () => {
+    // The Event where it matters most: a permanent record still needs a takedown
+    // path (#808), and a denial anywhere in this arm would close it.
+    await freeze();
+    await assertSucceeds(takedown(ADMIN));
+  });
+
+  it('ALLOWS the media’s OWNER while the Event is open, and DENIES it once frozen', async () => {
+    // The Proof delete arm's own predicate, restated: exactly the callers who
+    // could delete the Proof this accompanies. An owner cannot delete their own
+    // Proof out of a frozen record, so they cannot tombstone its media either.
+    await assertSucceeds(takedown(ALICE));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), tombstonePath()));
+      await setDoc(doc(ctx.firestore(), `${eventPath()}/proofs/${PROOF}`), {
+        uid: ALICE,
+        displayName: 'Alice',
+        type: 'photo',
+        cellIndex: 3,
+        status: 'active',
+        createdAt: NOW(),
+        // The object the row names — the arm binds the two together, so a
+        // re-seed that dropped it would fail this case for the wrong reason.
+        storagePath: photoPath,
+      });
+    });
+    await freeze();
+    await assertFails(takedown(ALICE));
+  });
+
+  it('DENIES a signed-in stranger, and an unauthenticated writer', async () => {
+    await assertFails(takedown(BOB));
+    const fs = unauthDb();
+    const batch = writeBatch(fs);
+    batch.set(doc(fs, tombstonePath()), TOMBSTONE());
+    batch.delete(doc(fs, `${eventPath()}/proofs/${PROOF}`));
+    await assertFails(batch.commit());
+  });
+
+  it('DENIES a tombstone minted WITHOUT the Proof delete it accompanies — and the takedown still runs (#1147)', async () => {
+    // The owner-squat hole. Binding the row to a LIVE Proof was not enough on
+    // its own: an owner could mint their own Proof's tombstone and leave the
+    // Proof standing, after which `deleteProof`'s `set` was an UPDATE against
+    // that row, `update` is denied, and a denial inside the takedown's
+    // transaction failed the whole takedown — one Player could make every media
+    // Proof in the Event permanently un-deletable, and the sweeper would
+    // meanwhile revoke media a surviving Feed entry still points at.
+    //
+    // `existsAfter` closes both by admitting the row ONLY as part of the request
+    // that removes its Proof, so a standing row always means a Proof that is
+    // already gone and a `set` is always a create.
+    await assertFails(mintAlone(ALICE));
+    await assertFails(mintAlone(ADMIN));
+    // A batch that touches the Proof but does not REMOVE it is the same squat
+    // with a decoration, and is refused for the same reason.
+    const fs = db(ALICE);
+    const batch = writeBatch(fs);
+    batch.set(doc(fs, tombstonePath()), TOMBSTONE());
+    batch.update(doc(fs, `${eventPath()}/proofs/${PROOF}`), { reportCount: 1 });
+    await assertFails(batch.commit());
+    // …and with no row standing, the admin takedown the squat used to block
+    // still lands.
+    await assertSucceeds(takedown(ADMIN));
+  });
+
+  it('DENIES a row whose uid is not the Proof’s own owner, or whose Proof does not exist', async () => {
+    // The row names the object THAT Proof named, not merely a well-formed path.
+    // Bob's own object under Alice's Proof id is the shape the path pin accepts
+    // on its own, and the binding is what refuses it — for the admin too.
+    await assertFails(
+      takedown(ADMIN, TOMBSTONE({ storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg`, uid: BOB })),
+    );
+    // A Proof that never existed. The admin's Proof-delete arm is a bare
+    // `isAdmin` and permits the no-op delete, so this case is about the
+    // tombstone alone: `exists()` refuses to mint a revocation for a document
+    // that was never there.
+    await assertFails(
+      takedown(
+        ADMIN,
+        TOMBSTONE({ storagePath: `proofs/${EVENT}/${ALICE}/never-existed.jpg` }),
+        'never-existed',
+      ),
+    );
+  });
+
+  it('DENIES an extra field, a missing field, and a wrong type', async () => {
+    await assertFails(takedown(ADMIN, TOMBSTONE({ attempts: 0 })));
+    await assertFails(takedown(ADMIN, { storagePath: photoPath, uid: ALICE }));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ uid: 7 })));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ requestedAt: 'now' })));
+  });
+
+  it('ACCEPTS the OPTIONAL generation as a string, and refuses any other shape of it (#1153)', async () => {
+    // The object the row targeted, not merely the name it had. Optional because
+    // the client reads it from Storage before the commit and that read is best
+    // effort: a takedown must not fail because a metadata request did, so a row
+    // without the key is still admitted and is revoked by path.
+    //
+    // The denials run FIRST on purpose: a denied batch writes nothing, so the
+    // Proof this arm binds against is still there for the acceptance below —
+    // which would otherwise pass for the wrong reason (a missing Proof).
+    await assertFails(takedown(ADMIN, TOMBSTONE({ generation: 1700000000000001 })));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ generation: null })));
+    await assertSucceeds(takedown(ADMIN, TOMBSTONE({ generation: '1700000000000001' })));
+  });
+
+  it('DENIES a client-minted row carrying a SWEEP LEASE, and admits the plain row beside it (#1153)', async () => {
+    // Codex round 6 P2. `leaseId` / `leaseAt` are `revokeDeletedProofMedia`'s
+    // claim on the row — the only fields any server writes to this collection,
+    // and what stops two duplicate deliveries of one event both reaching the
+    // bucket. A client that could mint a row already carrying one could park an
+    // unexpired lease on its own takedown's row and stall the server sweep until
+    // the TTL ran out, leaving the reported media in the bucket meanwhile. So
+    // `hasOnly` refuses both keys here, exactly as it refuses any other extra.
+    //
+    // The denials run FIRST on purpose, as in the generation case above: a denied
+    // batch writes nothing, so the Proof this arm binds against is still there
+    // for the acceptance below — which would otherwise pass for the wrong reason.
+    await assertFails(takedown(ADMIN, TOMBSTONE({ leaseId: 'forged' })));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ leaseAt: NOW() })));
+    await assertFails(takedown(ALICE, TOMBSTONE({ leaseId: 'forged', leaseAt: NOW() })));
+    // The same row without them is the ordinary takedown, and still lands.
+    await assertSucceeds(takedown(ADMIN, TOMBSTONE()));
+  });
+
+  it('DENIES a path naming another Player, another Proof, another Event or another prefix', async () => {
+    // The whole point of the durable row is that it authorizes a delete later,
+    // so the object it names is pinned by equality to THIS Event, THIS
+    // document's Proof id and the uid the row itself declares.
+    await assertFails(
+      takedown(ADMIN, TOMBSTONE({ storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg` })),
+    );
+    await assertFails(
+      takedown(ADMIN, TOMBSTONE({ storagePath: `proofs/${EVENT}/${ALICE}/other.jpg` })),
+    );
+    await assertFails(
+      takedown(ADMIN, TOMBSTONE({ storagePath: `proofs/${LEGACY_EVENT}/${ALICE}/${PROOF}.jpg` })),
+    );
+    await assertFails(takedown(ADMIN, TOMBSTONE({ storagePath: `avatars/${ALICE}.jpg` })));
+  });
+
+  it('DENIES a row naming an object the live Proof never stored (#1153)', async () => {
+    // The gap the shape pin alone left. `{proofId}.webm` satisfies every clause
+    // this arm had — the Event prefix, the Proof id, the owner the row declares
+    // and the owner the Proof carries — while naming an object this `.jpg`
+    // Proof never had. Admitting it lets the client and the sweeper revoke the
+    // wrong name, and the Proof document, the only record of which object was
+    // really its own, is gone by the time anyone could notice.
+    //
+    // Both callers are bound: this is a statement about the row, not about
+    // permission.
+    const wrongObject = `proofs/${EVENT}/${ALICE}/${PROOF}.webm`;
+    await assertFails(takedown(ADMIN, TOMBSTONE({ storagePath: wrongObject })));
+    await assertFails(takedown(ALICE, TOMBSTONE({ storagePath: wrongObject })));
+    // …and the row that names what the Proof actually stores still lands, so
+    // the denial above is about the object and not about the arm.
+    await assertSucceeds(takedown(ADMIN));
+  });
+
+  it('DENIES a tombstone for a TEXT Proof, which stored no object to revoke', async () => {
+    // `PROOF_MEDIA` keeps the shared fixture's shape: `type: 'text'`,
+    // `storagePath: null`. A Proof that never uploaded anything owes no
+    // revocation, so the well-formed `.jpg` row its id would accept on shape
+    // alone is refused — `deleteProof` writes none for a text Proof either, and
+    // a row that could be minted here would authorize a delete against a name
+    // no Proof in this Event ever used.
+    await assertFails(
+      takedown(
+        ADMIN,
+        TOMBSTONE({ storagePath: mediaProofPath }),
+        PROOF_MEDIA,
+      ),
+    );
+    await assertFails(
+      takedown(
+        ALICE,
+        TOMBSTONE({ storagePath: mediaProofPath }),
+        PROOF_MEDIA,
+      ),
+    );
+  });
+
+  it('DENIES every client READ and every UPDATE, the admin’s included', async () => {
+    await seedTombstone();
+    await assertFails(getDoc(doc(db(ADMIN), tombstonePath())));
+    await assertFails(getDoc(doc(db(ALICE), tombstonePath())));
+    // Update is denied outright rather than shape-checked, so a pending
+    // revocation can never be re-pointed at another object after the fact.
+    await assertFails(updateDoc(doc(db(ADMIN), tombstonePath()), { requestedAt: NOW() }));
+    await assertFails(
+      updateDoc(doc(db(ALICE), tombstonePath()), {
+        storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg`,
+      }),
+    );
+    // And a SWEEP LEASE cannot be added after the fact either (#1153, Codex
+    // round 6 P2). The update denial now carries that second job: the server
+    // stamps `leaseId` / `leaseAt` to claim the row for exclusive processing, so
+    // the row is no longer immutable for its whole life — but only to the Admin
+    // SDK, which bypasses this file.
+    await assertFails(
+      updateDoc(doc(db(ALICE), tombstonePath()), { leaseId: 'forged', leaseAt: NOW() }),
+    );
+    await assertFails(
+      updateDoc(doc(db(ADMIN), tombstonePath()), { leaseId: 'forged', leaseAt: NOW() }),
+    );
+  });
+
+  it('DENIES every client RETIREMENT — the media’s OWNER above all (#1153)', async () => {
+    // Codex round 3 P1. The delete arm used to be `isAdmin || isOwner`, mirrored
+    // off who may delete the media directly. That mirror is wrong on the one
+    // path this collection exists for: when an Admin takes reported media down
+    // and the inline Storage delete fails or is interrupted, this row is the
+    // only thing still owing the revocation, and it sits at the entirely
+    // predictable `events/{eventId}/proofStorageDeletes/{proofId}`. Denying the
+    // READ never prevented a DELETE, so the owner could blind-delete the row,
+    // after which `revokeDeletedProofMedia` finds no tombstone, abandons the
+    // sweep by design, and the reported photo stays reachable through its
+    // download URL. The subject of a takedown must not be able to cancel its
+    // durable half, so retirement is SERVER-ONLY — the Admin SDK sweeper
+    // bypasses these rules and is untouched.
+    await seedTombstone();
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(ADMIN), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(BOB), tombstonePath())));
+    await assertFails(deleteDoc(doc(unauthDb(), tombstonePath())));
+    // …and the row is still standing afterwards, so the denials above are real
+    // rather than a delete of something already gone.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const snap = await getDoc(doc(ctx.firestore(), tombstonePath()));
+      expect(snap.exists()).toBe(true);
+    });
+  });
+
+  it('DENIES the retirement on a FROZEN Event too — the freeze is not what closes it', async () => {
+    // The old arm was deliberately ungated by the freeze, because a tombstone
+    // nobody could clear would be swept forever. The sweeper clears it now, so
+    // the state of the Event has nothing to do with the answer: no client
+    // retires one in any state.
+    await seedTombstone();
+    await freeze();
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(deleteDoc(doc(db(ADMIN), tombstonePath())));
+  });
+
+  it('REFUSES bringing the Proof id back while its revocation stands, and FREES it the moment the row is retired (#1153)', async () => {
+    // The other half of #1147, closed from the Proof's own side. `existsAfter`
+    // stops a row being minted over a LIVE Proof; nothing stopped a live Proof
+    // being minted over a STANDING row. An owner could legally delete Proof P
+    // together with its tombstone and then re-create P — same id, same
+    // `storagePath` — while the Event was open, reassembling exactly the pair the
+    // clause forbids: the next admin takedown's `set` becomes an UPDATE against
+    // the standing row and is denied, taking the whole transaction with it, and
+    // the delayed sweeper meanwhile revokes media the re-created Feed entry
+    // still points at, archived Event or not.
+    await assertSucceeds(takedown(ALICE));
+    await assertFails(createProof(PROOF));
+    // The admin is bound by it too — this is not a permission check, it is a
+    // statement about an id that still owes a revocation.
+    await assertFails(createProof(PROOF, ADMIN));
+    // …and the refusal is about THAT id, not about the Event: every other id is
+    // untouched, so a Player who just had a Proof taken down can post again.
+    await assertSucceeds(createProof('unheld-proof'));
+    // Retiring the row releases the id — and ONLY the sweeper can retire one
+    // (#1153, Codex round 3 P1), so the release is modelled with the rules
+    // disabled, which is what the Admin SDK's bypass actually is. A client
+    // attempt is denied and leaves the hold exactly where it was.
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath())));
+    await assertFails(createProof(PROOF));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await deleteDoc(doc(ctx.firestore(), tombstonePath()));
+    });
+    await assertSucceeds(createProof(PROOF));
+  });
+
+  it('pins the Proof create arm’s access budget: 6 distinct-Event creates pass and 7 deny', async () => {
+    // The measurement the added `exists()` has to answer for. Firestore allows
+    // 20 document access calls per multi-document request, and the create arm
+    // now spends THREE per Event: `eventOpenForPlay` is `exists()` + `get()` on
+    // the Event document, and the revocation check is one more `exists()`. Six
+    // distinct Events therefore cost 18 and pass; seven cost 21 and deny — which
+    // is what fixes the per-arm cost at three rather than leaving it inferred.
+    //
+    // Distinct EVENTS, because the rules engine caches an access per document:
+    // repeating the same Event would measure the cache, not the arm. A real
+    // request only ever creates one Proof in one Event, which is why the arm's
+    // real neighbour is the `attachProof` transaction pinned below.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(6, 'budget-pass');
+    const deny = events(7, 'budget-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+      }
+    });
+
+    const create = (ids: string[]) => {
+      const fs = db(ALICE);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          photoURL: null,
+          type: 'text',
+          cellIndex: 4,
+          itemText: 'Something happens',
+          storagePath: null,
+          mediaURL: null,
+          thumbURL: null,
+          text: 'again',
+          createdAt: NOW(),
+          reportCount: 0,
+          status: 'active',
+          visionFlag: null,
+          source: null,
+          dayIndex: 0,
+        });
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(create(pass));
+    await assertFails(create(deny));
+  });
+
+  it('ALLOWS the WHOLE attachProof transaction in ONE commit — Proof, Board, stats and Tally marker', async () => {
+    // The production shape the create arm's new `exists()` had to stay inside.
+    // A capture writes four documents in one transaction, and every arm in it
+    // reads the same Event document, so the added access is one more on a
+    // request whose Event reads are already cached — not one more per write.
+    const fs = db(ALICE);
+    const batch = writeBatch(fs);
+    batch.set(doc(fs, `${eventPath()}/proofs/fresh-capture`), {
+      uid: ALICE,
+      displayName: 'Alice',
+      photoURL: null,
+      type: 'text',
+      cellIndex: 6,
+      itemText: 'Something happens',
+      storagePath: null,
+      mediaURL: null,
+      thumbURL: null,
+      text: 'it happened',
+      createdAt: NOW(),
+      reportCount: 0,
+      status: 'active',
+      visionFlag: null,
+      source: null,
+      dayIndex: 0,
+    });
+    batch.set(
+      doc(fs, `${eventPath()}/days/0/boards/${ALICE}`),
+      { cells: cells([6]), markSeed: 7 },
+      { merge: true },
+    );
+    batch.set(doc(fs, `${eventPath()}/players/${ALICE}`), { squaresMarked: 1 }, { merge: true });
+    batch.set(doc(fs, `${eventPath()}/tally/${ITEM}/markers/${ALICE}`), {
+      eventId: EVENT,
+      uid: ALICE,
+      displayName: 'Alice',
+      markedAt: NOW(),
+      itemText: 'Something happens',
+      dayIndex: 0,
+    });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('pins the tombstone arm’s access budget: 6 distinct-Event takedowns pass and 7 deny', async () => {
+    // The measurement the storagePath binding has to answer for (#1153, Phase
+    // 4b P2). It reads the Proof with a `get()` the arm ALREADY performs for the
+    // owner check, and the rules engine serves a repeated access to the same
+    // document from its per-request cache — so the clause is free. This is what
+    // says so out loud rather than leaving it inferred: Firestore allows 20
+    // document access calls per multi-document request and the arm spends THREE
+    // per Event, so six takedowns cost 18 and pass while seven cost 21 and deny
+    // — the SAME boundary as before the binding was added. A future edit that
+    // reached for a second distinct document, or that read the Proof by some
+    // other path, would move this number.
+    //
+    // Distinct EVENTS, because the cache is per document: repeating one Event
+    // would measure the cache rather than the arm. The real production shape is
+    // the single live takedown pinned below.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(6, 'tombstone-budget-pass');
+    const deny = events(7, 'tombstone-budget-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+        await setDoc(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          type: 'photo',
+          cellIndex: 3,
+          status: 'active',
+          createdAt: NOW(),
+          storagePath: `proofs/${eventId}/${ALICE}/${PROOF}.jpg`,
+        });
+      }
+    });
+
+    const takedowns = (ids: string[]) => {
+      const fs = db(ADMIN);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofStorageDeletes/${PROOF}`), {
+          storagePath: `proofs/${eventId}/${ALICE}/${PROOF}.jpg`,
+          uid: ALICE,
+          requestedAt: NOW(),
+        });
+        batch.delete(doc(fs, `events/${eventId}/proofs/${PROOF}`));
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(takedowns(pass));
+    await assertFails(takedowns(deny));
+  });
+
+  it('ALLOWS the WHOLE live-Event takedown in ONE commit — Board, stats, Tally marker, Proof and tombstone', async () => {
+    // The budget, spent on the real shape. The tombstone arm adds `exists()`,
+    // `get()` and `existsAfter()` on the Proof to a request that already reads
+    // the Event document for four other arms, and Firestore caps document
+    // access calls per transaction — so the case that would break production is
+    // the LIVE takedown, where the gameplay cleanup rides along, rather than the
+    // archived one where it is skipped.
+    const fs = db(ADMIN);
+    const batch = writeBatch(fs);
+    batch.set(
+      doc(fs, `${eventPath()}/days/0/boards/${ALICE}`),
+      { cells: cells(), markSeed: 7 },
+      { merge: true },
+    );
+    batch.set(doc(fs, `${eventPath()}/players/${ALICE}`), { squaresMarked: 0 }, { merge: true });
+    batch.delete(doc(fs, `${eventPath()}/tally/${ITEM}/markers/${ALICE}`));
+    batch.set(doc(fs, tombstonePath()), TOMBSTONE());
+    batch.delete(doc(fs, `${eventPath()}/proofs/${PROOF}`));
+    await assertSucceeds(batch.commit());
   });
 });

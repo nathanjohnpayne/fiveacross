@@ -815,6 +815,62 @@ export interface ProofDoc {
   dayIndex?: number | null;
 }
 
+/**
+ * The pending media-revocation TOMBSTONE for a deleted Proof (#134 child 5,
+ * #1153), at `events/{eventId}/proofStorageDeletes/{proofId}`.
+ *
+ * A cross-root document: the BROWSER writes it (`deleteProof`, in the same
+ * transaction that removes the Proof) and the separately-rooted Functions
+ * project consumes it (`revokeDeletedProofMedia` →
+ * `functions/src/proofStorageDeletes.ts`). It lives here for exactly that
+ * reason — the writer and the sweeper must not be able to drift, which is what
+ * the single shared domain contract exists to prevent (Codex round 4 P1 on PR
+ * #1163). The Functions side additionally models it as an all-`unknown` INPUT
+ * shape, because a document is untrusted until validated; that shape is pinned
+ * to this one at compile time in its own module.
+ *
+ * Four of these keys are what `firestore.rules` admits on the create arm —
+ * three required, `generation` optional. The last two are the SWEEPER'S OWN and
+ * no client may write either: the arm's `hasOnly` does not list them, and update
+ * is denied outright, so the only writer that can ever add a lease is the Admin
+ * SDK identity that bypasses the rules. Every field except the lease is
+ * immutable for the life of the row.
+ */
+export interface ProofStorageDeleteDoc {
+  /** The canonical `proofs/{eventId}/{uid}/{proofId}.{ext}` object to revoke —
+   *  the path the deleted Proof document itself STORED, which the rules bind
+   *  the row to. */
+  storagePath: string;
+  /** The media owner, derived FROM `storagePath` so the two cannot disagree —
+   *  the rules pin the path against this field by string equality. */
+  uid: string;
+  /** When the revocation was requested (ms epoch). Operational only: how long
+   *  has this been pending. Deliberately unbounded in the rules, because a
+   *  denial here would fail the whole takedown. */
+  requestedAt: number;
+  /** The Storage generation of the object the row was written about, when the
+   *  deleting client could read it. OPTIONAL: a takedown must not fail because
+   *  a metadata read did, so `deleteProof` omits the key rather than writing a
+   *  placeholder. A row without it is NOT swept by bare path — the sweeper reads
+   *  the object's generation under its own lease and binds the delete to that
+   *  instead, so no unbound delete exists anywhere (#1153, Codex round 6 P2). */
+  generation?: string;
+  /** The id of the sweep delivery that currently holds this row for EXCLUSIVE
+   *  processing — server-only, written by `revokeProofMedia`'s claim
+   *  transaction and by nothing else (#1153, Codex round 6 P2). Absent on every
+   *  row a client writes, because the create arm's `hasOnly` does not admit it
+   *  and update is denied outright. Deliberately NOT part of the revocation's
+   *  identity (`isSameRevocation`): the lease is bookkeeping ABOUT the row, not
+   *  a statement of which revocation it is, and a row that has been leased is
+   *  still the same row it was. */
+  leaseId?: string;
+  /** When that lease was taken (ms epoch), so a holder that crashed mid-sweep
+   *  cannot hold the row forever: a lease older than
+   *  `SWEEP_LEASE_TTL_MS` — or stamped further ahead than that by a skewed
+   *  clock — is expired and re-claimable. Server-only, like `leaseId`. */
+  leaseAt?: number;
+}
+
 export interface ClaimDoc {
   id: string;
   uid: string; // board owner who claimed the square

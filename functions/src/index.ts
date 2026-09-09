@@ -1,6 +1,6 @@
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { onObjectFinalized, type StorageEvent } from 'firebase-functions/v2/storage';
-import { onDocumentWritten } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
@@ -29,6 +29,14 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
+import {
+  hasActiveSweepLease,
+  isObjectAlreadyGone,
+  isSameRevocation,
+  revokeProofMedia,
+  type ProofStorageDeleteInput,
+  type SweepLeaseOutcome,
+} from './proofStorageDeletes';
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -330,6 +338,164 @@ export const moderateProof = VISION_ENABLED
       moderateProofHandler,
     )
   : undefined;
+
+/**
+ * Finish a Proof media revocation the deleting client could not (#134 child 5,
+ * #1153; specs/post-sailing-archive.md § "Moderation is not a gameplay write").
+ *
+ * `deleteProof` removes the Proof document and its media as two operations
+ * against two services, Firestore first, and that commit destroys the only
+ * reference to the object. The tombstone this triggers on is written in the SAME
+ * transaction as the Proof delete, so the media's revocation outlives the row
+ * that named it — and writing it is the LAST thing the client does with it. This
+ * both finishes the revocation and RETIRES the row, because `firestore.rules`
+ * denies every client delete on it (#1153, Codex round 3 P1): the row's path is
+ * entirely predictable, and letting the media's owner clear it would let the
+ * subject of an admin takedown cancel its durable half.
+ *
+ * `retry: true` is load-bearing — `revokeProofMedia` rethrows a real Storage
+ * failure with the tombstone still standing, so the platform redelivers rather
+ * than silently accepting media that is still reachable. "Already gone" counts as
+ * success, which is also the ordinary case: the client's own inline Storage
+ * delete usually wins the race. NOT gated on the freeze: this IS the takedown,
+ * and an archived Event is exactly where a permanent record most needs one
+ * (#808).
+ *
+ * `retry: true` also means DUPLICATE DELIVERIES, which is what the sweep lease
+ * below exists for (#1153, Codex round 6 P2). Two deliveries of one CloudEvent
+ * can be in flight at once, and the sweeper's Firestore pre-checks cannot
+ * serialise them because they are reads taken before the bucket call rather than
+ * a hold over it. So the row is CLAIMED — `leaseId` / `leaseAt`, server-only,
+ * written by `claimSweepLease` below and admitted from no client — and only the
+ * holder deletes anything. The lease decides liveness; the generation binding on
+ * every delete decides safety. A delivery that finds the row held REJECTS rather
+ * than acking, precisely because `retry: true` is the only thing that brings it
+ * back: a holder that failed leaves its lease behind for the TTL, and acking its
+ * own redelivery would end the retry chain with the revocation still owed.
+ *
+ * `ADMIN_SDK_SERVICE_ACCOUNT` for the ordinary reason the other data-plane
+ * triggers pin it: the sweep reads and deletes a bucket object and then writes
+ * and deletes a Firestore document, and the default Gen2 compute identity can do
+ * none of that in this project — under which the rethrow would buy nothing,
+ * because every delivery would fail identically.
+ */
+export const revokeDeletedProofMedia = onDocumentCreated(
+  {
+    document: 'events/{eventId}/proofStorageDeletes/{proofId}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
+  async (event) => {
+    const tombstone = event.data?.data();
+    if (!tombstone) return;
+    const { eventId, proofId } = event.params;
+    await revokeProofMedia(
+      {
+        // Strongly consistent, and read at SWEEP time rather than trusted from
+        // the event snapshot: `event.data` is the row as it was CREATED, this is
+        // the row that is standing NOW (#1153, Phase 4b P2, Codex round 3 P2).
+        // Retirement is server-only, so a delivery that finds nothing was
+        // preceded by another delivery of this same event that already
+        // discharged the revocation — and the rules free the Proof id the moment
+        // it does, which is why the CONTENT comes back rather than a boolean:
+        // the freed id can be re-posted and taken down again, leaving a
+        // different revocation's row at the very same path.
+        currentTombstone: async () => {
+          const snap = await db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`).get();
+          return snap.exists ? ((snap.data() ?? {}) as ProofStorageDeleteInput) : null;
+        },
+        // Strongly consistent, and read at SWEEP time rather than trusted from
+        // the row: the tombstone says a Proof was deleted, this says whether one
+        // is there now (#1153, Phase 4b P1).
+        proofExists: async () =>
+          (await db.doc(`events/${eventId}/proofs/${proofId}`).get()).exists,
+        // EXCLUSIVE PROCESSING, taken before anything is deleted (#1153, Codex
+        // round 6 P2). The sweeper's two Firestore pre-checks are reads at one
+        // instant and two duplicate deliveries of this event can both pass
+        // them — so the row is claimed here, in a transaction that re-asks both
+        // questions against its own read and stamps the lease atomically with
+        // the answer. `update` rather than `set`, because the row exists (this
+        // transaction just read it) and every other field on it is the client's
+        // and must not be rewritten. The lease pair is the ONLY thing the server
+        // ever writes to this collection.
+        claimSweepLease: async (identity, lease) => {
+          const ref = db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`);
+          return await db.runTransaction<SweepLeaseOutcome>(async (tx) => {
+            const snap = await tx.get(ref);
+            if (!snap.exists) return 'lost';
+            const row = (snap.data() ?? {}) as ProofStorageDeleteInput;
+            if (!isSameRevocation(row, identity)) return 'lost';
+            // `lease.at` is this delivery's own clock reading, used both as the
+            // stamp and as the instant the incumbent lease is aged against, so
+            // one reading decides both halves. A lease this delivery already
+            // holds is re-taken rather than refused, which is what makes the
+            // claim idempotent under a transaction retry.
+            if (hasActiveSweepLease(row, lease.at) && row.leaseId !== lease.id) return 'held';
+            tx.update(ref, { leaseId: lease.id, leaseAt: lease.at });
+            return 'claimed';
+          });
+        },
+        // The generation the object carries RIGHT NOW, read under the lease, so
+        // even a row whose client-side metadata capture failed takes a BOUND
+        // delete (#1153, Codex round 6 P2). A 404 is "nothing there to revoke"
+        // and answers null; every other failure propagates, because "I could not
+        // tell which object is there" must never become "delete whatever is".
+        currentObjectGeneration: async (storagePath) => {
+          try {
+            const [metadata] = await getStorage().bucket().file(storagePath).getMetadata();
+            const generation: unknown = metadata.generation;
+            if (generation === undefined || generation === null) return null;
+            const value = String(generation);
+            return value.length > 0 ? value : null;
+          } catch (err) {
+            if (isObjectAlreadyGone(err)) return null;
+            throw err;
+          }
+        },
+        deleteObject: async (storagePath, generation) => {
+          const file = getStorage().bucket().file(storagePath);
+          // `ifGenerationMatch` makes the delete a compare-and-swap on the
+          // object's identity, so a name re-occupied since the generation was
+          // read answers 412 and keeps its bytes. ALWAYS passed now (#1153,
+          // Codex round 6 P2): the sweeper supplies the row's own generation, or
+          // the one it read under the lease, and there is no unconditioned
+          // delete left for a stale delivery to remove a live re-post with.
+          await file.delete({ ifGenerationMatch: generation });
+        },
+        // COMPARE-AND-DELETE, not a delete (#1153, Codex round 4 P2). The
+        // sweeper's own pre-check reads the row at one instant and this runs at
+        // a later one — after a bucket round trip on the ordinary path — and
+        // the row can be retired, its Proof id freed, re-posted and taken down
+        // again inside that gap, leaving a DIFFERENT revocation's row here. An
+        // unconditional delete would clear that one, whose own delivery would
+        // then find nothing, abandon by design, and leave its media in the
+        // bucket. So the identity check runs INSIDE the transaction that
+        // deletes, against the row this transaction itself read.
+        //
+        // AND THE LEASE IS CHECKED WITH IT (#1153, Codex round 6 P2), on every
+        // path that took one. Identity says "this is the same revocation"; the
+        // lease says "and I am still the delivery discharging it". A holder that
+        // stalled past the TTL and was overtaken must leave the row for the
+        // delivery that now owns it, whose bucket call may still be outstanding.
+        // `null` reaches here only from the malformed-path drop, which claims no
+        // lease because it never touches the bucket.
+        retireTombstoneIfSame: async (identity, leaseId) => {
+          const ref = db.doc(`events/${eventId}/proofStorageDeletes/${proofId}`);
+          return await db.runTransaction(async (tx) => {
+            const snap = await tx.get(ref);
+            if (!snap.exists) return false;
+            const row = (snap.data() ?? {}) as ProofStorageDeleteInput;
+            if (!isSameRevocation(row, identity)) return false;
+            if (leaseId !== null && row.leaseId !== leaseId) return false;
+            tx.delete(ref);
+            return true;
+          });
+        },
+      },
+      { eventId, proofId, tombstone },
+    );
+  },
+);
 
 /**
  * Queue an admin alert when a Proof/Prompt write earns one (issues #101, #638).

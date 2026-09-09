@@ -37,39 +37,65 @@ service firebase.storage {
         && closedToPlay(firestore.get(/databases/(default)/documents/events/$(eventId)).data);
     }
 
-    // WHO MAY DELETE PROOF MEDIA, from ONE Event read (Phase 4b P1, PR #1157).
-    // The owner's arm used to be unconditional, so a direct `deleteObject` still
-    // stripped an archived Proof's media although `firestore.rules` refuses the
-    // owner's DOCUMENT delete on a closed Event — leaving a Feed entry whose
-    // image can never load, on the one Event where nothing can be re-posted. The
-    // freeze therefore reaches the owner's media delete as well, on both halves
-    // of it, exactly as it reaches the upload.
+    // WHO MAY DELETE PROOF MEDIA. NOBODY, WHILE ITS PROOF DOCUMENT STANDS.
     //
-    // THE ADMIN TAKEDOWN STAYS OPEN in every state, which is the whole point of
-    // the asymmetry: a permanent record that locks out its own Admin is #808's
-    // support incident in a new place. An Admin must be able to take a reported
-    // photo down out of a frozen Event.
+    // EVERY client delete of a proof object requires the Proof document to be
+    // already GONE — the owner's and the Admin's alike (#1153, Codex round 4 P2
+    // for the owner, round 5 P2 for the rest). `proofDocMissing` is the
+    // load-bearing condition and it gates the WHOLE arm; the identity check
+    // after it only decides WHICH signed-in caller may clear the resulting
+    // orphan.
     //
-    // ONE `get()`, ANSWERING BOTH QUESTIONS. Asking `isEventAdmin()` and then
-    // `eventClosedToPlay()` would read the same document twice — three accesses
-    // against a two-access budget — and Storage Rules make no promise of
-    // deduplicating that, so every legitimate delete could fail closed. So the
-    // document is fetched once, here, and `proofMediaDeleteOk` answers the admin
-    // check and the closed check from the same map. `admins` is read through
-    // `get('admins', [])` rather than `.admins` so an Event document missing the
-    // field denies cleanly instead of erroring the evaluation.
+    // ROUND 4 CLOSED THIS FOR THE PLAIN OWNER AND LEFT IT OPEN FOR THE ADMIN.
+    // The arm read `(isOwner(uid) && proofDocMissing(...)) || <is an admin>`, so
+    // a media owner who is ALSO listed in the Event's `admins` — the ordinary
+    // shape for an organiser playing their own Event — still passed the admin
+    // branch while their Proof document stood, and the upload arm still let that
+    // same identity recreate the emptied path as its owner, because `resource ==
+    // null` refuses an overwrite and welcomes a RECREATE. That is precisely the
+    // delete-and-recreate window round 4 was closing: a delete-then-reupload
+    // landing between `proofMediaGeneration()`'s read and `deleteProof`'s commit
+    // binds the media-revocation tombstone to the OLD blob while the path holds
+    // the replacement; the inline delete fails, the sweeper's
+    // `ifGenerationMatch` answers `412`, and it retires the row as a post-delete
+    // replacement — leaving the deleted Proof's media reachable through its
+    // download URL, which is the one outcome the tombstone exists to prevent.
+    // Generation capture has to be serialised against EVERY identity that can
+    // empty and refill the path, so the condition belongs on the arm rather than
+    // inside one of its branches.
     //
-    // THE ORPHAN CARVE-OUT (Codex P1, PR #1157). The freeze exists to protect a
-    // Proof DOCUMENT's media: a Feed entry whose image can never load is the
-    // harm, and it needs an entry to be the harm at all. Media whose Proof
-    // document does NOT exist has no entry to strand — it is a blob nothing
-    // points at — so the owner may always clear it, in every state. That is not
-    // a loosening for its own sake: it is the only thing that makes the two
-    // client paths recoverable across the quiesce. An `attachProof` upload whose
-    // Proof/Board transaction is then denied by the freeze leaves exactly such a
-    // blob, and `deleteProof` (which now commits BEFORE revoking the media)
-    // retries exactly such a blob from its durable queue. Without the carve-out
-    // both are permanent litter in the one Event nothing can be re-posted to.
+    // NOTHING THE APP DOES NEEDS THE LIVE-PROOF DELETE, ON EITHER PATH. There
+    // are exactly two client Storage deletes, both in `src/data/proofs.ts`, and
+    // both run on media no Proof document points at:
+    //   - `deleteProof` — which is the OWNER's delete AND the ADMIN takedown,
+    //     one function for both — calls `deleteStoragePath` AFTER
+    //     `await runTransaction(...)` has resolved, and that transaction's last
+    //     write is `tx.delete(proofRef)`. The document is gone before the object
+    //     delete is even issued. A takedown re-run after a committed delete
+    //     finds no Proof either, and revokes inline exactly as it did before.
+    //   - `attachProof`'s rollback deletes the object from the `.catch` on its
+    //     own transaction, so that transaction was REFUSED and no Proof document
+    //     was ever written for it.
+    //
+    // THE ADMIN TAKEDOWN IS THEREFORE UNTOUCHED IN PRACTICE, in every Event
+    // state including the frozen one: it is an ORPHAN delete like every other,
+    // and orphan deletes never close. That is what #808 asks for — a permanent
+    // record that locks out its own Admin is that support incident in a new
+    // place — and it is why the freeze is not consulted on this arm at all.
+    //
+    // THE IDENTITY CHECK STAYS, WHICH IS WHY THE EVENT `get()` STAYS. With
+    // `proofDocMissing` carrying the safety, the only remaining question is who
+    // may clear an orphan, and the answer is not "any signed-in caller": a
+    // stranger deleting somebody else's orphaned media is still a denial. So the
+    // branch is `isOwner(uid)` OR the Event's `admins` roster. `admins` is read
+    // through `get('admins', [])` so an Event document missing the field denies
+    // cleanly instead of erroring the evaluation, and `proofMediaDeleteOk` takes
+    // the document's DATA as an ARGUMENT rather than fetching its own copy:
+    // Storage Rules allow two Firestore accesses per evaluation and make no
+    // promise of deduplicating a repeated `firestore.get()` on one path, so a
+    // helper that read its own would spend three beside the `exists()` and fail
+    // every legitimate delete closed. That threading is what #806 has to reclaim
+    // (`specs/event-membership.md` § "Storage has zero headroom").
     //
     // `{file}` is `<proofId>.<ext>` — `uploadProofMedia` writes that shape and
     // only that shape (`src/data/storage.ts`), and `firestore.rules` pins the
@@ -82,25 +108,33 @@ service firebase.storage {
     // follows it, which is the extension `uploadProofMedia` appended.
     //
     // THE BUDGET, SPENT PRECISELY. Storage Rules allow two Firestore accesses
-    // per evaluation. The orphan clause is FIRST and short-circuiting, so the
-    // common paths cost one access each: an orphan delete spends the
-    // `exists()` and stops; an admin takedown is not `isOwner`, skips the
-    // `exists()` entirely, and spends the `get()`. Only an OWNER deleting media
-    // a live Proof document still points at spends both — which is the cap, not
-    // past it.
+    // per evaluation, and this arm never exceeds them:
+    //   - UNAUTHENTICATED: zero. `signedIn()` short-circuits ahead of both.
+    //   - ANY signed-in caller against a LIVE Proof's object: one. The
+    //     `exists()` answers no and the `get()` is never reached — which is the
+    //     whole delete-and-recreate denial, plain owner, admin-owner, Admin and
+    //     stranger alike.
+    //   - THE PATH'S OWNER, orphan: one. `isOwner(uid)` reads the token and the
+    //     path only, so the `||` short-circuits before the `get()`.
+    //   - A NON-OWNER (an Admin, or a stranger), orphan: two — the `exists()`
+    //     that answered yes, then the `get()` that asks whether they are an
+    //     Admin of this Event, which is the one way that request can still be
+    //     allowed.
+    // That is the cap, not past it. (The Storage EMULATOR does not enforce the
+    // cap at all: an arm making eighteen distinct accesses is admitted there.
+    // Measured for #1153, Codex round 4 P2 — which is why the budget is
+    // reasoned about here rather than asserted by a test.)
     //
-    // A MISSING Event document now DENIES the existing-Proof branch, because
-    // the `exists()` that used to guard the `get()` is spent on the Proof
-    // instead and the `get()` errors closed. That is reachable only for media
-    // whose Proof document exists under an Event document that does not, and
-    // denying is the conservative direction; the absence-means-open default the
-    // upload arm carries is preserved for every path that has no Proof document,
-    // which is what a legacy or orphaned path actually is. (#806 will thread its
-    // membership check through the same fetch — see `specs/event-membership.md`
-    // § "Storage has zero headroom".)
-    function proofMediaDeleteOk(event, uid) {
-      return (signedIn() && request.auth.uid in event.get('admins', []))
-        || (isOwner(uid) && !closedToPlay(event));
+    // A MISSING Event document DENIES the NON-OWNER orphan branch, because the
+    // `get()` errors and an errored access is a denial. Conservative, and it
+    // costs the app nothing: the OWNER's orphan delete never reads the Event at
+    // all, so a legacy Event — or media under an Event document that was never
+    // written — stays clearable by the party that uploaded it, which is the
+    // absence-means-open default this file carries everywhere it matters. Media
+    // whose Proof document exists under a missing Event document is denied one
+    // step earlier still, by `proofDocMissing` itself.
+    function proofMediaDeleteOk(event) {
+      return signedIn() && request.auth.uid in event.get('admins', []);
     }
     function proofDocMissing(eventId, file) {
       return !firestore.exists(
@@ -108,9 +142,10 @@ service firebase.storage {
     }
     function mayDeleteProofMedia(eventId, uid, file) {
       return signedIn()
-        && ((isOwner(uid) && proofDocMissing(eventId, file))
+        && proofDocMissing(eventId, file)
+        && (isOwner(uid)
           || proofMediaDeleteOk(
-               firestore.get(/databases/(default)/documents/events/$(eventId)).data, uid));
+               firestore.get(/databases/(default)/documents/events/$(eventId)).data));
     }
     function okImage() {
       return request.resource.contentType.matches('image/.*')
@@ -134,12 +169,77 @@ service firebase.storage {
       allow read: if signedIn();
       // Content-validate uploads, but keep delete separate: a delete carries no
       // request.resource, so okImage()/okAudio() would reject it and leave the
-      // blob orphaned when deleteProof() removes the doc. Owners delete their own
-      // media while the Event is open to play; admins delete reported/flagged
-      // media during moderation, in every state including the frozen one. An
-      // ORPHANED object — one no Proof document points at — is the owner's to
-      // clear in every state; see `mayDeleteProofMedia`.
+      // blob orphaned when deleteProof() removes the doc. An ORPHANED object —
+      // one no Proof document points at — is clearable in every state, and since
+      // #1153 that is the ONLY client delete this arm admits: media a live Proof
+      // document still points at is nobody's to remove, the OWNER's and the
+      // ADMIN's alike, because either could otherwise empty the path and refill
+      // it inside the generation-capture window. Admins still take reported or
+      // flagged media down in every state including the frozen one — `deleteProof`
+      // commits the Proof delete BEFORE it revokes the object, so the takedown is
+      // an orphan delete like every other. See `mayDeleteProofMedia`.
+      //
+      // CREATE ONLY: A PROOF OBJECT IS IMMUTABLE (#1153, Codex round 3 P2). The
+      // arm used to read `create, update`, so the owner — or another tab of
+      // theirs — could OVERWRITE the canonical object in place. `deleteProof`
+      // reads the object's Storage `generation` before its transaction opens and
+      // records it on the tombstone; an overwrite landing in the window between
+      // that read and the commit leaves the row bound to the PREVIOUS blob,
+      // although the Proof pointed at the replacement when it was deleted. The
+      // inline Storage delete then fails, the sweeper's `ifGenerationMatch`
+      // answers `412`, and it retires the row as a post-delete replacement —
+      // leaving the deleted Proof's own media reachable through its download
+      // URL, which is exactly the outcome the tombstone exists to prevent.
+      //
+      // Immutability closes it at the source rather than teaching the sweeper to
+      // tell an overwrite that PRECEDES its row from one that FOLLOWS it: with
+      // no overwrite possible, a `412` can only mean the name was re-occupied
+      // after a DELETE, which is the case retirement is already correct for.
+      //
+      // AND `resource == null` ALONE WAS NOT ENOUGH (#1153, Codex rounds 4 and
+      // 5 P2). It refuses an overwrite and welcomes a recreate, so a caller who
+      // could DELETE a live Proof's object could immediately upload a replacement
+      // to the now-empty path — the same desynchronised tombstone by another
+      // route. The half that closes it is on the DELETE arm, not here: NO client
+      // may remove media while its Proof document stands, an admin-owner
+      // included (see `mayDeleteProofMedia`), so within this window there is
+      // nothing to recreate. This arm stays exactly as it is, because a Proof
+      // id under a pending revocation cannot be brought back anyway —
+      // `firestore.rules` refuses the Proof create while its
+      // `proofStorageDeletes` row stands, and asking that question HERE would be
+      // a third Firestore access this arm has no budget for
+      // (`eventClosedToPlay` already spends both).
+      //
+      // `resource == null` IS THE PREDICATE, not an `allow create` without
+      // `update`. The two are supposed to be equivalent — `create` is documented
+      // as the new-object method and `update` as the existing-object one — and
+      // they are not: the Storage emulator evaluates a second `uploadBytes` at
+      // an occupied path under `create` and lets it through, so an arm that only
+      // dropped `update` would deny nothing and no test could catch it. Asking
+      // the state directly is both correct and provable, and it holds whichever
+      // method a platform decides a wholesale object replacement is. `resource`
+      // is the EXISTING object's metadata — null when there is none — so this
+      // reads the bucket, not Firestore, and the two-access budget below is
+      // untouched. The method list stays `create, update` so neither can slip
+      // past the predicate.
+      //
+      // The app never wanted the overwrite. `attachProof` mints a fresh
+      // Firestore auto-id per capture and `uploadProofMedia` names the object
+      // after it, so every upload is a first write to a name nothing has used; a
+      // refused transaction DELETES its object and the Player's retry re-uploads
+      // under a NEW id. `src/data/storage.ts` has asserted this invariant since
+      // #363 — it is why proof media is served `immutable` while
+      // `avatars/{uid}.jpg`, which IS overwritten in place on a profile edit,
+      // deliberately is not. That avatar arm is a separate `match` above and
+      // keeps its full `write`.
+      //
+      // NOT a claim that nothing under this prefix is ever rewritten. The Vision
+      // handler's thumbnail (`functions/src/index.ts`) saves
+      // `{proofId}_thumb.jpg` on the Admin SDK, which bypasses these rules
+      // entirely and can legitimately re-save on a redelivered Storage trigger.
+      // What this arm governs is the browser.
       allow create, update: if isOwner(uid)
+        && resource == null
         && !eventClosedToPlay(eventId)
         && (okImage() || okAudio());
       allow delete: if mayDeleteProofMedia(eventId, uid, file);

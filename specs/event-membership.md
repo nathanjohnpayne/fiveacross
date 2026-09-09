@@ -214,11 +214,13 @@ function admittedWith(ev, eventId) {
 }
 
 // Already done, in the shape #806 needs: since #1149's Phase 4b P1 the delete
-// arm has no standalone isEventAdmin() of its own — `proofMediaDeleteOk(ev, uid)`
-// answers the admin check off the threaded Event data (`storage.rules`). What
-// #806 must still drop from that arm is its `exists()` guard, which today buys
-// absence-means-open for the freeze check and would otherwise be the third
-// access once the membership get() joins.
+// arm has no standalone isEventAdmin() of its own — `proofMediaDeleteOk(ev)`
+// answers the admin check off the threaded Event data (`storage.rules`). It
+// took a `uid` too until #1153's Codex round 4 P2 removed the owner arm from
+// it; the threading is the part #806 depends on and is unchanged. What #806
+// must still drop from that arm is its `exists()` guard, which today buys the
+// orphan branch its short-circuit and would otherwise be the third access once
+// the membership get() joins.
 function isEventAdminWith(ev) { return request.auth.uid in ev.get('admins', []); }
 
 // Call site, e.g. the delete arm:
@@ -296,7 +298,7 @@ The supported schedule maximum is **ten Days**, the same `MAX_DAYS` enforced by 
 
 The prerequisite of #804 is therefore discharged by #1079's executable proof, not by treating Firestore's general "may be cached" wording as a promise. A future emulator or rules change that breaks the shared-path regression blocks #804 or requires the bounded optional-Echo design described above before enforcement can ship.
 
-**3. Storage has zero headroom, which fixes where the switch lives.** Two Firestore **accesses** is the whole budget — counted as calls, not as distinct paths, which is the stricter reading and the one this spec now takes after getting it wrong once. The switch spends one and the membership check spends the other, which is why the Storage membership check is a single `get()` rather than Firestore's `exists()`-then-`get()`. **And why `isEventAdmin()` cannot keep its own `get()`**: on the delete arm the switch, the membership and `isEventAdmin` would be three accesses, so #806 must thread one Event fetch through both the switch and the admin check or every admin moderation delete is denied on an enforced Event (Codex P1 on PR #891). That threading has SHIPPED, ahead of #806: #1149's freeze on the owner's media delete (Phase 4b P1, PR #1157) replaced the standalone `isEventAdmin()` with `proofMediaDeleteOk(ev, uid)`, answering the admin check and the freeze check off one fetch. The arm's remaining `exists()` guard is the access #806 must reclaim—it buys absence-means-open for the freeze check today, and error-to-deny is the same trade the membership `get()` already makes. A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add another cross-service read.
+**3. Storage has zero headroom, which fixes where the switch lives.** Two Firestore **accesses** is the whole budget — counted as calls, not as distinct paths, which is the stricter reading and the one this spec now takes after getting it wrong once. The switch spends one and the membership check spends the other, which is why the Storage membership check is a single `get()` rather than Firestore's `exists()`-then-`get()`. **And why `isEventAdmin()` cannot keep its own `get()`**: on the delete arm the switch, the membership and `isEventAdmin` would be three accesses, so #806 must thread one Event fetch through both the switch and the admin check or every admin moderation delete is denied on an enforced Event (Codex P1 on PR #891). That threading has SHIPPED, ahead of #806: #1149's freeze on the owner's media delete (Phase 4b P1, PR #1157) replaced the standalone `isEventAdmin()` with `proofMediaDeleteOk(ev, uid)`, answering the admin check and the freeze check off one fetch, and #1153's Codex round 4 P2 then dropped the owner arm from that helper altogether (it is `proofMediaDeleteOk(ev)` now, admin-only) without disturbing the threading #806 needs. The arm's remaining `exists()` guard is the access #806 must reclaim—it buys the orphan branch its short-circuit today, and error-to-deny is the same trade the membership `get()` already makes. A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add another cross-service read.
 
 ### The enforced-path inventory
 

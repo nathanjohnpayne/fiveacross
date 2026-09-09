@@ -207,6 +207,27 @@ describe('moderateProof export gating (#126)', () => {
     expect(endpoint.secretEnvironmentVariables).toContainEqual({ key: 'RESEND_API_KEY' });
   });
 
+  it('exports the proof-media revocation sweeper as a retryable path-scoped Admin trigger', async () => {
+    // #1153. All three properties are load-bearing and none is decoration.
+    // `retry: true` is what turns `revokeProofMedia`'s rethrow into redelivery —
+    // without it a failed Storage delete is simply dropped and the tombstone
+    // stands forever, which is the durability the whole ticket exists for. The
+    // path is the tombstone's own, so the sweeper reads the Event and Proof ids
+    // it confines the object path against straight off the trigger. And the
+    // Admin identity is what lets it delete a bucket object and then a
+    // Firestore document at all: under the default Gen2 compute identity every
+    // delivery would fail identically and the rethrow would buy nothing.
+    const mod = await importIndex();
+    const endpoint = mod.revokeDeletedProofMedia.__endpoint;
+    expect(endpoint.eventTrigger.retry).toBe(true);
+    expect(endpoint.eventTrigger.eventFilterPathPatterns.document).toBe(
+      'events/{eventId}/proofStorageDeletes/{proofId}',
+    );
+    expect(endpoint.serviceAccountEmail).toBe(
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+    );
+  });
+
   it('exports the legacy-marker normalizer as a retryable path-scoped Admin trigger', async () => {
     const mod = await importIndex();
     const endpoint = mod.repairLegacyMarkerEventIdentityOnWrite.__endpoint;
@@ -242,6 +263,7 @@ describe('moderateProof export gating (#126)', () => {
       expect(mod.unlockDay.__endpoint.serviceAccountEmail).toBe(expected);
       expect(mod.unlockDayNow.__endpoint.serviceAccountEmail).toBe(expected);
       expect(mod.repairLegacyMarkerEventIdentityOnWrite.__endpoint.serviceAccountEmail).toBe(expected);
+      expect(mod.revokeDeletedProofMedia.__endpoint.serviceAccountEmail).toBe(expected);
     } finally {
       process.env.FIREBASE_CONFIG = priorConfig;
       process.env.GCLOUD_PROJECT = priorProject;
