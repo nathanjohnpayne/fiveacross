@@ -253,10 +253,34 @@ function stableJson(value: unknown, seen: WeakSet<object> = new WeakSet()): stri
     return `{"latitude":${stableJson(obj.latitude)},"longitude":${stableJson(obj.longitude)}}`;
   }
   // A `DocumentReference` or a `CollectionReference`. `path` is the SDK's own
-  // identity for both, and it is the field the reference's `isEqual` compares —
-  // so this is the same question, asked without walking the `firestore` handle
-  // hanging off it.
-  if (typeof obj.path === 'string' && typeof obj.firestore === 'object') {
+  // identity for both — the value its equality is decided by — so reducing to it
+  // asks the same question without walking the `firestore` handle hanging off it.
+  //
+  // A FUNCTION-VALUED SDK MARKER IS REQUIRED BESIDE IT (Codex P2 on PR #1162,
+  // round 8), for the reason the GeoPoint branch above requires `isEqual` and
+  // with more at stake. `path` (a string) and `firestore` (a map) are BOTH
+  // shapes a stored Day can hold, so asking for that pair alone matched an
+  // ordinary map that merely carried those two field names — and collapsed the
+  // whole Day to its `path`. Every other field then left the fingerprint, so an
+  // Admin editing `index`, `theme` or `unlockAt` between the pre-read and the
+  // transaction produced two EQUAL fingerprints: `archiveEvent` skipped its
+  // `config-changed` abort and froze honour pins fetched for the old schedule
+  // into a record built from the new one, permanently. `firestore` is no longer
+  // asked at all, because it never discriminated anything — it named the cycle
+  // this branch exists to avoid, not the type.
+  //
+  // The invariant the marker rests on: a value DECODED from Firestore is built
+  // out of Firestore's own types, and none of them is a JS function — so no
+  // stored map can present one, whatever its field names. TWO are accepted
+  // because the SDKs disagree about which they carry: the modular client's
+  // `DocumentReference`/`CollectionReference` carry `withConverter` and dropped
+  // `isEqual` at v9 (the free `refEqual` replaced it), while the Admin SDK's
+  // carry both. Asking for either keeps this branch true of a real reference
+  // from whichever SDK left the value behind.
+  if (
+    typeof obj.path === 'string'
+    && (typeof obj.withConverter === 'function' || typeof obj.isEqual === 'function')
+  ) {
     return stableJson(obj.path);
   }
 

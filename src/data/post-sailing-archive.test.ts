@@ -2022,12 +2022,15 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
   // `archiveRead` wrapper.
   it('fingerprints a SELF-REFERENCING value without throwing, and stably', () => {
     // A faithful stand-in for the SDK's own shape: `path` is the reference's
-    // identity, and `firestore` is the handle that makes the graph cyclic.
+    // identity, `withConverter` is the function-valued marker no stored map can
+    // present (the modular client dropped `isEqual` at v9), and `firestore` is
+    // the handle that makes the graph cyclic.
     const mkRef = (path: string) => {
       const ref: Record<string, unknown> = { path, id: path.split('/').pop(), type: 'document' };
       const firestore: Record<string, unknown> = { app: {} };
       firestore.ref = ref;
       ref.firestore = firestore;
+      ref.withConverter = () => ref;
       return ref;
     };
     const withRef = (path: string) => ({
@@ -2085,6 +2088,47 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
     expect(fp({ g: { latitude: 1.5, longitude: -2.5, place: 'Ibiza' } })).not.toBe(
       fp({ g: { latitude: 1.5, longitude: -2.5, place: 'Mykonos' } }),
     );
+  });
+
+  // Codex P2 on PR #1162, round 8. The reference branch is the GeoPoint case
+  // again and worse: `path` (a string) and `firestore` (a map) are BOTH shapes a
+  // stored Day can hold, so the pair alone reduced an ordinary map to its `path`
+  // and dropped every other field from the fingerprint — which is the one
+  // direction this comparison must never fail in, because an equal fingerprint
+  // is what lets `archiveEvent` skip `config-changed` and freeze pins fetched
+  // for a schedule that no longer exists.
+  it('walks a plain map carrying `path` and `firestore`, and reduces only a real reference', () => {
+    const fp = (day: unknown) => archiveSnapshotFingerprint({ days: [day] } as never);
+    // A DAY, not a reference: a stored map that happens to carry both field
+    // names. Every field it holds is still fingerprinted, so an edit to any of
+    // them is seen.
+    const plainDay = (theme: string) => ({
+      index: 0,
+      theme,
+      unlockAt: 1,
+      path: 'events/e/days/0',
+      firestore: { app: 'x' },
+    });
+    expect(fp(plainDay('sunset'))).not.toBe(fp(plainDay('neon')));
+    expect(fp(plainDay('sunset'))).toBe(fp(plainDay('sunset')));
+
+    // A REAL reference is still reduced to its `path`, by either function-valued
+    // marker — `isEqual` on the Admin SDK's, `withConverter` on the modular
+    // client's, and no map decoded from Firestore can present either, because
+    // none of Firestore's own types is a JS function.
+    for (const marker of ['isEqual', 'withConverter'] as const) {
+      const ref = (path: string, extra: string) => ({
+        path,
+        firestore: { app: 'x' },
+        [marker]: () => true,
+        // Ignored, because the reduction is the point: two references to the
+        // same document are equal whatever else hangs off the object.
+        converter: extra,
+      });
+      expect(fp(ref('events/e/items/a', 'one'))).toBe(fp(ref('events/e/items/a', 'two')));
+      // …and one that really moved still moves the fingerprint.
+      expect(fp(ref('events/e/items/a', 'one'))).not.toBe(fp(ref('events/e/items/b', 'one')));
+    }
   });
 });
 
