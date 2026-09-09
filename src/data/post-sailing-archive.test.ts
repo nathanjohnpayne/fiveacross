@@ -1474,6 +1474,58 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(draft.archive.dailyHonors).toEqual(once.archive.dailyHonors);
   });
 
+  // Codex P2 on PR #1162, round 8. `EventArchive.dailyHonors` declares itself
+  // ordered by Day index and every archived surface renders it straight through,
+  // so the order is part of the permanent record. `pinnedOrDerivedDailyHonors`
+  // flat-maps over the schedule's ENTRIES, and a schedule listing `[4, 1]` is
+  // perfectly legitimate — the indexes are unique, `usableDayIndexes` accepts it,
+  // and `DayDef.index` is what names a Day — so the honours arrived in schedule
+  // order and froze that way.
+  it('freezes the daily honours in Day-index order, whatever order the schedule lists', () => {
+    const alice = mkPlayer({ uid: 'alice', displayName: 'Alice', bingoCount: 2, squaresMarked: 8 });
+    const bob = mkPlayer({ uid: 'bob', displayName: 'Bob', bingoCount: 1, squaresMarked: 5 });
+    const metas = new Map<number, DayMetaDoc>([
+      [1, { firstBingo: { uid: 'alice', displayName: 'Alice', at: 900 } }],
+      [4, { firstBingo: { uid: 'bob', displayName: 'Bob', at: 800 } }],
+    ] as unknown as Iterable<[number, DayMetaDoc]>);
+    const draftFor = (days: DayDef[]) =>
+      draftEventArchive({
+        players: [alice, bob],
+        event: { days, bannedUids: [] },
+        dayMetas: metas,
+        dayMetasLoaded: true,
+        archivedAt: 1,
+      });
+
+    const outOfOrder = draftFor([mkDay(4), mkDay(1)]);
+    expect(outOfOrder.archive.dailyHonors.map((h) => h.dayIndex)).toEqual([1, 4]);
+    // Ordered, not reassigned: each Day keeps the holder its own pin names, and
+    // the chip label still comes off that Day's own schedule entry.
+    expect(outOfOrder.archive.dailyHonors.map((h) => h.uid)).toEqual(['alice', 'bob']);
+    expect(outOfOrder.archive.dailyHonors.map((h) => h.dayLabel)).toEqual(['🌈 D2', '🌈 D5']);
+    // Nothing was DROPPED to achieve the order — the count the console shows the
+    // Admin is unmoved.
+    expect(outOfOrder.skippedHonors).toBe(0);
+
+    // The PREVIEW and the RECORD are the same expression, so the console cannot
+    // show one order and freeze another: the schedule's order and the sorted one
+    // produce byte-identical honour lists.
+    const inOrder = draftFor([mkDay(1), mkDay(4)]);
+    expect(outOfOrder.archive.dailyHonors).toEqual(inOrder.archive.dailyHonors);
+
+    // And the backstop agrees, so a later regression in the sort is refused on
+    // the near side of the quiesce rather than frozen. The boundary itself
+    // cannot ask this — rules have no iteration, so `completeArchiveRecord` gets
+    // no further than `dailyHonors is list`.
+    expect(writableArchiveRecord(outOfOrder.archive)).toBe(true);
+    expect(
+      writableArchiveRecord({
+        ...outOfOrder.archive,
+        dailyHonors: [...outOfOrder.archive.dailyHonors].reverse(),
+      }),
+    ).toBe(false);
+  });
+
   // #1151, Codex P2 on PR #1162. The Day-meta arm validates `displayName` and
   // `at` on a pin but NOT `uid` on its ADMIN branch (firestore.rules, the
   // `meta/{metaId}` create), and the Admin SDK beside it is constrained by no arm

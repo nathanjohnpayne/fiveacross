@@ -866,6 +866,31 @@ function writableDayHonor(honor: ArchivedDayHonor): boolean {
 }
 
 /**
+ * Is the frozen honours list in the order its own contract declares? (#1151,
+ * Codex P2 on PR #1162, round 8.)
+ *
+ * `EventArchive.dailyHonors` is documented as "ordered by Day index", and every
+ * archived surface renders it straight through, so the order is part of the
+ * record rather than a rendering preference — on the one write that can never be
+ * amended. `firestore.rules` cannot ask this at all: rules have no iteration and
+ * no way to relate one list element to the next, so `completeArchiveRecord` gets
+ * no further than `dailyHonors is list` (asserting it by unrolling all
+ * `MAX_DAYS` positions would cost more expressions than that arm has left, on a
+ * clause the writer can guarantee for free). That is exactly why it is asserted
+ * here: this predicate is the boundary's question PLUS the two things the
+ * boundary cannot see inside a list to ask, and this is the second of them.
+ *
+ * STRICTLY ascending, so it re-states the one-honour-per-Day contract in the
+ * same clause: a repeat is not merely out of order, it is a second honour for a
+ * Day that has one. The builder's dedupe already makes that true by
+ * construction; asserting both here is what refuses a later regression in the
+ * dedupe or in the sort before the quiesce rather than after it.
+ */
+function ascendingHonorDays(honors: readonly ArchivedDayHonor[]): boolean {
+  return honors.every((h, i) => i === 0 || honors[i - 1].dayIndex < h.dayIndex);
+}
+
+/**
  * `firestore.rules`' `standingsSizeMatches`, restated (#1151, Codex P2 on PR
  * #1162).
  *
@@ -907,17 +932,30 @@ function writableStandingsSize(archive: EventArchive): boolean {
  * caught on the same side of the quiesce as the ones that were.
  *
  * It mirrors `completeArchiveRecord` and its two helpers CLAUSE FOR CLAUSE, with
- * ONE deliberate exception: `dailyHonors`' entries are checked
- * (`writableDayHonor`). Rules cannot iterate a list, so the boundary does not
- * look inside either list — but the Day-meta arm that admits a pin does not
- * type-check its `uid` on the ADMIN branch, so an admin-written pin is the one
- * value in the record that reaches here unvalidated by anything. The rules would
- * accept such a record and the archived surfaces would then render an
- * `ArchivedDayHonor` that violates its own declared shape, permanently. A
- * stricter check is worth taking there BECAUSE the builder itself now guarantees
- * the clause it asserts — the discard below drops exactly the pins that would
- * fail it — so this refuses no record the writer can legitimately produce, only
- * one a later regression could.
+ * TWO deliberate exceptions, and both are the same exception: rules cannot
+ * iterate a list, so the boundary gets no further than `dailyHonors is list` and
+ * everything that list's own contract promises has to be asked here or nowhere.
+ *
+ * The first is each ENTRY's shape (`writableDayHonor`). The Day-meta arm that
+ * admits a pin does not type-check its `uid` on the ADMIN branch, so an
+ * admin-written pin is the one value in the record that reaches here unvalidated
+ * by anything. The rules would accept such a record and the archived surfaces
+ * would then render an `ArchivedDayHonor` that violates its own declared shape,
+ * permanently.
+ *
+ * The second is the list's ORDER (`ascendingHonorDays`, Codex P2 on PR #1162,
+ * round 8). `EventArchive.dailyHonors` declares itself ordered by Day index, and
+ * a stored schedule listing its Days out of order — `[{index: 4}, {index: 1}]`,
+ * unique indexes the schedule check accepts and should — froze them in schedule
+ * order, so every archived surface showed the Days out of chronological sequence
+ * forever or had to re-sort defensively. Strictly ascending, which re-states the
+ * one-honour-per-Day contract in the same clause.
+ *
+ * A stricter check is worth taking on both BECAUSE the builder itself now
+ * guarantees the clauses they assert — the discard below drops exactly the pins
+ * that would fail the first, and the sort beside it establishes the second — so
+ * this refuses no record the writer can legitimately produce, only one a later
+ * regression could.
  *
  * `standings`' rows stay unchecked, for the original reason unchanged: every one
  * of them is built by `toStandingRow` from a row `usableUid` has already
@@ -949,6 +987,7 @@ export function writableArchiveRecord(archive: EventArchive): boolean {
     && writableStandingsSize(archive)
     && Array.isArray(archive.dailyHonors)
     && archive.dailyHonors.every(writableDayHonor)
+    && ascendingHonorDays(archive.dailyHonors)
     && ((archive.firstBingo === null && archive.firstBingoRow === null)
       || (!!archive.firstBingo
         && !!archive.firstBingoRow
@@ -1254,13 +1293,36 @@ export function draftEventArchive(params: {
   // amended. The FIRST entry wins, which is the same entry `dayMetas.get(index)`
   // would have answered with — so the deduped record is exactly the one a
   // schedule naming that Day once would have produced.
+  //
+  // AND IN DAY-INDEX ORDER, whatever order the schedule lists its Days in (#1151,
+  // Codex P2 on PR #1162, round 8). `EventArchive.dailyHonors` declares itself
+  // "ordered by Day index" and every archived surface renders it straight
+  // through, so the order is part of the record rather than a rendering
+  // preference — and the record is permanent. `pinnedOrDerivedDailyHonors`
+  // flat-maps over the schedule's ENTRIES, so a stored schedule listing
+  // `[{index: 4}, {index: 1}]` — unique indexes, which `usableDayIndexes`
+  // accepts and should, since a non-contiguous schedule is a legitimate one —
+  // emitted D5's honour ahead of D2's and froze them that way. The scheduleless
+  // path never could: `perDayHonors` sorts its derived list already, so this
+  // makes the two paths agree rather than imposing something new on one of them.
+  //
+  // Sorted rather than refused, because there is nothing wrong with the
+  // schedule: `DayDef.index` is what names a Day, and the array position has
+  // never meant anything. And sorted HERE, on the deduped list, so the preview
+  // and the frozen record come out of the same expression — the console renders
+  // this builder's own output, and a record whose order the preview disagreed
+  // with would be the same class of drift `dayLabel` was stored to close.
   const seenHonorDays = new Set<number>();
-  const carriedHonors = selectedHonors.filter((h) => {
-    if (!supportedDayIndex(h.dayIndex) || !usableUid(h.uid)) return false;
-    if (seenHonorDays.has(h.dayIndex)) return false;
-    seenHonorDays.add(h.dayIndex);
-    return true;
-  });
+  const carriedHonors = selectedHonors
+    .filter((h) => {
+      if (!supportedDayIndex(h.dayIndex) || !usableUid(h.uid)) return false;
+      if (seenHonorDays.has(h.dayIndex)) return false;
+      seenHonorDays.add(h.dayIndex);
+      return true;
+    })
+    // On the array `filter` just minted, so `selectedHonors` is not touched —
+    // this builder is PURE and its caller's list is not its to reorder.
+    .sort((a, b) => a.dayIndex - b.dayIndex);
   const skippedHonors = selectedHonors.length - carriedHonors.length;
 
   const archive: EventArchive = {
