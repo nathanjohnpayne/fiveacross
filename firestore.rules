@@ -7,6 +7,23 @@ service cloud.firestore {
     function eventData(eventId) {
       return get(/databases/$(database)/documents/events/$(eventId)).data;
     }
+    // The Event this REQUEST will leave behind, for the one clause that has to
+    // ask about the resulting state rather than the stored one (#1151,
+    // CodeRabbit on PR #1162 — the Claims requeue arm, far below). `get()` reads
+    // the PRE-write document, so a batched write that changes the Event and
+    // something that depends on the Event is decided against an Event neither
+    // write leaves standing; `getAfter()` is the projection that closes it, the
+    // same way `reshuffleCounterPaired` uses it to require a paired counter
+    // write. It names the SAME document `isAdmin` has already read, which is
+    // what keeps it affordable — measured against the emulator, the projection
+    // costs the arm that calls it no additional access — but it is still asked
+    // only where the pre-write reading would be wrong. A batch that DELETES the
+    // Event makes it an evaluation error, which denies: the conservative
+    // direction, and the same fail-closed default every other `getAfter` here
+    // carries.
+    function eventDataAfter(eventId) {
+      return getAfter(/databases/$(database)/documents/events/$(eventId)).data;
+    }
     // Admin uids listed in the already-read event doc's `admins` array.
     function isAdminWithEvent(event) {
       return signedIn() && request.auth.uid in event.admins;
@@ -2244,18 +2261,46 @@ service cloud.firestore {
         // BEFORE it shuts the Event). Restating a stored `pending` is not a
         // transition and is left alone. On a live Event nothing changes at all.
         //
-        // It reuses the Event document `isAdmin` has already read rather than
-        // calling `eventClosedToPlay`, which would add an `exists()` on the same
-        // path: `isAdmin` fails closed on a missing Event document (`get()`
-        // returns null and reading `.data` errors), so the arm already requires
-        // the document that answers this question. The disjunction is ordered so
-        // an ordinary resolution short-circuits before the Event is consulted at
-        // all.
+        // AND THE EVENT IT ASKS ABOUT IS THE ONE THIS REQUEST LEAVES BEHIND
+        // (CodeRabbit on PR #1162). `get()` reads the PRE-write Event, and rules
+        // decide every document in a batch independently — so ONE atomic admin
+        // batch that set `archiving: true` and moved a terminal Claim to
+        // `pending` was judged against an Event that was still open, and both
+        // writes committed. What they committed together is exactly the state
+        // this clause exists to refuse: an Event closed to play with a Claim
+        // back in a queue whose Confirm/Reject pair can now only fail, which the
+        // flip is then free to make permanent (its transaction reads only the
+        // Event document, so a Claim in another collection neither conflicts
+        // with it nor retries it). `getAfter` asks the question of the RESULTING
+        // Event, which no single write and no batch can slip past.
+        //
+        // It answers the opposite direction honestly too: a batch that REOPENS
+        // play and requeues in one write is now allowed, because the Event it
+        // leaves behind is open and an open Event's queue may legitimately
+        // refill. Nothing downstream leans on that being barred — a reopen
+        // breaks the quiesce, and any flip still bound to it is refused by the
+        // flip arm's own stored-`archiving` and generation checks.
+        //
+        // The `getAfter` stays confined to THIS branch, exactly as the `get()`
+        // it replaces did: the disjunction is ordered so an ordinary resolution
+        // and an unchanged restatement both short-circuit before the Event is
+        // consulted at all, and only a Claim being made pending again pays for
+        // it. And beside the `isAdmin` read it costs nothing measurable — the
+        // two name the SAME document. Measured against the emulator on the
+        // branch that actually reaches the read (a terminal Claim moved to
+        // `pending` on a LIVE Event), the arm's aggregate access boundary is
+        // UNCHANGED: 20 distinct Events pass in one batch and 21 deny, with the
+        // pre-write read and with the projection alike.
+        //
+        // The projection replaces the pre-write read rather than joining it, so
+        // no `exists()` is spent either: `getAfter` on a missing or deleted
+        // Event errors and denies, which is the same fail-closed default
+        // `isAdmin` already gives this arm.
         allow update: if isAdmin(eventId)
           && (request.resource.data.get('status', '') != 'pending'
               || resource.data.get('status', '') == 'pending'
-              || (eventData(eventId).get('status', 'active') != 'archived'
-                  && eventData(eventId).get('archiving', false) != true));
+              || (eventDataAfter(eventId).get('status', 'active') != 'archived'
+                  && eventDataAfter(eventId).get('archiving', false) != true));
         allow delete: if isAdmin(eventId);
       }
 

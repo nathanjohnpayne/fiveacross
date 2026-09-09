@@ -1728,6 +1728,100 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
       await assertFails(reopenClaim());
     });
 
+    // …AND IT MAY NOT RIDE ALONG WITH THE CLOSE ITSELF (#1151, CodeRabbit on
+    // PR #1162). `get()` reads the PRE-write Event, so one atomic admin batch
+    // that shuts the Event and requeues a terminal Claim was decided against an
+    // Event that was still open — both writes committed, and the state they
+    // committed together is precisely the one the gate exists to refuse: closed
+    // to play, with a Claim back in a queue whose Confirm/Reject pair can now
+    // only fail. `getAfter` asks the question of the Event this request will
+    // LEAVE behind, which is the only reading a single write cannot slip past.
+    it('DENIES an atomic batch that closes the Event and requeues the Claim', async () => {
+      await seedClaim('confirmed');
+      const database = db(ADMIN);
+      const closeAndRequeue = writeBatch(database);
+      closeAndRequeue.update(doc(database, eventPath()), {
+        archiving: true,
+        archiveToken: QUIESCE,
+      });
+      closeAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertFails(closeAndRequeue.commit());
+
+      // The control that keeps the denial about the Claim riding along rather
+      // than about the shut: the very same close, alone, still lands.
+      const closeAlone = writeBatch(database);
+      closeAlone.update(doc(database, eventPath()), { archiving: true, archiveToken: QUIESCE });
+      await assertSucceeds(closeAlone.commit());
+    });
+
+    it('DENIES an atomic batch that FLIPS the Event and requeues the Claim', async () => {
+      // The flip's own arm is reachable only from an ALREADY-quiescing Event, so
+      // this batch was denied before the `getAfter` read as well — the stored
+      // Event the old clause read was already closing. Pinned anyway, because
+      // the two arms are independent and nothing else states that the record's
+      // own write cannot carry a requeue beside it.
+      await seedClaim('confirmed');
+      await quiesce();
+      const database = db(ADMIN);
+      const flipPayload = {
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archiving: false,
+        archivedUnder: QUIESCE,
+        archive: FROZEN_RECORD,
+      };
+      const flipAndRequeue = writeBatch(database);
+      flipAndRequeue.update(doc(database, eventPath()), flipPayload);
+      flipAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertFails(flipAndRequeue.commit());
+
+      const flipAlone = writeBatch(database);
+      flipAlone.update(doc(database, eventPath()), flipPayload);
+      await assertSucceeds(flipAlone.commit());
+    });
+
+    it('still lets the drain FINISH inside the closing batch', async () => {
+      // The resulting status is terminal, so the branch never reaches the Event
+      // at all: an Admin may empty the queue and shut the Event in one write.
+      await seedClaim('pending');
+      const database = db(ADMIN);
+      const drainAndClose = writeBatch(database);
+      drainAndClose.update(doc(database, eventPath()), {
+        archiving: true,
+        archiveToken: QUIESCE,
+      });
+      drainAndClose.update(doc(database, claimPath), { status: 'confirmed', resolvedBy: ADMIN });
+      await assertSucceeds(drainAndClose.commit());
+    });
+
+    it('leaves the requeue alone in a batch whose Event stays OPEN', async () => {
+      // An ordinary admin config write beside the correction: the Event this
+      // request leaves behind is open, so the correction is the same ordinary
+      // one the live case above already allows.
+      await seedClaim('confirmed');
+      const database = db(ADMIN);
+      const renameAndRequeue = writeBatch(database);
+      renameAndRequeue.update(doc(database, eventPath()), { name: 'Archive fixture (renamed)' });
+      renameAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertSucceeds(renameAndRequeue.commit());
+    });
+
+    it('accepts the requeue in a batch that REOPENS play', async () => {
+      // The other half of asking about the RESULTING Event, and the one the
+      // pre-write read got wrong in the opposite direction: a batch that puts
+      // play back leaves an OPEN Event, and a queue an Admin may legitimately
+      // refill. Any flip still bound to the quiesce this reopen breaks is
+      // refused by the flip arm's own stored-state and generation checks, so
+      // nothing downstream depends on the correction being barred here.
+      await seedClaim('confirmed');
+      await quiesce();
+      const database = db(ADMIN);
+      const reopenAndRequeue = writeBatch(database);
+      reopenAndRequeue.update(doc(database, eventPath()), { archiving: false });
+      reopenAndRequeue.update(doc(database, claimPath), { status: 'pending', resolvedBy: null });
+      await assertSucceeds(reopenAndRequeue.commit());
+    });
+
     it('still lets the drain FINISH from the closing state', async () => {
       // The window exists so the queue can be emptied. A pending Claim must
       // still reach a terminal status from here, or the gate would bar the very
