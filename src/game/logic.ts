@@ -1005,9 +1005,10 @@ export function withReadableRanking<T extends Rankable>(row: T): T {
  * IT SUBTRACTS ITS INPUTS, and that is deliberate. `players/{uid}` validates none
  * of these fields, so an unreadable stat reaching here is a thrown TypeError or a
  * `NaN` result — but the fix for that lives BEFORE the sort, not inside the
- * comparator: `withReadableRanking` normalises the live roster in `useLeaderboard`
- * and `withReadableDayStats` normalises the archive builder's own roster, each in
- * one pass over the rows they are about to rank. Both are pinned as the mechanism
+ * comparator: `withReadableDayStats` normalises both the live roster in
+ * `useLeaderboard` and the archive builder's own roster (calling
+ * `withReadableRanking` for the root fields and clamping the per-Day buckets
+ * beside them), in one pass over the rows they are about to rank. Both are pinned as the mechanism
  * by their own suites (`src/data/post-sailing-archive.test.ts` § "hands the
  * comparator a row it can order, rather than NaN" asserts the raw comparator's
  * `NaN` at that seam), and a coercion here as well would make the ORDER and the
