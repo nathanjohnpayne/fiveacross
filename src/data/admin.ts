@@ -883,7 +883,10 @@ export type ArchiveReadFailure = `read-failed:${ArchiveReadStage}`;
  *  the server re-read would not fit on the Event document; `record-unwritable`
  *  means that record is a shape `firestore.rules` would refuse, caught here
  *  rather than thrown at the boundary after the Event is already shut (#1151,
- *  Codex P1 on PR #1162); and `read-failed:<stage>` means one of the server
+ *  Codex P1 on PR #1162); `schedule-unusable` means the stored `days` carry an
+ *  entry with no usable Day index, which the converter tolerates (so the console
+ *  armed) but the raw post-quiesce read cannot address an honour pin with
+ *  (Codex P2 on PR #1162); and `read-failed:<stage>` means one of the server
  *  reads the record is built from did not answer at all (CodeRabbit Major, PR
  *  #1162). All of them write NOTHING (#1151). */
 export type ArchiveEventResult =
@@ -897,6 +900,7 @@ export type ArchiveEventResult =
   | 'finale-pending'
   | 'too-large'
   | 'record-unwritable'
+  | 'schedule-unusable'
   | ArchiveReadFailure;
 
 /**
@@ -1194,7 +1198,7 @@ export async function abandonArchive(
  * deliberately NOT swallowed: a failed write is a failed archive and keeps
  * surfacing as one.
  *
- * FIVE THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
+ * SEVEN THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
  * reports instead of throwing so the console can say what happened and, where
  * this call is what shut the Event, put play back (Codex P1+P2, PR #1139):
  *
@@ -1220,6 +1224,17 @@ export async function abandonArchive(
  *    plus the ones it writes — because the archive never lands on an empty one:
  *    an Event whose own `days` / `bannedUids` / `mostLovedPhoto` already fill the
  *    budget overflows on a perfectly ordinary record.
+ *  - `record-unwritable` — that same record is a shape `firestore.rules` would
+ *    REFUSE (#1151, Codex P1 on PR #1162). The builder's coercions are what make
+ *    that unreachable for any value a Player can write; asking the boundary's own
+ *    question here is what keeps a cause nobody anticipated from arriving as a
+ *    rejected write on an Event this call has already shut.
+ *  - `schedule-unusable` — the stored `days` carry an entry with no usable Day
+ *    index (Codex P2 on PR #1162). `eventConverter` tolerates such an entry, so
+ *    the console renders and ARMS over it; this raw read cannot address a Day's
+ *    honour pin without an index, and dereferencing one threw outside every
+ *    `archiveRead` wrapper — past the console's cleanup, on an Event already
+ *    shut.
  */
 export async function archiveEvent(
   token: number,
@@ -1330,7 +1345,33 @@ export async function archiveEvent(
   // neither wrapper ever rejects, the `Promise.all` cannot either: the two reads
   // still overlap on the wire, and neither can leave the other's rejection
   // unhandled.
-  const dayIndexes = (Array.isArray(preData.days) ? preData.days : []).map((d) => d.index);
+  // THE SCHEDULE IS NORMALISED BEFORE ITS INDEXES ARE READ (Codex P2 on PR
+  // #1162). This is a RAW read, and `EventDoc.days` is admin-written with no
+  // per-entry validation in its rules arm — an older seed, an Admin-SDK repair
+  // or a console hand edit can leave a `null` in the list. `eventConverter`
+  // tolerates exactly that (`migrateDayFields` treats a nullish entry as `{}`),
+  // so the Admin console renders, previews and ARMS over such an Event
+  // perfectly happily — and then this line dereferenced the entry directly and
+  // threw. The throw lands after `beginArchive` has closed play and outside
+  // every `archiveRead` wrapper, so `archiveEvent` REJECTED instead of
+  // returning a refusal, the console's automatic reopen never ran, and the
+  // Admin was left with a generic failure pill over an Event nobody could play
+  // on: the one outcome the two-write protocol exists to make impossible.
+  //
+  // Normalised through the converter's OWN helper rather than a local guard, so
+  // the raw read and the console agree about what a Day is — the same reason the
+  // record's derivations below run on `migrateDayFields` output.
+  const scheduleDays = (Array.isArray(preData.days) ? preData.days : []).map(migrateDayFields);
+  // …and an entry that still has no usable index is REFUSED rather than read.
+  // `migrateDayFields` defaults the fields it knows about; `index` is not one of
+  // them, because there is nothing to default a Day's identity to — it is the
+  // `days/{dayIndex}` path segment every honour pin below is addressed by, so a
+  // missing or fractional one would read a document at `days/undefined` and
+  // freeze whatever it found (or did not) as that Day's honour. A typed refusal
+  // is what the console's cleanup keys on, so this reopens play exactly as the
+  // read refusals do.
+  if (scheduleDays.some((d) => !Number.isInteger(d.index))) return 'schedule-unusable';
+  const dayIndexes = scheduleDays.map((d) => d.index);
   const [rosterRead, metaRead] = await Promise.all([
     archiveRead(() => getDocsFromServer(playersCol(eventId))),
     archiveRead(() =>
