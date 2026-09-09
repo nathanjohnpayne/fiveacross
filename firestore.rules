@@ -305,6 +305,34 @@ service cloud.firestore {
     // whole-record hole — `{status: 'archived', archivedAt}` with no `archive`
     // at all, or an empty map — which is irreversible and leaves the archived
     // surfaces on their live fallback while play is frozen (Codex P2, PR #1139).
+    //
+    // AND `is number` IS NOT ENOUGH FOR THE TOP-LEVEL NUMBERS EITHER (Codex P2
+    // on PR #1162). The pairing above stopped admitting `NaN` and the infinities
+    // inside the First-BINGO halves and left the record's own two numbers still
+    // admitting them, so a direct admin flip could persist `playerCount: NaN` or
+    // `freezeAt: Infinity` — and the flip is irreversible and locks `archive`,
+    // so the archived-state summary this console already renders would read
+    // "NaN players" for the life of the Event.
+    //
+    //   - `playerCount` is a non-negative INT, which is more than finiteness and
+    //     is exactly what the writer guarantees: it is `ranked.length`, a count
+    //     the builder COMPUTES rather than copies off a Player row, so it stands
+    //     on the same footing as `rank` above rather than on the deliberately
+    //     permissive one the copied counts stand on. The JS SDK stores an
+    //     integral number as a Firestore integer, which is what lets `is int` be
+    //     asked of it at all.
+    //   - `freezeAt` is `finiteArchiveNumber` or null, the same bound the pair's
+    //     instants carry — `null` stays legitimate (an Event with no Standings
+    //     Freeze). It is the one number in the record that needs no Player to
+    //     misbehave: it resolves from `frozenAt`, which the Admin SDK writes and
+    //     no arm here constrains, so `src/data/eventArchive.ts` clamps it for
+    //     the same reason it clamps the copied stats.
+    //
+    // `archivedAt` needs no clause of its own: `== stamp` below ties it to the
+    // document's own stamp, and the arm that calls this has already required
+    // THAT to be a bounded, positive number. `eventName` is a string-or-null,
+    // `standings` and `dailyHonors` are lists whose contents Rules cannot walk.
+    // Those are every top-level key `EventArchive` declares.
     function completeArchiveRecord(archive, stamp) {
       return archive is map
         // The Event's own name, frozen with the standings it titles (#1151,
@@ -314,10 +342,11 @@ service cloud.firestore {
         // stored value for an Event that had no name.
         && (archive.eventName == null || archive.eventName is string)
         && archive.standings is list
-        && archive.playerCount is number
+        && archive.playerCount is int
+        && archive.playerCount >= 0
         && archive.dailyHonors is list
         && firstBingoPairComplete(archive)
-        && (archive.freezeAt == null || archive.freezeAt is number)
+        && (archive.freezeAt == null || finiteArchiveNumber(archive.freezeAt))
         && archive.archivedAt == stamp;
     }
     // #804 deploy 1: freeze the per-Event rollout switch before any production
