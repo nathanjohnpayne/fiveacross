@@ -927,6 +927,80 @@ describe('ArchiveEvent — the pending-claim drain gate (#1151)', () => {
     await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event'));
   });
 
+  it('shuts the closing controls while the automatic reopen is in flight, and gives them back', async () => {
+    // Codex P2 on PR #1165, round 5. Skipping the cleanup for a SUPERSEDED
+    // invocation closes the interval before the reopen is issued; it cannot
+    // touch the one after. The liveness check passes, `abandonArchive` goes out,
+    // and the closing surface this action's own quiesce put on screen is still
+    // offering **Freeze the record** — so a newer freeze can be started against
+    // the generation this handler is a round trip away from lifting, and a
+    // sequence number cannot recall a write already issued. The surface stops
+    // offering the race for as long as it lasts, and says which write it is
+    // waiting on.
+    let settleReopen: (value: unknown) => void = () => {};
+    H.archiveEvent.mockResolvedValueOnce('config-changed');
+    H.abandonArchive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleReopen = resolve;
+        }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
+    // The closing snapshot this action's own quiesce produced — the surface the
+    // Admin is looking at while the reopen is outstanding.
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled(),
+    );
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeDisabled();
+    expect(screen.getByText(/until that write settles/)).toBeInTheDocument();
+
+    // …and the moment it settles they are the Admin's again. `quiesce-changed`
+    // rather than `reopened` so the Event stays CLOSING and the same two
+    // controls are still the ones on screen to assert against.
+    settleReopen('quiesce-changed');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled(),
+    );
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.queryByText(/until that write settles/)).not.toBeInTheDocument();
+  });
+
+  it('shuts Close play and the armed confirm row too, for the surface a concurrent reopen swaps in', async () => {
+    // The same window, reached from the other side (Codex P2 on PR #1165, round
+    // 5). Another Admin lifting the quiesce while this cleanup is outstanding
+    // puts the OPEN surface back — with the confirm row still armed, because
+    // disarming is held to the same liveness check — so **Close play** and
+    // **Archive now** are inside the window as well, and a quiesce taken by
+    // either is one the in-flight reopen is about to lift.
+    let settleReopen: (value: unknown) => void = () => {};
+    H.archiveEvent.mockResolvedValueOnce('config-changed');
+    H.abandonArchive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleReopen = resolve;
+        }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Close play' })).toBeDisabled(),
+    );
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+
+    // Settling gives **Close play** back; the confirm row goes with the action
+    // that armed it, which disarms itself on the way out.
+    settleReopen('quiesce-changed');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close play' })).toBeEnabled());
+    expect(screen.queryByText(/until that write settles/)).not.toBeInTheDocument();
+  });
+
   it('leaves the Event shut when the quiesce it read was taken over by another', async () => {
     // `quiesce-changed` is deliberately outside the reopen set: the closing state
     // now in force is a DIFFERENT one, so clearing it would reopen an Event

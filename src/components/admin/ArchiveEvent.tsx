@@ -157,6 +157,14 @@ const SCHEDULE_UNUSABLE_BLOCKED_COPY = `One of the days in the schedule above is
 const REOPEN_SUPERSEDED_COPY =
   ' Play was left closed: the Event has been shut again by another archive, and that closing state is not this one to lift. Reopen play below if that archive is not going ahead.';
 
+/** Why every lifecycle control is briefly unavailable (Codex P2 on PR #1165,
+ *  round 5). The automatic reopen is a write in flight against the very quiesce
+ *  the controls beside it act on, and an issued write cannot be recalled — so
+ *  the surface stops OFFERING the race for the moment it lasts, and says which
+ *  write it is waiting on rather than looking inexplicably dead. */
+const CLEANUP_IN_FLIGHT_COPY =
+  'Reopening play after the refused freeze—nothing can be closed, frozen or reopened until that write settles, or it would be committing against a quiesce this console is in the middle of lifting.';
+
 /** One sentence for all four read refusals, differing only in WHICH read did not
  *  answer (CodeRabbit Major, PR #1162). Written once and applied per stage
  *  rather than restated four times: the Admin's remedy is identical—the freeze
@@ -507,6 +515,35 @@ export default function ArchiveEvent({
   // replacing it: the Admin needs both halves — why nothing was frozen, and why
   // play is nonetheless still closed.
   const [reopenSuperseded, setReopenSuperseded] = useState(false);
+  // WHILE THE AUTOMATIC REOPEN IS IN FLIGHT, EVERY LIFECYCLE CONTROL IS SHUT
+  // (Codex P2 on PR #1165, round 5).
+  //
+  // Skipping the cleanup for a SUPERSEDED invocation closes the case where the
+  // newer action starts before the reopen is issued; it cannot touch the
+  // interval after. The liveness check passes, `abandonArchive` goes out, and
+  // the closing surface this action's own quiesce put on screen is still
+  // offering **Freeze the record** — so an Admin can start a newer freeze
+  // against the generation this handler is a round trip away from lifting. That
+  // newer action bumps the sequence number, but a sequence number cannot recall
+  // an issued write: if the reopen commits first it clears the same generation
+  // and the newer `archiveEvent` comes back `not-closing`, overriding the intent
+  // the Admin most recently expressed. Neither the generation binding nor
+  // `created` can see it — the token matches and this handler did create it.
+  //
+  // So the surface stops OFFERING the race for as long as it lasts. The
+  // alternative — letting a newer action AWAIT the pending cleanup — would keep
+  // the click but lose the report: `act` bumps the sequence number the instant
+  // the button is pressed, which discards the refused action's own message, so
+  // the Admin would be left with a reopened Event and no explanation of why
+  // nothing was frozen, and the newer outcome would then be judged against a
+  // phase the deliberate wait itself moved. Disabling keeps both reports true:
+  // the refusal lands as it stands, and the next click starts from a settled
+  // Event with its own honest starting phase.
+  //
+  // Cleared in a `finally` and NOT behind `isCurrent()`: this describes a write
+  // that is genuinely outstanding, so a rejected reopen has to give the controls
+  // back too, and a flag that could stick would leave the console dead.
+  const [cleanupInFlight, setCleanupInFlight] = useState(false);
   useEffect(() => {
     setResult((current) => {
       if (!current || phase === current.from) return current;
@@ -685,7 +722,16 @@ export default function ArchiveEvent({
   // names a repair the Admin can make on the surface they are already looking at,
   // and it is upstream of the honours the sentence below is about: the Days those
   // pins would be read from are the ones the schedule cannot name.
-  const blockedReason = scheduleUnusable
+  //
+  // AND A CLEANUP WRITE IN FLIGHT COMES AHEAD OF EVEN THAT (Codex P2 on PR
+  // #1165, round 5). Every other reason on this list is a state of the Event or
+  // its inputs that the Admin either waits out or repairs; this one is a write
+  // THIS console issued moments ago and is about to hear back from. It is the
+  // shortest-lived and the most immediate, and it is the reason the controls
+  // beside it are disabled, so it is the sentence to show while it holds.
+  const blockedReason = cleanupInFlight
+    ? CLEANUP_IN_FLIGHT_COPY
+    : scheduleUnusable
     ? `${SCHEDULE_UNUSABLE_BLOCKED_COPY}${nothingClosedYet}`
     : dayMetasFailed && !dayMetasConfirmed
       ? `${HONORS_UNREADABLE_COPY}${nothingClosedYet}`
@@ -770,7 +816,19 @@ export default function ArchiveEvent({
     // already replaced, and its refusal is dropped exactly as its outcome is.
     if (REOPEN_AFTER.has(outcome) && isCurrent()) {
       if (created) {
-        const reopened = await abandonArchive(token ?? undefined, eventId);
+        // …AND THE CONTROLS ARE SHUT FOR THE LENGTH OF IT (Codex P2 on PR #1165,
+        // round 5). The check above stops a superseded invocation from writing;
+        // it cannot stop the Admin from starting a newer freeze in the interval
+        // between this check passing and the reopen committing. See the flag's
+        // own note beside `reopenSuperseded` for why the controls are closed
+        // here rather than made to queue behind this promise.
+        setCleanupInFlight(true);
+        let reopened: AbandonArchiveResult;
+        try {
+          reopened = await abandonArchive(token ?? undefined, eventId);
+        } finally {
+          setCleanupInFlight(false);
+        }
         if (isCurrent()) setReopenSuperseded(reopened === 'quiesce-changed');
         // WHERE THE EVENT ACTUALLY ENDS UP (Codex P2 on PR #1162). The reopen
         // this handler just performed put it back OPEN, so the refusal is a
@@ -821,6 +879,12 @@ export default function ArchiveEvent({
             // in front of them, not an automatic cleanup of a call that already
             // failed — the token binding exists to stop a STALE handler
             // reopening a newer quiesce, and there is no stale handler here.
+            //
+            // Except while this console's OWN cleanup is outstanding (Codex P2
+            // on PR #1165, round 5): a reopen issued beside a reopen already in
+            // flight is two writes racing for one generation, and the second one
+            // reports on a state the first is about to change under it.
+            disabled={cleanupInFlight}
             onAction={() => act(() => abandonArchive())}
           >
             Reopen play
@@ -828,7 +892,12 @@ export default function ArchiveEvent({
           <AsyncButton
             ariaLabel="Freeze the record now"
             failureLabel="Freeze failed—try again."
-            disabled={!ready}
+            // …and shut outright while this console's automatic reopen is in
+            // flight (Codex P2 on PR #1165, round 5): this is the control the
+            // refused action's own closing snapshot put on screen, and the
+            // freeze it would start is the one the outstanding reopen is about
+            // to fail with `not-closing`.
+            disabled={!ready || cleanupInFlight}
             // The closing-state surface reaches the flip too, and deliberately
             // does NOT reopen on a refusal: that Event was already shut when the
             // Admin arrived, and **Reopen play** sits beside the button they
@@ -858,6 +927,11 @@ export default function ArchiveEvent({
             <AsyncButton
               ariaLabel="Close play"
               failureLabel="Closing play failed—try again."
+              // Shut while this console's automatic reopen is outstanding (Codex
+              // P2 on PR #1165, round 5). This surface is reachable inside that
+              // window — another Admin reopening play swaps it in — and a quiesce
+              // taken here would be one the in-flight reopen is about to lift.
+              disabled={cleanupInFlight}
               onAction={() => act(async () => (await beginArchive()).result)}
             >
               Close play
@@ -921,8 +995,11 @@ export default function ArchiveEvent({
                 failureLabel="Archive failed—try again."
                 // Re-checked at the second tap, not only at the first: a claim
                 // can arrive, or a subscription re-key, while the confirm row is
-                // armed.
-                disabled={!ready}
+                // armed. The armed row survives into the cleanup window too —
+                // disarming is held to the same liveness check — so it is shut
+                // there for the same reason **Freeze the record** is (Codex P2
+                // on PR #1165, round 5).
+                disabled={!ready || cleanupInFlight}
                 // Disarming is this invocation's own housekeeping, so it is held
                 // to the same liveness check its outcome and its cleanup are
                 // (CodeRabbit on PR #1165). A superseded action still runs to
