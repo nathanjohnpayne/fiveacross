@@ -646,9 +646,11 @@ export async function deleteProof(
   //
   // BEST EFFORT: `proofMediaGeneration` swallows its own failures and answers
   // `null`, and a null is simply omitted from the row. A takedown must never
-  // fail because a metadata read did, and a row without a generation is exactly
-  // the row this ticket shipped originally — still guarded by the sweeper's
-  // Proof-absence check.
+  // fail because a metadata read did — and a row without a generation is still
+  // never swept by bare path, because the sweeper reads the object's generation
+  // under its own sweep lease and binds the delete to that (#1153, Codex round 6
+  // P2). What this read buys is a binding to the object as it stood at DELETE
+  // time rather than at sweep time, plus one saved server round trip.
   let generation: string | null = null;
   if (storagePath && proofMediaOwnerUid(storagePath, eventId, id)) {
     generation = await proofMediaGeneration(storagePath);
@@ -886,6 +888,14 @@ export async function deleteProof(
         // writer and reader could drift is the failure the single shared domain
         // contract exists to prevent — and the rules would answer the drift with
         // a denial inside the takedown's own transaction.
+        //
+        // THE CONTRACT'S TWO LEASE FIELDS ARE NOT THIS WRITER'S (#1153, Codex
+        // round 6 P2). `leaseId` / `leaseAt` are the sweeper's claim on the row
+        // and only the Admin SDK may write them; the create arm's `hasOnly` does
+        // not admit either, so a client that added one would be DENIED inside
+        // this transaction and fail the whole takedown. They are declared on the
+        // shared shape because the sweeper reads them, not because anything here
+        // does.
         const tombstone: ProofStorageDeleteDoc = {
           storagePath: revokePath,
           uid: ownerUid,

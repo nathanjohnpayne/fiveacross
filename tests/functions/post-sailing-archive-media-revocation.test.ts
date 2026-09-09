@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  SWEEP_LEASE_TTL_MS,
   confinedProofMediaPath,
+  hasActiveSweepLease,
   isGenerationMismatch,
   isObjectAlreadyGone,
   isSameRevocation,
@@ -8,6 +10,7 @@ import {
   sameFirestoreValue,
   type ProofStorageDeleteInput,
   type RevokeProofMediaDeps,
+  type SweepLease,
 } from '../../functions/src/proofStorageDeletes';
 
 // specs/post-sailing-archive.md § "Moderation is not a gameplay write", the
@@ -23,6 +26,9 @@ import {
 // Every seam is a fake; no Functions runtime, no emulator, no bucket. What is
 // asserted throughout is the ORDERING contract — the tombstone is retired only
 // after the object is actually gone, never on the strength of an attempt.
+
+/** The generation the fake bucket reports when a case does not care which. */
+const SWEPT_GENERATION = '1700000000000900';
 
 function makeDeps(
   deleteObject: (storagePath: string) => Promise<void>,
@@ -42,16 +48,34 @@ function makeDeps(
   // between the pre-check and the retirement. A case that passes something else
   // is modelling exactly the gap this dep exists to close.
   atRetirement?: () => Promise<ProofStorageDeleteInput | null>,
+  // The sweep-lease seams (#1153, Codex round 6 P2). `objectGeneration` is what
+  // the bucket reports for a row that recorded none — `null` models an object
+  // that is already gone by the time the metadata read runs.
+  leaseOptions: { objectGeneration?: string | null; now?: () => number } = {},
 ): RevokeProofMediaDeps & {
   objectDeletes: Array<{ storagePath: string; generation: string | null }>;
+  generationReads: string[];
+  claims: SweepLease[];
   tombstoneDeletes: number;
   retirementRefusals: number;
   warnings: Array<{ message: string; context: Record<string, unknown> }>;
 } {
   const objectDeletes: Array<{ storagePath: string; generation: string | null }> = [];
+  const generationReads: string[] = [];
+  const claims: SweepLease[] = [];
   const warnings: Array<{ message: string; context: Record<string, unknown> }> = [];
+  // The lease this delivery holds once it has claimed the row. The row-reading
+  // seams above are plain callbacks rather than a store, so the harness OVERLAYS
+  // the granted lease onto whatever they hand back — but only on a row that does
+  // not already declare one, so a case can still put somebody else's lease on
+  // the row and have it stick.
+  let granted: { leaseId: string; leaseAt: number } | null = null;
+  const leased = (row: ProofStorageDeleteInput | null): ProofStorageDeleteInput | null =>
+    row !== null && granted !== null && row.leaseId === undefined ? { ...row, ...granted } : row;
   const deps = {
     objectDeletes,
+    generationReads,
+    claims,
     tombstoneDeletes: 0,
     retirementRefusals: 0,
     warnings,
@@ -60,23 +84,48 @@ function makeDeps(
     // ordinary cases here and still mis-handle a real Firestore snapshot.
     currentTombstone: currentTombstone ?? (async () => ({ ...ownRow })),
     proofExists,
-    deleteObject: async (storagePath: string, generation: string | null) => {
+    // The REAL claim transaction, modelled: re-read, re-ask both pre-check
+    // questions, and refuse a row another delivery still holds.
+    claimSweepLease: async (identity: ProofStorageDeleteInput, lease: SweepLease) => {
+      claims.push(lease);
+      const standing = leased(await deps.currentTombstone());
+      if (standing === null || !isSameRevocation(standing, identity)) return 'lost' as const;
+      if (hasActiveSweepLease(standing, lease.at) && standing.leaseId !== lease.id) {
+        return 'held' as const;
+      }
+      granted = { leaseId: lease.id, leaseAt: lease.at };
+      return 'claimed' as const;
+    },
+    currentObjectGeneration: async (storagePath: string) => {
+      generationReads.push(storagePath);
+      return leaseOptions.objectGeneration === undefined
+        ? SWEPT_GENERATION
+        : leaseOptions.objectGeneration;
+    },
+    deleteObject: async (storagePath: string, generation: string) => {
       objectDeletes.push({ storagePath, generation });
       await deleteObject(storagePath);
     },
     // The REAL compare-and-delete, modelled: re-read the row and delete it only
-    // while it is still the one this delivery is holding. `index.ts` runs this
-    // inside `db.runTransaction`; here the re-read is a seam so a case can put a
-    // DIFFERENT row there and prove the retirement declines.
-    retireTombstoneIfSame: async (identity: ProofStorageDeleteInput) => {
-      const standing = await (atRetirement ?? deps.currentTombstone)();
-      if (standing === null || !isSameRevocation(standing, identity)) {
+    // while it is still the one this delivery is holding, under this delivery's
+    // own lease. `index.ts` runs this inside `db.runTransaction`; here the
+    // re-read is a seam so a case can put a DIFFERENT row there and prove the
+    // retirement declines.
+    retireTombstoneIfSame: async (identity: ProofStorageDeleteInput, leaseId: string | null) => {
+      const standing = leased(await (atRetirement ?? deps.currentTombstone)());
+      const ours =
+        standing !== null &&
+        isSameRevocation(standing, identity) &&
+        (leaseId === null || standing.leaseId === leaseId);
+      if (!ours) {
         deps.retirementRefusals += 1;
         return false;
       }
       deps.tombstoneDeletes += 1;
       return true;
     },
+    now: leaseOptions.now ?? (() => 1_000_000),
+    newLeaseId: () => `lease-${claims.length + 1}`,
     warn: (message: string, context: Record<string, unknown>) => {
       warnings.push({ message, context });
     },
@@ -107,9 +156,9 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     });
     const wrapped: RevokeProofMediaDeps = {
       ...deps,
-      retireTombstoneIfSame: async (identity) => {
+      retireTombstoneIfSame: async (identity, leaseId) => {
         order.push('tombstone');
-        return await deps.retireTombstoneIfSame(identity);
+        return await deps.retireTombstoneIfSame(identity, leaseId);
       },
     };
 
@@ -341,15 +390,20 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.tombstoneDeletes).toBe(0);
   });
 
-  it('asks whether the debt is still owed BEFORE the Proof and BEFORE the bucket', async () => {
+  it('asks whether the debt is still owed BEFORE the Proof and BEFORE the bucket, and LEASES before either', async () => {
     // Order is the claim, not merely presence: the row is re-read on EVERY
     // delivery and ahead of everything else, because a retired row makes every
     // later question one about somebody else's object. The ordinary delivery is
     // otherwise unchanged — object first, tombstone after.
+    //
+    // And the lease is taken before the Proof read, the metadata read and the
+    // delete alike (#1153, Codex round 6 P2). That is the whole point of it:
+    // every read that authorises the bucket call has to happen INSIDE the window
+    // no other delivery can be working in, not before it.
     const order: string[] = [];
     const deps = makeDeps(
       async () => {
-        order.push('object');
+        order.push('object-delete');
       },
       async () => {
         order.push('proof');
@@ -362,21 +416,33 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     );
     const wrapped: RevokeProofMediaDeps = {
       ...deps,
-      retireTombstoneIfSame: async (identity) => {
+      claimSweepLease: async (identity, lease) => {
+        order.push('lease-claim');
+        return await deps.claimSweepLease(identity, lease);
+      },
+      currentObjectGeneration: async (storagePath) => {
+        order.push('object-generation');
+        return await deps.currentObjectGeneration(storagePath);
+      },
+      retireTombstoneIfSame: async (identity, leaseId) => {
         order.push('tombstone-retire');
-        return await deps.retireTombstoneIfSame(identity);
+        return await deps.retireTombstoneIfSame(identity, leaseId);
       },
     };
 
     await revokeProofMedia(wrapped, TARGET);
 
-    // The trailing `tombstone-read` is the RETIREMENT's own re-read (#1153,
-    // Codex round 4 P2): retiring is a compare-and-delete against the row as it
-    // stands at that moment, not a delete authorised by the pre-check above.
+    // The `tombstone-read` inside `lease-claim` and the trailing one are the
+    // claim's and the RETIREMENT's own re-reads (#1153, Codex rounds 4 P2 and 6
+    // P2): both are compare-and-swap against the row as it stands at that moment,
+    // not operations authorised by the pre-check at the top.
     expect(order).toEqual([
       'tombstone-read',
+      'lease-claim',
+      'tombstone-read',
       'proof',
-      'object',
+      'object-generation',
+      'object-delete',
       'tombstone-retire',
       'tombstone-read',
     ]);
@@ -425,28 +491,74 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     expect(deps.tombstoneDeletes).toBe(0);
   });
 
-  it('binds the delete to the generation the row recorded, and to nothing when it recorded none', async () => {
+  it('binds the delete to the generation the row recorded, and asks the bucket when it recorded none', async () => {
     const bound = makeDeps(async () => {}, undefined, undefined, BOUND.tombstone);
     await revokeProofMedia(bound, BOUND);
     expect(bound.objectDeletes).toEqual([
       { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: '1700000000000001' },
     ]);
+    // The row named the object, so nothing is asked of the bucket first.
+    expect(bound.generationReads).toEqual([]);
 
     // A row written before this existed, or by a client whose metadata read
-    // failed, still revokes by path — the pre-generation behaviour, unchanged.
+    // failed, is NOT revoked by bare path (#1153, Codex round 6 P2). It reads the
+    // generation the object carries right now — under the lease claimed above,
+    // so nothing can replace the object between the read and the delete — and
+    // binds the delete to THAT.
     const unbound = makeDeps(async () => {});
     await revokeProofMedia(unbound, TARGET);
+    expect(unbound.generationReads).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
     expect(unbound.objectDeletes).toEqual([
-      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: null },
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: SWEPT_GENERATION },
     ]);
 
     // A non-string generation is no generation: the row is client-written and
     // this handler holds a bucket-wide delete, so a value it cannot use is
-    // ignored rather than passed through to the precondition.
+    // ignored rather than passed through to the precondition — and the bucket is
+    // asked instead, exactly as for an absent one.
     const junkRow = { ...TARGET.tombstone, generation: 17 };
     const junk = makeDeps(async () => {}, undefined, undefined, junkRow);
     await revokeProofMedia(junk, { ...TARGET, tombstone: junkRow });
-    expect(junk.objectDeletes[0].generation).toBeNull();
+    expect(junk.objectDeletes[0].generation).toBe(SWEPT_GENERATION);
+  });
+
+  it('NEVER issues an unbound delete — the seam cannot even express one (#1153)', async () => {
+    // Codex round 6 P2, stated as an invariant over every path that reaches the
+    // bucket rather than case by case. `null` was the shape a stale delivery used
+    // to take a live re-post's media with; there is no call left that produces it.
+    for (const row of [TARGET.tombstone, BOUND.tombstone, { ...TARGET.tombstone, generation: '' }]) {
+      const deps = makeDeps(async () => {}, undefined, undefined, row);
+      await revokeProofMedia(deps, { ...TARGET, tombstone: row });
+      expect(deps.objectDeletes).toHaveLength(1);
+      expect(typeof deps.objectDeletes[0].generation).toBe('string');
+      expect(deps.objectDeletes[0].generation).not.toBe('');
+    }
+  });
+
+  it('retires WITHOUT a bucket call when the object is already gone at the metadata read', async () => {
+    // The ordinary discharged revocation on a generation-less row: the deleting
+    // client's own inline Storage delete won the race, so there is nothing at the
+    // path to bind a delete to. That is success, not a failure to retry — the same
+    // answer the 404 from the delete itself has always produced.
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket delete must not be reached');
+      },
+      undefined,
+      undefined,
+      TARGET.tombstone,
+      undefined,
+      { objectGeneration: null },
+    );
+
+    await revokeProofMedia(deps, TARGET);
+
+    expect(deps.generationReads).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(1);
+    expect(deps.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation: the object was already gone before the delete',
+    ]);
   });
 
   it('LEAVES a re-uploaded object alone when the generation no longer matches', async () => {
@@ -483,6 +595,11 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     //
     // So the identity is re-checked INSIDE the transaction that deletes: B is
     // left exactly where it is, its own delivery still owed.
+    //
+    // Since the sweep lease (Codex round 6 P2) this whole sequence needs A's
+    // lease to have EXPIRED first — A2 cannot claim a row A still holds. It is
+    // still reachable, which is why the compare-and-delete stays: a lease is
+    // wall-clock liveness, and an overtaken holder must still be refused.
     const rowB = { ...BOUND.tombstone, requestedAt: 9000, generation: '1700000000000002' };
     const deps = makeDeps(
       async () => {
@@ -530,6 +647,8 @@ describe('revokeProofMedia — the server finishes a revocation the client could
         {
           currentTombstone: async () => ({ ...TARGET.tombstone }),
           proofExists: async () => false,
+          claimSweepLease: async () => 'claimed',
+          currentObjectGeneration: async () => SWEPT_GENERATION,
           deleteObject: async () => {
             throw new Error('the bucket must not be reached');
           },
@@ -541,6 +660,339 @@ describe('revokeProofMedia — the server finishes a revocation the client could
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+// A FAITHFUL LITTLE WORLD: one Firestore row, one bucket object, shared by every
+// delivery in a case (#1153, Codex round 6 P2). The callback harness above is
+// enough for a single delivery's decision table, but the hazard this suite is
+// about is two deliveries INTERLEAVING — so these cases need state that one
+// delivery's writes are visible to the other's reads, exactly as Firestore and
+// Cloud Storage behave.
+function makeWorld(initial: {
+  row: ProofStorageDeleteInput | null;
+  object: { generation: string } | null;
+  proofExists?: boolean;
+  now?: number;
+}) {
+  const world = {
+    row: initial.row,
+    object: initial.object,
+    proofExists: initial.proofExists ?? false,
+    now: initial.now ?? 1_000_000,
+  };
+
+  /** One delivery's seams, all bound to the shared world above. */
+  function delivery(leaseId: string): RevokeProofMediaDeps & {
+    objectDeletes: Array<{ storagePath: string; generation: string | null }>;
+    warnings: Array<{ message: string; context: Record<string, unknown> }>;
+  } {
+    const objectDeletes: Array<{ storagePath: string; generation: string | null }> = [];
+    const warnings: Array<{ message: string; context: Record<string, unknown> }> = [];
+    return {
+      objectDeletes,
+      warnings,
+      // Firestore hands back a fresh object per read, so nothing here can be
+      // mutated through a reference a delivery is still holding.
+      currentTombstone: async () => (world.row === null ? null : structuredClone(world.row)),
+      proofExists: async () => world.proofExists,
+      claimSweepLease: async (identity, lease) => {
+        const row = world.row;
+        if (row === null) return 'lost';
+        if (!isSameRevocation(row, identity)) return 'lost';
+        if (hasActiveSweepLease(row, lease.at) && row.leaseId !== lease.id) return 'held';
+        world.row = { ...row, leaseId: lease.id, leaseAt: lease.at };
+        return 'claimed';
+      },
+      currentObjectGeneration: async () => world.object?.generation ?? null,
+      // The bucket, modelled — INCLUDING the shape a delete with no generation
+      // takes, which is what makes a reverted fix visibly destroy the wrong
+      // bytes rather than quietly no-op. `ifGenerationMatch` is a precondition,
+      // and omitting it means "whatever answers to this name".
+      deleteObject: async (storagePath, generation) => {
+        objectDeletes.push({ storagePath, generation: generation ?? null });
+        if (world.object === null) throw Object.assign(new Error('No such object'), { code: 404 });
+        if (generation != null && world.object.generation !== generation) {
+          throw Object.assign(new Error('Precondition Failed'), { code: 412 });
+        }
+        world.object = null;
+      },
+      retireTombstoneIfSame: async (identity, id) => {
+        const row = world.row;
+        if (row === null) return false;
+        if (!isSameRevocation(row, identity)) return false;
+        if (id !== null && row.leaseId !== id) return false;
+        world.row = null;
+        return true;
+      },
+      now: () => world.now,
+      newLeaseId: () => leaseId,
+      warn: (message, context) => {
+        warnings.push({ message, context });
+      },
+    };
+  }
+
+  return { world, delivery };
+}
+
+describe('the sweep lease — exclusive processing through the bucket delete (#1153)', () => {
+  // Codex round 6 P2. The compare-and-delete of round 4 protected the
+  // RETIREMENT; the bucket call in front of it was still authorised by reads
+  // taken before it, and nothing serialised two deliveries across it.
+  const UNBOUND = { storagePath: 'proofs/med-2026/alice/proof-1.jpg', uid: 'alice', requestedAt: 1000 };
+
+  it('leaves a re-posted Proof’s LIVE media alone when a stale duplicate resumes mid-sweep', async () => {
+    // THE FINDING, exactly as reported. The row carries no `generation` because
+    // the deleting client's metadata read failed, which is the case the old code
+    // fell back to an unconditioned path delete for.
+    //
+    // Duplicate deliveries A and A2 both pass the two Firestore pre-checks; A
+    // pauses; A2 deletes the old object and retires the row; the rules free the
+    // Proof id, which is re-posted with NEW media uploaded to the very same path
+    // before its Proof document is created — so the Proof read is still false.
+    // A then resumes into the delete. Under the old code that delete was
+    // unconditioned and took the replacement's bytes.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const a = delivery('lease-A');
+    const a2 = delivery('lease-A2');
+
+    // A's pre-check read is where it pauses. Everything the world does while it
+    // is paused happens INSIDE that await, which is the interleaving.
+    const aReads = a.currentTombstone;
+    const paused: RevokeProofMediaDeps = {
+      ...a,
+      currentTombstone: async () => {
+        const seen = await aReads();
+        await revokeProofMedia(a2, { ...TARGET, tombstone: { ...UNBOUND } });
+        // The freed id, re-posted: new bytes at the same name.
+        world.object = { generation: 'gen-B' };
+        return seen;
+      },
+    };
+
+    await revokeProofMedia(paused, { ...TARGET, tombstone: { ...UNBOUND } });
+
+    // A2 did its job: the ORIGINAL object went and the row was retired.
+    expect(paths(a2.objectDeletes)).toEqual(['proofs/med-2026/alice/proof-1.jpg']);
+    // And A, resuming, touched nothing at all — it never got the lease, because
+    // there was no longer a row of its own to claim.
+    expect(a.objectDeletes).toEqual([]);
+    expect(world.object).toEqual({ generation: 'gen-B' });
+    expect(a.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation abandoned: the row changed before the sweep lease was taken',
+    ]);
+  });
+
+  it('DEFERS a second delivery while the first still holds the lease — bucket and row untouched', async () => {
+    // The narrower interleaving, where A has already CLAIMED before A2 arrives.
+    // A2 must not delete, must not retire, and must not steal the lease: A is
+    // discharging the revocation right now.
+    //
+    // And A2 must REJECT rather than resolve. Nothing was discharged on its
+    // behalf, and `retry: true` redelivers a rejected delivery and only a
+    // rejected one — so acking here would end the retry chain for a revocation
+    // that a FAILED holder (whose lease outlives its own rejection by the TTL)
+    // may well still owe. That is the durability regression an "abandon quietly"
+    // would have shipped.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const a = delivery('lease-A');
+    const a2 = delivery('lease-A2');
+
+    // A pauses AFTER claiming — between the lease and the bucket — which is the
+    // window A2 must find closed.
+    const aGeneration = a.currentObjectGeneration;
+    let a2Rejected: unknown;
+    const paused: RevokeProofMediaDeps = {
+      ...a,
+      currentObjectGeneration: async (storagePath) => {
+        a2Rejected = await revokeProofMedia(a2, { ...TARGET, tombstone: { ...UNBOUND } }).catch(
+          (err: unknown) => err,
+        );
+        return await aGeneration(storagePath);
+      },
+    };
+
+    await revokeProofMedia(paused, { ...TARGET, tombstone: { ...UNBOUND } });
+
+    expect(a2.objectDeletes).toEqual([]);
+    expect(a2Rejected).toBeInstanceOf(Error);
+    expect((a2Rejected as Error).message).toContain('held by another sweep delivery');
+    expect(a2.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation deferred: another delivery holds the sweep lease',
+    ]);
+    // A, the holder, still finishes normally: one bound delete, and the row goes.
+    expect(a.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: 'gen-A' },
+    ]);
+    expect(world.object).toBeNull();
+    expect(world.row).toBeNull();
+  });
+
+  it('REDELIVERS a deferred delivery into a lease that has since aged out', async () => {
+    // The other half of the deferral, and what makes it a deferral rather than a
+    // loss: the holder failed and never came back, so the redelivery that lands
+    // past the TTL claims the row and discharges the revocation. Without the
+    // rejection above there would BE no redelivery to land.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const stalled = delivery('lease-stalled');
+    expect(await stalled.claimSweepLease({ ...UNBOUND }, { id: 'lease-stalled', at: world.now })).toBe(
+      'claimed',
+    );
+
+    // The redelivery, arriving before the lease ages out: refused, and rejected.
+    const soon = delivery('lease-soon');
+    await expect(
+      revokeProofMedia(soon, { ...TARGET, tombstone: { ...UNBOUND } }),
+    ).rejects.toThrow('held by another sweep delivery');
+    expect(soon.objectDeletes).toEqual([]);
+    expect(world.row).not.toBeNull();
+
+    // The one after it, past the TTL: claims, sweeps, retires.
+    world.now += SWEEP_LEASE_TTL_MS;
+    const later = delivery('lease-later');
+    await revokeProofMedia(later, { ...TARGET, tombstone: { ...UNBOUND } });
+    expect(later.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: 'gen-A' },
+    ]);
+    expect(world.object).toBeNull();
+    expect(world.row).toBeNull();
+  });
+
+  it('lets an EXPIRED lease be re-claimed, and refuses the overtaken holder’s retirement', async () => {
+    // A lease has to expire or a holder that crashed mid-sweep would hold the
+    // revocation forever — the media in the bucket, the row standing, and the
+    // Proof create arm's hold on that id standing with it. So B takes the row
+    // once the TTL has passed. A, if it somehow resumes, must not then retire a
+    // row that is no longer its own to retire: B's bucket call may still be
+    // outstanding, and retiring would free the Proof id underneath it.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const a = delivery('lease-A');
+
+    expect(await a.claimSweepLease({ ...UNBOUND }, { id: 'lease-A', at: world.now })).toBe('claimed');
+    expect(world.row?.leaseId).toBe('lease-A');
+
+    // One millisecond inside the TTL: still A's.
+    const b = delivery('lease-B');
+    const justInside = world.now + SWEEP_LEASE_TTL_MS - 1;
+    expect(await b.claimSweepLease({ ...UNBOUND }, { id: 'lease-B', at: justInside })).toBe('held');
+    expect(world.row?.leaseId).toBe('lease-A');
+
+    // One past it: B takes over.
+    const expired = world.now + SWEEP_LEASE_TTL_MS;
+    expect(await b.claimSweepLease({ ...UNBOUND }, { id: 'lease-B', at: expired })).toBe('claimed');
+    expect(world.row?.leaseId).toBe('lease-B');
+
+    // A, overtaken, may not retire — even though the row is unmistakably still
+    // the same revocation it was created for.
+    expect(await a.retireTombstoneIfSame({ ...UNBOUND }, 'lease-A')).toBe(false);
+    expect(world.row).not.toBeNull();
+    // B, the holder, may.
+    expect(await b.retireTombstoneIfSame({ ...UNBOUND }, 'lease-B')).toBe(true);
+    expect(world.row).toBeNull();
+  });
+
+  it('does NOT retire when this delivery’s lease was overtaken mid-sweep', async () => {
+    // The end-to-end half of the case above: the lease id has to be THREADED to
+    // the retirement, not merely checkable. A sweeps, its lease ages out and B
+    // claims the row while A is still between the lease and the bucket; A's
+    // delete then lands, but the row is no longer A's to retire. Retiring it
+    // would free the Proof id underneath B, whose own bucket call is outstanding
+    // — the exact shape of "a revocation marked done that never happened", one
+    // holder removed.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const a = delivery('lease-A');
+    const b = delivery('lease-B');
+
+    const aGeneration = a.currentObjectGeneration;
+    const overtaken: RevokeProofMediaDeps = {
+      ...a,
+      currentObjectGeneration: async (storagePath) => {
+        // A's lease ages out and B takes the row, all inside A's own await.
+        const claimed = await b.claimSweepLease(
+          { ...UNBOUND },
+          { id: 'lease-B', at: world.now + SWEEP_LEASE_TTL_MS },
+        );
+        expect(claimed).toBe('claimed');
+        return await aGeneration(storagePath);
+      },
+    };
+
+    await revokeProofMedia(overtaken, { ...TARGET, tombstone: { ...UNBOUND } });
+
+    // A's delete still landed — it was bound to the generation it read, so it
+    // could only ever have taken that object.
+    expect(a.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: 'gen-A' },
+    ]);
+    // But the row is still standing, and still B's.
+    expect(world.row).not.toBeNull();
+    expect(world.row?.leaseId).toBe('lease-B');
+    expect(a.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation: the tombstone was NOT retired — the row there is no longer ours',
+    ]);
+  });
+
+  it('re-takes a lease this delivery already holds, so a transaction retry is idempotent', async () => {
+    // The claim runs inside `db.runTransaction`, which re-runs its callback on
+    // contention. A delivery must not lock itself out of its own row.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const a = delivery('lease-A');
+    const lease: SweepLease = { id: 'lease-A', at: world.now };
+
+    expect(await a.claimSweepLease({ ...UNBOUND }, lease)).toBe('claimed');
+    expect(await a.claimSweepLease({ ...UNBOUND }, lease)).toBe('claimed');
+  });
+
+  it('sweeps the ORDINARY delivery unchanged — one bound delete, then the row', async () => {
+    // The control every guard above needs: with nothing racing, a generation-less
+    // row is still discharged, and it is discharged against the object that is
+    // actually there rather than against its name.
+    const { world, delivery } = makeWorld({ row: { ...UNBOUND }, object: { generation: 'gen-A' } });
+    const only = delivery('lease-A');
+
+    await revokeProofMedia(only, { ...TARGET, tombstone: { ...UNBOUND } });
+
+    expect(only.objectDeletes).toEqual([
+      { storagePath: 'proofs/med-2026/alice/proof-1.jpg', generation: 'gen-A' },
+    ]);
+    expect(world.object).toBeNull();
+    expect(world.row).toBeNull();
+    expect(only.warnings).toEqual([]);
+  });
+});
+
+describe('hasActiveSweepLease — is this row still somebody’s to sweep (#1153)', () => {
+  const AT = 1_000_000;
+
+  it('is active inside the TTL and expired at it', () => {
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: AT }, AT)).toBe(true);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: AT }, AT + SWEEP_LEASE_TTL_MS - 1)).toBe(true);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: AT }, AT + SWEEP_LEASE_TTL_MS)).toBe(false);
+  });
+
+  it('expires a stamp far in the FUTURE too, so a skewed clock cannot pin the row', () => {
+    // The lease is wall-clock bookkeeping shared between instances whose clocks
+    // are merely close. Measured in one direction only, an instance running an
+    // hour fast would hold every row it touched for an hour after it had gone.
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: AT + SWEEP_LEASE_TTL_MS - 1 }, AT)).toBe(true);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: AT + SWEEP_LEASE_TTL_MS }, AT)).toBe(false);
+  });
+
+  it('treats a lease it cannot read as NO lease at all', () => {
+    // The safe direction, and the same reasoning the structural comparison
+    // shipped for (Codex round 5 P2): a row no delivery could ever claim is a row
+    // no delivery could ever discharge or retire, which is an immortal poison row
+    // with the Proof id held behind it. Only the Admin SDK can write these two
+    // fields, and it writes them together.
+    expect(hasActiveSweepLease({}, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: 'a' }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseAt: AT }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: '', leaseAt: AT }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: 7, leaseAt: AT }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: 'soon' }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: Number.NaN }, AT)).toBe(false);
+    expect(hasActiveSweepLease({ leaseId: 'a', leaseAt: Number.POSITIVE_INFINITY }, AT)).toBe(false);
   });
 });
 
@@ -580,6 +1032,22 @@ describe('isSameRevocation — is the standing row the one THIS delivery was cre
     expect(isSameRevocation(withoutGeneration, ROW)).toBe(false);
     expect(isSameRevocation(ROW, withoutGeneration)).toBe(false);
     expect(isSameRevocation({ ...withoutGeneration }, withoutGeneration)).toBe(true);
+  });
+
+  it('IGNORES the sweep lease, which is the one thing on the row that moves (#1153)', () => {
+    // Codex round 6 P2. `leaseId` / `leaseAt` are written by the sweeper itself,
+    // so a row that has just been claimed is the same revocation it was a
+    // moment earlier. Folding them into the identity would make every delivery's
+    // own claim look like somebody else's row: the retirement immediately after
+    // it would compare the leased row against the unleased event snapshot,
+    // refuse, and strand every revocation this module ever discharged.
+    expect(isSameRevocation({ ...ROW, leaseId: 'lease-A', leaseAt: 1_000_000 }, ROW)).toBe(true);
+    expect(isSameRevocation({ ...ROW, leaseId: 'lease-A' }, { ...ROW, leaseId: 'lease-B' })).toBe(
+      true,
+    );
+    // …and it is only the LEASE that is exempt: a real disagreement beside one
+    // still mismatches.
+    expect(isSameRevocation({ ...ROW, leaseId: 'lease-A', uid: 'bob' }, ROW)).toBe(false);
   });
 
   it('matches a CONTAINER field that is equal by structure but not by reference (#1153)', () => {

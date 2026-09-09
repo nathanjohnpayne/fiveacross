@@ -109,7 +109,11 @@ export async function uploadAvatar(uid: string, blob: Blob): Promise<string> {
  * is one more network round trip on a takedown path whose whole design goal is
  * that it cannot be made to fail: a tombstone denied — or never written — because
  * a HEAD request timed out would cost exactly the durability the row exists for.
- * A row with no generation is revoked by path, as it was before this existed.
+ * A row with no generation is NOT revoked by bare path: the sweeper reads the
+ * object's generation under its own sweep lease and binds the delete to that
+ * instead (#1153, Codex round 6 P2), so what this read buys is one saved server
+ * round trip and a binding to the object as it stood at DELETE time rather than
+ * at sweep time — not the protection itself.
  */
 export async function proofMediaGeneration(path: string): Promise<string | null> {
   try {

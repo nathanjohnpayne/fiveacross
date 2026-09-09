@@ -2062,6 +2062,15 @@ service cloud.firestore {
         // entirely, so the sweeper is untouched by this arm; `deleteProof` no
         // longer issues the retirement at all, rather than issuing a write that
         // is always denied.
+        //
+        // THE UPDATE DENIAL NOW CARRIES A SECOND JOB (#1153, Codex round 6 P2).
+        // The sweeper stamps a `leaseId` / `leaseAt` pair on the row to claim it
+        // for exclusive processing before it deletes any media, so the row is no
+        // longer immutable for its whole life — the SERVER may change it. No
+        // client may: update is denied outright here, and the create arm's
+        // `hasOnly` below does not admit either key, so a lease can only ever be
+        // written by the Admin SDK identity that bypasses this file. That is
+        // what keeps a forged or squatted lease from stalling a takedown's sweep.
         allow read, update, delete: if false;
         allow create: if (isAdmin(eventId)
                           || (isOwner(request.resource.data.uid) && eventOpenForPlay(eventId)))
@@ -2091,6 +2100,18 @@ service cloud.firestore {
           && !existsAfter(/databases/$(database)/documents/events/$(eventId)/proofs/$(proofId))
           // Exactly these three required keys, no more and no fewer, plus the
           // OPTIONAL `generation` below.
+          //
+          // AND THE SWEEP LEASE IS NOT AMONG THEM, ON PURPOSE (#1153, Codex
+          // round 6 P2). `revokeDeletedProofMedia` claims a row for exclusive
+          // processing before it deletes anything, by stamping `leaseId` and
+          // `leaseAt` on it — the only fields any server ever writes to this
+          // collection, and the reason two duplicate deliveries of one event
+          // cannot both reach the bucket. A client that could mint a row already
+          // carrying a lease could park an unexpired one on it and stall its own
+          // takedown's sweep until the TTL ran out, so `hasOnly` refuses the two
+          // keys here and `update: if false` above refuses them afterwards. The
+          // Admin SDK bypasses both, which is exactly the asymmetry wanted: the
+          // lease is the server's alone, like the retirement it guards.
           && request.resource.data.keys().hasOnly(['storagePath', 'uid', 'requestedAt', 'generation'])
           && request.resource.data.keys().hasAll(['storagePath', 'uid', 'requestedAt'])
           && request.resource.data.uid is string
@@ -2108,8 +2129,10 @@ service cloud.firestore {
           // OPTIONAL because the client may not have it: the read is one extra
           // Storage round trip taken before the transaction, best-effort by
           // construction, and a takedown must not fail because a HEAD request
-          // did. A row without it is revoked by path, exactly as before — the
-          // Proof-absence check the sweeper runs is the guard that still applies.
+          // did. A row without it is NOT swept by bare path (#1153, Codex round
+          // 6 P2): the sweeper reads the object's generation under its own lease
+          // and binds the delete to that instead, so the optionality costs a
+          // metadata round trip on the server rather than the protection.
           && (!('generation' in request.resource.data)
               || request.resource.data.generation is string)
           // `requestedAt` is operational only (how long has this been pending).

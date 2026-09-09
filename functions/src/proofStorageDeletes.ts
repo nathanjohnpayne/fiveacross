@@ -29,9 +29,18 @@
  * reachable. The Admin SDK bypasses those rules, so the sweeper below is the
  * only writer that ever clears one.
  *
+ * IT IS ALSO THE ONLY WRITER THAT EVER LEASES ONE (#1153, Codex round 6 P2).
+ * `retry: true` and ordinary platform duplication both mean two deliveries of
+ * one CloudEvent can be in flight at once, and a Firestore read taken before a
+ * bucket delete cannot serialise them — so a row is claimed for EXCLUSIVE
+ * processing before anything is deleted, through a server-only `leaseId` /
+ * `leaseAt` pair the rules admit from nobody. See `SWEEP_LEASE_TTL_MS`.
+ *
  * Every seam is injected, so the whole flow is unit-testable without a Functions
  * runtime or an emulator (the `autohide.ts` / `notify.ts` precedent).
  */
+
+import { randomUUID } from 'node:crypto';
 
 // The canonical persisted shape, declared ONCE for both compiler roots
 // (`src/domainTypes.d.ts`, the `dailyEmailContent.ts` / `finaleContent.ts`
@@ -66,6 +75,12 @@ export interface ProofStorageDeleteInput {
    * writing a placeholder.
    */
   generation?: unknown;
+  /**
+   * The sweep lease — SERVER-ONLY, and the reason this module writes to the row
+   * at all (#1153, Codex round 6 P2). See `SWEEP_LEASE_TTL_MS`.
+   */
+  leaseId?: unknown;
+  leaseAt?: unknown;
 }
 
 /** `T` must be assignable to `U`, checked at compile time and erased at run time. */
@@ -75,13 +90,115 @@ type MustExtend<T extends U, U> = T;
  * THE DRIFT GUARD (#1153, Codex round 4 P1). Both directions on purpose: a key
  * this module reads that the contract does not declare is a sweeper inventing a
  * field, and a key the contract declares that this module does not read is a
- * field `isSameRevocation` would silently stop comparing — the identity check
- * that keeps a delayed delivery from retiring somebody else's revocation.
- * Either way the build stops until both halves are updated together.
+ * field the sweeper would silently stop modelling. Either way the build stops
+ * until both halves are updated together.
  */
 type _TombstoneShapeIsPinned =
   | MustExtend<keyof ProofStorageDeleteInput, keyof ProofStorageDeleteDoc>
   | MustExtend<keyof ProofStorageDeleteDoc, keyof ProofStorageDeleteInput>;
+
+/**
+ * The row's own bookkeeping, as opposed to a statement about WHICH revocation it
+ * is (#1153, Codex round 6 P2). The sweeper writes these two and nothing else
+ * ever does, so a row that has been leased is still the same row it was — which
+ * is exactly why they must stay OUT of `isSameRevocation`. Naming them once, as
+ * a type, is what lets the identity list below be pinned to "the contract minus
+ * these" rather than restated by hand.
+ */
+type SweepLeaseKey = 'leaseId' | 'leaseAt';
+
+/**
+ * THE IDENTITY FIELDS, pinned to the contract (#1153, Codex round 6 P2). The
+ * key-set guard above stops the two SHAPES drifting; this stops the identity
+ * drifting from the shape. A field added to `ProofStorageDeleteDoc` fails the
+ * build here until it is either listed as part of a revocation's identity or
+ * declared to be lease bookkeeping — which is the choice that used to be made
+ * silently by whether anyone remembered to add a line to `isSameRevocation`.
+ */
+const IDENTITY_FIELDS = ['storagePath', 'uid', 'requestedAt', 'generation'] as const;
+type _IdentityFieldsArePinned =
+  | MustExtend<(typeof IDENTITY_FIELDS)[number], Exclude<keyof ProofStorageDeleteDoc, SweepLeaseKey>>
+  | MustExtend<Exclude<keyof ProofStorageDeleteDoc, SweepLeaseKey>, (typeof IDENTITY_FIELDS)[number]>;
+
+/**
+ * How long one delivery may hold a row before another may take it (#1153, Codex
+ * round 6 P2).
+ *
+ * A lease has to expire, or a holder that crashed between claiming the row and
+ * discharging it would hold the revocation FOREVER: the media would stay in the
+ * bucket, the row would stand, and the Proof create arm's hold on that id would
+ * stand with it. Ten minutes is an order of magnitude past the longest a holder
+ * can possibly still be running — the trigger takes the Gen2 event-driven
+ * default of 60 SECONDS, and the sweep inside it is one Firestore read, one
+ * transaction, one bucket metadata read, one bucket delete and one more
+ * transaction — and it is comfortably shorter than the hours `retry: true` keeps
+ * redelivering, so a genuinely stuck sweep is re-attempted many times before the
+ * platform gives up.
+ *
+ * IT IS ALSO THE RECOVERY LATENCY after a failed sweep, which is the cost side
+ * of the number. A holder that rejects (a Storage 5xx) leaves its lease behind,
+ * and its own redelivery arrives long before the lease ages out — that delivery
+ * defers, rejects and is redelivered again, so the retry that actually gets to
+ * work is the first one past this window. Ten minutes of extra latency on a
+ * background revocation whose media has already left the Feed is a fair price
+ * for not having to write a release path that can itself fail; shortening it
+ * would only be safe down to the function's own timeout.
+ *
+ * It is not a correctness boundary on its own, which is what makes a wall-clock
+ * TTL acceptable here. An expired lease that gets re-claimed while its original
+ * holder is somehow still running cannot corrupt anything: every bucket delete
+ * is bound to a generation READ UNDER A LEASE, so the overtaken holder's delete
+ * answers `412` against anything the new holder replaced, and the retirement
+ * refuses a holder whose lease has been taken over. The TTL decides liveness,
+ * never safety.
+ */
+export const SWEEP_LEASE_TTL_MS = 10 * 60 * 1000;
+
+/** One delivery's claim on a row: a fresh id, and the moment it was taken. */
+export interface SweepLease {
+  id: string;
+  at: number;
+}
+
+/**
+ * What the claim transaction found.
+ *
+ * `claimed` — the row is this delivery's, exclusively, until it retires the row
+ * or the lease ages out. `held` — another delivery's lease is still live, so
+ * this one does nothing and REJECTS, because nothing was discharged and only a
+ * rejected delivery is redelivered. `lost` — the row is gone, or is no longer
+ * the revocation this delivery was created for, which are the two conditions the
+ * pre-check already abandons on and which the transaction re-asks because the
+ * pre-check is a read at an earlier instant.
+ */
+export type SweepLeaseOutcome = 'claimed' | 'held' | 'lost';
+
+/**
+ * Is `row` under a lease that is still live at `now` (#1153, Codex round 6 P2)?
+ *
+ * Called from INSIDE the claim transaction, against the row that transaction
+ * itself read, which is the only place the answer means anything.
+ *
+ * A lease this cannot read is NOT a lease. A missing or non-string `leaseId`, or
+ * a `leaseAt` that is not a finite number, answers false and the row is
+ * claimable — the safe direction, because the alternative is a hand-written row
+ * that no delivery can ever claim, discharge or retire, which is precisely the
+ * immortal poison row (and the permanently held Proof id behind it) the
+ * structural comparison had to be introduced to avoid. Nothing reachable
+ * produces one: the Admin SDK is the only writer of these two fields and it
+ * writes them together, as this module's own transaction.
+ *
+ * A stamp far in the FUTURE expires too, for the same reason. The lease is
+ * wall-clock bookkeeping across instances whose clocks are merely close, so the
+ * window is measured in both directions: a lease taken by an instance running an
+ * hour fast would otherwise pin the row for an hour after its holder had gone.
+ */
+export function hasActiveSweepLease(row: ProofStorageDeleteInput, now: number): boolean {
+  if (typeof row.leaseId !== 'string' || row.leaseId.length === 0) return false;
+  const at = row.leaseAt;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return false;
+  return Math.abs(now - at) < SWEEP_LEASE_TTL_MS;
+}
 
 export interface RevokeProofMediaDeps {
   /**
@@ -108,17 +225,68 @@ export interface RevokeProofMediaDeps {
    */
   proofExists(): Promise<boolean>;
   /**
-   * Deletes the named Storage object, bound to `generation` when the row carried
-   * one. Rejects with a 404-shaped error if it is already gone, and with a
-   * 412-shaped one if the generation no longer matches.
+   * CLAIM THE ROW FOR EXCLUSIVE PROCESSING (#1153, Codex round 6 P2), inside an
+   * Admin SDK transaction that re-reads it and, in one atomic step, requires all
+   * three of: the row is still there, `isSameRevocation` still holds against
+   * `identity`, and `hasActiveSweepLease(row, lease.at)` is false or the live
+   * lease is already `lease.id`. Only then does it stamp `{ leaseId: lease.id,
+   * leaseAt: lease.at }` onto the row and answer `claimed`.
+   *
+   * THE LEASE IS WHAT SERIALISES THE BUCKET CALL, which the compare-and-delete
+   * retirement never did. Both Firestore reads above it are PRE-checks taken at
+   * one instant, and duplicate deliveries A and A2 of one event can both pass
+   * them; A can then pause while A2 deletes the object and retires the row, the
+   * freed Proof id is re-posted with new media at the very same path, and A
+   * resumes holding a delete that is about to run. Retirement was already
+   * protected — it re-reads and compares — but the DELETE was not, so the whole
+   * protection sat downstream of the one operation that destroys bytes. A row
+   * may now be swept by exactly one delivery at a time, and the reads that
+   * authorise the delete happen under that exclusivity rather than before it.
+   *
+   * A rejection PROPAGATES, like every other Firestore failure here: nothing has
+   * been deleted, and `retry: true` brings the delivery back to a row that is
+   * still standing.
    */
-  deleteObject(storagePath: string, generation: string | null): Promise<void>;
+  claimSweepLease(identity: ProofStorageDeleteInput, lease: SweepLease): Promise<SweepLeaseOutcome>;
+  /**
+   * The Storage generation the object at `storagePath` carries RIGHT NOW, or
+   * `null` when nothing is there (#1153, Codex round 6 P2).
+   *
+   * Read under the lease, and only for a row that recorded no generation of its
+   * own — the metadata read `deleteProof` attempts before the commit is best
+   * effort, and a takedown must not fail because it failed. It is what lets even
+   * that row take a GENERATION-BOUND delete: there is no unconditioned delete on
+   * any path any more, so a replacement object cannot be removed by a stale
+   * delivery even in the window a lease cannot cover.
+   *
+   * A 404 answers `null` — nothing to revoke — rather than rejecting. Every
+   * other failure REJECTS and propagates: "I could not tell which object is
+   * there" must never become "delete whatever is".
+   */
+  currentObjectGeneration(storagePath: string): Promise<string | null>;
+  /**
+   * Deletes the named Storage object, bound to `generation` — ALWAYS. Rejects
+   * with a 404-shaped error if it is already gone, and with a 412-shaped one if
+   * the generation no longer matches.
+   *
+   * The parameter is not nullable, which is the point (#1153, Codex round 6 P2):
+   * a row that carried no generation now takes the one read under its lease, so
+   * "delete whatever answers to this path" is not a call this seam can express.
+   */
+  deleteObject(storagePath: string, generation: string): Promise<void>;
   /**
    * Retires the tombstone — but ONLY if the row standing there is still the one
-   * `identity` describes. A COMPARE-AND-DELETE, run inside an Admin SDK
-   * transaction that re-reads the row and applies `isSameRevocation` against it
-   * (#1153, Codex round 4 P2). Resolves `true` when it retired the row and
-   * `false` when it left a different one — or nothing — where it was.
+   * `identity` describes AND still carries THIS delivery's lease. A
+   * COMPARE-AND-DELETE, run inside an Admin SDK transaction that re-reads the
+   * row and applies `isSameRevocation` against it (#1153, Codex round 4 P2) plus
+   * a `leaseId` check (#1153, Codex round 6 P2). Resolves `true` when it retired
+   * the row and `false` when it left a different one — or a row another delivery
+   * has since claimed, or nothing — where it was.
+   *
+   * `leaseId` is `null` only on the malformed-row path, which never claims a
+   * lease because it never reaches the bucket: it drops a row whose `storagePath`
+   * could not be confined, and no lease is needed to serialise an operation that
+   * does not exist. The identity comparison still governs that delete.
    *
    * THE PRE-CHECK IS NOT THE RETIREMENT, which is the whole reason this dep has
    * this shape. `currentTombstone()` reads at one instant and every retirement
@@ -138,7 +306,18 @@ export interface RevokeProofMediaDeps {
    * true` brings the delivery back, and the row it could not retire is still
    * standing to be found.
    */
-  retireTombstoneIfSame(identity: ProofStorageDeleteInput): Promise<boolean>;
+  retireTombstoneIfSame(
+    identity: ProofStorageDeleteInput,
+    leaseId: string | null,
+  ): Promise<boolean>;
+  /** Wall clock, injected so the lease's TTL is testable; defaults to `Date.now`. */
+  now?(): number;
+  /**
+   * A fresh lease id, unique per DELIVERY rather than per event — two duplicate
+   * deliveries of one CloudEvent must be able to tell each other apart, which is
+   * the whole hazard the lease closes. Defaults to `randomUUID()`.
+   */
+  newLeaseId?(): string;
   /** Structured log sink; defaults to `console.warn`. */
   warn?(message: string, context: Record<string, unknown>): void;
 }
@@ -170,6 +349,15 @@ export interface RevokeProofMediaTarget {
  * optional fourth and is compared the same way, so present-against-absent is
  * itself a mismatch rather than a field quietly skipped.
  *
+ * THE LEASE IS NOT PART OF THE IDENTITY (#1153, Codex round 6 P2). It is the one
+ * thing on the row that DOES change while it stands, because this module writes
+ * it — a leased row is the same revocation it was a moment earlier, and folding
+ * the lease in would make every delivery's own claim look like somebody else's
+ * row and abandon the sweep it had just been granted. The split is pinned at
+ * compile time rather than left to this function's memory: `IDENTITY_FIELDS` is
+ * checked against the contract minus `SweepLeaseKey`, so a new contract field
+ * cannot join the row without a decision about which side of the line it is on.
+ *
  * COMPARED STRUCTURALLY, NOT BY REFERENCE (#1153, Codex round 5 P2). All four
  * are primitives in every row `firestore.rules` admits, and for those
  * `sameFirestoreValue` IS `===`. The rules are not the only writer, though: the
@@ -191,11 +379,8 @@ export function isSameRevocation(
   current: ProofStorageDeleteInput,
   fromEvent: ProofStorageDeleteInput,
 ): boolean {
-  return (
-    sameFirestoreValue(current.requestedAt, fromEvent.requestedAt) &&
-    sameFirestoreValue(current.storagePath, fromEvent.storagePath) &&
-    sameFirestoreValue(current.uid, fromEvent.uid) &&
-    sameFirestoreValue(current.generation, fromEvent.generation)
+  return IDENTITY_FIELDS.every((field) =>
+    sameFirestoreValue(current[field], fromEvent[field]),
   );
 }
 
@@ -365,6 +550,15 @@ export function isGenerationMismatch(err: unknown): boolean {
  * fresh object on every read, so a reference comparison reported "not ours"
  * about a row that had not changed at all.
  *
+ * AND IT MUST STILL CARRY THIS DELIVERY'S LEASE (#1153, Codex round 6 P2), on
+ * every path that took one. Identity alone answers "is this the same
+ * revocation"; the lease answers "and am I still the delivery discharging it".
+ * A holder that stalled past the TTL and was overtaken has to leave the row
+ * where it is: the delivery that took the lease from it is mid-sweep, and
+ * retiring the row out from under it would free the Proof id while its bucket
+ * call is still outstanding. `leaseId` is `null` only for the malformed-path
+ * drop, which never claims one because it never touches the bucket.
+ *
  * A refusal is LOGGED AND ACCEPTED, never rethrown. The row standing there
  * belongs to somebody else's delivery, which is still owed and still coming;
  * redelivering this one cannot make it ours, so there is nothing for `retry:
@@ -375,9 +569,10 @@ export function isGenerationMismatch(err: unknown): boolean {
 async function retireIfStillOurs(
   deps: RevokeProofMediaDeps,
   { eventId, proofId, tombstone }: RevokeProofMediaTarget,
+  leaseId: string | null,
   warn: (message: string, context: Record<string, unknown>) => void,
 ): Promise<void> {
-  const retired = await deps.retireTombstoneIfSame(tombstone);
+  const retired = await deps.retireTombstoneIfSame(tombstone, leaseId);
   if (!retired) {
     warn('proof media revocation: the tombstone was NOT retired — the row there is no longer ours', {
       eventId,
@@ -406,14 +601,14 @@ async function retireIfStillOurs(
  * retire the row it had just decided to drop, and the poison row — plus the
  * Proof-create hold that lives as long as it does — stood forever.
  *
- * FOUR CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
+ * FIVE CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
  * promise about the past and this runs in the future (#1153, Phase 4b P1 and
- * P2, Codex round 3 P2). A tombstone is admitted only alongside its own Proof's
- * deletion and the Proof create arm now refuses to bring that id back while the
- * row stands, so a live Proof under a pending revocation should be unreachable —
- * but the Admin SDK bypasses those rules entirely and this handler holds a
- * bucket-wide delete, so "should be unreachable" is not a safe premise for
- * revoking media.
+ * P2, Codex rounds 3 P2 and 6 P2). A tombstone is admitted only alongside its own
+ * Proof's deletion and the Proof create arm now refuses to bring that id back
+ * while the row stands, so a live Proof under a pending revocation should be
+ * unreachable — but the Admin SDK bypasses those rules entirely and this handler
+ * holds a bucket-wide delete, so "should be unreachable" is not a safe premise
+ * for revoking media.
  *
  * FIRST, IS ANY DEBT STILL OWED. The triggering row is re-read on EVERY
  * delivery, not only when the path is unbound. Retirement is server-only
@@ -441,22 +636,40 @@ async function retireIfStillOurs(
  * mismatch is logged and ABANDONED with the row left exactly where it is. It is
  * not this delivery's to retire, and its own delivery is still coming.
  *
- * THIRD, IS THE PROOF BACK. If it is THERE, the revocation is abandoned rather
+ * THIRD, AM I THE ONE SWEEPING IT (#1153, Codex round 6 P2). The two questions
+ * above are PRE-checks and nothing more: they read the row at one instant, and
+ * two duplicate deliveries of one event can both pass them. So the row is
+ * CLAIMED — an Admin SDK transaction that re-asks both questions against its own
+ * read and, atomically with the answer, stamps a lease naming this delivery. A
+ * delivery that finds another live lease deletes nothing and retires nothing,
+ * and REJECTS so `retry: true` brings it back to a lease that has aged out (see
+ * the claim dep for why acking there would strand the revocation). Everything
+ * below this line happens under that exclusivity.
+ *
+ * FOURTH, IS THE PROOF BACK. If it is THERE, the revocation is abandoned rather
  * than performed, because whatever the row was owed for, it is not this Feed
  * entry's media.
  *
- * FOURTH, IS IT THE SAME OBJECT. The object is deleted by GENERATION when the
- * row recorded one, so even a name re-occupied by a blob with no document
- * pointing at it is left alone instead of swept.
+ * FIFTH, IS IT THE SAME OBJECT — ALWAYS, NOT ONLY WHEN THE ROW SAID SO (#1153,
+ * Codex round 6 P2). The delete is bound to the generation the row recorded; a
+ * row that recorded none takes the generation READ UNDER THE LEASE instead, and
+ * is deleted bound to that. There is no unconditioned "delete whatever answers
+ * to this path" left anywhere, which is what the lease alone could not
+ * guarantee: a lease is wall-clock bookkeeping and a generation binding is not,
+ * so the two together mean even an overtaken holder's delete can only ever
+ * remove the exact bytes it looked at. An object that is already gone at the
+ * metadata read is the ordinary discharged revocation, and retires the row.
  *
  * The last two retire the row: neither condition can improve on redelivery, and
- * a row that cannot be discharged is a poison row. The first two retire nothing
- * — the first because the row it would retire is already gone, the second
- * because the row standing there belongs to a revocation this delivery knows
- * nothing about.
+ * a row that cannot be discharged is a poison row. The first three retire
+ * nothing — the first because the row it would retire is already gone, the
+ * second because the row standing there belongs to a revocation this delivery
+ * knows nothing about, and the third because it belongs to a delivery that is
+ * still working on it. Only the third REJECTS, because only the third leaves a
+ * revocation still owed.
  *
  * AND EVERY RETIREMENT IS ITSELF A COMPARE-AND-DELETE (#1153, Codex round 4
- * P2). The two checks above are a PRE-check: they read the row at one instant,
+ * P2). The first two checks are a PRE-check: they read the row at one instant,
  * and the retirement they authorise happens at a later one — after a bucket
  * round trip, in the case that matters. The gap is enough. Duplicate delivery A
  * can validate row A and pause; A2 finishes and retires it; the rules free the
@@ -464,9 +677,22 @@ async function retireIfStillOurs(
  * path — and A, resuming, takes `412` against B's object and would have deleted
  * B on the way out. B's own delivery would then find no tombstone, abandon by
  * design, and B's media would stay in the bucket. So `retireIfStillOurs` re-reads
- * the row inside a transaction and deletes it only while `isSameRevocation`
- * still holds against this delivery's snapshot; a refusal is logged and the row
- * is left standing for the delivery it actually belongs to.
+ * the row inside a transaction and deletes it only while `isSameRevocation` —
+ * and this delivery's own lease — still hold against it; a refusal is logged and
+ * the row is left standing for the delivery it actually belongs to.
+ *
+ * THAT WAS NOT ENOUGH ON ITS OWN, which is what the lease is for (#1153, Codex
+ * round 6 P2). The compare-and-delete protected the RETIREMENT and only the
+ * retirement; the bucket call in front of it was still authorised by a read
+ * taken before it. Run the same interleaving against a row whose metadata
+ * capture failed and so carries NO generation: A and A2 both pass the two
+ * pre-checks, A pauses, A2 deletes the object and retires the row, the freed
+ * Proof id is re-posted with new media at the same path — and A resumes into an
+ * UNCONDITIONED delete that removes the live replacement. Nothing downstream can
+ * undo that; the bytes are gone. Hence both halves of this fix: exclusive
+ * processing through the lease, so A2 cannot start while A holds the row, and a
+ * generation binding on EVERY delete, so even a delete that escapes the lease
+ * can only remove the object it was actually looking at.
  *
  * A read failure in either Firestore check PROPAGATES rather than resolving to
  * a delete: "I could not tell" must never become "delete it", and `retry: true`
@@ -484,7 +710,10 @@ export async function revokeProofMedia(
       proofId,
       storagePath: tombstone.storagePath,
     });
-    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
+    // `null` lease: this branch never claims one, because it never reaches the
+    // bucket. There is nothing here to serialise — only a poison row to drop,
+    // which the identity comparison already governs.
+    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, null, warn);
     return;
   }
 
@@ -525,6 +754,62 @@ export async function revokeProofMedia(
     return;
   }
 
+  // …AND THIS DELIVERY MUST BE THE ONE SWEEPING IT (#1153, Codex round 6 P2).
+  // Everything above is a pre-check: two duplicate deliveries of one event can
+  // both reach this line, and only one of them may go on to touch the bucket.
+  // The claim re-asks both questions inside a transaction and, atomically with
+  // the answer, stamps this delivery's lease on the row — so the Proof read, the
+  // metadata read and the delete below all happen while no other delivery can be
+  // doing the same. A rejection propagates: nothing has been deleted, and the row
+  // is still standing for the redelivery `retry: true` brings.
+  const lease: SweepLease = {
+    id: (deps.newLeaseId ?? randomUUID)(),
+    at: (deps.now ?? Date.now)(),
+  };
+  const claim = await deps.claimSweepLease(tombstone, lease);
+  if (claim !== 'claimed') {
+    // NOTHING IS DELETED AND NOTHING IS RETIRED on either outcome — but they end
+    // the delivery in opposite ways, and the difference is the whole durability
+    // of this handler.
+    //
+    // `lost` RESOLVES. The row is gone, or the row standing there is a different
+    // revocation: this delivery owes nothing, exactly as the two pre-checks
+    // above already decided for the same two reasons.
+    //
+    // `held` THROWS. Nothing was discharged, so acknowledging the delivery would
+    // be a lie — and unlike everything else here, it is a lie the platform acts
+    // on. `retry: true` redelivers a REJECTED delivery and only a rejected one,
+    // so a holder that fails (a Storage 5xx, an instance killed mid-sweep) has
+    // left the row leased, and its own redelivery arrives seconds later to find
+    // that lease still live. Resolving there would ack the redelivery, end the
+    // retry chain, and strand a revocation nobody is discharging — a durability
+    // regression, on the one path this whole collection exists to keep durable.
+    // Throwing costs an extra redelivery when the holder is genuinely still
+    // running (it acks its own delivery, and the loser's next attempt finds the
+    // row retired and resolves), and it is what makes "the lease ages out and
+    // somebody sweeps" true rather than hopeful.
+    if (claim === 'lost') {
+      warn('proof media revocation abandoned: the row changed before the sweep lease was taken', {
+        eventId,
+        proofId,
+        storagePath,
+        requestedAt: tombstone.requestedAt,
+        leaseId: lease.id,
+      });
+      return;
+    }
+    warn('proof media revocation deferred: another delivery holds the sweep lease', {
+      eventId,
+      proofId,
+      storagePath,
+      requestedAt: tombstone.requestedAt,
+      leaseId: lease.id,
+    });
+    throw new Error(
+      `proof media revocation deferred: ${eventId}/${proofId} is held by another sweep delivery`,
+    );
+  }
+
   // THE PROOF MUST BE ABSENT. A read failure is NOT swallowed: it propagates and
   // the platform redelivers, because "I could not tell whether a Feed entry
   // still points at this media" must never resolve to "delete it".
@@ -534,14 +819,36 @@ export async function revokeProofMedia(
       proofId,
       storagePath,
     });
-    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
+    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, lease.id, warn);
     return;
   }
 
-  const generation =
+  // EVERY DELETE IS GENERATION-BOUND, INCLUDING A ROW THAT RECORDED NONE (#1153,
+  // Codex round 6 P2). The recorded generation is preferred — it names the object
+  // the revocation was actually written about — and a row whose client-side
+  // metadata read failed takes the generation the object carries RIGHT NOW,
+  // read under the lease that keeps anyone else from replacing it in between.
+  // The unconditioned path delete this used to fall back to is what let a stale
+  // duplicate delivery remove a live re-post's media; it no longer exists.
+  //
+  // A metadata read that finds nothing there means the revocation is already
+  // discharged — the ordinary outcome, where the deleting client's own inline
+  // Storage delete won the race — so the row is retired without a bucket call.
+  // Any other metadata failure REJECTS out of the dep and propagates.
+  const recorded =
     typeof tombstone.generation === 'string' && tombstone.generation.length > 0
       ? tombstone.generation
       : null;
+  const generation = recorded ?? (await deps.currentObjectGeneration(storagePath));
+  if (generation === null) {
+    warn('proof media revocation: the object was already gone before the delete', {
+      eventId,
+      proofId,
+      storagePath,
+    });
+    await retireIfStillOurs(deps, { eventId, proofId, tombstone }, lease.id, warn);
+    return;
+  }
 
   try {
     await deps.deleteObject(storagePath, generation);
@@ -553,10 +860,10 @@ export async function revokeProofMedia(
         storagePath,
         generation,
       });
-      await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
+      await retireIfStillOurs(deps, { eventId, proofId, tombstone }, lease.id, warn);
       return;
     }
     if (!isObjectAlreadyGone(err)) throw err;
   }
-  await retireIfStillOurs(deps, { eventId, proofId, tombstone }, warn);
+  await retireIfStillOurs(deps, { eventId, proofId, tombstone }, lease.id, warn);
 }

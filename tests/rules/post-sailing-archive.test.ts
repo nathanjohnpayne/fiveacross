@@ -1555,6 +1555,25 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await assertSucceeds(takedown(ADMIN, TOMBSTONE({ generation: '1700000000000001' })));
   });
 
+  it('DENIES a client-minted row carrying a SWEEP LEASE, and admits the plain row beside it (#1153)', async () => {
+    // Codex round 6 P2. `leaseId` / `leaseAt` are `revokeDeletedProofMedia`'s
+    // claim on the row — the only fields any server writes to this collection,
+    // and what stops two duplicate deliveries of one event both reaching the
+    // bucket. A client that could mint a row already carrying one could park an
+    // unexpired lease on its own takedown's row and stall the server sweep until
+    // the TTL ran out, leaving the reported media in the bucket meanwhile. So
+    // `hasOnly` refuses both keys here, exactly as it refuses any other extra.
+    //
+    // The denials run FIRST on purpose, as in the generation case above: a denied
+    // batch writes nothing, so the Proof this arm binds against is still there
+    // for the acceptance below — which would otherwise pass for the wrong reason.
+    await assertFails(takedown(ADMIN, TOMBSTONE({ leaseId: 'forged' })));
+    await assertFails(takedown(ADMIN, TOMBSTONE({ leaseAt: NOW() })));
+    await assertFails(takedown(ALICE, TOMBSTONE({ leaseId: 'forged', leaseAt: NOW() })));
+    // The same row without them is the ordinary takedown, and still lands.
+    await assertSucceeds(takedown(ADMIN, TOMBSTONE()));
+  });
+
   it('DENIES a path naming another Player, another Proof, another Event or another prefix', async () => {
     // The whole point of the durable row is that it authorizes a delete later,
     // so the object it names is pinned by equality to THIS Event, THIS
@@ -1623,6 +1642,17 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
       updateDoc(doc(db(ALICE), tombstonePath()), {
         storagePath: `proofs/${EVENT}/${BOB}/${PROOF}.jpg`,
       }),
+    );
+    // And a SWEEP LEASE cannot be added after the fact either (#1153, Codex
+    // round 6 P2). The update denial now carries that second job: the server
+    // stamps `leaseId` / `leaseAt` to claim the row for exclusive processing, so
+    // the row is no longer immutable for its whole life — but only to the Admin
+    // SDK, which bypasses this file.
+    await assertFails(
+      updateDoc(doc(db(ALICE), tombstonePath()), { leaseId: 'forged', leaseAt: NOW() }),
+    );
+    await assertFails(
+      updateDoc(doc(db(ADMIN), tombstonePath()), { leaseId: 'forged', leaseAt: NOW() }),
     );
   });
 
