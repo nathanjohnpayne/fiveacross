@@ -377,6 +377,11 @@ const CLASSIFIER_PRIVATE_ENV = Object.freeze([
   // that had it set would make the preload's watch look like the codebase's own
   // configuration.
   "FIREBASE_DEPLOY_SCOPE_WATCH_RUNTIME_CONFIG",
+  // `FORCE_NO_CONTAINMENT_VAR`, spelled out because it is declared beside the
+  // containment it governs, far below this list. A run that sets it executes no
+  // hook at all, so nothing can read it here today — it is listed so that stays
+  // true of any later caller, on the same terms as every other name above.
+  "FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT",
 ]);
 
 function withoutClassifierPrivateEnv(environment) {
@@ -703,6 +708,32 @@ export const WRITE_CONTAINMENT_REFUSAL = Object.freeze({
     "checkout after this classification returned",
 });
 
+/**
+ * The test-only switch that makes this machine answer as one with no usable
+ * mechanism, WITHOUT running a candidate.
+ *
+ * WHY IT EXISTS. `ubuntu-latest` is such a machine — no `bwrap`, and an
+ * unprivileged user namespace the kernel refuses — so the fail-closed arm is
+ * what CI actually exercises, while the development Mac only ever exercises the
+ * proved arm. A suite that could not reach the other arm locally would be
+ * written blind against the one machine that runs it.
+ *
+ * WHY IT IS SAFE. It can only make this classifier answer MORE conservatively:
+ * the sole thing it does is refuse the exemption before any hook, probe or
+ * canary runs, which is the same answer `ubuntu-latest` reaches on its own. It
+ * is read from the environment rather than taken as an argument because the
+ * harness cases drive `deploy.sh`, which passes no options through — and unlike
+ * `writeContainment: "unavailable"`, it reports the UNPROVED arm CI reaches
+ * rather than the DISABLED one, naming the candidates it did not try.
+ */
+const FORCE_NO_CONTAINMENT_VAR = "FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT";
+
+/** Whether this run has been told to behave as a machine with no mechanism. */
+function forcedNoWriteContainment() {
+  const value = process.env[FORCE_NO_CONTAINMENT_VAR];
+  return value !== undefined && value !== "" && value !== "0";
+}
+
 /** One argument, as a POSIX shell will read it back verbatim. */
 function shellQuote(argument) {
   return `'${String(argument).replaceAll("'", `'\\''`)}'`;
@@ -991,6 +1022,20 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
   if (candidates.length === 0) {
     return { ok: false, reason: `${process.platform} ${WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM}` };
   }
+  // The forced arm, taken BEFORE the first canary so nothing runs: this is the
+  // machine that has candidates and can prove none of them, which is what
+  // `ubuntu-latest` is and what the development Mac otherwise never is. The
+  // reason is composed exactly as a real failure sweep composes it, candidate
+  // labels and all, so a caller cannot tell the simulation from the machine.
+  if (forcedNoWriteContainment()) {
+    const forced = candidates.map(
+      (candidate) => `${candidate.label}: not attempted, ${FORCE_NO_CONTAINMENT_VAR} is set`,
+    );
+    return {
+      ok: false,
+      reason: `${WRITE_CONTAINMENT_REFUSAL.UNPROVED} (${forced.join("; ")})`,
+    };
+  }
   const failures = [];
   for (const candidate of candidates) {
     const proof = await proveWriteContainment(candidate, { root, checkout, readOnlyRoots });
@@ -1013,6 +1058,69 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
     ok: false,
     reason: `${WRITE_CONTAINMENT_REFUSAL.UNPROVED} (${failures.join("; ")})`,
   };
+}
+
+/** One answer per process: the machine does not change while a suite runs. */
+let writeContainmentProbe = null;
+
+/**
+ * WHAT THIS MACHINE CAN PROVE, asked once and answered by the real machinery.
+ *
+ * WHO ASKS. The suites. Every case that expects an EXEMPT classification, and
+ * every case whose drift is injected by a hook, needs a hook to have RUN — and
+ * on a machine that can prove no containment none ever does, because
+ * `establishWriteContainment` refuses before the first one. `ubuntu-latest` is
+ * such a machine: no `bwrap`, and a kernel that refuses to write
+ * `/proc/self/uid_map` for an unprivileged user namespace. Those cases are then
+ * asserting the exemption path against a machine that has no exemption path,
+ * which is not a finding about this classifier.
+ *
+ * WHY A PROBE RATHER THAN A PLATFORM TEST. `process.platform === "linux"` is
+ * the wrong question twice over: a Linux box WITH `bwrap` runs every case
+ * exactly as the Mac does, and a Mac whose `sandbox-exec` was finally removed
+ * would go on claiming it could. The only honest answer is the one the
+ * classifier itself reaches, from the same candidate list and the same canary —
+ * so this runs `establishWriteContainment`, unmodified, and reports what it
+ * said.
+ *
+ * THE LAYOUT IS THE NESTED ONE — a scratch root and a checkout as siblings
+ * under the system temp dir — because that is where the fixtures live and it is
+ * the arrangement that needs the read-only override. A machine that proves this
+ * proves the flat arrangement too, which needs no override at all; a machine
+ * that proves only the flat one reports a CHECKOUT canary failure here, and
+ * that is a broken mechanism rather than an absent one — a caller must not read
+ * it as "this machine has none".
+ *
+ * NOTHING IS STAGED. No project is copied, no hook is executed, no discovery
+ * process is started: `establishWriteContainment` writes a profile and one
+ * contained canary, and both roots are removed before this returns.
+ *
+ * @returns {Promise<{ok: boolean, label?: string, reason?: string}>}
+ */
+export async function probeWriteContainment() {
+  if (writeContainmentProbe !== null) return writeContainmentProbe;
+  const scratchRoot = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-probe-"));
+  const projectDir = await mkdtemp(join(tmpdir(), "firebase-deploy-scope-probe-checkout-"));
+  try {
+    const containment = await establishWriteContainment({ scratchRoot, projectDir });
+    writeContainmentProbe = containment.ok
+      ? { ok: true, label: containment.label }
+      : { ok: false, reason: containment.reason };
+  } catch (error) {
+    // A probe that cannot answer is not a machine without a mechanism: it is a
+    // probe that failed, and it says so in its own words rather than borrowing
+    // a refusal that would license a caller to skip.
+    writeContainmentProbe = {
+      ok: false,
+      reason: `the write-containment probe could not run — ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  } finally {
+    await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(projectDir, { recursive: true, force: true }).catch(() => {});
+  }
+  return writeContainmentProbe;
 }
 
 /**
