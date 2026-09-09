@@ -28,8 +28,11 @@ type DocSubscriptionState<T> = {
   hasServerData: boolean;
   /**
    * "The server has answered for this key — or never can." `hasServerData` plus
-   * the ERROR case, latched, exactly as `useDayMetasStatus` resolves an errored
-   * Day for its own `serverLoaded` (#1152, Codex P2 on PR #1139 round 5).
+   * the ERROR case, latched — the same pair `useDayMetasStatus` draws between
+   * `loaded` and `serverLoaded`: an errored Day resolves that hook's `loaded` and
+   * is deliberately kept OUT of its stricter `serverLoaded` (Codex P2 on PR
+   * #1162), and `serverResolved`/`hasServerData` split the same way here
+   * (#1152, Codex P2 on PR #1139 round 5).
    *
    * A caller that must not act on a cache replay needs "the server has spoken"
    * as a GATE, and the Leaderboard's routing half is that caller: it mounts a
