@@ -4,6 +4,10 @@ import {
   ceremonialDayIndexes,
   buildPodiumPayload,
   standingsFreezeAtFor as fnsStandingsFreezeAtFor,
+  withReadableFinaleRanking,
+  clampArchiveNumber as fnsClampArchiveNumber,
+  ARCHIVE_NUMBER_BOUND as FNS_ARCHIVE_NUMBER_BOUND,
+  MAX_ARCHIVE_NUMBER as FNS_MAX_ARCHIVE_NUMBER,
   type FinaleDay,
   type FinalePlayer,
 } from '../../functions/src/finaleContent';
@@ -23,6 +27,12 @@ import {
 } from '../../src/game/logic';
 import { scoringForDay } from '../../src/game/scoring';
 import { buildPodium } from '../../src/data/finale';
+import { withReadableDayStats } from '../../src/data/eventArchive';
+import {
+  ARCHIVE_NUMBER_BOUND,
+  MAX_ARCHIVE_NUMBER,
+  clampArchiveNumber,
+} from '../../src/data/eventLimits';
 import type { DayDef, PlayerDoc } from '../../src/types';
 
 // Parity guard for the client/functions podium mirror (ADR 0011).
@@ -442,6 +452,235 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
     expect(buildPodiumPayload(asFinalePlayers(players), undefined).firstBingo).toEqual(
       buildPodium(players, undefined).firstBingo,
     );
+  });
+});
+
+// --- One normalisation, three ranking paths (#1152, Codex P2 on PR #1165) -------
+//
+// `players/{uid}` validates no field (ADR 0001), so a Player can self-write a
+// count or an instant far outside the magnitude `firestore.rules` accepts. The
+// live board (`useLeaderboard`) and the freeze (`draftEventArchive`) both CLAMP
+// those before they rank, through `withReadableDayStats`. The scheduler did not:
+// `readFinaleRoster` checked only finiteness and `buildPodiumPayload` compared
+// the raw numbers, so two oversized counts collapsed to a tie and reordered on
+// squares on the two client paths while the podium Moment — written once, never
+// amended — kept their original count order, and an out-of-bound first-bingo
+// instant could name a different holder on each side.
+//
+// So this pins the whole mirror: the bound CONSTANTS, the clamp, the normaliser's
+// own output, and then the ANSWER both podium builders reach from one oversized
+// roster. Each case also pins what the UNNORMALISED roster produces, so a
+// regression that drops the mirror fails here rather than passing symmetrically.
+
+/** A roster row in the client's shape, with only the ranking fields varying. */
+const oversized = (
+  uid: string,
+  displayName: string,
+  fields: Partial<Pick<PlayerDoc, 'bingoCount' | 'squaresMarked' | 'firstBingoAt' | 'dayStats'>>,
+): PlayerDoc => ({
+  uid,
+  displayName,
+  photoURL: null,
+  joinedAt: 0,
+  bingoCount: 0,
+  squaresMarked: 0,
+  firstBingoAt: null,
+  reshufflesUsed: 0,
+  ...fields,
+});
+
+/** No ceremonial Day, no Tutorial Day: nothing is excluded, so the ROOT totals
+ *  and the ROOT instant are what both builders rank by. */
+const PLAIN_SCHEDULE: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'>> = [
+  { index: 0, pool: 'main', tutorial: false },
+  { index: 1, pool: 'main', tutorial: false },
+];
+
+/** The live path's roster, exactly as `useLeaderboard` prepares it. */
+const asLiveRoster = (players: readonly PlayerDoc[]): PlayerDoc[] =>
+  players.map((p) => withReadableDayStats(p));
+
+/** The scheduler's roster, exactly as `readFinaleRoster` now prepares it. */
+const asNormalisedFinalePlayers = (players: readonly PlayerDoc[]): FinalePlayer[] =>
+  asFinalePlayers(players).map(withReadableFinaleRanking);
+
+describe('client/functions parity — the archive bound the podium ranks by (#1152)', () => {
+  it('mirrors the bound constants exactly', () => {
+    expect(FNS_ARCHIVE_NUMBER_BOUND).toBe(ARCHIVE_NUMBER_BOUND);
+    expect(FNS_MAX_ARCHIVE_NUMBER).toBe(MAX_ARCHIVE_NUMBER);
+    // Pin the values too, so a symmetric edit to both sides still fails: this is
+    // `firestore.rules`' `finiteArchiveNumber` magnitude (2100-01-01T00:00:00Z),
+    // and the clamp sits one below it because the rules compare with `<`.
+    expect(ARCHIVE_NUMBER_BOUND).toBe(4_102_444_800_000);
+    expect(MAX_ARCHIVE_NUMBER).toBe(4_102_444_799_999);
+  });
+
+  it.each([
+    0,
+    -0,
+    1,
+    -1,
+    MAX_ARCHIVE_NUMBER,
+    -MAX_ARCHIVE_NUMBER,
+    ARCHIVE_NUMBER_BOUND,
+    -ARCHIVE_NUMBER_BOUND,
+    MAX_ARCHIVE_NUMBER + 1,
+    -MAX_ARCHIVE_NUMBER - 1,
+    5e12,
+    -5e12,
+    MAX_ARCHIVE_NUMBER - 0.5,
+    Number.MAX_SAFE_INTEGER,
+    -Number.MAX_SAFE_INTEGER,
+  ])('clamps %p identically on both sides', (value) => {
+    expect(fnsClampArchiveNumber(value)).toBe(clampArchiveNumber(value));
+  });
+
+  it('normalises one malformed row to the same numbers on both sides', () => {
+    const row = oversized('messy', 'Messy', {
+      bingoCount: MAX_ARCHIVE_NUMBER + 5_000,
+      squaresMarked: -(MAX_ARCHIVE_NUMBER + 5_000),
+      firstBingoAt: MAX_ARCHIVE_NUMBER + 5_000,
+      dayStats: {
+        0: { bingoCount: MAX_ARCHIVE_NUMBER + 7, squaresMarked: 4, firstBingoAt: -(MAX_ARCHIVE_NUMBER + 7) },
+        1: { bingoCount: 2, squaresMarked: 3, firstBingoAt: 900 },
+      },
+    });
+    const client = withReadableDayStats(row);
+    const fns = withReadableFinaleRanking(asFinalePlayers([row])[0]);
+
+    expect(fns.bingoCount).toBe(client.bingoCount);
+    expect(fns.squaresMarked).toBe(client.squaresMarked);
+    expect(fns.firstBingoAt).toBe(client.firstBingoAt);
+    expect(fns.dayStats).toEqual(client.dayStats);
+    // …and pin the values, so both sides regressing together still fails.
+    expect(client.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(client.squaresMarked).toBe(-MAX_ARCHIVE_NUMBER);
+    expect(client.firstBingoAt).toBe(MAX_ARCHIVE_NUMBER);
+    expect(client.dayStats).toEqual({
+      0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 4, firstBingoAt: -MAX_ARCHIVE_NUMBER },
+      1: { bingoCount: 2, squaresMarked: 3, firstBingoAt: 900 },
+    });
+  });
+
+  it('returns an in-bounds row by identity on both sides', () => {
+    const row = oversized('ordinary', 'Ordinary', {
+      bingoCount: 3,
+      squaresMarked: 30,
+      firstBingoAt: 100,
+      dayStats: { 0: { bingoCount: 3, squaresMarked: 30, firstBingoAt: 100 } },
+    });
+    expect(withReadableDayStats(row)).toBe(row);
+    const finaleRow = asFinalePlayers([row])[0];
+    expect(withReadableFinaleRanking(finaleRow)).toBe(finaleRow);
+  });
+
+  it('ranks two distinct oversized counts identically — a clamped tie, broken by squares', () => {
+    // Both counts are above the bound and clamp to the SAME number, so the
+    // bingos tie and squares decide. Unclamped, the bigger raw count wins.
+    const players = [
+      oversized('more-squares', 'More Squares', {
+        bingoCount: MAX_ARCHIVE_NUMBER + 1_000,
+        squaresMarked: 999,
+      }),
+      oversized('bigger-count', 'Bigger Count', {
+        bingoCount: MAX_ARCHIVE_NUMBER + 2_000,
+        squaresMarked: 1,
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), PLAIN_SCHEDULE as DayDef[]);
+    const fns = buildPodiumPayload(asNormalisedFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE));
+
+    expect(fns.champion).toEqual(client.champion);
+    expect(client.champion).toEqual({
+      uid: 'more-squares',
+      displayName: 'More Squares',
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 999,
+    });
+
+    // The defect, stated directly: WITHOUT the normalisation the scheduler's
+    // podium crowns the other Player — permanently, on a Moment never amended.
+    expect(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE)).champion).toEqual({
+      uid: 'bigger-count',
+      displayName: 'Bigger Count',
+      bingoCount: MAX_ARCHIVE_NUMBER + 2_000,
+      squaresMarked: 1,
+    });
+  });
+
+  it('selects the same First to BINGO holder when both instants are out of bounds', () => {
+    // Both stamps clamp to -MAX_ARCHIVE_NUMBER, so the honour ties on the
+    // instant and the shared uid tie-break (ascending) decides it. Unclamped,
+    // the more negative stamp is "earlier" and takes it instead.
+    const players = [
+      oversized('zed', 'Zed', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: -(MAX_ARCHIVE_NUMBER + 2_000),
+        dayStats: {},
+      }),
+      oversized('ada', 'Ada', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: -(MAX_ARCHIVE_NUMBER + 1_000),
+        dayStats: {},
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), PLAIN_SCHEDULE as DayDef[]);
+    const fns = buildPodiumPayload(asNormalisedFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE));
+
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(client.firstBingo).toEqual({ uid: 'ada', displayName: 'Ada', at: -MAX_ARCHIVE_NUMBER });
+
+    // …and the same defect on the honour: the unnormalised roster names Zed.
+    expect(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE)).firstBingo).toEqual({
+      uid: 'zed',
+      displayName: 'Zed',
+      at: -(MAX_ARCHIVE_NUMBER + 2_000),
+    });
+  });
+
+  it('selects the same holder when the out-of-bounds instant is in a per-Day bucket', () => {
+    // The pin resolves through the per-Day buckets whenever a row carries any,
+    // which is why the mirror normalises them too and not only the root.
+    const players = [
+      oversized('zed', 'Zed', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: 10,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 1, firstBingoAt: -(MAX_ARCHIVE_NUMBER + 2_000) } },
+      }),
+      oversized('ada', 'Ada', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: 20,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 1, firstBingoAt: -(MAX_ARCHIVE_NUMBER + 1_000) } },
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), PLAIN_SCHEDULE as DayDef[]);
+    const fns = buildPodiumPayload(asNormalisedFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE));
+
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(client.firstBingo).toEqual({ uid: 'ada', displayName: 'Ada', at: -MAX_ARCHIVE_NUMBER });
+    expect(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(PLAIN_SCHEDULE)).firstBingo).toEqual({
+      uid: 'zed',
+      displayName: 'Zed',
+      at: -(MAX_ARCHIVE_NUMBER + 2_000),
+    });
+  });
+
+  it('leaves an ordinary roster untouched, podium and all', () => {
+    // The bound is nine orders of magnitude above any real stat, so normalising
+    // must be invisible on every roster that was already fine.
+    const players = roster();
+    for (const shape of [CRUISE_SHAPE, SCHEDULE, COMPETITIVE_CLOSE]) {
+      const normalised = buildPodiumPayload(
+        asNormalisedFinalePlayers(players),
+        asFinaleDays(shape),
+      );
+      expect(normalised).toEqual(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(shape)));
+      expect(normalised.champion).toEqual(buildPodium(asLiveRoster(players), shape as DayDef[]).champion);
+    }
   });
 });
 

@@ -86,6 +86,108 @@ export function compareFinalePlayers(a: Rankable, b: Rankable): number {
   return af - bf;
 }
 
+/**
+ * The magnitude `firestore.rules`' `finiteArchiveNumber` bounds every number in
+ * the frozen record by, EXCLUSIVELY. Mirror of `ARCHIVE_NUMBER_BOUND` in
+ * `src/data/eventLimits.ts` — 4102444800000 is 2100-01-01T00:00:00Z, the
+ * estate's stand-in for an `isFinite()` Rules does not have. Restated rather
+ * than imported for the reason every mirror in this file is: `functions/tsconfig.json`
+ * sets `rootDir: "src"`, so a runtime import from `../../src/**` does not compile.
+ */
+export const ARCHIVE_NUMBER_BOUND = 4_102_444_800_000;
+
+/** The largest magnitude a ranking number may carry — one BELOW the bound above,
+ *  because the rules' comparison is `<` rather than `<=`. Mirror of
+ *  `MAX_ARCHIVE_NUMBER` in `src/data/eventLimits.ts`, pinned against the client's
+ *  own constant by `tests/functions/finale-parity.test.ts`. */
+export const MAX_ARCHIVE_NUMBER = ARCHIVE_NUMBER_BOUND - 1;
+
+/** A finite number brought inside `MAX_ARCHIVE_NUMBER` in both directions.
+ *  Mirror of `clampArchiveNumber` in `src/data/eventLimits.ts`. */
+export function clampArchiveNumber(value: number): number {
+  return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
+}
+
+/** A ranking count the comparator can SUBTRACT: a non-numeric or non-finite stat
+ *  reads as `0`, a finite one is CLAMPED. Mirror of `readableRankingCount`
+ *  (`src/game/logic.ts`). */
+function readableRankingCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : 0;
+}
+
+/** A ranking instant, or `null` — which `compareFinalePlayers` already means by
+ *  "never bingoed". Bounded like the count beside it. Mirror of
+ *  `readableRankingInstant` (`src/game/logic.ts`). */
+function readableRankingInstant(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : null;
+}
+
+/**
+ * One roster row with its RANKING fields — the root three AND the per-Day
+ * buckets — made readable, so THE PODIUM RANKS BY THE SAME NUMBERS THE LIVE
+ * BOARD AND THE FROZEN RECORD DO (#1152, Codex P2 on PR #1165).
+ *
+ * Mirror of `withReadableDayStats` in `src/data/eventArchive.ts`, which is what
+ * `useLeaderboard` maps the live roster through and what `draftEventArchive`
+ * maps the roster it freezes through. This side had only `readFinaleRoster`'s
+ * finiteness checks, and `buildPodiumPayload` then compared the RAW numbers —
+ * so for values `players/{uid}` freely admits (its rules arm validates no field,
+ * ADR 0001) the scheduler's podium ordered a roster the two client paths ordered
+ * differently. Two distinct oversized `bingoCount`s collapse to a tie under the
+ * clamp and reorder on squares live and in the archive, while the podium Moment
+ * — which is written once and never amended — kept their original count order;
+ * an out-of-bound first-bingo instant likewise ties under the clamp, where the
+ * uid tie-break can hand the honour to the other Player. One normalisation,
+ * three ranking paths.
+ *
+ * A well-formed row is returned by IDENTITY, buckets included, and no count is
+ * recomputed: this decides nothing about who won, it only makes the row read the
+ * same on every surface. Bucket KEYS are already canonical integers by the time
+ * this runs — `sanitizeDayStats` (`unlockDay.ts`) rebuilds the map through
+ * `Number(key)` before this sees it — so re-keying them here is a round-trip,
+ * not a merge.
+ */
+export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
+  const bingoCount = readableRankingCount(player.bingoCount);
+  const squaresMarked = readableRankingCount(player.squaresMarked);
+  const firstBingoAt = readableRankingInstant(player.firstBingoAt);
+  const rooted: FinalePlayer =
+    bingoCount === player.bingoCount
+    && squaresMarked === player.squaresMarked
+    && firstBingoAt === player.firstBingoAt
+      ? player
+      : { ...player, bingoCount, squaresMarked, firstBingoAt };
+  const raw = rooted.dayStats;
+  if (!raw || typeof raw !== 'object') return rooted;
+  let changed = false;
+  const readable: Record<number, FinaleDayStat> = {};
+  for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
+    // A bucket that is not an object is DROPPED — there is nothing to default a
+    // Day's evidence to — and dropping one is itself a change.
+    if (!bucket || typeof bucket !== 'object') {
+      changed = true;
+      continue;
+    }
+    const stat = bucket as Record<string, unknown>;
+    const dayBingoCount = readableRankingCount(stat.bingoCount);
+    const daySquaresMarked = readableRankingCount(stat.squaresMarked);
+    const dayFirstBingoAt = readableRankingInstant(stat.firstBingoAt);
+    if (
+      dayBingoCount !== stat.bingoCount
+      || daySquaresMarked !== stat.squaresMarked
+      || dayFirstBingoAt !== stat.firstBingoAt
+    ) {
+      changed = true;
+    }
+    readable[Number(key)] = {
+      bingoCount: dayBingoCount,
+      squaresMarked: daySquaresMarked,
+      firstBingoAt: dayFirstBingoAt,
+    };
+  }
+  return changed ? { ...rooted, dayStats: readable } : rooted;
+}
+
 /** The Tutorial Day indexes from an Event's schedule. The Event-wide First to
  *  BINGO honor excludes these Days.
  *

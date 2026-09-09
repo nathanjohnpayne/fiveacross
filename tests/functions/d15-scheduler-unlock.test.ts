@@ -16,6 +16,7 @@ import {
   type EventLike,
   runFinaleBeats,
 } from '../../functions/src/unlockDay';
+import { MAX_ARCHIVE_NUMBER } from '../../functions/src/finaleContent';
 
 // specs/d15-scheduler-unlock.md — the Phase 1.5 daily scheduler (#202,
 // daily-cards-spec § "Unlock mechanics" / "Scoring and social surfaces"). Pure
@@ -883,6 +884,85 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       podium?: { champion?: { displayName?: string; bingoCount?: number; squaresMarked?: number } | null };
     };
     expect(podium.podium?.champion).toMatchObject({ displayName: 'Jess', bingoCount: 3, squaresMarked: 40 });
+  });
+
+  // #1152, Codex P2 on PR #1165. `readFinaleRoster` only asked whether a value
+  // was finite, and `players/{uid}` validates no field at all (ADR 0001) — so a
+  // Player self-writing a count or an instant far outside the magnitude
+  // `firestore.rules` accepts was ranked here by its RAW value, while the live
+  // board and the freeze both clamped it first. These two pin the SEAM: the
+  // roster this beat reads is normalised before `buildPodiumPayload` ranks it.
+  // `tests/functions/finale-parity.test.ts` § "the archive bound the podium ranks
+  // by (#1152)" is where the same answers are compared against the client's.
+  it('ranks the podium by the CLAMPED counts, so a tie above the bound falls to squares', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: { days: mainDays() },
+      // No `dayStats`: nothing to re-aggregate, so the ROOT totals are ranked.
+      // Both counts sit above the bound and clamp to the same number, so the
+      // bingos tie and squares decide — as they do on the live Leaderboard.
+      players: [
+        {
+          uid: 'more-squares',
+          displayName: 'More Squares',
+          bingoCount: MAX_ARCHIVE_NUMBER + 1_000,
+          squaresMarked: 999,
+          firstBingoAt: null,
+        },
+        {
+          uid: 'bigger-count',
+          displayName: 'Bigger Count',
+          bingoCount: MAX_ARCHIVE_NUMBER + 2_000,
+          squaresMarked: 1,
+          firstBingoAt: null,
+        },
+      ],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
+      podium?: { champion?: Record<string, unknown> | null };
+    };
+    expect(podium.podium?.champion).toEqual({
+      uid: 'more-squares',
+      displayName: 'More Squares',
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 999,
+    });
+  });
+
+  it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: { days: mainDays() },
+      // Both stamps clamp to -MAX_ARCHIVE_NUMBER, so the honour ties on the
+      // instant and the shared uid tie-break (ascending) hands it to Ada.
+      // Unclamped, Zed's more-negative stamp reads as "earlier" and takes it.
+      players: [
+        {
+          uid: 'zed',
+          displayName: 'Zed',
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: -(MAX_ARCHIVE_NUMBER + 2_000),
+        },
+        {
+          uid: 'ada',
+          displayName: 'Ada',
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: -(MAX_ARCHIVE_NUMBER + 1_000),
+        },
+      ],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
+      podium?: { firstBingo?: Record<string, unknown> | null };
+    };
+    expect(podium.podium?.firstBingo).toEqual({
+      uid: 'ada',
+      displayName: 'Ada',
+      at: -MAX_ARCHIVE_NUMBER,
+    });
   });
 
   it('a roster read failure still posts the minimal beat (content is best-effort)', async () => {

@@ -182,6 +182,7 @@ import {
   buildMostLovedPhotoAward,
   freezePhraseForUnlock,
   standingsFreezeAtFor,
+  withReadableFinaleRanking,
   type FinalePlayer,
   type FinaleDay,
   type FinaleDayStat,
@@ -791,7 +792,21 @@ function sanitizeDayStats(value: unknown): Record<number, FinaleDayStat> | undef
 
 /** The canonical roster as `FinalePlayer[]` (#266) — the same shape the content
  *  builders and client-side podium consume. Ban filtering is applied only to the
- *  rendered view/copy, so reversible bans do not permanently erase finale data. */
+ *  rendered view/copy, so reversible bans do not permanently erase finale data.
+ *
+ *  READABLE BEFORE RANKED, and by the SAME normalisation the two client paths
+ *  apply (#1152, Codex P2 on PR #1165). The coercions above only asked whether a
+ *  value was finite, and `buildPodiumPayload` then compared the raw numbers —
+ *  but `players/{uid}` validates no field (ADR 0001), so a Player can self-write
+ *  a count or an instant far outside the magnitude `firestore.rules` accepts, and
+ *  both `useLeaderboard` and `draftEventArchive` CLAMP those before they rank.
+ *  The scheduler did not, so the live board and the frozen record could order two
+ *  oversized rows one way (a clamped tie, reordered on squares) while the podium
+ *  Moment — written once, never amended — kept their original count order, and an
+ *  out-of-bound first-bingo instant could name a different holder on each side.
+ *  This is the scheduler's analogue of `useLeaderboard` mapping its roster
+ *  through `withReadableDayStats`: ONE normalisation applied once, at the entry
+ *  point, so every finale beat reading this roster reads the same numbers. */
 async function readFinaleRoster(
   db: AdminFirestore,
   eventId: string,
@@ -810,7 +825,8 @@ async function readFinaleRoster(
         dayStats: sanitizeDayStats(data.dayStats),
       };
     })
-    .filter((p) => p.uid !== '');
+    .filter((p) => p.uid !== '')
+    .map(withReadableFinaleRanking);
 }
 
 function visibleFinaleRoster(roster: readonly FinalePlayer[], bannedUids: readonly string[]): FinalePlayer[] {
