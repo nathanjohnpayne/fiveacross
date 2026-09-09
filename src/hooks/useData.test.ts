@@ -409,6 +409,38 @@ describe('useDayMetasStatus — the fan addresses the schedule’s own Day index
     expect(result.current.loaded).toBe(true);
     expect(result.current.serverLoaded).toBe(true);
     expect(result.current.serverConfirmed).toBe(true);
+
+    // …and NORMALISING IS NOT ACCEPTING (Codex P2 on PR #1162). Every shape it
+    // just collapsed is one `archiveEvent` refuses as `schedule-unusable`, and
+    // silently normalising them is what let the Archive control arm over a
+    // schedule the freeze was going to turn down after the Event was already
+    // shut. The fan still completes — it has to, or every gate on this hook hangs
+    // — and reports that it had to.
+    expect(result.current.scheduleUnusable).toBe(true);
+  });
+
+  it('reports an unusable schedule per SHAPE, and a unique non-contiguous one as fine', () => {
+    captureFan();
+    // A repeated Day: readable, but two entries for ONE Day — the freeze would
+    // read one meta document twice and freeze that Day's honour twice.
+    expect(renderHook(() => useDayMetasStatus([0, 1, 1])).result.current.scheduleUnusable).toBe(
+      true,
+    );
+    // An index that names no Day at all.
+    expect(
+      renderHook(() => useDayMetasStatus([0, undefined as unknown as number])).result.current
+        .scheduleUnusable,
+    ).toBe(true);
+    // THE CONTROLS, and the reason the fan keys on `DayDef.index` at all: a
+    // unique non-contiguous schedule is a schedule the freeze reads correctly.
+    expect(renderHook(() => useDayMetasStatus([4])).result.current.scheduleUnusable).toBe(false);
+    expect(renderHook(() => useDayMetasStatus([0, 3, 7])).result.current.scheduleUnusable).toBe(
+      false,
+    );
+    // An Event with no schedule at all is not an unusable one — it is an Event
+    // with nothing to fan over, which the completion tests already read as
+    // vacuously satisfied.
+    expect(renderHook(() => useDayMetasStatus([])).result.current.scheduleUnusable).toBe(false);
   });
 });
 

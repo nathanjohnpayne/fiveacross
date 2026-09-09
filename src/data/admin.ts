@@ -12,6 +12,7 @@ import {
   archiveSnapshotFingerprint,
   draftEventArchive,
   finaleHasRun,
+  usableDayIndexes,
 } from './eventArchive';
 import { migrateClaimMode, migrateDayFields } from './converters';
 import { dayMetaRef, playersCol } from './paths';
@@ -884,9 +885,10 @@ export type ArchiveReadFailure = `read-failed:${ArchiveReadStage}`;
  *  means that record is a shape `firestore.rules` would refuse, caught here
  *  rather than thrown at the boundary after the Event is already shut (#1151,
  *  Codex P1 on PR #1162); `schedule-unusable` means the stored `days` carry an
- *  entry with no usable Day index, which the converter tolerates (so the console
- *  armed) but the raw post-quiesce read cannot address an honour pin with
- *  (Codex P2 on PR #1162); and `read-failed:<stage>` means one of the server
+ *  entry with no usable Day index, or name one Day TWICE, neither of which the
+ *  converter refuses (so the console armed) and neither of which the raw
+ *  post-quiesce read can turn into one honour per Day (Codex P2 on PR #1162);
+ *  and `read-failed:<stage>` means one of the server
  *  reads the record is built from did not answer at all (CodeRabbit Major, PR
  *  #1162). All of them write NOTHING (#1151). */
 export type ArchiveEventResult =
@@ -1230,11 +1232,15 @@ export async function abandonArchive(
  *    question here is what keeps a cause nobody anticipated from arriving as a
  *    rejected write on an Event this call has already shut.
  *  - `schedule-unusable` — the stored `days` carry an entry with no usable Day
- *    index (Codex P2 on PR #1162). `eventConverter` tolerates such an entry, so
- *    the console renders and ARMS over it; this raw read cannot address a Day's
- *    honour pin without an index, and dereferencing one threw outside every
- *    `archiveRead` wrapper — past the console's cleanup, on an Event already
- *    shut.
+ *    index, or name the same Day twice (Codex P2 on PR #1162). `eventConverter`
+ *    tolerates both, so the console renders over them; this raw read cannot
+ *    address a Day's honour pin without an index, and dereferencing one threw
+ *    outside every `archiveRead` wrapper — past the console's cleanup, on an
+ *    Event already shut — while a repeated index reads two snapshots of ONE Day
+ *    and freezes that Day's honour twice. Both are asked through the shared
+ *    `usableDayIndexes`, which the console's honour fan asks BEFORE arming, so
+ *    neither shape reaches this refusal by way of a console that offered the
+ *    control.
  */
 export async function archiveEvent(
   token: number,
@@ -1370,8 +1376,20 @@ export async function archiveEvent(
   // freeze whatever it found (or did not) as that Day's honour. A typed refusal
   // is what the console's cleanup keys on, so this reopens play exactly as the
   // read refusals do.
-  if (scheduleDays.some((d) => !Number.isInteger(d.index))) return 'schedule-unusable';
+  //
+  // A REPEATED index is refused by the same clause (Codex P2 on PR #1162). It is
+  // readable — both entries address a real document — but the two reads are not
+  // two Days: `dayMetas` below is keyed by index, so the second snapshot simply
+  // overwrites the first, while `draftEventArchive`'s honour selection flat-maps
+  // over the schedule ENTRIES and emits that one Day's honour once per entry. The
+  // record would then carry the same `dayIndex` twice, permanently, against a
+  // `dailyHonors` contract that is one honour per Day — and `completeArchiveRecord`
+  // cannot look inside a list to refuse it. Asked through the shared
+  // `usableDayIndexes`, so this refusal and the console's own arming gate cannot
+  // drift apart; a unique NON-CONTIGUOUS schedule (a one-Day Event at index 4)
+  // stays perfectly usable, which is the whole point of keying on `DayDef.index`.
   const dayIndexes = scheduleDays.map((d) => d.index);
+  if (!usableDayIndexes(dayIndexes)) return 'schedule-unusable';
   const [rosterRead, metaRead] = await Promise.all([
     archiveRead(() => getDocsFromServer(playersCol(eventId))),
     archiveRead(() =>

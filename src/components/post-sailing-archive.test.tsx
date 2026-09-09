@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ClaimDoc, DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
+// The freeze's OWN schedule predicate, used by the honour-fan stub below so the
+// console gate under test is asked the same question `archiveEvent` asks (Codex
+// P2 on PR #1162). Referenced only from inside the stub's closure, which runs at
+// render time, so the hoisted factory never touches it before this import lands.
+import { usableDayIndexes } from '../data/eventArchive';
 
 // specs/post-sailing-archive.md, RTL layer (#1149 and #1151, epic #134). The
 // Admin console's three actions and the states they move between:
@@ -79,6 +84,11 @@ const H = vi.hoisted(() => {
       serverLoaded: state.dayMetasServerConfirmed,
       serverConfirmed: state.dayMetasServerConfirmed,
       failed: state.dayMetasFailed,
+      // …and faithful about the SCHEDULE too (Codex P2 on PR #1162): the real
+      // hook asks `archiveEvent`'s own `usableDayIndexes` of the list it was
+      // handed, and so does this, rather than carrying a flag a test could set
+      // independently of the schedule it rendered.
+      scheduleUnusable: !usableDayIndexes(dayIndexes),
     })),
   };
   return state;
@@ -737,6 +747,48 @@ describe('ArchiveEvent — the archive waits for its inputs to be server-confirm
   it('says nothing about unreadable honours while every Day is still confirmed', () => {
     H.dayMetasFailed = true;
     H.dayMetasServerConfirmed = true;
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  // Codex P2 on PR #1162. `archiveEvent` refuses a stored schedule that names one
+  // Day twice, exactly as it refuses one carrying an index it cannot address —
+  // but the honour fan NORMALISES both away so it can still complete, so every
+  // latch went true and this control armed. The Admin then closed play, the flip
+  // refused, and the handler reopened it: a round trip through a shut Event for a
+  // defect that was on screen the whole time.
+  it('does NOT arm over a schedule the freeze would refuse, and names the repair', () => {
+    H.event = mkEvent({ days: [mkDay(0), mkDay(1), mkDay(1)] });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(/the same day is listed twice/);
+    // The repair is the one the flip's own refusal names, at the surface the
+    // Admin is already looking at — and it is stated INSTEAD of the loading
+    // sentence, because nothing here is still arriving.
+    expect(screen.getByRole('status')).toHaveTextContent(/Fix or re-save that day/);
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Loading the final standings/);
+    expect(screen.getByRole('status')).toHaveTextContent(/Nothing has been closed\./);
+  });
+
+  it('holds the CLOSING-state freeze shut on an unusable schedule too', () => {
+    // The other surface that reaches the flip: an Admin who has already used
+    // Close play cannot get back to the confirm row, so this gate has to hold
+    // here on its own terms — and Reopen play is the way out.
+    H.event = mkEvent({ archiving: true, archiveToken: 1, days: [mkDay(2), mkDay(2)] });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /the same day is listed twice.*Play is already closed—nothing has been frozen\./,
+    );
+  });
+
+  it('arms over a UNIQUE non-contiguous schedule — the control', () => {
+    // The reason every day-scoped path keys on `DayDef.index`: a one-Day Event at
+    // index 4 is a schedule the freeze reads correctly, not a broken one, and
+    // this gate must not confuse the two.
+    H.event = mkEvent({ days: [mkDay(4)] });
     renderConsole();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeEnabled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();

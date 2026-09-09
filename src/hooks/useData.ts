@@ -6,6 +6,7 @@ import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '..
 import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
+import { usableDayIndexes } from '../data/eventArchive';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -358,13 +359,23 @@ export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, 
  *    entry it cannot read (`migrateDayFields` treats a nullish one as `{}`), so
  *    an index can be `undefined` or fractional. `dayMetaRef` would then address
  *    `days/undefined/meta/undefined` — a document that is not there, delivered
- *    as a perfectly ordinary "no pin here". The freeze refuses such a schedule
- *    outright (`archiveEvent`'s `schedule-unusable`), so nothing downstream is
- *    made worse by the fan simply not addressing it.
+ *    as a perfectly ordinary "no pin here".
  *  - **Duplicates are collapsed.** The completion tests below count DISTINCT
  *    Days answered against the list's length, so a schedule naming one index
  *    twice could never reach `seen.size >= length` and the archive control would
  *    sit disabled behind a message that never resolves.
+ *
+ * NORMALISING IS NOT THE SAME AS ACCEPTING (#1151, Codex P2 on PR #1162). Both
+ * shapes above are ones `archiveEvent` REFUSES as `schedule-unusable` — a
+ * non-integer index it cannot address, a repeated one it would freeze twice —
+ * and normalising them away silently is exactly what let the console arm over a
+ * schedule the freeze was going to turn down: the fan completed, every latch
+ * went true, the Admin closed play, and the flip refused and reopened it. So the
+ * normalisation stays (the fan still has to address SOMETHING, and a list it
+ * cannot complete would hang every gate on this hook) and the fact that it was
+ * needed is REPORTED beside it, through `useDayMetasStatus`' `scheduleUnusable`.
+ * The question itself is the freeze's own `usableDayIndexes`, asked rather than
+ * restated, so the two halves cannot drift.
  *
  * Order is preserved, because the fan's own key is the list's content and a
  * stable order keeps that key stable across renders.
@@ -471,12 +482,22 @@ export function useDayMetasStatus(dayIndexes: readonly number[]): {
    *  its listener died stays latched and stays current. What it means is that a
    *  Day still MISSING one can never acquire it for this key. */
   failed: boolean;
+  /** The SUPPLIED list is one `archiveEvent` would refuse as `schedule-unusable`
+   *  — an index that is not an integer, or the same Day named twice (Codex P2 on
+   *  PR #1162). The fan still runs, over the normalised list; this is what stops
+   *  a surface that PERSISTS what it read from arming over a schedule the freeze
+   *  is going to turn down after it has already shut the Event. */
+  scheduleUnusable: boolean;
 } {
   const eventId = EVENT_ID;
   // The DAYS this fan addresses, normalised (see `canonicalDayIndexes`). Derived
   // per render because callers rebuild `days.map(d => d.index)` every render;
   // the effect keys on its CONTENT, exactly as `useMyDayBoards` does.
   const indexes = canonicalDayIndexes(dayIndexes);
+  // …and whether normalising it was NECESSARY, which is a different fact and the
+  // one the archive gate needs. Asked through the freeze's own predicate so the
+  // console and `archiveEvent` cannot disagree about which schedules are usable.
+  const scheduleUnusable = !usableDayIndexes(dayIndexes);
   const dayCount = indexes.length;
   const key = eventScopeKey(eventId, 'day-metas', indexes.join(','));
   type State = {
@@ -583,6 +604,7 @@ export function useDayMetasStatus(dayIndexes: readonly number[]): {
     serverLoaded: dayCount <= 0 || current.serverSeen.size >= dayCount,
     serverConfirmed: dayCount <= 0 || current.serverCurrent.size >= dayCount,
     failed: current.errored.size > 0,
+    scheduleUnusable,
   };
 }
 

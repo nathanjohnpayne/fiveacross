@@ -104,6 +104,23 @@ const RECORD_UNWRITABLE_COPY =
 const HONORS_UNREADABLE_COPY =
   'The daily honours could not be read from the server, so the archive cannot tell a Day that had no First to BINGO from one whose honour never arrived. Reload the console and try again.';
 
+/** Why the archive will not open over a schedule the FREEZE would refuse (#1151,
+ *  Codex P2 on PR #1162).
+ *
+ *  `archiveEvent` turns down a stored schedule carrying an unreadable Day index
+ *  or naming one Day twice (`usableDayIndexes` → `schedule-unusable`), and until
+ *  this the console could not see that coming: the honour fan normalised both
+ *  shapes away, every latch went true, and the Archive control armed. The Admin
+ *  then closed play, the flip refused, and the handler reopened it — a round trip
+ *  through a shut Event for a condition that was visible on screen the whole
+ *  time.
+ *
+ *  It names the same repair the post-flip copy does, in the same words and at the
+ *  same surface—the day schedule in Game settings, directly above this control—
+ *  because it is the same defect caught earlier. */
+const SCHEDULE_UNUSABLE_BLOCKED_COPY =
+  'One of the days in the schedule above cannot be read, or the same day is listed twice, so the daily honours cannot be looked up one per day. Fix or re-save that day, then archive.';
+
 /** Appended to a refusal's own copy when the automatic reopen DECLINED — the
  *  closing state in force is a later Admin's, so this handler left it alone
  *  (Codex P2, PR #1139). Stated rather than silent: play is still shut, and the
@@ -412,11 +429,18 @@ export default function ArchiveEvent({
   // preview showed the roster-DERIVED honour or none, and the Admin armed and
   // archived. The freeze then read `days/4/meta/4`, found the real pin, and
   // froze a different honour from the one on the screen that was approved.
+  //
+  // …and a schedule the FREEZE would refuse blocks the control rather than
+  // arming it (Codex P2 on PR #1162). The fan normalises an unreadable index and
+  // a repeated Day away so it can still complete, which made both invisible here
+  // — so it reports that it had to, and `archiveEvent`'s own `usableDayIndexes`
+  // is the question it reports on.
   const {
     metas: dayMetas,
     loaded: dayMetasLoaded,
     serverConfirmed: dayMetasConfirmed,
     failed: dayMetasFailed,
+    scheduleUnusable,
   } = useDayMetasStatus(event?.days?.map((d) => d.index) ?? []);
   const [arming, setArming] = useState(false);
   const [beforeFinale, setBeforeFinale] = useState(false);
@@ -531,7 +555,14 @@ export default function ArchiveEvent({
   // already shut the Event by the time the second one would discover that. Every
   // attempt would close play and then fail.
   const fits = draft.refusal === null;
-  const ready = previewConfirmed && drained && fits && (finaleDone || beforeFinale);
+  // …and the FOURTH, which is about the schedule rather than the record (Codex P2
+  // on PR #1162). A stored schedule with an unreadable Day index or the same Day
+  // listed twice is one the flip refuses as `schedule-unusable` — after the
+  // quiesce, on an Event this control has already shut. The console can see it
+  // from here, so it says so from here.
+  const scheduleUsable = !scheduleUnusable;
+  const ready =
+    previewConfirmed && drained && fits && scheduleUsable && (finaleDone || beforeFinale);
   // Why the door is shut, in the order the Admin can act on it: nothing to do
   // about a loading roster but wait, whereas a pending claim names its own fix.
   //
@@ -561,8 +592,16 @@ export default function ArchiveEvent({
   const nothingClosedYet = closing
     ? ' Play is already closed—nothing has been frozen.'
     : ' Nothing has been closed.';
-  const blockedReason =
-    dayMetasFailed && !dayMetasConfirmed
+  //
+  // AND AN UNUSABLE SCHEDULE COMES FIRST OF ALL (Codex P2 on PR #1162). It is
+  // terminal in the same way a dead honours listener is — nothing here resolves
+  // it and waiting does not help — but unlike every other reason on this list it
+  // names a repair the Admin can make on the surface they are already looking at,
+  // and it is upstream of the honours the sentence below is about: the Days those
+  // pins would be read from are the ones the schedule cannot name.
+  const blockedReason = scheduleUnusable
+    ? `${SCHEDULE_UNUSABLE_BLOCKED_COPY}${nothingClosedYet}`
+    : dayMetasFailed && !dayMetasConfirmed
       ? `${HONORS_UNREADABLE_COPY}${nothingClosedYet}`
       : !previewConfirmed || !pendingClaimsLoaded
       ? 'Loading the final standings—the archive stays closed until every one of them is confirmed by the server.'
@@ -722,7 +761,7 @@ export default function ArchiveEvent({
               <button
                 type="button"
                 className="btn"
-                disabled={!previewConfirmed || !drained || !fits}
+                disabled={!previewConfirmed || !drained || !fits || !scheduleUsable}
                 onClick={() => setArming(true)}
               >
                 Archive…

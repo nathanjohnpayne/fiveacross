@@ -1349,6 +1349,52 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(draft.skippedHonors).toBe(1);
   });
 
+  // Codex P2 on PR #1162. DEFENCE IN DEPTH beside `archiveEvent`'s own refusal:
+  // the freeze turns a repeated Day index down before it reads anything
+  // (`usableDayIndexes` → `schedule-unusable`) and the console's honour fan asks
+  // the same question before it arms, but this builder is also called from
+  // surfaces that never went through either gate — and the record is the one
+  // write that can never be amended. `pinnedOrDerivedDailyHonors` flat-maps over
+  // the schedule's ENTRIES, so without this the same Day's honour is emitted once
+  // per entry.
+  it('carries ONE honour per Day index even when the schedule names a Day twice', () => {
+    const holder = mkPlayer({
+      uid: 'pinned',
+      displayName: 'Pinned',
+      bingoCount: 1,
+      squaresMarked: 5,
+    });
+    const draft = draftEventArchive({
+      players: [holder],
+      event: { days: [mkDay(1), mkDay(1)], bannedUids: [] },
+      dayMetas: new Map([[1, { firstBingo: { uid: 'pinned', displayName: 'Pinned', at: 900 } }]]),
+      dayMetasLoaded: true,
+      archivedAt: 1,
+    });
+    // The FIRST entry wins, which is the same entry `dayMetas.get(1)` answered
+    // with — so the deduped record is exactly the one a schedule naming that Day
+    // once would have produced.
+    expect(draft.archive.dailyHonors).toEqual([
+      expect.objectContaining({ dayIndex: 1, uid: 'pinned', displayName: 'Pinned' }),
+    ]);
+    // And the shape the boundary would be asked to accept is still one it can:
+    // the duplicate is invisible to `completeArchiveRecord`, which cannot look
+    // inside a list, so the builder is the only thing standing between the
+    // schedule and a permanent record.
+    expect(writableArchiveRecord(draft.archive)).toBe(true);
+
+    // The control: a schedule naming the Day ONCE produces the identical list,
+    // which is what makes the dedupe a no-op on every schedule the freeze admits.
+    const once = draftEventArchive({
+      players: [holder],
+      event: { days: [mkDay(1)], bannedUids: [] },
+      dayMetas: new Map([[1, { firstBingo: { uid: 'pinned', displayName: 'Pinned', at: 900 } }]]),
+      dayMetasLoaded: true,
+      archivedAt: 1,
+    });
+    expect(draft.archive.dailyHonors).toEqual(once.archive.dailyHonors);
+  });
+
   // #1151, Codex P2 on PR #1162. The Day-meta arm validates `displayName` and
   // `at` on a pin but NOT `uid` on its ADMIN branch (firestore.rules, the
   // `meta/{metaId}` create), and the Admin SDK beside it is constrained by no arm
@@ -1996,6 +2042,46 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     expect(await archiveEvent(1, { now: 5 })).toBe('archived');
     expect(A.serverReads).toContain('events/test-event/days/0/meta/0');
     expect(A.serverReads).toContain('events/test-event/days/1/meta/1');
+  });
+
+  it('refuses a schedule that names one Day TWICE, and still takes a non-contiguous one', async () => {
+    // Codex P2 on PR #1162. A repeated integer index is perfectly READABLE —
+    // both entries address a real document — which is why the unusable-index
+    // check let it through. But the two entries are not two Days: `dayMetas` is
+    // keyed by index, so the second snapshot overwrites the first, while
+    // `pinnedOrDerivedDailyHonors` flat-maps over the schedule ENTRIES and emits
+    // that one Day's honour once per entry. The record would freeze the same
+    // `dayIndex` twice, permanently, against a `dailyHonors` contract that is one
+    // honour per Day — and `completeArchiveRecord` cannot look inside a list to
+    // refuse it.
+    A.dayMetas = new Map([[1, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 1200 } }]]);
+    A.event = closingEvent({ days: [mkDay(0), mkDay(1), mkDay(1)] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('schedule-unusable');
+    expect(A.updates).toEqual([]);
+    // Refused BEFORE the pins are addressed, exactly as the unreadable-index
+    // case is: the refusal is about the schedule, not about what is stored under
+    // it, so there is no reason to spend the reads.
+    expect(A.serverReads.some((p) => p.includes('/meta/'))).toBe(false);
+
+    // …and the duplicate need not be adjacent, or the only pair.
+    A.updates = [];
+    A.event = closingEvent({ days: [mkDay(4), mkDay(7), mkDay(4)] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('schedule-unusable');
+    expect(A.updates).toEqual([]);
+
+    // THE CONTROL, and the point of keying on `DayDef.index` at all: a UNIQUE
+    // non-contiguous schedule is not a broken one. A one-Day Event at index 4 is
+    // read at `days/4/meta/4` and frozen, never at `days/0`.
+    A.updates = [];
+    A.serverReads = [];
+    A.dayMetas = new Map([[4, { firstBingo: { uid: 'pin', displayName: 'Pinned', at: 1200 } }]]);
+    A.event = closingEvent({ days: [mkDay(4)] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.serverReads).toContain('events/test-event/days/4/meta/4');
+    expect(A.serverReads.some((p) => p.includes('days/0/meta/0'))).toBe(false);
+    expect((A.updates[0].archive as { dailyHonors: { dayIndex: number }[] }).dailyHonors).toEqual([
+      expect.objectContaining({ dayIndex: 4, uid: 'pin' }),
+    ]);
   });
 
   it('never reaches the queue when the Event was not shut at all', async () => {

@@ -346,6 +346,48 @@ function usableUid(uid: unknown): uid is string {
 }
 
 /**
+ * Is this schedule's list of Day indexes one the archive can be taken over?
+ * (#1151, Codex P2 on PR #1162.)
+ *
+ * `EventDoc.days` is admin-written with NO per-entry validation in its rules
+ * arm, and `eventConverter` tolerates an entry it cannot read
+ * (`migrateDayFields` treats a nullish one as `{}`), so a stored schedule can
+ * carry either shape this refuses:
+ *
+ *  - **An index that is not an integer.** It is the `days/{dayIndex}` path
+ *    segment every honour pin is addressed by, so a missing or fractional one
+ *    reads `days/undefined/meta/undefined` — a document that is not there,
+ *    delivered as a perfectly ordinary "no pin here" — and the record would
+ *    freeze that absence as the Day's honour.
+ *  - **The same index TWICE.** Every Day-keyed structure downstream is keyed by
+ *    index rather than by position, so the two entries are not two Days: the
+ *    freeze's own `Map<number, DayMetaDoc>` collapses both reads onto one entry,
+ *    while `pinnedOrDerivedDailyHonors` flat-maps over the schedule ENTRIES and
+ *    emits that one Day's honour once per entry. The record then carries the
+ *    same `dayIndex` twice, permanently, against a spec whose whole `dailyHonors`
+ *    contract is one honour per Day.
+ *
+ * ONE PREDICATE, TWO CALLERS, on purpose. `archiveEvent` refuses such a schedule
+ * as `schedule-unusable` after the quiesce; the console's honour fan asks the
+ * same question BEFORE it, so the Archive control never arms over a schedule the
+ * freeze is going to refuse. Stated once here rather than restated in each,
+ * which is the drift that made the console and the freeze disagree about which
+ * Days existed in the first place.
+ *
+ * A UNIQUE NON-CONTIGUOUS list stays usable, deliberately. `days[i].index === i`
+ * is what the setup wizard's draft validation enforces at AUTHORING time and
+ * nothing enforces on a stored Event; every day-scoped path in the estate keys
+ * on `DayDef.index` (the #447 precedent), so a one-Day schedule at index 4 is a
+ * schedule this reads and freezes correctly, not a broken one.
+ */
+export function usableDayIndexes(dayIndexes: readonly number[]): boolean {
+  return (
+    dayIndexes.every((index) => Number.isInteger(index))
+    && new Set(dayIndexes).size === dayIndexes.length
+  );
+}
+
+/**
  * A display name the record can carry: trimmed, defaulted, and BOUNDED.
  *
  * `'Anonymous'` is the estate's existing stand-in for a nameless Player
@@ -1031,9 +1073,28 @@ export function draftEventArchive(params: {
   // (non-finite reads `0`, finite is clamped into `MAX_ARCHIVE_NUMBER`). `uid` is
   // the only one that cannot be coerced — there is nothing to default an
   // identity to, which is the argument `usableUid` already won for a roster row.
-  const carriedHonors = selectedHonors.filter(
-    (h) => Number.isInteger(h.dayIndex) && usableUid(h.uid),
-  );
+  //
+  // AND ONE HONOUR PER DAY INDEX, whatever the schedule says (#1151, Codex P2 on
+  // PR #1162). `pinnedOrDerivedDailyHonors` flat-maps over the schedule's
+  // ENTRIES, so a stored schedule naming the same index twice emits that Day's
+  // honour twice — two identical `ArchivedDayHonor` entries in a list whose whole
+  // contract is one honour per Day, frozen permanently, and invisible to
+  // `completeArchiveRecord`, which cannot look inside a list. `archiveEvent`
+  // refuses such a schedule outright (`usableDayIndexes` → `schedule-unusable`)
+  // and the console's honour fan asks the same question before arming, so this is
+  // DEFENCE IN DEPTH rather than the fix: the builder is called from surfaces
+  // that never went through the freeze's own gate (the console preview, the
+  // tests, any later caller), and the record is the one write that can never be
+  // amended. The FIRST entry wins, which is the same entry `dayMetas.get(index)`
+  // would have answered with — so the deduped record is exactly the one a
+  // schedule naming that Day once would have produced.
+  const seenHonorDays = new Set<number>();
+  const carriedHonors = selectedHonors.filter((h) => {
+    if (!Number.isInteger(h.dayIndex) || !usableUid(h.uid)) return false;
+    if (seenHonorDays.has(h.dayIndex)) return false;
+    seenHonorDays.add(h.dayIndex);
+    return true;
+  });
   const skippedHonors = selectedHonors.length - carriedHonors.length;
 
   const archive: EventArchive = {
