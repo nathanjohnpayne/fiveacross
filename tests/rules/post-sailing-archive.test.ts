@@ -823,6 +823,44 @@ describe('post-sailing-archive — the archive write must carry the whole record
     );
   });
 
+  // Codex P2 on PR #1162, round 9. `dailyHonors is list` accepted a list of ANY
+  // length, so a direct admin flip could freeze thousands of entries into a field
+  // whose contract is at most one honour per Day on an Event that supports at
+  // most ten — permanently, because the flip locks `archive`, and unrepairably,
+  // because no client can amend it. Rules cannot walk a list, so what is IN it
+  // stays the stated residual; its SIZE is one expression, the same one
+  // `standingsSizeMatches` already spends.
+  const honor = (i: number) => ({
+    dayIndex: i,
+    uid: `player-uid-${i}`,
+    displayName: `P${i}`,
+    firstBingoAt: 1000 + i,
+    dayLabel: `🌈 D${i + 1}`,
+  });
+
+  it('DENIES more archived honours than an Event has Days', async () => {
+    // Eleven, which is `MAX_DAYS + 1` — the eleventh Day sits outside the
+    // schedule lock `daysThemeLockOk` unrolls, so it is unsupported rather than
+    // merely undesirable.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        dailyHonors: Array.from({ length: 11 }, (_, i) => honor(i)),
+      }),
+    );
+  });
+
+  it('ALLOWS an honour for every Day the Event can have', async () => {
+    // Ten is the boundary case rather than an exception: a full schedule with a
+    // pinned holder on every Day is exactly what `draftEventArchive` produces.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        dailyHonors: Array.from({ length: 10 }, (_, i) => honor(i)),
+      }),
+    );
+  });
+
   it('DENIES a non-finite or out-of-range freezeAt', async () => {
     // The Standings Freeze the whole record cut on, held to the same bound as
     // the pair's own instants. It is the one number here that needs no Player to

@@ -12,7 +12,7 @@
 // selectors the live Leaderboard already renders with, reused rather than
 // restated: the frozen record must say what the last live Leaderboard said.
 import { isBanned } from './moderation';
-import { supportedDayIndex } from './eventLimits';
+import { MAX_DAYS, supportedDayIndex } from './eventLimits';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import {
   eventFirstBingoWinner,
@@ -957,6 +957,17 @@ function writableStandingsSize(archive: EventArchive): boolean {
  * this refuses no record the writer can legitimately produce, only one a later
  * regression could.
  *
+ * The list's SIZE is not one of the two, because the boundary CAN ask it — a
+ * list's size is one expression rather than a walk — so `dailyHonors.length <=
+ * MAX_DAYS` here is a mirror of `completeArchiveRecord`'s own bound rather than a
+ * departure from it (Codex P2 on PR #1162, round 9). Stated explicitly rather
+ * than left to follow from the order: `ascendingHonorDays` proves the indexes
+ * strictly increase, and `writableDayHonor` asks only `Number.isInteger` of each
+ * one — deliberately, so this predicate refuses a shape rather than adjudicating
+ * a Day the builder's own `supportedDayIndex` filter has already dropped — so
+ * `[100, 200, 300, …]` is a strictly ascending list of any length. At most ten
+ * does not follow, and the bound has to be stated to be had.
+ *
  * Everything else here MIRRORS the boundary, the First-BINGO holder's place in
  * the roster included (`rank <= playerCount`, Codex P2 on PR #1162, round 9):
  * `rank > 0` says the place is a real ordinal and says nothing about whether the
@@ -995,6 +1006,12 @@ export function writableArchiveRecord(archive: EventArchive): boolean {
     && archive.playerCount >= 0
     && writableStandingsSize(archive)
     && Array.isArray(archive.dailyHonors)
+    // The boundary's own bound, restated (Codex P2 on PR #1162, round 9). It is
+    // NOT implied by the two clauses beside it: `ascendingHonorDays` proves the
+    // indexes strictly increase and `writableDayHonor` asks only
+    // `Number.isInteger` of each, so `[100, 200, 300, …]` is a strictly
+    // ascending list of any length. The bound has to be stated to be had.
+    && archive.dailyHonors.length <= MAX_DAYS
     && archive.dailyHonors.every(writableDayHonor)
     && ascendingHonorDays(archive.dailyHonors)
     && ((archive.firstBingo === null && archive.firstBingoRow === null)

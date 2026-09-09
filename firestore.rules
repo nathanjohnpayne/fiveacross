@@ -428,6 +428,21 @@ service cloud.firestore {
         // (`standingsSizeMatches`, Codex P2 on PR #1162).
         && standingsSizeMatches(archive)
         && archive.dailyHonors is list
+        // …and the honours list is bounded too (Codex P2 on PR #1162, round 9).
+        // Rules cannot walk a list, so what is IN it stays the stated residual —
+        // but its SIZE is one expression, exactly as `standingsSizeMatches`
+        // spends one, and `dailyHonors` had no bound at all. An Event supports at
+        // most ten Days and the archive contract is at most one honour per Day,
+        // so a direct admin flip carrying thousands of scalar or duplicate
+        // entries was a record no builder can produce, frozen permanently on the
+        // write that locks `archive`, and unrepairable by any client.
+        //
+        // 10 is `MAX_DAYS` in `src/data/eventLimits.ts`, restated here because
+        // the writer and this arm have to agree about it — the same
+        // shared-contract discipline the 200 above and `finiteArchiveNumber`
+        // already carry, and the same number `daysThemeLockOk` already unrolls
+        // its schedule lock over.
+        && archive.dailyHonors.size() <= 10
         && firstBingoPairComplete(archive)
         && (archive.freezeAt == null || finiteArchiveNumber(archive.freezeAt))
         && archive.archivedAt == stamp;

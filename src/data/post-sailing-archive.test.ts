@@ -1655,6 +1655,39 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     }
   });
 
+  // Codex P2 on PR #1162, round 9. `completeArchiveRecord` accepted a
+  // `dailyHonors` of ANY length, so a direct admin flip could freeze thousands of
+  // entries into a field whose contract is at most one honour per Day on an Event
+  // that supports at most ten. The boundary bounds it now — a list's SIZE is one
+  // expression, not a walk — and this is the writer's own copy of that clause.
+  it('bounds the frozen honours list at MAX_DAYS, which the ORDER does not imply', () => {
+    const record = draftEventArchive({
+      players: [mkPlayer({ uid: 'a', displayName: 'A', bingoCount: 1, squaresMarked: 1 })],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    }).archive;
+    const honors = (n: number, step = 1) =>
+      Array.from({ length: n }, (_, i) => ({
+        dayIndex: i * step,
+        uid: `p${i}`,
+        displayName: `P${i}`,
+        firstBingoAt: 1000 + i,
+        dayLabel: `D${i * step + 1}`,
+      }));
+
+    // Ten is the boundary case rather than an exception: one honour for every Day
+    // an Event can have is exactly what a full schedule produces.
+    expect(writableArchiveRecord({ ...record, dailyHonors: honors(MAX_DAYS) })).toBe(true);
+    expect(writableArchiveRecord({ ...record, dailyHonors: honors(MAX_DAYS + 1) })).toBe(false);
+    // And the bound has to be STATED rather than left to follow from the two
+    // clauses beside it: `ascendingHonorDays` proves the indexes strictly
+    // increase, `writableDayHonor` asks only `Number.isInteger` of each, so a
+    // strictly ascending list of well-formed entries can be any length at all.
+    const spaced = honors(MAX_DAYS + 1, 100);
+    expect(spaced.every((h, i) => i === 0 || spaced[i - 1].dayIndex < h.dayIndex)).toBe(true);
+    expect(writableArchiveRecord({ ...record, dailyHonors: spaced })).toBe(false);
+  });
+
   // Codex P2 on PR #1162. `standings` and `playerCount` are ONE contract — the
   // bounded prefix in rank order, and the complete ban-filtered cardinality it is
   // a prefix OF — and typing them apart said nothing about each other. An
