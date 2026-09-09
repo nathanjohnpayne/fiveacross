@@ -26,9 +26,87 @@ import {
   classifyInvokerScope,
   firstUnprovableCodebase,
   gitAnswerFingerprint,
+  probeWriteContainment,
 } from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// ---------------------------------------------------------------------------
+// What this machine can prove, asked once, before a single case is collected
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT THIS MACHINE CAN PROVE, from the classifier's own machinery.
+ *
+ * Nearly everything below asserts what a PREDEPLOY HOOK did — the artifact it
+ * built, the write it was denied, the drift the fingerprints caught while it
+ * ran — and no hook runs anywhere unless `establishWriteContainment` first
+ * proved a mechanism that can hold its writes. On a machine that can prove
+ * none, the classifier refuses before staging anything, and every one of those
+ * cases is then asserting the exemption path against a machine that has no
+ * exemption path. That is not a finding about this classifier; it is a fact
+ * about the machine, and this asks the machine directly.
+ *
+ * `ubuntu-latest` — where `app-ci` runs — is exactly such a machine: `bwrap` is
+ * not installed, and Ubuntu 24.04 refuses an unprivileged user namespace
+ * (`write failed /proc/self/uid_map: Operation not permitted`), so all three
+ * Linux candidates fail and the refusal is correct production behaviour. The
+ * runner-side fix belongs to the runner; what belongs here is a suite that
+ * says so instead of failing 78 cases.
+ *
+ * NOT `process.platform`. A Linux box WITH `bwrap` runs every case exactly as
+ * this repository's development Mac does, and a Mac whose `sandbox-exec` was
+ * finally removed would go on claiming it could. `probeWriteContainment` runs
+ * the real candidates against a scratch root and stages nothing.
+ */
+const WRITE_CONTAINMENT = await probeWriteContainment();
+
+/**
+ * ABSENCE, not breakage — the only reason a case here may be skipped.
+ *
+ * A probe that comes back with NO_MECHANISM or UNPROVED found nothing to run:
+ * `bwrap` is not on the PATH, the kernel refuses the namespace, the platform
+ * offers no candidate at all. Nothing was contained because nothing could be.
+ *
+ * A probe that comes back with the CHECKOUT canary or an ESCAPED root found the
+ * opposite: a mechanism ran and its containment LEAKED. That is the failure
+ * this whole apparatus exists to catch, and skipping on it would retire the
+ * guard exactly when it fires — so it is deliberately not a skip, on CI or
+ * anywhere else. The cases run, and they fail, which is the point.
+ */
+const NO_CONTAINMENT_MECHANISM =
+  !WRITE_CONTAINMENT.ok &&
+  (WRITE_CONTAINMENT.reason.includes(WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM) ||
+    (WRITE_CONTAINMENT.reason.includes(WRITE_CONTAINMENT_REFUSAL.UNPROVED) &&
+      !WRITE_CONTAINMENT.reason.includes(WRITE_CONTAINMENT_REFUSAL.CHECKOUT_CANARY) &&
+      !WRITE_CONTAINMENT.reason.includes(WRITE_CONTAINMENT_REFUSAL.ESCAPED_ROOT)));
+
+/**
+ * `it`, for a case that needs a hook to have RUN inside a proved containment.
+ *
+ * Every case marked with this is skipped on a machine that can prove none, and
+ * runs unchanged everywhere else. What replaces them there is not nothing: the
+ * two cases at the end of "write containment holds a rehearsal's writes inside
+ * the scratch root" assert the fail-closed contract itself, and they run on
+ * every machine.
+ */
+const itContained = it.skipIf(NO_CONTAINMENT_MECHANISM);
+
+if (NO_CONTAINMENT_MECHANISM) {
+  // Printed once, and naming the refusal, because a run whose skips are silent
+  // reads as a run that proved what it did not.
+  console.warn(
+    [
+      "",
+      "single-endpoint-deploy-scope: this machine can prove no write containment, so every",
+      "case that needs a predeploy hook to run inside one is SKIPPED. The refusal was:",
+      `  ${WRITE_CONTAINMENT.reason}`,
+      "What still runs here is the fail-closed contract itself — the classifier refuses every",
+      "selector, names the candidates it could not prove, stages nothing and executes no hook.",
+      "",
+    ].join("\n"),
+  );
+}
 
 /** The conventional Firebase predeploy hook. */
 const PREDEPLOY = ['npm --prefix "$RESOURCE_DIR" run build'];
@@ -607,7 +685,7 @@ afterAll(async () => {
 });
 
 describe("exact single-endpoint scopes against the real Functions index", RUNS_A_BUILD, () => {
-  it("does not select any invoker for endpoints the artifact deploys alone", async () => {
+  itContained("does not select any invoker for endpoints the artifact deploys alone", async () => {
     const result = await classify([
       "--only",
       "functions:dailyEngagementEmail,functions:adminAlertDigest",
@@ -619,7 +697,7 @@ describe("exact single-endpoint scopes against the real Functions index", RUNS_A
     });
   });
 
-  it("normalizes whitespace in the filter list exactly as the CLI does", async () => {
+  itContained("normalizes whitespace in the filter list exactly as the CLI does", async () => {
     // Codex P1, round 22: the pinned CLI splits `--only` on commas AND
     // whitespace, so a protected selector after ", " is released by Firebase;
     // iterating the raw comma chunks let it slip past classification.
@@ -632,7 +710,7 @@ describe("exact single-endpoint scopes against the real Functions index", RUNS_A
     });
   });
 
-  it("accepts the codebase-qualified form of the same endpoint", async () => {
+  itContained("accepts the codebase-qualified form of the same endpoint", async () => {
     // `functions:<codebase>:<name>` is Firebase's documented three-part form.
     const result = await classify(["--only", "functions:default:dailyEngagementEmail"]);
     expect(result).toMatchObject(EXEMPT);
@@ -681,7 +759,7 @@ describe("exact single-endpoint scopes against the real Functions index", RUNS_A
 });
 
 describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, () => {
-  it("exempts a single endpoint that survives the real build", async () => {
+  itContained("exempts a single endpoint that survives the real build", async () => {
     // The positive control for this whole describe: without it, every
     // assertion below would still pass if the exemption never fired at all.
     await withFunctionsProject({}, async (configPath) => {
@@ -789,7 +867,7 @@ describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, 
     );
   });
 
-  it("exempts a builder from a nested SDK provider subpath", async () => {
+  itContained("exempts a builder from a nested SDK provider subpath", async () => {
     // `firebase-functions/v2/alerts/billing` is two levels below `v2`. The walk
     // recognises the SHAPE the loader recognises, so no subpath is enumerated.
     await withFunctionsProject(
@@ -805,7 +883,7 @@ describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, 
     );
   });
 
-  it("exempts a source that binds `module` as an ordinary local name", async () => {
+  itContained("exempts a source that binds `module` as an ordinary local name", async () => {
     // The artifact walk reads VALUES, so an identifier that merely spells
     // `module` or `exports` costs nothing — where a source-text guard had to
     // refuse the whole file to stay safe.
@@ -877,7 +955,7 @@ describe("the built artifact decides, not the TypeScript source", RUNS_A_BUILD, 
     );
   });
 
-  it("exempts a reassignable binding that is never reassigned", async () => {
+  itContained("exempts a reassignable binding that is never reassigned", async () => {
     // Discriminates the case above: `let` is not itself the hazard, the
     // overwrite is, and only the artifact can tell them apart.
     await withFunctionsSource(
@@ -903,7 +981,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       run,
     );
 
-  it("exempts an unbuilt codebase whose artifact really is one endpoint", async () => {
+  itContained("exempts an unbuilt codebase whose artifact really is one endpoint", async () => {
     await withPrewrittenArtifact("exports.daily = endpoint();", async (configPath) => {
       expect(await classify(["--only", "functions:daily"], configPath)).toMatchObject(EXEMPT);
     });
@@ -935,7 +1013,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("exempts a prefix-sharing export that is not an endpoint at all", async () => {
+  itContained("exempts a prefix-sharing export that is not an endpoint at all", async () => {
     // Discriminates the prefix rule from the NAME: a `daily-…` property that
     // the loader never turns into an endpoint is not deployed, so it cannot
     // widen the selector.
@@ -994,7 +1072,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("skips a real extension descriptor without recursing into it", async () => {
+  itContained("skips a real extension descriptor without recursing into it", async () => {
     // Discriminates the clause above from "never skip anything": a descriptor
     // whose `events` IS an array is an extension, the loader does not walk it,
     // and its contents are not deployed endpoints.
@@ -1088,7 +1166,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("exempts an artifact that reads the project id from GCLOUD_PROJECT", async () => {
+  itContained("exempts an artifact that reads the project id from GCLOUD_PROJECT", async () => {
     // The discrimination the case above used to carry, drawn where it belongs:
     // on whether this classifier can REPRODUCE the value. `discoveryEnvironment`
     // sets `GCLOUD_PROJECT` to the pinned project in both probes, which is the
@@ -1213,7 +1291,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("exempts the SDK's own load-time read of the legacy runtime config", async () => {
+  itContained("exempts the SDK's own load-time read of the legacy runtime config", async () => {
     // The control for the rule above, and the reason it is not simply "every
     // load-time read is a consultation": `firebase-functions` reads
     // `CLOUD_RUNTIME_CONFIG` as it initialises, beneath the codebase's
@@ -1418,7 +1496,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("still exempts a branch on the project id read through the backing object", async () => {
+  itContained("still exempts a branch on the project id read through the backing object", async () => {
     // The control for the three cases above: the aliases are guarded per KEY,
     // exactly as `app.options` is, rather than refused wholesale. `projectId` is
     // deliberately outside `ADMIN_OPTION_KEYS` — it is the pinned project, the
@@ -1470,7 +1548,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
     );
   });
 
-  it("exempts an artifact that only initialises firebase-admin", async () => {
+  itContained("exempts an artifact that only initialises firebase-admin", async () => {
     // The control for both cases above, and the reason the admin watch is on the
     // OPTIONS rather than on `initializeApp` itself: this repository's own
     // Functions index calls it and reads nothing back, and `initializeApp`'s own
@@ -1748,7 +1826,7 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     );
   });
 
-  it("exempts a codebase-qualified endpoint proven in that same codebase", async () => {
+  itContained("exempts a codebase-qualified endpoint proven in that same codebase", async () => {
     await withCodebases(
       { alpha: endpoint("alphaOnly"), beta: endpoint("betaOnly") },
       async (configPath) => {
@@ -1803,7 +1881,7 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     );
   });
 
-  it("does not load a codebase this deploy will not discover", async () => {
+  itContained("does not load a codebase this deploy will not discover", async () => {
     // `getReleventConfigs` runs every config's HOOKS for an endpoint-named
     // scope, but `loadCodebases` still discovers only the codebases the filters
     // name (`targetCodebases`). Loading one Firebase will not load runs its
@@ -1835,7 +1913,7 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     );
   });
 
-  it("exempts when the neighbouring codebase's hook leaves the artifact alone", async () => {
+  itContained("exempts when the neighbouring codebase's hook leaves the artifact alone", async () => {
     // Discriminates the case above from "any second codebase forfeits": the
     // neighbour's hook still runs, it just does not change the answer.
     await withNeighbourCodebase({ neighbourPredeploy: PREDEPLOY }, async (configPath) => {
@@ -1887,7 +1965,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", RUNS_A_
     }
   });
 
-  it("does not let another codebase veto an unqualified default-codebase proof", async () => {
+  itContained("does not let another codebase veto an unqualified default-codebase proof", async () => {
     // `fragments.length < 2` resolves to DEFAULT_CODEBASE, so a non-endpoint of
     // the same name in `beta` is unreachable and must not force conservatism.
     await withCodebases(
@@ -1902,7 +1980,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", RUNS_A_
     );
   });
 
-  it("does not let one codebase's unreadable source poison a qualified proof in another", async () => {
+  itContained("does not let one codebase's unreadable source poison a qualified proof in another", async () => {
     // endpointMatchesFilter rejects a codebase mismatch before comparing ids,
     // so uncertainty in `beta` cannot widen an explicitly qualified `alpha`.
     const fixture = await mkdtemp(join(tmpdir(), "single-endpoint-authority-"));
@@ -1934,7 +2012,7 @@ describe("selector resolution mirrors the pinned firebase-tools parser", RUNS_A_
     }
   });
 
-  it("allows a hyphenated CODEBASE while still refusing a hyphenated endpoint id", async () => {
+  itContained("allows a hyphenated CODEBASE while still refusing a hyphenated endpoint id", async () => {
     // validateCodebase permits [a-z0-9_-]+, and the parser splits the codebase
     // off before applying idChunks, so the hyphen rule belongs to the id alone.
     await withCodebases({ "my-codebase": endpoint("daily") }, async (configPath) => {
@@ -1961,7 +2039,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("accepts an explicitly declared Node runtime", async () => {
+  itContained("accepts an explicitly declared Node runtime", async () => {
     await withFunctionsProject(
       { functionsConfig: { runtime: "nodejs22" } },
       async (configPath) => {
@@ -2060,7 +2138,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("exempts the same codebase when its configDir carries no such flag", async () => {
+  itContained("exempts the same codebase when its configDir carries no such flag", async () => {
     // Discriminates the case above from "a configDir forfeits": the directory
     // is read either way, it just says nothing that changes the surface.
     await withFunctionsProject(
@@ -2172,7 +2250,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("leaves the live firebase.json alone when a hook overwrites it", async () => {
+  itContained("leaves the live firebase.json alone when a hook overwrites it", async () => {
     // The overlay symlinks project directories but COPIES project files, so a
     // hook that rewrites a deployment input rewrites the scratch copy. A
     // symlinked `firebase.json` would be a route into the live checkout, after
@@ -2269,7 +2347,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("hides its own preload from the codebase", async () => {
+  itContained("hides its own preload from the codebase", async () => {
     // The preload is loaded with `--require`, which node keeps out of
     // `process.argv` but leaves in `process.execArgv`. The real discovery
     // process has none, so the trace is removed before any codebase code runs
@@ -2289,7 +2367,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("leaves no trace of its discovery preload in the module system", async () => {
+  itContained("leaves no trace of its discovery preload in the module system", async () => {
     // `process.execArgv` was only the first of three places `--require` shows
     // up. `require.cache` is one object shared with every module the artifact
     // loads, node keeps the raw preload list in `process._preload_modules`, and
@@ -2318,7 +2396,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("ABORTS when a write through the overlay reaches the checkout", async () => {
+  itContained("ABORTS when a write through the overlay reaches the checkout", async () => {
     // Only the Functions sources are copied; every other project directory is a
     // symlink to the live tree, so a write through the overlay — here a toggle
     // whose second run differs from its first — mutates the real checkout AFTER
@@ -2355,7 +2433,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("exits with the live-checkout-drift status through the production wrapper", async () => {
+  itContained("exits with the live-checkout-drift status through the production wrapper", async () => {
     // The status `deploy.sh` reads. It is distinct from the invalid-request
     // status precisely because the request was valid: it is the TREE that is no
     // longer the one the clean-tree guard approved.
@@ -2404,7 +2482,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     }
   });
 
-  it("still exempts when that same write lands inside the staged source dir", async () => {
+  itContained("still exempts when that same write lands inside the staged source dir", async () => {
     // The discriminator for the case above: the guard watches the live
     // boundary, not writing as such. A hook that writes into its own
     // `$RESOURCE_DIR` writes into the scratch copy, which is the whole point of
@@ -2422,7 +2500,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it("ABORTS when the checkout changes while the artifact is LOADING", async () => {
+  itContained("ABORTS when the checkout changes while the artifact is LOADING", async () => {
     // The live tree is checked AGAIN once every codebase has been discovered,
     // because discovery runs after the hooks have been cleared and the post-hook
     // check can no longer speak for it. That check is fatal for the same reason
@@ -2462,7 +2540,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     }
   });
 
-  it("keeps its own environment out of the predeploy hooks it runs", async () => {
+  itContained("keeps its own environment out of the predeploy hooks it runs", async () => {
     // `deploy.sh` passes the pinned project, config path, override policy and
     // output format to the classifier and to NOTHING else, so a hook run from
     // here would see variables its real run cannot (Codex P2, round 17).
@@ -2473,7 +2551,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     });
   });
 
-  it("keeps it out of the hooks the production wrapper runs too", async () => {
+  itContained("keeps it out of the hooks the production wrapper runs too", async () => {
     // The same claim about the path that actually reads those variables:
     // `main()`, spawned the way `deploy.sh` spawns it.
     await withFunctionsProject(ENV_SNIFFING_FIXTURE, async (configPath) => {
@@ -2489,7 +2567,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     });
   });
 
-  it("keeps its own environment out of the discovery processes", async () => {
+  itContained("keeps its own environment out of the discovery processes", async () => {
     // Discovery's environment is built from `{}` rather than from
     // `process.env`, so nothing ambient reaches it. That is a property of the
     // code rather than of a list of names, and this pins it.
@@ -2565,7 +2643,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
     );
   });
 
-  it.each([["./functions"], ["functions/"]])(
+  itContained.each([["./functions"], ["functions/"]])(
     "accepts the equivalent source spelling %s",
     async (source) => {
       // `./functions`, `functions/` and `functions` are one directory. The
@@ -2578,7 +2656,7 @@ describe("configs whose deployed surface this classifier cannot reproduce", RUNS
 });
 
 describe("round-18 fresh evidence: the execution the deploy will actually run", RUNS_A_BUILD, () => {
-  it("keeps a relative source symlink pointing inside the staged copy", async () => {
+  itContained("keeps a relative source symlink pointing inside the staged copy", async () => {
     // `fs.cp`'s default `verbatimSymlinks: false` REWRITES a copied link to
     // point at its original target, so this relative link came out of the copy
     // as an absolute link back into the developer's `functions/` — a directory
@@ -2703,7 +2781,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("runs an IMPORTED target config's predeploy hooks too", async () => {
+  itContained("runs an IMPORTED target config's predeploy hooks too", async () => {
     // Barrier round on #1107: `firebase.json` may externalise a target —
     // `"firestore": "firestore.config.json"` — and the pinned CLI materialises
     // that file in `Config`'s constructor (`MATERIALIZE_TARGETS`) long before
@@ -2747,7 +2825,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     }
   });
 
-  it("still proves the endpoint when an imported target config carries no hooks", async () => {
+  itContained("still proves the endpoint when an imported target config carries no hooks", async () => {
     // The control: materialising the imported file is not itself a reason to
     // forfeit. Same externalised Firestore target, no `predeploy` in it.
     await withFunctionsProject(
@@ -2828,7 +2906,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     }
   });
 
-  it("leaves the configured public directory alone when no --public is given", async () => {
+  itContained("leaves the configured public directory alone when no --public is given", async () => {
     // The control: the same fixture, the same selector, and the hook reading
     // `firebase.json`'s own `public` — which is what makes the case above an
     // assertion about the override rather than about the hook running at all.
@@ -2839,7 +2917,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("refuses --public against a multi-site Hosting configuration, as the CLI does", async () => {
+  itContained("refuses --public against a multi-site Hosting configuration, as the CLI does", async () => {
     // `handlePublicDirectoryFlag` throws for an ARRAY `hosting` — there is no
     // one site to override — so the deploy never starts. Mirrored as a refusal
     // rather than modelled: a request the pinned CLI rejects must not be built
@@ -2901,7 +2979,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("leaves a plain public Hosting config exempt", async () => {
+  itContained("leaves a plain public Hosting config exempt", async () => {
     // The control, and the reason the refusal above is attributable to the
     // framework shape: the same fixture and the same selector with a `public`
     // directory instead runs no framework build, so nothing about the hooks
@@ -2913,7 +2991,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("ignores a framework Hosting config this request does not deploy", async () => {
+  itContained("ignores a framework Hosting config this request does not deploy", async () => {
     // The CLI's own scoping, mirrored: `isDeployingWebFramework` is consulted
     // only behind `targetNames.includes("hosting")`, so a Functions-only scope
     // never reaches `prepareFrameworks` and must not be refused for a config it
@@ -2952,7 +3030,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     },
   };
 
-  it("runs a hook that reads the ADC document against the document a wrapper named", async () => {
+  itContained("runs a hook that reads the ADC document against the document a wrapper named", async () => {
     // The wrapper's documented default: the source credential IS the target
     // service account, so `op-firebase-deploy` writes that document straight
     // through and the hook sees `service_account`.
@@ -3026,7 +3104,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("answers a git branch lookup the way the deployment will", async () => {
+  itContained("answers a git branch lookup the way the deployment will", async () => {
     // A build that selects its exports with `git rev-parse --abbrev-ref HEAD`
     // is an ordinary build. Omitting `.git` from the overlay did not withhold
     // authority, it changed the answer: the lookup failed, the fallback ran,
@@ -3104,7 +3182,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("leaves a checkout-ROOTED project at the repository root it already had", async () => {
+  itContained("leaves a checkout-ROOTED project at the repository root it already had", async () => {
     // The control for the case above: a `firebase.json` AT the checkout root
     // has `.git` as an entry of its own project directory, the staged set is
     // the whole repository, and the exemption stands. Written through both
@@ -3133,7 +3211,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when something changes what the repository answers", async () => {
+  itContained("ABORTS when something changes what the repository answers", async () => {
     // The other half of exposing `.git`: the view is live, so a write through it
     // changes what the repository answers. The guard is on what `git` ANSWERS
     // rather than on the files under `.git`, because that is the property a
@@ -3168,7 +3246,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a write lands THROUGH a symlink inside a linked directory", async () => {
+  itContained("ABORTS when a write lands THROUGH a symlink inside a linked directory", async () => {
     // A linked project directory can hold a symlink back to a ROOT deployment
     // input — a file the overlay copies rather than links, so the live copy
     // sits under no walked directory. Fingerprinting only the link's own inode
@@ -3203,7 +3281,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a file is overwritten THROUGH a directory-valued symlink", async () => {
+  itContained("ABORTS when a file is overwritten THROUGH a directory-valued symlink", async () => {
     // Codex P1, round 13: overwriting an EXISTING file through a link whose
     // target is a directory moves neither the link nor the directory's mtime,
     // so the target's metadata alone would let the write through. The target
@@ -3463,7 +3541,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("still exempts that hook when the live directory is the newer one", async () => {
+  itContained("still exempts that hook when the live directory is the newer one", async () => {
     // The control, and the reason the case above is attributable to the
     // restored directory mtime rather than to the hook always grouping: the
     // same fixture with the STAMP past-dated instead leaves `$RESOURCE_DIR`
@@ -3476,7 +3554,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it.each([
+  itContained.each([
     ["the copied Functions source", "functions/src/index.ts"],
     ["a copied project-root file", "firebase.json"],
   ])("ABORTS when %s is written through an absolute live path", async (_label, target) => {
@@ -3510,7 +3588,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a Functions source is edited while the staging is copying", async () => {
+  itContained("ABORTS when a Functions source is edited while the staging is copying", async () => {
     // Codex P1, round 25 on #1107. The post-staging baseline is what every
     // later drift check compares against, so an edit landing between the copy
     // reading a file and that baseline being taken was accepted AS the
@@ -3540,7 +3618,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("proves the same scope when nothing writes while the staging is copying", async () => {
+  itContained("proves the same scope when nothing writes while the staging is copying", async () => {
     // The control for the case above, and for the bracket generally: a checkout
     // that simply holds still must still be provable, and the `onStaged` seam
     // itself must change nothing when it writes nothing. Without this, the
@@ -3552,7 +3630,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("ABORTS when a remote-tracking ref moves before the staging even starts", async () => {
+  itContained("ABORTS when a remote-tracking ref moves before the staging even starts", async () => {
     // Codex P1, round 26 on #1107. The first Git-answer baseline used to be
     // taken after the write containment had been proved and after the whole
     // staging copy — seconds of this classifier's own setup during which a
@@ -3579,7 +3657,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("proves the same scope when nothing moves in that window", async () => {
+  itContained("proves the same scope when nothing moves in that window", async () => {
     // The control for the bracket above and for the seam itself: a repository
     // that holds still must still be provable, or the refusal would pass for a
     // bracket that refused every deploy.
@@ -3590,7 +3668,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("ABORTS when a hook writes THROUGH a copied root file that is a symlink", async () => {
+  itContained("ABORTS when a hook writes THROUGH a copied root file that is a symlink", async () => {
     // Codex P1, round 16: a copied root file can itself be a link — a shared
     // build input outside the repository, say — and fingerprinting only the
     // link inode would let a hook rewrite its target through INIT_CWD. The
@@ -3627,7 +3705,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a remote-tracking ref moves during the rehearsal", async () => {
+  itContained("ABORTS when a remote-tracking ref moves during the rehearsal", async () => {
     // Codex P1, round 18: a `git fetch` advances refs/remotes/origin/main
     // without touching HEAD, the branch or the nearest tag, and the wrapper's
     // approved-checkout guard asked whether HEAD equals origin/main BEFORE the
@@ -3653,7 +3731,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a new project-root entry appears through an absolute live path", async () => {
+  itContained("ABORTS when a new project-root entry appears through an absolute live path", async () => {
     // Codex P1, round 18: the roots and copied files are the entries that
     // existed when staging ran, so a marker a non-idempotent hook creates at
     // the live root was in neither snapshot. The root's entry set is part of
@@ -3706,7 +3784,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a hook leaves descendants running and a remote-tracking ref has moved", async () => {
+  itContained("ABORTS when a hook leaves descendants running and a remote-tracking ref has moved", async () => {
     // Codex P1, round 19: the background-hook refusal checked the live tree
     // but not what git answers, and returned BEFORE the post-hook metadata
     // check — so a hook that left a child running while origin/main moved was
@@ -3743,7 +3821,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     }
   });
 
-  it("ABORTS when an entry appears in an intermediate overlay directory", async () => {
+  itContained("ABORTS when an entry appears in an intermediate overlay directory", async () => {
     // Phase 4b P1, run 4: with the source at `packages/functions`, the overlay
     // traverses `packages` to place it and registered only its existing
     // children, so `packages/generated.ts` at the live root was in neither
@@ -3779,7 +3857,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS when a marker is left at the root of a linked node_modules", async () => {
+  itContained("ABORTS when a marker is left at the root of a linked node_modules", async () => {
     // Codex P1, round 22: the dependency tree is linked into the overlay and
     // was excluded from both fingerprints, so a marker left there for the
     // deploy's second run was invisible. Each node_modules is watched one level
@@ -3862,7 +3940,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("refuses the inventory when discovery outlives its own deadline", async () => {
+  itContained("refuses the inventory when discovery outlives its own deadline", async () => {
     // The other half of the same fix: a codebase that leaves a live handle
     // behind keeps the discovery process running after `quitquitquit` closes
     // the server, so the deadline — not the program — is what ends it. The
@@ -3919,7 +3997,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     });
   });
 
-  it("ABORTS on a change to a watched directory's own permissions", async () => {
+  itContained("ABORTS on a change to a watched directory's own permissions", async () => {
     // Codex P1, round 25: the walk recorded only a root's children, so flipping
     // a linked directory's mode through the scratch symlink moved nothing the
     // fingerprint compared. Each watched directory's own signature is part of
@@ -3944,7 +4022,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS on a mode change a file named like the synthetic key used to mask", async () => {
+  itContained("ABORTS on a mode change a file named like the synthetic key used to mask", async () => {
     // Barrier round on #1107: the fingerprint keyed a watched directory's own
     // signature under the filesystem-looking string `<dir> (self)`, so a
     // repository holding a real file of that exact name produced the SAME key
@@ -3978,7 +4056,7 @@ describe("round-18 fresh evidence: the execution the deploy will actually run", 
     );
   });
 
-  it("ABORTS on a write that lands while a hook is running, and THEN fails", async () => {
+  itContained("ABORTS on a write that lands while a hook is running, and THEN fails", async () => {
     // The write is the fatal condition and the failure is merely conservative;
     // checking them in that order is what keeps the write fatal. Handled the
     // other way round, the refusal returns first and `deploy.sh` walks into
@@ -4115,7 +4193,7 @@ const DETACHING_HOOK = [
 ].join("\n");
 
 describe("write containment holds a rehearsal's writes inside the scratch root", RUNS_A_BUILD, () => {
-  it.each([
+  itContained.each([
     ["under the system temp dir", undefined],
     ["outside every writable root", LIVE_FIXTURE_ROOT],
   ])("stops a writer a hook detached with an environment of its own, %s", async (
@@ -4192,7 +4270,7 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
   // treats as it treats any failing hook — a project-wide refusal. The live file
   // is checked in both, because a refusal that arrived after the write would be
   // no better than the exemption it replaced.
-  it.each([
+  itContained.each([
     ["under the system temp dir", undefined],
     ["outside every writable root", LIVE_FIXTURE_ROOT],
   ])("denies a hook's write into a checkout %s", async (_label, fixtureRoot) => {
@@ -4217,7 +4295,7 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
     );
   });
 
-  it.each([
+  itContained.each([
     ["under the system temp dir", undefined],
     ["outside every writable root", LIVE_FIXTURE_ROOT],
   ])("still proves the endpoint for a checkout %s whose hook writes nothing", async (
@@ -4286,6 +4364,92 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
       },
     );
   });
+
+  /**
+   * The fail-closed contract, asserted the same way twice: once on any machine
+   * by forcing the refusal, and once on a machine that reaches it by itself.
+   *
+   * WHAT IT PINS. The refusal is not a classification detail; it is the whole
+   * behaviour of this classifier on a machine that cannot contain a hook. So it
+   * is asserted in four parts, and each part is a different way the refusal
+   * could be wrong: it must REFUSE every invoker, it must NAME what it could
+   * not prove (a caller reading `FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1` has
+   * nothing else to go on), it must run NO HOOK, and it must leave the checkout
+   * exactly as it found it — the refusal has to arrive before the staging, not
+   * after, or it is no better than the exemption it replaces.
+   *
+   * The hook writes its sentinel through `$INIT_CWD`, which npm points at the
+   * live checkout: the same absolute route the round-15 finding used, and the
+   * one a refusal reached too late would leave open.
+   */
+  async function expectFailClosedRefusal(classifyOptions = {}) {
+    await withFunctionsProject(
+      {
+        functionsConfig: {
+          predeploy: [...PREDEPLOY, 'printf ran > "$INIT_CWD/hook-ran"'],
+        },
+        // As the DISABLED case above: an artifact already on disk, so nothing
+        // here can refuse for the unrelated reason that `main` points at a file
+        // the build was never allowed to produce.
+        files: { "functions/lib/index.js": artifact("exports.placeholder = 1;") },
+      },
+      async (configPath) => {
+        const checkout = dirname(configPath);
+        const before = (await readdir(checkout)).sort();
+        const previous = process.env.INIT_CWD;
+        process.env.INIT_CWD = checkout;
+        try {
+          const { result, reasons } = await withRefusalReasons(() =>
+            classify(["--only", "functions:daily"], configPath, classifyOptions),
+          );
+          expect(result).toMatchObject({
+            functionsAttempted: true,
+            ...ALL_INVOKERS_CONSERVATIVE,
+          });
+          // Either arm of "this machine has nothing that works": a platform with
+          // no candidate at all, or one whose every candidate failed.
+          expect(reasons).toMatch(
+            new RegExp(
+              `${WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM}|${WRITE_CONTAINMENT_REFUSAL.UNPROVED}`,
+            ),
+          );
+          if (reasons.includes(WRITE_CONTAINMENT_REFUSAL.UNPROVED)) {
+            // A candidate list that failed has to say WHICH, or an operator
+            // cannot tell an absent `bwrap` from a disabled namespace.
+            expect(reasons).toMatch(/sandbox-exec|bwrap|unshare/);
+          }
+          expect(existsSync(join(checkout, "hook-ran"))).toBe(false);
+          expect((await readdir(checkout)).sort()).toEqual(before);
+        } finally {
+          if (previous === undefined) delete process.env.INIT_CWD;
+          else process.env.INIT_CWD = previous;
+        }
+      },
+    );
+  }
+
+  it("refuses every selector, names what it could not prove, and stages nothing", async () => {
+    // On EVERY machine, including the one that can contain a hook perfectly
+    // well: `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT` is how the
+    // development Mac reaches the arm `ubuntu-latest` reaches on its own. It
+    // only ever narrows — it refuses before the first candidate is tried — so
+    // the answer under it is the answer a machine with no mechanism gives.
+    await withEnv({ FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT: "1" }, () =>
+      expectFailClosedRefusal(),
+    );
+  });
+
+  it.runIf(NO_CONTAINMENT_MECHANISM)(
+    "takes that same refusal on this machine, with no test switch at all",
+    async () => {
+      // The case the forced one cannot be: this is the machine, answering for
+      // itself. It is what `app-ci` on `ubuntu-latest` proves in place of every
+      // case skipped above, and it is why those skips are not a hole — the
+      // exemption path is untested here because there is none, and the path
+      // that replaces it is tested exactly here.
+      await expectFailClosedRefusal();
+    },
+  );
 });
 
 describe("a codebase this classifier refused to build is never discovered", RUNS_A_BUILD, () => {
@@ -4333,7 +4497,7 @@ describe("a codebase this classifier refused to build is never discovered", RUNS
     );
   });
 
-  it("proves the same selector when neither codebase is blocked", async () => {
+  itContained("proves the same selector when neither codebase is blocked", async () => {
     // The control. Without it the case above would pass for a fixture that was
     // never provable to begin with: the two codebases, the two selectors and
     // the two hooks are identical, and only beta's own config differs.
@@ -4474,7 +4638,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     },
   });
 
-  it("selects the pinned callable's invoker for an otherwise exact selector", async () => {
+  itContained("selects the pinned callable's invoker for an otherwise exact selector", async () => {
     await withFunctionsProject(
       { config: pinned(), files: { "public/index.html": "" } },
       async (configPath) => {
@@ -4490,7 +4654,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
-  it("classifies a Hosting target written as an import path", async () => {
+  itContained("classifies a Hosting target written as an import path", async () => {
     // Codex P2, round 27 on #1107. `"hosting": "hosting.config.json"` is a
     // supported spelling — the pinned `Config` materialises it from the named
     // file — but everything that read `firebase.json` directly still saw the
@@ -4515,7 +4679,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
-  it("widens the selector for a pinned rewrite inside an imported Hosting config", async () => {
+  itContained("widens the selector for a pinned rewrite inside an imported Hosting config", async () => {
     // The pin widening asked the same question one line earlier and swallowed
     // the same throw, so an imported config's `pinTag` rewrite widened nothing:
     // the CLI would have appended `functions:submitBugReport` to the selector
@@ -4542,7 +4706,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
-  it("does not widen when Hosting is not part of the deploy", async () => {
+  itContained("does not widen when Hosting is not part of the deploy", async () => {
     await withFunctionsProject(
       { config: pinned(), files: { "public/index.html": "" } },
       async (configPath) => {
@@ -4552,7 +4716,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
-  it("does not widen for a rewrite that is not pinned", async () => {
+  itContained("does not widen for a rewrite that is not pinned", async () => {
     const unpinned = { hosting: { public: "public", rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport" } }] } };
     await withFunctionsProject(
       { config: unpinned, files: { "public/index.html": "" } },
@@ -4676,7 +4840,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     );
   });
 
-  it("widens a codebase-qualified request to the pinned callable as well", async () => {
+  itContained("widens a codebase-qualified request to the pinned callable as well", async () => {
     await withFunctionsProject(
       { config: pinned(), files: { "public/index.html": "" } },
       async (configPath) => {
@@ -4732,7 +4896,7 @@ describe("a Functions kit beside an explicit codebase", RUNS_A_BUILD, () => {
     );
   });
 
-  it("still proves the exact endpoint when the kit carries no hooks", async () => {
+  itContained("still proves the exact endpoint when the kit carries no hooks", async () => {
     await withFunctionsProject(
       { config: withKit({}) },
       async (configPath) => {

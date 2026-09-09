@@ -108,8 +108,72 @@ printf '%s\n' \
 
 PASS=0
 FAIL=0
+SKIPPED=0
 pass() { echo "PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
+# Counted on its OWN line, never as a pass: a skip is a case that did not run,
+# and a summary that folded it into $PASS would report coverage this run does
+# not have.
+skip() { echo "SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
+
+# ---------------------------------------------------------------------------
+# What this machine can prove, before the first case
+#
+# Several cases below assert what a PREDEPLOY HOOK did — the write it was
+# denied, the timestamps it compared, the checkout it could not reach — and no
+# hook runs anywhere unless the deploy-scope classifier first PROVED a write
+# containment that can hold it. `ubuntu-latest`, where `app-ci` runs, can prove
+# none: `bwrap` is not installed and the kernel refuses an unprivileged user
+# namespace, so the classifier refuses every exemption before staging anything.
+# That is correct production behaviour, and it means those cases there would be
+# asserting a hook's effects on a machine that runs no hooks.
+#
+# Asked of the classifier's own machinery rather than of `uname`: a Linux box
+# WITH `bwrap` runs every case exactly as this repository's development Mac
+# does. `probeWriteContainment` runs the real candidates against a scratch root
+# of its own and stages nothing.
+# ---------------------------------------------------------------------------
+CONTAINMENT_PROBE="$(
+  DEPLOY_SCOPE_CLASSIFIER="$ROOT/scripts/validate-firebase-deploy-filters.mjs" \
+    node --input-type=module -e '
+      const { probeWriteContainment } = await import(process.env.DEPLOY_SCOPE_CLASSIFIER);
+      const answer = await probeWriteContainment();
+      process.stdout.write(answer.ok ? "ok" : "no:" + answer.reason);
+    ' 2>/dev/null
+)" || CONTAINMENT_PROBE=""
+
+CONTAINMENT_REASON="${CONTAINMENT_PROBE#no:}"
+# ABSENCE, not breakage. A probe reporting that a contained child "could still
+# write" found a mechanism whose containment LEAKED — the exact failure this
+# apparatus exists to catch — so that is never a skip; the cases run and fail.
+# A probe that could not run at all is not evidence about the machine either.
+if [[ "$CONTAINMENT_PROBE" == "no:"* ]] &&
+  [[ "$CONTAINMENT_REASON" != *"could still write"* ]] &&
+  { [[ "$CONTAINMENT_REASON" == *"no mechanism this classifier can use"* ]] ||
+    [[ "$CONTAINMENT_REASON" == *"no write containment could be proved"* ]]; }; then
+  CONTAINMENT_ABSENT=1
+else
+  CONTAINMENT_ABSENT=0
+  [[ "$CONTAINMENT_PROBE" == "ok" ]] || CONTAINMENT_REASON="the write-containment probe gave no usable answer"
+fi
+
+if [[ $CONTAINMENT_ABSENT -eq 1 ]]; then
+  printf '%s\n' \
+    "" \
+    "test_deploy.sh: this machine can prove no write containment, so every case that needs" \
+    "a predeploy hook to run inside one is SKIPPED. The refusal was:" \
+    "  $CONTAINMENT_REASON" \
+    "Case 37 below still runs, and proves the fail-closed contract in their place." \
+    "" >&2
+fi
+
+# Skip the named case when no hook can run here. Returns 0 when it skipped, so
+# a caller reads `needs_write_containment "<case>" && return`.
+needs_write_containment() {
+  [[ $CONTAINMENT_ABSENT -eq 1 ]] || return 1
+  skip "$1: needs a predeploy hook to run inside a proved write containment, and this machine can prove none."
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # Build a PATH shim that supplies a stub `op-firebase-deploy` so the
@@ -2775,58 +2839,60 @@ init_public_override_repo() {
   )
 }
 
-REPO27A="$WORKDIR/case27a-public-override"
-init_public_override_repo "$REPO27A"
-: >"$WORKDIR/ofd-calls-27a.log"
-: >"$WORKDIR/npm-calls-27a.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-27a.log" \
-NPM_LOG="$WORKDIR/npm-calls-27a.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
-  bash -c "cd '$REPO27A' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting --public other" \
-  >"$WORKDIR/case27a.out" 2>"$WORKDIR/case27a.err"
-RC27A=$?
-set -e
-if [[ $RC27A -ne 0 ]]; then
-  fail "public-override: deploy.sh returned $RC27A. stderr was:"
-  cat "$WORKDIR/case27a.err" >&2
-elif ! grep -q 'predeploy hook failed' "$WORKDIR/case27a.err"; then
-  fail "public-override: the Hosting hook did not see the --public directory as \$RESOURCE_DIR, so it never took the branch whose write the containment denies. stderr was:"
-  cat "$WORKDIR/case27a.err" >&2
-elif [[ -s "$REPO27A/shared/toggle" ]]; then
-  fail "public-override: the Hosting hook's write reached the live checkout, so the write containment did not hold."
-elif [[ ! -s "$WORKDIR/ofd-calls-27a.log" ]]; then
-  fail "public-override: the deploy never published, though the denied write left the tree exactly as the guards approved it."
-else
-  pass "public-override: --public moves the Hosting hook's \$RESOURCE_DIR in the rehearsal too, and its write into the checkout is denied (rc=$RC27A)."
-fi
+if ! needs_write_containment "public-override (27a) and its control (27b)"; then
+  REPO27A="$WORKDIR/case27a-public-override"
+  init_public_override_repo "$REPO27A"
+  : >"$WORKDIR/ofd-calls-27a.log"
+  : >"$WORKDIR/npm-calls-27a.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-27a.log" \
+  NPM_LOG="$WORKDIR/npm-calls-27a.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+  FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
+    bash -c "cd '$REPO27A' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting --public other" \
+    >"$WORKDIR/case27a.out" 2>"$WORKDIR/case27a.err"
+  RC27A=$?
+  set -e
+  if [[ $RC27A -ne 0 ]]; then
+    fail "public-override: deploy.sh returned $RC27A. stderr was:"
+    cat "$WORKDIR/case27a.err" >&2
+  elif ! grep -q 'predeploy hook failed' "$WORKDIR/case27a.err"; then
+    fail "public-override: the Hosting hook did not see the --public directory as \$RESOURCE_DIR, so it never took the branch whose write the containment denies. stderr was:"
+    cat "$WORKDIR/case27a.err" >&2
+  elif [[ -s "$REPO27A/shared/toggle" ]]; then
+    fail "public-override: the Hosting hook's write reached the live checkout, so the write containment did not hold."
+  elif [[ ! -s "$WORKDIR/ofd-calls-27a.log" ]]; then
+    fail "public-override: the deploy never published, though the denied write left the tree exactly as the guards approved it."
+  else
+    pass "public-override: --public moves the Hosting hook's \$RESOURCE_DIR in the rehearsal too, and its write into the checkout is denied (rc=$RC27A)."
+  fi
 
-REPO27B="$WORKDIR/case27b-public-override-control"
-init_public_override_repo "$REPO27B"
-: >"$WORKDIR/ofd-calls-27b.log"
-: >"$WORKDIR/npm-calls-27b.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-27b.log" \
-NPM_LOG="$WORKDIR/npm-calls-27b.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
-  bash -c "cd '$REPO27B' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting" \
-  >"$WORKDIR/case27b.out" 2>"$WORKDIR/case27b.err"
-RC27B=$?
-set -e
-if [[ $RC27B -ne 0 ]]; then
-  fail "public-override-control: the same deploy without --public returned $RC27B. stderr was:"
-  cat "$WORKDIR/case27b.err" >&2
-elif [[ ! -s "$WORKDIR/ofd-calls-27b.log" ]]; then
-  fail "public-override-control: the deploy never published, so 27a's refusal is not attributable to --public."
-elif grep -q 'predeploy hook failed' "$WORKDIR/case27b.err"; then
-  fail "public-override-control: the Hosting hook took the override branch without --public too, so 27a proves nothing about the override. stderr was:"
-  cat "$WORKDIR/case27b.err" >&2
-else
-  pass "public-override-control: without --public the Hosting hook reads firebase.json's own directory, takes no branch, and the deploy publishes (rc=$RC27B)."
+  REPO27B="$WORKDIR/case27b-public-override-control"
+  init_public_override_repo "$REPO27B"
+  : >"$WORKDIR/ofd-calls-27b.log"
+  : >"$WORKDIR/npm-calls-27b.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-27b.log" \
+  NPM_LOG="$WORKDIR/npm-calls-27b.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+  FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
+    bash -c "cd '$REPO27B' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic --skip-env-check -- fiveacross --only functions:dailyEngagementEmail,hosting" \
+    >"$WORKDIR/case27b.out" 2>"$WORKDIR/case27b.err"
+  RC27B=$?
+  set -e
+  if [[ $RC27B -ne 0 ]]; then
+    fail "public-override-control: the same deploy without --public returned $RC27B. stderr was:"
+    cat "$WORKDIR/case27b.err" >&2
+  elif [[ ! -s "$WORKDIR/ofd-calls-27b.log" ]]; then
+    fail "public-override-control: the deploy never published, so 27a's refusal is not attributable to --public."
+  elif grep -q 'predeploy hook failed' "$WORKDIR/case27b.err"; then
+    fail "public-override-control: the Hosting hook took the override branch without --public too, so 27a proves nothing about the override. stderr was:"
+    cat "$WORKDIR/case27b.err" >&2
+  else
+    pass "public-override-control: without --public the Hosting hook reads firebase.json's own directory, takes no branch, and the deploy publishes (rc=$RC27B)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2928,52 +2994,54 @@ exports.daily = admin.app().options.marker ? endpoint() : { submitBugReport: end
 ADMIN_OPTIONS_CONTROL_BRANCH='const snapshot = admin.app().options;
 exports.daily = snapshot.marker ? { submitBugReport: endpoint() } : endpoint();'
 
-REPO28A="$WORKDIR/case28a-admin-options-snapshot"
-init_admin_options_repo "$REPO28A" "$ADMIN_OPTIONS_MUTATED_BRANCH"
-: >"$WORKDIR/ofd-calls-28a.log"
-: >"$WORKDIR/gcloud-calls-28a.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-28a.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-28a.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO28A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
-  >"$WORKDIR/case28a.out" 2>"$WORKDIR/case28a.err"
-RC28A=$?
-set -e
-if [[ $RC28A -ne 0 ]]; then
-  fail "admin-options-snapshot: deploy.sh returned $RC28A. stderr was:"
-  cat "$WORKDIR/case28a.err" >&2
-elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28a.log"; then
-  fail "admin-options-snapshot: an artifact that mutates one app.options snapshot was exempted, so the protected group it really exports was released with no invoker reconciliation. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-28a.log" >&2
-else
-  pass "admin-options-snapshot: a mutated app.options snapshot does not survive into the rehearsal's next read, so the group the deploy would export is still reconciled (rc=$RC28A)."
-fi
+if ! needs_write_containment "admin-options-snapshot (28a) and its control (28b)"; then
+  REPO28A="$WORKDIR/case28a-admin-options-snapshot"
+  init_admin_options_repo "$REPO28A" "$ADMIN_OPTIONS_MUTATED_BRANCH"
+  : >"$WORKDIR/ofd-calls-28a.log"
+  : >"$WORKDIR/gcloud-calls-28a.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-28a.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-28a.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO28A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+    >"$WORKDIR/case28a.out" 2>"$WORKDIR/case28a.err"
+  RC28A=$?
+  set -e
+  if [[ $RC28A -ne 0 ]]; then
+    fail "admin-options-snapshot: deploy.sh returned $RC28A. stderr was:"
+    cat "$WORKDIR/case28a.err" >&2
+  elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28a.log"; then
+    fail "admin-options-snapshot: an artifact that mutates one app.options snapshot was exempted, so the protected group it really exports was released with no invoker reconciliation. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-28a.log" >&2
+  else
+    pass "admin-options-snapshot: a mutated app.options snapshot does not survive into the rehearsal's next read, so the group the deploy would export is still reconciled (rc=$RC28A)."
+  fi
 
-REPO28B="$WORKDIR/case28b-admin-options-control"
-init_admin_options_repo "$REPO28B" "$ADMIN_OPTIONS_CONTROL_BRANCH"
-: >"$WORKDIR/ofd-calls-28b.log"
-: >"$WORKDIR/gcloud-calls-28b.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-28b.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-28b.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO28B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
-  >"$WORKDIR/case28b.out" 2>"$WORKDIR/case28b.err"
-RC28B=$?
-set -e
-if [[ $RC28B -ne 0 ]]; then
-  fail "admin-options-control: the unmutated fixture returned $RC28B. stderr was:"
-  cat "$WORKDIR/case28b.err" >&2
-elif [[ ! -s "$WORKDIR/ofd-calls-28b.log" ]]; then
-  fail "admin-options-control: the deploy never published, so 28a's reconciliation is not attributable to the group its artifact exports."
-elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28b.log"; then
-  fail "admin-options-control: a codebase that reads app.options and really exports one endpoint was not exempted. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-28b.log" >&2
-else
-  pass "admin-options-control: reading app.options without mutating it still proves the single-endpoint scope exact (rc=$RC28B)."
+  REPO28B="$WORKDIR/case28b-admin-options-control"
+  init_admin_options_repo "$REPO28B" "$ADMIN_OPTIONS_CONTROL_BRANCH"
+  : >"$WORKDIR/ofd-calls-28b.log"
+  : >"$WORKDIR/gcloud-calls-28b.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-28b.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-28b.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO28B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+    >"$WORKDIR/case28b.out" 2>"$WORKDIR/case28b.err"
+  RC28B=$?
+  set -e
+  if [[ $RC28B -ne 0 ]]; then
+    fail "admin-options-control: the unmutated fixture returned $RC28B. stderr was:"
+    cat "$WORKDIR/case28b.err" >&2
+  elif [[ ! -s "$WORKDIR/ofd-calls-28b.log" ]]; then
+    fail "admin-options-control: the deploy never published, so 28a's reconciliation is not attributable to the group its artifact exports."
+  elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-28b.log"; then
+    fail "admin-options-control: a codebase that reads app.options and really exports one endpoint was not exempted. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-28b.log" >&2
+  else
+    pass "admin-options-control: reading app.options without mutating it still proves the single-endpoint scope exact (rc=$RC28B)."
+  fi
 fi
 
 
@@ -3037,6 +3105,10 @@ run_dir_mtime_case() {
   local case_id="$1"
   local past_dated="$2"
   local expectation="$3"
+  # BOTH halves, not only the branch-taken one: 29a's pass says the hook read a
+  # live timestamp and did NOT take the branch, and a run in which the hook
+  # never executed produces that same absence for a different reason.
+  needs_write_containment "dir-mtime ($case_id)" && return
   local repo="$WORKDIR/case${case_id}-dir-mtime"
   init_dir_mtime_repo "$repo"
   # A timestamp far enough back that no filesystem resolution can call it a tie.
@@ -3105,27 +3177,29 @@ run_dir_mtime_case 29b shared/stamp branch-taken
 ADMIN_OPTIONS_LOCATION_BRANCH='const options = admin.app().options;
 exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
 
-REPO30="$WORKDIR/case30-admin-options-location"
-init_admin_options_repo "$REPO30" "$ADMIN_OPTIONS_LOCATION_BRANCH"
-: >"$WORKDIR/ofd-calls-30.log"
-: >"$WORKDIR/gcloud-calls-30.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-30.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-30.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO30' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
-  >"$WORKDIR/case30.out" 2>"$WORKDIR/case30.err"
-RC30=$?
-set -e
-if [[ $RC30 -ne 0 ]]; then
-  fail "admin-options-location: deploy.sh returned $RC30. stderr was:"
-  cat "$WORKDIR/case30.err" >&2
-elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-30.log"; then
-  fail "admin-options-location: an artifact branching on adminSdkConfig's locationId was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-30.log" >&2
-else
-  pass "admin-options-location: reading a project locationId this preflight cannot supply forfeits the exemption (rc=$RC30)."
+if ! needs_write_containment "admin-options-location (30), whose control is 28b"; then
+  REPO30="$WORKDIR/case30-admin-options-location"
+  init_admin_options_repo "$REPO30" "$ADMIN_OPTIONS_LOCATION_BRANCH"
+  : >"$WORKDIR/ofd-calls-30.log"
+  : >"$WORKDIR/gcloud-calls-30.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-30.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-30.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO30' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+    >"$WORKDIR/case30.out" 2>"$WORKDIR/case30.err"
+  RC30=$?
+  set -e
+  if [[ $RC30 -ne 0 ]]; then
+    fail "admin-options-location: deploy.sh returned $RC30. stderr was:"
+    cat "$WORKDIR/case30.err" >&2
+  elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-30.log"; then
+    fail "admin-options-location: an artifact branching on adminSdkConfig's locationId was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-30.log" >&2
+  else
+    pass "admin-options-location: reading a project locationId this preflight cannot supply forfeits the exemption (rc=$RC30)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3144,54 +3218,56 @@ fi
 # ---------------------------------------------------------------------------
 FRAMEWORK_SINGLE_BRANCH='exports.daily = endpoint();'
 
-REPO31A="$WORKDIR/case31a-hosting-source"
-init_admin_options_repo "$REPO31A" "$FRAMEWORK_SINGLE_BRANCH" \
-  '{"hosting":{"site":"gaycruisebingo","source":"web"},"functions":{"source":"functions","predeploy":[]}}'
-: >"$WORKDIR/ofd-calls-31a.log"
-: >"$WORKDIR/gcloud-calls-31a.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-31a.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-31a.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO31A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
-  >"$WORKDIR/case31a.out" 2>"$WORKDIR/case31a.err"
-RC31A=$?
-set -e
-if [[ $RC31A -ne 0 ]]; then
-  fail "hosting-source: deploy.sh returned $RC31A. stderr was:"
-  cat "$WORKDIR/case31a.err" >&2
-elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31a.log"; then
-  fail "hosting-source: a request whose Hosting config the pinned CLI would build as a web framework was still exempted, so a surface that framework build can rewrite was released with no invoker reconciliation. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-31a.log" >&2
-else
-  pass "hosting-source: a selected Hosting source forfeits the exemption for every codebase in the project (rc=$RC31A)."
-fi
+if ! needs_write_containment "hosting-source (31a) and its control (31b)"; then
+  REPO31A="$WORKDIR/case31a-hosting-source"
+  init_admin_options_repo "$REPO31A" "$FRAMEWORK_SINGLE_BRANCH" \
+    '{"hosting":{"site":"gaycruisebingo","source":"web"},"functions":{"source":"functions","predeploy":[]}}'
+  : >"$WORKDIR/ofd-calls-31a.log"
+  : >"$WORKDIR/gcloud-calls-31a.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-31a.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-31a.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO31A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+    >"$WORKDIR/case31a.out" 2>"$WORKDIR/case31a.err"
+  RC31A=$?
+  set -e
+  if [[ $RC31A -ne 0 ]]; then
+    fail "hosting-source: deploy.sh returned $RC31A. stderr was:"
+    cat "$WORKDIR/case31a.err" >&2
+  elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31a.log"; then
+    fail "hosting-source: a request whose Hosting config the pinned CLI would build as a web framework was still exempted, so a surface that framework build can rewrite was released with no invoker reconciliation. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-31a.log" >&2
+  else
+    pass "hosting-source: a selected Hosting source forfeits the exemption for every codebase in the project (rc=$RC31A)."
+  fi
 
-REPO31B="$WORKDIR/case31b-hosting-public"
-init_admin_options_repo "$REPO31B" "$FRAMEWORK_SINGLE_BRANCH" \
-  '{"hosting":{"site":"gaycruisebingo","public":"dist"},"functions":{"source":"functions","predeploy":[]}}'
-: >"$WORKDIR/ofd-calls-31b.log"
-: >"$WORKDIR/gcloud-calls-31b.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-31b.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-31b.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO31B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
-  >"$WORKDIR/case31b.out" 2>"$WORKDIR/case31b.err"
-RC31B=$?
-set -e
-if [[ $RC31B -ne 0 ]]; then
-  fail "hosting-public: the same request against a plain public directory returned $RC31B. stderr was:"
-  cat "$WORKDIR/case31b.err" >&2
-elif [[ ! -s "$WORKDIR/ofd-calls-31b.log" ]]; then
-  fail "hosting-public: the deploy never published, so 31a's reconciliation is not attributable to the Hosting source."
-elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31b.log"; then
-  fail "hosting-public: a Hosting config the CLI would not build as a framework still forfeited the exemption. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-31b.log" >&2
-else
-  pass "hosting-public: a plain public directory runs no framework build and keeps the single-endpoint scope exact (rc=$RC31B)."
+  REPO31B="$WORKDIR/case31b-hosting-public"
+  init_admin_options_repo "$REPO31B" "$FRAMEWORK_SINGLE_BRANCH" \
+    '{"hosting":{"site":"gaycruisebingo","public":"dist"},"functions":{"source":"functions","predeploy":[]}}'
+  : >"$WORKDIR/ofd-calls-31b.log"
+  : >"$WORKDIR/gcloud-calls-31b.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-31b.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-31b.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO31B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+    >"$WORKDIR/case31b.out" 2>"$WORKDIR/case31b.err"
+  RC31B=$?
+  set -e
+  if [[ $RC31B -ne 0 ]]; then
+    fail "hosting-public: the same request against a plain public directory returned $RC31B. stderr was:"
+    cat "$WORKDIR/case31b.err" >&2
+  elif [[ ! -s "$WORKDIR/ofd-calls-31b.log" ]]; then
+    fail "hosting-public: the deploy never published, so 31a's reconciliation is not attributable to the Hosting source."
+  elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-31b.log"; then
+    fail "hosting-public: a Hosting config the CLI would not build as a framework still forfeited the exemption. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-31b.log" >&2
+  else
+    pass "hosting-public: a plain public directory runs no framework build and keeps the single-endpoint scope exact (rc=$RC31B)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3218,26 +3294,28 @@ fi
 # really does export one endpoint and IS exempted once the document is named —
 # so the reconciliation below is attributable to the missing credential alone.
 # ---------------------------------------------------------------------------
-REPO32="$WORKDIR/case32-no-established-credential"
-init_admin_options_repo "$REPO32" "$ADMIN_OPTIONS_CONTROL_BRANCH"
-: >"$WORKDIR/ofd-calls-32.log"
-: >"$WORKDIR/gcloud-calls-32.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-32.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-32.log" \
-  bash -c "cd '$REPO32' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
-  >"$WORKDIR/case32.out" 2>"$WORKDIR/case32.err"
-RC32=$?
-set -e
-if [[ $RC32 -ne 0 ]]; then
-  fail "no-established-credential: deploy.sh returned $RC32. stderr was:"
-  cat "$WORKDIR/case32.err" >&2
-elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-32.log"; then
-  fail "no-established-credential: a rehearsal with no real ADC document still exempted the scope, so a hook that reads the credential could have taken a different branch in the deploy. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-32.log" >&2
-else
-  pass "no-established-credential: a standalone deploy classifies conservatively rather than rehearsing against a synthetic credential (rc=$RC32)."
+if ! needs_write_containment "no-established-credential (32), whose fixture is 28b's"; then
+  REPO32="$WORKDIR/case32-no-established-credential"
+  init_admin_options_repo "$REPO32" "$ADMIN_OPTIONS_CONTROL_BRANCH"
+  : >"$WORKDIR/ofd-calls-32.log"
+  : >"$WORKDIR/gcloud-calls-32.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-32.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-32.log" \
+    bash -c "cd '$REPO32' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+    >"$WORKDIR/case32.out" 2>"$WORKDIR/case32.err"
+  RC32=$?
+  set -e
+  if [[ $RC32 -ne 0 ]]; then
+    fail "no-established-credential: deploy.sh returned $RC32. stderr was:"
+    cat "$WORKDIR/case32.err" >&2
+  elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-32.log"; then
+    fail "no-established-credential: a rehearsal with no real ADC document still exempted the scope, so a hook that reads the credential could have taken a different branch in the deploy. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-32.log" >&2
+  else
+    pass "no-established-credential: a standalone deploy classifies conservatively rather than rehearsing against a synthetic credential (rc=$RC32)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3384,27 +3462,29 @@ run_post_classification_guard_case 33b hold
 ADMIN_OPTIONS_BACKING_BRANCH='const options = admin.app().options_;
 exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
 
-REPO34="$WORKDIR/case34-admin-options-backing"
-init_admin_options_repo "$REPO34" "$ADMIN_OPTIONS_BACKING_BRANCH"
-: >"$WORKDIR/ofd-calls-34.log"
-: >"$WORKDIR/gcloud-calls-34.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-34.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-34.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO34' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
-  >"$WORKDIR/case34.out" 2>"$WORKDIR/case34.err"
-RC34=$?
-set -e
-if [[ $RC34 -ne 0 ]]; then
-  fail "admin-options-backing: deploy.sh returned $RC34. stderr was:"
-  cat "$WORKDIR/case34.err" >&2
-elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-34.log"; then
-  fail "admin-options-backing: an artifact branching on the backing options object was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-34.log" >&2
-else
-  pass "admin-options-backing: reading a locationId through firebase-admin's own options_ forfeits the exemption too (rc=$RC34)."
+if ! needs_write_containment "admin-options-backing (34), whose controls are 28b and 30"; then
+  REPO34="$WORKDIR/case34-admin-options-backing"
+  init_admin_options_repo "$REPO34" "$ADMIN_OPTIONS_BACKING_BRANCH"
+  : >"$WORKDIR/ofd-calls-34.log"
+  : >"$WORKDIR/gcloud-calls-34.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-34.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-34.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO34' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+    >"$WORKDIR/case34.out" 2>"$WORKDIR/case34.err"
+  RC34=$?
+  set -e
+  if [[ $RC34 -ne 0 ]]; then
+    fail "admin-options-backing: deploy.sh returned $RC34. stderr was:"
+    cat "$WORKDIR/case34.err" >&2
+  elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-34.log"; then
+    fail "admin-options-backing: an artifact branching on the backing options object was exempted, so the group it exports for the real project was released with no invoker reconciliation. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-34.log" >&2
+  else
+    pass "admin-options-backing: reading a locationId through firebase-admin's own options_ forfeits the exemption too (rc=$RC34)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3420,36 +3500,38 @@ fi
 # happily. Case 31b is the control: the same request with that same Hosting
 # config written INLINE, which already published and stayed exempt.
 # ---------------------------------------------------------------------------
-REPO35="$WORKDIR/case35-imported-hosting"
-init_admin_options_repo "$REPO35" "$FRAMEWORK_SINGLE_BRANCH" \
-  '{"hosting":"hosting.config.json","functions":{"source":"functions","predeploy":[]}}'
-(
-  cd "$REPO35"
-  printf '%s\n' '{"site":"gaycruisebingo","public":"dist"}' > hosting.config.json
-  git add -A
-  git commit --quiet -m "externalise the hosting config"
-)
-: >"$WORKDIR/ofd-calls-35.log"
-: >"$WORKDIR/gcloud-calls-35.log"
-set +e
-PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-35.log" \
-GCLOUD_LOG="$WORKDIR/gcloud-calls-35.log" \
-FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
-  bash -c "cd '$REPO35' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
-  >"$WORKDIR/case35.out" 2>"$WORKDIR/case35.err"
-RC35=$?
-set -e
-if [[ $RC35 -ne 0 ]]; then
-  fail "imported-hosting: deploy.sh returned $RC35 for a Hosting target written as an import path. stderr was:"
-  cat "$WORKDIR/case35.err" >&2
-elif [[ ! -s "$WORKDIR/ofd-calls-35.log" ]]; then
-  fail "imported-hosting: the deploy never published, so the imported Hosting config still aborts classification."
-elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-35.log"; then
-  fail "imported-hosting: the materialised config lost the exemption the same config inline keeps. gcloud log was:"
-  cat "$WORKDIR/gcloud-calls-35.log" >&2
-else
-  pass "imported-hosting: a Hosting target written as an import path is read from the materialised config (rc=$RC35)."
+if ! needs_write_containment "imported-hosting (35), whose control is 31b"; then
+  REPO35="$WORKDIR/case35-imported-hosting"
+  init_admin_options_repo "$REPO35" "$FRAMEWORK_SINGLE_BRANCH" \
+    '{"hosting":"hosting.config.json","functions":{"source":"functions","predeploy":[]}}'
+  (
+    cd "$REPO35"
+    printf '%s\n' '{"site":"gaycruisebingo","public":"dist"}' > hosting.config.json
+    git add -A
+    git commit --quiet -m "externalise the hosting config"
+  )
+  : >"$WORKDIR/ofd-calls-35.log"
+  : >"$WORKDIR/gcloud-calls-35.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-35.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-35.log" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+    bash -c "cd '$REPO35' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily,hosting" \
+    >"$WORKDIR/case35.out" 2>"$WORKDIR/case35.err"
+  RC35=$?
+  set -e
+  if [[ $RC35 -ne 0 ]]; then
+    fail "imported-hosting: deploy.sh returned $RC35 for a Hosting target written as an import path. stderr was:"
+    cat "$WORKDIR/case35.err" >&2
+  elif [[ ! -s "$WORKDIR/ofd-calls-35.log" ]]; then
+    fail "imported-hosting: the deploy never published, so the imported Hosting config still aborts classification."
+  elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-35.log"; then
+    fail "imported-hosting: the materialised config lost the exemption the same config inline keeps. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-35.log" >&2
+  else
+    pass "imported-hosting: a Hosting target written as an import path is read from the materialised config (rc=$RC35)."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3524,6 +3606,10 @@ DETACH
 run_detached_writer_case() {
   local case_id="$1"
   local expectation="$2"
+  # BOTH halves. 36a asserts an EMPTY checkout, which a run that started no
+  # worker at all produces just as well — its pass is only a containment's when
+  # 36b shows the same worker still writing where the containment allows it.
+  needs_write_containment "detached-writer ($case_id)" && return
   local repo="$WORKDIR/case${case_id}-detached-writer"
   local target
   if [[ "$expectation" == "denied" ]]; then
@@ -3575,10 +3661,69 @@ run_detached_writer_case 36a denied
 run_detached_writer_case 36b allowed
 
 # ---------------------------------------------------------------------------
+# Case 37 (#1107): on a machine that can prove no write containment, deploy.sh
+# still deploys — conservatively — and no predeploy hook runs.
+#
+# This is the arm `app-ci` takes on every run: `ubuntu-latest` ships no `bwrap`
+# and refuses an unprivileged user namespace, so the classifier proves nothing
+# and refuses every exemption before staging. It is what replaces the cases
+# skipped above, and it runs on EVERY machine —
+# `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT=1` makes a machine that CAN
+# contain a hook answer the same way, so the refusal is never a path only CI
+# exercises.
+#
+# The fixture is 28b's, which really does export one endpoint and IS exempted
+# when a containment can be proved — so the reconciliation below is attributable
+# to the refusal alone. Its predeploy hook writes a sentinel at an absolute path
+# in the live checkout: a refusal that arrived after running the hook would be
+# no better than the exemption it replaces, and the sentinel is how that shows.
+# ---------------------------------------------------------------------------
+REPO37="$WORKDIR/case37-no-containment"
+init_admin_options_repo "$REPO37" "$ADMIN_OPTIONS_CONTROL_BRANCH" \
+  "{\"hosting\":{\"site\":\"fiveacross\",\"public\":\"dist\"},\"functions\":{\"source\":\"functions\",\"predeploy\":[\"printf ran > $WORKDIR/case37-hook-ran\"]}}"
+rm -f "$WORKDIR/case37-hook-ran"
+: >"$WORKDIR/ofd-calls-37.log"
+: >"$WORKDIR/gcloud-calls-37.log"
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-37.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-37.log" \
+FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="$ESTABLISHED_CREDENTIAL" \
+FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT=1 \
+FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 \
+  bash -c "cd '$REPO37' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:daily" \
+  >"$WORKDIR/case37.out" 2>"$WORKDIR/case37.err"
+RC37=$?
+set -e
+if [[ $RC37 -ne 0 ]]; then
+  fail "no-containment: deploy.sh returned $RC37 on a machine that can prove no containment — the refusal must stay conservative, not fatal. stderr was:"
+  cat "$WORKDIR/case37.err" >&2
+elif [[ ! -s "$WORKDIR/ofd-calls-37.log" ]]; then
+  fail "no-containment: the deploy never published, so the reconciliation below is not attributable to the refused exemption."
+elif [[ -e "$WORKDIR/case37-hook-ran" ]]; then
+  fail "no-containment: a predeploy hook RAN though no containment could be proved — the refusal arrived after the write it exists to prevent."
+elif ! grep -q 'no write containment could be proved' "$WORKDIR/case37.err"; then
+  fail "no-containment: the refusal did not name what it could not prove. stderr was:"
+  cat "$WORKDIR/case37.err" >&2
+elif ! grep -qE 'sandbox-exec|bwrap|unshare' "$WORKDIR/case37.err"; then
+  fail "no-containment: the refusal named no candidate, so an operator cannot tell an absent bwrap from a disabled namespace. stderr was:"
+  cat "$WORKDIR/case37.err" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-37.log"; then
+  fail "no-containment: an exemption survived a machine that could contain nothing, so a surface no rehearsal reproduced was released with its invoker reconciliation switched off. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-37.log" >&2
+else
+  pass "no-containment: a machine that can prove no write containment refuses every exemption, names the candidates it could not prove, runs no hook, and still deploys (rc=$RC37)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
-echo "test_deploy.sh: $PASS passed, $FAIL failed"
+echo "test_deploy.sh: $PASS passed, $FAIL failed, $SKIPPED skipped"
+if [[ $SKIPPED -gt 0 ]]; then
+  echo "test_deploy.sh: the skips are cases that need a predeploy hook to run inside a proved"
+  echo "test_deploy.sh: write containment. This machine can prove none — $CONTAINMENT_REASON"
+fi
 if [[ $FAIL -gt 0 ]]; then
   exit 1
 fi
