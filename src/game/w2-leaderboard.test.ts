@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { comparePlayers, sortPlayers, withReadableRanking, type Rankable } from './logic';
+// The archive's half of the same normalisation, imported so the two ranking
+// paths are compared against each other rather than described separately
+// (#1152, Codex P2 on PR #1165). Both modules are Firestore-free and React-free.
+import { MAX_ARCHIVE_NUMBER, withReadableDayStats } from '../data/eventArchive';
+import type { PlayerDoc } from '../types';
 
 // specs/w2-leaderboard.md — issue #35. comparePlayers/sortPlayers already
 // exist and ship the PRD tie-break (bingos desc -> squares desc -> earliest
@@ -240,5 +245,91 @@ describe('withReadableRanking — the roster is made readable BEFORE it is ranke
     // The unreadable row ranks last on its coerced 0, and — the point of the
     // guard — the two well-formed rows keep the order they always had.
     expect(sortPlayers(roster).map((r) => r.bingoCount)).toEqual([2, 1, 0]);
+  });
+});
+
+// ONE BOUND, BOTH RANKING PATHS (#1152, Codex P2 on PR #1165). `players/{uid}`
+// validates no field, so a Player can self-write a count or an instant above the
+// magnitude `firestore.rules`' `finiteArchiveNumber` accepts. The archive clamped
+// those before it ranked and serialised; this live normaliser passed them through
+// untouched — so two oversized rows could order one way on the last live
+// Leaderboard and another way in the frozen record, and the archived standings
+// stopped COPYING what Players last saw, which is the record's whole promise
+// (ADR 0001). `clampArchiveNumber` now lives in `src/data/eventLimits.ts`, the one
+// module with no imports of its own, and both paths read it from there.
+describe('withReadableRanking applies the archive’s own bounds — one mechanism, two paths', () => {
+  const row = (uid: string, over: Partial<PlayerDoc>): PlayerDoc =>
+    ({
+      uid,
+      displayName: uid,
+      bingoCount: 0,
+      squaresMarked: 0,
+      firstBingoAt: null,
+      ...over,
+    }) as PlayerDoc;
+
+  const rankedBy = (rows: readonly PlayerDoc[], normalise: (p: PlayerDoc) => PlayerDoc) =>
+    sortPlayers(rows.map(normalise)).map((r) => r.uid);
+
+  it('orders two oversized bingo counts the same live as frozen', () => {
+    const rows = [
+      // The BIGGER raw count, but almost no squares. Unclamped it wins outright;
+      // clamped it ties, and the tie-break moves to squares — which is the whole
+      // divergence, in one pair.
+      row('bigger-count', { bingoCount: MAX_ARCHIVE_NUMBER + 2_000, squaresMarked: 1 }),
+      row('more-squares', { bingoCount: MAX_ARCHIVE_NUMBER + 1_000, squaresMarked: 999 }),
+    ];
+    expect(rankedBy(rows, withReadableRanking)).toEqual(['more-squares', 'bigger-count']);
+    expect(rankedBy(rows, withReadableDayStats)).toEqual(rankedBy(rows, withReadableRanking));
+  });
+
+  it('does the same for two oversized first-bingo instants', () => {
+    const rows = [
+      row('later-stamp', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: MAX_ARCHIVE_NUMBER + 2_000,
+      }),
+      row('earlier-stamp', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: MAX_ARCHIVE_NUMBER + 1_000,
+      }),
+    ];
+    // Clamped, both stamps ARE the same instant: the pair ties at 0 and the
+    // sort's stability keeps the roster order it was handed. Unclamped,
+    // `earlier-stamp` jumps ahead on the live board and nowhere else.
+    expect(rankedBy(rows, withReadableRanking)).toEqual(['later-stamp', 'earlier-stamp']);
+    expect(rankedBy(rows, withReadableDayStats)).toEqual(rankedBy(rows, withReadableRanking));
+  });
+
+  it('reads back the same numbers the frozen record carries, in both directions', () => {
+    const huge = row('huge', {
+      bingoCount: Number.MAX_SAFE_INTEGER,
+      squaresMarked: -Number.MAX_SAFE_INTEGER,
+      firstBingoAt: Number.MAX_SAFE_INTEGER,
+    });
+    const live = withReadableRanking(huge);
+    const frozen = withReadableDayStats(huge);
+    expect(live.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    expect(live.squaresMarked).toBe(-MAX_ARCHIVE_NUMBER);
+    expect(live.firstBingoAt).toBe(MAX_ARCHIVE_NUMBER);
+    expect([live.bingoCount, live.squaresMarked, live.firstBingoAt]).toEqual([
+      frozen.bingoCount,
+      frozen.squaresMarked,
+      frozen.firstBingoAt,
+    ]);
+  });
+
+  it('leaves an in-bounds row alone, by IDENTITY — the clamp costs the ordinary roster nothing', () => {
+    const ordinary = row('ordinary', { bingoCount: 3, squaresMarked: 18, firstBingoAt: 1_000 });
+    expect(withReadableRanking(ordinary)).toBe(ordinary);
+    // The boundary value itself is in bounds, so it is not a copy either.
+    const atBound = row('at-bound', {
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 0,
+      firstBingoAt: null,
+    });
+    expect(withReadableRanking(atBound)).toBe(atBound);
   });
 });

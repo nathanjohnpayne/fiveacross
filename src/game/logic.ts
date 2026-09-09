@@ -2,6 +2,13 @@
 import type { Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { normalizePool } from './pool';
 import { isCeremonialDay } from './scoring';
+// The ONE data-layer import this module takes, and only because that module
+// imports nothing itself: it is the shared numeric contract with
+// `firestore.rules`, and the LIVE ranking below has to apply the same bound the
+// frozen record does or the two orders can disagree (#1152, Codex P2 on PR
+// #1165). `src/data/eventArchive.ts` imports this module, so the bound cannot
+// live there without a cycle — see that file's `MAX_ARCHIVE_NUMBER` re-export.
+import { clampArchiveNumber } from '../data/eventLimits';
 
 export const GRID = 5;
 export const CENTER = 12;
@@ -910,15 +917,18 @@ export function foldEchoStats(params: {
 export type Rankable = Pick<PlayerDoc, 'bingoCount' | 'squaresMarked' | 'firstBingoAt'>;
 
 /** A ranking count the comparator can SUBTRACT. A non-numeric or non-finite stat
- *  reads as `0` — the same number the row already displays for it. */
+ *  reads as `0` — the same number the row already displays for it — and a finite
+ *  one is CLAMPED into `MAX_ARCHIVE_NUMBER`, exactly as `archiveCount` clamps it
+ *  for the frozen record. */
 function readableRankingCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : 0;
 }
 
 /** A ranking instant, or `null` — which `comparePlayers` already means by "never
- *  bingoed", and which sorts last. */
+ *  bingoed", and which sorts last. Bounded like the count beside it, and like
+ *  `archiveInstant`. */
 function readableRankingInstant(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : null;
 }
 
 /**
@@ -935,10 +945,23 @@ function readableRankingInstant(value: unknown): number | null {
  * order that pair however it likes (the #93 hazard, one layer earlier).
  *
  * The coercions are the ones the surfaces already agree on: a count reads `0`, an
- * unreadable instant reads `null`. This decides NOTHING about who won — a
- * well-formed row is returned unchanged, by identity — and it writes nothing: the
- * frozen record still copies each row's own stats through `toStandingRow`'s
- * identical coercion, so the archive is byte-for-byte what it was (ADR 0001).
+ * unreadable instant reads `null`, and a finite value outside the archive's bound
+ * is CLAMPED to it. This decides NOTHING about who won — a well-formed row is
+ * returned unchanged, by identity — and it writes nothing: the frozen record
+ * still copies each row's own stats through `toStandingRow`'s identical coercion,
+ * so the archive is byte-for-byte what it was (ADR 0001).
+ *
+ * THE BOUND IS SHARED RATHER THAN RESTATED (Codex P2 on PR #1165). It used to be
+ * the archive's alone: this helper kept any finite value while
+ * `withReadableDayStats` clamped, so two rows above `MAX_ARCHIVE_NUMBER` — which
+ * `players/{uid}` freely admits, validating no field — could order one way on the
+ * last live Leaderboard and another way in the frozen record. Distinct oversized
+ * `bingoCount`s collapse to a tie under the clamp and then reorder on squares, so
+ * the archived standings stopped COPYING what Players last saw, which is the
+ * record's whole promise. Both paths now read `clampArchiveNumber` out of
+ * `src/data/eventLimits.ts` — the one module with no imports of its own, so this
+ * pure game module can share a bound with the data layer that imports it without
+ * a cycle.
  *
  * `comparePlayers` below is deliberately NOT guarded a second time. Normalising
  * BEFORE the sort is the one mechanism (#1151, Codex P1 on PR #1162): the order
@@ -952,12 +975,10 @@ function readableRankingInstant(value: unknown): number | null {
  *
  * The sibling coercion is `withReadableDayStats` in `src/data/eventArchive.ts`,
  * which normalises the SAME three root fields and a row's per-Day BUCKETS beside
- * them for the honour selectors. The two are deliberately separate rather than
- * shared: that one belongs to what a stored record can carry and runs on the
- * server re-read the freeze takes, this one belongs to what the client sorts and
- * runs on every roster snapshot. A pure game module cannot import the data layer,
- * and the archive path needs its own coercion regardless because it never passes
- * through this hook.
+ * them for the honour selectors. They stay separate FUNCTIONS — that one runs on
+ * the server re-read the freeze takes and has buckets to walk, this one runs on
+ * every roster snapshot and does not — but they no longer carry separate rules
+ * about what a number is: the bound above is one helper, imported by both.
  */
 export function withReadableRanking<T extends Rankable>(row: T): T {
   const bingoCount = readableRankingCount(row.bingoCount);

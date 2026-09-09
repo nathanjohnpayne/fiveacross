@@ -12,7 +12,12 @@
 // selectors the live Leaderboard already renders with, reused rather than
 // restated: the frozen record must say what the last live Leaderboard said.
 import { isBanned } from './moderation';
-import { MAX_DAYS, supportedDayIndex } from './eventLimits';
+import {
+  ARCHIVE_NUMBER_BOUND,
+  MAX_DAYS,
+  clampArchiveNumber,
+  supportedDayIndex,
+} from './eventLimits';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import {
   eventFirstBingoWinner,
@@ -579,46 +584,14 @@ function archiveEventName(value: unknown): string | null {
 }
 
 /**
- * The magnitude `firestore.rules`' `finiteArchiveNumber` bounds every number in
- * the frozen record by, EXCLUSIVELY:
- * `value is number && value > -4102444800000 && value < 4102444800000`.
- *
- * 4102444800000 is 2100-01-01T00:00:00Z, the estate's stand-in for an
- * `isFinite()` Rules does not have — already used that way for
- * `standingsFreezeAt` and for the flip's own `archivedAt`. Restated here rather
- * than left implicit because the WRITER and the RULES have to agree about it:
- * see `MAX_ARCHIVE_NUMBER`.
+ * The bound every number in the frozen record is held inside, re-exported from
+ * its own module because the LIVE ranking path applies it too (#1152, Codex P2
+ * on PR #1165). `src/data/eventLimits.ts` owns it: that module imports nothing,
+ * so `src/game/logic.ts`'s `withReadableRanking` can read the same clamp without
+ * importing this one, which imports `game/logic` and would cycle. The rules fact
+ * it encodes, and why the writer clamps rather than refusing, are stated there.
  */
-const ARCHIVE_NUMBER_BOUND = 4_102_444_800_000;
-
-/**
- * The largest magnitude a number in the frozen record may carry (#1151, Codex P1
- * on PR #1162) — one below `firestore.rules`' exclusive bound, because the rules'
- * comparison is `<` rather than `<=`.
- *
- * THE WRITER AND THE RULES MUST SHARE ONE REPRESENTABLE-NUMBER CONTRACT, and
- * before this they did not. The coercions below kept ANY finite value, while
- * `finiteArchiveNumber` accepts only the bounded ones — so a Player self-writing
- * `bingoCount: 5e12` on their own row (`players/{uid}` validates no field at all,
- * ADR 0001) produced a record the rules REFUSED. That refusal lands on the flip,
- * which runs after `beginArchive` has already shut the Event, and a rejected
- * write throws past the refusal cleanup rather than returning one — so play was
- * closed, nothing was frozen, no automatic reopen ran, and every retry failed
- * identically until an admin found and repaired, banned or deleted that one row.
- *
- * Clamping rather than refusing, for the reason every other coercion here
- * clamps: the record has to be expressible, and a value 40 times the age of the
- * universe in milliseconds is not a stat anybody is going to lose. It decides
- * nothing about who won (ADR 0001) — no real count or instant is within nine
- * orders of magnitude of this — it only keeps the row writable.
- */
-export const MAX_ARCHIVE_NUMBER = ARCHIVE_NUMBER_BOUND - 1;
-
-/** A finite number brought inside `MAX_ARCHIVE_NUMBER` in both directions, so
- *  the value the writer produces is one `finiteArchiveNumber` accepts. */
-function clampArchiveNumber(value: number): number {
-  return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
-}
+export { MAX_ARCHIVE_NUMBER } from './eventLimits';
 
 /** A count the record can carry. A non-finite or non-numeric stat reads as 0 —
  *  which is what the live Leaderboard already renders for the same row — and a
