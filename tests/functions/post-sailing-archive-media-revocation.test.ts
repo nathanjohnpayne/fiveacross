@@ -5,6 +5,7 @@ import {
   isObjectAlreadyGone,
   isSameRevocation,
   revokeProofMedia,
+  sameFirestoreValue,
   type ProofStorageDeleteInput,
   type RevokeProofMediaDeps,
 } from '../../functions/src/proofStorageDeletes';
@@ -180,6 +181,47 @@ describe('revokeProofMedia — the server finishes a revocation the client could
 
     expect(deps.objectDeletes).toEqual([]);
     expect(deps.tombstoneDeletes).toBe(1);
+  });
+
+  it('RETIRES a MALFORMED row on the defensive path, even when its fields are containers (#1153)', async () => {
+    // Codex round 5 P2. `confinedProofMediaPath` refuses a non-string
+    // `storagePath`, so an Admin-SDK-written row carrying an ARRAY there takes
+    // the defensive branch — which drops the row rather than retrying, because
+    // redelivery cannot make an unconfinable path confinable.
+    //
+    // Reference equality made that drop unreachable. The event snapshot and the
+    // retirement transaction's own re-read deserialise the array into two
+    // DIFFERENT JavaScript objects, so `isSameRevocation` reported two different
+    // revocations for one unchanged row, `retireTombstoneIfSame` refused, and
+    // the poison row stood forever — with the Proof create arm holding that id
+    // for just as long, because the hold lifts only when the row is retired.
+    //
+    // Both reads here are DEEP copies, which is the point: a shallow spread
+    // would share the array reference and let the old implementation pass.
+    const poison: ProofStorageDeleteInput = {
+      storagePath: ['proofs', 'med-2026', 'alice', 'proof-1.jpg'],
+      uid: 'alice',
+      requestedAt: 1000,
+    };
+    const readBack = (): ProofStorageDeleteInput => structuredClone(poison);
+    const deps = makeDeps(
+      async () => {
+        throw new Error('the bucket must not be reached');
+      },
+      async () => false,
+      readBack,
+      poison,
+      readBack,
+    );
+
+    await revokeProofMedia(deps, { ...TARGET, tombstone: poison });
+
+    expect(deps.objectDeletes).toEqual([]);
+    expect(deps.tombstoneDeletes).toBe(1);
+    expect(deps.retirementRefusals).toBe(0);
+    expect(deps.warnings.map((w) => w.message)).toEqual([
+      'proof media revocation refused: path outside its own Event/Proof',
+    ]);
   });
 
   it('ABANDONS a delivery whose tombstone has already been retired — bucket untouched, nothing deleted', async () => {
@@ -540,11 +582,118 @@ describe('isSameRevocation — is the standing row the one THIS delivery was cre
     expect(isSameRevocation({ ...withoutGeneration }, withoutGeneration)).toBe(true);
   });
 
-  it('rejects a row whose fields are not primitives at all', () => {
-    // Unreachable through `firestore.rules`, which type-checks all four. A
-    // hand-written Admin SDK document can still produce one, and comparing
-    // unequal is the safe direction: the delivery abandons and deletes nothing.
-    expect(isSameRevocation({ ...ROW, uid: ['alice'] }, { ...ROW, uid: ['alice'] })).toBe(false);
+  it('matches a CONTAINER field that is equal by structure but not by reference (#1153)', () => {
+    // Codex round 5 P2. `firestore.rules` type-checks all four fields, so no
+    // reachable row carries a map or an array — but the Admin SDK bypasses the
+    // rules, and such a row is exactly the poison row `revokeProofMedia`'s
+    // malformed-path branch exists to RETIRE. Firestore deserialises a container
+    // into a fresh JavaScript object on every read, so reference equality said
+    // "a different revocation" about one unchanged row, the retirement refused,
+    // and the row stood forever with the Proof id held behind it.
+    //
+    // `structuredClone` is the point: these two readings share no references.
+    const mapRow: ProofStorageDeleteInput = {
+      ...ROW,
+      storagePath: { bucket: 'b', segments: ['proofs', 'med-2026'], meta: { deep: [1, 2] } },
+    };
+    expect(isSameRevocation(structuredClone(mapRow), structuredClone(mapRow))).toBe(true);
+    const arrayRow: ProofStorageDeleteInput = { ...ROW, uid: ['alice', { alias: 'a' }] };
+    expect(isSameRevocation(structuredClone(arrayRow), structuredClone(arrayRow))).toBe(true);
+  });
+
+  it('still MISMATCHES a container row whose other fields disagree', () => {
+    // The control the case above needs: structural comparison is what makes an
+    // unchanged malformed row retirable, not a licence to treat two different
+    // rows as one. A different `requestedAt` is still a different revocation,
+    // and so is a container that differs one level down.
+    const mapRow: ProofStorageDeleteInput = {
+      ...ROW,
+      storagePath: { bucket: 'b', segments: ['proofs', 'med-2026'] },
+    };
+    expect(
+      isSameRevocation(structuredClone(mapRow), { ...structuredClone(mapRow), requestedAt: 1001 }),
+    ).toBe(false);
+    expect(
+      isSameRevocation(structuredClone(mapRow), {
+        ...ROW,
+        storagePath: { bucket: 'b', segments: ['proofs', 'other-event'] },
+      }),
+    ).toBe(false);
+    // A key present on one side only is a disagreement, not a field skipped.
+    expect(
+      isSameRevocation(structuredClone(mapRow), {
+        ...ROW,
+        storagePath: { bucket: 'b', segments: ['proofs', 'med-2026'], extra: 1 },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('sameFirestoreValue — two readings, one stored value (#1153)', () => {
+  it('is plain `===` for every value a well-formed row carries', () => {
+    expect(sameFirestoreValue('proofs/a/b/c.jpg', 'proofs/a/b/c.jpg')).toBe(true);
+    expect(sameFirestoreValue(1000, 1000)).toBe(true);
+    expect(sameFirestoreValue(1000, 1001)).toBe(false);
+    expect(sameFirestoreValue(true, false)).toBe(false);
+    // Present-against-absent, which `isSameRevocation` leans on for `generation`.
+    expect(sameFirestoreValue(undefined, undefined)).toBe(true);
+    expect(sameFirestoreValue(null, null)).toBe(true);
+    expect(sameFirestoreValue(undefined, null)).toBe(false);
+    expect(sameFirestoreValue(null, '')).toBe(false);
+    expect(sameFirestoreValue(undefined, '1700000000000001')).toBe(false);
+    // Never a loose comparison: a string is not the number it spells.
+    expect(sameFirestoreValue('1000', 1000)).toBe(false);
+    expect(sameFirestoreValue(0, false)).toBe(false);
+  });
+
+  it('compares arrays and maps by structure, recursively', () => {
+    expect(sameFirestoreValue([1, 'a', { b: [2] }], [1, 'a', { b: [2] }])).toBe(true);
+    expect(sameFirestoreValue([1, 2], [1, 2, 3])).toBe(false);
+    expect(sameFirestoreValue([1, 2], [2, 1])).toBe(false);
+    expect(sameFirestoreValue({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
+    expect(sameFirestoreValue({ a: 1 }, { a: 1, b: undefined })).toBe(false);
+    expect(sameFirestoreValue({ a: { b: 1 } }, { a: { b: 2 } })).toBe(false);
+    // Containers of different KINDS are never equal, whatever they hold.
+    expect(sameFirestoreValue([], {})).toBe(false);
+  });
+
+  it('uses the Admin SDK value types’ own `isEqual`, and needs it on both sides', () => {
+    // `Timestamp`, `GeoPoint` and `DocumentReference` all publish `isEqual`, so
+    // the SDK's own answer is used rather than an import or a field-name guess.
+    class FakeTimestamp {
+      constructor(
+        readonly seconds: number,
+        readonly nanoseconds: number,
+      ) {}
+      isEqual(other: unknown): boolean {
+        return (
+          other instanceof FakeTimestamp &&
+          other.seconds === this.seconds &&
+          other.nanoseconds === this.nanoseconds
+        );
+      }
+    }
+    expect(sameFirestoreValue(new FakeTimestamp(1, 2), new FakeTimestamp(1, 2))).toBe(true);
+    expect(sameFirestoreValue(new FakeTimestamp(1, 2), new FakeTimestamp(1, 3))).toBe(false);
+    // A library type is never asked to compare itself against a plain map: that
+    // falls through to the plain-object branch, which refuses a class instance.
+    expect(sameFirestoreValue(new FakeTimestamp(1, 2), { seconds: 1, nanoseconds: 2 })).toBe(false);
+  });
+
+  it('compares bytes by content, and refuses anything it cannot reason about', () => {
+    expect(sameFirestoreValue(Buffer.from('abc'), Buffer.from('abc'))).toBe(true);
+    expect(sameFirestoreValue(Buffer.from('abc'), Buffer.from('abd'))).toBe(false);
+    expect(sameFirestoreValue(Buffer.from('abc'), Buffer.from('ab'))).toBe(false);
+    // A class instance with no `isEqual` is not a Firestore map, so it compares
+    // unequal unless it is literally the same object — the safe direction, since
+    // a false POSITIVE would retire somebody else's revocation.
+    class Opaque {
+      constructor(readonly v: number) {}
+    }
+    const one = new Opaque(1);
+    expect(sameFirestoreValue(one, one)).toBe(true);
+    expect(sameFirestoreValue(new Opaque(1), new Opaque(1))).toBe(false);
+    expect(sameFirestoreValue(new Date(0), new Date(0))).toBe(false);
   });
 });
 

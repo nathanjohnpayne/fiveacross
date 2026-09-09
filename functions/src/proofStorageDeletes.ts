@@ -170,23 +170,108 @@ export interface RevokeProofMediaTarget {
  * optional fourth and is compared the same way, so present-against-absent is
  * itself a mismatch rather than a field quietly skipped.
  *
- * Strict equality on purpose. All four are primitives in every row the rules
- * admit (string, string, number, string), so a value that is not one — reachable
- * only through a hand-written Admin SDK document — compares unequal and the
- * delivery ABANDONS rather than sweeping on it. Nothing is deleted and nothing
- * is retired on that path, which is the safe direction for a question this
- * handler cannot answer.
+ * COMPARED STRUCTURALLY, NOT BY REFERENCE (#1153, Codex round 5 P2). All four
+ * are primitives in every row `firestore.rules` admits, and for those
+ * `sameFirestoreValue` IS `===`. The rules are not the only writer, though: the
+ * Admin SDK bypasses them, so a hand-written row can carry an array or a map
+ * under one of these names — and that is precisely the MALFORMED row
+ * `revokeProofMedia`'s defensive path exists to retire. Strict equality made
+ * that path unreachable. The event snapshot and the retirement transaction's own
+ * re-read deserialise such a value into two DIFFERENT JavaScript objects, so
+ * `===` reported two different revocations for one unchanged row,
+ * `retireTombstoneIfSame` refused, and the poison row stood forever — with the
+ * Proof create arm holding its id for just as long, because that hold lifts only
+ * when the row is retired.
+ *
+ * A row that genuinely differs still mismatches, which is the property that
+ * matters: `sameFirestoreValue` answers "these two readings describe the same
+ * stored value", never "these two rows are close enough".
  */
 export function isSameRevocation(
   current: ProofStorageDeleteInput,
   fromEvent: ProofStorageDeleteInput,
 ): boolean {
   return (
-    current.requestedAt === fromEvent.requestedAt &&
-    current.storagePath === fromEvent.storagePath &&
-    current.uid === fromEvent.uid &&
-    current.generation === fromEvent.generation
+    sameFirestoreValue(current.requestedAt, fromEvent.requestedAt) &&
+    sameFirestoreValue(current.storagePath, fromEvent.storagePath) &&
+    sameFirestoreValue(current.uid, fromEvent.uid) &&
+    sameFirestoreValue(current.generation, fromEvent.generation)
   );
+}
+
+/**
+ * Do two deserialisations describe the SAME Firestore value?
+ *
+ * Firestore hands back a fresh JavaScript object for every read, so reference
+ * equality answers "same value" only for primitives. `isSameRevocation` needs a
+ * comparison that survives a container, because a row this handler must be able
+ * to RETIRE can legitimately contain one: `firestore.rules` type-checks all four
+ * fields, but the Admin SDK bypasses the rules entirely, and a hand-written row
+ * carrying an array or a map under `storagePath` is exactly the poison row the
+ * malformed-path branch is there to drop (#1153, Codex round 5 P2).
+ *
+ * Deterministic, and deliberately narrow. It handles the value kinds a Firestore
+ * read can actually produce AND compare soundly:
+ *
+ *   - primitives, `null` and `undefined` — `Object.is`, so this is `===` for
+ *     every well-formed row, and a `NaN` matches itself;
+ *   - arrays — same length, element-wise, recursively;
+ *   - maps — same key SET, value-wise, recursively, and only for PLAIN objects
+ *     (prototype `Object.prototype` or `null`), which is what a Firestore map
+ *     deserialises to;
+ *   - bytes — `Buffer`/`Uint8Array`, by length and content;
+ *   - the Admin SDK's own value types — `Timestamp`, `GeoPoint`,
+ *     `DocumentReference` — through the `isEqual` each of them publishes, which
+ *     is the SDK's own answer to this question and costs no import. Calling it
+ *     is safe on an untrusted row because a value that came back from Firestore
+ *     is either one of those library types or plain JSON: a stored map cannot
+ *     carry a function, so an `isEqual` found here is never supplied by whoever
+ *     wrote the document.
+ *
+ * ANYTHING ELSE COMPARES UNEQUAL, which is the safe direction. A false negative
+ * leaves a row standing for a delivery that still owes it; a false POSITIVE
+ * would retire somebody else's revocation with its media still in the bucket,
+ * which is the one state this collection exists to make impossible.
+ */
+export function sameFirestoreValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  // Everything past here needs two objects. `typeof null === 'object'`, and two
+  // nulls were already answered above.
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => sameFirestoreValue(item, b[index]));
+  }
+
+  // Timestamp / GeoPoint / DocumentReference — the SDK's own equality, required
+  // on BOTH sides so a library type is never asked to compare itself against a
+  // plain map.
+  const aIsEqual = (a as { isEqual?: unknown }).isEqual;
+  const bIsEqual = (b as { isEqual?: unknown }).isEqual;
+  if (typeof aIsEqual === 'function' && typeof bIsEqual === 'function') {
+    return (aIsEqual as (other: unknown) => unknown).call(a, b) === true;
+  }
+
+  if (a instanceof Uint8Array || b instanceof Uint8Array) {
+    if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) {
+      return false;
+    }
+    return a.every((byte, index) => byte === b[index]);
+  }
+
+  if (!isPlainRecord(a) || !isPlainRecord(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every(
+    (key) => Object.prototype.hasOwnProperty.call(b, key) && sameFirestoreValue(a[key], b[key]),
+  );
+}
+
+/** A Firestore MAP, as opposed to some class instance this cannot reason about. */
+function isPlainRecord(value: object): value is Record<string, unknown> {
+  const proto = Object.getPrototypeOf(value) as unknown;
+  return proto === Object.prototype || proto === null;
 }
 
 /**
@@ -274,6 +359,12 @@ export function isGenerationMismatch(err: unknown): boolean {
  * delete would then clear a revocation this delivery knows nothing about,
  * leaving its media in the bucket with nothing left owing it.
  *
+ * The identity is compared STRUCTURALLY (`sameFirestoreValue`), which is what
+ * lets the malformed-row branch above actually retire what it drops: a row
+ * carrying an array or a map under one of the four fields deserialises into a
+ * fresh object on every read, so a reference comparison reported "not ours"
+ * about a row that had not changed at all.
+ *
  * A refusal is LOGGED AND ACCEPTED, never rethrown. The row standing there
  * belongs to somebody else's delivery, which is still owed and still coming;
  * redelivering this one cannot make it ours, so there is nothing for `retry:
@@ -308,7 +399,12 @@ async function retireIfStillOurs(
  * A row whose path escapes its own Event/Proof is dropped rather than retried:
  * redelivery cannot make an unconfinable path confinable, so retrying it only
  * buys an immortal poison row. It is logged, because the only way one exists is
- * a write that did not come through `firestore.rules`.
+ * a write that did not come through `firestore.rules`. That drop only WORKS
+ * because the retirement compares the row structurally (#1153, Codex round 5
+ * P2): the malformed values this branch fires on are exactly the ones two reads
+ * deserialise into two different objects, so a reference comparison refused to
+ * retire the row it had just decided to drop, and the poison row — plus the
+ * Proof-create hold that lives as long as it does — stood forever.
  *
  * FOUR CHECKS STAND BETWEEN THE ROW AND THE BUCKET, because the row is a
  * promise about the past and this runs in the future (#1153, Phase 4b P1 and
