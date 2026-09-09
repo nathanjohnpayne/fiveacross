@@ -17,7 +17,7 @@ import {
   MAX_ARCHIVED_UID,
   writableArchiveRecord,
 } from './eventArchive';
-import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
+import { buildPodium, dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import { MAX_DAYS } from './eventLimits';
 import { comparePlayers } from '../game/logic';
 import { migrateDayFields, playerConverter } from './converters';
@@ -1524,6 +1524,28 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
         dailyHonors: [...outOfOrder.archive.dailyHonors].reverse(),
       }),
     ).toBe(false);
+
+    // AND THE ORDER IS THE SHARED SELECTION'S, not this builder's alone (Codex
+    // P2 on PR #1162, round 9). Sorting only here left the record ordered while
+    // the LIVE surfaces were not: `pinnedOrDerivedDailyHonors` flat-maps over the
+    // schedule's ENTRIES, and the podium and the Feed's honours line render its
+    // result straight through — so they showed D5 ahead of D2 against a record
+    // that says `[1, 4]`, and "the frozen record says what the last live display
+    // said" stopped being true. The selection is where the order now comes from,
+    // so every consumer inherits it.
+    const outOfOrderDays = [mkDay(4), mkDay(1)];
+    expect(
+      pinnedOrDerivedDailyHonors([alice, bob], outOfOrderDays, metas, true).map((h) => h.dayIndex),
+    ).toEqual([1, 4]);
+    // The podium the farewell view renders — and the finale Moment's own copy of
+    // it — consumes exactly that list.
+    expect(
+      buildPodium([alice, bob], outOfOrderDays, metas, true).dailyHonors.map((h) => h.dayIndex),
+    ).toEqual([1, 4]);
+    // …and it is the same list the record froze, holder for holder, which is the
+    // whole claim: one selection, one order, three surfaces.
+    expect(buildPodium([alice, bob], outOfOrderDays, metas, true).dailyHonors.map((h) => h.uid))
+      .toEqual(outOfOrder.archive.dailyHonors.map((h) => h.uid));
   });
 
   // #1151, Codex P2 on PR #1162. The Day-meta arm validates `displayName` and

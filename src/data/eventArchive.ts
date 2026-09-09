@@ -1312,6 +1312,19 @@ export function draftEventArchive(params: {
   // and the frozen record come out of the same expression — the console renders
   // this builder's own output, and a record whose order the preview disagreed
   // with would be the same class of drift `dayLabel` was stored to close.
+  //
+  // KEPT, now that `pinnedOrDerivedDailyHonors` orders its own output (round 9).
+  // The sort there is what fixed the LIVE surfaces — the podium and the Feed
+  // render the selection straight through, so the record was ordered while the
+  // last live display was not — and it does make this line a no-op on every list
+  // the selector can currently produce. It is kept because the two are not the
+  // same guarantee. This builder is called from surfaces that never went through
+  // the freeze's gate, `writableArchiveRecord` ASSERTS the order rather than
+  // establishing it, and that assertion fires as `record-unwritable` — a refusal
+  // that reopens play with nothing frozen. So a later regression in the
+  // selector's order would take the archive down here rather than merely
+  // rendering out of sequence, and one line on the deduped list is what keeps the
+  // builder's own promise its own.
   const seenHonorDays = new Set<number>();
   const carriedHonors = selectedHonors
     .filter((h) => {

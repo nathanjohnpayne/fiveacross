@@ -237,10 +237,28 @@ export default function Leaderboard() {
       (h) => [h.dayIndex, h],
     ),
   );
-  const honors = (event?.days ?? []).map((d) => ({
-    dayIndex: d.index,
-    displayName: honorByDay.get(d.index)?.displayName ?? null,
-  }));
+  // …AND IN DAY-INDEX ORDER, whatever order the schedule lists its Days in
+  // (#1151, Codex P2 on PR #1162, round 9). This strip is the one honours
+  // surface that does not render the selection itself — it renders a chip for
+  // every Day the SCHEDULE names, winnerless Days included, and reads each
+  // holder out of the map above — so ordering the selection could not reach it.
+  // A stored schedule listing `[{index: 4}, {index: 1}]` is a legitimate one
+  // (unique indexes, which `usableDayIndexes` accepts, and `DayDef.index` is
+  // what names a Day), and it put D5's chip ahead of D2's while the frozen
+  // record — and now the podium — said `[1, 4]`. The record's whole promise is
+  // that it says what the last live strip said, so the strip has to be ordered
+  // by the same key the record is.
+  //
+  // On a COPY, because `EventDoc.days` is the hook's own array and its order is
+  // the stored schedule's, which nothing here is entitled to rewrite. Keyed on
+  // `DayDef.index` rather than on the array position, which is the same question
+  // every Day-scoped path in the estate asks.
+  const honors = [...(event?.days ?? [])]
+    .sort((a, b) => a.index - b.index)
+    .map((d) => ({
+      dayIndex: d.index,
+      displayName: honorByDay.get(d.index)?.displayName ?? null,
+    }));
   // The LEGACY strip, for an Event with no schedule at all: the same selection,
   // read out of the map above rather than derived a second time (#1151, Codex P2
   // on PR #1162, round 7). It used to call `perDayHonors` itself, which is the

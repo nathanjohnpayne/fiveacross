@@ -148,6 +148,34 @@ function podiumStandingRow(
  * carried-honour filter: `archiveEvent` will not freeze such a schedule at all
  * (`usableDayIndexes` → `schedule-unusable`), and the builder is what stands
  * between the ungated callers and a permanent record.
+ *
+ * AND THE SELECTION COMES OUT IN DAY-INDEX ORDER (#1151, Codex P2 on PR #1162,
+ * round 9). This flat-maps over the schedule's ENTRIES, and a stored schedule
+ * listing `[{index: 4}, {index: 1}]` is a legitimate one — the indexes are
+ * unique, `usableDayIndexes` accepts it, and keying on `DayDef.index` rather than
+ * on the array position is the whole point of that check. So the honours arrived
+ * in SCHEDULE order, and every surface downstream inherited it: the podium
+ * (`buildPodium`) and the Feed's honours line render this list straight through,
+ * so they showed D5 ahead of D2 — while `draftEventArchive` sorted its own copy
+ * and froze `[1, 4]`. The record's whole promise is that it says what the last
+ * live display said, and the two had stopped agreeing.
+ *
+ * Sorted HERE rather than in each consumer, because the order is a property of
+ * the SELECTION — `EventArchive.dailyHonors` and `Podium.dailyHonors` both
+ * declare themselves ordered by Day index — and one shared answer is what stops
+ * a consumer re-sorting defensively against a contract that already promised it.
+ * The scheduleless path needed nothing: `perDayHonors` sorts its derived list
+ * already, so this makes the two paths agree rather than imposing something new
+ * on one of them. On the array `flatMap` just minted, so `days` is not the
+ * caller's to reorder, and STABLE (V8's `Array#sort` is), so a schedule naming
+ * the same Day twice still emits that Day's entries in schedule order — which is
+ * the order `draftEventArchive`'s first-entry-wins dedupe reads them in.
+ *
+ * The Leaderboard's own strip is the one surface this does NOT order, because it
+ * does not render this list: it renders a chip for every Day the SCHEDULE names,
+ * winnerless Days included, and reads the holder out of this selection by index.
+ * It sorts its chips by `DayDef.index` for the same reason and to the same
+ * answer.
  */
 export function pinnedOrDerivedDailyHonors(
   players: readonly PlayerDoc[],
@@ -158,23 +186,25 @@ export function pinnedOrDerivedDailyHonors(
 ): DayHonor[] {
   const derivedHonors = perDayHonors(players).filter((h) => supportedDayIndex(h.dayIndex));
   if (!days?.length || !dayMetas) return derivedHonors;
-  return days.flatMap((day) => {
-    const pinned = dayMetas.get(day.index)?.firstBingo;
-    if (pinned) {
-      if (isBanned(pinned.uid, bannedUids)) return [];
-      return [
-        {
-          dayIndex: day.index,
-          uid: pinned.uid,
-          displayName: pinned.displayName,
-          firstBingoAt: pinned.at,
-        },
-      ];
-    }
-    if (!dayMetasLoaded) return [];
-    const derived = derivedHonors.find((h) => h.dayIndex === day.index);
-    return derived ? [derived] : [];
-  });
+  return days
+    .flatMap((day) => {
+      const pinned = dayMetas.get(day.index)?.firstBingo;
+      if (pinned) {
+        if (isBanned(pinned.uid, bannedUids)) return [];
+        return [
+          {
+            dayIndex: day.index,
+            uid: pinned.uid,
+            displayName: pinned.displayName,
+            firstBingoAt: pinned.at,
+          },
+        ];
+      }
+      if (!dayMetasLoaded) return [];
+      const derived = derivedHonors.find((h) => h.dayIndex === day.index);
+      return derived ? [derived] : [];
+    })
+    .sort((a, b) => a.dayIndex - b.dayIndex);
 }
 
 /**
