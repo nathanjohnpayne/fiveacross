@@ -68,21 +68,33 @@ function useDocSub<T>(
   key: string,
   /**
    * A side effect to run on every snapshot this subscription delivers, given the
-   * document and that snapshot's own origin flags — the seam `useEventDoc` uses
-   * to record a server-committed archive on whatever route observes it first
-   * (Codex P2 on PR #1165, `../data/archiveConfirmation`).
+   * document, that snapshot's own origin flags, and THE EVENT THIS SUBSCRIPTION
+   * WAS OPENED FOR — the seam `useEventDoc` uses to record a server-committed
+   * archive on whatever route observes it first (Codex P2 on PR #1165,
+   * `../data/archiveConfirmation`).
    *
    * It runs inside the `onSnapshot` callback rather than in a render or an
    * effect, so the observation does not depend on the holding component
    * re-rendering or staying mounted — a route that subscribes to the Event and
    * shows nothing about it still records what it saw.
    *
+   * THE EVENT ID IS HANDED IN RATHER THAN READ (#1152, Codex P2 on PR #1165
+   * round 4). `EVENT_ID` is a live ESM binding (`src/firebase.ts`), and an
+   * observer that read it in the snapshot callback would read whatever it says
+   * WHEN THE SNAPSHOT LANDS — which, in the window between the active Event
+   * moving and this effect's cleanup retiring the listener, is already the NEW
+   * Event. An Event A snapshot would then be persisted under Event B's key, and
+   * `specs/event-scoped-client-state.md`'s invariant is that A's state may never
+   * "persist under" B: a matching pending generation in B could be read back as
+   * previously server-confirmed. The value below is captured when the listener is
+   * OPENED, so every observation names the Event whose document produced it.
+   *
    * MUST be a module-scope constant. The subscription effect below is keyed on
    * `key` alone (deliberately, see its own dependency note), so a callback whose
    * identity changed per render would be captured stale; every caller passes a
    * function defined once at module load.
    */
-  observe?: (data: T | null, origin: SnapshotOrigin) => void,
+  observe?: (data: T | null, origin: SnapshotOrigin, eventId: string) => void,
 ) {
   const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
@@ -101,6 +113,16 @@ function useDocSub<T>(
   // standing) is what the drain sees.
   useEffect(() => {
     let active = true;
+    // THE EVENT THIS LISTENER BELONGS TO, read once here — where the listener is
+    // opened — and never again (#1152, Codex P2 on PR #1165 round 4). Every
+    // Event-scoped `key` this hook is given is built from `EVENT_ID` by
+    // `eventSubscriptionKey` in the same render, and this effect re-runs on every
+    // `key` change, so the captured id and the key always name the same Event.
+    // The one caller whose key is NOT Event-scoped is `useMyUser` (identity is
+    // global by contract) and it passes no observer; an observer added to a
+    // key that does not carry the Event id would not be re-bound when the Event
+    // moves, so that pairing is the invariant to keep.
+    const subscribedEventId = EVENT_ID;
     // Drop the previous ref's document so stale data from another subscription
     // (e.g. a different signed-in uid) can't render under the new key.
     setState(emptyDocState(key, ref !== null));
@@ -120,7 +142,7 @@ function useDocSub<T>(
         // throw from one must never stop the snapshot from reaching `setState`
         // — that would strand every consumer of this document on stale data.
         try {
-          observe?.(data, snap.metadata);
+          observe?.(data, snap.metadata, subscribedEventId);
         } catch {
           /* an observation is never worth the subscription */
         }
@@ -246,11 +268,21 @@ const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
 
 /**
  * The Event's archive observer, module-scope so `useDocSub` can capture it once
- * (Codex P2 on PR #1165). `EVENT_ID` is read at CALL time, not at module load,
- * so a build whose Event id resolves later still records under the right one.
+ * (Codex P2 on PR #1165).
+ *
+ * IT READS NO BINDING OF ITS OWN (#1152, Codex P2 on PR #1165 round 4). The
+ * Event id arrives as an argument, captured by `useDocSub` when the listener was
+ * opened, so a snapshot that lands after the active Event has moved — but before
+ * that listener's cleanup has retired it — is still recorded under the Event
+ * whose document produced it. Reaching for the live `EVENT_ID` here instead
+ * persisted Event A's archive generation under Event B's key, which
+ * `specs/event-scoped-client-state.md` forbids outright.
  */
-const observeEventArchive = (event: EventDoc | null, origin: SnapshotOrigin): void =>
-  recordArchiveConfirmation(EVENT_ID, event, origin);
+const observeEventArchive = (
+  event: EventDoc | null,
+  origin: SnapshotOrigin,
+  eventId: string,
+): void => recordArchiveConfirmation(eventId, event, origin);
 
 export function useEventDoc(enabled = true) {
   // `enabled` lets a pre-auth caller (main.tsx) skip the subscription: events

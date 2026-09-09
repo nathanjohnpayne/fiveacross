@@ -804,6 +804,28 @@ describe('useEventDoc records a server-committed archive for every route (#1152)
     sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
     expect(window.localStorage.getItem(confirmedKey)).toBe('4');
   });
+
+  // Codex P2 on PR #1165 round 4. `EVENT_ID` is a LIVE ESM binding, so an
+  // observer that read it in the snapshot callback read whatever it said when
+  // the snapshot LANDED. Between the active Event moving and this listener's
+  // effect cleanup retiring it, that is already the NEW Event — so an Event A
+  // snapshot was persisted under Event B's key, and a pending archive generation
+  // in B that happened to match could then be read back as previously
+  // server-confirmed. `specs/event-scoped-client-state.md`: A's state may never
+  // persist under B.
+  it('records the snapshot under the Event the subscription was opened for', () => {
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    // The active Event moves while A's listener is still live — the window
+    // before effect cleanup runs, which is exactly when the binding is mutable
+    // and the callback is still armed.
+    H.eventId = 'event-b';
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+    expect(window.localStorage.getItem('gcb.archive.event-b.confirmedUnder')).toBeNull();
+  });
 });
 
 // #1145 / #1142 item 10, routed to #1152. `players/{uid}` validates none of its
