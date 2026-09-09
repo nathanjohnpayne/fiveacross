@@ -75,6 +75,11 @@ const H = vi.hoisted(() => {
      *  `eventPendingWrites` false beside it that is a fully committed snapshot,
      *  which is what confirms an archive for good (Codex P2 on PR #1165). */
     eventFromCache: false,
+    /** `useEventDoc`'s per-subscription "nothing has arrived yet". `true` is the
+     *  COLD MOUNT's first render — no snapshot, cache-served or otherwise — which
+     *  the offline escape must not mistake for a settled answer (Codex P2 on PR
+     *  #1165). `useDocSub` clears it on the first snapshot or on an error. */
+    eventLoading: false,
     /** `useOnline`. A client the browser says is offline can never BE answered by
      *  the server, so the routing gate stops waiting on one. */
     online: true,
@@ -139,7 +144,7 @@ vi.mock('../hooks/useData', () => ({
   useLeaderboard: H.useLeaderboard,
   useEventDoc: () => ({
     data: H.event,
-    loading: false,
+    loading: H.eventLoading,
     serverResolved: H.eventServerResolved,
     fromCache: H.eventFromCache,
     hasPendingWrites: H.eventPendingWrites,
@@ -329,6 +334,7 @@ beforeEach(() => {
   H.eventServerResolved = true;
   H.eventPendingWrites = false;
   H.eventFromCache = false;
+  H.eventLoading = false;
   H.online = true;
   H.writes = [];
   H.beginArchive.mockResolvedValue({
@@ -1742,6 +1748,59 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
     H.online = false;
     H.event = liveEvent();
     renderLeaderboard();
+    expect(screen.getByText('Late Riser')).toBeInTheDocument();
+    expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  // Codex P2 on PR #1165. The escape above is read on the FIRST render of a cold
+  // offline mount, where `useEventDoc` has not delivered anything yet — so
+  // `!online` alone settled the status over `data: null` and mounted the live
+  // child, opening the whole fan the archived surface exists not to open and
+  // tearing it down one snapshot later. Offline has to wait for the CACHE.
+  it('opens nothing on an offline cold mount, and renders the cached archive when it lands', () => {
+    H.online = false;
+    H.eventServerResolved = false;
+    H.eventLoading = true; // the cache read is still in flight
+    H.eventFromCache = true;
+    H.event = null; // …so there is no Event to decide anything from yet
+    const { container, rerender } = renderLeaderboard();
+    expect(screen.getByRole('status')).toHaveTextContent('Tallying the leaderboard…');
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+
+    H.eventLoading = false; // the cache answers: this Event was archived
+    H.event = archivedEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('still reaches the live child offline once the cache says the Event is live', () => {
+    // The control: the offline wait ENDS at the cache result rather than at a
+    // server snapshot that is never coming, so this is one render longer than it
+    // used to be and not a spinner for the whole crossing.
+    H.online = false;
+    H.eventServerResolved = false;
+    H.eventLoading = true;
+    H.eventFromCache = true;
+    H.event = null;
+    const { rerender } = renderLeaderboard();
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+
+    H.eventLoading = false;
+    H.event = liveEvent();
+    rerender(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
     expect(screen.getByText('Late Riser')).toBeInTheDocument();
     expect(H.useLeaderboard).toHaveBeenCalled();
   });

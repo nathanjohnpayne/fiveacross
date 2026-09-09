@@ -184,7 +184,15 @@ function buildShareStandings(
  *    trustworthy half of that hook, and it is read here to stop waiting, never to
  *    authorize anything), and this app is offline-durable by design (ADR 0006) —
  *    so the wait ends and the Leaderboard renders from the cache, which is what
- *    it did before this gate existed.
+ *    it did before this gate existed — ONCE THE CACHE HAS ANSWERED (Codex P2 on
+ *    PR #1165). `useOnline` reports offline on the very first render, while the
+ *    Event subscription is still at `data: null` with its cache read in flight,
+ *    and settling on that alone mounted the live child over no Event at all:
+ *    the whole listener fan opened on a cold offline visit to an ARCHIVED Event
+ *    and was torn down a snapshot later, the same defect the server wait above
+ *    exists to close, reached through the escape hatch instead. So the offline
+ *    arm also requires `loading` to have cleared, which is exactly "this
+ *    subscription has produced its cache result, or failed".
  *
  * A PENDING archive is the one closed state this gate declines to believe, the
  * `App.tsx` Card-redirect rule applied to the surface that redirect points AT
@@ -219,7 +227,7 @@ function buildShareStandings(
  * `status` field alone.
  */
 export default function Leaderboard() {
-  const { data: event, serverResolved, fromCache, hasPendingWrites } = useEventDoc();
+  const { data: event, loading: eventLoading, serverResolved, fromCache, hasPendingWrites } = useEventDoc();
   const online = useOnline();
   // MONOTONE, and latched in STATE rather than in a ref — the adjust-during-
   // render idiom `Board`'s dangling-sheet close already uses, and deliberately
@@ -232,8 +240,20 @@ export default function Leaderboard() {
   // would otherwise bounce an already-rendered live view back through the
   // spinner, unmounting `LiveLeaderboard`, dropping its listeners and resetting
   // the Player's filter with them.
+  //
+  // AND THE OFFLINE ESCAPE WAITS FOR THE SUBSCRIPTION TO ANSWER (Codex P2 on PR
+  // #1165). `useOnline` reports false on the FIRST render of an offline cold
+  // mount, while `useEventDoc` is still at `data: null` with its cache read in
+  // flight — so `!online` alone settled the status over no Event at all and
+  // mounted the live child, opening the roster, Day-meta and Proof listeners an
+  // archived cached Event promises never to open and tearing them down one
+  // snapshot later. `loading` is the half that says the subscription has
+  // ANSWERED: `useDocSub` clears it on the first snapshot, cache-served
+  // included, and on an error (which also resolves `serverResolved`, the other
+  // arm here). So offline stops the wait once the cache has spoken, and never
+  // before it.
   const [statusLatched, setStatusLatched] = useState(false);
-  const statusSettled = statusLatched || serverResolved || !online;
+  const statusSettled = statusLatched || serverResolved || (!online && !eventLoading);
   if (statusSettled && !statusLatched) setStatusLatched(true);
 
   // The archive's own latch, monotone and adjusted during render by the same
