@@ -880,10 +880,12 @@ export type ArchiveReadFailure = `read-failed:${ArchiveReadStage}`;
  *  unresolvable; `finale-pending` means the Event's scheduled Standings Freeze
  *  has not run, so the irreversible flip would forgo the finale beats forever
  *  (#1151, routed from #1150's review); `too-large` means the record built from
- *  the server re-read would not fit on the Event document; and
- *  `read-failed:<stage>` means one of the server reads the record is built from
- *  did not answer at all (CodeRabbit Major, PR #1162). All of them write
- *  NOTHING (#1151). */
+ *  the server re-read would not fit on the Event document; `record-unwritable`
+ *  means that record is a shape `firestore.rules` would refuse, caught here
+ *  rather than thrown at the boundary after the Event is already shut (#1151,
+ *  Codex P1 on PR #1162); and `read-failed:<stage>` means one of the server
+ *  reads the record is built from did not answer at all (CodeRabbit Major, PR
+ *  #1162). All of them write NOTHING (#1151). */
 export type ArchiveEventResult =
   | 'archived'
   | 'already-archived'
@@ -894,6 +896,7 @@ export type ArchiveEventResult =
   | 'claims-pending'
   | 'finale-pending'
   | 'too-large'
+  | 'record-unwritable'
   | ArchiveReadFailure;
 
 /**
@@ -1447,10 +1450,13 @@ export async function archiveEvent(
     // The last line of the same defence the Admin console applies BEFORE the
     // quiesce (Codex P2, PR #1139). The console checks the record it previewed
     // from the live subscriptions; this checks the one actually built from the
-    // server re-read, which is a different roster and can be a different size.
-    // Refused rather than attempted, because the alternative is a write that
-    // throws on an Event whose gameplay is already shut.
-    if (draft.refusal === 'too-large') return 'too-large';
+    // server re-read, which is a different roster and can be a different size —
+    // and, since #1162, a different SHAPE too: `record-unwritable` is the draft
+    // saying `firestore.rules` would refuse this record, which is the one
+    // failure that would otherwise arrive as a REJECTED write on an Event this
+    // call has already shut. Reported verbatim, because every refusal the draft
+    // can name is an `ArchiveEventResult` member.
+    if (draft.refusal !== null) return draft.refusal;
     tx.update(eventRef, {
       status: 'archived',
       archivedAt,

@@ -70,6 +70,23 @@ const tooLargeCeiling = (draft: { bytes: number; projectedBytes: number }): stri
     ? ' The record is over its own share of the budget on its own, before the Event data is counted.'
     : ' The record fits its own share; it is the Event document that has no room left for it.';
 
+/**
+ * Stated identically wherever the record's SHAPE is refused — before the quiesce
+ * (the blocked control) and after it (the flip's own report), like
+ * `TOO_LARGE_COPY` beside it (#1151, Codex P1 on PR #1162).
+ *
+ * It is the backstop refusal, not an expected one: `draftEventArchive` coerces,
+ * bounds and clamps every value it copies precisely so the record it builds is
+ * always one `firestore.rules` accepts, and `writableArchiveRecord` asks the
+ * boundary's own question on this side of the quiesce so a cause nobody
+ * anticipated cannot arrive as a REJECTED write on an Event already shut. So the
+ * copy names no lever an Admin can pull—there is none to name that the builder
+ * has not already pulled itself—and says the one true thing instead: nothing was
+ * closed or frozen, and a second identical attempt is not the remedy.
+ */
+const RECORD_UNWRITABLE_COPY =
+  'These standings did not produce a record the Event will accept, so it cannot be frozen. Reload the console and try again—if it refuses a second time, the Event needs an operator rather than another attempt.';
+
 /** Why the archive will not open when a Day's honour listener has DIED (Codex P2
  *  on PR #1162).
  *
@@ -151,6 +168,9 @@ const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
   'claims-pending': 'closing',
   'finale-pending': 'closing',
   'too-large': 'closing',
+  // The record's own shape refused, which the flip reports without writing
+  // anything exactly as the ceiling does (#1151, Codex P1 on PR #1162).
+  'record-unwritable': 'closing',
   // A read that did not answer is the same shape of refusal as the four above:
   // the flip wrote nothing and the quiesce is still in force when it returns
   // (CodeRabbit Major, PR #1162). Each is listed rather than folded together so
@@ -177,6 +197,7 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
   'finale-pending':
     'The scheduled standings freeze has not run yet, so nothing was frozen. Wait for the finale, or tick the box below to archive without it.',
   'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
+  'record-unwritable': `${RECORD_UNWRITABLE_COPY} Nothing was frozen.`,
   'read-failed:event': readFailedCopy('The Event'),
   'read-failed:claims': readFailedCopy('The Review queue'),
   'read-failed:roster': readFailedCopy('The final standings'),
@@ -208,6 +229,7 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
 const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
   'claims-pending',
   'too-large',
+  'record-unwritable',
   'config-changed',
   'finale-pending',
   'read-failed:event',
@@ -504,16 +526,28 @@ export default function ArchiveEvent({
   // something that was not blocking them. The two now agree by construction:
   // this is the reason the door is shut, so it is stated only when the door is
   // shut on it.
+  //
+  // …and the third precondition now has TWO refusals behind it, so it is stated
+  // by NAME rather than by `!fits` (#1151, Codex P1 on PR #1162). The ceiling and
+  // the shape send an Admin after entirely different things — one names the Event
+  // data to trim, the other says there is nothing to trim and to reload instead —
+  // so folding them into one sentence would give the wrong advice to whichever
+  // one fired.
+  const nothingClosedYet = closing
+    ? ' Play is already closed—nothing has been frozen.'
+    : ' Nothing has been closed.';
   const blockedReason =
     dayMetasFailed && !dayMetasConfirmed
-      ? `${HONORS_UNREADABLE_COPY}${closing ? ' Play is already closed—nothing has been frozen.' : ' Nothing has been closed.'}`
+      ? `${HONORS_UNREADABLE_COPY}${nothingClosedYet}`
       : !previewConfirmed || !pendingClaimsLoaded
       ? 'Loading the final standings—the archive stays closed until every one of them is confirmed by the server.'
       : blockingClaims.length > 0
         ? `Resolve the ${blockingClaims.length} pending claim${blockingClaims.length === 1 ? '' : 's'} in the Review queue first. Confirming or rejecting a claim writes to a Board, which the freeze denies—so a claim left pending here stays pending forever.${closing ? ' Reopen play to drain the queue, then archive again.' : ''}`
-        : !fits
-          ? `${TOO_LARGE_COPY}${tooLargeCeiling(draft)}${closing ? ' Play is already closed—nothing has been frozen.' : ' Nothing has been closed.'}`
-          : null;
+        : draft.refusal === 'too-large'
+          ? `${TOO_LARGE_COPY}${tooLargeCeiling(draft)}${nothingClosedYet}`
+          : draft.refusal === 'record-unwritable'
+            ? `${RECORD_UNWRITABLE_COPY}${nothingClosedYet}`
+            : null;
 
   const frozen = event?.archive;
 
