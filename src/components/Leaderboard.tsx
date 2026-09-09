@@ -65,6 +65,44 @@ const FILTERS: Array<{ id: LeaderboardFilter; label: string }> = [
 export const CACHED_EVENT_SETTLE_MS = 4_000;
 
 /**
+ * localStorage slot recording that this device has SEEN a server-committed
+ * archive for an Event, holding the generation the flip was bound to
+ * (`EventDoc.archivedUnder`) as its value (Codex P2 on PR #1165).
+ *
+ * Per generation, not a bare "this Event is archived" flag, because the two
+ * things it has to tell apart are a committed archive and an Admin's OPTIMISTIC
+ * flip — and both write `status: 'archived'` on the local snapshot. The
+ * generation is what the flip is bound to at the rules boundary, so it is the
+ * one value that identifies WHICH archive was confirmed; an unconfirmed flip
+ * under a different generation cannot match a record left by a confirmed one.
+ *
+ * `gcb.*`-namespaced and fail-open on throw, the pattern the rest of the app's
+ * persisted UI state already uses: storage throws in some privacy modes and is
+ * absent under SSR. Reached through `window` for the reason `FarewellPodium`
+ * does — recent Node runtimes ship a bare `localStorage` global that is present
+ * but non-functional and can shadow the DOM's. And it is trusted for ROUTING and
+ * for nothing else: no number, name or honour is read from it, and the record
+ * the page prints still comes off the Event document.
+ */
+const archiveConfirmedKey = (eventId: string): string => `gcb.archive.${eventId}.confirmedUnder`;
+
+function confirmedArchiveGeneration(eventId: string): string | null {
+  try {
+    return window.localStorage.getItem(archiveConfirmedKey(eventId));
+  } catch {
+    return null;
+  }
+}
+
+function rememberConfirmedArchive(eventId: string, generation: number): void {
+  try {
+    window.localStorage.setItem(archiveConfirmedKey(eventId), String(generation));
+  } catch {
+    /* storage refused — the in-session latch still holds for this mount */
+  }
+}
+
+/**
  * Presentational-only predicate (ADR 0001: the Leaderboard is a for-fun tally,
  * not a tamper-proof record). It decides which already-ranked rows are
  * visible; it never reorders or re-ranks — `sortPlayers` (src/game/logic.ts)
@@ -257,6 +295,19 @@ function buildShareStandings(
  * underneath the latch. Every snapshot before that one still meets the
  * pending-write guard in full.
  *
+ * AND THE LATCH IS PERSISTED PER ARCHIVE GENERATION, so it survives a remount
+ * (Codex P2 on PR #1165). An in-session latch only covers moderation that starts
+ * after this mount has seen a clean server snapshot; a tab reloaded — or the
+ * Leaderboard revisited — while an offline ban is still queued starts from
+ * nothing, sees a cached `archived` snapshot carrying `hasPendingWrites: true`,
+ * and mounted the live child over an archive committed long before that write
+ * existed. `EventDoc.archivedUnder` is the generation the flip was bound to at
+ * the rules boundary, so a server-committed archive records `{eventId,
+ * archivedUnder}` in `localStorage` and a later cached snapshot naming the SAME
+ * generation is treated as confirmed. An optimistic flip carries a generation
+ * nothing ever confirmed, so it is still declined — which is precisely what a
+ * bare "this Event is archived" flag could not distinguish.
+ *
  * An Event marked archived with NO record is not a state this app produces —
  * `archiveEvent` writes status, stamp and record in one update — so the live view
  * is left as the fallback for a hand-edited document. It is still read-only in the
@@ -327,7 +378,39 @@ export default function Leaderboard() {
   const archiveCommitted = !fromCache && !hasPendingWrites && isEventArchived(event);
   if (archiveCommitted && !archiveConfirmed) setArchiveConfirmed(true);
 
-  if ((archiveConfirmed || !hasPendingWrites) && isEventArchived(event) && event?.archive) {
+  // …AND THE LATCH HAS TO SURVIVE A REMOUNT (Codex P2 on PR #1165). The latch
+  // above covers moderation that starts after THIS mount has already seen a
+  // clean server snapshot. A tab reloaded, or the Leaderboard revisited, while an
+  // offline ban or unban is still queued has no such history: the first cached
+  // snapshot is `archived` with `hasPendingWrites: true`, `archiveConfirmed`
+  // starts false, and the pending-write guard mounted `LiveLeaderboard` and
+  // opened all three gameplay listeners — over an archive the server settled
+  // long ago, and for as long as an unrelated write stays in flight, which
+  // offline is until the client reconnects.
+  //
+  // So the confirmation is PERSISTED, per archive generation. `archivedUnder` is
+  // what the flip is bound to at the rules boundary, so it names WHICH archive
+  // was confirmed; a cached archived snapshot whose generation matches a record
+  // this device wrote is the archive it already saw the server commit, pending
+  // writes or not. An optimistic flip is still declined, because it carries a
+  // generation nothing has confirmed — which is exactly what a bare "this Event
+  // is archived" flag could not express. The store is read ONCE, at mount, and
+  // is trusted for routing alone; every number the page prints still comes off
+  // the Event document.
+  const [persistedGeneration] = useState(() => confirmedArchiveGeneration(EVENT_ID));
+  const archivedUnder = event?.archivedUnder;
+  const generationConfirmed =
+    typeof archivedUnder === 'number' && persistedGeneration === String(archivedUnder);
+  useEffect(() => {
+    if (!archiveCommitted || typeof archivedUnder !== 'number') return;
+    rememberConfirmedArchive(EVENT_ID, archivedUnder);
+  }, [archiveCommitted, archivedUnder]);
+
+  if (
+    (archiveConfirmed || generationConfirmed || !hasPendingWrites) &&
+    isEventArchived(event) &&
+    event?.archive
+  ) {
     return <ArchivedLeaderboard event={event} archive={event.archive} />;
   }
   if (!statusSettled) return <LoadingState label="Tallying the leaderboard…" />;

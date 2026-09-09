@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
@@ -1587,6 +1587,26 @@ describe('the archived Leaderboard renders the frozen record (#1152)', () => {
   });
 });
 
+// A minimal in-memory `localStorage`, installed via `vi.stubGlobal`: jsdom
+// leaves `window.localStorage` unset in this project (the `App.test.tsx` /
+// `useTextSize.test.ts` note), and recent Node runtimes ship a built-in global
+// of the same name that is present but non-functional without
+// `--localstorage-file`. Bringing our own keeps the persisted-confirmation
+// assertions below deterministic whichever one the runtime would resolve.
+function createStorageStub(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  } as Storage;
+}
+
 describe('the archived Leaderboard opens no live subscription (#1152)', () => {
   // specs/post-sailing-archive.md: "It subscribes to NOTHING." Asserting on the
   // rendered output cannot prove that — a component can ignore a hook's value and
@@ -1595,6 +1615,10 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
   beforeEach(() => {
     H.players = liveRoster;
     H.event = archivedEvent();
+    vi.stubGlobal('localStorage', createStorageStub());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('never calls useLeaderboard, useDayMetasStatus or useProofKindsByUid', () => {
@@ -1737,6 +1761,78 @@ describe('the archived Leaderboard opens no live subscription (#1152)', () => {
     );
     expect(screen.getByText('Late Riser')).toBeInTheDocument();
     expect(H.useLeaderboard).toHaveBeenCalled();
+  });
+
+  // Codex P2 on PR #1165. The in-session latch above only covers moderation that
+  // starts AFTER this mount has seen a clean server snapshot. A tab reloaded, or
+  // the Leaderboard revisited, while an offline ban is still queued has no such
+  // history — so the confirmation is persisted per archive GENERATION and read
+  // back at mount. `EVENT_ID` is `'test-event'` (the `../firebase` stub above).
+  const confirmedKey = 'gcb.archive.test-event.confirmedUnder';
+
+  it('keeps a cached archive frozen on a FRESH mount with a moderation write pending', () => {
+    window.localStorage.setItem(confirmedKey, '3'); // a previous visit saw the server commit it
+    H.eventPendingWrites = true; // the queued ban, not the flip
+    H.eventFromCache = true;
+    H.eventServerResolved = false;
+    H.event = archivedEvent({ archivedUnder: 3 });
+    const { container } = renderLeaderboard();
+    expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
+    expect(H.useLeaderboard).not.toHaveBeenCalled();
+    expect(H.useDayMetasStatus).not.toHaveBeenCalled();
+    expect(H.useProofKindsByUid).not.toHaveBeenCalled();
+  });
+
+  it('still declines an optimistic flip on a fresh mount, with nothing persisted', () => {
+    // The non-vacuity half: without a record of the server having committed it,
+    // an Admin's own unacked flip is exactly the state the guard exists for. The
+    // cached status has not settled yet either, so the decline shows up as the
+    // live child one settle window later rather than immediately.
+    vi.useFakeTimers();
+    try {
+      H.eventPendingWrites = true;
+      H.eventFromCache = true;
+      H.eventServerResolved = false;
+      H.event = archivedEvent({ archivedUnder: 3 });
+      renderLeaderboard();
+      act(() => {
+        vi.advanceTimersByTime(CACHED_EVENT_SETTLE_MS);
+      });
+      expect(screen.getByText('Late Riser')).toBeInTheDocument();
+      expect(H.useLeaderboard).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not confirm an archive under a DIFFERENT generation from the persisted one', () => {
+    // The generation is what makes the record mean "this archive", rather than
+    // "some archive": a confirmation left by an earlier quiesce must not vouch
+    // for a flip bound to another one.
+    vi.useFakeTimers();
+    try {
+      window.localStorage.setItem(confirmedKey, '7');
+      H.eventPendingWrites = true;
+      H.eventFromCache = true;
+      H.eventServerResolved = false;
+      H.event = archivedEvent({ archivedUnder: 3 });
+      renderLeaderboard();
+      act(() => {
+        vi.advanceTimersByTime(CACHED_EVENT_SETTLE_MS);
+      });
+      expect(screen.getByText('Late Riser')).toBeInTheDocument();
+      expect(H.useLeaderboard).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('writes the confirmation when it observes the server-committed flip', () => {
+    // The other end of the round trip: this is the visit that leaves the record
+    // the three tests above read back.
+    H.event = archivedEvent({ archivedUnder: 3 });
+    renderLeaderboard();
+    expect(window.localStorage.getItem(confirmedKey)).toBe('3');
   });
 
   it('stops waiting when the browser says the client is offline', () => {
