@@ -12,13 +12,19 @@
 // selectors the live Leaderboard already renders with, reused rather than
 // restated: the frozen record must say what the last live Leaderboard said.
 import { isBanned } from './moderation';
-import { MAX_DAYS, supportedDayIndex } from './eventLimits';
+import {
+  ARCHIVE_NUMBER_BOUND,
+  MAX_DAYS,
+  clampArchiveNumber,
+  supportedDayIndex,
+} from './eventLimits';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import {
   eventFirstBingoWinner,
   resolvedStandingsFreezeAt,
   sortPlayers,
   tutorialDayIndexSet,
+  withReadableRanking,
 } from '../game/logic';
 import type {
   ArchivedDayHonor,
@@ -579,46 +585,14 @@ function archiveEventName(value: unknown): string | null {
 }
 
 /**
- * The magnitude `firestore.rules`' `finiteArchiveNumber` bounds every number in
- * the frozen record by, EXCLUSIVELY:
- * `value is number && value > -4102444800000 && value < 4102444800000`.
- *
- * 4102444800000 is 2100-01-01T00:00:00Z, the estate's stand-in for an
- * `isFinite()` Rules does not have — already used that way for
- * `standingsFreezeAt` and for the flip's own `archivedAt`. Restated here rather
- * than left implicit because the WRITER and the RULES have to agree about it:
- * see `MAX_ARCHIVE_NUMBER`.
+ * The bound every number in the frozen record is held inside, re-exported from
+ * its own module because the LIVE ranking path applies it too (#1152, Codex P2
+ * on PR #1165). `src/data/eventLimits.ts` owns it: that module imports nothing,
+ * so `src/game/logic.ts`'s `withReadableRanking` can read the same clamp without
+ * importing this one, which imports `game/logic` and would cycle. The rules fact
+ * it encodes, and why the writer clamps rather than refusing, are stated there.
  */
-const ARCHIVE_NUMBER_BOUND = 4_102_444_800_000;
-
-/**
- * The largest magnitude a number in the frozen record may carry (#1151, Codex P1
- * on PR #1162) — one below `firestore.rules`' exclusive bound, because the rules'
- * comparison is `<` rather than `<=`.
- *
- * THE WRITER AND THE RULES MUST SHARE ONE REPRESENTABLE-NUMBER CONTRACT, and
- * before this they did not. The coercions below kept ANY finite value, while
- * `finiteArchiveNumber` accepts only the bounded ones — so a Player self-writing
- * `bingoCount: 5e12` on their own row (`players/{uid}` validates no field at all,
- * ADR 0001) produced a record the rules REFUSED. That refusal lands on the flip,
- * which runs after `beginArchive` has already shut the Event, and a rejected
- * write throws past the refusal cleanup rather than returning one — so play was
- * closed, nothing was frozen, no automatic reopen ran, and every retry failed
- * identically until an admin found and repaired, banned or deleted that one row.
- *
- * Clamping rather than refusing, for the reason every other coercion here
- * clamps: the record has to be expressible, and a value 40 times the age of the
- * universe in milliseconds is not a stat anybody is going to lose. It decides
- * nothing about who won (ADR 0001) — no real count or instant is within nine
- * orders of magnitude of this — it only keeps the row writable.
- */
-export const MAX_ARCHIVE_NUMBER = ARCHIVE_NUMBER_BOUND - 1;
-
-/** A finite number brought inside `MAX_ARCHIVE_NUMBER` in both directions, so
- *  the value the writer produces is one `finiteArchiveNumber` accepts. */
-function clampArchiveNumber(value: number): number {
-  return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
-}
+export { MAX_ARCHIVE_NUMBER } from './eventLimits';
 
 /** A count the record can carry. A non-finite or non-numeric stat reads as 0 —
  *  which is what the live Leaderboard already renders for the same row — and a
@@ -690,43 +664,66 @@ export function archiveInstant(value: unknown): number | null {
  * nothing beyond it: `blackout` and `displayName` are coerced where they are
  * serialised, because no selector or comparator reads them.
  *
+ * AND IT IS NOW THE LIVE RANKING PATH'S NORMALISER TOO (#1152, Codex P2 on PR
+ * #1165 round 4). `useLeaderboard` used to map its roster through
+ * `withReadableRanking`, which normalises the ROOT alone — but the Leaderboard's
+ * First-to-BINGO pin resolves through `effectiveCruiseFirstBingoAt`, which
+ * PREFERS the per-Day buckets whenever the row carries any. So a bucket stamp
+ * outside the bound survived live and was clamped in the record: two rows whose
+ * bucket stamps are distinct but both below `-MAX_ARCHIVE_NUMBER` stay ordered
+ * live and collapse to a tie when frozen, where the uid tie-break can hand the
+ * honour to the OTHER Player — the frozen page naming someone the last live page
+ * did not. One function on both paths is the fix, rather than a third helper:
+ * the buckets are not an archive concern, they are a RANKING concern, and this
+ * is where their normalisation already lived.
+ *
  * A well-formed row is unchanged by construction, and no count is RECOMPUTED:
  * whatever the Player's own row said is still what the record says (ADR 0001).
  * This decides nothing about who won — it only makes the row readable by the
  * selectors and the comparator that were already reading it.
  */
 export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
-  const firstBingoAt = archiveInstant(p.firstBingoAt);
-  const bingoCount = archiveCount(p.bingoCount);
-  const squaresMarked = archiveCount(p.squaresMarked);
-  // Object identity is preserved for every ordinary row: the console re-runs
-  // this on each render, and copying rows would defeat the reference equality
-  // React's memoisation elsewhere relies on. `NaN === NaN` is false, so a row
-  // carrying one is correctly seen as changed.
-  const rootReadable =
-    firstBingoAt === p.firstBingoAt
-    && bingoCount === p.bingoCount
-    && squaresMarked === p.squaresMarked;
+  // THE ROOT HALF IS `withReadableRanking` ITSELF (#1152, Codex P2 on PR #1165
+  // round 4). It used to be a second statement of the same three coercions here,
+  // which is how the two paths drifted twice — once on the BOUND (b050334) and
+  // once on the BUCKETS (this change). `src/data/eventArchive.ts` already imports
+  // `src/game/logic.ts`, so the shared half lives on the side that imports
+  // nothing from this one and the cycle stays closed exactly as it does for
+  // `clampArchiveNumber`. Object identity survives the delegation: that helper
+  // returns a well-formed row unchanged.
+  const rooted = withReadableRanking(p);
   const raw = p.dayStats;
-  if (!raw || typeof raw !== 'object') {
-    return rootReadable ? p : { ...p, firstBingoAt, bingoCount, squaresMarked };
+  if (!raw || typeof raw !== 'object') return rooted;
+  // Object identity is preserved for every ordinary row — buckets included: the
+  // console re-runs this on each render, `useLeaderboard` runs it on every roster
+  // snapshot, and copying rows would defeat the reference equality React's
+  // memoisation elsewhere relies on. `NaN === NaN` is false, so a row carrying
+  // one is correctly seen as changed.
+  let changed = false;
+  const readable: Record<string, NonNullable<PlayerDoc['dayStats']>[number]> = {};
+  for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
+    // A bucket that is not an object is DROPPED — there is nothing to default a
+    // Day's evidence to — and dropping one is itself a change.
+    if (!bucket || typeof bucket !== 'object') {
+      changed = true;
+      continue;
+    }
+    const stat = bucket as Record<string, unknown>;
+    const bingoCount = archiveCount(stat.bingoCount);
+    const squaresMarked = archiveCount(stat.squaresMarked);
+    const firstBingoAt = archiveInstant(stat.firstBingoAt);
+    if (
+      bingoCount !== stat.bingoCount
+      || squaresMarked !== stat.squaresMarked
+      || firstBingoAt !== stat.firstBingoAt
+    ) {
+      changed = true;
+    }
+    readable[key] = { bingoCount, squaresMarked, firstBingoAt };
   }
-  const readable = Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>)
-      .filter(([, bucket]) => !!bucket && typeof bucket === 'object')
-      .map(([key, bucket]) => {
-        const stat = bucket as Record<string, unknown>;
-        return [
-          key,
-          {
-            bingoCount: archiveCount(stat.bingoCount),
-            squaresMarked: archiveCount(stat.squaresMarked),
-            firstBingoAt: archiveInstant(stat.firstBingoAt),
-          },
-        ];
-      }),
-  ) as NonNullable<PlayerDoc['dayStats']>;
-  return { ...p, firstBingoAt, bingoCount, squaresMarked, dayStats: readable };
+  return changed
+    ? { ...rooted, dayStats: readable as NonNullable<PlayerDoc['dayStats']> }
+    : rooted;
 }
 
 /**

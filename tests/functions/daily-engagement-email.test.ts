@@ -17,8 +17,10 @@ import {
 } from '../../functions/src/dailyEmailContent';
 import {
   ceremonialDayIndexes,
+  sanitizeFinaleDayStats,
   standingsFreezeAtFor,
   tutorialDayIndexes,
+  MAX_ARCHIVE_NUMBER,
 } from '../../functions/src/finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText, safeUrl } from '../../functions/src/dailyEmailTemplate';
 import { standingsRows } from '../../functions/src/dailyEmailContent';
@@ -30,7 +32,6 @@ import {
   resolveEventOrigin,
   readEmailRoster,
   runDailyEmailSweep,
-  sanitizeEmailDayStats,
   sendDailyEmailForEvent,
   shouldSendTo,
   SEND_WINDOW_MS,
@@ -346,18 +347,27 @@ describe('standingsThrough', () => {
     expect(standingsThrough(hostile, 3).map((p) => p.bingoCount)).toEqual([0, 0, 0]);
   });
 
-  it('sanitizes dayStats at the read boundary, dropping every malformed entry', () => {
-    expect(sanitizeEmailDayStats({ 0: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 } })).toEqual({
+  it('sanitizes dayStats at the read boundary, dropping every unusable entry', () => {
+    expect(sanitizeFinaleDayStats({ 0: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 } })).toEqual({
       0: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 },
     });
-    expect(sanitizeEmailDayStats({ 0: null })).toBeUndefined();
-    expect(sanitizeEmailDayStats({ 0: { bingoCount: 'x', squaresMarked: 1 } })).toBeUndefined();
-    expect(sanitizeEmailDayStats({ nope: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1 } })).toBeUndefined();
-    expect(sanitizeEmailDayStats([1, 2])).toBeUndefined();
-    expect(sanitizeEmailDayStats('nope')).toBeUndefined();
-    // A partly-valid map keeps only its good entries.
-    expect(sanitizeEmailDayStats({ 0: null, 1: { bingoCount: 1, squaresMarked: 1 } })).toEqual({
+    expect(sanitizeFinaleDayStats({ 0: null })).toBeUndefined();
+    expect(sanitizeFinaleDayStats({ nope: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1 } })).toBeUndefined();
+    expect(sanitizeFinaleDayStats([1, 2])).toBeUndefined();
+    expect(sanitizeFinaleDayStats('nope')).toBeUndefined();
+    // A partly-valid map keeps only its structurally valid entries.
+    expect(sanitizeFinaleDayStats({ 0: null, 1: { bingoCount: 1, squaresMarked: 1 } })).toEqual({
       1: { bingoCount: 1, squaresMarked: 1, firstBingoAt: null },
+    });
+    // …and a BUCKET is structurally valid whatever its counts say (#1152,
+    // CodeRabbit on PR #1165). It used to be dropped outright for a non-finite
+    // count, which is not what the client does: `withReadableDayStats` keeps the
+    // bucket, reads each invalid count as 0, and leaves `firstBingoAt` usable.
+    // Dropping it here left the row with NO breakdown at all, and the honour
+    // selectors fall back to the ROOT for exactly those rows — so the email
+    // could lose a ⭐ holder the in-app Leaderboard still shows.
+    expect(sanitizeFinaleDayStats({ 0: { bingoCount: 'x', squaresMarked: 1, firstBingoAt: 700 } })).toEqual({
+      0: { bingoCount: 0, squaresMarked: 1, firstBingoAt: 700 },
     });
   });
 
@@ -2072,6 +2082,162 @@ describe('sendDailyEmailForEvent', () => {
       3,
     );
     error.mockRestore();
+  });
+});
+
+// #1152, Codex P2 + CodeRabbit on PR #1165. The email is a THIRD reader of the
+// one ranking normalisation, and sent mail is irreversible. `players/{uid}`
+// validates no field (ADR 0001), so a Player can self-write a count or an
+// instant far outside the magnitude `firestore.rules` accepts; `useLeaderboard`
+// and `draftEventArchive` both clamp those before they rank, and
+// `readFinaleRoster` now does too. This path did not — `standingsThrough` and
+// `eventFirstBingoUid` accepted any finite value — so the morning email could
+// order two rows the live board tied, and star a Player the Leaderboard did not.
+//
+// These pin the SEAM: the roster `readEmailRoster` returns is already readable,
+// buckets included. `tests/functions/finale-parity.test.ts` § "the archive bound
+// the podium ranks by (#1152)" is where the same answers are compared against
+// the client's own.
+describe('the email roster is READABLE before it is ranked (#1152)', () => {
+  const rosterDocs = (players: Docs): Docs => ({ ...players });
+
+  it('clamps two oversized counts to the tie the live board already reads', async () => {
+    const db = makeDb(
+      rosterDocs({
+        'events/med-2026/players/more-squares': {
+          displayName: 'More Squares',
+          bingoCount: MAX_ARCHIVE_NUMBER + 1_000,
+          squaresMarked: 999,
+          firstBingoAt: null,
+        },
+        'events/med-2026/players/bigger-count': {
+          displayName: 'Bigger Count',
+          bingoCount: MAX_ARCHIVE_NUMBER + 2_000,
+          squaresMarked: 1,
+          firstBingoAt: null,
+        },
+      }),
+    );
+    const roster = await readEmailRoster(db, 'med-2026');
+
+    expect(roster.map((p) => p.bingoCount)).toEqual([MAX_ARCHIVE_NUMBER, MAX_ARCHIVE_NUMBER]);
+    // Both counts clamp to the same number, so the bingos tie and squares decide
+    // — as they do on the live Leaderboard and in the frozen record. Unclamped,
+    // the bigger raw count leads the email and nothing else.
+    expect(standingsThrough(roster, 1).map((p) => p.uid)).toEqual(['more-squares', 'bigger-count']);
+  });
+
+  it('clamps an out-of-bound first-bingo instant, so the ⭐ falls to the shared uid key', async () => {
+    const db = makeDb(
+      rosterDocs({
+        'events/med-2026/players/zed': {
+          displayName: 'Zed',
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: -(MAX_ARCHIVE_NUMBER + 2_000),
+        },
+        'events/med-2026/players/ada': {
+          displayName: 'Ada',
+          bingoCount: 1,
+          squaresMarked: 1,
+          firstBingoAt: -(MAX_ARCHIVE_NUMBER + 1_000),
+        },
+      }),
+    );
+    const roster = await readEmailRoster(db, 'med-2026');
+
+    expect(roster.map((p) => p.firstBingoAt)).toEqual([-MAX_ARCHIVE_NUMBER, -MAX_ARCHIVE_NUMBER]);
+    // Both stamps clamp to the bound, so the honour ties on the instant and the
+    // uid tie-break (ascending) hands it to Ada — the same key the in-app pin and
+    // both podiums apply. Unclamped, Zed's more-negative stamp reads as "earlier"
+    // and the email stars a Player no other surface does.
+    expect(eventFirstBingoUid(roster, 1)).toBe('ada');
+  });
+
+  it('keeps a bucket whose count is malformed, rather than losing the ⭐ holder with it', async () => {
+    const db = makeDb(
+      rosterDocs({
+        'events/med-2026/players/holder': {
+          displayName: 'Holder',
+          bingoCount: 1,
+          squaresMarked: 3,
+          // No root stamp at all: the bucket is this row's only evidence, which
+          // is exactly the row the drop used to erase.
+          firstBingoAt: null,
+          dayStats: { 1: { bingoCount: 'lots', squaresMarked: 3, firstBingoAt: 700 } },
+        },
+        'events/med-2026/players/later': {
+          displayName: 'Later',
+          bingoCount: 1,
+          squaresMarked: 5,
+          firstBingoAt: 900,
+          dayStats: { 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+        },
+      }),
+    );
+    const roster = await readEmailRoster(db, 'med-2026');
+
+    // Retained and coerced, the client's own bucket rule: the count reads 0 and
+    // the instant survives.
+    expect(roster.find((p) => p.uid === 'holder')?.dayStats).toEqual({
+      1: { bingoCount: 0, squaresMarked: 3, firstBingoAt: 700 },
+    });
+    // Dropped, the row carries no breakdown, `headlineFirstBingoAt` falls back to
+    // its null root, and the honour goes to the later bingo the client does not
+    // give it to.
+    expect(eventFirstBingoUid(roster, 2)).toBe('holder');
+  });
+
+  // Codex P2 on PR #1165, round 8. Clamping each BUCKET is not enough:
+  // `standingsThrough` re-aggregates the window's buckets, and a sum of bounded
+  // counts is not itself bounded. Two buckets at the maximum used to give their
+  // row twice the bound in the morning email while the in-app Leaderboard and
+  // the frozen record read that row's clamped ROOT — so the row another surface
+  // ranks FIRST arrived second in the mail, which cannot be corrected after the
+  // fact (specs/daily-engagement-email.md § Ranking parity).
+  it('clamps the RE-AGGREGATED window total, not only each bucket', async () => {
+    const db = makeDb(
+      rosterDocs({
+        'events/med-2026/players/two-buckets': {
+          displayName: 'Two Buckets',
+          // The honest root of the two buckets below, clamped on every surface.
+          bingoCount: 2 * MAX_ARCHIVE_NUMBER,
+          squaresMarked: 20,
+          firstBingoAt: 100,
+          dayStats: {
+            0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 100 },
+            1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 300 },
+          },
+        },
+        'events/med-2026/players/root-max': {
+          displayName: 'Root Max',
+          bingoCount: MAX_ARCHIVE_NUMBER,
+          squaresMarked: 30,
+          firstBingoAt: 200,
+          dayStats: {
+            1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 30, firstBingoAt: 200 },
+          },
+        },
+      }),
+    );
+    const roster = await readEmailRoster(db, 'med-2026');
+
+    // Every bucket is already at the bound coming out of the read boundary, so
+    // the defect lives entirely in the sum.
+    expect(roster.find((p) => p.uid === 'two-buckets')?.dayStats).toEqual({
+      0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 100 },
+      1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 300 },
+    });
+    expect(roster.map((p) => p.bingoCount)).toEqual([MAX_ARCHIVE_NUMBER, MAX_ARCHIVE_NUMBER]);
+
+    // Clamped, the two rows tie on bingos and squares decide — the order the
+    // roots already give the live board and both podiums. Unclamped, the summed
+    // row scores twice the bound and leads the email alone.
+    const ranked = standingsThrough(roster, 2);
+    expect(ranked.map((p) => `${p.uid}:${p.bingoCount}/${p.squaresMarked}`)).toEqual([
+      `root-max:${MAX_ARCHIVE_NUMBER}/30`,
+      `two-buckets:${MAX_ARCHIVE_NUMBER}/20`,
+    ]);
   });
 });
 

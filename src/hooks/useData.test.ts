@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
 // Codex P3 on PR #66: Board must not keep a live listener on the whole
@@ -45,8 +45,14 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard, useDayMetasStatus, useLeaderboard, useMyUser } from './useData';
-import { MAX_DAYS } from '../data/eventLimits';
+import { useItems, useBoard, useDayMetasStatus, useEventDoc, useLeaderboard, useMyUser } from './useData';
+import { MAX_ARCHIVE_NUMBER, MAX_DAYS } from '../data/eventLimits';
+// The archive's own roster normaliser and the shared First-to-BINGO selector, so
+// the LIVE path's answer is compared against the frozen one rather than described
+// separately (#1152, Codex P2 on PR #1165 round 4).
+import { withReadableDayStats } from '../data/eventArchive';
+import { cruiseFirstBingoUid, withReadableRanking } from '../game/logic';
+import type { PlayerDoc } from '../types';
 
 beforeEach(() => {
   H.eventId = 'event-a';
@@ -70,6 +76,34 @@ function captureOnNext(): { fire: (snap: unknown) => void } {
     fire: (snap: unknown) => {
       if (!captured.cb) throw new Error('onSnapshot not subscribed');
       act(() => captured.cb!(snap));
+    },
+  };
+}
+
+// Capture BOTH callbacks of the latest doc subscription. The error leg is what
+// separates `serverResolved` from `hasServerData` (#1152, Codex P2 on PR #1139
+// round 5): an errored onSnapshot listener is terminal, so it can never deliver
+// a server snapshot, and a gate that waited for one would never open.
+function captureDocSub(): { fire: (snap: unknown) => void; fail: () => void } {
+  const captured: { next: SnapCb | null; error: (() => void) | null } = {
+    next: null,
+    error: null,
+  };
+  H.onSnapshot.mockImplementation(
+    (_target: unknown, _options: unknown, onNext: SnapCb, onError: () => void) => {
+      captured.next = onNext;
+      captured.error = onError;
+      return () => {};
+    },
+  );
+  return {
+    fire: (snap: unknown) => {
+      if (!captured.next) throw new Error('onSnapshot not subscribed');
+      act(() => captured.next!(snap));
+    },
+    fail: () => {
+      if (!captured.error) throw new Error('onSnapshot not subscribed');
+      act(() => captured.error!());
     },
   };
 }
@@ -580,5 +614,358 @@ describe('useLeaderboard — the CURRENT snapshot beside the latch (#1151)', () 
     sub.fire(rosterSnap(false, true));
     expect(result.current.fromCache).toBe(false);
     expect(result.current.hasPendingWrites).toBe(true);
+  });
+});
+
+// #1152 (specs/post-sailing-archive.md § "The surfaces"), Codex P2 on PR #1139
+// round 5. The Leaderboard's routing half decides whether to mount the LIVE
+// listener fan — the whole `players` roster, every Day's meta document and up to
+// 60 Proofs — or the archived view, which opens none of them. That decision must
+// not be taken against a cache replay, so it needs "the server has answered — or
+// never will" as a gate. `hasServerData` alone cannot be that gate: an errored
+// subscription leaves it false forever, which is a surface stuck on a spinner.
+describe('serverResolved — the server has answered, or never can', () => {
+  it('latches on the first server snapshot, exactly like hasServerData', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(true)); // cache-served: delivered, but not answered
+    expect(result.current.serverResolved).toBe(false);
+
+    sub.fire(docSnap(false));
+    expect(result.current.serverResolved).toBe(true);
+
+    // Latched: a later offline flap does not un-answer it, so a reconnect cannot
+    // bounce an already-routed Leaderboard back through the spinner.
+    sub.fire(docSnap(true));
+    expect(result.current.serverResolved).toBe(true);
+  });
+
+  it('also resolves on an ERRORED subscription, which hasServerData deliberately does not', () => {
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+
+    sub.fire(docSnap(true));
+    sub.fail(); // permission-denied, signed out mid-flight — terminal
+    expect(result.current.serverResolved).toBe(true);
+    // The distinction is the point: nothing was ever confirmed BY the server, so
+    // a consumer reading the DATA still knows it is unconfirmed.
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('resolves an error that arrives before any snapshot at all', () => {
+    // The cold permission-denied: no snapshot was ever delivered, so the
+    // previous state is the empty one and the latch has to survive being rebuilt
+    // from it rather than being dropped with it.
+    const sub = captureDocSub();
+    const { result } = renderHook(() => useBoard('sailor-1'));
+
+    sub.fail();
+    expect(result.current.serverResolved).toBe(true);
+    expect(result.current.hasServerData).toBe(false);
+    expect(result.current.data).toBeNull();
+  });
+});
+
+// #1152, Codex P2 on PR #1165. The Leaderboard's routing half reads a persisted
+// per-generation record of a server-committed archive so a REMOUNT with an
+// unrelated moderation write still queued reaches the frozen surface. Only a
+// mounted Leaderboard used to WRITE that record, which made it useless in the
+// case it exists for: an Admin receives the committed archive on the console,
+// queues an offline ban there, and the Leaderboard's first snapshot is then a
+// cached archive with `hasPendingWrites: true` and nothing persisted behind it —
+// both latches false, and the live child mounted with every gameplay listener.
+//
+// The observation is a fact about the DEVICE, so the SHARED subscription every
+// route holds records it, from the `onSnapshot` callback rather than from a
+// render or an effect. These drive the real `useEventDoc` against hand-delivered
+// snapshots; `EVENT_ID` is `'event-a'` (the `../firebase` stub above).
+describe('useEventDoc records a server-committed archive for every route (#1152)', () => {
+  const confirmedKey = 'gcb.archive.event-a.confirmedUnder';
+
+  // jsdom leaves `window.localStorage` unset in this project (the `App.test.tsx`
+  // / `useTextSize.test.ts` note), and recent Node runtimes ship a built-in
+  // global of the same name that is present but non-functional. Bring our own.
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+      clear: () => store.clear(),
+      key: (index: number) => Array.from(store.keys())[index] ?? null,
+      get length() {
+        return store.size;
+      },
+    } as Storage;
+  }
+
+  const eventSnap = (
+    event: Record<string, unknown>,
+    metadata: { fromCache: boolean; hasPendingWrites: boolean },
+  ) => ({ exists: () => true, data: () => event, metadata });
+
+  // The freeze writes `status`, the stamp, the generation and the record in one
+  // update, so this is the shape a committed archive really arrives in.
+  const archived = (over: Record<string, unknown> = {}) => ({
+    name: 'Med 2026',
+    status: 'archived',
+    archivedAt: 9_000,
+    archivedUnder: 4,
+    archive: { standings: [], dailyHonors: [], freezeAt: null, archivedAt: 9_000 },
+    ...over,
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', createStorageStub());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('writes the generation when the snapshot is server-backed and free of local writes', () => {
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for a CACHE-served archived snapshot', () => {
+    // The ADR 0006 persistent cache replaying the flip is not the server having
+    // committed it — that is the whole distinction the record carries.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: true, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // …and the SAME document lands the moment the server serves it, so the
+    // decline above is about the origin and not about the fixture.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing while the flip is still an unacked local write', () => {
+    // An Admin's own optimistic `status: 'archived'` rolls back if the rules
+    // refuse it, so vouching for it would confirm an archive that never was.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: true }));
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // …and it lands the moment that write is acked, so the decline above is
+    // about the pending write and not about the fixture.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for a committed snapshot of a LIVE Event, and then the flip', () => {
+    // The subscription is on every route for the whole sailing, so the ordinary
+    // case is an open Event: it records nothing until the freeze actually lands.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(
+      eventSnap({ name: 'Med 2026', status: 'active' }, { fromCache: false, hasPendingWrites: false }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  it('writes nothing for an archived Event carrying no record, or no generation', () => {
+    // Neither shape is one `archiveEvent` produces — both are hand-edited
+    // documents — and the routing gate the record serves declines them anyway,
+    // so a confirmation for either could only ever vouch for a page nobody can
+    // reach.
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    sub.fire(
+      eventSnap(archived({ archive: undefined }), { fromCache: false, hasPendingWrites: false }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    sub.fire(
+      eventSnap(archived({ archivedUnder: undefined }), {
+        fromCache: false,
+        hasPendingWrites: false,
+      }),
+    );
+    expect(window.localStorage.getItem(confirmedKey)).toBeNull();
+
+    // The complete document — status, generation and record together, which is
+    // the one update the freeze writes — is what the two above are missing.
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+  });
+
+  // Codex P2 on PR #1165 round 4. `EVENT_ID` is a LIVE ESM binding, so an
+  // observer that read it in the snapshot callback read whatever it said when
+  // the snapshot LANDED. Between the active Event moving and this listener's
+  // effect cleanup retiring it, that is already the NEW Event — so an Event A
+  // snapshot was persisted under Event B's key, and a pending archive generation
+  // in B that happened to match could then be read back as previously
+  // server-confirmed. `specs/event-scoped-client-state.md`: A's state may never
+  // persist under B.
+  it('records the snapshot under the Event the subscription was opened for', () => {
+    const sub = captureDocSub();
+    renderHook(() => useEventDoc());
+
+    // The active Event moves while A's listener is still live — the window
+    // before effect cleanup runs, which is exactly when the binding is mutable
+    // and the callback is still armed.
+    H.eventId = 'event-b';
+    sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+
+    expect(window.localStorage.getItem(confirmedKey)).toBe('4');
+    expect(window.localStorage.getItem('gcb.archive.event-b.confirmedUnder')).toBeNull();
+  });
+});
+
+// #1145 / #1142 item 10, routed to #1152. `players/{uid}` validates none of its
+// fields, and `comparePlayers` SUBTRACTS two of them — so one Player's row could
+// throw a TypeError out of `sortPlayers` and take down every consumer of this
+// roster, the Admin console's Game settings and its Reopen play control included.
+describe('useLeaderboard makes the roster READABLE before it ranks it', () => {
+  const rosterSnap = (rows: unknown[]) => ({
+    docs: rows.map((row) => ({ data: () => row })),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+  const row = (over: Record<string, unknown>) => ({
+    uid: 'p',
+    displayName: 'P',
+    photoURL: null,
+    joinedAt: 0,
+    bingoCount: 0,
+    squaresMarked: 0,
+    firstBingoAt: null,
+    reshufflesUsed: 0,
+    ...over,
+  });
+
+  it('sorts a row whose bingoCount cannot be converted to a number, instead of throwing', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    // The exact shape #1145 names: an object with a nulled `toString`, which the
+    // comparator's subtraction cannot coerce.
+    sub.fire(
+      rosterSnap([
+        row({ uid: 'broken', displayName: 'Broken', bingoCount: { toString: null } }),
+        row({ uid: 'ok', displayName: 'Ok', bingoCount: 2, squaresMarked: 9 }),
+      ]),
+    );
+
+    expect(result.current.players.map((p) => p.uid)).toEqual(['ok', 'broken']);
+    // The unreadable count reads as the 0 the row already displayed for it —
+    // nothing is invented, and nothing else on the row moves.
+    const broken = result.current.players.find((p) => p.uid === 'broken');
+    expect(broken?.bingoCount).toBe(0);
+    expect(broken?.displayName).toBe('Broken');
+  });
+
+  it('reads a NaN stat as 0 and a NaN instant as null, so the sort order is never unspecified', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    // Every comparison against NaN is false, so a NaN row leaves the sort order
+    // formally unspecified — the #93 hazard, one layer earlier.
+    sub.fire(
+      rosterSnap([
+        row({ uid: 'nan', displayName: 'Nan', squaresMarked: Number.NaN, firstBingoAt: Number.NaN }),
+        row({ uid: 'real', displayName: 'Real', squaresMarked: 4, firstBingoAt: 1_000 }),
+      ]),
+    );
+
+    expect(result.current.players.map((p) => p.uid)).toEqual(['real', 'nan']);
+    const nan = result.current.players.find((p) => p.uid === 'nan');
+    expect(nan?.squaresMarked).toBe(0);
+    expect(nan?.firstBingoAt).toBeNull();
+  });
+
+  it('returns a well-formed row by IDENTITY, so a healthy roster is untouched', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+
+    const healthy = row({ uid: 'ok', displayName: 'Ok', bingoCount: 2, squaresMarked: 9 });
+    sub.fire(rosterSnap([healthy]));
+
+    // Not merely equal — the SAME object. The coercion is a repair, not a copy
+    // pass over every snapshot.
+    expect(result.current.players[0]).toBe(healthy);
+  });
+});
+
+// #1152, Codex P2 on PR #1165 round 4. The roster is normalised BEFORE it is
+// ranked — but "ranked" is two questions on this surface, and the root fields are
+// only the first. The Leaderboard's First-to-BINGO pin resolves through
+// `effectiveCruiseFirstBingoAt`, which PREFERS a row's per-Day `dayStats` buckets
+// whenever it has any, and `players/{uid}` validates a bucket exactly as little as
+// it validates the root. The freeze runs those buckets through
+// `withReadableDayStats`; the live path ran the root-only `withReadableRanking`,
+// so a bucket stamp outside the archive's magnitude bound survived here and was
+// clamped there — and the frozen page could then name a First to BINGO the last
+// live page did not. `useLeaderboard` therefore calls the archive's own function.
+describe('useLeaderboard normalises the per-Day buckets the pin ranks by (#1152)', () => {
+  const rosterSnap = (rows: unknown[]) => ({
+    docs: rows.map((row) => ({ data: () => row })),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+  // Root stamps stay `null` so the honour is decided by the BUCKETS alone, which
+  // is the half the root-only normaliser cannot reach.
+  const bucketRow = (uid: string, stamp: number): PlayerDoc =>
+    ({
+      uid,
+      displayName: uid,
+      photoURL: null,
+      joinedAt: 0,
+      bingoCount: 1,
+      squaresMarked: 1,
+      firstBingoAt: null,
+      reshufflesUsed: 0,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 1, firstBingoAt: stamp } },
+    }) as unknown as PlayerDoc;
+
+  const notTutorial = () => false;
+
+  it('keeps the same First-to-BINGO holder live and frozen for two out-of-bound bucket stamps', () => {
+    // Both stamps are below `-MAX_ARCHIVE_NUMBER` and DISTINCT, so they order one
+    // way unclamped and tie under the clamp — where the tie-break is uid
+    // ascending, which names the OTHER Player. The uid ordering is deliberately
+    // the opposite of the raw stamp ordering, so the two answers differ.
+    const rows = [
+      bucketRow('a-later', -(MAX_ARCHIVE_NUMBER + 1_000)),
+      bucketRow('z-earlier', -(MAX_ARCHIVE_NUMBER + 2_000)),
+    ];
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+    sub.fire(rosterSnap(rows));
+
+    // The freeze's answer, taken through the builder's own normaliser.
+    const frozenHolder = cruiseFirstBingoUid(rows.map(withReadableDayStats), notTutorial);
+    expect(frozenHolder).toBe('a-later');
+    expect(cruiseFirstBingoUid(result.current.players, notTutorial)).toBe(frozenHolder);
+
+    // …and the root-only normaliser really does answer differently, so the
+    // agreement above is about the buckets and not about the fixture.
+    expect(cruiseFirstBingoUid(rows.map(withReadableRanking), notTutorial)).toBe('z-earlier');
+  });
+
+  it('returns a row whose buckets are already readable by IDENTITY', () => {
+    // `useLeaderboard` runs this on every roster snapshot and every real Player
+    // carries `dayStats`, so the ordinary case still has to cost one array and no
+    // row copies — the property the root-only normaliser had, kept.
+    const healthy = bucketRow('ok', 900);
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+    sub.fire(rosterSnap([healthy]));
+
+    expect(result.current.players[0]).toBe(healthy);
   });
 });

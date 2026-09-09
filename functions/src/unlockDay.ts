@@ -181,10 +181,11 @@ import {
   buildPodiumPayload,
   buildMostLovedPhotoAward,
   freezePhraseForUnlock,
+  sanitizeFinaleDayStats,
   standingsFreezeAtFor,
+  withReadableFinaleRanking,
   type FinalePlayer,
   type FinaleDay,
-  type FinaleDayStat,
   type FinaleDayHonorDoc,
   type MostLovedProofLike,
   type MostLovedHeartLike,
@@ -771,27 +772,25 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function sanitizeDayStats(value: unknown): Record<number, FinaleDayStat> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const out: Record<number, FinaleDayStat> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    const dayIndex = Number(key);
-    if (!Number.isInteger(dayIndex) || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const stat = raw as Record<string, unknown>;
-    if (typeof stat.bingoCount !== 'number' || !Number.isFinite(stat.bingoCount)) continue;
-    if (typeof stat.squaresMarked !== 'number' || !Number.isFinite(stat.squaresMarked)) continue;
-    out[dayIndex] = {
-      bingoCount: stat.bingoCount,
-      squaresMarked: stat.squaresMarked,
-      firstBingoAt: typeof stat.firstBingoAt === 'number' && Number.isFinite(stat.firstBingoAt) ? stat.firstBingoAt : null,
-    };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 /** The canonical roster as `FinalePlayer[]` (#266) — the same shape the content
  *  builders and client-side podium consume. Ban filtering is applied only to the
- *  rendered view/copy, so reversible bans do not permanently erase finale data. */
+ *  rendered view/copy, so reversible bans do not permanently erase finale data.
+ *
+ *  READABLE BEFORE RANKED, and by the SAME normalisation the two client paths
+ *  apply (#1152, Codex P2 on PR #1165). The coercions here only asked whether a
+ *  value was finite, and `buildPodiumPayload` then compared the raw numbers —
+ *  but `players/{uid}` validates no field (ADR 0001), so a Player can self-write
+ *  a count or an instant far outside the magnitude `firestore.rules` accepts, and
+ *  both `useLeaderboard` and `draftEventArchive` CLAMP those before they rank.
+ *  The scheduler did not, so the live board and the frozen record could order two
+ *  oversized rows one way (a clamped tie, reordered on squares) while the podium
+ *  Moment — written once, never amended — kept their original count order, and an
+ *  out-of-bound first-bingo instant could name a different holder on each side.
+ *  This is the scheduler's analogue of `useLeaderboard` mapping its roster
+ *  through `withReadableDayStats`: ONE normalisation applied once, at the entry
+ *  point, so every finale beat reading this roster reads the same numbers. The
+ *  per-Day buckets travel with them, through the shared `sanitizeFinaleDayStats`
+ *  whose bucket rule is the client's own (#1152, CodeRabbit on PR #1165). */
 async function readFinaleRoster(
   db: AdminFirestore,
   eventId: string,
@@ -807,10 +806,11 @@ async function readFinaleRoster(
         bingoCount: finiteNumber(data.bingoCount, 0),
         squaresMarked: finiteNumber(data.squaresMarked, 0),
         firstBingoAt: typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt) ? data.firstBingoAt : null,
-        dayStats: sanitizeDayStats(data.dayStats),
+        dayStats: sanitizeFinaleDayStats(data.dayStats),
       };
     })
-    .filter((p) => p.uid !== '');
+    .filter((p) => p.uid !== '')
+    .map(withReadableFinaleRanking);
 }
 
 function visibleFinaleRoster(roster: readonly FinalePlayer[], bannedUids: readonly string[]): FinalePlayer[] {

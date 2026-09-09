@@ -50,9 +50,10 @@ import {
 } from './dailyEmailContent';
 import {
   ceremonialDayIndexes,
+  sanitizeFinaleDayStats,
   standingsFreezeAtFor,
   tutorialDayIndexes,
-  type FinaleDayStat,
+  withReadableFinaleRanking,
 } from './finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText } from './dailyEmailTemplate';
 // The SAME freeze predicate the scheduler's own writers use (#1150), restated at
@@ -295,39 +296,6 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-/**
- * Normalize a `dayStats` map read off a Player doc, dropping every entry that
- * is not a well-formed `{ bingoCount, squaresMarked, firstBingoAt }`.
- *
- * `players/{uid}` is SELF-WRITABLE by design (ADR 0001 — stats are
- * client-authoritative), so `dayStats` is untrusted runtime shape, not a
- * contract. A single row carrying `{ dayStats: { 0: null } }` — reachable by
- * any participant, deliberately or by a client bug — would otherwise throw
- * while building the model and take the WHOLE Event's send down with it (Codex
- * #623 P2). This is the same defensive normalization `readFinaleRoster` applies
- * in `unlockDay.ts`, and for the same reason.
- */
-export function sanitizeEmailDayStats(value: unknown): Record<number, FinaleDayStat> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const out: Record<number, FinaleDayStat> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    const dayIndex = Number(key);
-    if (!Number.isInteger(dayIndex) || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const stat = raw as Record<string, unknown>;
-    if (typeof stat.bingoCount !== 'number' || !Number.isFinite(stat.bingoCount)) continue;
-    if (typeof stat.squaresMarked !== 'number' || !Number.isFinite(stat.squaresMarked)) continue;
-    out[dayIndex] = {
-      bingoCount: stat.bingoCount,
-      squaresMarked: stat.squaresMarked,
-      firstBingoAt:
-        typeof stat.firstBingoAt === 'number' && Number.isFinite(stat.firstBingoAt)
-          ? stat.firstBingoAt
-          : null,
-    };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 /** The Event's roster as `EmailPlayer[]`, ban-filtered. Mirrors
  *  `readFinaleRoster`/`visibleFinaleRoster` in `unlockDay.ts` — the standings a
  *  banned Player is hidden from must be the same standings the email prints.
@@ -336,7 +304,20 @@ export function sanitizeEmailDayStats(value: unknown): Record<number, FinaleDayS
  *  an unbounded `.get()` materializes the whole collection into memory before
  *  any cap can apply, so a corrupted roster exhausts the function during the
  *  READ and never reaches the guard downstream. `limit` is one MORE than the
- *  ceiling so the caller can tell "exactly at the ceiling" from "truncated". */
+ *  ceiling so the caller can tell "exactly at the ceiling" from "truncated".
+ *
+ *  READABLE BEFORE RANKED, exactly as `readFinaleRoster` prepares the
+ *  scheduler's roster and `useLeaderboard` the live one (#1152, Codex P2 on PR
+ *  #1165). `standingsThrough` and `eventFirstBingoUid` accepted any FINITE
+ *  number a Player self-wrote (ADR 0001 — `players/{uid}` validates no field),
+ *  so two counts above the archive's magnitude bound tied on the two client
+ *  paths, which clamp, and ranked by their raw difference in the morning email;
+ *  an out-of-bound `firstBingoAt` likewise ties under the clamp, where the
+ *  shared uid tie-break can hand the ⭐ to the other Player. Sent mail is
+ *  irreversible, so the email is a third reader of ONE normalisation rather than
+ *  a third opinion — the parity contract `specs/daily-engagement-email.md`
+ *  § "Ranking parity" states. Applied once, at the read boundary, so every
+ *  recipient's model is built from the same numbers. */
 async function readEmailRosterPage(
   db: DailyEmailFirestore,
   eventId: string,
@@ -359,10 +340,11 @@ async function readEmailRosterPage(
           typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt)
             ? data.firstBingoAt
             : null,
-        dayStats: sanitizeEmailDayStats(data.dayStats),
+        dayStats: sanitizeFinaleDayStats(data.dayStats),
       };
     })
-    .filter((p) => p.uid !== '');
+    .filter((p) => p.uid !== '')
+    .map(withReadableFinaleRanking);
   const banned = new Set(bannedUids);
   const players = allPlayers.filter((p) => !banned.has(p.uid));
   return { allPlayers, players, queriedCount: snap.docs.length };

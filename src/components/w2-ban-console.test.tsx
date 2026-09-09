@@ -61,7 +61,16 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
+    // `serverResolved` is Leaderboard's ROUTING gate (#1152): the live view — the
+    // one this suite's ban filter is about — mounts only once the Event's status
+    // has been answered by the server.
+    useEventDoc: () => ({
+      data: H.event,
+      loading: false,
+      hasServerData: true,
+      serverResolved: true,
+      hasPendingWrites: false,
+    }),
     usePendingClaims: () => ({ claims: H.claims }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: H.items, loading: false }),

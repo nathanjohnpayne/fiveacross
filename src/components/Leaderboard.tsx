@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
 import type { ProofKindFlags } from '../hooks/useData';
+import { useOnline } from '../hooks/useOnline';
 import {
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
@@ -9,6 +10,9 @@ import {
   tutorialDayIndexSet,
 } from '../game/logic';
 import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from '../data/finale';
+import { isEventArchived } from '../data/eventArchive';
+import { confirmedArchiveGeneration } from '../data/archiveConfirmation';
+import ArchivedLeaderboard from './ArchivedLeaderboard';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
@@ -36,6 +40,30 @@ const FILTERS: Array<{ id: LeaderboardFilter; label: string }> = [
   { id: 'bingo', label: 'With BINGO' },
   { id: 'blackout', label: 'Blackout' },
 ];
+
+/**
+ * How long the routing gate below waits for a SERVER-committed Event once the
+ * ADR 0006 persistent cache has already answered, before it settles on what the
+ * cache said (Codex P1 on PR #1165).
+ *
+ * The wait exists because `onSnapshot` has no "the server is unreachable"
+ * signal. Behind a captive or partially routed Wi-Fi portal — the ship's normal
+ * network, and this app's whole operating context — Firestore serves the cached
+ * document with `fromCache: true` and RETRIES indefinitely: it never calls the
+ * error callback, so `serverResolved` stays false, and `navigator.onLine` reads
+ * TRUE, so the offline escape never fires either. Neither of the two things that
+ * end the wait short of a server snapshot could happen, and the Leaderboard sat
+ * on its spinner for the whole crossing.
+ *
+ * A few seconds rather than a round-trip estimate: it is not measuring the
+ * network, it is bounding how long a Player stares at a spinner before being
+ * shown the record their own device already has. Long enough that an ordinary
+ * slow answer still WINS the race (a server snapshot inside the window resolves
+ * the wait immediately and routes on the truth), short enough that a portal is
+ * not the rest of the sailing. Exported so the tests drive the real constant
+ * rather than a number that can drift away from it.
+ */
+export const CACHED_EVENT_SETTLE_MS = 4_000;
 
 /**
  * Presentational-only predicate (ADR 0001: the Leaderboard is a for-fun tally,
@@ -136,9 +164,243 @@ function buildShareStandings(
   return top;
 }
 
+/**
+ * The Leaderboard's routing half, and the ONLY hook it owns is the Event doc
+ * every Player already subscribes to.
+ *
+ * #1152: once the Event is archived, the FROZEN record supersedes the live
+ * roster entirely — `ArchivedLeaderboard` renders `EventDoc.archive`, so the
+ * standings a returning Player sees are the ones the archive stamped, not a
+ * re-derivation over rows that may since have been moderated.
+ *
+ * THE SPLIT IS WHAT MAKES THAT TRUE, not just what it renders. The live view's
+ * three subscriptions — the whole `players` roster, every Day's meta document,
+ * and up to 60 live Proofs — belong to `LiveLeaderboard` below, so an archived
+ * visit never opens them. With the branch inside one component the hooks had
+ * already run by the time it was reached: the archived page rendered from the
+ * snapshot while a listener fan stayed open behind it, which is the opposite of
+ * the spec's "it subscribes to NOTHING".
+ *
+ * A component boundary is also the only way to do this without breaking the #280
+ * hook-order rule. Conditioning the hooks in place is illegal in React; returning
+ * a DIFFERENT component unmounts the live one and its listeners with it, and each
+ * component's own hook sequence stays fixed.
+ *
+ * AND THE LIVE BRANCH WAITS FOR THE SERVER (Codex P2, PR #1139 round 5). The
+ * split decides nothing on a cold visit, where `useEventDoc` starts at
+ * `data: null` and the ADR 0006 persistent cache can then replay the Event as it
+ * stood when the tab last saw it — `active`, because it was. Falling through to
+ * the live child on either of those mounts the whole listener fan the archived
+ * page exists not to open, and the archived branch then arrives a snapshot later
+ * and tears it down again. The listeners were open; "it subscribes to NOTHING"
+ * was false for exactly as long as the roster, every Day's meta and 60 Proofs
+ * took to answer.
+ *
+ * So an UNRESOLVED status renders the live view's own loading state — the same
+ * label, so there is no visible seam between this wait and the roster's — and
+ * only a resolved one routes. Two things resolve it short of a server snapshot,
+ * because a spinner nobody can get past is worse than the listeners:
+ *
+ *  - a cached `archived` record, which needs no confirmation at all. The flip is
+ *    write-once at the rules boundary, so an Event that has been archived can
+ *    never be un-archived — the archive renders immediately, offline included.
+ *  - a subscription that ERRORED, or a client the browser says is OFFLINE.
+ *    Neither can ever be answered by the server (`useOnline`'s `false` is the
+ *    trustworthy half of that hook, and it is read here to stop waiting, never to
+ *    authorize anything), and this app is offline-durable by design (ADR 0006) —
+ *    so the wait ends and the Leaderboard renders from the cache, which is what
+ *    it did before this gate existed — ONCE THE CACHE HAS ANSWERED (Codex P2 on
+ *    PR #1165). `useOnline` reports offline on the very first render, while the
+ *    Event subscription is still at `data: null` with its cache read in flight,
+ *    and settling on that alone mounted the live child over no Event at all:
+ *    the whole listener fan opened on a cold offline visit to an ARCHIVED Event
+ *    and was torn down a snapshot later, the same defect the server wait above
+ *    exists to close, reached through the escape hatch instead. So the offline
+ *    arm also requires `loading` to have cleared, which is exactly "this
+ *    subscription has produced its cache result, or failed".
+ *  - a CACHE-SERVED snapshot the server has not contradicted within
+ *    `CACHED_EVENT_SETTLE_MS` (Codex P1 on PR #1165). Neither arm above can fire
+ *    behind a captive or partially routed portal, which is this app's normal
+ *    network: Firestore answers from the cache with `fromCache: true` and retries
+ *    forever rather than calling its terminal error callback, so `serverResolved`
+ *    stays false — and `navigator.onLine` reports TRUE, so `useOnline` says
+ *    nothing either. `navigator.onLine === false` cannot be the only non-error
+ *    escape. The bounded wait is the real settle signal: once the subscription
+ *    has answered from anywhere, the gate gives a server-committed snapshot a few
+ *    seconds to arrive and then settles on the cached Event, exactly as the
+ *    offline arm does. A server snapshot inside the window still WINS — it
+ *    resolves the wait outright, and the timer is cancelled with it — so nothing
+ *    about the answering case changes.
+ *
+ * A PENDING archive is the one closed state this gate declines to believe, the
+ * `App.tsx` Card-redirect rule applied to the surface that redirect points AT
+ * (Codex P2 on PR #1157, round 9). `status: 'archived'` written by an Admin on
+ * THIS device is emitted optimistically before the rules decide it, and a refused
+ * flip rolls back to open — so a record the server may never accept would
+ * otherwise tear down the live listeners and print itself as final. `fromCache`
+ * is deliberately NOT required alongside it: unlike the reversible `archiving`
+ * the redirect guards, an accepted `archived` can never be contradicted later, so
+ * demanding a fresh server snapshot would only break the offline archive read.
+ *
+ * THAT GUARD IS ABOUT THE TRANSITION, NOT ABOUT THE STATE (Codex P2 on PR #1165).
+ * `hasPendingWrites` is a flag on the WHOLE Event snapshot rather than on the
+ * field that moved, so an Admin's ban or unban after the freeze raises it over an
+ * archive the server settled long ago. Read as "this archive is unconfirmed" it
+ * put the page back on `LiveLeaderboard` — reopening every gameplay listener the
+ * archived surface exists not to open, and printing re-derived live standings
+ * over a frozen record — for as long as the moderation write stayed in flight,
+ * which offline is until the client reconnects. So a CONFIRMED archive is
+ * latched: the first snapshot that is `archived`, server-backed and free of local
+ * writes (`!fromCache && !hasPendingWrites`) is the flip committing, and the
+ * routing half stops asking after that. Monotone for the same reason the status
+ * latch above is, and safe for the same one the paragraph above gives — the flip
+ * is write-once at the rules boundary, so nothing can un-archive the Event
+ * underneath the latch. Every snapshot before that one still meets the
+ * pending-write guard in full.
+ *
+ * AND THE LATCH IS PERSISTED PER ARCHIVE GENERATION, so it survives a remount
+ * (Codex P2 on PR #1165). An in-session latch only covers moderation that starts
+ * after this mount has seen a clean server snapshot; a tab reloaded — or the
+ * Leaderboard revisited — while an offline ban is still queued starts from
+ * nothing, sees a cached `archived` snapshot carrying `hasPendingWrites: true`,
+ * and mounted the live child over an archive committed long before that write
+ * existed. `EventDoc.archivedUnder` is the generation the flip was bound to at
+ * the rules boundary, so a server-committed archive records `{eventId,
+ * archivedUnder}` in `localStorage` and a later cached snapshot naming the SAME
+ * generation is treated as confirmed. An optimistic flip carries a generation
+ * nothing ever confirmed, so it is still declined — which is precisely what a
+ * bare "this Event is archived" flag could not distinguish.
+ *
+ * AND THE RECORD IS WRITTEN BY THE SHARED SUBSCRIPTION, NOT BY THIS COMPONENT
+ * (Codex P2 on PR #1165). Persisting it from the Leaderboard's own effect left
+ * it useless in the case it was built for: only a mounted Leaderboard ever wrote
+ * it, and the visit that needs it is the one where some OTHER route saw the
+ * commit. An Admin receives the committed archive on the console, queues an
+ * offline ban there, and then opens the standings — whose first snapshot is the
+ * cached archive carrying that pending write, with both latches false and
+ * nothing persisted, so the gate mounted `LiveLeaderboard` after its settle
+ * escape and reopened every gameplay listener until the ban synced. The
+ * observation is a fact about the DEVICE, so `useEventDoc` records it from the
+ * `onSnapshot` callback every route already holds (`../data/archiveConfirmation`)
+ * and this component only reads it back.
+ *
+ * An Event marked archived with NO record is not a state this app produces —
+ * `archiveEvent` writes status, stamp and record in one update — so the live view
+ * is left as the fallback for a hand-edited document. It is still read-only in the
+ * only place that counts: `firestore.rules` deny its gameplay writes on the
+ * `status` field alone.
+ */
 export default function Leaderboard() {
+  const { data: event, loading: eventLoading, serverResolved, fromCache, hasPendingWrites } = useEventDoc();
+  const online = useOnline();
+  // MONOTONE, and latched in STATE rather than in a ref — the adjust-during-
+  // render idiom `Board`'s dangling-sheet close already uses, and deliberately
+  // not the ref write CodeRabbit rejected on #452: React discards state updates
+  // from an abandoned render, whereas a ref written during one would keep a
+  // conclusion that never committed.
+  //
+  // The latch exists because only ONE of its two inputs is monotone. A reconnect
+  // (`online` false → true, with the server snapshot still a round trip away)
+  // would otherwise bounce an already-rendered live view back through the
+  // spinner, unmounting `LiveLeaderboard`, dropping its listeners and resetting
+  // the Player's filter with them.
+  //
+  // AND THE OFFLINE ESCAPE WAITS FOR THE SUBSCRIPTION TO ANSWER (Codex P2 on PR
+  // #1165). `useOnline` reports false on the FIRST render of an offline cold
+  // mount, while `useEventDoc` is still at `data: null` with its cache read in
+  // flight — so `!online` alone settled the status over no Event at all and
+  // mounted the live child, opening the roster, Day-meta and Proof listeners an
+  // archived cached Event promises never to open and tearing them down one
+  // snapshot later. `loading` is the half that says the subscription has
+  // ANSWERED: `useDocSub` clears it on the first snapshot, cache-served
+  // included, and on an error (which also resolves `serverResolved`, the other
+  // arm here). So offline stops the wait once the cache has spoken, and never
+  // before it.
+  //
+  // AND `!online` IS NOT THE ONLY NON-ERROR ESCAPE (Codex P1 on PR #1165).
+  // Behind a captive or partially routed portal — the ship's ordinary Wi-Fi, and
+  // this app's whole operating context — Firestore cannot reach the server while
+  // the browser still reports ONLINE: the subscription serves the cached Event
+  // with `fromCache: true` and keeps retrying, never invoking the terminal error
+  // callback, so `serverResolved` stays false and `online` stays true and this
+  // expression never settled at all. A cached ACTIVE Event's Leaderboard then
+  // held its spinner indefinitely. `onSnapshot` exposes no reachability signal to
+  // read instead, so the settle signal is a BOUNDED WAIT, started once the
+  // subscription has answered from anywhere: `CACHED_EVENT_SETTLE_MS` after the
+  // cache result the gate settles on what the cache said, which is exactly what
+  // the offline arm already does one render earlier. The timer is cancelled the
+  // moment the server answers, so a snapshot inside the window still wins and
+  // the answering case is untouched.
+  const cacheAnswered = !eventLoading && !serverResolved;
+  const [cacheSettled, setCacheSettled] = useState(false);
+  useEffect(() => {
+    if (!cacheAnswered || cacheSettled) return;
+    const timer = window.setTimeout(() => setCacheSettled(true), CACHED_EVENT_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [cacheAnswered, cacheSettled]);
+  const [statusLatched, setStatusLatched] = useState(false);
+  const statusSettled =
+    statusLatched || serverResolved || (!eventLoading && (!online || cacheSettled));
+  if (statusSettled && !statusLatched) setStatusLatched(true);
+
+  // The archive's own latch, monotone and adjusted during render by the same
+  // idiom, because the two answer different questions: that one is "may this
+  // render decide anything at all", this one is "has the flip COMMITTED". A
+  // server-backed `archived` snapshot carrying no local write is the commit, and
+  // once it has been seen the pending-write guard below has nothing left to
+  // protect — every later `hasPendingWrites` on this Event belongs to some other
+  // field, a moderation ban being the one that actually happens.
+  const [archiveConfirmed, setArchiveConfirmed] = useState(false);
+  const archiveCommitted = !fromCache && !hasPendingWrites && isEventArchived(event);
+  if (archiveCommitted && !archiveConfirmed) setArchiveConfirmed(true);
+
+  // …AND THE LATCH HAS TO SURVIVE A REMOUNT (Codex P2 on PR #1165). The latch
+  // above covers moderation that starts after THIS mount has already seen a
+  // clean server snapshot. A tab reloaded, or the Leaderboard revisited, while an
+  // offline ban or unban is still queued has no such history: the first cached
+  // snapshot is `archived` with `hasPendingWrites: true`, `archiveConfirmed`
+  // starts false, and the pending-write guard mounted `LiveLeaderboard` and
+  // opened all three gameplay listeners — over an archive the server settled
+  // long ago, and for as long as an unrelated write stays in flight, which
+  // offline is until the client reconnects.
+  //
+  // So the confirmation is PERSISTED, per archive generation. `archivedUnder` is
+  // what the flip is bound to at the rules boundary, so it names WHICH archive
+  // was confirmed; a cached archived snapshot whose generation matches a record
+  // this device wrote is the archive it already saw the server commit, pending
+  // writes or not. An optimistic flip is still declined, because it carries a
+  // generation nothing has confirmed — which is exactly what a bare "this Event
+  // is archived" flag could not express. The store is read ONCE, at mount, and
+  // is trusted for routing alone; every number the page prints still comes off
+  // the Event document.
+  //
+  // AND THIS COMPONENT ONLY READS IT (Codex P2 on PR #1165). The write belongs to
+  // the SHARED Event subscription — `useEventDoc` hands `useDocSub` an observer
+  // that records a server-committed archive on whatever route observes it
+  // (`../data/archiveConfirmation`). While the write lived here it could only
+  // ever be made by a mounted Leaderboard, which is the one route the record is
+  // not needed on: an Admin receives the committed archive on the console, queues
+  // an offline ban THERE, and the Leaderboard's first snapshot is then a cached
+  // archive with `hasPendingWrites: true` and nothing persisted behind it — both
+  // latches false, and the live child mounted after the settle escape.
+  const [persistedGeneration] = useState(() => confirmedArchiveGeneration(EVENT_ID));
+  const archivedUnder = event?.archivedUnder;
+  const generationConfirmed =
+    typeof archivedUnder === 'number' && persistedGeneration === String(archivedUnder);
+
+  if (
+    (archiveConfirmed || generationConfirmed || !hasPendingWrites) &&
+    isEventArchived(event) &&
+    event?.archive
+  ) {
+    return <ArchivedLeaderboard event={event} archive={event.archive} />;
+  }
+  if (!statusSettled) return <LoadingState label="Tallying the leaderboard…" />;
+  return <LiveLeaderboard event={event} />;
+}
+
+function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   const { players, loading } = useLeaderboard();
-  const { data: event } = useEventDoc();
   // #264: the pinned day-meta honors. Called HERE, with the other hooks —
   // never below the loading/empty early returns, where a later non-empty
   // render would change the hook order and crash (Codex P1 on #280).

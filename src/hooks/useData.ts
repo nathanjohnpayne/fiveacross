@@ -6,7 +6,8 @@ import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '..
 import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
-import { usableDayIndexes } from '../data/eventArchive';
+import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
+import { usableDayIndexes, withReadableDayStats } from '../data/eventArchive';
 import { supportedDayIndex } from '../data/eventLimits';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
@@ -26,6 +27,28 @@ type DocSubscriptionState<T> = {
   data: T | null;
   loading: boolean;
   hasServerData: boolean;
+  /**
+   * "The server has answered for this key — or never can." `hasServerData` plus
+   * the ERROR case, latched — the same pair `useDayMetasStatus` draws between
+   * `loaded` and `serverLoaded`: an errored Day resolves that hook's `loaded` and
+   * is deliberately kept OUT of its stricter `serverLoaded` (Codex P2 on PR
+   * #1162), and `serverResolved`/`hasServerData` split the same way here
+   * (#1152, Codex P2 on PR #1139 round 5).
+   *
+   * A caller that must not act on a cache replay needs "the server has spoken"
+   * as a GATE, and the Leaderboard's routing half is that caller: it mounts a
+   * listener fan the archived view promises never to open, so a cached `active`
+   * replay of an Event the server is about to report as archived would open all
+   * of it and tear it down a snapshot later. But a gate an ERRORED subscription
+   * can never open is a surface stuck on a spinner forever — and an error is
+   * terminal for an `onSnapshot` listener, so no server answer is ever coming.
+   * It therefore RESOLVES the wait rather than prolonging it, and the caller
+   * falls back to whatever it would have rendered before this latch existed.
+   *
+   * The distinction from `hasServerData` is the point: a consumer that reads the
+   * DATA still learns, from that flag, that nothing was ever confirmed.
+   */
+  serverResolved: boolean;
   fromCache: boolean;
   hasPendingWrites: boolean;
 };
@@ -35,11 +58,44 @@ const emptyDocState = <T,>(key: string, loading: boolean): DocSubscriptionState<
   data: null,
   loading,
   hasServerData: false,
+  serverResolved: false,
   fromCache: true,
   hasPendingWrites: false,
 });
 
-function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
+function useDocSub<T>(
+  ref: DocumentReference<T> | null,
+  key: string,
+  /**
+   * A side effect to run on every snapshot this subscription delivers, given the
+   * document, that snapshot's own origin flags, and THE EVENT THIS SUBSCRIPTION
+   * WAS OPENED FOR — the seam `useEventDoc` uses to record a server-committed
+   * archive on whatever route observes it first (Codex P2 on PR #1165,
+   * `../data/archiveConfirmation`).
+   *
+   * It runs inside the `onSnapshot` callback rather than in a render or an
+   * effect, so the observation does not depend on the holding component
+   * re-rendering or staying mounted — a route that subscribes to the Event and
+   * shows nothing about it still records what it saw.
+   *
+   * THE EVENT ID IS HANDED IN RATHER THAN READ (#1152, Codex P2 on PR #1165
+   * round 4). `EVENT_ID` is a live ESM binding (`src/firebase.ts`), and an
+   * observer that read it in the snapshot callback would read whatever it says
+   * WHEN THE SNAPSHOT LANDS — which, in the window between the active Event
+   * moving and this effect's cleanup retiring the listener, is already the NEW
+   * Event. An Event A snapshot would then be persisted under Event B's key, and
+   * `specs/event-scoped-client-state.md`'s invariant is that A's state may never
+   * "persist under" B: a matching pending generation in B could be read back as
+   * previously server-confirmed. The value below is captured when the listener is
+   * OPENED, so every observation names the Event whose document produced it.
+   *
+   * MUST be a module-scope constant. The subscription effect below is keyed on
+   * `key` alone (deliberately, see its own dependency note), so a callback whose
+   * identity changed per render would be captured stale; every caller passes a
+   * function defined once at module load.
+   */
+  observe?: (data: T | null, origin: SnapshotOrigin, eventId: string) => void,
+) {
   const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
   // discipline `useColSub` below already exposes, and for the same reason:
@@ -57,6 +113,16 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
   // standing) is what the drain sees.
   useEffect(() => {
     let active = true;
+    // THE EVENT THIS LISTENER BELONGS TO, read once here — where the listener is
+    // opened — and never again (#1152, Codex P2 on PR #1165 round 4). Every
+    // Event-scoped `key` this hook is given is built from `EVENT_ID` by
+    // `eventSubscriptionKey` in the same render, and this effect re-runs on every
+    // `key` change, so the captured id and the key always name the same Event.
+    // The one caller whose key is NOT Event-scoped is `useMyUser` (identity is
+    // global by contract) and it passes no observer; an observer added to a
+    // key that does not carry the Event id would not be re-bound when the Event
+    // moves, so that pairing is the invariant to keep.
+    const subscribedEventId = EVENT_ID;
     // Drop the previous ref's document so stale data from another subscription
     // (e.g. a different signed-in uid) can't render under the new key.
     setState(emptyDocState(key, ref !== null));
@@ -70,21 +136,36 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
-        setState((previous) => ({
-          key,
-          data: snap.exists() ? (snap.data() as T) : null,
-          loading: false,
-          hasServerData: previous.key === key && previous.hasServerData
-            ? true
-            : !snap.metadata.fromCache,
-          fromCache: snap.metadata.fromCache,
-          hasPendingWrites: snap.metadata.hasPendingWrites,
-        }));
+        const data = snap.exists() ? (snap.data() as T) : null;
+        // Fail-open, on the same principle the persisted-state helpers it calls
+        // already use: an observer is a passenger on this subscription, and a
+        // throw from one must never stop the snapshot from reaching `setState`
+        // — that would strand every consumer of this document on stale data.
+        try {
+          observe?.(data, snap.metadata, subscribedEventId);
+        } catch {
+          /* an observation is never worth the subscription */
+        }
+        setState((previous) => {
+          const served =
+            previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache;
+          return {
+            key,
+            data,
+            loading: false,
+            hasServerData: served,
+            serverResolved: served || (previous.key === key && previous.serverResolved),
+            fromCache: snap.metadata.fromCache,
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+          };
+        });
       },
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key ? { ...previous, loading: false } : emptyDocState(key, false),
+          previous.key === key
+            ? { ...previous, loading: false, serverResolved: true }
+            : { ...emptyDocState<T>(key, false), serverResolved: true },
         );
       },
     );
@@ -185,14 +266,41 @@ function useColSub<T>(q: Query<T> | null, key: string) {
 const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
   eventScopeKey(EVENT_ID, ...parts);
 
+/**
+ * The Event's archive observer, module-scope so `useDocSub` can capture it once
+ * (Codex P2 on PR #1165).
+ *
+ * IT READS NO BINDING OF ITS OWN (#1152, Codex P2 on PR #1165 round 4). The
+ * Event id arrives as an argument, captured by `useDocSub` when the listener was
+ * opened, so a snapshot that lands after the active Event has moved — but before
+ * that listener's cleanup has retired it — is still recorded under the Event
+ * whose document produced it. Reaching for the live `EVENT_ID` here instead
+ * persisted Event A's archive generation under Event B's key, which
+ * `specs/event-scoped-client-state.md` forbids outright.
+ */
+const observeEventArchive = (
+  event: EventDoc | null,
+  origin: SnapshotOrigin,
+  eventId: string,
+): void => recordArchiveConfirmation(eventId, event, origin);
+
 export function useEventDoc(enabled = true) {
   // `enabled` lets a pre-auth caller (main.tsx) skip the subscription: events
   // require sign-in, so subscribing while signed out only yields a
   // permission-denied error. Toggle the key (not just the ref) so the effect
   // re-runs and subscribes once auth arrives — useDocSub is keyed on `key`.
+  //
+  // This is the SHARED Event subscription — every route mounts it, and the
+  // Admin console is routinely the first surface to receive a committed archive
+  // — so it is where the device's archive confirmation is recorded (Codex P2 on
+  // PR #1165). The Leaderboard's routing half only READS that record; leaving
+  // the write on the one surface that reads it meant the case it exists for —
+  // an archive first seen on another route, with a moderation write queued
+  // behind it — had nothing persisted when the Leaderboard finally mounted.
   return useDocSub<EventDoc>(
     enabled ? eventRef() : null,
     eventSubscriptionKey(enabled ? 'event' : 'event:disabled'),
+    observeEventArchive,
   );
 }
 
@@ -795,7 +903,44 @@ export function useLeaderboard() {
     playersCol(),
     eventSubscriptionKey('players'),
   );
-  return { players: sortPlayers(data), loading, hasServerData, fromCache, hasPendingWrites };
+  // READABLE BEFORE RANKED (#1145, #1142 item 10). `comparePlayers` subtracts two
+  // Player-written fields the rules arm validates in no way, so a row carrying
+  // (say) `bingoCount: { toString: null }` threw a TypeError out of `sortPlayers`
+  // — taking down every consumer of this roster, the Admin console's Game settings
+  // and its Reopen play control with them, on an Event that may already be shut.
+  //
+  // The guard goes HERE, before the sort, rather than inside the comparator — and
+  // it is `withReadableDayStats`, THE SAME FUNCTION `draftEventArchive` applies to
+  // the roster it re-reads (#1151, Codex P1 on PR #1162; #1152, Codex P2 on PR
+  // #1165 round 4). One pass over the rows about to be ranked keeps the ORDER and
+  // the row that is PRINTED reading the same numbers, and the printing is the half
+  // no comparator guard reaches: `Leaderboard` renders `{p.bingoCount}` into the
+  // DOM, where React throws on an object child.
+  //
+  // IT IS THE ARCHIVE'S OWN NORMALISER RATHER THAN THE ROOT-ONLY
+  // `withReadableRanking` because the ROOT IS NOT ALL THIS SURFACE RANKS BY. The
+  // First-to-BINGO pin resolves through `effectiveCruiseFirstBingoAt`, which
+  // prefers a row's per-Day `dayStats` buckets whenever it has any — buckets
+  // `players/{uid}` validates as little as it validates the root. The freeze
+  // clamped those and the live path did not, so two rows whose bucket stamps are
+  // distinct but both outside the bound stayed ordered here and tied in the
+  // record, where the uid tie-break could hand the honour to the other Player: the
+  // archived page naming a First to BINGO the last live page did not.
+  // `withReadableRanking` is still the statement of what a readable ranking FIELD
+  // is — `withReadableDayStats` calls it — but it is no longer a second ranking
+  // entry point that can drift from the first.
+  //
+  // A well-formed row is still returned by IDENTITY, buckets included, so this
+  // costs one array and changes nothing for the rosters that were always fine; it
+  // decides nothing about who won, and the frozen record is unaffected because
+  // `toStandingRow` applies the identical coercion on the server re-read.
+  return {
+    players: sortPlayers(data.map((p) => withReadableDayStats(p))),
+    loading,
+    hasServerData,
+    fromCache,
+    hasPendingWrites,
+  };
 }
 
 /** A caller-owned, already-loaded moderation snapshot. Supplying this avoids a

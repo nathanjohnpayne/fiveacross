@@ -2,6 +2,13 @@
 import type { Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { normalizePool } from './pool';
 import { isCeremonialDay } from './scoring';
+// The ONE data-layer import this module takes, and only because that module
+// imports nothing itself: it is the shared numeric contract with
+// `firestore.rules`, and the LIVE ranking below has to apply the same bound the
+// frozen record does or the two orders can disagree (#1152, Codex P2 on PR
+// #1165). `src/data/eventArchive.ts` imports this module, so the bound cannot
+// live there without a cycle — see that file's `MAX_ARCHIVE_NUMBER` re-export.
+import { clampArchiveNumber } from '../data/eventLimits';
 
 export const GRID = 5;
 export const CENTER = 12;
@@ -909,7 +916,107 @@ export function foldEchoStats(params: {
 
 export type Rankable = Pick<PlayerDoc, 'bingoCount' | 'squaresMarked' | 'firstBingoAt'>;
 
-/** Leaderboard order: bingos desc, then squares desc, then earliest first-bingo; two no-bingo Players tie at exactly 0. */
+/** A ranking count the comparator can SUBTRACT. A non-numeric or non-finite stat
+ *  reads as `0` — the same number the row already displays for it — and a finite
+ *  one is CLAMPED into `MAX_ARCHIVE_NUMBER`, exactly as `archiveCount` clamps it
+ *  for the frozen record. */
+function readableRankingCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : 0;
+}
+
+/** A ranking instant, or `null` — which `comparePlayers` already means by "never
+ *  bingoed", and which sorts last. Bounded like the count beside it, and like
+ *  `archiveInstant`. */
+function readableRankingInstant(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? clampArchiveNumber(value) : null;
+}
+
+/**
+ * One row with its RANKING fields made readable (#1145, #1142 item 10).
+ *
+ * `players/{uid}` validates none of its fields in its rules arm, so a Player can
+ * leave a row holding anything at all where a stat belongs — and `comparePlayers`
+ * SUBTRACTS two of them. A `bingoCount` of `{ toString: null }` therefore threw a
+ * TypeError out of `sortPlayers`, which is not a bad row rendering badly: it is
+ * every consumer of the roster crashing, the Admin console's **Game settings**
+ * included, and with it the **Reopen play** control that is the one way back from
+ * a closing Event. `NaN` is the quieter half of the same problem — every
+ * comparison against it is false, so `Array.prototype.sort` is formally free to
+ * order that pair however it likes (the #93 hazard, one layer earlier).
+ *
+ * The coercions are the ones the surfaces already agree on: a count reads `0`, an
+ * unreadable instant reads `null`, and a finite value outside the archive's bound
+ * is CLAMPED to it. This decides NOTHING about who won — a well-formed row is
+ * returned unchanged, by identity — and it writes nothing: the frozen record
+ * still copies each row's own stats through `toStandingRow`'s identical coercion,
+ * so the archive is byte-for-byte what it was (ADR 0001).
+ *
+ * THE BOUND IS SHARED RATHER THAN RESTATED (Codex P2 on PR #1165). It used to be
+ * the archive's alone: this helper kept any finite value while
+ * `withReadableDayStats` clamped, so two rows above `MAX_ARCHIVE_NUMBER` — which
+ * `players/{uid}` freely admits, validating no field — could order one way on the
+ * last live Leaderboard and another way in the frozen record. Distinct oversized
+ * `bingoCount`s collapse to a tie under the clamp and then reorder on squares, so
+ * the archived standings stopped COPYING what Players last saw, which is the
+ * record's whole promise. Both paths now read `clampArchiveNumber` out of
+ * `src/data/eventLimits.ts` — the one module with no imports of its own, so this
+ * pure game module can share a bound with the data layer that imports it without
+ * a cycle.
+ *
+ * `comparePlayers` below is deliberately NOT guarded a second time. Normalising
+ * BEFORE the sort is the one mechanism (#1151, Codex P1 on PR #1162): the order
+ * and the row then read the same numbers off the same row, in one pass, and a
+ * coercion inside the comparator would let them disagree again. It would also
+ * break the comparator's byte-identity with its `functions/src/finaleContent.ts`
+ * mirror. The row still has to be RENDERABLE as well as sortable, which is the
+ * other half of why this runs at all: `Leaderboard` prints `{p.bingoCount}`
+ * straight into the DOM, where React throws on an object child, so a sort that no
+ * longer crashes would simply move the crash one line down.
+ *
+ * IT IS NO LONGER A RANKING ENTRY POINT OF ITS OWN (#1152, Codex P2 on PR #1165
+ * round 4). `withReadableDayStats` in `src/data/eventArchive.ts` CALLS this for
+ * the root and adds a row's per-Day BUCKETS beside it, and BOTH ranking paths now
+ * call that one function: the archive builder as it always did, and
+ * `useLeaderboard` too. Keeping them as two entry points is what let the bound
+ * drift once (b050334) and the buckets drift again — the live pin resolves
+ * through `effectiveCruiseFirstBingoAt`, which prefers the buckets this helper
+ * cannot see. So this stays the statement of what a readable RANKING FIELD is,
+ * with exactly one caller, on the side of the graph `eventArchive` imports rather
+ * than the other way round.
+ */
+export function withReadableRanking<T extends Rankable>(row: T): T {
+  const bingoCount = readableRankingCount(row.bingoCount);
+  const squaresMarked = readableRankingCount(row.squaresMarked);
+  const firstBingoAt = readableRankingInstant(row.firstBingoAt);
+  if (
+    bingoCount === row.bingoCount &&
+    squaresMarked === row.squaresMarked &&
+    firstBingoAt === row.firstBingoAt
+  ) {
+    return row;
+  }
+  return { ...row, bingoCount, squaresMarked, firstBingoAt };
+}
+
+/**
+ * Leaderboard order: bingos desc, then squares desc, then earliest first-bingo;
+ * two no-bingo Players tie at exactly 0.
+ *
+ * IT SUBTRACTS ITS INPUTS, and that is deliberate. `players/{uid}` validates none
+ * of these fields, so an unreadable stat reaching here is a thrown TypeError or a
+ * `NaN` result — but the fix for that lives BEFORE the sort, not inside the
+ * comparator: `withReadableDayStats` normalises both the live roster in
+ * `useLeaderboard` and the archive builder's own roster (calling
+ * `withReadableRanking` for the root fields and clamping the per-Day buckets
+ * beside them), in one pass over the rows they are about to rank. Both are pinned as the mechanism
+ * by their own suites (`src/data/post-sailing-archive.test.ts` § "hands the
+ * comparator a row it can order, rather than NaN" asserts the raw comparator's
+ * `NaN` at that seam), and a coercion here as well would make the ORDER and the
+ * serialised ROW read different numbers off the same row — which is the exact
+ * defect #1151 normalised before the sort to close. It also keeps this function
+ * byte-identical to its `functions/src/finaleContent.ts` mirror, which
+ * `tests/functions/finale-parity.test.ts` guards.
+ */
 export function comparePlayers(a: Rankable, b: Rankable): number {
   if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
   if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;

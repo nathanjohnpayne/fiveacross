@@ -30,7 +30,14 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: H.players, loading: false }),
-  useEventDoc: () => ({ data: H.event, loading: false }),
+  // `serverResolved` is Leaderboard's ROUTING gate (#1152): the live view mounts
+  // only once the Event's status has been answered by the server.
+  useEventDoc: () => ({
+    data: H.event,
+    loading: false,
+    serverResolved: true,
+    hasPendingWrites: false,
+  }),
   useProofKindsByUid: () => ({ kindsByUid: H.kindsByUid, loading: false }),
   isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
     !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),

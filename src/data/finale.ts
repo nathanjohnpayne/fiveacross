@@ -5,7 +5,7 @@
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
 import { isBanned } from './moderation';
-import { supportedDayIndex } from './eventLimits';
+import { clampReaggregatedTotal, supportedDayIndex } from './eventLimits';
 import { THEMES } from '../theme/themes';
 import {
   ceremonialDayIndexSet,
@@ -65,6 +65,15 @@ export interface Podium {
  * (the state `playerRowRootLag` exists to detect) instead of leaving it alone.
  * `firstBingoAt` is the tutorial-excluded Event-wide value so the row ranks on
  * the same first-bingo tie-break the Leaderboard uses.
+ *
+ * THE RE-AGGREGATED TOTALS ARE CLAMPED TO THE SAME BOUND THE BUCKETS ARE (#1152,
+ * Codex P2 on PR #1165). `useLeaderboard` hands this a roster whose every count
+ * is already inside `MAX_ARCHIVE_NUMBER`, but a SUM of bounded counts is not
+ * itself bounded: two buckets at the maximum re-aggregate to twice it, and the
+ * row's clamped ROOT is what the live Leaderboard and the frozen record rank by.
+ * A second row would then tie this one on the board and lose to it here — one
+ * row ranking differently across surfaces that are documented never to disagree.
+ * So the finished totals go back through `clampReaggregatedTotal`, once each.
  */
 function podiumStandingRow(
   player: PlayerDoc,
@@ -97,7 +106,14 @@ function podiumStandingRow(
     bingoCount += stat.bingoCount;
     squaresMarked += stat.squaresMarked;
   }
-  return { uid: player.uid, displayName: player.displayName, bingoCount, squaresMarked, firstBingoAt };
+  return {
+    uid: player.uid,
+    displayName: player.displayName,
+    // The SUM is bounded, not just its addends: see `clampReaggregatedTotal`.
+    bingoCount: clampReaggregatedTotal(bingoCount),
+    squaresMarked: clampReaggregatedTotal(squaresMarked),
+    firstBingoAt,
+  };
 }
 
 /**
