@@ -2293,6 +2293,65 @@ describe('a ban still hides a Player after the freeze (#1152)', () => {
     expect(screen.getByLabelText('Hall of fame')).toHaveTextContent('Early Bird');
   });
 
+  // Codex P2 on PR #1165 round 4. When moderation hides EVERY visible row the
+  // empty state used to say nobody was ever on the board — which the record
+  // itself contradicts two elements down, where the frozen `playerCount` is
+  // printed. A ban decides who is SHOWN; it never re-rules who took part, and the
+  // archive's whole promise is that the participation history does not move.
+  it('says the standings are hidden, not that nobody played, when every row is banned', () => {
+    // A one-Player Event whose Player is banned after the freeze: the record
+    // still counts them, and no row survives the filter.
+    H.event = archivedEvent({
+      bannedUids: ['solo'],
+      archive: {
+        ...FROZEN,
+        standings: [
+          {
+            uid: 'solo',
+            displayName: 'Solo Sailor',
+            bingoCount: 2,
+            squaresMarked: 9,
+            blackout: false,
+            firstBingoAt: 1_000,
+          },
+        ],
+        playerCount: 1,
+        firstBingo: null,
+        firstBingoRow: null,
+        dailyHonors: [],
+      },
+    });
+    const { container } = renderLeaderboard();
+
+    expect(frozenNames(container)).toEqual([]);
+    expect(container.querySelector('.lb-empty')).toHaveTextContent(
+      '1 player was on the board\u2014every row this record carries is hidden by moderation.',
+    );
+    expect(screen.queryByText('No players were on the board.')).not.toBeInTheDocument();
+  });
+
+  it('still says nobody was on the board for an archive that counted no players', () => {
+    // The empty state the copy above must not replace: a record whose frozen
+    // `playerCount` really is zero, where "nobody" is the truth rather than a
+    // moderation artefact.
+    H.event = archivedEvent({
+      archive: {
+        ...FROZEN,
+        standings: [],
+        playerCount: 0,
+        firstBingo: null,
+        firstBingoRow: null,
+        dailyHonors: [],
+      },
+    });
+    const { container } = renderLeaderboard();
+
+    expect(container.querySelector('.lb-empty')).toHaveTextContent(
+      'No players were on the board.',
+    );
+    expect(screen.queryByText(/hidden by moderation/)).not.toBeInTheDocument();
+  });
+
   it('brings the row back on an unban, exactly as it was', () => {
     H.event = archivedEvent({ bannedUids: ['early-bird'] });
     const { container, rerender } = renderLeaderboard();

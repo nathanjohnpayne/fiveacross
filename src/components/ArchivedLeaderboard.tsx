@@ -145,6 +145,28 @@ export default function ArchivedLeaderboard({
       ? honor.dayLabel
       : `D${honor.dayIndex + 1}`;
 
+  // THE EMPTY STATE IS CHOSEN BY `playerCount`, NOT BY WHAT IS VISIBLE (#1152,
+  // Codex P2 on PR #1165 round 4). The visible rows are the stored ones minus
+  // whoever is banned RIGHT NOW, so moderation alone can empty them — a one-Player
+  // Event whose Player is banned after the freeze, or a truncated record whose
+  // whole retained prefix is hidden. Saying "no players were on the board" there
+  // is not an empty state, it is the record CONTRADICTING ITSELF: `playerCount`
+  // is frozen, positive and printed by the footnote two elements down, and a ban
+  // is a decision about who is SHOWN rather than a re-ruling of who took part
+  // ("Hidden, never reassigned", above).
+  //
+  // Moderation is the only thing that can produce this, because `standings` and
+  // `playerCount` are ONE contract at the rules boundary
+  // (`standingsSizeMatches`, `firestore.rules`): a record carrying a positive
+  // count and no rows cannot be written. So the sentence names moderation, states
+  // the frozen count rather than denying it, and scopes itself to the rows THIS
+  // RECORD CARRIES — which on a truncated archive is the retained prefix, not the
+  // whole roster it counts.
+  const emptyStandingsCopy =
+    archive.playerCount > 0
+      ? `${archive.playerCount} player${archive.playerCount === 1 ? ' was' : 's were'} on the board—every row this record carries is hidden by moderation.`
+      : 'No players were on the board.';
+
   // The Share Card prints the VISIBLE rows, so a banned Player never appears on a
   // shared card (#108's rule, same as the live Leaderboard's).
   //
@@ -305,7 +327,7 @@ export default function ArchivedLeaderboard({
       </div>
 
       {standings.length === 0 ? (
-        <div className="lb-empty muted">No players were on the board.</div>
+        <div className="lb-empty muted">{emptyStandingsCopy}</div>
       ) : (
         <div className="list">
           {standings.map((row, i) => {
