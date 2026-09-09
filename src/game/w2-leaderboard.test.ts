@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { comparePlayers, sortPlayers, type Rankable } from './logic';
+import { comparePlayers, sortPlayers, withReadableRanking, type Rankable } from './logic';
 
 // specs/w2-leaderboard.md — issue #35. comparePlayers/sortPlayers already
 // exist and ship the PRD tie-break (bingos desc -> squares desc -> earliest
@@ -171,37 +171,49 @@ describe('sortPlayers — the full PRD tie-break table end to end (bingos desc, 
 });
 
 // #1145 / #1142 item 10, routed to #1152. `players/{uid}` validates none of its
-// fields, so `comparePlayers`' two subtractions were the one place an unreadable
-// Player stat became a thrown TypeError — inside `sortPlayers`, which the whole
+// fields, so an unreadable Player stat reaching `comparePlayers`' two
+// subtractions became a thrown TypeError — inside `sortPlayers`, which the whole
 // roster and the archive builder both go through, taking the Admin console's Game
 // settings (and its Reopen play control) down with them.
-describe('comparePlayers — total over any row the rules will accept', () => {
+//
+// The guard is BEFORE the sort, not inside the comparator (#1151, Codex P1 on PR
+// #1162): the order and the serialised row then read the same numbers off the same
+// row. `withReadableRanking` is the live roster's half of it — `useLeaderboard`
+// maps every row through it before ranking — and `withReadableDayStats`
+// (src/data/eventArchive.ts) is the archive builder's, pinned in
+// `src/data/post-sailing-archive.test.ts`. The comparator itself stays raw, and
+// that suite asserts its raw `NaN` at the seam.
+describe('withReadableRanking — the roster is made readable BEFORE it is ranked', () => {
   const unreadable = (over: Record<string, unknown>): Rankable =>
     ({ bingoCount: 0, squaresMarked: 0, firstBingoAt: null, ...over }) as unknown as Rankable;
 
-  it('does not throw on a bingoCount that cannot be converted to a number', () => {
+  it('makes a bingoCount that cannot be converted to a number orderable', () => {
     // The exact shape #1145 names: an object whose `toString` is nulled, which
-    // the subtraction cannot coerce.
-    const broken = unreadable({ bingoCount: { toString: null } });
+    // the comparator's subtraction cannot coerce.
+    const broken = withReadableRanking(unreadable({ bingoCount: { toString: null } }));
     const ok = player({ bingoCount: 2 });
     expect(() => comparePlayers(broken, ok)).not.toThrow();
-    // Unreadable ranks as the 0 the row itself displays, so the real row wins.
+    // Unreadable reads as the 0 the row itself displays, so the real row wins.
     expect(comparePlayers(broken, ok)).toBeGreaterThan(0);
     expect(comparePlayers(ok, broken)).toBeLessThan(0);
   });
 
-  it('does not throw on an unreadable squaresMarked either', () => {
-    const broken = unreadable({ bingoCount: 1, squaresMarked: { toString: null } });
+  it('does the same for an unreadable squaresMarked', () => {
+    const broken = withReadableRanking(
+      unreadable({ bingoCount: 1, squaresMarked: { toString: null } }),
+    );
     const ok = player({ bingoCount: 1, squaresMarked: 5 });
     expect(() => comparePlayers(broken, ok)).not.toThrow();
     expect(comparePlayers(ok, broken)).toBeLessThan(0);
   });
 
-  it('never returns NaN, so the sort order is never left unspecified', () => {
+  it('leaves no comparison NaN, so the sort order is never left unspecified', () => {
     // Every comparison against NaN is false, which leaves
     // `Array.prototype.sort` formally free to order the pair however it likes —
     // the #93 hazard, reached through a malformed stat rather than a double null.
-    const nan = unreadable({ bingoCount: Number.NaN, firstBingoAt: Number.NaN });
+    const nan = withReadableRanking(
+      unreadable({ bingoCount: Number.NaN, firstBingoAt: Number.NaN }),
+    );
     const ok = player({ bingoCount: 0, firstBingoAt: 1_000 });
     expect(comparePlayers(nan, ok)).not.toBeNaN();
     expect(comparePlayers(ok, nan)).not.toBeNaN();
@@ -209,15 +221,24 @@ describe('comparePlayers — total over any row the rules will accept', () => {
     expect(comparePlayers(nan, ok)).toBeGreaterThan(0);
   });
 
+  it('returns a well-formed row by IDENTITY, so a healthy roster is not copied', () => {
+    // `useLeaderboard` runs this on every roster snapshot, so the ordinary case
+    // has to cost one array and no row copies.
+    const clean = player({ bingoCount: 2, squaresMarked: 3, firstBingoAt: 900 });
+    expect(withReadableRanking(clean)).toBe(clean);
+    const nulled = player({ bingoCount: 0, squaresMarked: 0, firstBingoAt: null });
+    expect(withReadableRanking(nulled)).toBe(nulled);
+  });
+
   it('sortPlayers orders a roster containing one unreadable row instead of throwing', () => {
     const roster = [
       unreadable({ bingoCount: { toString: null }, squaresMarked: 99 }),
       player({ bingoCount: 2, squaresMarked: 3 }),
       player({ bingoCount: 1, squaresMarked: 3 }),
-    ];
+    ].map(withReadableRanking);
     expect(() => sortPlayers(roster)).not.toThrow();
     // The unreadable row ranks last on its coerced 0, and — the point of the
     // guard — the two well-formed rows keep the order they always had.
-    expect(sortPlayers(roster).map((r) => r.bingoCount)).toEqual([2, 1, roster[0].bingoCount]);
+    expect(sortPlayers(roster).map((r) => r.bingoCount)).toEqual([2, 1, 0]);
   });
 });

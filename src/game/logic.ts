@@ -940,19 +940,24 @@ function readableRankingInstant(value: unknown): number | null {
  * frozen record still copies each row's own stats through `toStandingRow`'s
  * identical coercion, so the archive is byte-for-byte what it was (ADR 0001).
  *
- * `comparePlayers` below carries the same guard, and the two are not redundant: it
- * can only decide ORDER, and the row still has to be RENDERABLE. `Leaderboard`
- * prints `{p.bingoCount}` straight into the DOM, where React throws on an object
- * child — so a sort that no longer crashes would simply move the crash one line
- * down. This is what hands the surfaces a row they can display.
+ * `comparePlayers` below is deliberately NOT guarded a second time. Normalising
+ * BEFORE the sort is the one mechanism (#1151, Codex P1 on PR #1162): the order
+ * and the row then read the same numbers off the same row, in one pass, and a
+ * coercion inside the comparator would let them disagree again. It would also
+ * break the comparator's byte-identity with its `functions/src/finaleContent.ts`
+ * mirror. The row still has to be RENDERABLE as well as sortable, which is the
+ * other half of why this runs at all: `Leaderboard` prints `{p.bingoCount}`
+ * straight into the DOM, where React throws on an object child, so a sort that no
+ * longer crashes would simply move the crash one line down.
  *
  * The sibling coercion is `withReadableDayStats` in `src/data/eventArchive.ts`,
- * which makes a row's per-Day BUCKETS readable to the honour selectors. The two
- * are deliberately separate: that one belongs to what a stored record can carry
- * and runs on the server re-read the freeze takes, this one belongs to what the
- * comparator can subtract and runs on every roster snapshot the client sorts. A
- * pure game module cannot import the data layer, and the archive path needs its
- * own coercion regardless because it never passes through this hook.
+ * which normalises the SAME three root fields and a row's per-Day BUCKETS beside
+ * them for the honour selectors. The two are deliberately separate rather than
+ * shared: that one belongs to what a stored record can carry and runs on the
+ * server re-read the freeze takes, this one belongs to what the client sorts and
+ * runs on every roster snapshot. A pure game module cannot import the data layer,
+ * and the archive path needs its own coercion regardless because it never passes
+ * through this hook.
  */
 export function withReadableRanking<T extends Rankable>(row: T): T {
   const bingoCount = readableRankingCount(row.bingoCount);
@@ -972,32 +977,29 @@ export function withReadableRanking<T extends Rankable>(row: T): T {
  * Leaderboard order: bingos desc, then squares desc, then earliest first-bingo;
  * two no-bingo Players tie at exactly 0.
  *
- * TOTAL over any row `players/{uid}` will accept (#1145, #1142 item 10). It reads
- * each field through the coercions above rather than subtracting it raw, because
- * the rules arm validates none of them and this function's two subtractions were
- * where an unreadable stat became a thrown TypeError — inside `sortPlayers`,
- * which every roster consumer and the archive builder both go through. Guarding
- * HERE rather than at each call site is the point: the arithmetic is what fails,
- * there is exactly one of it, and a future caller inherits the guard for free.
- * Well-formed input is ordered exactly as before, so the tie-break table is
- * unchanged; a stat that cannot be read simply ranks as the `0` its own row
- * displays, and an unreadable instant as the `null` that already sorts last.
+ * IT SUBTRACTS ITS INPUTS, and that is deliberate. `players/{uid}` validates none
+ * of these fields, so an unreadable stat reaching here is a thrown TypeError or a
+ * `NaN` result — but the fix for that lives BEFORE the sort, not inside the
+ * comparator: `withReadableRanking` normalises the live roster in `useLeaderboard`
+ * and `withReadableDayStats` normalises the archive builder's own roster, each in
+ * one pass over the rows they are about to rank. Both are pinned as the mechanism
+ * by their own suites (`src/data/post-sailing-archive.test.ts` § "hands the
+ * comparator a row it can order, rather than NaN" asserts the raw comparator's
+ * `NaN` at that seam), and a coercion here as well would make the ORDER and the
+ * serialised ROW read different numbers off the same row — which is the exact
+ * defect #1151 normalised before the sort to close. It also keeps this function
+ * byte-identical to its `functions/src/finaleContent.ts` mirror, which
+ * `tests/functions/finale-parity.test.ts` guards.
  */
 export function comparePlayers(a: Rankable, b: Rankable): number {
-  const aBingos = readableRankingCount(a.bingoCount);
-  const bBingos = readableRankingCount(b.bingoCount);
-  if (bBingos !== aBingos) return bBingos - aBingos;
-  const aSquares = readableRankingCount(a.squaresMarked);
-  const bSquares = readableRankingCount(b.squaresMarked);
-  if (bSquares !== aSquares) return bSquares - aSquares;
-  const aFirst = readableRankingInstant(a.firstBingoAt);
-  const bFirst = readableRankingInstant(b.firstBingoAt);
+  if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
+  if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;
   // Both no-bingo: an explicit stable 0. Without this guard the `?? Infinity`
   // fallback below computes Infinity - Infinity = NaN, and a NaN comparator
   // result gives Array.prototype.sort unspecified order for the pair (#93).
-  if (aFirst == null && bFirst == null) return 0;
-  const af = aFirst ?? Number.POSITIVE_INFINITY;
-  const bf = bFirst ?? Number.POSITIVE_INFINITY;
+  if (a.firstBingoAt == null && b.firstBingoAt == null) return 0;
+  const af = a.firstBingoAt ?? Number.POSITIVE_INFINITY;
+  const bf = b.firstBingoAt ?? Number.POSITIVE_INFINITY;
   return af - bf;
 }
 
