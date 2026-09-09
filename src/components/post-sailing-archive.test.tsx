@@ -817,6 +817,24 @@ describe('ArchiveEvent — a record it could not store is refused before anythin
     expect(status).not.toHaveTextContent(/too large to freeze onto the Event/);
   });
 
+  it('reopens play when the stored SCHEDULE has an unusable Day, and names the repair', async () => {
+    // Codex P2 on PR #1162. `eventConverter` tolerates a `null` Day entry, so
+    // this console arms over such an Event — and the freeze's own RAW read is
+    // where it stops being tolerable. The refusal is what makes that a cleanup
+    // the handler can perform rather than a throw that skips it, and its copy is
+    // the one here with a repair the Admin can make from the surface this
+    // control already sits at the bottom of.
+    H.archiveEvent.mockResolvedValue('schedule-unusable');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event');
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'One of the days in the schedule above could not be read, so the daily honours could not be looked up and nothing was frozen. Fix or re-save that day, then archive again.',
+    );
+  });
+
   it('still renders Game settings when a Player row is unreadable to the selectors', () => {
     // #1142 item 10's neighbour: the draft is built during RENDER, so a row that
     // threw out of the builder took the whole surface — and the Reopen play

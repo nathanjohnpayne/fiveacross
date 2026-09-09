@@ -171,6 +171,10 @@ const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
   // The record's own shape refused, which the flip reports without writing
   // anything exactly as the ceiling does (#1151, Codex P1 on PR #1162).
   'record-unwritable': 'closing',
+  // An unusable Day entry in the stored schedule, which the freeze's raw read
+  // refuses rather than dereferences (Codex P2 on PR #1162) — again writing
+  // nothing, again with the quiesce still in force on the way out.
+  'schedule-unusable': 'closing',
   // A read that did not answer is the same shape of refusal as the four above:
   // the flip wrote nothing and the quiesce is still in force when it returns
   // (CodeRabbit Major, PR #1162). Each is listed rather than folded together so
@@ -198,6 +202,12 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
     'The scheduled standings freeze has not run yet, so nothing was frozen. Wait for the finale, or tick the box below to archive without it.',
   'too-large': `${TOO_LARGE_COPY} Nothing was frozen.`,
   'record-unwritable': `${RECORD_UNWRITABLE_COPY} Nothing was frozen.`,
+  // Named as the Admin knows it—the day schedule in Game settings, the surface
+  // this control sits at the bottom of—rather than as `EventDoc.days`. It is the
+  // one refusal here with a repair the Admin can actually make from the console
+  // they are already looking at.
+  'schedule-unusable':
+    'One of the days in the schedule above could not be read, so the daily honours could not be looked up and nothing was frozen. Fix or re-save that day, then archive again.',
   'read-failed:event': readFailedCopy('The Event'),
   'read-failed:claims': readFailedCopy('The Review queue'),
   'read-failed:roster': readFailedCopy('The final standings'),
@@ -230,6 +240,7 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
   'claims-pending',
   'too-large',
   'record-unwritable',
+  'schedule-unusable',
   'config-changed',
   'finale-pending',
   'read-failed:event',

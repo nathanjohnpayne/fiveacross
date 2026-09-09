@@ -1800,6 +1800,48 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     ]);
   });
 
+  it('REFUSES an unusable Day entry in the stored schedule, rather than throwing past the cleanup', async () => {
+    // Codex P2 on PR #1162. `EventDoc.days` is admin-written with no per-entry
+    // validation in its rules arm, and `eventConverter` TOLERATES a `null` entry
+    // (`migrateDayFields` reads a nullish entry as `{}`) — so the console renders
+    // its preview and arms the Archive control perfectly happily. The raw
+    // post-quiesce read then dereferenced `d.index` on that entry and threw,
+    // after `beginArchive` had closed play and outside every `archiveRead`
+    // wrapper: `archiveEvent` REJECTED instead of returning, so the console's
+    // automatic reopen never ran and a live Event was left shut.
+    A.event = closingEvent({ days: [mkDay(0), null] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('schedule-unusable');
+    expect(A.updates).toEqual([]);
+    // Refused before the honour pins are addressed at all — there is no index to
+    // address one WITH, and `days/undefined` is a path that would read (and
+    // freeze) whatever it found there.
+    expect(A.serverReads.some((p) => p.includes('/meta/'))).toBe(false);
+  });
+
+  it('refuses a Day whose index is not one, and leaves a well-formed schedule alone', async () => {
+    // The same question asked of the other shapes an unvalidated `days` entry
+    // can take: an entry that is not an object at all, and one whose `index` is
+    // present but names no Day.
+    for (const days of [
+      [mkDay(0), 'nope'],
+      [mkDay(0), { ...mkDay(1), index: 1.5 }],
+      [{ ...mkDay(0), index: undefined }],
+    ]) {
+      A.updates = [];
+      A.event = closingEvent({ days });
+      expect(await archiveEvent(1, { now: 5 })).toBe('schedule-unusable');
+      expect(A.updates).toEqual([]);
+    }
+    // The control: an ordinary schedule is untouched by any of this, and its
+    // pins are still read and frozen.
+    A.updates = [];
+    A.serverReads = [];
+    A.event = closingEvent();
+    expect(await archiveEvent(1, { now: 5 })).toBe('archived');
+    expect(A.serverReads).toContain('events/test-event/days/0/meta/0');
+    expect(A.serverReads).toContain('events/test-event/days/1/meta/1');
+  });
+
   it('never reaches the queue when the Event was not shut at all', async () => {
     // `not-closing` comes first: an Event that was never quiesced has a Claim
     // queue that is still moving, so reading it would answer nothing.
