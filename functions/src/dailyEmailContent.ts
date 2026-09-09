@@ -19,6 +19,7 @@
 import type { DayDef, EventDoc, PlayerDoc } from '../../src/domainTypes';
 import {
   ceremonialDayIndexes,
+  clampReaggregatedTotal,
   compareFinalePlayers,
   standingsFreezeAtFor,
   tutorialDayIndexes,
@@ -270,6 +271,17 @@ export function fromAddressFor(
  * is self-writable by design (ADR 0001), so a row like `{ dayStats: { 0: null } }`
  * is reachable, and one such row throwing here would suppress the whole Event's
  * send. The read boundary sanitizes too; this is the second line (Codex #623 P2).
+ *
+ * THE WINDOW TOTALS ARE CLAMPED TO THE SAME BOUND THEIR BUCKETS ARE (#1152,
+ * Codex P2 on PR #1165). `readEmailRosterPage` maps every row through
+ * `withReadableFinaleRanking`, so each addend here is already inside
+ * `MAX_ARCHIVE_NUMBER` — but their SUM is not: two buckets at the maximum give a
+ * row twice the bound in the morning email while the in-app Leaderboard and the
+ * frozen record read that row's clamped ROOT, so a second row ties it in the app
+ * and loses to it in the mail. Sent mail cannot be corrected, and § Ranking
+ * parity is explicit that these surfaces never disagree, so the finished totals
+ * go back through `clampReaggregatedTotal` — the same helper both
+ * `podiumStandingRow` implementations re-aggregate through.
  */
 export function standingsThrough(
   players: readonly EmailPlayer[],
@@ -305,7 +317,13 @@ export function standingsThrough(
           firstBingoAt = at;
         }
       }
-      return { ...p, bingoCount, squaresMarked, firstBingoAt };
+      return {
+        ...p,
+        // The SUM is bounded, not just its addends: see `clampReaggregatedTotal`.
+        bingoCount: clampReaggregatedTotal(bingoCount),
+        squaresMarked: clampReaggregatedTotal(squaresMarked),
+        firstBingoAt,
+      };
     })
     .sort(compareFinalePlayers);
 }

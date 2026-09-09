@@ -7,6 +7,7 @@ import {
   standingsFreezeAtFor as fnsStandingsFreezeAtFor,
   withReadableFinaleRanking,
   clampArchiveNumber as fnsClampArchiveNumber,
+  clampReaggregatedTotal as fnsClampReaggregatedTotal,
   ARCHIVE_NUMBER_BOUND as FNS_ARCHIVE_NUMBER_BOUND,
   MAX_ARCHIVE_NUMBER as FNS_MAX_ARCHIVE_NUMBER,
   type FinaleDay,
@@ -24,6 +25,7 @@ import {
   tutorialDayIndexSet,
   ceremonialDayIndexSet,
   cruiseFirstBingoUid,
+  sortPlayers,
   standingsFreezeAtFor as clientStandingsFreezeAtFor,
 } from '../../src/game/logic';
 import { scoringForDay } from '../../src/game/scoring';
@@ -33,6 +35,7 @@ import {
   ARCHIVE_NUMBER_BOUND,
   MAX_ARCHIVE_NUMBER,
   clampArchiveNumber,
+  clampReaggregatedTotal,
 } from '../../src/data/eventLimits';
 import type { DayDef, PlayerDoc } from '../../src/types';
 
@@ -768,6 +771,196 @@ describe('client/functions parity — the archive bound the podium ranks by (#11
   });
 });
 
+// --- The RE-AGGREGATED total shares that bound (#1152, Codex P2 on PR #1165) ----
+//
+// Clamping each BUCKET is not enough. Two of the three ranking surfaces do not
+// rank by the buckets: both `podiumStandingRow` implementations and
+// `standingsThrough` ADD the surviving buckets back up, and a sum of bounded
+// counts is not itself bounded. `players/{uid}` validates no field (ADR 0001),
+// so two buckets at the maximum are reachable — and they gave their row a
+// `2 * MAX_ARCHIVE_NUMBER` podium and email score while the live Leaderboard and
+// the frozen record read that same row's ROOT as `MAX_ARCHIVE_NUMBER`. Another
+// row therefore tied it on the board and lost to it on the podium: one roster,
+// four surfaces, two orders.
+
+/** A schedule that RE-AGGREGATES: `podiumStandingRow` passes the roots through
+ *  when nothing is ceremonial, so the sum only exists when something is. */
+const REAGGREGATING_SCHEDULE: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'>> = [
+  { index: 0, pool: 'main', tutorial: false },
+  { index: 1, pool: 'main', tutorial: false },
+  { index: 2, pool: 'farewell', tutorial: false },
+];
+
+/** Two rows that tie ONLY once the re-aggregated totals are clamped: one carries
+ *  two competitive buckets at the maximum, the other reaches the maximum at its
+ *  root and on its single bucket, with more squares. Clamped, the bingos tie and
+ *  squares crown `root-max`; unclamped, `two-buckets` scores twice the bound and
+ *  outranks every clamped row there can be. Each root is the honest aggregate of
+ *  that row's buckets, so the live path clamps it to the same number. */
+const TWO_MAXED_BUCKETS: PlayerDoc[] = [
+  oversized('two-buckets', 'Two Buckets', {
+    bingoCount: 2 * MAX_ARCHIVE_NUMBER,
+    squaresMarked: 20,
+    firstBingoAt: 100,
+    dayStats: {
+      0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 100 },
+      1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 300 },
+    },
+  }),
+  oversized('root-max', 'Root Max', {
+    bingoCount: MAX_ARCHIVE_NUMBER,
+    squaresMarked: 30,
+    firstBingoAt: 200,
+    dayStats: { 1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 30, firstBingoAt: 200 } },
+  }),
+];
+
+/** The raw re-aggregation the clamp replaces — the buckets a surface counts,
+ *  added up and left alone. Written out here so the defect is pinned as a
+ *  NUMBER rather than only as an ordering. */
+const rawBucketTotal = (player: PlayerDoc, excluded: ReadonlySet<number>): number =>
+  Object.entries(player.dayStats ?? {})
+    .filter(([key]) => !excluded.has(Number(key)))
+    .reduce((sum, [, stat]) => sum + stat.bingoCount, 0);
+
+describe('client/functions parity — the bound a RE-AGGREGATED total keeps (#1152)', () => {
+  it.each([
+    0,
+    1,
+    -1,
+    MAX_ARCHIVE_NUMBER,
+    -MAX_ARCHIVE_NUMBER,
+    MAX_ARCHIVE_NUMBER + 1,
+    -MAX_ARCHIVE_NUMBER - 1,
+    2 * MAX_ARCHIVE_NUMBER,
+    -2 * MAX_ARCHIVE_NUMBER,
+    Number.MAX_SAFE_INTEGER,
+    -Number.MAX_SAFE_INTEGER,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ])('clamps the re-aggregated total %p identically on both sides', (value) => {
+    expect(fnsClampReaggregatedTotal(value)).toBe(clampReaggregatedTotal(value));
+  });
+
+  it('pins what the shared re-aggregation clamp answers', () => {
+    // Both sides regressing together still has to fail, so the answers are
+    // stated as well as compared: the bound in both directions, an ordinary
+    // total untouched, and `0` for a total no comparator could subtract.
+    expect(clampReaggregatedTotal(2 * MAX_ARCHIVE_NUMBER)).toBe(MAX_ARCHIVE_NUMBER);
+    expect(clampReaggregatedTotal(-2 * MAX_ARCHIVE_NUMBER)).toBe(-MAX_ARCHIVE_NUMBER);
+    expect(clampReaggregatedTotal(7)).toBe(7);
+    expect(clampReaggregatedTotal(Number.NaN)).toBe(0);
+  });
+
+  it('ranks two maxed buckets the same on both podiums, the email and the live board', () => {
+    const ceremonial = new Set([2]);
+    const clientPodium = buildPodium(
+      asLiveRoster(TWO_MAXED_BUCKETS),
+      REAGGREGATING_SCHEDULE as DayDef[],
+    );
+    const fnsPodium = buildPodiumPayload(
+      asReadFinalePlayers(TWO_MAXED_BUCKETS),
+      asFinaleDays(REAGGREGATING_SCHEDULE),
+    );
+    // The email's window is the whole schedule; the ceremonial Day is excluded
+    // by policy exactly as the podium excludes it.
+    const emailRows = standingsThrough(
+      asReadFinalePlayers(TWO_MAXED_BUCKETS),
+      3,
+      new Set<number>(),
+      ceremonial,
+    );
+    const board = sortPlayers(asLiveRoster(TWO_MAXED_BUCKETS));
+
+    // ONE order, four surfaces: the bingos tie at the bound and squares decide.
+    expect(fnsPodium.champion).toEqual(clientPodium.champion);
+    expect(clientPodium.champion).toEqual({
+      uid: 'root-max',
+      displayName: 'Root Max',
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 30,
+    });
+    expect(emailRows.map((r) => `${r.uid}:${r.bingoCount}/${r.squaresMarked}`)).toEqual([
+      `root-max:${MAX_ARCHIVE_NUMBER}/30`,
+      `two-buckets:${MAX_ARCHIVE_NUMBER}/20`,
+    ]);
+    expect(board.map((p) => `${p.uid}:${p.bingoCount}/${p.squaresMarked}`)).toEqual([
+      `root-max:${MAX_ARCHIVE_NUMBER}/30`,
+      `two-buckets:${MAX_ARCHIVE_NUMBER}/20`,
+    ]);
+    expect(clientPodium.runnersUp[0]?.uid).toBe('two-buckets');
+    expect(clientPodium.runnersUp[0]?.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+
+    // The UNCLAMPED answer, pinned beside it: the raw sum of the two maxed
+    // buckets is twice the bound, so re-aggregating without the clamp put
+    // `two-buckets` first on both podiums and in the email while the live board
+    // — which ranks the clamped ROOT — kept `root-max` there. That divergence is
+    // the finding; asserting the number states it rather than implying it.
+    expect(rawBucketTotal(TWO_MAXED_BUCKETS[0], ceremonial)).toBe(2 * MAX_ARCHIVE_NUMBER);
+    expect(rawBucketTotal(TWO_MAXED_BUCKETS[1], ceremonial)).toBe(MAX_ARCHIVE_NUMBER);
+    expect(rawBucketTotal(TWO_MAXED_BUCKETS[0], ceremonial)).toBeGreaterThan(
+      rawBucketTotal(TWO_MAXED_BUCKETS[1], ceremonial),
+    );
+    expect(board[0].bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+  });
+
+  it('bounds a re-aggregated total in the NEGATIVE direction too, on both sides', () => {
+    // Counts go negative for the same reason they go oversized — the rules arm
+    // validates no field — and an unclamped negative sum sorts a row BELOW every
+    // representable one, which is again not where the clamped root puts it.
+    const players: PlayerDoc[] = [
+      oversized('two-negatives', 'Two Negatives', {
+        bingoCount: -2 * MAX_ARCHIVE_NUMBER,
+        squaresMarked: 4,
+        firstBingoAt: 100,
+        dayStats: {
+          0: { bingoCount: -MAX_ARCHIVE_NUMBER, squaresMarked: 2, firstBingoAt: 100 },
+          1: { bingoCount: -MAX_ARCHIVE_NUMBER, squaresMarked: 2, firstBingoAt: 300 },
+        },
+      }),
+      oversized('root-negative', 'Root Negative', {
+        bingoCount: -MAX_ARCHIVE_NUMBER,
+        squaresMarked: 1,
+        firstBingoAt: 200,
+        dayStats: { 1: { bingoCount: -MAX_ARCHIVE_NUMBER, squaresMarked: 1, firstBingoAt: 200 } },
+      }),
+    ];
+    const ceremonial = new Set([2]);
+    const clientPodium = buildPodium(asLiveRoster(players), REAGGREGATING_SCHEDULE as DayDef[]);
+    const fnsPodium = buildPodiumPayload(
+      asReadFinalePlayers(players),
+      asFinaleDays(REAGGREGATING_SCHEDULE),
+    );
+    const emailRows = standingsThrough(
+      asReadFinalePlayers(players),
+      3,
+      new Set<number>(),
+      ceremonial,
+    );
+
+    expect(fnsPodium.champion).toEqual(clientPodium.champion);
+    // Both rows bottom out at -MAX, so squares decide — and the board agrees.
+    expect(clientPodium.champion).toEqual({
+      uid: 'two-negatives',
+      displayName: 'Two Negatives',
+      bingoCount: -MAX_ARCHIVE_NUMBER,
+      squaresMarked: 4,
+    });
+    expect(emailRows.map((r) => r.uid)).toEqual(['two-negatives', 'root-negative']);
+    expect(sortPlayers(asLiveRoster(players)).map((p) => p.uid)).toEqual([
+      'two-negatives',
+      'root-negative',
+    ]);
+    // Unclamped, `two-negatives` sums to twice the negative bound and sorts
+    // LAST — the reverse of what every clamped surface answers.
+    expect(rawBucketTotal(players[0], ceremonial)).toBe(-2 * MAX_ARCHIVE_NUMBER);
+    expect(rawBucketTotal(players[0], ceremonial)).toBeLessThan(
+      rawBucketTotal(players[1], ceremonial),
+    );
+  });
+});
+
 // --- The Standings Freeze, resolved once per package ----------------------------
 //
 // `standingsFreezeAtFor` is the third member of the ADR 0011 mirror family, and
@@ -1093,11 +1286,29 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
     });
     expect(rows[0].uid).toBe(clientPodium.champion?.uid);
 
-    // Pin the UNNORMALISED answer, so removing the map at the read boundary fails
-    // here rather than passing symmetrically: raw, the bigger count simply wins
-    // and the email leads with the row every other surface ranks second.
+    // An unnormalised BUCKET no longer reorders this pair, because the window
+    // total is clamped inside `standingsThrough` too (#1152, Codex P2 on PR
+    // #1165 round 8) — the second line the function's own contract describes,
+    // holding. Pinned so a regression that removes THAT clamp fails here.
     expect(
       standingsThrough(asEmailPlayers(OVERSIZED), 3, tutorial, ceremonial).map((r) => r.uid),
+    ).toEqual(['ace', 'zed']);
+
+    // What the read boundary is still the only line for is a row with NO
+    // breakdown in the window: `standingsThrough` has nothing to re-aggregate
+    // and reports the ROOT it was handed, so dropping the map there leads the
+    // email with a count no other surface reads.
+    const stripped = (rows: readonly EmailPlayer[]): EmailPlayer[] =>
+      rows.map((r) => ({ ...r, dayStats: undefined }));
+    expect(
+      standingsThrough(stripped(asReadFinalePlayers(OVERSIZED)), 3, tutorial, ceremonial).map(
+        (r) => r.uid,
+      ),
+    ).toEqual(['ace', 'zed']);
+    expect(
+      standingsThrough(stripped(asEmailPlayers(OVERSIZED)), 3, tutorial, ceremonial).map(
+        (r) => r.uid,
+      ),
     ).toEqual(['zed', 'ace']);
   });
 

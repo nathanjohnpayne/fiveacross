@@ -130,3 +130,33 @@ export const MAX_ARCHIVE_NUMBER = ARCHIVE_NUMBER_BOUND - 1;
 export function clampArchiveNumber(value: number): number {
   return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
 }
+
+/**
+ * A ranking total RE-AGGREGATED from a row's per-Day buckets, brought back
+ * inside the same bound each bucket already sits inside (#1152, Codex P2 on PR
+ * #1165).
+ *
+ * CLAMPING THE BUCKETS IS NOT ENOUGH, because two of the three ranking surfaces
+ * do not rank by the buckets: `podiumStandingRow` (`src/data/finale.ts`, and its
+ * `functions/src/finaleContent.ts` mirror) and `standingsThrough`
+ * (`functions/src/dailyEmailContent.ts`) ADD the surviving buckets back up, and
+ * a sum of clamped addends is not itself clamped. Two buckets at the maximum
+ * give a row a `2 * MAX_ARCHIVE_NUMBER` podium and email score while the LIVE
+ * Leaderboard and the frozen record read that same row's root as
+ * `MAX_ARCHIVE_NUMBER` — so a second row ties the champion on the board and
+ * loses to it on the podium, which is exactly the disagreement one shared bound
+ * exists to prevent. `players/{uid}` validates no field (ADR 0001), so a pair of
+ * maxed buckets is reachable on any Event.
+ *
+ * The clamp is applied ONCE, to the finished total, never per addend: a count
+ * may be negative for the same reason it may be oversized, and clamping as the
+ * sum accumulates would make the answer depend on the order the buckets happen
+ * to be visited in.
+ *
+ * A non-finite total reads `0` — the same number `readableRankingCount` gives an
+ * unreadable count — so a caller that has not been through that coercion still
+ * yields a sortable, renderable number rather than a `NaN`.
+ */
+export function clampReaggregatedTotal(total: number): number {
+  return Number.isFinite(total) ? clampArchiveNumber(total) : 0;
+}

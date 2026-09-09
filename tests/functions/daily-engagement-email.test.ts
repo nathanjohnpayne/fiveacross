@@ -2187,6 +2187,58 @@ describe('the email roster is READABLE before it is ranked (#1152)', () => {
     // give it to.
     expect(eventFirstBingoUid(roster, 2)).toBe('holder');
   });
+
+  // Codex P2 on PR #1165, round 8. Clamping each BUCKET is not enough:
+  // `standingsThrough` re-aggregates the window's buckets, and a sum of bounded
+  // counts is not itself bounded. Two buckets at the maximum used to give their
+  // row twice the bound in the morning email while the in-app Leaderboard and
+  // the frozen record read that row's clamped ROOT — so the row another surface
+  // ranks FIRST arrived second in the mail, which cannot be corrected after the
+  // fact (specs/daily-engagement-email.md § Ranking parity).
+  it('clamps the RE-AGGREGATED window total, not only each bucket', async () => {
+    const db = makeDb(
+      rosterDocs({
+        'events/med-2026/players/two-buckets': {
+          displayName: 'Two Buckets',
+          // The honest root of the two buckets below, clamped on every surface.
+          bingoCount: 2 * MAX_ARCHIVE_NUMBER,
+          squaresMarked: 20,
+          firstBingoAt: 100,
+          dayStats: {
+            0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 100 },
+            1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 300 },
+          },
+        },
+        'events/med-2026/players/root-max': {
+          displayName: 'Root Max',
+          bingoCount: MAX_ARCHIVE_NUMBER,
+          squaresMarked: 30,
+          firstBingoAt: 200,
+          dayStats: {
+            1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 30, firstBingoAt: 200 },
+          },
+        },
+      }),
+    );
+    const roster = await readEmailRoster(db, 'med-2026');
+
+    // Every bucket is already at the bound coming out of the read boundary, so
+    // the defect lives entirely in the sum.
+    expect(roster.find((p) => p.uid === 'two-buckets')?.dayStats).toEqual({
+      0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 100 },
+      1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: 300 },
+    });
+    expect(roster.map((p) => p.bingoCount)).toEqual([MAX_ARCHIVE_NUMBER, MAX_ARCHIVE_NUMBER]);
+
+    // Clamped, the two rows tie on bingos and squares decide — the order the
+    // roots already give the live board and both podiums. Unclamped, the summed
+    // row scores twice the bound and leads the email alone.
+    const ranked = standingsThrough(roster, 2);
+    expect(ranked.map((p) => `${p.uid}:${p.bingoCount}/${p.squaresMarked}`)).toEqual([
+      `root-max:${MAX_ARCHIVE_NUMBER}/30`,
+      `two-buckets:${MAX_ARCHIVE_NUMBER}/20`,
+    ]);
+  });
 });
 
 describe('the Bodega Bay POC, replayed sweep by sweep (#723)', () => {

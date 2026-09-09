@@ -108,6 +108,20 @@ export function clampArchiveNumber(value: number): number {
   return Math.min(MAX_ARCHIVE_NUMBER, Math.max(-MAX_ARCHIVE_NUMBER, value));
 }
 
+/** A ranking total RE-AGGREGATED from a row's per-Day buckets, brought back
+ *  inside the same bound each bucket already sits inside. Mirror of
+ *  `clampReaggregatedTotal` in `src/data/eventLimits.ts`, whose comment states
+ *  why a sum of clamped addends still has to be clamped: two buckets at the
+ *  maximum give a row twice the bound where its clamped ROOT is what the live
+ *  board and the frozen record rank by. Applied ONCE to the finished total —
+ *  clamping as the sum accumulates would make a negative count's placement in
+ *  the map decide the answer. Read by `podiumStandingRow` below and by
+ *  `standingsThrough` (`dailyEmailContent.ts`), the two re-aggregating rankers
+ *  on this side (#1152, Codex P2 on PR #1165). */
+export function clampReaggregatedTotal(total: number): number {
+  return Number.isFinite(total) ? clampArchiveNumber(total) : 0;
+}
+
 /** A ranking count the comparator can SUBTRACT: a non-numeric or non-finite stat
  *  reads as `0`, a finite one is CLAMPED. Mirror of `readableRankingCount`
  *  (`src/game/logic.ts`). */
@@ -352,6 +366,12 @@ function effectiveFirstBingoAt(
  *  stand — there is nothing to exclude, and re-summing the buckets anyway would
  *  rewrite a legacy/hybrid row whose roots and buckets disagree.
  *
+ *  The re-aggregated totals are CLAMPED to the same bound their buckets already
+ *  sit inside (#1152, Codex P2 on PR #1165): a sum of bounded counts is not
+ *  itself bounded, and the live board and the frozen record rank this row by its
+ *  clamped ROOT, so an unclamped podium total would let another row tie it there
+ *  and lose to it here.
+ *
  *  Byte-identical to `podiumStandingRow` in `src/data/finale.ts`, including that
  *  empty-set passthrough — the parity test compares the two builders' output. */
 function podiumStandingRow(
@@ -379,7 +399,13 @@ function podiumStandingRow(
     bingoCount += stat.bingoCount;
     squaresMarked += stat.squaresMarked;
   }
-  return { ...player, bingoCount, squaresMarked, firstBingoAt };
+  return {
+    ...player,
+    // The SUM is bounded, not just its addends: see `clampReaggregatedTotal`.
+    bingoCount: clampReaggregatedTotal(bingoCount),
+    squaresMarked: clampReaggregatedTotal(squaresMarked),
+    firstBingoAt,
+  };
 }
 
 // --- Last-call standings copy ---------------------------------------------------

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { buildPodium, finaleDayIndex, finalePinIndex } from './finale';
+import { MAX_ARCHIVE_NUMBER } from './eventLimits';
+import { sortPlayers } from '../game/logic';
+import { withReadableDayStats } from './eventArchive';
 import type { DayDef, PlayerDoc } from '../types';
 
 // Fixtures (#217, specs/d15-finale.md): a 3-Day cruise — embark (Day 0,
@@ -308,5 +311,68 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     ];
     const podium = buildPodium(players, DAYS, new Map(), false);
     expect(podium.dailyHonors).toEqual([]);
+  });
+
+  // #1152, Codex P2 on PR #1165. THE RE-AGGREGATED TOTAL IS BOUNDED TOO. Every
+  // bucket reaching this podium is already inside `MAX_ARCHIVE_NUMBER` — the
+  // live roster comes through `withReadableDayStats` — but `podiumStandingRow`
+  // ADDS the non-ceremonial buckets back up, and a sum of bounded counts is not
+  // itself bounded. `players/{uid}` validates no field (ADR 0001), so two
+  // buckets at the maximum are reachable, and they used to hand their row twice
+  // the bound HERE while the live Leaderboard ranked that same row by its
+  // clamped ROOT — the two surfaces ordering one roster two different ways.
+  it('clamps a re-aggregated total to the same bound the live board ranks by', () => {
+    const players = [
+      player({
+        uid: 'two-buckets',
+        // The honest root of the two buckets below, which the live path clamps.
+        bingoCount: 2 * MAX_ARCHIVE_NUMBER,
+        squaresMarked: 20,
+        dayStats: {
+          0: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: null },
+          1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 10, firstBingoAt: null },
+        },
+      }),
+      player({
+        uid: 'root-max',
+        bingoCount: MAX_ARCHIVE_NUMBER,
+        squaresMarked: 30,
+        dayStats: { 1: { bingoCount: MAX_ARCHIVE_NUMBER, squaresMarked: 30, firstBingoAt: null } },
+      }),
+    ];
+    // Day 2 is ceremonial, so the podium re-aggregates rather than reading roots.
+    const podium = buildPodium(players.map(withReadableDayStats), DAYS);
+
+    // Clamped, the bingos TIE and squares decide — the same answer the live
+    // board reaches from the clamped roots.
+    expect(podium.champion).toEqual({
+      uid: 'root-max',
+      displayName: 'root-max',
+      bingoCount: MAX_ARCHIVE_NUMBER,
+      squaresMarked: 30,
+    });
+    expect(podium.runnersUp).toEqual([
+      {
+        uid: 'two-buckets',
+        displayName: 'two-buckets',
+        bingoCount: MAX_ARCHIVE_NUMBER,
+        squaresMarked: 20,
+      },
+    ]);
+    expect(sortPlayers(players.map(withReadableDayStats)).map((p) => p.uid)).toEqual([
+      'root-max',
+      'two-buckets',
+    ]);
+
+    // The input that makes the case bite, pinned: UNCLAMPED, this row's two
+    // maxed buckets re-aggregate to twice the bound, which outranks every
+    // clamped row there can be — so the podium crowned `two-buckets` while the
+    // board, reading the same row's clamped root, did not.
+    const rawTotal = Object.values(players[0].dayStats ?? {}).reduce(
+      (sum, stat) => sum + stat.bingoCount,
+      0,
+    );
+    expect(rawTotal).toBe(2 * MAX_ARCHIVE_NUMBER);
+    expect(rawTotal).toBeGreaterThan(podium.champion?.bingoCount ?? 0);
   });
 });
