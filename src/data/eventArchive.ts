@@ -24,6 +24,7 @@ import {
   resolvedStandingsFreezeAt,
   sortPlayers,
   tutorialDayIndexSet,
+  withReadableRanking,
 } from '../game/logic';
 import type {
   ArchivedDayHonor,
@@ -663,43 +664,66 @@ export function archiveInstant(value: unknown): number | null {
  * nothing beyond it: `blackout` and `displayName` are coerced where they are
  * serialised, because no selector or comparator reads them.
  *
+ * AND IT IS NOW THE LIVE RANKING PATH'S NORMALISER TOO (#1152, Codex P2 on PR
+ * #1165 round 4). `useLeaderboard` used to map its roster through
+ * `withReadableRanking`, which normalises the ROOT alone — but the Leaderboard's
+ * First-to-BINGO pin resolves through `effectiveCruiseFirstBingoAt`, which
+ * PREFERS the per-Day buckets whenever the row carries any. So a bucket stamp
+ * outside the bound survived live and was clamped in the record: two rows whose
+ * bucket stamps are distinct but both below `-MAX_ARCHIVE_NUMBER` stay ordered
+ * live and collapse to a tie when frozen, where the uid tie-break can hand the
+ * honour to the OTHER Player — the frozen page naming someone the last live page
+ * did not. One function on both paths is the fix, rather than a third helper:
+ * the buckets are not an archive concern, they are a RANKING concern, and this
+ * is where their normalisation already lived.
+ *
  * A well-formed row is unchanged by construction, and no count is RECOMPUTED:
  * whatever the Player's own row said is still what the record says (ADR 0001).
  * This decides nothing about who won — it only makes the row readable by the
  * selectors and the comparator that were already reading it.
  */
 export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
-  const firstBingoAt = archiveInstant(p.firstBingoAt);
-  const bingoCount = archiveCount(p.bingoCount);
-  const squaresMarked = archiveCount(p.squaresMarked);
-  // Object identity is preserved for every ordinary row: the console re-runs
-  // this on each render, and copying rows would defeat the reference equality
-  // React's memoisation elsewhere relies on. `NaN === NaN` is false, so a row
-  // carrying one is correctly seen as changed.
-  const rootReadable =
-    firstBingoAt === p.firstBingoAt
-    && bingoCount === p.bingoCount
-    && squaresMarked === p.squaresMarked;
+  // THE ROOT HALF IS `withReadableRanking` ITSELF (#1152, Codex P2 on PR #1165
+  // round 4). It used to be a second statement of the same three coercions here,
+  // which is how the two paths drifted twice — once on the BOUND (b050334) and
+  // once on the BUCKETS (this change). `src/data/eventArchive.ts` already imports
+  // `src/game/logic.ts`, so the shared half lives on the side that imports
+  // nothing from this one and the cycle stays closed exactly as it does for
+  // `clampArchiveNumber`. Object identity survives the delegation: that helper
+  // returns a well-formed row unchanged.
+  const rooted = withReadableRanking(p);
   const raw = p.dayStats;
-  if (!raw || typeof raw !== 'object') {
-    return rootReadable ? p : { ...p, firstBingoAt, bingoCount, squaresMarked };
+  if (!raw || typeof raw !== 'object') return rooted;
+  // Object identity is preserved for every ordinary row — buckets included: the
+  // console re-runs this on each render, `useLeaderboard` runs it on every roster
+  // snapshot, and copying rows would defeat the reference equality React's
+  // memoisation elsewhere relies on. `NaN === NaN` is false, so a row carrying
+  // one is correctly seen as changed.
+  let changed = false;
+  const readable: Record<string, NonNullable<PlayerDoc['dayStats']>[number]> = {};
+  for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
+    // A bucket that is not an object is DROPPED — there is nothing to default a
+    // Day's evidence to — and dropping one is itself a change.
+    if (!bucket || typeof bucket !== 'object') {
+      changed = true;
+      continue;
+    }
+    const stat = bucket as Record<string, unknown>;
+    const bingoCount = archiveCount(stat.bingoCount);
+    const squaresMarked = archiveCount(stat.squaresMarked);
+    const firstBingoAt = archiveInstant(stat.firstBingoAt);
+    if (
+      bingoCount !== stat.bingoCount
+      || squaresMarked !== stat.squaresMarked
+      || firstBingoAt !== stat.firstBingoAt
+    ) {
+      changed = true;
+    }
+    readable[key] = { bingoCount, squaresMarked, firstBingoAt };
   }
-  const readable = Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>)
-      .filter(([, bucket]) => !!bucket && typeof bucket === 'object')
-      .map(([key, bucket]) => {
-        const stat = bucket as Record<string, unknown>;
-        return [
-          key,
-          {
-            bingoCount: archiveCount(stat.bingoCount),
-            squaresMarked: archiveCount(stat.squaresMarked),
-            firstBingoAt: archiveInstant(stat.firstBingoAt),
-          },
-        ];
-      }),
-  ) as NonNullable<PlayerDoc['dayStats']>;
-  return { ...p, firstBingoAt, bingoCount, squaresMarked, dayStats: readable };
+  return changed
+    ? { ...rooted, dayStats: readable as NonNullable<PlayerDoc['dayStats']> }
+    : rooted;
 }
 
 /**

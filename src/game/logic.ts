@@ -973,12 +973,16 @@ function readableRankingInstant(value: unknown): number | null {
  * straight into the DOM, where React throws on an object child, so a sort that no
  * longer crashes would simply move the crash one line down.
  *
- * The sibling coercion is `withReadableDayStats` in `src/data/eventArchive.ts`,
- * which normalises the SAME three root fields and a row's per-Day BUCKETS beside
- * them for the honour selectors. They stay separate FUNCTIONS — that one runs on
- * the server re-read the freeze takes and has buckets to walk, this one runs on
- * every roster snapshot and does not — but they no longer carry separate rules
- * about what a number is: the bound above is one helper, imported by both.
+ * IT IS NO LONGER A RANKING ENTRY POINT OF ITS OWN (#1152, Codex P2 on PR #1165
+ * round 4). `withReadableDayStats` in `src/data/eventArchive.ts` CALLS this for
+ * the root and adds a row's per-Day BUCKETS beside it, and BOTH ranking paths now
+ * call that one function: the archive builder as it always did, and
+ * `useLeaderboard` too. Keeping them as two entry points is what let the bound
+ * drift once (b050334) and the buckets drift again — the live pin resolves
+ * through `effectiveCruiseFirstBingoAt`, which prefers the buckets this helper
+ * cannot see. So this stays the statement of what a readable RANKING FIELD is,
+ * with exactly one caller, on the side of the graph `eventArchive` imports rather
+ * than the other way round.
  */
 export function withReadableRanking<T extends Rankable>(row: T): T {
   const bingoCount = readableRankingCount(row.bingoCount);

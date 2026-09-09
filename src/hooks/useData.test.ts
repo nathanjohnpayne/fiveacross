@@ -46,7 +46,13 @@ vi.mock('firebase/firestore', () => {
 
 // Real module under test — imported after the mocks are declared.
 import { useItems, useBoard, useDayMetasStatus, useEventDoc, useLeaderboard, useMyUser } from './useData';
-import { MAX_DAYS } from '../data/eventLimits';
+import { MAX_ARCHIVE_NUMBER, MAX_DAYS } from '../data/eventLimits';
+// The archive's own roster normaliser and the shared First-to-BINGO selector, so
+// the LIVE path's answer is compared against the frozen one rather than described
+// separately (#1152, Codex P2 on PR #1165 round 4).
+import { withReadableDayStats } from '../data/eventArchive';
+import { cruiseFirstBingoUid, withReadableRanking } from '../game/logic';
+import type { PlayerDoc } from '../types';
 
 beforeEach(() => {
   H.eventId = 'event-a';
@@ -870,6 +876,74 @@ describe('useLeaderboard makes the roster READABLE before it ranks it', () => {
 
     // Not merely equal — the SAME object. The coercion is a repair, not a copy
     // pass over every snapshot.
+    expect(result.current.players[0]).toBe(healthy);
+  });
+});
+
+// #1152, Codex P2 on PR #1165 round 4. The roster is normalised BEFORE it is
+// ranked — but "ranked" is two questions on this surface, and the root fields are
+// only the first. The Leaderboard's First-to-BINGO pin resolves through
+// `effectiveCruiseFirstBingoAt`, which PREFERS a row's per-Day `dayStats` buckets
+// whenever it has any, and `players/{uid}` validates a bucket exactly as little as
+// it validates the root. The freeze runs those buckets through
+// `withReadableDayStats`; the live path ran the root-only `withReadableRanking`,
+// so a bucket stamp outside the archive's magnitude bound survived here and was
+// clamped there — and the frozen page could then name a First to BINGO the last
+// live page did not. `useLeaderboard` therefore calls the archive's own function.
+describe('useLeaderboard normalises the per-Day buckets the pin ranks by (#1152)', () => {
+  const rosterSnap = (rows: unknown[]) => ({
+    docs: rows.map((row) => ({ data: () => row })),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+  // Root stamps stay `null` so the honour is decided by the BUCKETS alone, which
+  // is the half the root-only normaliser cannot reach.
+  const bucketRow = (uid: string, stamp: number): PlayerDoc =>
+    ({
+      uid,
+      displayName: uid,
+      photoURL: null,
+      joinedAt: 0,
+      bingoCount: 1,
+      squaresMarked: 1,
+      firstBingoAt: null,
+      reshufflesUsed: 0,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 1, firstBingoAt: stamp } },
+    }) as unknown as PlayerDoc;
+
+  const notTutorial = () => false;
+
+  it('keeps the same First-to-BINGO holder live and frozen for two out-of-bound bucket stamps', () => {
+    // Both stamps are below `-MAX_ARCHIVE_NUMBER` and DISTINCT, so they order one
+    // way unclamped and tie under the clamp — where the tie-break is uid
+    // ascending, which names the OTHER Player. The uid ordering is deliberately
+    // the opposite of the raw stamp ordering, so the two answers differ.
+    const rows = [
+      bucketRow('a-later', -(MAX_ARCHIVE_NUMBER + 1_000)),
+      bucketRow('z-earlier', -(MAX_ARCHIVE_NUMBER + 2_000)),
+    ];
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+    sub.fire(rosterSnap(rows));
+
+    // The freeze's answer, taken through the builder's own normaliser.
+    const frozenHolder = cruiseFirstBingoUid(rows.map(withReadableDayStats), notTutorial);
+    expect(frozenHolder).toBe('a-later');
+    expect(cruiseFirstBingoUid(result.current.players, notTutorial)).toBe(frozenHolder);
+
+    // …and the root-only normaliser really does answer differently, so the
+    // agreement above is about the buckets and not about the fixture.
+    expect(cruiseFirstBingoUid(rows.map(withReadableRanking), notTutorial)).toBe('z-earlier');
+  });
+
+  it('returns a row whose buckets are already readable by IDENTITY', () => {
+    // `useLeaderboard` runs this on every roster snapshot and every real Player
+    // carries `dayStats`, so the ordinary case still has to cost one array and no
+    // row copies — the property the root-only normaliser had, kept.
+    const healthy = bucketRow('ok', 900);
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useLeaderboard());
+    sub.fire(rosterSnap([healthy]));
+
     expect(result.current.players[0]).toBe(healthy);
   });
 });

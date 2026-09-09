@@ -7,9 +7,9 @@ import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
 import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
-import { usableDayIndexes } from '../data/eventArchive';
+import { usableDayIndexes, withReadableDayStats } from '../data/eventArchive';
 import { supportedDayIndex } from '../data/eventLimits';
-import { sortPlayers, withReadableRanking, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
+import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
 // Both subs subscribe with includeMetadataChanges so the cache→server
@@ -877,18 +877,33 @@ export function useLeaderboard() {
   // — taking down every consumer of this roster, the Admin console's Game settings
   // and its Reopen play control with them, on an Event that may already be shut.
   //
-  // The guard goes HERE, before the sort, rather than inside the comparator — the
-  // same mechanism `draftEventArchive` applies through `withReadableDayStats` on
-  // the roster it re-reads (#1151, Codex P1 on PR #1162). One pass over the rows
-  // about to be ranked keeps the ORDER and the row that is PRINTED reading the
-  // same numbers, and the printing is the half no comparator guard reaches:
-  // `Leaderboard` renders `{p.bingoCount}` into the DOM, where React throws on an
-  // object child. `withReadableRanking` returns a well-formed row by IDENTITY, so
-  // this costs one array and changes nothing for the rosters that were always
-  // fine; it decides nothing about who won, and the frozen record is unaffected
-  // because `toStandingRow` applies the identical coercion on the server re-read.
+  // The guard goes HERE, before the sort, rather than inside the comparator — and
+  // it is `withReadableDayStats`, THE SAME FUNCTION `draftEventArchive` applies to
+  // the roster it re-reads (#1151, Codex P1 on PR #1162; #1152, Codex P2 on PR
+  // #1165 round 4). One pass over the rows about to be ranked keeps the ORDER and
+  // the row that is PRINTED reading the same numbers, and the printing is the half
+  // no comparator guard reaches: `Leaderboard` renders `{p.bingoCount}` into the
+  // DOM, where React throws on an object child.
+  //
+  // IT IS THE ARCHIVE'S OWN NORMALISER RATHER THAN THE ROOT-ONLY
+  // `withReadableRanking` because the ROOT IS NOT ALL THIS SURFACE RANKS BY. The
+  // First-to-BINGO pin resolves through `effectiveCruiseFirstBingoAt`, which
+  // prefers a row's per-Day `dayStats` buckets whenever it has any — buckets
+  // `players/{uid}` validates as little as it validates the root. The freeze
+  // clamped those and the live path did not, so two rows whose bucket stamps are
+  // distinct but both outside the bound stayed ordered here and tied in the
+  // record, where the uid tie-break could hand the honour to the other Player: the
+  // archived page naming a First to BINGO the last live page did not.
+  // `withReadableRanking` is still the statement of what a readable ranking FIELD
+  // is — `withReadableDayStats` calls it — but it is no longer a second ranking
+  // entry point that can drift from the first.
+  //
+  // A well-formed row is still returned by IDENTITY, buckets included, so this
+  // costs one array and changes nothing for the rosters that were always fine; it
+  // decides nothing about who won, and the frozen record is unaffected because
+  // `toStandingRow` applies the identical coercion on the server re-read.
   return {
-    players: sortPlayers(data.map((p) => withReadableRanking(p))),
+    players: sortPlayers(data.map((p) => withReadableDayStats(p))),
     loading,
     hasServerData,
     fromCache,
