@@ -771,6 +771,58 @@ describe('post-sailing-archive — the archive write must carry the whole record
     );
   });
 
+  // Codex P2 on PR #1162, round 9. `rank > 0` says the holder's place is a real
+  // ordinal and says nothing about whether the roster is that long, so the two
+  // clauses beside each other still admitted a record that claims in one breath
+  // that nobody played and that somebody came first — permanently, because the
+  // flip is irreversible and locks `archive`, and visibly, because the archived
+  // Share Card prints that place out of a roster it also reports as empty.
+  it('DENIES a First-BINGO rank that overruns the roster the record declares', async () => {
+    // The shape the finding names: `playerCount: 0` beside `standings: []`,
+    // which `standingsSizeMatches` is perfectly happy with — the two agree the
+    // roster is empty — and an otherwise valid pair whose row ranks first.
+    await assertFails(archiveWith({ ...FROZEN_RECORD, standings: [], playerCount: 0 }));
+    // …and any rank past the count, on a roster that does exist. The fixture
+    // carries one Player, so second place names nobody.
+    await assertFails(
+      archiveWith({
+        ...FROZEN_RECORD,
+        firstBingoRow: { ...FROZEN_RECORD.firstBingoRow, rank: 2 },
+      }),
+    );
+  });
+
+  it('ALLOWS a holder ranked LAST', async () => {
+    // `rank == playerCount` is the boundary case rather than an exception: the
+    // Player who got there first can be last in the standings, and the fixture's
+    // own `rank: 1` beside `playerCount: 1` is that same equality.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 3 }, (_, i) => standingsRow(i)),
+        playerCount: 3,
+        firstBingo: { uid: 'player-uid-2', displayName: 'P2', at: 1002 },
+        firstBingoRow: { ...standingsRow(2), rank: 3 },
+      }),
+    );
+  });
+
+  it('ALLOWS a holder ranked past the retained prefix', async () => {
+    // The bound is `playerCount`, not `standings.size()`: the holder's row is
+    // carried OUTSIDE the bounded prefix precisely so a place past it can still
+    // be printed, so asking the prefix would refuse the very record the pairing
+    // exists for.
+    await assertSucceeds(
+      archiveWith({
+        ...FROZEN_RECORD,
+        standings: Array.from({ length: 200 }, (_, i) => standingsRow(i)),
+        playerCount: 250,
+        firstBingo: { uid: 'player-uid-249', displayName: 'P249', at: 1249 },
+        firstBingoRow: { ...standingsRow(249), rank: 250 },
+      }),
+    );
+  });
+
   it('DENIES a non-finite or out-of-range freezeAt', async () => {
     // The Standings Freeze the whole record cut on, held to the same bound as
     // the pair's own instants. It is the one number here that needs no Player to

@@ -291,13 +291,42 @@ service cloud.firestore {
         && row.rank is int
         && row.rank > 0;
     }
+    // …AND THAT PLACE HAS TO EXIST IN THE ROSTER THE RECORD DECLARES (#1151,
+    // Codex P2 on PR #1162, round 9).
+    //
+    // `rank > 0` says the place is a real ordinal; it says nothing about whether
+    // the standings it indexes are that long. So a direct admin flip could
+    // freeze `playerCount: 0` beside `standings: []` — which `standingsSizeMatches`
+    // is perfectly happy with, the two agreeing that the roster is empty — and a
+    // First-BINGO pair whose row claims `rank: 1`. The record then says in one
+    // breath that nobody played and that somebody came first, permanently, on the
+    // write that can never be amended, and the archived Share Card prints the
+    // pinned row's place out of a roster it also reports as having none.
+    //
+    // Asked HERE rather than in `firstBingoRowComplete`, which is handed the row
+    // alone and cannot see the count. The comparison is against `playerCount`
+    // rather than `standings.size()` because `playerCount` is the COMPLETE
+    // ban-filtered cardinality while `standings` is only its bounded prefix — the
+    // holder's row is carried outside that prefix precisely so a rank past 200
+    // can still be printed, and asking the prefix would refuse exactly the record
+    // that pairing exists for. `playerCount` has already been held to a
+    // non-negative int by the time this is reached, and `firstBingoRowComplete`
+    // has already required `rank is int` — so the two are comparable numbers
+    // here, and `rank > 0` combined with this bound is what forbids a non-null
+    // pair beside a roster of zero.
+    //
+    // The writer produces exactly this: `holderAt + 1` over an index into
+    // `ranked`, beside `ranked.length`, so the bound holds by construction for
+    // every record `draftEventArchive` can build — including the boundary case
+    // where the holder is last.
     function firstBingoPairComplete(archive) {
       return (archive.firstBingo == null && archive.firstBingoRow == null)
         || (archive.firstBingo is map
             && archive.firstBingoRow is map
             && firstBingoHonorComplete(archive.firstBingo)
             && firstBingoRowComplete(archive.firstBingoRow)
-            && archive.firstBingoRow.uid == archive.firstBingo.uid);
+            && archive.firstBingoRow.uid == archive.firstBingo.uid
+            && archive.firstBingoRow.rank <= archive.playerCount);
     }
     // THE RETAINED ROWS AND THE ROSTER CARDINALITY, BOUND TO EACH OTHER (#1151,
     // Codex P2 on PR #1162).

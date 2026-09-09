@@ -1700,6 +1700,64 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     ).toBe(false);
   });
 
+  // Codex P2 on PR #1162, round 9. `rank > 0` says the holder's place is a real
+  // ordinal; it says nothing about whether the roster the record declares is that
+  // long. So `playerCount: 0` beside `standings: []` — which the pairing above is
+  // perfectly happy with, the two agreeing the roster is empty — and a
+  // First-BINGO pair ranked first was a record BOTH sides accepted, claiming in
+  // one breath that nobody played and that somebody came first. The flip arm's
+  // `firstBingoPairComplete` asks it now, and this is the writer's own copy,
+  // asked before the quiesce rather than after it.
+  it('binds the First-BINGO rank to the roster count, on both ends of the range', () => {
+    const roster = Array.from({ length: 3 }, (_, i) =>
+      mkPlayer({
+        uid: `p${i}`,
+        displayName: `P${i}`,
+        bingoCount: 1,
+        squaresMarked: 3 - i,
+        firstBingoAt: 1000 + i,
+        dayStats: { 1: { bingoCount: 1, squaresMarked: 3 - i, firstBingoAt: 1000 + i } },
+      }),
+    );
+    const record = draftEventArchive({
+      players: roster,
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    }).archive;
+    // The control: the builder produces `holderAt + 1` over an index into
+    // `ranked`, beside `ranked.length`, so the bound holds by construction.
+    expect(record.firstBingoRow?.rank).toBe(1);
+    expect(record.playerCount).toBe(3);
+    expect(writableArchiveRecord(record)).toBe(true);
+
+    const withRank = (rank: number, playerCount = record.playerCount) => ({
+      ...record,
+      playerCount,
+      firstBingoRow: { ...record.firstBingoRow!, rank },
+    });
+    // LAST place is the boundary, not an exception — the Player who got there
+    // first can be bottom of the standings.
+    expect(writableArchiveRecord(withRank(3))).toBe(true);
+    // One past the roster names nobody.
+    expect(writableArchiveRecord(withRank(4))).toBe(false);
+    // And the shape the finding names: an empty roster still claiming a first
+    // place. `standings` has to empty with it, or the pairing above refuses it
+    // for a different reason and this clause is never reached.
+    expect(
+      writableArchiveRecord({ ...withRank(1, 0), standings: [] }),
+    ).toBe(false);
+    // A holder ranked PAST the retained prefix is still legitimate: the row is
+    // carried outside that prefix precisely so its place can be printed.
+    expect(
+      writableArchiveRecord({
+        ...record,
+        standings: Array.from({ length: MAX_ARCHIVED_STANDING_ROWS }, () => record.standings[0]),
+        playerCount: MAX_ARCHIVED_STANDING_ROWS + 50,
+        firstBingoRow: { ...record.firstBingoRow!, rank: MAX_ARCHIVED_STANDING_ROWS + 50 },
+      }),
+    ).toBe(true);
+  });
+
   it('bounds a name at the cap the rest of the estate already enforces', () => {
     const draft = draftEventArchive({
       players: [mkPlayer({ uid: 'shouty', displayName: 'A'.repeat(50_000), squaresMarked: 1 })],

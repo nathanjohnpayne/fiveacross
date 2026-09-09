@@ -957,6 +957,15 @@ function writableStandingsSize(archive: EventArchive): boolean {
  * this refuses no record the writer can legitimately produce, only one a later
  * regression could.
  *
+ * Everything else here MIRRORS the boundary, the First-BINGO holder's place in
+ * the roster included (`rank <= playerCount`, Codex P2 on PR #1162, round 9):
+ * `rank > 0` says the place is a real ordinal and says nothing about whether the
+ * roster is that long, so `playerCount: 0` beside a pair claiming `rank: 1` was
+ * a record both sides accepted — one that says nobody played and that somebody
+ * came first. The flip arm asks it now, and this asks it on the near side of the
+ * quiesce, where a refusal is a typed `record-unwritable` rather than a rejected
+ * write past every cleanup.
+ *
  * `standings`' rows stay unchecked, for the original reason unchanged: every one
  * of them is built by `toStandingRow` from a row `usableUid` has already
  * accepted, so there is no unvalidated value left in them to ask about. How MANY
@@ -993,7 +1002,15 @@ export function writableArchiveRecord(archive: EventArchive): boolean {
         && !!archive.firstBingoRow
         && writableFirstBingo(archive.firstBingo)
         && writableFirstBingoRow(archive.firstBingoRow)
-        && archive.firstBingoRow.uid === archive.firstBingo.uid))
+        && archive.firstBingoRow.uid === archive.firstBingo.uid
+        // …and the holder's place exists in the roster the record declares
+        // (Codex P2 on PR #1162, round 9), the same clause the flip arm's
+        // `firstBingoPairComplete` now carries. Against `playerCount`, the
+        // COMPLETE ban-filtered cardinality, rather than `standings.length`,
+        // which is only its bounded prefix — the holder's row is carried outside
+        // that prefix precisely so a rank past `MAX_ARCHIVED_STANDING_ROWS` can
+        // still be printed.
+        && archive.firstBingoRow.rank <= archive.playerCount))
     && (archive.freezeAt === null || writableArchiveNumber(archive.freezeAt))
     && Number.isFinite(archive.archivedAt)
   );
