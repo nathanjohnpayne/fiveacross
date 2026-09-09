@@ -82,6 +82,15 @@ set -euo pipefail
 #                        deploy.sh runs exact-SA handoff readiness after every
 #                        pre-build guard and before BUILD_CMD for a Hosting or
 #                        handoff-Function scope.
+#   FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL
+#                        Path of the ADC document GOOGLE_APPLICATION_CREDENTIALS
+#                        will point at when `firebase deploy` runs. Naming it
+#                        lets the classifier rehearse predeploy hooks against
+#                        the credential they will really run with. Unset is the
+#                        ordinary case — op-firebase-deploy mints that document
+#                        inside its own process and deletes it on exit — and
+#                        then every exact single-endpoint exemption is refused
+#                        and this deploy classifies conservatively.
 #
 # Credentials:
 #   The invoker steps (1.6 and 2.5) shell out to `gcloud`. When a named deploy
@@ -108,7 +117,7 @@ ENV_CHECK_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,89p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,97p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -191,16 +200,165 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 # config/site selection, and the invoker/readiness scope. Keeping those
 # decisions together prevents the wrapper from building or mutating readiness
 # for an argv shape firebase-tools will later classify differently.
+#
+# For an exact `--only functions:<name>` scope the adapter also BUILDS that
+# codebase — it runs EVERY selected target's own `predeploy` hooks, in the order
+# Firebase runs them and under the environment `op-firebase-deploy` establishes,
+# in a scratch project whose Functions source dirs are copies, then asks that
+# codebase's OWN Firebase Functions SDK what it would deploy, exactly as the
+# deploy does: it starts the SDK's discovery server and reads
+# `/__/functions.yaml`. That is what decides whether the selector releases
+# exactly one endpoint and may therefore skip the auth-handoff readiness step;
+# the source alone cannot say, because Firebase loads `package.json.main`, not
+# `src/index.ts`. It is not new trust — `firebase deploy` runs those same hooks
+# and the same discovery a few steps below — and it is not new mutation, because
+# the build lands in the scratch copy.
+#
+# Those hooks are planned from the request the way firebase-tools assembles it,
+# not from `firebase.json` alone. `--only` / `--except` choose the targets and
+# the codebases whose hooks run; `-c/--config` and `-P/--project` name the
+# project directory and the dotenv files they see; and `-p/--public <path>`
+# overrides the Hosting public directory in the deploy's config BEFORE the
+# first hook, so it moves a Hosting hook's `$RESOURCE_DIR`. A request the
+# pinned CLI rejects outright — `--public` against a multi-site Hosting
+# configuration — is rejected here rather than rehearsed.
+#
+# It costs about 10s on this repository (the codebase's build, then discovery
+# run twice, one project probe at a time from a private copy so that two live
+# probes cannot agree with each other, with every selected codebase discovered
+# in sequence inside each), and only for that selector shape: `--only hosting`,
+# a whole-codebase `--only functions`, and every protected callable classify
+# without building anything (about 1s).
+# Running discovery twice does not by itself prove the surface is independent of
+# the project's configuration: the two synthetic probes can AGREE on a branch
+# that is false in both and true for the real project — a bucket named after its
+# project satisfies `storageBucket.startsWith(projectId + ".")` and neither probe
+# can. So a codebase that READS a value this preflight cannot reproduce forfeits
+# the inventory outright: the legacy `functions.config()` namespaces, the
+# `FIREBASE_CONFIG` adminSdkConfig, and the `storageBucket` / `databaseURL` /
+# `credential` a firebase-admin app hands back from it. The project id is not on
+# that list, deliberately — the preflight passes the real, pinned id in both
+# probes, so a branch on it is rehearsed rather than guessed at.
+# The exemption requires `firebase.json` at the CHECKOUT ROOT. Everything the
+# adapter stages and everything it watches for mutation starts from the
+# configured project directory, so a config in a subdirectory (`-c
+# deploy/firebase.json`) leaves the rest of the checkout as a deployment input
+# that no guard is watching: a hook reaching it through an inherited absolute
+# path such as `$INIT_CWD` would change what this deploy publishes without
+# moving a single fingerprint. That layout is refused outright, before any hook
+# or discovery probe runs, rather than watched at unbounded cost.
+# The tree the adapter watches has to be the tree it staged, so the staging is
+# BRACKETED by fingerprints: one before the first file is copied, one after, and
+# the deploy stops unless they are identical. Taking the baseline only after the
+# copy accepted whatever the checkout had become while the copy was running — an
+# edit landing in that window left the scratch project holding the pre-edit bytes
+# while every later comparison matched the post-edit baseline, so the exemption
+# could be granted for a checkout that is no longer the one the clean-tree guard
+# above approved.
+# What the REPOSITORY answers is bracketed the same way and from earlier still:
+# the adapter reads `git`'s answers before it establishes write containment and
+# before the copy starts, not beside the tree baseline afterwards. A background
+# fetch that advanced `origin/main` during that setup used to become the
+# baseline, so every later metadata check passed while the `HEAD == origin/main`
+# guard above no longer held. The other half of that fix is here rather than in
+# the adapter: the guard is RE-RUN once classification returns and before
+# BUILD_CMD, because the adapter can only watch a window it is inside, and a
+# fetch that lands while it refuses early — before it fingerprints anything — is
+# invisible to it and fatal to the premise that this deploy ships the reviewed,
+# merged commit.
+# A Hosting config that names a `source` rather than a `public` directory is
+# refused outright, project-wide. `deploy/index.js` runs the app's own framework
+# build BEFORE it chains a single predeploy hook, and that build replaces
+# `hosting.public` and can write a Functions artifact — so the request the
+# adapter would rehearse is not the request the deploy runs, and no rehearsal of
+# the hooks can be made to speak for it.
+# The hooks run against the ADC document the deploy will hand them, or the
+# exemption is refused. A synthetic stand-in was worse than nothing: the
+# documented path gives op-firebase-deploy the target service account directly,
+# so the real document is a `service_account` carrying the real `client_email`,
+# while the rehearsal always wrote an `impersonated_service_account` for a
+# synthetic one — and a hook that merely inspects that JSON took one branch here
+# and the other for real, with nothing failing to say so. This wrapper cannot
+# supply the real document: `op-firebase-deploy` mints it inside its own process
+# immediately before `firebase deploy`, deletes it in its own EXIT trap, and
+# refuses to run an arbitrary command under it, so there is no point in this
+# sequence where the document exists and nothing has been published. Every
+# ordinary deploy therefore classifies conservatively, and
+# FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL below is the seam through which a
+# wrapper that CAN establish it first names the document — an assertion that the
+# named file is the one the deploy's own hooks will read.
+# Every uncertainty is conservative, and conservatism is PROJECT-wide: if any
+# codebase this request loads cannot be vouched for — it consulted a value the
+# preflight cannot supply, it left work running outside its process group, it
+# would not load, or the adapter declined to build it at all (a non-Node
+# runtime, a `configDir` outside the project, a kit) — then no codebase in the
+# request is judged exact, because the codebases are loaded in one sequence and
+# any of them can rewrite another's artifact before that one is read. A codebase
+# the adapter declined to build is also never LOADED here: rehearsing it would
+# run its module-scope code under a configuration the adapter had to substitute,
+# for an inventory that could not be authoritative anyway.
+# Nothing runs uncontained. Before the first hook, the adapter puts every
+# program it is about to run under a platform write-containment mechanism —
+# `sandbox-exec` on macOS, `bwrap` or an unprivileged user+mount namespace on
+# Linux — under which the only writes that succeed are into its own scratch
+# directory and the system temp dir, MINUS this checkout wherever it happens to
+# sit. Nothing a Firebase deploy publishes is read from the temp dir, so what
+# that denies is every route from a hook to a deployment input.
+# What it PROVES before trusting any of it is exactly two things, in the
+# containment and before the first hook: a write inside THIS checkout fails, and
+# a write inside the adapter's own staging directory succeeds. Both are
+# required, because a mechanism that denied everything and one that denied
+# nothing each satisfy one of them alone. The first is stated in terms of this
+# checkout rather than of some other read-only directory because a repository
+# checked out beneath the system temp dir used to be dropped from the read-only
+# set — the temp dir has to stay writable for the staging — leaving the canary
+# to pass against $HOME while the deployment inputs stayed writable; the
+# checkout is now carved back out of that writable root as a nested read-only
+# override, and the canary asks about it by name.
+# This is the only guard here that acts on those programs rather than reporting
+# on them afterwards, which is what a detached worker needs: a hook can hand one
+# to the operating system with an environment of its own, past the process group
+# and past the marker sweep, to change a deployment input minutes after this
+# classification was accepted. A machine where either half cannot be proved, or
+# where the checkout cannot be expressed as read-only at all, gets the
+# conservative classification and runs no hooks. Set
+# FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see which half gave way.
+# No conservative answer is returned until the rehearsal has ENDED whatever it
+# started either. A hook can detach a writer into a session of its own and then
+# fail for a reason of the rehearsal's own, so the classifier sweeps its own
+# escaped processes and re-checks the tree on every exit, not only on the exits a
+# process caused — the second layer behind the containment, because a process
+# that escaped is still one whose effect on the artifact cannot be rehearsed.
+# Set FIREBASE_DEPLOY_CLASSIFIER_DEBUG=1 to see on stderr why a scope was
+# refused the exemption.
+#
+# Exit status 3 is its own outcome, not an invalid request: the classifier
+# detected that the live checkout CHANGED while it worked — tracked source the
+# clean-tree guard above had already approved, rewritten either by one of the
+# config's own predeploy hooks or by something else on this machine while the
+# staging was copying. The tree is no longer the tree that guard passed, so this
+# deploy stops here rather than building and publishing it, and nothing is
+# restored: which of those writes belong in the tree is a question for a human,
+# not for a preflight.
 echo ">> Validating and classifying Firebase deploy request (local)"
 FIREBASE_REQUEST_CLASSIFICATION=""
-if ! FIREBASE_REQUEST_CLASSIFICATION="$(
+CLASSIFIER_STATUS=0
+FIREBASE_REQUEST_CLASSIFICATION="$(
   FIREBASE_DEPLOY_DEFAULT_PROJECT="${DEPLOY_TARGET_PROJECT:-}" \
   FIREBASE_DEPLOY_DEFAULT_CONFIG="$PWD/firebase.json" \
   FIREBASE_DEPLOY_REJECT_OVERRIDES="$([[ -n "${DEPLOY_TARGET_PROJECT:-}" ]] && printf true || printf false)" \
+  FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL="${FIREBASE_DEPLOY_ESTABLISHED_CREDENTIAL:-}" \
   FIREBASE_DEPLOY_CLASSIFIER_FORMAT=shell \
     node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" -- \
       ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
-)"; then
+)" || CLASSIFIER_STATUS=$?
+if [[ "$CLASSIFIER_STATUS" -ne 0 ]]; then
+  if [[ "$CLASSIFIER_STATUS" -eq 3 ]]; then
+    echo "✗ A predeploy hook or a concurrent writer mutated this checkout during classification." >&2
+    echo "  The working tree is no longer the one the clean-tree guard approved, and nothing has been restored." >&2
+    echo "  Inspect it with 'git status', decide what belongs in it, then deploy again." >&2
+    echo "  NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
+  fi
   exit 1
 fi
 
@@ -234,6 +392,26 @@ if [[ "$CLASSIFICATION_FIELDS" -ne 14 ]]; then
   echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
+
+# The approved-checkout guard AGAIN, over the interval the classification just
+# spent.
+#
+# The guard above answered before the classifier ran a build, a hook and two
+# discovery probes — seconds to tens of seconds during which a background fetch
+# can advance `origin/main`, a scheduled job can move the branch, or an agent in
+# another window can write into the tree. The classifier's own fingerprints
+# cover only the window it is inside, and it does not always have one: every
+# refusal that lands before the staging (a scope with nothing to prove, an
+# unbuildable codebase, a web-framework Hosting config, no established deploy
+# credential) returns success having fingerprinted nothing at all. Asking again
+# here costs one fetch and closes the gap between the checkout this deploy was
+# approved for and the checkout BUILD_CMD is about to package.
+#
+# Deliberately BEFORE the build and before every mutating step below, and it
+# honours --force and DEPLOY_ALLOW_DIRTY exactly as the first call does, so a
+# break-glass deploy is not stopped here by a rule it already opted out of.
+echo ">> Re-checking the approved-checkout guards after classification"
+guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 
 # Reconciliation coordinates and readiness-only identity controls are PINNED
 # to the selected deploy target, never inherited (#768 r4 Codex P2; #852).
