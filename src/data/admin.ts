@@ -9,7 +9,7 @@ import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { claimsAwaitingAdmin, isSystemAuthor, safetyHideStands, type SafetyHideState } from './moderation';
 import {
-  archiveSnapshotFingerprint,
+  archiveSnapshotFingerprintOrNull,
   draftEventArchive,
   finaleHasRun,
   usableDayIndexes,
@@ -888,7 +888,10 @@ export type ArchiveReadFailure = `read-failed:${ArchiveReadStage}`;
  *  entry with no usable Day index, or name one Day TWICE, neither of which the
  *  converter refuses (so the console armed) and neither of which the raw
  *  post-quiesce read can turn into one honour per Day (Codex P2 on PR #1162);
- *  and `read-failed:<stage>` means one of the server
+ *  `config-unreadable` means the Event document could not be FINGERPRINTED at
+ *  all, so the configuration the reads were taken under cannot be compared with
+ *  the one the commit would land on (Codex P2 on PR #1162); and
+ *  `read-failed:<stage>` means one of the server
  *  reads the record is built from did not answer at all (CodeRabbit Major, PR
  *  #1162). All of them write NOTHING (#1151). */
 export type ArchiveEventResult =
@@ -903,6 +906,7 @@ export type ArchiveEventResult =
   | 'too-large'
   | 'record-unwritable'
   | 'schedule-unusable'
+  | 'config-unreadable'
   | ArchiveReadFailure;
 
 /**
@@ -1241,6 +1245,14 @@ export async function abandonArchive(
  *    `usableDayIndexes`, which the console's honour fan asks BEFORE arming, so
  *    neither shape reaches this refusal by way of a console that offered the
  *    control.
+ *  - `config-unreadable` — the Event document could not be fingerprinted (Codex
+ *    P2 on PR #1162). The snapshot-defining comparison below is taken over a RAW
+ *    document whose `days` no rules arm validates, and the canonicaliser threw
+ *    rather than answering: without a fingerprint there is no way to tell a
+ *    configuration that held from one that moved, and guessing either way is a
+ *    permanent record built against reads it does not match. Reported rather
+ *    than thrown, because the throw landed outside every `archiveRead` wrapper
+ *    on an Event this call had already shut.
  */
 export async function archiveEvent(
   token: number,
@@ -1294,7 +1306,16 @@ export async function archiveEvent(
   // unresolvable; an edited `days` leaves the record built from honour pins
   // fetched for a schedule that no longer exists. The transaction refuses rather
   // than combining the two.
-  const configAtRead = archiveSnapshotFingerprint(preData);
+  //
+  // FINGERPRINTED WITHOUT THROWING (Codex P2 on PR #1162). This line runs after
+  // the close and outside every `archiveRead` wrapper, over a RAW document whose
+  // `days` no rules arm validates — so a value the canonicaliser cannot walk
+  // threw out of `archiveEvent` entirely, skipping the console's automatic reopen
+  // and stranding a live Event shut with no record and no explanation. The
+  // canonicaliser is cycle-safe and Firestore-aware now; this is what makes a
+  // cause nobody anticipated a refusal the console can clean up after instead.
+  const configAtRead = archiveSnapshotFingerprintOrNull(preData);
+  if (configAtRead === null) return 'config-unreadable';
 
   // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
   // #1139). The console's own gate reads a passive listener, and a Claim can
@@ -1450,7 +1471,16 @@ export async function archiveEvent(
     // outside the fingerprint — moderation stays open through the quiesce on
     // purpose, and a ban is applied to the rows the record keeps rather than
     // deciding which rows were read (see `archiveSnapshotFingerprint`).
-    if (archiveSnapshotFingerprint(data) !== configAtRead) return 'config-changed';
+    //
+    // …and the transactional side is fingerprinted the same way, for the same
+    // reason (Codex P2 on PR #1162). A throw here would leave the transaction
+    // rejecting, which the classification below reads as a failed COMMIT — the
+    // one outcome that must keep surfacing as a thrown failure — so an
+    // unfingerprintable document would be reported as an archive whose fate this
+    // call does not know, when in fact it wrote nothing at all.
+    const configNow = archiveSnapshotFingerprintOrNull(data);
+    if (configNow === null) return 'config-unreadable';
+    if (configNow !== configAtRead) return 'config-changed';
     // THE FINALE GATE (#1151, routed here from #1150's review). The quiesce only
     // DELAYS the finale beats — the freeze stamp, the podium Moment and the
     // Most-Loved award are withheld while play is shut and land at the scheduled

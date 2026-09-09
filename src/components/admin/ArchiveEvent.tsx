@@ -192,6 +192,10 @@ const RESULT_PHASE: Record<ArchiveOutcome, Phase> = {
   // refuses rather than dereferences (Codex P2 on PR #1162) — again writing
   // nothing, again with the quiesce still in force on the way out.
   'schedule-unusable': 'closing',
+  // The Event document could not be fingerprinted, so the snapshot-defining
+  // comparison could not be made at all (Codex P2 on PR #1162) — again nothing
+  // written, again with the quiesce still in force on the way out.
+  'config-unreadable': 'closing',
   // A read that did not answer is the same shape of refusal as the four above:
   // the flip wrote nothing and the quiesce is still in force when it returns
   // (CodeRabbit Major, PR #1162). Each is listed rather than folded together so
@@ -225,6 +229,11 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
   // they are already looking at.
   'schedule-unusable':
     'One of the days in the schedule above could not be read, so the daily honours could not be looked up and nothing was frozen. Fix or re-save that day, then archive again.',
+  // No lever to name, like `record-unwritable`: the defect is a value stored on
+  // the Event document itself that nothing in the console can reach, and a
+  // second identical attempt would meet it again (Codex P2 on PR #1162).
+  'config-unreadable':
+    'The Event’s own settings could not be read closely enough to tell whether they changed while the standings were being taken, so nothing was frozen. Reload the console and try again—if it refuses a second time, the Event needs an operator rather than another attempt.',
   'read-failed:event': readFailedCopy('The Event'),
   'read-failed:claims': readFailedCopy('The Review queue'),
   'read-failed:roster': readFailedCopy('The final standings'),
@@ -258,6 +267,11 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
   'too-large',
   'record-unwritable',
   'schedule-unusable',
+  // IN for the same reason the four read refusals are (Codex P2 on PR #1162):
+  // before it existed, an unfingerprintable Event threw out of `archiveEvent`,
+  // past this set entirely, and left a live Event shut with the generic failure
+  // pill over it.
+  'config-unreadable',
   'config-changed',
   'finale-pending',
   'read-failed:event',

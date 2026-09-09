@@ -654,6 +654,25 @@ describe('ArchiveEvent — the pending-claim drain gate (#1151)', () => {
       /The Event settings changed while the record was being taken/,
     );
   });
+
+  // Codex P2 on PR #1162. The fingerprint is taken after play has closed and
+  // outside every `archiveRead` wrapper, so an Event document the canonicaliser
+  // cannot walk used to throw out of `archiveEvent` entirely — past this
+  // handler's cleanup, leaving a live Event shut with the generic `AsyncButton`
+  // failure pill and no way back. As a typed refusal it takes the same route as
+  // every other refusal that wrote nothing: stated, and play put back.
+  it('reopens play when the Event could not be FINGERPRINTED, and says nothing was frozen', async () => {
+    H.archiveEvent.mockResolvedValue('config-unreadable');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /could not be read closely enough to tell whether they changed.*nothing was frozen/,
+    );
+    // Play is back, so the Admin is looking at an OPEN Event's controls.
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+  });
 });
 
 describe('ArchiveEvent — the archive waits for its inputs to be server-confirmed', () => {

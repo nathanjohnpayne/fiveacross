@@ -1836,6 +1836,80 @@ describe('archiveEvent — the snapshot configuration is held across the reads',
       archiveSnapshotFingerprint(a as never),
     );
   });
+
+  // Codex P2 on PR #1162. This runs over a RAW document whose `days` no rules arm
+  // validates, so an Admin-SDK repair or a console hand edit can leave a native
+  // Firestore value in it — and a `DocumentReference` carries an ENUMERABLE
+  // `firestore` back-reference pointing at a graph that contains the reference
+  // again. A plain recursive walk cycles on it and throws `RangeError: Maximum
+  // call stack size exceeded`, after play has closed and outside every
+  // `archiveRead` wrapper.
+  it('fingerprints a SELF-REFERENCING value without throwing, and stably', () => {
+    // A faithful stand-in for the SDK's own shape: `path` is the reference's
+    // identity, and `firestore` is the handle that makes the graph cyclic.
+    const mkRef = (path: string) => {
+      const ref: Record<string, unknown> = { path, id: path.split('/').pop(), type: 'document' };
+      const firestore: Record<string, unknown> = { app: {} };
+      firestore.ref = ref;
+      ref.firestore = firestore;
+      return ref;
+    };
+    const withRef = (path: string) => ({
+      claimMode: 'honor',
+      days: [{ index: 0, theme: 'x', unlockAt: 1, source: mkRef(path) }],
+    });
+
+    // It answers rather than throwing…
+    expect(() => archiveSnapshotFingerprint(withRef('events/e/items/a') as never)).not.toThrow();
+    // …STABLY, which is the property the comparison is built on: two reads of an
+    // unchanged document must agree, or the freeze aborts at random.
+    expect(archiveSnapshotFingerprint(withRef('events/e/items/a') as never)).toBe(
+      archiveSnapshotFingerprint(withRef('events/e/items/a') as never),
+    );
+    // …and by the reference's PATH, so a reference that actually moved is still
+    // seen to have moved rather than collapsing onto a single "some object" tag.
+    expect(archiveSnapshotFingerprint(withRef('events/e/items/b') as never)).not.toBe(
+      archiveSnapshotFingerprint(withRef('events/e/items/a') as never),
+    );
+
+    // A cycle that is NOT one of the known Firestore shapes is tagged rather than
+    // walked — the backstop under the four special cases above.
+    const looping: Record<string, unknown> = { index: 0 };
+    looping.self = looping;
+    expect(() =>
+      archiveSnapshotFingerprint({ claimMode: 'honor', days: [looping] } as never),
+    ).not.toThrow();
+  });
+
+  it('reduces each Firestore value to the scalar the SDK round-trips it by', () => {
+    // Recognised by SHAPE rather than by `instanceof`: this module is
+    // Firestore-free on purpose, and duck-typing also survives two copies of the
+    // SDK in one bundle, which `instanceof` does not.
+    const fp = (day: unknown) => archiveSnapshotFingerprint({ days: [day] } as never);
+    // A Timestamp, by its milliseconds — so two decodes of one stored instant
+    // agree even though they are different objects.
+    expect(fp({ at: { toMillis: () => 1_700, seconds: 1, nanoseconds: 7 } })).toBe(
+      fp({ at: { toMillis: () => 1_700, seconds: 99, nanoseconds: 99 } }),
+    );
+    expect(fp({ at: { toMillis: () => 1_700 } })).not.toBe(fp({ at: { toMillis: () => 1_701 } }));
+    // Bytes, by their base64.
+    expect(fp({ b: { toBase64: () => 'AQI=' } })).toBe(fp({ b: { toBase64: () => 'AQI=' } }));
+    expect(fp({ b: { toBase64: () => 'AQI=' } })).not.toBe(fp({ b: { toBase64: () => 'AQM=' } }));
+    // A GeoPoint, by its coordinates.
+    const geo = (lat: number, lng: number) => ({ latitude: lat, longitude: lng, isEqual: () => true });
+    expect(fp({ g: geo(1.5, -2.5) })).toBe(fp({ g: geo(1.5, -2.5) }));
+    expect(fp({ g: geo(1.5, -2.5) })).not.toBe(fp({ g: geo(1.5, -2.6) }));
+
+    // …and a PLAIN map that merely has coordinates is walked as a map, not
+    // reduced to them. `latitude`/`longitude` are ordinary field names a stored
+    // Day could carry, and collapsing such a map to its two numbers would drop
+    // every other field from the fingerprint — so a change to one of them would
+    // read as no change, which is the one direction this comparison must never
+    // fail in.
+    expect(fp({ g: { latitude: 1.5, longitude: -2.5, place: 'Ibiza' } })).not.toBe(
+      fp({ g: { latitude: 1.5, longitude: -2.5, place: 'Mykonos' } }),
+    );
+  });
 });
 
 // Codex P2, PR #1139. `dayHonorChipLabel` resolves the Day's theme emoji out of
@@ -2082,6 +2156,31 @@ describe('archiveEvent — the reads are taken from the server AFTER the close',
     expect((A.updates[0].archive as { dailyHonors: { dayIndex: number }[] }).dailyHonors).toEqual([
       expect.objectContaining({ dayIndex: 4, uid: 'pin' }),
     ]);
+  });
+
+  it('REPORTS an Event it cannot fingerprint, rather than throwing past the cleanup', async () => {
+    // Codex P2 on PR #1162. The canonicaliser is cycle-safe and Firestore-aware
+    // now, so the concrete `DocumentReference` cycle cannot reach here — but the
+    // fingerprint is taken over a RAW document after play has closed and outside
+    // every `archiveRead` wrapper, so ANY throw from it left `archiveEvent`
+    // rejecting: the console's automatic reopen never ran and a live Event was
+    // stranded shut. A throwing getter stands in for the causes nobody
+    // anticipated, all of which are properties of the STORED document and would
+    // therefore meet a second attempt too.
+    const hostile: Record<string, unknown> = { index: 0 };
+    Object.defineProperty(hostile, 'theme', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable');
+      },
+    });
+    A.event = closingEvent({ days: [hostile] });
+    expect(await archiveEvent(1, { now: 5 })).toBe('config-unreadable');
+    expect(A.updates).toEqual([]);
+    // Refused at the PRE-READ, before the queue, the roster or any honour pin is
+    // asked for: without a fingerprint there is nothing for the later reads to be
+    // compared against.
+    expect(A.serverReads).toEqual(['events/test-event']);
   });
 
   it('never reaches the queue when the Event was not shut at all', async () => {

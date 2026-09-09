@@ -168,20 +168,108 @@ export type ArchivableEvent = Pick<
   Partial<Pick<EventDoc, 'name'>>;
 
 /**
+ * A tag for a value this canonicaliser will not walk into: a CYCLE, or a
+ * primitive `JSON.stringify` cannot represent (#1151, Codex P2 on PR #1162).
+ *
+ * Non-colliding BY CONSTRUCTION, which is the property that matters — this
+ * output is never parsed, only compared, so the tag only has to be a byte
+ * sequence no other branch below can emit. Every string this function produces
+ * goes through `JSON.stringify` and is therefore quoted; numbers, booleans and
+ * `null` are emitted bare but never in this shape. So a stored string literally
+ * reading `<<cycle>>` serialises as `"<<cycle>>"` — quoted, and distinct from
+ * this.
+ */
+const UNWALKABLE = (kind: string): string => `<<${kind}>>`;
+
+/**
  * JSON with object keys in a fixed order, so two reads of an UNCHANGED document
  * always serialize identically. `JSON.stringify` follows insertion order, which
  * the Firestore SDK does not promise to reproduce across two decodes of the same
  * document — and a comparison that can report a spurious change would abort
  * archives at random.
+ *
+ * FIRESTORE-AWARE AND CYCLE-SAFE, because it is handed RAW documents (#1151,
+ * Codex P2 on PR #1162). `archiveSnapshotFingerprint` fingerprints
+ * `EventDoc.days`, which is admin-written and validated by no rules arm, so an
+ * Admin-SDK repair or a console hand edit can leave a native Firestore value
+ * sitting in it. A plain recursive walk enumerated those as ordinary objects,
+ * and a `DocumentReference` carries an enumerable `firestore` back-reference
+ * that points at a graph containing the reference again: the walk cycles and
+ * throws `RangeError: Maximum call stack size exceeded`. That throw lands after
+ * play has closed and OUTSIDE every `archiveRead` wrapper, so `archiveEvent`
+ * rejected rather than returning a refusal, the console's automatic reopen never
+ * ran, and the Event was left stuck closing — the one outcome the two-write
+ * protocol exists to make impossible.
+ *
+ * The four special types are recognised by SHAPE rather than by `instanceof`,
+ * deliberately. This module is Firestore-free on purpose (its whole test layer
+ * runs without an emulator or an SDK), and duck-typing is also the more robust
+ * check at runtime: two copies of `firebase/firestore` in one bundle produce
+ * values that fail `instanceof` against the class this module would have
+ * imported. Each is reduced to the scalar the SDK itself round-trips it by —
+ * `Timestamp.toMillis()`, `GeoPoint`'s latitude/longitude, a reference's `path`,
+ * `Bytes.toBase64()` — so two reads of an unchanged field still agree, which is
+ * the only property this fingerprint needs.
+ *
+ * `seen` tracks the current PATH, not every node visited: an object is added
+ * before its children are walked and removed afterwards, so a value that appears
+ * twice in a TREE serialises identically both times and only a true back-edge is
+ * tagged. Tracking every visited node instead would report a spurious change the
+ * moment a document repeated a subobject.
  */
-function stableJson(value: unknown): string {
+function stableJson(value: unknown, seen: WeakSet<object> = new WeakSet()): string {
   if (value === null || value === undefined) return 'null';
+  // `JSON.stringify` THROWS on a bigint rather than returning undefined, and a
+  // throw here is the very failure this function was hardened against — so the
+  // one primitive it cannot represent is tagged with its own value, which keeps
+  // two different bigints distinguishable.
+  if (typeof value === 'bigint') return UNWALKABLE(`bigint:${value}`);
   if (typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(',')}}`;
+
+  const obj = value as Record<string, unknown>;
+  // THE FIRESTORE TYPES, ahead of the cycle check: none of them is cyclic in
+  // itself, and reducing them to a scalar is what stops the walk reaching the
+  // back-reference that is.
+  if (typeof obj.toMillis === 'function') {
+    return stableJson((obj.toMillis as () => unknown)());
+  }
+  if (typeof obj.toBase64 === 'function') {
+    return stableJson((obj.toBase64 as () => unknown)());
+  }
+  // A `GeoPoint`. `isEqual` is asked for alongside the coordinates BECAUSE the
+  // coordinates alone are not a distinctive enough shape: `latitude` and
+  // `longitude` are ordinary field names a stored Day could plausibly carry
+  // (`DayDef` already has `place`), and reducing such a map to its two numbers
+  // would drop every other field from the fingerprint — so a change to one of
+  // them would read as no change, which is the failure this fingerprint exists
+  // to prevent. Firestore's own `GeoPoint` carries `isEqual`; a plain map does
+  // not.
+  if (
+    typeof obj.latitude === 'number'
+    && typeof obj.longitude === 'number'
+    && typeof obj.isEqual === 'function'
+  ) {
+    return `{"latitude":${stableJson(obj.latitude)},"longitude":${stableJson(obj.longitude)}}`;
+  }
+  // A `DocumentReference` or a `CollectionReference`. `path` is the SDK's own
+  // identity for both, and it is the field the reference's `isEqual` compares —
+  // so this is the same question, asked without walking the `firestore` handle
+  // hanging off it.
+  if (typeof obj.path === 'string' && typeof obj.firestore === 'object') {
+    return stableJson(obj.path);
+  }
+
+  if (seen.has(obj)) return UNWALKABLE('cycle');
+  seen.add(obj);
+  try {
+    if (Array.isArray(value)) return `[${value.map((v) => stableJson(v, seen)).join(',')}]`;
+    const entries = Object.entries(obj)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v, seen)}`).join(',')}}`;
+  } finally {
+    seen.delete(obj);
+  }
 }
 
 /**
@@ -238,6 +326,42 @@ export function archiveSnapshotFingerprint(
     standingsFreezeAt: event?.standingsFreezeAt ?? null,
     frozenAt: event?.frozenAt ?? null,
   });
+}
+
+/**
+ * The fingerprint, or `null` if the document could not be fingerprinted at all
+ * (#1151, Codex P2 on PR #1162).
+ *
+ * `stableJson` above is now cycle-safe and Firestore-aware, so the concrete
+ * throw that prompted this — a `DocumentReference`'s enumerable `firestore`
+ * back-reference sending the walk round a cycle — cannot happen any more. This
+ * is the BELT beside those braces, and it is here because of WHERE the
+ * fingerprint runs rather than because of any value in particular: both calls
+ * are taken after `beginArchive` has already shut the Event, and one of them is
+ * outside every `archiveRead` wrapper. A throw from either therefore leaves
+ * `archiveEvent` REJECTING instead of returning, which skips the console's
+ * automatic reopen entirely and strands a live Event closed to gameplay with no
+ * record and no explanation — the failure mode the two-write protocol exists to
+ * make impossible.
+ *
+ * Anything that can still throw in there is something no one anticipated: a
+ * throwing getter, a Proxy that refuses enumeration, a `toMillis` that is not
+ * the SDK's. Every one of them is a property of the STORED document, so a second
+ * attempt would meet it again — which is exactly the case for turning it into a
+ * refusal the caller can name (`config-unreadable`) rather than a rejection it
+ * cannot clean up after.
+ */
+export function archiveSnapshotFingerprintOrNull(
+  event:
+    | Partial<Pick<EventDoc, 'claimMode' | 'days' | 'standingsFreezeAt' | 'frozenAt'>>
+    | null
+    | undefined,
+): string | null {
+  try {
+    return archiveSnapshotFingerprint(event);
+  } catch {
+    return null;
+  }
 }
 
 /**
