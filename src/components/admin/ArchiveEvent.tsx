@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   abandonArchive,
   archiveEvent,
@@ -529,17 +529,30 @@ export default function ArchiveEvent({
   // alone cannot tell from "nothing happened yet". A boolean "it moved" flag
   // answers that for ONE action; a monotonic count, snapshotted at click time,
   // answers it PER action, so a second action cannot clear the record the first
-  // was relying on (or vice versa). Both live in refs written during render,
-  // together, so they can never disagree about the same commit: an abandoned
-  // render would bump the count for a phase that never committed, which
-  // suppresses a message rather than showing a stale one — the safe direction,
-  // and the same posture the unconditional `phaseRef` write already took.
+  // was relying on (or vice versa). Both live in refs written TOGETHER, so they
+  // can never disagree about the same commit.
+  //
+  // …AND THEY ARE WRITTEN IN THE COMMIT PHASE, not during render (CodeRabbit on
+  // PR #1165). React may discard render work — an interrupted concurrent pass is
+  // the reachable case — and a ref written during one keeps a conclusion that
+  // never committed: a discarded pass for a phase the Event never reached leaves
+  // `phaseRef` naming that phase and bumps the count for it, so a pending action
+  // then fails BOTH of `report`'s tests and loses a status that was true. It is
+  // the safe direction (a message suppressed, never a stale one shown), but it is
+  // still a message lost for no reason, and it is the same rule the `#452` finding
+  // put the status latch in state for. `useLayoutEffect` rather than `useEffect`
+  // because the ref has to be current the instant a commit lands: `report` runs
+  // after an awaited write and `act` snapshots the count at click time, and a
+  // passive effect is a separate task those could both beat. A layout effect runs
+  // synchronously inside the commit, so a committed phase is never one behind,
+  // and an ABANDONED one leaves both refs untouched.
   const phaseRef = useRef(phase);
   const phaseSeqRef = useRef(0);
-  if (phaseRef.current !== phase) {
+  useLayoutEffect(() => {
+    if (phaseRef.current === phase) return;
     phaseRef.current = phase;
     phaseSeqRef.current += 1;
-  }
+  }, [phase]);
   // WHICH invocation is speaking (the post-4b barrier round on PR #1157). The
   // controls are swapped by the listener, not by the action: while a Close is
   // pending, the closing snapshot puts **Reopen play** on screen, the Admin
@@ -910,10 +923,18 @@ export default function ArchiveEvent({
                 // can arrive, or a subscription re-key, while the confirm row is
                 // armed.
                 disabled={!ready}
+                // Disarming is this invocation's own housekeeping, so it is held
+                // to the same liveness check its outcome and its cleanup are
+                // (CodeRabbit on PR #1165). A superseded action still runs to
+                // completion, and clearing `arming` unconditionally closed a
+                // confirm row a LATER action had opened — an Event that came back
+                // open while this one was in flight puts the Archive… control
+                // back, and an Admin who armed it again lost the row from under
+                // themselves for a write nobody is waiting on any more.
                 onAction={() =>
                   act(async (isCurrent) => {
                     const outcome = await runArchive(isCurrent);
-                    setArming(false);
+                    if (isCurrent()) setArming(false);
                     return outcome;
                   })
                 }

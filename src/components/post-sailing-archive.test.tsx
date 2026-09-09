@@ -1,3 +1,4 @@
+import { Suspense, startTransition, useState } from 'react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -1522,6 +1523,113 @@ describe('ArchiveEvent — a read that did not answer (#1162)', () => {
     expect(H.abandonArchive).not.toHaveBeenCalled();
     expect(await screen.findByRole('status')).toHaveTextContent(/The Event could not be read back/);
     expect(screen.getByRole('button', { name: 'Reopen play' })).toBeInTheDocument();
+  });
+});
+
+describe('ArchiveEvent — a superseded action keeps its hands off the surface (#1165)', () => {
+  it('does not close the confirmation panel from a SUPERSEDED action', async () => {
+    // CodeRabbit on PR #1165. Disarming is the invocation's own housekeeping, and
+    // it ran unconditionally: an Admin who reopened play while an Archive was in
+    // flight got the open controls back with the confirm row still armed, ready
+    // for a second attempt — and the superseded action then closed it under them.
+    let settleFirst: (value: unknown) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleFirst = resolve;
+        }),
+    );
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+
+    // The quiesce lands, the Admin reopens play — a second action over the first…
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: false }))} />);
+    // …and the open controls come back with the confirm row still on screen.
+    expect(screen.getByRole('group', { name: 'Confirm archive' })).toBeInTheDocument();
+
+    settleFirst({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'abandon', 'archive']));
+    await act(async () => {});
+    expect(screen.getByRole('group', { name: 'Confirm archive' })).toBeInTheDocument();
+  });
+
+  it('still closes it for the action that is CURRENT — the control', async () => {
+    // The same flush, the opposite outcome: if the wait above were too short to
+    // let the superseded continuation run, this would not close the row either.
+    let settle: (value: unknown) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    void userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+
+    settle({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive']));
+    await act(async () => {});
+    expect(screen.queryByRole('group', { name: 'Confirm archive' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive…' })).toBeInTheDocument();
+  });
+
+  it('keeps a pending action’s status when a render for another phase never commits', async () => {
+    // CodeRabbit on PR #1165, the render-purity half. `phaseRef`/`phaseSeqRef`
+    // were written DURING render, so a pass React threw away left them naming a
+    // phase the Event never reached and counting a move that never happened —
+    // and the pending Close then failed BOTH of `report`'s tests and lost a
+    // status that was true. The discarded pass here is a real one: a transition
+    // renders `ArchiveEvent` with an ARCHIVED Event and then suspends on the
+    // sibling beside it, so React keeps the committed OPEN tree and commits
+    // nothing from that pass.
+    const neverSettles = new Promise<void>(() => {});
+    function Suspender({ suspend }: { suspend: boolean }) {
+      if (suspend) throw neverSettles;
+      return null;
+    }
+    let move: (next: { event: EventDoc; suspend: boolean }) => void = () => {};
+    function Harness() {
+      const [state, setState] = useState(() => ({ event: mkEvent(), suspend: false }));
+      move = setState;
+      return (
+        <Suspense fallback={<p>loading</p>}>
+          <ArchiveEvent {...props(state.event)} />
+          <Suspender suspend={state.suspend} />
+        </Suspense>
+      );
+    }
+
+    let settle: (value: unknown) => void = () => {};
+    H.beginArchive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    render(<Harness />);
+    void userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      startTransition(() => {
+        move({
+          event: mkEvent({ status: 'archived', archivedAt: 1_700_000_000_000 }),
+          suspend: true,
+        });
+      });
+    });
+    // Nothing from that pass reached the DOM: the Event is still open.
+    expect(screen.getByRole('button', { name: 'Close play' })).toBeInTheDocument();
+
+    // So the Close resolved on an Event that never moved, and its message holds.
+    settle({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
+    expect(await screen.findByRole('status')).toHaveTextContent(/Play is closed/);
   });
 });
 
