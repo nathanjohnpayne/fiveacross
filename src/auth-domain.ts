@@ -79,9 +79,10 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // down for every Event at once.
   //
   // Registered on the `fiveacross` project's authorized domains and its Google
-  // OAuth web client, like the two entries above. That registration is #547 and
-  // is console-only: until a human completes it, this entry pins an authDomain
-  // Google will reject, so the handoff cannot carry real traffic yet.
+  // OAuth web client, like the two entries above (#547, verified 2026-09-10
+  // against Google's authorize endpoint), so this entry pins an authDomain
+  // Google accepts and the handoff can carry real traffic once the
+  // handoff-mode client ships.
   'auth.fiveacross.app',
 ]);
 
