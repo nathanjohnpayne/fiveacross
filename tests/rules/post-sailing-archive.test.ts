@@ -2655,6 +2655,77 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await assertFails(create(deny));
   });
 
+  it('pins the Proof create arm’s access budget UNDER ENFORCEMENT: 5 distinct-Event creates pass and 6 deny', async () => {
+    // The probe above is the UNENFORCED control: its Events carry no
+    // `membershipEnforcement`, so `admitted()` returns through the
+    // switch-off branch and never spends the membership `exists()` + `get()`.
+    // This one seeds the switch ON with an active membership for the writer
+    // (Codex round 3 on #1093). Measured, not derived: the membership check is
+    // `exists()` then `get()` on the membership record, and the emulator counts
+    // those as two accesses, so the arm spends FOUR per Event under enforcement
+    // and the boundary moves from ten/eleven to five/six. A real capture creates
+    // one Proof in one Event, so four of twenty leaves the same room the
+    // `attachProof` transaction below relies on. Both probes stay, because a
+    // later clause can regress either path without touching the other.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(5, 'enforced-pass');
+    const deny = events(6, 'enforced-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Enforced budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          membershipEnforcement: 'enforced',
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+        await setDoc(doc(fs, `${eventPath(eventId)}/memberships/${ALICE}`), {
+          schemaVersion: 1,
+          eventId,
+          uid: ALICE,
+          role: 'member',
+          status: 'active',
+          grantedAt: NOW(),
+          grantedBy: 'system:test',
+          invitationId: null,
+        });
+      }
+    });
+
+    const create = (ids: string[]) => {
+      const fs = db(ALICE);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          photoURL: null,
+          type: 'text',
+          cellIndex: 4,
+          itemText: 'Something happens',
+          storagePath: null,
+          mediaURL: null,
+          thumbURL: null,
+          text: 'again',
+          createdAt: NOW(),
+          reportCount: 0,
+          status: 'active',
+          visionFlag: null,
+          source: null,
+          dayIndex: 0,
+        });
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(create(pass));
+    await assertFails(create(deny));
+  });
+
   it('ALLOWS the WHOLE attachProof transaction in ONE commit — Proof, Board, stats and Tally marker', async () => {
     // The production shape the create arm's new `exists()` had to stay inside.
     // A capture writes four documents in one transaction, and every arm in it
