@@ -312,6 +312,37 @@ describe('marker collection-group delivery cutover (#1072)', () => {
     ]);
     expect(result.docs[0].data().eventId).toBe(EVENT_A);
   });
+  it('keeps the Event-scoped query authorized when the compatibility document is absent or malformed', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const database = ctx.firestore();
+      await setDoc(
+        doc(database, markerPath(EVENT_A, ITEM, UID)),
+        marker(UID, EVENT_A),
+      );
+      await setDoc(
+        doc(database, markerPath(EVENT_B, ITEM, UID)),
+        marker(UID, EVENT_B),
+      );
+    });
+    const scoped = () =>
+      query(collectionGroup(db(READER), 'markers'), where('eventId', '==', EVENT_A));
+
+    // No control document at all: the canonical branch must stand on its own.
+    const absent = await assertSucceeds(getDocs(scoped()));
+    expect(absent.docs.map((snap) => snap.ref.path)).toEqual([
+      markerPath(EVENT_A, ITEM, UID),
+    ]);
+    await assertFails(getDocs(collectionGroup(db(READER), 'markers')));
+
+    // A malformed control document errors inside the legacy branch; the
+    // canonical branch is a separate statement and is unaffected.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await seedCompatibility(ctx.firestore(), 'tomorrow');
+    });
+    const malformed = await assertSucceeds(getDocs(scoped()));
+    expect(malformed.docs).toHaveLength(1);
+    await assertFails(getDocs(collectionGroup(db(READER), 'markers')));
+  });
 });
 
 describe('direct Tally marker reads remain path-scoped (#1072)', () => {

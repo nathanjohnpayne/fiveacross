@@ -90,7 +90,7 @@ service cloud.firestore {
     // because `status: 'archived'` is write-once and denies here on its own.
     //
     // MODERATION IS NOT A GAMEPLAY WRITE, and is deliberately left open. Every
-    // `isAdmin(eventId)` arm below — hide/restore, delete, ban, resolve a
+    // admin arm below (`isAdmin(eventId)` / `isAdmittedAdmin(eventId)`) — hide/restore, delete, ban, resolve a
     // dangling claim, edit Event config — keeps working on an archived Event,
     // because a permanent record needs a takedown path (a reported photo that
     // can never be hidden again is the support incident, #808).
@@ -1569,7 +1569,7 @@ service cloud.firestore {
       // stays admin-writable exactly as it always was, which is precisely why
       // the gate's evidence moved off it. The CREATE half names it for symmetry
       // with the four fields beside it rather than for reach: no client create
-      // of an Event document can succeed at all, because `isAdmin(eventId)`
+      // of an Event document can succeed at all, because `eventConfigWriteAuthorized(eventId)`
       // reads the very document being created and a missing `get()` denies.
       allow create, update: if eventConfigWriteAuthorized(eventId)
         && (resource == null
@@ -1798,7 +1798,7 @@ service cloud.firestore {
       // `allow` statements short-circuit, so an ordinary admin write never pays
       // for a clause that only an archive flip can satisfy.
       //
-      // The stored-state checks come BEFORE `isAdmin(eventId)` deliberately: a
+      // The stored-state checks come BEFORE `isAdmittedAdmin(eventId)` deliberately: a
       // write that reaches this arm has already been refused by the general
       // arm's `affectedKeys` check, and the four dedicated arms sit AFTER
       // that arm so an ordinary admin write never pays for them at all.
@@ -3123,16 +3123,28 @@ service cloud.firestore {
     // and writes stay owner/path-bound there too.
     match /{path=**}/markers/{markerUid} {
       // #1072 made the collection-group query prove one Event identity. Rules
-      // are not filters: the query's eventId equality is what lets the first
+      // are not filters: the query's eventId equality is what lets the
       // document-shaped admission predicate authorize the whole result set.
-      // The compatibility arm comes first so its true result short-circuits
-      // access to the field that legacy rows do not have. After cutoff it is
-      // false and the canonical query must prove a string Event identity before
-      // the membership predicate is evaluated.
+      //
+      // TWO STATEMENTS ON PURPOSE (Codex round 2 on #1093). `allow` statements
+      // are evaluated independently, so the canonical query never shares an
+      // expression with the legacy branch: a `get()` on a missing or malformed
+      // control document errors inside the legacy statement alone and cannot
+      // reach the Event-scoped listen. Rules `||` already absorbs an erroring
+      // operand when the other side is true (the executable pin in
+      // tests/rules/marker-event-delivery.test.ts proves the scoped query
+      // succeeds with the document absent and malformed either way), but the
+      // guarantee the spec makes — equality-filtered queries stay authorized
+      // after compatibility ends — should not rest on that subtlety.
+      //
+      // The legacy statement admits the unfiltered signed-in query only while
+      // the explicit window is open; absent, malformed or expired, it denies.
+      // For that unfiltered query the canonical statement is simply false
+      // (no equality proves a string identity), never an error.
       allow list: if signedIn()
-        && (markerDeliveryCompatibilityOpen()
-            || (resource.data.eventId is string
-                && admitted(resource.data.eventId)));
+        && resource.data.eventId is string
+        && admitted(resource.data.eventId);
+      allow list: if signedIn() && markerDeliveryCompatibilityOpen();
     }
   }
 }
