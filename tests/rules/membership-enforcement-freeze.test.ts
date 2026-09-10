@@ -15,10 +15,10 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 
-// Deploy 1 of #804 freezes the per-Event switch before any production allow
-// arm is allowed to consult admission. The deliberately separate suite keeps
-// that rollout boundary executable: deploy 2 will replace its negative source
-// assertions when the full Event inventory is gated.
+// Deploy 1 of #804 froze the per-Event switch before any production allow arm
+// consulted admission; deploy 2 gated the inventory and replaced this suite's
+// negative dark-boundary assertions with their live counterparts. The
+// presence/value matrix itself is unchanged across both deploys.
 
 const RULES_PATH = fileURLToPath(
   new URL('../../firestore.rules', import.meta.url),
@@ -162,12 +162,22 @@ describe('firestore.rules — membership enforcement switch freeze (#804 deploy 
     );
   });
 
-  it('keeps admission dark even when an Event already says enforced', async () => {
+  it('consults admission now that the inventory is gated (deploy 2)', async () => {
+    // Deploy 1 pinned the opposite: a memberless signed-in Player could still
+    // read and self-write beneath an Event that already said 'enforced'. Deploy
+    // 2 replaces that dark-boundary assertion with the live one, and keeps the
+    // off-state proof that the switch, not the deploy, decides.
     await seedEvent('enforced');
-
-    await assertSucceeds(
-      getDoc(doc(db(MEMBERLESS_PLAYER), eventPath())),
+    await assertFails(getDoc(doc(db(MEMBERLESS_PLAYER), eventPath())));
+    await assertFails(
+      setDoc(
+        doc(db(MEMBERLESS_PLAYER), `${eventPath()}/players/${MEMBERLESS_PLAYER}`),
+        { uid: MEMBERLESS_PLAYER, displayName: 'Memberless player' },
+      ),
     );
+
+    await seedEvent('off');
+    await assertSucceeds(getDoc(doc(db(MEMBERLESS_PLAYER), eventPath())));
     await assertSucceeds(
       setDoc(
         doc(db(MEMBERLESS_PLAYER), `${eventPath()}/players/${MEMBERLESS_PLAYER}`),
@@ -176,34 +186,38 @@ describe('firestore.rules — membership enforcement switch freeze (#804 deploy 
     );
   });
 
-  it('pins the source boundary between the freeze and the later gate deploy', () => {
-    const allowStatements = EXECUTABLE_RULES.match(/\ballow\b[\s\S]*?;/g) ?? [];
+  it('pins the root Event write arm to the frozen-switch composition', () => {
+    // Scoped to the one arm this suite owns (#1099): the root Event write must
+    // route through the single helper that composes the Admin roster, the
+    // create-vs-update null guard, admission, and the switch freeze. Global
+    // helper call counts belong to the inventory suite, not here.
     const rootWrite = rootEventWriteAllow();
-
-    expect(allowStatements.length).toBeGreaterThan(0);
-    expect(allowStatements.join('\n')).not.toMatch(
-      /\badmitted(?:WithEvent)?\s*\(/,
+    // The arm keeps its field-shape validators after the helper; only the
+    // authorization head is this suite's concern.
+    expect(rootWrite).toMatch(
+      /^allow create, update: if eventConfigWriteAuthorized\(eventId\)/,
     );
-    // Direct allow-arm checks are insufficient: an arm could call a new wrapper
-    // that reaches isEventMember(), or inline the Membership path. Exact-count
-    // the complete canonical scaffold so either form fails closed until deploy
-    // 2 deliberately replaces this dark-boundary assertion.
-    expect(EXECUTABLE_RULES.match(/\badmitted\s*\(/g)).toHaveLength(1);
-    expect(EXECUTABLE_RULES.match(/\badmittedWithEvent\s*\(/g)).toHaveLength(2);
-    expect(EXECUTABLE_RULES.match(/\bisEventMember\s*\(/g)).toHaveLength(2);
-    expect(EXECUTABLE_RULES.match(/\bmembershipDoc\s*\(/g)).toHaveLength(3);
-    expect(EXECUTABLE_RULES.match(/\/memberships\//g)).toHaveLength(1);
+    expect(rootWrite).not.toMatch(/\bisAdmin\(eventId\)/);
+
+    const helperStart = EXECUTABLE_RULES.indexOf(
+      'function eventConfigWriteAuthorized(eventId)',
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    const helper = EXECUTABLE_RULES.slice(
+      helperStart,
+      EXECUTABLE_RULES.indexOf('}', helperStart) + 1,
+    );
+    expect(helper).toMatch(/isAdminWithEvent\(event\)/);
+    expect(helper).toMatch(/resource == null/);
+    expect(helper).toMatch(/admittedWithEvent\(eventId, event\)/);
+    expect(helper).toMatch(/membershipEnforcementUnchanged\(\)/);
+
+    // One switch read site: a second reader would be a second switch
+    // semantics, which is the drift the freeze exists to prevent.
     expect(
       EXECUTABLE_RULES.match(
         /event\.get\('membershipEnforcement', 'off'\)/g,
       ),
     ).toHaveLength(1);
-    expect(rootWrite).toMatch(/^allow create, update: if isAdmin\(eventId\)/);
-    expect(rootWrite).toMatch(
-      /&&\s*\(resource == null\s*\|\|\s*membershipEnforcementUnchanged\(\)\)/,
-    );
-    expect(EXECUTABLE_RULES).not.toContain(
-      'function eventConfigWriteAuthorized(eventId)',
-    );
   });
 });

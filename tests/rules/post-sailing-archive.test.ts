@@ -2584,13 +2584,24 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     await assertSucceeds(createProof(PROOF));
   });
 
-  it('pins the Proof create arm’s access budget: 6 distinct-Event creates pass and 7 deny', async () => {
+  it('pins the Proof create arm’s access budget: 10 distinct-Event creates pass and 11 deny', async () => {
     // The measurement the added `exists()` has to answer for. Firestore allows
-    // 20 document access calls per multi-document request, and the create arm
-    // now spends THREE per Event: `eventOpenForPlay` is `exists()` + `get()` on
-    // the Event document, and the revocation check is one more `exists()`. Six
-    // distinct Events therefore cost 18 and pass; seven cost 21 and deny — which
-    // is what fixes the per-arm cost at three rather than leaving it inferred.
+    // 20 document access calls per multi-document request. The arm spent THREE
+    // per Event when its leading predicate was a bare `signedIn()`:
+    // `eventOpenForPlay` was `exists()` + `get()` on the Event document, and the
+    // revocation check one more `exists()` — six distinct Events cost 18 and
+    // passed, seven cost 21 and denied.
+    //
+    // #804 made the leading predicate `admitted(eventId)`, which reads the SAME
+    // Event document with a `get()` — and, measured here, that reordering made
+    // the arm CHEAPER, not dearer: the arm now spends TWO accesses per Event,
+    // so ten distinct Events cost 20 and pass, eleven cost 22 and deny. Firestore
+    // documents only that repeated document access calls on one path within a
+    // request may be cached; it does not document which of `get()` and
+    // `exists()` seeds that cache for the other, so this test pins the measured
+    // count and claims no mechanism. What the number does establish is that no
+    // arm gained an access: the admission read absorbed one the freeze check was
+    // already paying for.
     //
     // Distinct EVENTS, because the rules engine caches an access per document:
     // repeating the same Event would measure the cache, not the arm. A real
@@ -2598,8 +2609,8 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     // real neighbour is the `attachProof` transaction pinned below.
     const events = (n: number, prefix: string) =>
       Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
-    const pass = events(6, 'budget-pass');
-    const deny = events(7, 'budget-deny');
+    const pass = events(10, 'budget-pass');
+    const deny = events(11, 'budget-deny');
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const fs = ctx.firestore();
       for (const eventId of [...pass, ...deny]) {
@@ -2610,6 +2621,77 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
           bannedUids: [],
           settings: { reportHideThreshold: 3 },
           days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+      }
+    });
+
+    const create = (ids: string[]) => {
+      const fs = db(ALICE);
+      const batch = writeBatch(fs);
+      for (const eventId of ids) {
+        batch.set(doc(fs, `events/${eventId}/proofs/${PROOF}`), {
+          uid: ALICE,
+          displayName: 'Alice',
+          photoURL: null,
+          type: 'text',
+          cellIndex: 4,
+          itemText: 'Something happens',
+          storagePath: null,
+          mediaURL: null,
+          thumbURL: null,
+          text: 'again',
+          createdAt: NOW(),
+          reportCount: 0,
+          status: 'active',
+          visionFlag: null,
+          source: null,
+          dayIndex: 0,
+        });
+      }
+      return batch.commit();
+    };
+
+    await assertSucceeds(create(pass));
+    await assertFails(create(deny));
+  });
+
+  it('pins the Proof create arm’s access budget UNDER ENFORCEMENT: 5 distinct-Event creates pass and 6 deny', async () => {
+    // The probe above is the UNENFORCED control: its Events carry no
+    // `membershipEnforcement`, so `admitted()` returns through the
+    // switch-off branch and never spends the membership `exists()` + `get()`.
+    // This one seeds the switch ON with an active membership for the writer
+    // (Codex round 3 on #1093). Measured, not derived: the membership check is
+    // `exists()` then `get()` on the membership record, and the emulator counts
+    // those as two accesses, so the arm spends FOUR per Event under enforcement
+    // and the boundary moves from ten/eleven to five/six. A real capture creates
+    // one Proof in one Event, so four of twenty leaves the same room the
+    // `attachProof` transaction below relies on. Both probes stay, because a
+    // later clause can regress either path without touching the other.
+    const events = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, index) => `${prefix}-${index}`);
+    const pass = events(5, 'enforced-pass');
+    const deny = events(6, 'enforced-deny');
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const fs = ctx.firestore();
+      for (const eventId of [...pass, ...deny]) {
+        await setDoc(doc(fs, eventPath(eventId)), {
+          name: 'Enforced budget fixture',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          membershipEnforcement: 'enforced',
+          settings: { reportHideThreshold: 3 },
+          days: [{ index: 0, unlockAt: PAST(), theme: 'neon-playground', pool: 'main' }],
+        });
+        await setDoc(doc(fs, `${eventPath(eventId)}/memberships/${ALICE}`), {
+          schemaVersion: 1,
+          eventId,
+          uid: ALICE,
+          role: 'member',
+          status: 'active',
+          grantedAt: NOW(),
+          grantedBy: 'system:test',
+          invitationId: null,
         });
       }
     });
