@@ -113,7 +113,7 @@ function publicReadPaths(eventId: string, uid: string): string[] {
     `${eventPath(eventId)}/players/${uid}/analyticsTransitions/transition`,
     `${eventPath(eventId)}/reshuffles/seeded-marker`,
     `${eventPath(eventId)}/days/0/boards/${uid}`,
-    `${eventPath(eventId)}/days/0/meta/0`,
+    `${eventPath(eventId)}/days/0/meta/admin-seeded`,
     `${eventPath(eventId)}/proofs/target-proof`,
     `${eventPath(eventId)}/claims/${uid}`,
     `${eventPath(eventId)}/tally/shared-item`,

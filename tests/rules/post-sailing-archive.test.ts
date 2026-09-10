@@ -2593,14 +2593,15 @@ describe('post-sailing-archive — the media-revocation tombstone accompanies it
     // passed, seven cost 21 and denied.
     //
     // #804 made the leading predicate `admitted(eventId)`, which reads the SAME
-    // Event document with a `get()` — and that reordering made the arm CHEAPER,
-    // not dearer. A `get()` populates the per-request cache that the following
-    // `exists()` on the same path is then served from, while an `exists()` does
-    // not populate the one a following `get()` needs. So the Event document now
-    // costs ONE access instead of two and the arm spends TWO per Event: ten
-    // distinct Events cost 20 and pass, eleven cost 22 and deny. The number
-    // moved because the admission read absorbed an access the freeze check was
-    // already paying for — no arm gained one.
+    // Event document with a `get()` — and, measured here, that reordering made
+    // the arm CHEAPER, not dearer: the arm now spends TWO accesses per Event,
+    // so ten distinct Events cost 20 and pass, eleven cost 22 and deny. Firestore
+    // documents only that repeated document access calls on one path within a
+    // request may be cached; it does not document which of `get()` and
+    // `exists()` seeds that cache for the other, so this test pins the measured
+    // count and claims no mechanism. What the number does establish is that no
+    // arm gained an access: the admission read absorbed one the freeze check was
+    // already paying for.
     //
     // Distinct EVENTS, because the rules engine caches an access per document:
     // repeating the same Event would measure the cache, not the arm. A real
