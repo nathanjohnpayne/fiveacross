@@ -57,7 +57,7 @@ Use `npm run deploy:gaycruisebingo` to deploy every configured Firebase surface.
 
 ## Deploying Five Across / Vacay
 
-Five Across deployment runs the exact-SA auth-handoff readiness proof before it builds. Because the central handoff origin is active, `skipInvokerReconcile` is `false` (#547, completed 2026-09-10): after the main/freshness/clean-tree and Functions parameter-coverage guards, every Hosting or handoff-callable scope forces an idempotent update on both callables under `firebase-deployer@fiveacross.iam.gserviceaccount.com`, and a `PERMISSION_DENIED` there aborts before `BUILD_CMD` or any Firebase side effect. Rules, Storage and exact known-unrelated Function scopes skip that proof. The target refuses `--skip-invoker`, so the post-Functions handoff repair always runs.
+Five Across deployment runs the exact-SA auth-handoff readiness proof before it builds. Because the central handoff origin is active, `skipInvokerReconcile` is `false` (#547, completed 2026-09-10): after the main/freshness/clean-tree and Functions parameter-coverage guards, every Hosting or handoff-callable scope forces an idempotent update on both callables under `firebase-deployer@fiveacross.iam.gserviceaccount.com`, and a `PERMISSION_DENIED` there aborts before `BUILD_CMD` or any Firebase side effect. Rules, Storage and exact known-unrelated Function scopes skip that proof. The target refuses `--skip-invoker`, so the post-Functions handoff repair always runs. A Firebase `--dry-run` skips both that readiness update and the post-Functions reconciliation after the same guards (it publishes no app or Function release), so a dry run is not an exact-service-account readiness proof; only a real named deploy is.
 
 Run from the clean, current `main` checkout:
 

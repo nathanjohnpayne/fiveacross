@@ -2535,11 +2535,18 @@ POST_CALLS_24J=0
 if [[ -f "$WORKDIR/gcloud-calls-24j.at-build.log" ]]; then
   POST_CALLS_24J=$(( $(wc -l <"$WORKDIR/gcloud-calls-24j.log") - $(wc -l <"$WORKDIR/gcloud-calls-24j.at-build.log") ))
 fi
+# Count the post-build `run services` calls themselves, not every logged
+# gcloud call: an unrelated post-build call (key activation, say) must not
+# let the impersonation check below pass vacuously (CodeRabbit on #1169).
+POST_RUN_SERVICES_24J=0
+if [[ "$POST_CALLS_24J" -gt 0 ]]; then
+  POST_RUN_SERVICES_24J=$(tail -n "$POST_CALLS_24J" "$WORKDIR/gcloud-calls-24j.log" | grep -c -- "$RUN_SERVICES_TAB" || true)
+fi
 if [[ $RC24J -ne 0 ]]; then
   fail "handoff-identity-carry: deploy.sh returned $RC24J. stderr was:"
   cat "$WORKDIR/case24j.err" >&2
-elif [[ "$POST_CALLS_24J" -le 0 ]]; then
-  fail "handoff-identity-carry: no reconciliation gcloud call ran after BUILD_CMD. gcloud log was:"
+elif [[ "$POST_RUN_SERVICES_24J" -le 0 ]]; then
+  fail "handoff-identity-carry: no \`run services\` reconciliation call ran after BUILD_CMD. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-24j.log" >&2
 elif tail -n "$POST_CALLS_24J" "$WORKDIR/gcloud-calls-24j.log" | grep -- "$RUN_SERVICES_TAB" | grep -qv -- '--impersonate-service-account=firebase-deployer@fiveacross.iam.gserviceaccount.com'; then
   fail "handoff-identity-carry: a post-build reconciliation call ran without impersonating the exact deployer. gcloud log was:"
