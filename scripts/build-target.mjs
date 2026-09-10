@@ -63,33 +63,19 @@ export const DEPLOY_TARGETS = Object.freeze({
     staticFallbackEdition: 'vacay',
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
-    // Opted out because the exact fiveacross firebase-deployer SA — reached
-    // directly or by keyless impersonation — is not known to hold
-    // run.services.update on this project, and the readiness apply ABORTS
-    // BEFORE BUILDING on a PERMISSION_DENIED.
-    // Enabling it on an unverified assumption would therefore not degrade to a
-    // warning; it would break every Five Across deploy outright.
-    //
-    // The ORIGINAL reason recorded here — that the wrappers would target
-    // gaycruisebingo's services from a fiveacross credential — no longer holds:
-    // scripts/deploy.sh pins BUG_REPORT_PROJECT / EMAIL_UNSUBSCRIBE_PROJECT /
-    // AUTH_HANDOFF_PROJECT to the selected deploy target (#768 r4), so the
-    // reconciliation is same-project now. What remains is purely the unproven
-    // IAM grant above.
-    //
-    // ⚠️  THIS SKIP IS A REAL GAP (#548, Codex P1 round 4). The auth handoff
-    // lives in THIS project, and Domain Restricted Sharing applies here too.
-    // While the handoff origin is active, scripts/deploy-target.mjs refuses a
-    // Five Across deploy before build or publish instead of releasing
-    // mintAuthHandoff and exchangeAuthHandoff with both left 403.
-    //
-    // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
-    // run.services.update on fiveacross, successfully run the exact-SA
-    // readiness apply (which forces updates on both callables), then flip this
-    // to false. Once false, deploy-target.mjs pins readiness into deploy.sh;
-    // after every pre-build guard, deploy.sh repeats that permission proof
-    // before BUILD_CMD/Firebase for each Hosting or handoff-callable scope.
-    skipInvokerReconcile: true,
+    // Reconciled since 2026-09-10 (#547). The exact fiveacross firebase-deployer
+    // SA holds roles/run.admin (which carries run.services.update), both
+    // handoff callables exist on fiveacross, and
+    // `AUTH_HANDOFF_PROJECT=fiveacross scripts/apply-auth-handoff-deploy-readiness.sh`
+    // completed a forced update on both under that exact identity. With the
+    // skip off, scripts/deploy-target.mjs pins readiness into deploy.sh: after
+    // every pre-build guard, deploy.sh repeats that permission proof before
+    // BUILD_CMD/Firebase for each Hosting or handoff-callable scope, and the
+    // post-Functions handoff repair runs on every deploy (--skip-invoker is
+    // refused for this target). The readiness apply still ABORTS BEFORE
+    // BUILDING on a PERMISSION_DENIED, so a revoked grant fails the deploy
+    // closed rather than releasing a client against 403ing callables.
+    skipInvokerReconcile: false,
   }),
 });
 
