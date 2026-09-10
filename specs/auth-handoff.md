@@ -191,5 +191,5 @@ It defaults to **off**, exactly like `BUG_REPORT_APP_CHECK`, because enforcing a
 ## Not in scope
 
 - **Client code (#549).** No `src/**` change ships with this contract.
-- **Provisioning the central origin (#547).** `auth.fiveacross.app` needs a human in the Firebase and Google OAuth consoles; no code can do it.
+- **Provisioning the central origin (#547)—done, and never code.** `auth.fiveacross.app` is a Firebase Auth authorized domain and its handler is a registered redirect URI on the Google OAuth web client (verified 2026-09-10); that registration was console work and stays outside this contract, which only consumes it.
 - **The Firestore TTL policy.** `expiresAt` is written as a Timestamp ready for one, but enabling the policy on `authHandoffs.expiresAt` is a console/gcloud action. Until it is enabled, abandoned sign-ins leave documents behind—one small document per attempt, harmless to correctness and unbounded only in storage.
