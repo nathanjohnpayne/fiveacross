@@ -145,24 +145,52 @@ describe('deploy target selection', () => {
     });
   });
 
-  it('refuses Five Across before build or publish while handoff invoker reconciliation is skipped', () => {
-    const result = spawnSync(process.execPath, [deployTargetScript, 'fiveacross'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-    });
+  it('refuses a handoff-enabled target before build or publish while invoker reconciliation is skipped', () => {
+    const calls = [];
+    const skippedConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: true,
+    };
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
 
-    expect(result.status).toBe(1);
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toMatch(
+    expect(() =>
+      executeDeployRequest(
+        { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'firestore:rules'] },
+        skippedConfig,
+        {},
+        spawn,
+      ),
+    ).toThrow(
       /^Refusing to deploy fiveacross: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true\./,
     );
-    expect(result.stderr).toContain(
-      'Complete #547: grant firebase-deployer@fiveacross.iam.gserviceaccount.com run.services.update, ' +
-        'successfully run AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh --prove-update ' +
-        'under that exact identity for both callables, ' +
-        'then set skipInvokerReconcile to false.',
+    expect(calls).toHaveLength(0);
+  });
+
+  it('ships the live Five Across registry with reconciliation on and readiness pinned (#547)', () => {
+    expect(DEPLOY_TARGETS.fiveacross.skipInvokerReconcile).toBe(false);
+    expect(DEPLOY_TARGETS.fiveacross.identity.VITE_AUTH_HANDOFF_ORIGIN).toBe('https://auth.fiveacross.app');
+
+    const calls = [];
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+    const result = executeDeployRequest(
+      { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'firestore:rules'] },
+      undefined,
+      {},
+      spawn,
     );
-    expect(result.stderr).toContain('Nothing has been built or published.\nUsage:');
+
+    expect(result.status).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross', '--only', 'firestore:rules']);
+    expect(calls[0][1]).not.toContain('--skip-invoker');
+    expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
   });
 
   it('refuses the actual Five Across CLI when --skip-invoker would suppress post-Functions repair', () => {
@@ -411,13 +439,11 @@ describe('deploy target selection', () => {
   it('keeps Five Across project, build, synthetic, and cache choices together', () => {
     const invocation = deployInvocation('fiveacross', ['--only', 'firestore:rules'], { NODE_ENV: 'production' });
 
-    // fiveacross still plans to skip same-project Cloud Run invoker
-    // reconciliation until #547 grants its deploy service account
-    // run.services.update on fiveacross. The public CLI guard above refuses
-    // before this plan is spawned while the handoff origin is active.
+    // fiveacross reconciles its own Cloud Run invokers (#547 complete): the
+    // plan carries no --skip-invoker, and the handoff-enabled target refuses
+    // one if a caller passes it.
     expect(invocation.args).toEqual([
       '--skip-cf-purge',
-      '--skip-invoker',
       '--',
       'fiveacross',
       '--only',

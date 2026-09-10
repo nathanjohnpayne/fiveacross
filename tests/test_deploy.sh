@@ -2500,6 +2500,63 @@ fi
 # update. This fixture deliberately stays on feature/deploy-test and omits
 # --force, so reaching gcloud or Firebase would prove the hook moved ahead of
 # the canonical guard.
+# Case 24j (#547; Codex round 2 on #1169): the handoff-enabled target carries the
+# exact deployer identity through the pre-publish check and the Step 2.5 repair.
+# GOOGLE_APPLICATION_CREDENTIALS here is a DIFFERENT service account, so
+# readiness proves the identity by impersonation; every reconciliation gcloud
+# call after BUILD_CMD must impersonate that same exact deployer rather than
+# run as the loaded key.
+REPO24J="$WORKDIR/case24j-handoff-identity-carry"
+init_fixture_repo "$REPO24J"
+: >"$WORKDIR/gcloud-calls-24j.log"
+: >"$WORKDIR/ofd-calls-24j.log"
+OTHER_CREDENTIAL_24J="$WORKDIR/other-deployer.json"
+printf '%s\n' \
+  '{"type":"service_account","client_email":"someone-else@fiveacross.iam.gserviceaccount.com"}' \
+  >"$OTHER_CREDENTIAL_24J"
+set +e
+(
+  cd "$REPO24J"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-24j.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-24j.log" \
+  GCLOUD_STUB_ANNOTATION=false \
+  GOOGLE_APPLICATION_CREDENTIALS="$OTHER_CREDENTIAL_24J" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+  BUILD_CMD="cp '$WORKDIR/gcloud-calls-24j.log' '$WORKDIR/gcloud-calls-24j.at-build.log'" \
+    bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross --only functions:mintAuthHandoff
+) >"$WORKDIR/case24j.out" 2>"$WORKDIR/case24j.err"
+RC24J=$?
+set -e
+RUN_SERVICES_TAB="$(printf '\trun\tservices\t')"
+POST_CALLS_24J=0
+if [[ -f "$WORKDIR/gcloud-calls-24j.at-build.log" ]]; then
+  POST_CALLS_24J=$(( $(wc -l <"$WORKDIR/gcloud-calls-24j.log") - $(wc -l <"$WORKDIR/gcloud-calls-24j.at-build.log") ))
+fi
+# Count the post-build `run services` calls themselves, not every logged
+# gcloud call: an unrelated post-build call (key activation, say) must not
+# let the impersonation check below pass vacuously (CodeRabbit on #1169).
+POST_RUN_SERVICES_24J=0
+if [[ "$POST_CALLS_24J" -gt 0 ]]; then
+  POST_RUN_SERVICES_24J=$(tail -n "$POST_CALLS_24J" "$WORKDIR/gcloud-calls-24j.log" | grep -c -- "$RUN_SERVICES_TAB" || true)
+fi
+if [[ $RC24J -ne 0 ]]; then
+  fail "handoff-identity-carry: deploy.sh returned $RC24J. stderr was:"
+  cat "$WORKDIR/case24j.err" >&2
+elif [[ "$POST_RUN_SERVICES_24J" -le 0 ]]; then
+  fail "handoff-identity-carry: no \`run services\` reconciliation call ran after BUILD_CMD. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-24j.log" >&2
+elif tail -n "$POST_CALLS_24J" "$WORKDIR/gcloud-calls-24j.log" | grep -- "$RUN_SERVICES_TAB" | grep -qv -- '--impersonate-service-account=firebase-deployer@fiveacross.iam.gserviceaccount.com'; then
+  fail "handoff-identity-carry: a post-build reconciliation call ran without impersonating the exact deployer. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-24j.log" >&2
+elif grep -q -- 'someone-else@fiveacross' "$WORKDIR/gcloud-calls-24j.log"; then
+  fail "handoff-identity-carry: reconciliation impersonated the loaded non-deployer key."
+else
+  pass "handoff-identity-carry: pre-publish check and Step 2.5 impersonate the exact deployer when the loaded key is not it (rc=$RC24J)."
+fi
+
 REPO23Q="$WORKDIR/case23q-readiness-after-guard"
 init_fixture_repo "$REPO23Q"
 : >"$WORKDIR/gcloud-calls-23q.log"

@@ -463,7 +463,51 @@ if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
     EVENT_INVITATIONS_PROJECT="$INVOKER_PIN_PROJECT"
   )
 fi
-run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
+# Exact-SA identity for the handoff-enabled target (#547; Codex round 2 on
+# #1169). Readiness proves the deploy identity by impersonating
+# firebase-deployer@<project> whenever GOOGLE_APPLICATION_CREDENTIALS is not
+# that key itself, but the pre-publish check and the Step 2.5 repair below used
+# to run under whatever credential was loaded. A source identity holding only
+# token-creator on the deployer therefore passed readiness and then either
+# aborted at the read-only check or — worse — read but could not update after
+# Functions had published, leaving the just-released callables 403. The same
+# identity now carries through: the exact key is activated directly when it is
+# what was loaded, and every reconciliation gcloud call impersonates the exact
+# deployer otherwise. The scrub above still strips any AMBIENT identity
+# override; this pins the one identity the selected target itself names.
+credential_is_exact_deployer_key() {
+  local file="${1:-}" expected="${2:-}"
+  [[ -n "$file" && -f "$file" && -s "$file" ]] || return 1
+  python3 - "$file" "$expected" <<'PY'
+import json
+import sys
+try:
+    credential = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+ok = credential.get("type") == "service_account" and credential.get("client_email") == sys.argv[2]
+sys.exit(0 if ok else 1)
+PY
+}
+handoff_reconciliation_identity() {
+  local project="${AUTH_HANDOFF_DEPLOY_READINESS_PROJECT:-}"
+  [[ -n "$project" ]] || return 0
+  local exact_sa="firebase-deployer@${project}.iam.gserviceaccount.com"
+  if credential_is_exact_deployer_key "${GOOGLE_APPLICATION_CREDENTIALS:-}" "$exact_sa"; then
+    printf 'GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION=true'
+  else
+    printf 'GCLOUD_IMPERSONATE_SERVICE_ACCOUNT=%s' "$exact_sa"
+  fi
+}
+run_invoker() {
+  local identity
+  identity="$(handoff_reconciliation_identity)"
+  if [[ -n "$identity" ]]; then
+    "${INVOKER_ENV[@]}" "$identity" "$@"
+  else
+    "${INVOKER_ENV[@]}" "$@"
+  fi
+}
 
 # The project a MANUAL repair must name, for the failure guidance below. Same
 # value deploy.sh pins automatically; printed because a human re-running a bare
@@ -874,11 +918,11 @@ set -e
 # them costs one cheap read-only `gcloud` call when nothing regressed, and
 # silently fixes the regression when something did.
 #
-# Not gated per-target: `scripts/deploy-target.mjs` auto-injects
-# --skip-invoker for the fiveacross target (`skipInvokerReconcile: true` in
-# `scripts/build-target.mjs`) because that project's deploy credential is
-# fiveacross-scoped and is not provisioned with IAM access to describe or
-# update a gaycruisebingo Cloud Run service — see the comment there.
+# Not gated per-target: both shipped targets reconcile their own project
+# (`skipInvokerReconcile: false` for gaycruisebingo and, since #547 completed
+# on 2026-09-10, for fiveacross too). The project is pinned from the selected
+# target above, and the handoff-enabled target refuses --skip-invoker outright,
+# so the skip branch below is reachable only from a bare `scripts/deploy.sh`.
 #
 # WHEN IT RUNS (rewritten in #768 r4 — Codex P1).
 #
@@ -935,9 +979,8 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
   # A skipped reconciliation is normally harmless — the annotation is only reset
   # by a Functions RELEASE. When this deploy could have released the auth
   # handoff, it is not harmless, and it must not be silent (#548, Codex P1
-  # round 4). `scripts/deploy-target.mjs` auto-injects --skip-invoker for the
-  # fiveacross target, which is exactly the project the handoff lives in, so the
-  # routine `npm run deploy:fiveacross` path lands here every time.
+  # round 4). The named fiveacross target refuses --skip-invoker (#547), so only
+  # a bare `scripts/deploy.sh --skip-invoker -- fiveacross` can land here.
   if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
     cat >&2 <<EOF
 
@@ -949,15 +992,12 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
     broken feature — it is sign-in unavailable on every Event origin that uses
     the handoff.
 
-    This is a KNOWN GAP, not a transient failure: enabling the reconciliation
-    for this target needs run.services.update on the target project for its
-    deploy credential (see skipInvokerReconcile in scripts/build-target.mjs).
-    Until that is provisioned, repair by hand after every Functions deploy:
+    A named Five Across deploy cannot reach this branch — the handoff-enabled
+    target refuses --skip-invoker — so this is a bare scripts/deploy.sh run.
+    Repair now, under the exact deployer identity, and never leave it for
+    later: the handoff has live callers since #547 completed.
 
       AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
-
-    Harmless today only while the handoff has no caller — the client half
-    (#549) and the central origin (#547) are both still outstanding.
 EOF
   fi
   if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
