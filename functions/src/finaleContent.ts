@@ -156,10 +156,11 @@ function readableRankingInstant(value: unknown): number | null {
  *
  * A well-formed row is returned by IDENTITY, buckets included, and no count is
  * recomputed: this decides nothing about who won, it only makes the row read the
- * same on every surface. Bucket KEYS are already canonical integers by the time
- * this runs — `sanitizeFinaleDayStats` below rebuilds the map through
- * `Number(key)` before this sees it — so re-keying them here is a round-trip,
- * not a merge.
+ * same on every surface. The bucket half is `readableDayStats` below — the ONE
+ * entry rule this side has, shared with `sanitizeFinaleDayStats` — so a row
+ * that reaches this without passing the read boundary first (a test fixture,
+ * a future caller) still reads its buckets by exactly the rule the boundary
+ * applies, and running both is a round-trip, not a second opinion (#1168).
  */
 export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
   const bingoCount = readableRankingCount(player.bingoCount);
@@ -171,35 +172,108 @@ export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
     && firstBingoAt === player.firstBingoAt
       ? player
       : { ...player, bingoCount, squaresMarked, firstBingoAt };
-  const raw = rooted.dayStats;
-  if (!raw || typeof raw !== 'object') return rooted;
+  const { dayStats, changed } = readableDayStats(rooted.dayStats);
+  return changed ? { ...rooted, dayStats } : rooted;
+}
+
+/**
+ * Is this `dayStats` KEY the canonical decimal spelling of an integer — the only
+ * spelling a client ever writes? Mirror of `canonicalDayStatsKey` in
+ * `src/data/eventLimits.ts`, whose comment states the rule and why both sides
+ * DROP every other spelling rather than one side merging some of them (#1168):
+ * a key survives only when `Number(key)` round-trips — a safe integer whose
+ * `String()` is the key itself — so `"07"`, `" 7"`, `""` and `"-0"` are refused
+ * here exactly as `"7.5"` and `"seven"` always were, instead of being read as
+ * Days 7, 7, 0 and 0 and merged over the real bucket under that Day. Pinned
+ * against the client's predicate over a table of spellings by
+ * `tests/functions/finale-parity.test.ts`.
+ */
+export function canonicalDayStatsKey(key: string): boolean {
+  const index = Number(key);
+  return Number.isSafeInteger(index) && String(index) === key;
+}
+
+/**
+ * THE ENTRY RULE, stated once (#1168) — the map as every Functions ranker reads
+ * it, plus whether reading it changed anything (so `withReadableFinaleRanking`
+ * can keep returning a well-formed row by identity):
+ *
+ *   - a map that is not a non-null, non-array object — absent, `null`, a
+ *     string, an ARRAY — has no entries to read and reads as ABSENT;
+ *   - an entry survives only under a key `canonicalDayStatsKey` accepts, and
+ *     only with a non-null, non-array object for a bucket — a `null`, a string,
+ *     a number or an array is dropped, because there is nothing to default a
+ *     Day's evidence to. Plainness is NOT asked: a `Date` or a `Timestamp`
+ *     written where a bucket belongs is kept, with every field unreadable, on
+ *     both sides;
+ *   - a surviving bucket's three fields get the root's own coercions: an
+ *     unreadable count reads `0`, an unreadable instant reads `null`, a finite
+ *     one is clamped — an array-valued FIELD is just an unreadable value;
+ *   - a map in which nothing had to be dropped or coerced is returned by
+ *     IDENTITY — a field beyond the three the rankers read included — and is
+ *     rebuilt to those three fields only around a dropped or coerced entry,
+ *     which is what the client does too;
+ *   - a map left with nothing reads as ABSENT, so the row ranks as a legacy row
+ *     by its roots on every surface, rather than as a breakdown that sums to
+ *     nothing on one surface and as no breakdown on another.
+ *
+ * Entry for entry the rule `withReadableDayStats` (`src/data/eventArchive.ts`)
+ * applies on the client, identity included: `sanitizeFinaleDayStats` used to
+ * rebuild the map unconditionally, so a well-formed bucket carrying a field the
+ * rankers never read lost that field here and kept it there (#1168, fix round
+ * 1). The rule itself used to differ on three shapes, all reachable
+ * because `players/{uid}` validates no field (ADR 0001) and none written by a
+ * real client: a non-integer key (client kept, Functions canonicalised or
+ * dropped), an array bucket (client kept and coerced, Functions dropped), and
+ * a map with nothing readable in it (client `{}`, Functions absent — which
+ * `podiumStandingRow` then re-aggregated to 0/0 on one side and passed the
+ * roots through on the other). `absent` is the only one of those answers under
+ * which every consumer on both sides — the podium's re-aggregation, the
+ * effective first-bingo fallback, the email's window fold — already agreed.
+ */
+function readableDayStats(value: unknown): {
+  dayStats: Record<number, FinaleDayStat> | undefined;
+  changed: boolean;
+} {
+  if (value === undefined) return { dayStats: undefined, changed: false };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { dayStats: undefined, changed: true };
+  }
   let changed = false;
-  const readable: Record<number, FinaleDayStat> = {};
-  for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
-    // A bucket that is not an object is DROPPED — there is nothing to default a
-    // Day's evidence to — and dropping one is itself a change.
-    if (!bucket || typeof bucket !== 'object') {
+  let kept = 0;
+  // Keyed by the STRING key, exactly as the client keys its rebuilt map — never
+  // through `Number(key)`. Every key that reaches this loop is the canonical
+  // spelling of its integer (`canonicalDayStatsKey`), so the two are the same
+  // property under the same name; keying through `Number()` would only ever
+  // differ if that predicate were loosened here alone, and then it would MERGE
+  // two spellings into one Day on this side while the client dropped them.
+  const readable: Record<string, FinaleDayStat> = {};
+  for (const [key, bucket] of Object.entries(value)) {
+    if (!canonicalDayStatsKey(key) || !bucket || typeof bucket !== 'object' || Array.isArray(bucket)) {
       changed = true;
       continue;
     }
     const stat = bucket as Record<string, unknown>;
-    const dayBingoCount = readableRankingCount(stat.bingoCount);
-    const daySquaresMarked = readableRankingCount(stat.squaresMarked);
-    const dayFirstBingoAt = readableRankingInstant(stat.firstBingoAt);
+    const bingoCount = readableRankingCount(stat.bingoCount);
+    const squaresMarked = readableRankingCount(stat.squaresMarked);
+    const firstBingoAt = readableRankingInstant(stat.firstBingoAt);
     if (
-      dayBingoCount !== stat.bingoCount
-      || daySquaresMarked !== stat.squaresMarked
-      || dayFirstBingoAt !== stat.firstBingoAt
+      bingoCount !== stat.bingoCount
+      || squaresMarked !== stat.squaresMarked
+      || firstBingoAt !== stat.firstBingoAt
     ) {
       changed = true;
     }
-    readable[Number(key)] = {
-      bingoCount: dayBingoCount,
-      squaresMarked: daySquaresMarked,
-      firstBingoAt: dayFirstBingoAt,
-    };
+    readable[key] = { bingoCount, squaresMarked, firstBingoAt };
+    kept += 1;
   }
-  return changed ? { ...rooted, dayStats: readable } : rooted;
+  if (kept === 0) return { dayStats: undefined, changed: true };
+  // Nothing dropped, nothing coerced: the map the Player wrote IS the readable
+  // map, foreign fields and all, and it is returned by identity — as the client
+  // returns it — rather than rebuilt around the three ranked fields.
+  return changed
+    ? { dayStats: readable, changed }
+    : { dayStats: value as Record<number, FinaleDayStat>, changed };
 }
 
 /**
@@ -211,8 +285,13 @@ export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
  * contract: a row carrying `{ dayStats: { 0: null } }` is reachable by any
  * participant, deliberately or by a client bug, and one such row throwing while
  * a model is built would take a whole Event's finale beat or morning send down
- * with it. So the map is rebuilt: non-integer keys and non-object buckets are
- * dropped, and a map left with nothing reads as absent.
+ * with it. So the map is read by the entry rule `readableDayStats` above
+ * states: a key that is not the canonical spelling of an integer, and a bucket
+ * that is not a non-null, non-array object, are dropped; a map left with
+ * nothing reads as absent; and a map in which nothing had to be dropped or
+ * coerced is passed through by identity rather than rebuilt (#1168 — the same
+ * rule, key for key and shape for shape, that `withReadableDayStats` applies on
+ * the client).
  *
  * THE BUCKET RULE IS `withReadableDayStats`'s, EXACTLY (#1152, CodeRabbit on PR
  * #1165). The two roster readers used to drop a bucket whose count was
@@ -231,21 +310,7 @@ export function withReadableFinaleRanking(player: FinalePlayer): FinalePlayer {
  * is what a second copy of a normalisation buys.
  */
 export function sanitizeFinaleDayStats(value: unknown): Record<number, FinaleDayStat> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const out: Record<number, FinaleDayStat> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    const dayIndex = Number(key);
-    if (!Number.isInteger(dayIndex) || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      continue;
-    }
-    const stat = raw as Record<string, unknown>;
-    out[dayIndex] = {
-      bingoCount: readableRankingCount(stat.bingoCount),
-      squaresMarked: readableRankingCount(stat.squaresMarked),
-      firstBingoAt: readableRankingInstant(stat.firstBingoAt),
-    };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
+  return readableDayStats(value).dayStats;
 }
 
 /** The Tutorial Day indexes from an Event's schedule. The Event-wide First to

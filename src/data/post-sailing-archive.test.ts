@@ -18,7 +18,7 @@ import {
   writableArchiveRecord,
 } from './eventArchive';
 import { buildPodium, dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
-import { MAX_DAYS } from './eventLimits';
+import { MAX_DAYS, canonicalDayStatsKey } from './eventLimits';
 import { comparePlayers } from '../game/logic';
 import { migrateDayFields, playerConverter } from './converters';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
@@ -1049,6 +1049,45 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     expect(draft.archive.standings.map((r) => r.uid)).toEqual(['junk']);
   });
 
+  it('drops an ARRAY bucket, and any bucket under a key that is not an integer — the Functions read boundary\'s own rule (#1168)', () => {
+    // The client used to keep a `"7.5"`, `"seven"` or `"01"` key verbatim and an
+    // array bucket coerced, while the Functions read boundary canonicalised the
+    // key and dropped the array. Both sides now drop; and with nothing left the
+    // map reads as ABSENT, so this row's only honour evidence is its root stamp
+    // (none), Day 1's honour goes to the row that carries it, and the roots are
+    // still copied verbatim (ADR 0001).
+    const draft = draftEventArchive({
+      players: [
+        {
+          ...mkPlayer({ uid: 'junk', displayName: 'Junk', bingoCount: 2, squaresMarked: 4 }),
+          dayStats: {
+            '7.5': { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
+            seven: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
+            '01': { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
+            1: [{ bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 }],
+          },
+        } as unknown as PlayerDoc,
+        mkPlayer({
+          uid: 'real',
+          displayName: 'Real',
+          bingoCount: 1,
+          squaresMarked: 5,
+          firstBingoAt: 900,
+          dayStats: { 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+        }),
+      ],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(draft.archive.firstBingo?.uid).toBe('real');
+    expect(draft.archive.dailyHonors.map((h) => h.uid)).toEqual(['real']);
+    expect(draft.archive.standings.find((r) => r.uid === 'junk')).toMatchObject({
+      bingoCount: 2,
+      squaresMarked: 4,
+    });
+    expect(draft.refusal).toBeNull();
+  });
+
   it('coerces a bucket whose fields are MISSING or non-finite rather than ranking them', () => {
     // The bucket is a real object, so it is kept — and every field inside it
     // gets the same coercion the standings rows get. A non-finite instant is the
@@ -1212,6 +1251,79 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
       firstBingoAt: 900,
     });
     expect(withReadableDayStats(scored)).toBe(scored);
+    // A well-formed bucket carrying a field the rankers never read is kept by
+    // identity too, field included: the map is rebuilt only around a dropped or
+    // coerced entry, and the Functions read boundary now answers the same
+    // (#1168, fix round 1).
+    const annotated = mkPlayer({
+      uid: 'annotated',
+      displayName: 'Annotated',
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3, note: 'x' } } as PlayerDoc['dayStats'],
+    });
+    expect(withReadableDayStats(annotated)).toBe(annotated);
+  });
+
+  it('reads a map with no surviving bucket as ABSENT, never as a breakdown that sums to nothing (#1168)', () => {
+    // `podiumStandingRow` re-aggregates a `{}` to 0/0 and passes an absent map
+    // through to the roots; the Functions read boundary already answered
+    // "absent" for every one of these shapes, so this side now does too.
+    const bucket = { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 };
+    const base = mkPlayer({ uid: 'u', displayName: 'U', bingoCount: 1, firstBingoAt: 500 });
+    for (const dayStats of [
+      {},
+      { '7.5': bucket },
+      { seven: bucket },
+      { '07': bucket },
+      { ' 7': bucket },
+      { '': bucket },
+      { 1: [bucket] },
+      { 1: null },
+      { 1: 'nonsense' },
+      [bucket],
+      'nonsense',
+      null,
+    ]) {
+      const readable = withReadableDayStats({ ...base, dayStats } as unknown as PlayerDoc);
+      expect(readable.dayStats).toBeUndefined();
+      // The roots are untouched: the row simply ranks as a legacy row.
+      expect(readable).toMatchObject({ bingoCount: 1, firstBingoAt: 500 });
+    }
+    // A surviving bucket beside the junk keeps the map, minus the junk — and a
+    // zero-padded key is DROPPED rather than merged into the real Day beside it.
+    const mixed = withReadableDayStats({
+      ...base,
+      dayStats: {
+        7: bucket,
+        '07': { bingoCount: 9, squaresMarked: 9, firstBingoAt: 1 },
+        seven: bucket,
+        1: [bucket],
+      },
+    } as unknown as PlayerDoc);
+    expect(mixed.dayStats).toEqual({ 7: bucket });
+    // A bucket whose FIELDS are arrays is a real bucket with unreadable fields.
+    const arrays = withReadableDayStats({
+      ...base,
+      dayStats: { 1: { bingoCount: [1], squaresMarked: [], firstBingoAt: [900] } },
+    } as unknown as PlayerDoc);
+    expect(arrays.dayStats).toEqual({ 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } });
+  });
+
+  it.each([
+    ['0', true],
+    ['7', true],
+    ['10', true],
+    ['-1', true],
+    ['07', false],
+    [' 7', false],
+    ['7.5', false],
+    ['seven', false],
+    ['', false],
+    ['-0', false],
+    ['1e3', false],
+    [String(Number.MAX_SAFE_INTEGER), true],
+    [String(Number.MAX_SAFE_INTEGER + 2), false],
+  ])('canonicalDayStatsKey(%j) is %s — the spelling `foldDayStat` and `foldEchoStats` write, and no other', (key, canonical) => {
+    expect(canonicalDayStatsKey(key)).toBe(canonical);
   });
 
   it('CLAMPS a finite number the rules would refuse, rather than freezing one the flip cannot write', () => {

@@ -15,6 +15,7 @@ import { isBanned } from './moderation';
 import {
   ARCHIVE_NUMBER_BOUND,
   MAX_DAYS,
+  canonicalDayStatsKey,
   clampArchiveNumber,
   supportedDayIndex,
 } from './eventLimits';
@@ -626,12 +627,39 @@ export function archiveInstant(value: unknown): number | null {
  * is the one way back. The coercions further down never ran, because the throw
  * happened first.
  *
- * So a bucket that is not an object is DROPPED (there is nothing to default a
- * Day's evidence to) and every field inside one that is gets the same coercion
- * the standings rows get: a non-finite count reads `0`, a bad instant reads
- * `null`. Nothing else moves — the KEY is preserved verbatim, junk included, so
- * the selectors see exactly the Days they saw before and the record's own
- * `Number.isInteger` filter still decides which honours survive.
+ * So the map is read by ONE ENTRY RULE, and it is the Functions read boundary's
+ * own (`readableDayStats` in `functions/src/finaleContent.ts`, #1168):
+ *
+ *   - a map that is not a non-null, non-array object — `null`, a string, an
+ *     ARRAY — has no entries to read and reads as ABSENT;
+ *   - an entry survives only under a key `canonicalDayStatsKey` accepts (the
+ *     canonical spelling of an integer — the only spelling `foldDayStat` and
+ *     `foldEchoStats` in `src/game/logic.ts` ever write), and only with a
+ *     non-null, non-array object for a bucket: a `null`, a string, a number or
+ *     an array is DROPPED, because there is nothing to default a Day's evidence
+ *     to. Plainness is NOT asked: a `Date` or a `Timestamp` written where a
+ *     bucket belongs is kept, with every field unreadable, on both sides;
+ *   - every field inside a surviving bucket gets the same coercion the standings
+ *     rows get — a non-finite count reads `0`, a bad instant reads `null` — and
+ *     an array-valued FIELD is just an unreadable value;
+ *   - a map in which nothing had to be dropped or coerced passes through by
+ *     IDENTITY — a field beyond the three the rankers read included — and is
+ *     rebuilt to those three fields only around a dropped or coerced entry,
+ *     exactly as the Functions read boundary now does (#1168, fix round 1);
+ *   - a map left with nothing reads as ABSENT, so the row ranks as a legacy row
+ *     by its roots on every surface.
+ *
+ * The key used to be preserved verbatim here, junk included, and an array
+ * bucket kept and coerced, while the Functions side canonicalised the key
+ * through `Number(key)` — reading `"07"` as Day 7 and merging it over the real
+ * bucket there — and dropped the array. #1165 left both divergences out of
+ * scope because no real client writes either shape; #1168 closes them by
+ * having BOTH sides drop, the stricter contract and the one under which no two
+ * entries can collapse into one Day. The empty-map corollary rides with it:
+ * this used to hand `podiumStandingRow` a `{}` it re-aggregated to 0/0, where
+ * the Functions side handed an absent map it passed the roots through for.
+ * The record's own `supportedDayIndex` filter still decides which honours
+ * survive; this only decides which entries are Days at all.
  *
  * AND THE ROOT `firstBingoAt` IS NORMALISED TOO (#1142 item 9). Sanitising only
  * the buckets left the one path that does not read them exposed:
@@ -693,18 +721,26 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
   // returns a well-formed row unchanged.
   const rooted = withReadableRanking(p);
   const raw = p.dayStats;
-  if (!raw || typeof raw !== 'object') return rooted;
+  // Absent stays absent, by identity.
+  if (raw === undefined) return rooted;
+  // A map that is not a non-null, non-array object has no entries to read: it
+  // reads as ABSENT, exactly as the Functions read boundary reads it (#1168).
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...rooted, dayStats: undefined };
+  }
   // Object identity is preserved for every ordinary row — buckets included: the
   // console re-runs this on each render, `useLeaderboard` runs it on every roster
   // snapshot, and copying rows would defeat the reference equality React's
   // memoisation elsewhere relies on. `NaN === NaN` is false, so a row carrying
   // one is correctly seen as changed.
   let changed = false;
+  let kept = 0;
   const readable: Record<string, NonNullable<PlayerDoc['dayStats']>[number]> = {};
   for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
-    // A bucket that is not an object is DROPPED — there is nothing to default a
-    // Day's evidence to — and dropping one is itself a change.
-    if (!bucket || typeof bucket !== 'object') {
+    // An entry under a key that does not spell an integer, or whose bucket is
+    // not a non-null, non-array object, is DROPPED — there is nothing to default
+    // a Day's evidence to — and dropping one is itself a change.
+    if (!canonicalDayStatsKey(key) || !bucket || typeof bucket !== 'object' || Array.isArray(bucket)) {
       changed = true;
       continue;
     }
@@ -720,7 +756,11 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
       changed = true;
     }
     readable[key] = { bingoCount, squaresMarked, firstBingoAt };
+    kept += 1;
   }
+  // A map left with nothing reads as ABSENT — not as a breakdown that sums to
+  // nothing — so the row ranks by its roots everywhere, as a legacy row does.
+  if (kept === 0) return { ...rooted, dayStats: undefined };
   return changed
     ? { ...rooted, dayStats: readable as NonNullable<PlayerDoc['dayStats']> }
     : rooted;

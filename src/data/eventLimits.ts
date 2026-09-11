@@ -60,6 +60,46 @@ export function supportedDayIndex(value: unknown): value is number {
 }
 
 /**
+ * Is this `dayStats` KEY the canonical decimal spelling of an integer — the only
+ * spelling a client ever writes? (#1168.)
+ *
+ * `PlayerDoc.dayStats` is declared `Record<number, …>`, but a Firestore map key
+ * is a string, and the map is Player-written under ADR 0001 with a rules arm
+ * that validates nothing inside it — so a key can be `"7.5"`, `"seven"`, `"07"`,
+ * `" 7"` or `""` as easily as `"7"`. The two sides of the finale mirror used to
+ * answer those differently: `withReadableDayStats` kept such a key verbatim,
+ * junk included, while the Functions read boundary canonicalised every key
+ * through `Number(key)` — dropping `"7.5"` and `"seven"`, but KEEPING `"07"` and
+ * `""` as Days 7 and 0, merged over whatever real bucket already sat under that
+ * Day. One row could therefore carry a breakdown on the live board that the
+ * podium Moment and the morning email never saw, or the other way round.
+ *
+ * THE RULE BOTH SIDES NOW APPLY: a key survives only when `Number(key)`
+ * ROUND-TRIPS — it is a safe integer whose `String()` is the key itself. That is
+ * how every real key is spelled, because `foldDayStat` and `foldEchoStats`
+ * (`src/game/logic.ts`) file the bucket under the numeric `dayIndex`, the seed
+ * and post-freeze ceremonial writes (`src/data/api.ts`, `src/data/admin.ts`) key
+ * the same way, and JavaScript stringifies a number canonically. Every other
+ * spelling is dropped, on both sides, rather than merged on one: dropping is
+ * the only answer under which no two entries can collapse into one Day, and no
+ * side can see a Day the other does not.
+ *
+ * SAFE-INTEGER for the reason `supportedDayIndex` gives — stated rather than
+ * implied — and because an unsafe integer does not spell itself back either
+ * (`String(1e21)` is `"1e+21"`). Range is deliberately NOT asked here: this is
+ * "does this key name a Day index at all?", the question the sums and the honour
+ * selectors ask of every key; `supportedDayIndex` is "is it a Day the contract
+ * has?", asked of the honours alone, and a bucket under `"10"` or `"-1"` still
+ * sums exactly as it always did. Mirrored, not imported, by
+ * `functions/src/finaleContent.ts` (`rootDir: "src"`), and pinned against it
+ * over a table of spellings by `tests/functions/finale-parity.test.ts`.
+ */
+export function canonicalDayStatsKey(key: string): boolean {
+  const index = Number(key);
+  return Number.isSafeInteger(index) && String(index) === key;
+}
+
+/**
  * Refuse an oversized Event schedule before a writer performs any Firestore
  * reads or constructs a batch. Counting the supplied entries (rather than
  * unique values) is deliberately conservative: every entry can fan out into
