@@ -2158,12 +2158,14 @@ export async function runAdminAlertCycle(
   // Both legs share a scheduler timeout but not a liveness dependency. Run
   // them concurrently so a slow relationship lookup cannot consume the whole
   // invocation before ordinary moderation alerts begin draining.
+  // A query-level failure here may echo a document path or a reporter uid in
+  // its message. Log only the status code, as the per-task sweep does (#990).
   await Promise.all([
     runAbuseEscalationSweep(db, deps).catch((err) => {
-      console.error('runAdminAlertCycle: abuse escalation sweep failed', err);
+      console.error('runAdminAlertCycle: abuse escalation sweep failed', { code: firestoreErrorCodeForLog(err) });
     }),
     runAdminAlertSweep(db, deps).catch((err) => {
-      console.error('runAdminAlertCycle: admin digest sweep failed', err);
+      console.error('runAdminAlertCycle: admin digest sweep failed', { code: firestoreErrorCodeForLog(err) });
     }),
   ]);
 }
