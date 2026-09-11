@@ -111,6 +111,41 @@ describe('Firebase handoff commit Worker adapter', () => {
     );
   });
 
+  it('refuses a second commit on its own, without relying on the controller phase machine (#1077)', async () => {
+    const adapter = createFirebaseHandoffCommitWorkerAdapter({} as IDBFactory);
+    await adapter.initialize({
+      attempt,
+      firebaseOptions: { apiKey: 'api-key', projectId: 'project' },
+      tenantId: null,
+      emulatorUrl: null,
+    });
+    await adapter.prepare({ attempt, customToken: 'custom-token' });
+    await adapter.commit();
+    expect(mocks.initializeApp).toHaveBeenCalledTimes(2);
+
+    await expect(adapter.commit()).rejects.toThrow('handoff-worker-already-committed');
+    // No third [DEFAULT] initialization and no second persistent write.
+    expect(mocks.initializeApp).toHaveBeenCalledTimes(2);
+    expect(mocks.initializeAuth).toHaveBeenCalledTimes(2);
+    expect(mocks.updateCurrentUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps refusing after a commit that threw part-way, so the adapter is one-shot (#1077)', async () => {
+    const adapter = createFirebaseHandoffCommitWorkerAdapter({} as IDBFactory);
+    await adapter.initialize({
+      attempt,
+      firebaseOptions: { apiKey: 'api-key', projectId: 'project' },
+      tenantId: null,
+      emulatorUrl: null,
+    });
+    await adapter.prepare({ attempt, customToken: 'custom-token' });
+    mocks.updateCurrentUser.mockRejectedValueOnce(new Error('persist-failed'));
+    await expect(adapter.commit()).rejects.toThrow('persist-failed');
+
+    await expect(adapter.commit()).rejects.toThrow('handoff-worker-already-committed');
+    expect(mocks.initializeApp).toHaveBeenCalledTimes(2);
+  });
+
   it('fails before Firebase initialization when IndexedDB is not really writable', async () => {
     mocks.proveWritableIndexedDb.mockRejectedValue(new Error('private mode'));
     const adapter = createFirebaseHandoffCommitWorkerAdapter({} as IDBFactory);
