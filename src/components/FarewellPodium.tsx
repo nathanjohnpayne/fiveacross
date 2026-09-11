@@ -12,6 +12,7 @@ import { buildPodium, type Podium } from '../data/finale';
 import { resolvedStandingsFreezeAt } from '../game/logic';
 import { mostLovedDisplayWinners, mostLovedFrozenEventPayload } from '../data/mostLoved';
 import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { useProofFeed } from '../hooks/useData';
@@ -642,9 +643,7 @@ function FarewellPodiumInner({
     } catch {
       // shareCardBlob never throws by design; belt-and-braces regardless.
     } finally {
-      if (EVENT_ID === actedEventId) {
-        track('share_click', { surface: 'farewell' });
-      }
+      trackIfCurrentEvent(actedEventId, 'share_click', { surface: 'farewell' });
     }
   };
 

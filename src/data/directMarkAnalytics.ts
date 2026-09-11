@@ -6,6 +6,7 @@ import {
 } from '../analytics';
 import { onPostHogReady } from '../posthog';
 import { db, EVENT_ID } from '../firebase';
+import { isCurrentEvent } from './currentEvent';
 import { isLocalDirectMarkRequest } from './markAnalytics';
 import type { ClaimMode } from '../types';
 
@@ -288,11 +289,11 @@ export function subscribeDirectMarkAnalytics(uid: string, eventId: string = EVEN
     // Sink dimensions follow the currently active Event and cannot be rebound
     // for an older subscription. Keep A's durable outbox parked while B is
     // active; its retry (or a later A remount) can drain once A is active again.
-    if (EVENT_ID !== eventId) return false;
+    if (!isCurrentEvent(eventId)) return false;
     for (const delivery of [...outbox.values()]) {
       // A sink call is synchronous, but re-check between rows so no later row
       // can start after an Event transition triggered by the preceding call.
-      if (EVENT_ID !== eventId) return false;
+      if (!isCurrentEvent(eventId)) return false;
       const updated = dispatch(delivery, eventId);
       outbox.set(updated.event.transitionId, updated);
       // Persistence is the preferred crash boundary, but constrained browsers

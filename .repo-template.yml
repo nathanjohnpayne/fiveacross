@@ -15,6 +15,8 @@ spec_test_map:
   # shares the spec basename, so map the contract's primary isolation suites.
   event-scoped-client-state:
     - src/data/eventScope.test.ts
+    - src/data/currentEvent.test.ts
+    - src/eventScopedAnalytics.test.ts
     - src/hooks/event-scope-lifecycle.test.tsx
     - src/data/moments-event-scope.test.ts
     - src/hooks/useOpenSquare.test.tsx
