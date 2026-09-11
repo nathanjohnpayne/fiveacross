@@ -888,6 +888,11 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
       },
     },
     {
+      name: 'a bucket lacking firstBingoAt — the foldDayStat preserve write (#75), the one real-client shape NOT returned by identity: rebuilt with null on both sides',
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 2 } },
+      reads: { 1: { bingoCount: 1, squaresMarked: 2, firstBingoAt: null } },
+    },
+    {
       name: 'a well-formed bucket carrying a field the rankers never read — kept by identity, field included',
       dayStats: { 1: { ...BUCKET, note: 'x' } },
       reads: { 1: { ...BUCKET, note: 'x' } } as PlayerDoc['dayStats'],
@@ -901,6 +906,11 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
       name: 'every shape at once beside one real bucket',
       dayStats: { 2: BUCKET, '7.5': BUCKET, seven: BUCKET, '02': BUCKET, 3: [BUCKET], 4: null, 5: 'x' },
       reads: { 2: BUCKET },
+    },
+    {
+      name: 'keys beyond the supported Day range — kept, because range is not a question this rule asks',
+      dayStats: { 10: BUCKET, '-1': BUCKET },
+      reads: { 10: BUCKET, '-1': BUCKET },
     },
     { name: 'an empty map', dayStats: {}, reads: undefined },
     { name: 'a map that is an ARRAY', dayStats: [BUCKET], reads: undefined },
@@ -935,6 +945,38 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
     expect(sanitizeFinaleDayStats(row.dayStats)).toBe(row.dayStats);
     expect(asReadFinalePlayers([row])[0].dayStats).toBe(row.dayStats);
     expect(asReadFinalePlayers([row])[0]).toEqual(fnsRow);
+  });
+
+  it('rebuilds a bucket lacking firstBingoAt on both sides — the one real-client shape NOT returned by identity', () => {
+    // `foldDayStat` (src/game/logic.ts) OMITS `firstBingoAt` from the Day bucket
+    // of its `{ merge: true }` write in the #75 preserve case, so a stored bucket
+    // can lack the key outright when the server held no bucket to merge over.
+    // An absent instant reads `null`, `null !== undefined` is a change, and the
+    // map is rebuilt around it on both sides. Pinned as NOT identity because it
+    // is the one real-client shape on which the two sides must agree to rebuild
+    // rather than pass through — the shape most likely to regress asymmetrically
+    // if one side ever starts treating an absent field as nothing to coerce.
+    const row = oversized('sparse', 'Sparse', {
+      bingoCount: 1,
+      squaresMarked: 2,
+      firstBingoAt: null,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 2 } } as unknown as PlayerDoc['dayStats'],
+    });
+    const rebuilt = { 1: { bingoCount: 1, squaresMarked: 2, firstBingoAt: null } };
+
+    const client = withReadableDayStats(row);
+    expect(client).not.toBe(row);
+    expect(client.dayStats).not.toBe(row.dayStats);
+    expect(client.dayStats).toEqual(rebuilt);
+
+    const fnsRow = asFinalePlayers([row])[0];
+    const fns = withReadableFinaleRanking(fnsRow);
+    expect(fns).not.toBe(fnsRow);
+    expect(fns.dayStats).not.toBe(fnsRow.dayStats);
+    expect(fns.dayStats).toEqual(rebuilt);
+    expect(sanitizeFinaleDayStats(row.dayStats)).not.toBe(row.dayStats);
+    expect(sanitizeFinaleDayStats(row.dayStats)).toEqual(rebuilt);
+    expect(asReadFinalePlayers([row])[0].dayStats).toEqual(rebuilt);
   });
 
   it('ranks a row whose every bucket is unreadable by its ROOTS on both podiums and in the email', () => {
@@ -1017,6 +1059,43 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
     // …and the UNREAD roster really does name the other Player on both sides.
     expect(buildPodium(players, schedule as DayDef[]).firstBingo?.uid).toBe('zed');
     expect(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(schedule)).firstBingo?.uid).toBe('zed');
+  });
+
+  it('re-aggregates buckets under keys beyond the supported Day range to one champion on both podiums', () => {
+    // `supportedDayIndex` bounds the client's HONOUR paths alone
+    // (`pinnedOrDerivedDailyHonors`, the archive's carried-honour filter), which
+    // have no Functions counterpart: `buildPodiumPayload` takes its Day honours
+    // from pinned `days/{i}/meta/{i}` docs and never derives them from
+    // `dayStats`. Neither `podiumStandingRow` asks it either, so a bucket under
+    // Day 10 or Day -1 is a canonical entry both sides KEEP and SUM. The range is
+    // not this rule's question; this pins that it is nobody's on the podium path.
+    const players = [
+      oversized('wide', 'Wide', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: 100,
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
+          1: { bingoCount: 9, squaresMarked: 9, firstBingoAt: 50 },
+          10: { bingoCount: 3, squaresMarked: 4, firstBingoAt: null },
+          '-1': { bingoCount: 4, squaresMarked: 4, firstBingoAt: null },
+        },
+      }),
+      oversized('root', 'Root', {
+        bingoCount: 7,
+        squaresMarked: 8,
+        firstBingoAt: 200,
+        dayStats: { 0: { bingoCount: 7, squaresMarked: 8, firstBingoAt: 200 } },
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), CEREMONIAL_CLOSE as DayDef[]);
+    const fns = buildPodiumPayload(asReadFinalePlayers(players), asFinaleDays(CEREMONIAL_CLOSE));
+    expect(fns.champion).toEqual(client.champion);
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    // 1/1 + 3/4 + 4/4: the ceremonial Day 1 bucket is excluded, BOTH out-of-range
+    // buckets are counted, and Wide's roots (1/1, which would lose to Root's 7/8)
+    // are not what either side ranks by.
+    expect(client.champion).toEqual({ uid: 'wide', displayName: 'Wide', bingoCount: 8, squaresMarked: 9 });
   });
 });
 

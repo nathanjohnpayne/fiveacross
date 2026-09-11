@@ -241,7 +241,13 @@ function readableDayStats(value: unknown): {
   }
   let changed = false;
   let kept = 0;
-  const readable: Record<number, FinaleDayStat> = {};
+  // Keyed by the STRING key, exactly as the client keys its rebuilt map — never
+  // through `Number(key)`. Every key that reaches this loop is the canonical
+  // spelling of its integer (`canonicalDayStatsKey`), so the two are the same
+  // property under the same name; keying through `Number()` would only ever
+  // differ if that predicate were loosened here alone, and then it would MERGE
+  // two spellings into one Day on this side while the client dropped them.
+  const readable: Record<string, FinaleDayStat> = {};
   for (const [key, bucket] of Object.entries(value)) {
     if (!canonicalDayStatsKey(key) || !bucket || typeof bucket !== 'object' || Array.isArray(bucket)) {
       changed = true;
@@ -258,7 +264,7 @@ function readableDayStats(value: unknown): {
     ) {
       changed = true;
     }
-    readable[Number(key)] = { bingoCount, squaresMarked, firstBingoAt };
+    readable[key] = { bingoCount, squaresMarked, firstBingoAt };
     kept += 1;
   }
   if (kept === 0) return { dayStats: undefined, changed: true };
