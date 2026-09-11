@@ -124,9 +124,6 @@ export async function stubAuthWidgetCdn(page: Page): Promise<void> {
 
 /** Best-effort dismiss of the analytics disclosure banner — it never blocks
  * the sign-in control, but clearing it keeps the viewport tidy for later
-
-/** Best-effort dismiss of the analytics disclosure banner — it never blocks
- * the sign-in control, but clearing it keeps the viewport tidy for later
  * taps on small/short viewports. */
 export async function dismissConsentNotice(page: Page): Promise<void> {
   const gotIt = page.getByRole('button', { name: 'Got it' });
