@@ -612,7 +612,20 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
     // confirmed under one Edition says nothing about another. This gate is
     // pure and synchronous and cannot await a read, so the component records
     // the verification and the gate consumes it.
-    if (draft.slugVerifiedForEdition !== draft.edition) {
+    //
+    // The verification key is the PAIR, not the Edition alone (#993). The
+    // Edition marker says which hostnames were checked but not which label:
+    // a parsed or imported draft can carry a new `slugCandidate` beside a
+    // same-Edition marker earned by an earlier address, and on the Edition
+    // alone this gate accepted it without any availability read. Requiring
+    // the recorded candidate to equal the one the draft now carries closes
+    // that: same label, same Edition, or unverified. Compared against the
+    // trimmed candidate to match the presence check above; a candidate with
+    // surrounding whitespace is refused by `validateSlug` below regardless.
+    if (
+      draft.slugVerifiedForEdition !== draft.edition ||
+      draft.slugVerifiedCandidate !== draft.slugCandidate.trim()
+    ) {
       issues.push({
         code: 'event-slug-unverified',
         field: 'slugCandidate',

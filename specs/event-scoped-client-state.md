@@ -27,6 +27,8 @@ The inverse is equally important: returning from B to A must not let a retired A
 
 Event-owned public async entry points read the live `EVENT_ID` once, before their first await, and carry that captured value explicitly through every ref, cache lookup, retry, continuation, upload, and related helper. Lazy path helpers may continue to default to `EVENT_ID` for synchronous callers; a continuation must not re-read the live binding after it has begun.
 
+`isCurrentEvent(eventId)` (`src/data/currentEvent.ts`) is the one spelling of the late-continuation check: after its await, an Event-owned operation asks it with the id it captured before touching live client state, opening a share surface, or draining an Event-keyed outbox. Analytics emission goes through `trackIfCurrentEvent(actedEventId, name, params?, options?)` (`src/eventScopedAnalytics.ts`), which emits nothing unless the acted Event is still live and takes the acted Event id as a required argument, so an Event-guarded emission cannot be written without naming the Event it is guarded against ([#1083](https://github.com/nathanjohnpayne/fiveacross/issues/1083)). Call sites do not hand-roll `if (EVENT_ID === actedEventId) track(...)`.
+
 ## Subscription lifecycle
 
 Every Firestore subscription that exposes React data below `events/{eventId}` has all four safeguards:
@@ -88,6 +90,7 @@ Because this ticket ships no in-session switcher, it does not define a product f
 ## Acceptance and tests
 
 - Event scope keys change with Event identity and preserve segment boundaries: `src/data/eventScope.test.ts`.
+- `isCurrentEvent` reads the live binding on every call, so a captured id goes stale on a switch and revives on return: `src/data/currentEvent.test.ts`. `trackIfCurrentEvent` forwards to `track` verbatim for the live Event and emits nothing for a stale one: `src/eventScopedAnalytics.test.ts`.
 - Event A listener results disappear synchronously on B, retired successes/errors cannot alter B, a B→A return cannot resurrect the retired A lifetime, board freshness cannot cross Events, and a subscription's per-snapshot observer persists under the Event it was opened for rather than the one now active: `src/hooks/event-scope-lifecycle.test.tsx` and `src/hooks/useData.test.ts`.
 - Pending Moments, generations, confirm state, observer callbacks, retraction retries, and broadcasts retain their captured Event: `src/data/moments-event-scope.test.ts` plus the existing Moments and component suites.
 - Feed-to-Board and Suggest-panel intents do not surface across Events: `src/hooks/useOpenSquare.test.tsx` and `src/components/SuggestPanelBridge.test.tsx`.

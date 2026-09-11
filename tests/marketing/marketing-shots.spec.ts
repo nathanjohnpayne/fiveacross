@@ -22,6 +22,7 @@ import {
   HERO_DAY_DEAL,
   PLAYER_NAMES,
   FEED_PROOF_TEXT,
+  FEED_TALLY_TEXT,
   heroClock,
 } from './support/fixture';
 import { CENTER, dealBoard, type DealItem } from '../../src/game/logic';
@@ -171,10 +172,19 @@ test('capture marketing shots', async ({ page }) => {
   // the harness would then write a "Loading…" / "Tallying the leaderboard…"
   // image and exit 0. A screenshot tool failing loudly beats one succeeding
   // with the wrong picture.
+  //
+  // The Feed is THREE seeded sections on three subscriptions — the text proofs,
+  // the BINGO Moment and the shared tally — and each settles on its own.
+  // Waiting on a proof and the Moment alone let the shutter fire before the
+  // tally card mounted, so the capture was nondeterministic (#1021). Every
+  // section is asserted; the tally by the SAME prompt text the fixture wrote.
   await renameSignedInPlayer(testEnv, uid, SIGNED_IN_NAME);
   await page.locator('nav.tabs a', { hasText: 'Feed' }).click();
   await expect(page.getByText(FEED_PROOF_TEXT, { exact: false })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText(/got a BINGO/i).first()).toBeVisible({ timeout: 30_000 });
+  const tallyCard = page.locator('.tally-card').first();
+  await expect(tallyCard).toBeVisible({ timeout: 30_000 });
+  await expect(tallyCard).toContainText(FEED_TALLY_TEXT);
   await shoot(page, 'feed');
 
   await renameSignedInPlayer(testEnv, uid, SIGNED_IN_NAME);

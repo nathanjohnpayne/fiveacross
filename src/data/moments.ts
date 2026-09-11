@@ -2,6 +2,7 @@ import { doc, getDoc, getDocFromCache, getDocFromServer, setDoc, writeBatch } fr
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
 import { dropHeldHonorPins } from './dayMeta';
+import { isCurrentEvent } from './currentEvent';
 import { eventScopeKey } from './eventScope';
 import { cellsFromData } from '../game/cells';
 import {
@@ -974,7 +975,7 @@ export function createRetractionFallObserver(
     // An unsubscribed listener can still have one delivery queued. Once another
     // Event is active, that old delivery is history and must not mutate either
     // Event's client state or call dayMeta through its live EVENT_ID binding.
-    if (EVENT_ID !== eventId) return;
+    if (!isCurrentEvent(eventId)) return;
     if (snap.hasPendingWrites) return; // an optimistic fold can neither arm nor adjudicate
     if (snap.boardUid !== uid || snap.cells.length === 0) return; // no evidence — hold
     const stands = { bingo: hasBingo(snap.cells), blackout: isBlackout(snap.cells) };

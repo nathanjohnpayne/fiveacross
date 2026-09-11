@@ -157,12 +157,12 @@ function trackCommunityPromptDeal(
 ): void {
   const count = cells.filter((c) => c.communityPrompt === true).length;
   if (count === 0) return;
-  void import('../analytics')
-    .then(({ track }) => {
+  void import('../eventScopedAnalytics')
+    .then(({ trackIfCurrentEvent }) => {
       // Analytics dimensions follow the active Event and cannot be rebound for
       // a late dynamic-import continuation. Never report A's committed deal as
       // a B action after navigation; the Firestore write remains correctly A.
-      if (EVENT_ID === eventId) track('community_prompt_dealt', { dayIndex, count });
+      trackIfCurrentEvent(eventId, 'community_prompt_dealt', { dayIndex, count });
     })
     .catch(() => {});
 }
@@ -2224,13 +2224,12 @@ async function runSetMark(
     // dependency (test doubles mock ../firebase with only { db, EVENT_ID });
     // both the import and the call are guarded — observability must never
     // throw out of a fire-and-forget commit handler.
-    void import('../analytics')
-      .then(({ track }) => {
+    void import('../eventScopedAnalytics')
+      .then(({ trackIfCurrentEvent }) => {
         // The failed batch still belongs to the Event captured by setMark.
         // Analytics dimensions are ambient, so a late rejection must not be
         // reported as activity in whichever Event is active by then.
-        if (EVENT_ID !== eventId) return;
-        track('mark_rejected', {
+        trackIfCurrentEvent(eventId, 'mark_rejected', {
           code: (err as { code?: string } | null)?.code ?? 'unknown',
           index: params.index,
           marked: params.nextMarked,

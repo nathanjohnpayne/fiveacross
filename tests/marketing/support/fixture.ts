@@ -271,6 +271,25 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
   },
 ];
 
+/**
+ * The active Day's dealable prompts, in deal order — the ONE list every seeded
+ * social entry (the shared tally and both text proofs) is drawn from. Sourcing
+ * them from the main pool while stamping dayIndex 0 depicted players marking
+ * prompts nobody could have been dealt that Day — a screenshot asserting
+ * something the product cannot produce (Codex P2 on #1020).
+ */
+const ACTIVE_DAY_ITEMS = heroDealable(HERO_DAY_DEAL[HERO_TODAY_INDEX].items()) as SeedItem[];
+
+/**
+ * The prompt the seeded shared tally sits on — what the spec waits for before
+ * the Feed capture, the same way it waits on FEED_PROOF_TEXT. Exported from
+ * HERE, beside the seed that writes it, so the wait and the write cannot
+ * drift: the Feed's tally stream settles on its own subscription, independent
+ * of proofs and Moments, and a capture that waited on those two alone could
+ * fire before the tally card mounted (Codex P2 on #1020, filed as #1021).
+ */
+export const FEED_TALLY_TEXT: string = ACTIVE_DAY_ITEMS[0].text;
+
 // Per-Edition Day chrome. Bodega's own Themes are Vacay-scoped
 // (THEME_EDITIONS), so the platform build wears the occasion-neutral trio.
 const DAY_CHROME =
@@ -479,16 +498,10 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
       // Feed content: a shared tally (two players on one prompt), two text
       // proofs and a BINGO moment. No photo proofs — a hero shot must not
       // carry anybody's real picture, and a fake one would be worse.
-      // Every social entry is drawn from the ACTIVE Day's own dealable
-      // snapshot. Sourcing them from the main pool while stamping
-      // dayIndex 0 depicted players marking prompts nobody could have been
-      // dealt that Day — a screenshot asserting something the product
-      // cannot produce (Codex P2 on #1020).
-      const activeDayItems = heroDealable(
-        HERO_DAY_DEAL[HERO_TODAY_INDEX].items(),
-      ) as SeedItem[];
-      const sharedText = activeDayItems[0].text;
-      const sharedId = seedItemDocId(sharedText);
+      // Every social entry is drawn from ACTIVE_DAY_ITEMS, the active Day's
+      // own dealable snapshot; the tally sits on FEED_TALLY_TEXT, the exported
+      // prompt the spec waits for before it captures the Feed.
+      const sharedId = seedItemDocId(FEED_TALLY_TEXT);
       for (const [p, ago] of [
         [PLAYERS[1], 2 * HOUR],
         [PLAYERS[2], 1 * HOUR],
@@ -499,7 +512,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
           displayName: p.displayName,
           markedAt: now - ago,
           dayIndex: HERO_TODAY_INDEX,
-          itemText: sharedText,
+          itemText: FEED_TALLY_TEXT,
         });
       }
 
@@ -507,7 +520,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         uid: PLAYERS[3].uid,
         displayName: PLAYERS[3].displayName,
         photoURL: null,
-        itemText: activeDayItems[3].text,
+        itemText: ACTIVE_DAY_ITEMS[3].text,
         type: 'text',
         text: 'Took the long way. Worth it.',
         createdAt: now - 40 * 60_000,
@@ -519,7 +532,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         uid: PLAYERS[2].uid,
         displayName: PLAYERS[2].displayName,
         photoURL: null,
-        itemText: activeDayItems[6].text,
+        itemText: ACTIVE_DAY_ITEMS[6].text,
         type: 'text',
         text: FEED_PROOF_TEXT,
         createdAt: now - 20 * 60_000,

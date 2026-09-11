@@ -26,8 +26,9 @@ const H = vi.hoisted(() => ({
   txSet: vi.fn(),
   txGet: vi.fn(),
   // #559: captures `community_prompt_dealt` (fired via a dynamic import of
-  // ../analytics, mirroring the existing #387 mark_rejected call — see
-  // src/data/w1-board-mark-win.test.ts's identical harness shape).
+  // ../eventScopedAnalytics, whose `track` seam this double is — mirroring the
+  // existing #387 mark_rejected call; see src/data/w1-board-mark-win.test.ts's
+  // identical harness shape).
   trackSpy: vi.fn(),
   eventId: 'test-event',
   afterTransaction: vi.fn(),
@@ -278,8 +279,11 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     });
 
     await expect(dealDayCard(U, 2)).resolves.toBe(true);
-    await Promise.resolve();
-    await Promise.resolve();
+    // The emission sits behind a dynamic import of the REAL ../eventScopedAnalytics
+    // (only its `track` seam is doubled), which settles later than a bare
+    // microtask flush: two `await Promise.resolve()`s let this assertion run
+    // before the continuation and pass with the guard deleted (#1083).
+    await vi.dynamicImportSettled();
 
     expect(H.trackSpy).not.toHaveBeenCalledWith('community_prompt_dealt', expect.anything());
     for (const call of H.txSet.mock.calls) {
@@ -297,10 +301,9 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     };
 
     await dealDayCard(U, 2);
-    // Nothing to `waitFor` on a negative — flush the same microtask queue the
-    // dynamic import resolves on, then assert it never fired.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Nothing to `waitFor` on a negative — wait for any dynamic import (and the
+    // continuation chained on it) to settle, then assert it never fired.
+    await vi.dynamicImportSettled();
     expect(H.trackSpy).not.toHaveBeenCalledWith('community_prompt_dealt', expect.anything());
   });
 

@@ -75,6 +75,7 @@ function launchableDraft(over: Partial<EventDraft> = {}): EventDraft {
     endsOn: '2026-08-09',
     slugCandidate: 'point-reyes',
     slugVerifiedForEdition: 'vacay',
+    slugVerifiedCandidate: 'point-reyes',
     defaultTheme: 'fog-froth-farewells' as ThemeId,
     edition: 'vacay',
     prompts: {
@@ -470,6 +471,29 @@ describe('eventCompletenessIssues', () => {
     expect(issues.map((i) => i.code)).toContain('event-slug-unverified');
   });
 
+  it('refuses a candidate that differs from the one its same-Edition marker was earned for (#993)', () => {
+    // The Edition marker alone said WHICH hostnames were checked but not WHICH
+    // label. A parsed or imported draft could carry `slugCandidate:
+    // 'new-address'` beside a marker produced for an earlier address, and the
+    // gate accepted it without any availability read. The launch transaction
+    // still refuses an invalid claim, but the wizard must not advance on a
+    // verification that belonged to something else. Both directions: the
+    // candidate moved under the marker, or the marker names another label.
+    const moved = eventCompletenessIssues(launchableDraft({ slugCandidate: 'new-address' }));
+    expect(moved.map((i) => i.code)).toContain('event-slug-unverified');
+    const stale = eventCompletenessIssues(launchableDraft({ slugVerifiedCandidate: 'old-address' }));
+    expect(stale.map((i) => i.code)).toContain('event-slug-unverified');
+  });
+
+  it('accepts an address only when BOTH halves of the verification key match — this Edition, this exact candidate', () => {
+    const codes = (over: Partial<EventDraft>) => eventCompletenessIssues(launchableDraft(over)).map((i) => i.code);
+    expect(codes({})).not.toContain('event-slug-unverified');
+    // A matching candidate does not rescue a stale Edition, and a matching
+    // Edition does not rescue a stale candidate.
+    expect(codes({ slugVerifiedForEdition: 'fiveacross' })).toContain('event-slug-unverified');
+    expect(codes({ slugVerifiedCandidate: '' })).toContain('event-slug-unverified');
+  });
+
   it('requires an occasion — it is what binds the Edition', () => {
     expect(eventCompletenessIssues(launchableDraft({ occasion: null })).map((i) => i.field)).toEqual([
       'occasion',
@@ -484,7 +508,10 @@ describe('eventCompletenessIssues', () => {
     ['reserved IDNA form', 'ab--cd', 'reserved-tag'],
     ['uppercase wire spelling', 'Point-Reyes', 'invalid-characters'],
   ])('uses the shared router Slug contract for %s', (_label, slugCandidate, rejection) => {
-    const issues = eventCompletenessIssues(launchableDraft({ slugCandidate }));
+    // The verification key names the candidate it was earned for (#993), so
+    // the fixture's marker is moved with it — this test isolates the format
+    // check, and a stale key would add a second, unrelated issue.
+    const issues = eventCompletenessIssues(launchableDraft({ slugCandidate, slugVerifiedCandidate: slugCandidate }));
     expect(issues).toEqual([
       expect.objectContaining({
         code: 'event-invalid-slug',
@@ -492,7 +519,9 @@ describe('eventCompletenessIssues', () => {
         message: expect.stringContaining(rejection),
       }),
     ]);
-    expect(isDraftLaunchable(launchableDraft({ slugCandidate }), NOW)).toBe(false);
+    expect(isDraftLaunchable(launchableDraft({ slugCandidate, slugVerifiedCandidate: slugCandidate }), NOW)).toBe(
+      false,
+    );
   });
 
   it('rejects a zone the read-side contract would silently rewrite', () => {

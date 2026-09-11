@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Shuffle } from 'lucide-react';
 import { RESHUFFLE_ALLOWANCE, reshuffleBoard } from '../data/api';
-import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { EVENT_ID } from '../firebase';
 
 export type ReshuffleSheetProps = {
@@ -60,9 +60,7 @@ export default function ReshuffleSheet({
       // close in Board handles the case where THIS tab can see that; this is the
       // case where it cannot.
       const nextUsed = await reshuffle({ uid, dayIndex, expectedSeed });
-      if (EVENT_ID === actedEventId) {
-        track('reshuffle_card', { dayIndex, reshufflesUsed: nextUsed });
-      }
+      trackIfCurrentEvent(actedEventId, 'reshuffle_card', { dayIndex, reshufflesUsed: nextUsed });
       onReshuffled?.(nextUsed);
       onClose();
     } catch {

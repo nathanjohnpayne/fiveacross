@@ -13,7 +13,8 @@ import { dayHonorChipLabel, pinnedOrDerivedDailyHonors } from '../data/finale';
 import { isEventArchived } from '../data/eventArchive';
 import { confirmedArchiveGeneration } from '../data/archiveConfirmation';
 import ArchivedLeaderboard from './ArchivedLeaderboard';
-import { track } from '../analytics';
+import { isCurrentEvent } from '../data/currentEvent';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
@@ -604,7 +605,7 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     // Reuses the warmed render when its inputs still match, else renders
     // fresh (the cold-tap path — same behavior as before the warm-up).
     const blob = await warmShareCard();
-    if (EVENT_ID !== actedEventId) return;
+    if (!isCurrentEvent(actedEventId)) return;
     try {
       await shareCardBlob({
         blob,
@@ -622,9 +623,7 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
       // shareCardBlob is designed to never throw, but a share failure must
       // never crash the Leaderboard regardless.
     } finally {
-      if (EVENT_ID === actedEventId) {
-        track('share_click', { surface: 'leaderboard' });
-      }
+      trackIfCurrentEvent(actedEventId, 'share_click', { surface: 'leaderboard' });
     }
   };
 

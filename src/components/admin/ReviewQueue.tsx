@@ -20,7 +20,7 @@ import {
   type ApprovalPlacement,
 } from '../../data/admin';
 import { deleteProof, ProofBacksMarkWhileClosingError } from '../../data/proofs';
-import { track } from '../../analytics';
+import { trackIfCurrentEvent } from '../../eventScopedAnalytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
@@ -610,8 +610,8 @@ export default function ReviewQueue({
     // contract (which always resolves one): test doubles for `data/admin`
     // commonly stub a bare `async () => {}`, and analytics is presentational
     // — it must never turn a mocked-away approval into a rejected promise.
-    if (EVENT_ID === ownedEventId && p && p.outcome !== 'stale' && p.outcome !== 'missing') {
-      track('prompt_suggestion_approved', {
+    if (p && p.outcome !== 'stale' && p.outcome !== 'missing') {
+      trackIfCurrentEvent(ownedEventId, 'prompt_suggestion_approved', {
         outcome: p.outcome,
         ...(p.dayIndex != null ? { dayIndex: p.dayIndex } : {}),
       });

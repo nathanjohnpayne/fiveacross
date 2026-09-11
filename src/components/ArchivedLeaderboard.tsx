@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import {
@@ -306,9 +306,7 @@ export default function ArchivedLeaderboard({
       // shareCardBlob is designed never to throw; a share failure must not crash
       // the archive either.
     } finally {
-      if (EVENT_ID === actedEventId) {
-        track('share_click', { surface: 'leaderboard_archive' });
-      }
+      trackIfCurrentEvent(actedEventId, 'share_click', { surface: 'leaderboard_archive' });
     }
   };
 
