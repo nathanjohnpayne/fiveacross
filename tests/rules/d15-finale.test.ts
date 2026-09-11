@@ -1,13 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteField, doc, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteField, doc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 
 // specs/d15-finale.md, rules layer: `EventDoc.frozenAt` (the finale freeze stamp,
 // set by the 08:00-Day-10 scheduler run via the Admin SDK) is admin/Function-
@@ -49,10 +49,12 @@ afterAll(async () => {
 
 // A canonical, valid Event doc (admins/settings/bannedUids/timezone/days all
 // shaped so the admin update gate's own field checks pass) with no freeze stamp yet.
-beforeEach(async () => {
-  await testEnv.clearFirestore();
-  await testEnv.withSecurityRulesDisabled(async (ctx) => {
-    await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+// The canonical, valid Event doc every case starts from: admins/settings/
+// bannedUids/timezone/days all shaped so the admin update gate's own field
+// checks pass, with no freeze stamp yet. A function so the schedule-matrix
+// test below can seed one Event per case from the same shape (#958).
+function baseEvent(): Record<string, unknown> {
+  return {
       name: 'Cruise',
       status: 'active',
       admins: [ADMIN],
@@ -67,7 +69,13 @@ beforeEach(async () => {
         { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
         { index: 1, unlockAt: NOW() + 7200_000, theme: 'get-sporty' },
       ],
-    });
+  };
+}
+
+beforeEach(async () => {
+  await testEnv.clearFirestore();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), `events/${EVENT}`), baseEvent());
   });
 });
 
@@ -235,32 +243,35 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
   });
 
   it('keeps first-derived-freeze resolution equivalent across schedule sizes 0 through 10', async () => {
-    const setSchedule = async (days: Array<Record<string, unknown>>) => {
-      await testEnv.withSecurityRulesDisabled(async (ctx) => {
-        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), {
-          days,
-          standingsFreezeAt: deleteField(),
-        });
-      });
-    };
-    const addFutureFreeze = (now: number) =>
-      updateDoc(doc(db(ADMIN), `events/${EVENT}`), {
-        standingsFreezeAt: now + 12 * 3600_000,
-      });
-
-    // No branch may invent a boundary when every Day is competitive.
-    for (let size = 0; size <= 10; size += 1) {
-      const now = NOW();
-      const days = Array.from({ length: size }, (_, index) => ({
+    // One Event per case, all seeded in a single rules-disabled batch, and the
+    // thirty admin writes asserted concurrently (#958): the same size and
+    // candidate-index coverage as the sequential loop this replaced, at one
+    // batch write plus one concurrent round of updates instead of sixty
+    // sequential round trips. Each Event carries its own schedule, so the cases
+    // cannot observe one another.
+    const now = NOW();
+    const futureFreeze = now + 12 * 3600_000;
+    const competitive = (size: number) =>
+      Array.from({ length: size }, (_, index) => ({
         index,
         unlockAt: index === size - 1 ? now - 3600_000 : now + (index + 1) * 3600_000,
         theme: `theme-${index}`,
         scoring: 'competitive',
       }));
-      await setSchedule(days);
-      await assertSucceeds(addFutureFreeze(now));
-    }
+    const withCeremonial = (size: number, ceremonialIndex: number) =>
+      Array.from({ length: size }, (_, index) => ({
+        index,
+        unlockAt:
+          index === ceremonialIndex ? now - 3600_000 : now + (index + 1) * 3600_000,
+        theme: `theme-${index}`,
+        scoring: index === ceremonialIndex ? 'ceremonial' : 'competitive',
+      }));
 
+    const cases: Array<{ id: string; days: Array<Record<string, unknown>>; allowed: boolean }> = [];
+    // No branch may invent a boundary when every Day is competitive.
+    for (let size = 0; size <= 10; size += 1) {
+      cases.push({ id: `competitive-${size}`, days: competitive(size), allowed: true });
+    }
     // For every possible candidate index, the ten-Day fast path and the
     // shortest guarded-fallback prefix that can contain that index must both
     // observe the same already-settled ceremonial boundary. Day 9 has no
@@ -268,18 +279,31 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     for (let ceremonialIndex = 0; ceremonialIndex < 10; ceremonialIndex += 1) {
       const sizes = ceremonialIndex === 9 ? [10] : [ceremonialIndex + 1, 10];
       for (const size of sizes) {
-        const now = NOW();
-        const days = Array.from({ length: size }, (_, index) => ({
-          index,
-          unlockAt:
-            index === ceremonialIndex ? now - 3600_000 : now + (index + 1) * 3600_000,
-          theme: `theme-${index}`,
-          scoring: index === ceremonialIndex ? 'ceremonial' : 'competitive',
-        }));
-        await setSchedule(days);
-        await assertFails(addFutureFreeze(now));
+        cases.push({
+          id: `ceremonial-${ceremonialIndex}-of-${size}`,
+          days: withCeremonial(size, ceremonialIndex),
+          allowed: false,
+        });
       }
     }
+    expect(cases).toHaveLength(30);
+
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const batch = writeBatch(ctx.firestore());
+      for (const c of cases) {
+        batch.set(doc(ctx.firestore(), `events/${EVENT}-${c.id}`), { ...baseEvent(), days: c.days });
+      }
+      await batch.commit();
+    });
+
+    await Promise.all(
+      cases.map((c) => {
+        const write = updateDoc(doc(db(ADMIN), `events/${EVENT}-${c.id}`), {
+          standingsFreezeAt: futureFreeze,
+        });
+        return c.allowed ? assertSucceeds(write) : assertFails(write);
+      }),
+    );
   });
 
   it('uses a middle legacy-pool Day as the derived freeze on a shorter schedule', async () => {

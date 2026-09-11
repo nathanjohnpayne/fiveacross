@@ -1049,6 +1049,15 @@ service cloud.firestore {
     // Tonight metadata, or the unlock source. This narrow fast path proves
     // each old Day is still future and each map changes ONLY `theme`, so all
     // other invariants carry through byte-for-byte without re-evaluation.
+    //
+    // CAVEAT (#959): this path does NOT re-validate the stored Days. It relies
+    // on the invariant that whatever `oldDays` carries was already accepted
+    // by the general path (scoring shape, Tonight metadata, unlock source)
+    // when it was written, and `hasOnly(['theme'])` proves the new write
+    // changes nothing else, so the stored validity carries forward untouched.
+    // A future maintainer must not read the fast path as a re-check of
+    // scoring: if the general path's validators ever change, stored Days
+    // written under the old validators still pass through here unchanged.
     function futureThemeOnlyChangeOk(newDay, oldDay) {
       return !dayLocked(oldDay)
         && newDay.diff(oldDay).affectedKeys().hasOnly(['theme']);
