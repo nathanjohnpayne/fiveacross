@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // specs/community-prompt-targeting.md (#557) — the client half: the pure
 // targeting decisions, the submission that records an intended Day, and the
@@ -711,6 +711,20 @@ describe('approveItems — routing an approval into one Day', () => {
 });
 
 describe('setItemSpicy — approval-race fence (#558)', () => {
+  // The fence restart is now logged (#1071), and several rows here legitimately
+  // have no stored revision, so the warning is expected rather than incidental.
+  // Capture it instead of letting the suite print it, and assert on the spy.
+  const spyOnWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+  let warn: ReturnType<typeof spyOnWarn>;
+
+  beforeEach(() => {
+    warn = spyOnWarn();
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
   it('refuses a late stale toggle after Easy approval has made the row active', async () => {
     putItem('p1', {
       status: 'active',
@@ -757,6 +771,63 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       spicyRevision: 8,
     });
     expect(revision).toBe(8);
+  });
+
+  // #1071: `spicyRevision` only ever reaches Firestore through this
+  // transaction, one increment at a time, so a stored value outside the
+  // contract is corrupted or hand-edited data. The correction must stay
+  // writable, so the fence still restarts at 0 — but that silently re-bases the
+  // acknowledgement the queue retires its optimistic overlay on, so it is said
+  // out loud, naming the row and the SHAPE of the bad value (never the value,
+  // never the row, which holds submitter prose).
+  describe('an out-of-contract stored revision is logged, not swallowed', () => {
+    const outOfContract: Array<[string, unknown, string]> = [
+      ['negative', -1, 'negative'],
+      ['NaN', Number.NaN, 'NaN'],
+      ['fractional', 1.5, 'non-integer'],
+      ['a string', '3', 'typeof string'],
+      ['absent', undefined, 'missing'],
+    ];
+
+    it.each(outOfContract)(
+      'restarts the fence at 0 and warns once when the stored revision is %s',
+      async (_label, stored, shape) => {
+        putItem('p1', {
+          status: 'pending',
+          pool: 'main',
+          spicy: false,
+          spicyRevision: stored,
+        });
+
+        const revision = await setItemSpicy('p1', true);
+
+        expect(revision).toBe(1);
+        expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+          spicy: true,
+          spicyRevision: 1,
+        });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(`item p1 has an out-of-contract spicyRevision (${shape})`),
+        );
+      },
+    );
+
+    it('says nothing when the stored revision is a usable one', async () => {
+      putItem('p1', {
+        status: 'pending',
+        pool: 'main',
+        spicy: false,
+        spicyRevision: 4,
+      });
+
+      await expect(setItemSpicy('p1', true)).resolves.toBe(5);
+      expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+        spicy: true,
+        spicyRevision: 5,
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps a spicy correction in its acted Event when the transaction callback starts after A to B', async () => {

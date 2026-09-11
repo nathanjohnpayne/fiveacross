@@ -341,6 +341,36 @@ export const approveItem = (
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
+// `spicyRevision` is written only by `setItemSpicy`'s transaction, one
+// increment at a time, so a stored value outside the contract — missing,
+// non-numeric, fractional, negative, or past the safe-integer range — is
+// corrupted or hand-edited data rather than a state the app can reach through
+// its own writes. Restarting the fence at 0 keeps the correction writable, but
+// it silently re-bases the acknowledgement fence the queue compares against, so
+// the optimistic overlay for that row can retire a beat earlier or later than
+// intended (#1071). Say so at the coercion rather than absorbing it.
+//
+// The line carries the item id and the SHAPE of the offending value only —
+// never the value, and never the row, which holds submitter prose.
+const spicyRevisionShape = (raw: unknown): string => {
+  if (raw === undefined) return 'missing';
+  if (raw === null) return 'null';
+  if (typeof raw !== 'number') return `typeof ${typeof raw}`;
+  if (Number.isNaN(raw)) return 'NaN';
+  if (!Number.isInteger(raw)) return 'non-integer';
+  if (!Number.isSafeInteger(raw)) return 'unsafe-integer';
+  return 'negative';
+};
+
+const readSpicyRevision = (raw: unknown, itemId: string): number => {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw;
+  console.warn(
+    `[admin] item ${itemId} has an out-of-contract spicyRevision ` +
+      `(${spicyRevisionShape(raw)}); restarting the correction fence at 0`,
+  );
+  return 0;
+};
+
 // Lets an admin correct a submitter's 🔞 tagging from the Approvals queue BEFORE
 // approving it into the live pool. This must contend with approval, not race it:
 // the former bare update could land after an Easy approval and recreate the
@@ -353,7 +383,8 @@ export const rejectItem = (id: string, adminUid: string) =>
 // and another Admin can then correct it again before settlement. Comparing the
 // listener's monotonic revision with this return value distinguishes that newer
 // correction from a stale pre-commit snapshot without treating value equality
-// as authorship. Legacy rows have no revision and therefore start at 0. `null`
+// as authorship. A row with no usable revision — a legacy row, or a corrupted
+// one — starts at 0, and `readSpicyRevision` logs every such restart. `null`
 // means the authoritative row was missing or no longer eligible, so no write
 // occurred and the caller must drop any optimistic overlay.
 export async function setItemSpicy(
@@ -369,12 +400,7 @@ export async function setItemSpicy(
     if (!snap.exists()) return null;
     const row = snap.data() as Partial<ItemDoc>;
     if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
-    const previousRevision =
-      typeof row.spicyRevision === 'number' &&
-      Number.isSafeInteger(row.spicyRevision) &&
-      row.spicyRevision >= 0
-        ? row.spicyRevision
-        : 0;
+    const previousRevision = readSpicyRevision(row.spicyRevision, id);
     if (previousRevision === Number.MAX_SAFE_INTEGER) {
       throw new Error('Prompt spicy revision exhausted');
     }
