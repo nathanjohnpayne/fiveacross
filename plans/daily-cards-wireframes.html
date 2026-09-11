@@ -6,7 +6,9 @@
 <title>Five Across—tri-brand wireframes (Daily Cards)</title>
 <!-- The OG artboards use the same checked display faces as og-edition.html.
      Other frames retain their documented fallbacks; these two faces are
-     loaded here because #884 claims composition parity with the renderer. -->
+     loaded here because src/recon-share-og.test.ts's #884 wireframe suite
+     pins matching display faces between the two documents, alongside the
+     board pattern/bars and the eyebrow/stamp copy—not the full composition. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;500;600;700&display=block" rel="stylesheet">
@@ -749,8 +751,15 @@
   /* ---------- share + OG artboards (share stage) ---------- */
   /* OG / link-unfurl artboards, redrawn from render-og-editions.mjs (#884).
      300×158 is exactly one quarter of the shipped 1200×630 canvas. These are
-     vector annotations of the generated composition, not alternate artwork:
-     the geometry, pattern, ornaments and copy hierarchy all follow ART. */
+     vector annotations of the generated composition, not alternate artwork.
+     src/recon-share-og.test.ts's wireframe suite pins the board pattern/bars,
+     the bar/cell geometry (og-short, og-long, og-bar-inset, og-bar-span,
+     og-cell-radius), the on-mark palette tokens (og-freeink, og-onglow,
+     og-ongrad, og-boardshadow), the eyebrow/stamp/wordmark/description/
+     caption copy, and the checked display faces below against ART. The base
+     palette hex values, background gradient geometry, font sizes, and
+     mark/board offsets are illustrative and are not checked against the
+     renderer. */
   .ogc{width:300px;height:158px;border-radius:12px;overflow:hidden;box-sizing:border-box;
     position:relative;color:var(--ink);font-family:'Helvetica Neue',Arial,sans-serif}
   .ogc-gcb{--ink:#f6ecff;--dim:#b9a9d6;--primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;
@@ -950,7 +959,7 @@
 <p class="sub" style="border-left:3px solid var(--accent);padding-left:10px"><b>Known deltas—where this document is deliberately ahead of the app.</b> Every one is tracked, so a reviewer can tell a <i>decision</i> from a <i>mistake</i> without re-deriving it. If you find a divergence that is not on this list, it is a bug in the document, not a proposal.
 <br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/882">#882</a> — <code>fiveacross-slate</code>, the platform palette these frames wear on Edition-less surfaces. Not a registered <code>ThemeId</code>; the shipped wardrobe is ✨ Marquee / 🎊 Confetti Hour / 🌙 Afterglow (#617).
 <br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/883">#883</a> — DECIDED (won't-adopt, signed off): the Admin console stays Edition-branded, mounted in the Edition shell at <code>/more/admin</code> and scoped to one Event. <a href="#sec-fa-admin">sec-fa-admin</a> keeps drawing the declined Five Across <i>platform</i>-surface alternative for the record, not as a live proposal; <code>lexicon.placePlural</code> stays unconsumed either way.
-<br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/884">#884</a> — resolved: the OG artboards now annotate the composition and patterns in <code>scripts/og/render-og-editions.mjs</code>; the generated PNGs remain pixel truth.
+<br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/884">#884</a> — resolved: <code>src/recon-share-og.test.ts</code> pins the OG artboards' board pattern/bars, on-mark palette tokens, and eyebrow/stamp copy against <code>scripts/og/render-og-editions.mjs</code>'s <code>OG_EDITION_ART</code> manifest; the generated PNGs remain pixel truth, and the artboards' base palette, gradient geometry, font sizes and offsets are illustrative only.
 <br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/885">#885</a> — DECIDED (won't-adopt, signed off): "— no theme" does not become a first-class Day option. <code>DayDef.theme</code> stays a required registered <code>ThemeId</code>; an occasion-neutral Event picks from its Edition's registered Themes instead.
 <br>· <a href="https://github.com/nathanjohnpayne/fiveacross/issues/785">#785</a> / <a href="https://github.com/nathanjohnpayne/fiveacross/issues/786">#786</a> / <a href="https://github.com/nathanjohnpayne/fiveacross/issues/545">#545</a> — the organizer-setup wizard, exploratory in full and marked so in its own section header.</p>
 
@@ -3895,7 +3904,7 @@
 </div>
 
 <h3 id="sec-og-wireframes">The artboards</h3>
-<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #1118 edge HTML rewrite. These annotated vector artboards follow the shipped #609 composition as rebuilt in <code>scripts/og/render-og-editions.mjs</code>: the eyebrow and share mark, wordmark treatment, endorsement, rule, <code>appDescription</code>, brand domain, board pattern, BINGO caption, and Edition-specific ornament all match the generator and its shared <code>og-edition-art.mjs</code> manifest. The committed PNGs above remain pixel truth; these frames explain their composition.</p>
+<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #1118 edge HTML rewrite. These annotated vector artboards follow the shipped #609 composition as rebuilt in <code>scripts/og/render-og-editions.mjs</code>. <code>src/recon-share-og.test.ts</code>'s wireframe suite (#884) pins the eyebrow and share-mark copy, wordmark/byline text, <code>appDescription</code> (including its wrap point), the BINGO caption, Edition-specific stamp copy, the board pattern/bars and their bar/cell geometry, the on-mark palette tokens (freeink, on-glow, on-gradient, board shadow), and the checked display faces against the generator's shared <code>og-edition-art.mjs</code> manifest. The committed PNGs above remain pixel truth; the base palette hex values, background gradient geometry, font sizes, and mark/board offsets drawn here are illustrative approximations at 1/4 scale and are not checked against the renderer.</p>
 <div class="frames">
 
   <div class="unit" id="fx-og-gcb">
