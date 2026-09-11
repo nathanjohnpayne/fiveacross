@@ -59,22 +59,26 @@ async function seedEvent(
 // match block's braces rather than by the first substring hit, so a second
 // `match /events/{eventId}` block, a nested match that carries its own
 // `allow create, update` arm, or an unterminated arm all fail loudly here
-// instead of silently pinning the wrong text. Comments are already stripped
-// from EXECUTABLE_RULES, so only real braces are counted; the `{eventId}`
-// segments of nested match paths net to zero and never reach depth 1 at the
-// start of an `allow` keyword.
+// instead of silently pinning the wrong text. Both needles are
+// whitespace-tolerant regexes (Codex P2 on #1194): a duplicate block written
+// as `match /events/{eventId}  {` or with its brace on the next line is
+// counted, not skipped. Comments are already stripped from EXECUTABLE_RULES,
+// so only real braces are counted; the `{eventId}` segments of nested match
+// paths net to zero and never reach depth 1 at the start of an `allow`.
+const ROOT_EVENT_MATCH = /match\s+\/events\/\{eventId\}\s*\{/g;
+const CREATE_UPDATE_ARM = /allow\s+create\s*,\s*update\s*:\s*if\b/y;
+
 function rootEventWriteAllow(): string {
-  const matchNeedle = 'match /events/{eventId} {';
-  const matchCount = EXECUTABLE_RULES.split(matchNeedle).length - 1;
-  if (matchCount !== 1) {
+  const blocks = [...EXECUTABLE_RULES.matchAll(ROOT_EVENT_MATCH)];
+  if (blocks.length !== 1) {
     throw new Error(
-      `root Event match block: expected exactly one '${matchNeedle}', found ${matchCount}`,
+      `root Event match block: expected exactly one 'match /events/{eventId} {', found ${blocks.length}`,
     );
   }
-  const armNeedle = 'allow create, update: if';
   const arms: string[] = [];
   let depth = 0;
-  let i = EXECUTABLE_RULES.indexOf(matchNeedle) + matchNeedle.length - 1;
+  // Start on the block's own opening brace (the last character of the match).
+  let i = (blocks[0].index ?? 0) + blocks[0][0].length - 1;
   for (; i < EXECUTABLE_RULES.length; i += 1) {
     const ch = EXECUTABLE_RULES[i];
     if (ch === '{') {
@@ -82,12 +86,15 @@ function rootEventWriteAllow(): string {
     } else if (ch === '}') {
       depth -= 1;
       if (depth === 0) break;
-    } else if (depth === 1 && EXECUTABLE_RULES.startsWith(armNeedle, i)) {
-      const end = EXECUTABLE_RULES.indexOf(';', i);
-      if (end < 0) {
-        throw new Error('root Event create/update allow arm is unterminated');
+    } else if (depth === 1 && ch === 'a') {
+      CREATE_UPDATE_ARM.lastIndex = i;
+      if (CREATE_UPDATE_ARM.test(EXECUTABLE_RULES)) {
+        const end = EXECUTABLE_RULES.indexOf(';', i);
+        if (end < 0) {
+          throw new Error('root Event create/update allow arm is unterminated');
+        }
+        arms.push(EXECUTABLE_RULES.slice(i, end + 1).trim());
       }
-      arms.push(EXECUTABLE_RULES.slice(i, end + 1).trim());
     }
   }
   if (depth !== 0) {
@@ -95,7 +102,7 @@ function rootEventWriteAllow(): string {
   }
   if (arms.length !== 1) {
     throw new Error(
-      `root Event match block: expected exactly one direct '${armNeedle}' arm, found ${arms.length}`,
+      `root Event match block: expected exactly one direct 'allow create, update: if' arm, found ${arms.length}`,
     );
   }
   return arms[0];

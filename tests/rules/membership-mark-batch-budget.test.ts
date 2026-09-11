@@ -39,12 +39,13 @@ const PAST = () => NOW() - 3_600_000;
 
 // The preview ruleset is built by exact-matching snippets of the live
 // firestore.rules and rewriting each exactly once, on purpose: a predicate
-// change that this suite has not been told about must fail closed. The cost
-// is that an unrelated formatting, comment, or reindentation change to one of
-// those blocks also trips the anchor. This hint tells that failure apart from
-// a real predicate regression (#1088).
+// change that this suite has not been told about must fail closed. The same
+// occurrence checks also guard semantic clauses (the admission calls and the
+// budget-sensitive exists()/get() sites), so a mismatch has two possible
+// causes and the hint names both rather than diagnosing drift (#1088, Codex
+// P2 on #1194).
 const ANCHOR_DRIFT_HINT =
-  'This is a fixture-anchor drift in firestore.rules (a formatting, comment, or reindentation change to the anchored block), not a predicate regression: re-anchor the snippet in this test to the current rules text and re-run.';
+  'Two possible causes: (a) fixture-anchor drift, i.e. a formatting, comment, or reindentation change to the anchored block in firestore.rules, in which case re-anchor the snippet in this test to the current text; or (b) a real predicate or access-budget regression, e.g. a duplicated or removed admission call or exists()/get() site. Confirm from the firestore.rules diff that the change is formatting-only before re-anchoring.';
 
 function replaceExactlyOnce(
   source: string,
