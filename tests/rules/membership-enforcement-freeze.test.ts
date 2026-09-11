@@ -56,8 +56,11 @@ async function seedEvent(
 }
 
 // Structural locator (#1100). Rather than the first substring hit, the arm is
-// found by a small scanner over the executable rules source (comments already
-// stripped) that understands the three things a substring search cannot:
+// found by a small scanner over the raw rules source (it skips `//` and `/* */`
+// comments itself, because the line-based comment strip that produces
+// EXECUTABLE_RULES cuts a `//` inside a string literal such as a URL and
+// leaves that literal unterminated) that understands the three things a
+// substring search cannot:
 //
 //   - string literals: a `'}'` or `"{"` inside a condition never changes the
 //     brace depth (Codex P2 round 3 on #1194);
@@ -121,7 +124,7 @@ function stripDocumentsRoot(path: string[]): string[] | null {
 }
 
 function rootEventWriteAllow(): string {
-  const src = EXECUTABLE_RULES;
+  const src = RULES_SOURCE;
   // One stack entry per open brace: the match path segments it introduced, or
   // null for a brace that is not a match block (a function body, for example).
   const scopes: Array<string[] | null> = [];
@@ -132,14 +135,27 @@ function rootEventWriteAllow(): string {
 
   for (let i = 0; i < src.length; i += 1) {
     const ch = src[i];
+    if (ch === '/' && src[i + 1] === '/') {
+      // Line comment: skip to the end of the line.
+      const nl = src.indexOf('\n', i);
+      i = nl < 0 ? src.length : nl;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      if (close < 0) throw new Error('rules source has an unterminated block comment');
+      i = close + 1;
+      continue;
+    }
     if (ch === "'" || ch === '"') {
-      // Skip a string literal wholesale; braces inside it are data.
+      // Skip a string literal wholesale; braces inside it are data. Rules
+      // string literals never span lines, so a newline also ends the scan.
       let j = i + 1;
-      while (j < src.length && src[j] !== ch) {
+      while (j < src.length && src[j] !== ch && src[j] !== '\n') {
         if (src[j] === '\\') j += 1;
         j += 1;
       }
-      if (j >= src.length) throw new Error('rules source has an unterminated string literal');
+      if (j >= src.length || src[j] === '\n') throw new Error('rules source has an unterminated string literal');
       i = j;
       continue;
     }
@@ -148,8 +164,9 @@ function rootEventWriteAllow(): string {
       const m = MATCH_PATH.exec(src);
       if (m !== null && (i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]))) {
         pendingMatch = m[1].split('/').filter((segment) => segment.length > 0);
-        // Land on the block's own brace; the loop's `{` branch pushes the scope.
-        i = MATCH_PATH.lastIndex - 1;
+        // Stop just before the block's own brace so the next iteration's `{`
+        // branch pushes the scope (lastIndex points past the brace).
+        i = MATCH_PATH.lastIndex - 2;
       }
     }
     if (ch === '{') {
