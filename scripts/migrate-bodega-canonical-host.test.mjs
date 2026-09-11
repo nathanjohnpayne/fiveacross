@@ -221,10 +221,12 @@ describe('Bodega canonical-host migration plan', () => {
     expect(() => planCanonicalHostMigration(replace(withLegacyDrift(), host, patch))).toThrow(message);
   });
 
-  it('keys the apex alias-metadata precondition by host name, not array position', () => {
-    // Every other document is in its exact accepted state, so the apex row is
-    // the only precondition that can fail. A positional lookup that resolved
-    // to the converged legacy row would pass silently or name the wrong host.
+  it('refuses apex alias-metadata drift on an otherwise converged inventory', () => {
+    // The converged inventory would otherwise plan `changed: false`, so this
+    // pins that the apex precondition still runs on the idempotent path and
+    // that the refusal names the apex host exactly. It cannot tell a by-name
+    // lookup from a positional one: BODEGA_HOSTS is frozen with the apex host
+    // at index 2, so the inventory order pin above is what guards a reorder.
     const rows = replace(canonicalDocuments(), APEX_HOST, { isCanonical: true });
     expect(() => planCanonicalHostMigration(rows)).toThrow(
       'bodega-canonical-host: alias metadata drifted on hostnames/fiveacross.app. No write performed.',
