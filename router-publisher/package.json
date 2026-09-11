@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc",
     "check:no-admin": "node scripts/check-no-admin.mjs",
+    "typecheck:test": "tsc -p tsconfig.test.json",
     "deploy:plan": "npm run build && node scripts/render-deploy.mjs",
     "gcp-build": "npm run build"
   },

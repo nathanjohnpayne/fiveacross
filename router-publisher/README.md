@@ -12,9 +12,12 @@ The separation is a capability boundary, not packaging style: the main `function
 npm ci --prefix router-publisher
 npm run check:no-admin --prefix router-publisher
 npm run typecheck:router-publisher
+npx vitest run router-publisher/src/runtime.test.ts
 npx vitest run --config vitest.functions.config.ts \
   tests/functions/routerReplicaPublisher.test.ts \
   tests/functions/routerReplicaPublisherRuntime.test.ts
 ```
+
+`src/runtime.test.ts` is the rehearsal-class call-site suite (#1135) and runs in the repo-root `npm test` layer, not the functions layer: it imports nothing from `functions/package.json`, so it is self-contained on root dependencies the way `worker/**` is. It is excluded from this codebase's own emitting TypeScript program — `lib/` is the deployed artifact and must not grow a spec — and typechecked instead by the sibling `tsconfig.test.json`, which `npm run typecheck:router-publisher` runs after the build.
 
 The App CI installs, dependency-checks, and builds this codebase independently. Provisioning and deployment require the reviewed publisher service account, exact KMS version, immutable public-key record, audience, publisher epoch, and matching Eventarc trigger location from the registry runbook; building or rendering the plan never provisions or deploys them.

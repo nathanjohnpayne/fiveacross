@@ -228,10 +228,19 @@ describe('reserved-label mirrors in separately deployed programs', () => {
  * LITERAL, not its use. A mirror whose regex is untouched but whose call site
  * changes around it — `.test(host.toLowerCase())` is the sharp example, which
  * would make the publisher admit uppercase rehearsal hosts — passes every
- * assertion here. Closing that needs the fixtures driven through each deployed
- * entry point instead, which is a different test against a different surface;
- * `router-publisher` has no suite of its own to put it in yet. Tracked in #1135;
- * do not read a green run here as a claim about call sites.
+ * assertion here. Closing that needs the fixture driven through the call sites
+ * themselves, which is a different test against a different surface.
+ *
+ * For `router-publisher/src/runtime.ts` that test now exists (#1135):
+ * `router-publisher/src/runtime.test.ts` drives a host fixture through
+ * `isRegistryHost`, both class-testing branches of `validDesired`, and the
+ * exported `replicaPayloadFromEvent` entry point that reaches all three, with
+ * every expectation derived from the same canonical predicates this block
+ * imports. The two suites are a pair and neither subsumes the other: that one
+ * cannot close the literal space, because a host is a string and no finite
+ * table of them pins an infinite space, and this one cannot see an expression.
+ * The two `.mjs` mirrors keep the limit as stated — their controller suites are
+ * their own — so a green run here is still not a claim about call sites.
  */
 describe('rehearsal-class mirrors in separately deployed programs', () => {
   /**
