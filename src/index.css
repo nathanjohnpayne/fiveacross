@@ -3075,6 +3075,7 @@ body.install-prompt-visible.update-prompt-visible .bug-report-pick {
   margin-top: 0;
 }
 .bug-report-privacy,
+.bug-report-status,
 .bug-report-capture p {
   color: var(--dim);
   font-size: 12px;

@@ -437,7 +437,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       )}
                     </div>
                     {error && <p className="bug-report-error" role="alert">{error}</p>}
-                    {busy && <p className="bug-report-privacy" role="status" tabIndex={0}>Sending report…</p>}
+                    {busy && <p className="bug-report-status" role="status" tabIndex={0}>Sending report…</p>}
                     <div className="sheet-actions">
                       <button className="btn" type="button" disabled={busy} onClick={close}>Cancel</button>
                       <button className="btn primary" type="button" disabled={!description.trim() || busy} onClick={submit}>
