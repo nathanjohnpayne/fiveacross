@@ -1169,10 +1169,22 @@ export interface AdminDigestResult {
     | 'rebatched';
 }
 
+/**
+ * What one archive settlement did to the pending page it found, counted AFTER
+ * the follow-up replay of any preserved frozen batch (#945). A preserved batch
+ * is replayed before the function returns, and the replay decides its fate, so
+ * these are read back from the rows as the function leaves them rather than
+ * reported from the settlement transaction's intent.
+ */
 export interface ArchiveSettlementResult {
-  /** Pending rows replaced by payload-free discard tombstones. */
+  /** Pending rows replaced by payload-free discard tombstones: the unclaimed
+   *  and unfrozen rows the settlement transaction discarded, plus a preserved
+   *  batch the replay released and — the Event being archived — discarded. */
   discarded: number;
-  /** Pending rows retained because their claimed request is already frozen. */
+  /** Pending rows retained because their claimed request is already frozen,
+   *  and still pending once the replay has run. A frozen batch the replay
+   *  delivered or discarded is no longer preserved; one the replay could not
+   *  deliver — a failed send, a lost claim that left the rows queued — is. */
   preserved: number;
 }
 
@@ -2020,6 +2032,11 @@ async function finishBatch(
  * That makes a concurrent reactivation or freeze creation invalidate the read
  * rather than letting archive cleanup erase newer live work or an externally
  * committed delivery identity.
+ *
+ * The returned counts describe the rows as this function LEAVES them, not as
+ * the transaction found them (#945): a preserved batch is replayed before
+ * returning, and whether the replay delivered it, discarded it, or left it
+ * queued is read back from the rows afterwards.
  */
 export async function settleAdminAlertsForArchivedEvent(
   db: AdminAlertFirestore,
@@ -2034,9 +2051,9 @@ export async function settleAdminAlertsForArchivedEvent(
     .get();
   if (pending.docs.length === 0) return { discarded: 0, preserved: 0 };
 
-  const result = await db.runTransaction(async (tx) => {
+  const settled = await db.runTransaction(async (tx) => {
     const event = (await tx.get(db.doc(`events/${eventId}`))).data();
-    if (event?.status !== 'archived') return { discarded: 0, preserved: 0 };
+    if (event?.status !== 'archived') return { discarded: 0, preserved: [] as string[] };
 
     const rows = await Promise.all(
       pending.docs.map(async (snapshot) => ({
@@ -2059,13 +2076,13 @@ export async function settleAdminAlertsForArchivedEvent(
     });
 
     let discarded = 0;
-    let preserved = 0;
-    rows.forEach(({ ref }, index) => {
+    const preserved: string[] = [];
+    rows.forEach(({ id, ref }, index) => {
       const data = rowSnaps[index].data();
       if (!data || data.sentAt !== null) return;
       const batchId = typeof data.batchId === 'string' && data.batchId ? data.batchId : null;
       if (batchId && frozen.has(batchId)) {
-        preserved++;
+        preserved.push(id);
         return;
       }
       tx.set(ref, {
@@ -2076,13 +2093,29 @@ export async function settleAdminAlertsForArchivedEvent(
     });
     return { discarded, preserved };
   });
-  if (result.preserved > 0) {
-    const replay = await sendAdminDigestForEvent(db, eventId, deps);
-    if (replay.reason === 'inactive-event') {
-      return { discarded: result.discarded + result.preserved, preserved: 0 };
-    }
+  if (settled.preserved.length === 0) return { discarded: settled.discarded, preserved: 0 };
+
+  // The replay decides what becomes of the preserved rows, so the counts are
+  // READ BACK from those rows afterwards rather than reported from the
+  // transaction's intent (#945). A delivered batch leaves `sentAt` tombstones
+  // (neither preserved nor discarded); a batch the replay released under an
+  // archived Event leaves discard tombstones, which fold into `discarded`; a
+  // batch the replay could not deliver — or lost its claim on while the rows
+  // stayed queued — is still pending, and still preserved. Classifying by row
+  // state rather than by the replay's `reason` keeps this exact when the page
+  // carried more than one frozen batch, of which a replay handles only one.
+  await sendAdminDigestForEvent(db, eventId, deps);
+  const after = await Promise.all(
+    settled.preserved.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`).get()),
+  );
+  let discarded = settled.discarded;
+  let preserved = 0;
+  for (const snapshot of after) {
+    const data = snapshot.data();
+    if (data?.sentAt === null) preserved++;
+    else if (data?.discardedAt !== undefined) discarded++;
   }
-  return result;
+  return { discarded, preserved };
 }
 
 /**
