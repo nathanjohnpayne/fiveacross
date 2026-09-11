@@ -630,16 +630,22 @@ export function archiveInstant(value: unknown): number | null {
  * So the map is read by ONE ENTRY RULE, and it is the Functions read boundary's
  * own (`readableDayStats` in `functions/src/finaleContent.ts`, #1168):
  *
- *   - a map that is not a plain object — `null`, a string, an ARRAY — has no
- *     entries to read and reads as ABSENT;
+ *   - a map that is not a non-null, non-array object — `null`, a string, an
+ *     ARRAY — has no entries to read and reads as ABSENT;
  *   - an entry survives only under a key `canonicalDayStatsKey` accepts (the
- *     canonical spelling of an integer — the only spelling `foldDayStats` ever
- *     writes), and only with a plain, non-array object for a bucket: a `null`,
- *     a string, a number or an array is DROPPED, because there is nothing to
- *     default a Day's evidence to;
+ *     canonical spelling of an integer — the only spelling `foldDayStat` and
+ *     `foldEchoStats` in `src/game/logic.ts` ever write), and only with a
+ *     non-null, non-array object for a bucket: a `null`, a string, a number or
+ *     an array is DROPPED, because there is nothing to default a Day's evidence
+ *     to. Plainness is NOT asked: a `Date` or a `Timestamp` written where a
+ *     bucket belongs is kept, with every field unreadable, on both sides;
  *   - every field inside a surviving bucket gets the same coercion the standings
  *     rows get — a non-finite count reads `0`, a bad instant reads `null` — and
  *     an array-valued FIELD is just an unreadable value;
+ *   - a map in which nothing had to be dropped or coerced passes through by
+ *     IDENTITY — a field beyond the three the rankers read included — and is
+ *     rebuilt to those three fields only around a dropped or coerced entry,
+ *     exactly as the Functions read boundary now does (#1168, fix round 1);
  *   - a map left with nothing reads as ABSENT, so the row ranks as a legacy row
  *     by its roots on every surface.
  *
@@ -717,8 +723,8 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
   const raw = p.dayStats;
   // Absent stays absent, by identity.
   if (raw === undefined) return rooted;
-  // A map that is not a plain object has no entries to read: it reads as
-  // ABSENT, exactly as the Functions read boundary reads it (#1168).
+  // A map that is not a non-null, non-array object has no entries to read: it
+  // reads as ABSENT, exactly as the Functions read boundary reads it (#1168).
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ...rooted, dayStats: undefined };
   }
@@ -732,8 +738,8 @@ export function withReadableDayStats(p: PlayerDoc): PlayerDoc {
   const readable: Record<string, NonNullable<PlayerDoc['dayStats']>[number]> = {};
   for (const [key, bucket] of Object.entries(raw as Record<string, unknown>)) {
     // An entry under a key that does not spell an integer, or whose bucket is
-    // not a plain object, is DROPPED — there is nothing to default a Day's
-    // evidence to — and dropping one is itself a change.
+    // not a non-null, non-array object, is DROPPED — there is nothing to default
+    // a Day's evidence to — and dropping one is itself a change.
     if (!canonicalDayStatsKey(key) || !bucket || typeof bucket !== 'object' || Array.isArray(bucket)) {
       changed = true;
       continue;

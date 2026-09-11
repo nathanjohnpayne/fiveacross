@@ -198,21 +198,30 @@ export function canonicalDayStatsKey(key: string): boolean {
  * it, plus whether reading it changed anything (so `withReadableFinaleRanking`
  * can keep returning a well-formed row by identity):
  *
- *   - a map that is not a plain object — absent, `null`, a string, an ARRAY —
- *     has no entries to read and reads as ABSENT;
+ *   - a map that is not a non-null, non-array object — absent, `null`, a
+ *     string, an ARRAY — has no entries to read and reads as ABSENT;
  *   - an entry survives only under a key `canonicalDayStatsKey` accepts, and
- *     only with a plain, non-array object for a bucket — a `null`, a string, a
- *     number or an array is dropped, because there is nothing to default a
- *     Day's evidence to;
+ *     only with a non-null, non-array object for a bucket — a `null`, a string,
+ *     a number or an array is dropped, because there is nothing to default a
+ *     Day's evidence to. Plainness is NOT asked: a `Date` or a `Timestamp`
+ *     written where a bucket belongs is kept, with every field unreadable, on
+ *     both sides;
  *   - a surviving bucket's three fields get the root's own coercions: an
  *     unreadable count reads `0`, an unreadable instant reads `null`, a finite
  *     one is clamped — an array-valued FIELD is just an unreadable value;
+ *   - a map in which nothing had to be dropped or coerced is returned by
+ *     IDENTITY — a field beyond the three the rankers read included — and is
+ *     rebuilt to those three fields only around a dropped or coerced entry,
+ *     which is what the client does too;
  *   - a map left with nothing reads as ABSENT, so the row ranks as a legacy row
  *     by its roots on every surface, rather than as a breakdown that sums to
  *     nothing on one surface and as no breakdown on another.
  *
- * Byte-for-byte the rule `withReadableDayStats` (`src/data/eventArchive.ts`)
- * applies on the client. It used to differ on three shapes, all reachable
+ * Entry for entry the rule `withReadableDayStats` (`src/data/eventArchive.ts`)
+ * applies on the client, identity included: `sanitizeFinaleDayStats` used to
+ * rebuild the map unconditionally, so a well-formed bucket carrying a field the
+ * rankers never read lost that field here and kept it there (#1168, fix round
+ * 1). The rule itself used to differ on three shapes, all reachable
  * because `players/{uid}` validates no field (ADR 0001) and none written by a
  * real client: a non-integer key (client kept, Functions canonicalised or
  * dropped), an array bucket (client kept and coerced, Functions dropped), and
@@ -253,7 +262,12 @@ function readableDayStats(value: unknown): {
     kept += 1;
   }
   if (kept === 0) return { dayStats: undefined, changed: true };
-  return { dayStats: readable, changed };
+  // Nothing dropped, nothing coerced: the map the Player wrote IS the readable
+  // map, foreign fields and all, and it is returned by identity — as the client
+  // returns it — rather than rebuilt around the three ranked fields.
+  return changed
+    ? { dayStats: readable, changed }
+    : { dayStats: value as Record<number, FinaleDayStat>, changed };
 }
 
 /**
@@ -265,11 +279,13 @@ function readableDayStats(value: unknown): {
  * contract: a row carrying `{ dayStats: { 0: null } }` is reachable by any
  * participant, deliberately or by a client bug, and one such row throwing while
  * a model is built would take a whole Event's finale beat or morning send down
- * with it. So the map is rebuilt, by the entry rule `readableDayStats` above
+ * with it. So the map is read by the entry rule `readableDayStats` above
  * states: a key that is not the canonical spelling of an integer, and a bucket
- * that is not a plain object, are dropped, and a map left with nothing reads as
- * absent (#1168 — the same rule, key for key and shape for shape, that
- * `withReadableDayStats` applies on the client).
+ * that is not a non-null, non-array object, are dropped; a map left with
+ * nothing reads as absent; and a map in which nothing had to be dropped or
+ * coerced is passed through by identity rather than rebuilt (#1168 — the same
+ * rule, key for key and shape for shape, that `withReadableDayStats` applies on
+ * the client).
  *
  * THE BUCKET RULE IS `withReadableDayStats`'s, EXACTLY (#1152, CodeRabbit on PR
  * #1165). The two roster readers used to drop a bucket whose count was

@@ -76,8 +76,10 @@ export function supportedDayIndex(value: unknown): value is number {
  *
  * THE RULE BOTH SIDES NOW APPLY: a key survives only when `Number(key)`
  * ROUND-TRIPS — it is a safe integer whose `String()` is the key itself. That is
- * how every real key is spelled, because `foldDayStats` files the bucket under
- * the numeric `dayIndex` and JavaScript stringifies it canonically. Every other
+ * how every real key is spelled, because `foldDayStat` and `foldEchoStats`
+ * (`src/game/logic.ts`) file the bucket under the numeric `dayIndex`, the seed
+ * and post-freeze ceremonial writes (`src/data/api.ts`, `src/data/admin.ts`) key
+ * the same way, and JavaScript stringifies a number canonically. Every other
  * spelling is dropped, on both sides, rather than merged on one: dropping is
  * the only answer under which no two entries can collapse into one Day, and no
  * side can see a Day the other does not.

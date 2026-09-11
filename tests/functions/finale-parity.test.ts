@@ -787,18 +787,34 @@ describe('client/functions parity — the archive bound the podium ranks by (#11
 //
 // Both sides now DROP. An entry survives only under a key `Number(key)`
 // round-trips (`canonicalDayStatsKey`, one predicate per package) and only with
-// a plain, non-array object for a bucket; a map left with nothing — or that was
-// never a plain object — reads as ABSENT, so the row ranks as a legacy row by
-// its roots everywhere. Dropping was chosen over keep-and-coerce because it is
-// the stricter contract, the one under which no two entries can collapse into
-// one Day, and the one the Functions boundary already promised. The empty-map
+// a non-null, non-array object for a bucket — plainness is not asked, so a
+// `Date` or a `Timestamp` where a bucket belongs is kept with every field
+// unreadable; a map left with nothing — or that was never a non-null, non-array
+// object — reads as ABSENT, so the row ranks as a legacy row by its roots
+// everywhere. Dropping was chosen over keep-and-coerce because it is the
+// stricter contract, the one under which no two entries can collapse into one
+// Day, and the one the Functions boundary already promised. The empty-map
 // answer is the corollary the alignment surfaced: `podiumStandingRow` re-
 // aggregates a `{}` to 0/0 and passes an absent map through to the roots, so
 // the client's old `{}` and the Functions side's `undefined` crowned different
-// champions from one row.
+// champions from one row. And a map in which nothing had to be dropped or
+// coerced passes through by IDENTITY on both sides, a field beyond the three
+// ranked ones included; the three-field rebuild happens only around a dropped
+// or coerced entry. The Functions sanitiser used to rebuild unconditionally, so
+// it stripped a foreign field the client kept (fix round 1) — pinned below.
 
 /** A well-formed bucket, reused across the shapes below. */
 const BUCKET = { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 };
+
+/** A class instance where a bucket belongs — what a Firestore `Timestamp` (or a
+ *  `Date`) deserialises to on either SDK. Neither side asks for plainness, so
+ *  it is a bucket with no readable field, not a dropped one. */
+class TimestampLike {
+  constructor(
+    readonly _seconds: number,
+    readonly _nanoseconds: number,
+  ) {}
+}
 
 /** A ceremonial final Day, so `podiumStandingRow` RE-AGGREGATES — the path on
  *  which an empty map and an absent one answer differently. */
@@ -864,6 +880,24 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
       reads: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
     },
     {
+      name: 'a Date, and a Timestamp-shaped instance, where a bucket belongs — kept, every field unreadable',
+      dayStats: { 1: new Date(0), 2: new TimestampLike(0, 0) },
+      reads: {
+        1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+        2: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+      },
+    },
+    {
+      name: 'a well-formed bucket carrying a field the rankers never read — kept by identity, field included',
+      dayStats: { 1: { ...BUCKET, note: 'x' } },
+      reads: { 1: { ...BUCKET, note: 'x' } } as PlayerDoc['dayStats'],
+    },
+    {
+      name: 'that same bucket beside a dropped entry — the map is rebuilt, and the foreign field goes with it',
+      dayStats: { 1: { ...BUCKET, note: 'x' }, seven: BUCKET },
+      reads: { 1: BUCKET },
+    },
+    {
       name: 'every shape at once beside one real bucket',
       dayStats: { 2: BUCKET, '7.5': BUCKET, seven: BUCKET, '02': BUCKET, 3: [BUCKET], 4: null, 5: 'x' },
       reads: { 2: BUCKET },
@@ -895,8 +929,11 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
     expect(withReadableDayStats(row)).toBe(row);
     const fnsRow = asFinalePlayers([row])[0];
     expect(withReadableFinaleRanking(fnsRow)).toBe(fnsRow);
-    // …and the boundary's rebuilt map is the same map, so running both is a
-    // round-trip rather than a second opinion.
+    // …and the boundary hands the very map the Player wrote back, so running
+    // both is a round-trip rather than a second opinion — and a well-formed
+    // row's buckets keep their identity through the boundary too (fix round 1).
+    expect(sanitizeFinaleDayStats(row.dayStats)).toBe(row.dayStats);
+    expect(asReadFinalePlayers([row])[0].dayStats).toBe(row.dayStats);
     expect(asReadFinalePlayers([row])[0]).toEqual(fnsRow);
   });
 

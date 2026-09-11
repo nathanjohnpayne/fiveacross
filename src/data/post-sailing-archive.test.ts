@@ -1251,6 +1251,16 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
       firstBingoAt: 900,
     });
     expect(withReadableDayStats(scored)).toBe(scored);
+    // A well-formed bucket carrying a field the rankers never read is kept by
+    // identity too, field included: the map is rebuilt only around a dropped or
+    // coerced entry, and the Functions read boundary now answers the same
+    // (#1168, fix round 1).
+    const annotated = mkPlayer({
+      uid: 'annotated',
+      displayName: 'Annotated',
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3, note: 'x' } } as PlayerDoc['dayStats'],
+    });
+    expect(withReadableDayStats(annotated)).toBe(annotated);
   });
 
   it('reads a map with no surviving bucket as ABSENT, never as a breakdown that sums to nothing (#1168)', () => {
@@ -1312,7 +1322,7 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
     ['1e3', false],
     [String(Number.MAX_SAFE_INTEGER), true],
     [String(Number.MAX_SAFE_INTEGER + 2), false],
-  ])('canonicalDayStatsKey(%j) is %s — the spelling `foldDayStats` writes, and no other', (key, canonical) => {
+  ])('canonicalDayStatsKey(%j) is %s — the spelling `foldDayStat` and `foldEchoStats` write, and no other', (key, canonical) => {
     expect(canonicalDayStatsKey(key)).toBe(canonical);
   });
 
