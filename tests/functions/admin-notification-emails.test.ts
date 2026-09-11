@@ -684,6 +684,62 @@ describe('durable abuse-escalation sweep (#859)', () => {
     spy.mockRestore();
   });
 
+  // The cycle's outer catch arms only fire when a leg's opening query itself
+  // rejects. A Firestore error there can echo a document path or a reporter
+  // uid in its message, so the arms must log the status code alone (#990).
+  function cycleDbWhoseQueryRejects(path: string, error: Error): AdminAlertFirestore {
+    const base = fakeDb();
+    type Query = ReturnType<AdminAlertFirestore['collection']>;
+    let failing: Query;
+    failing = {
+      where: () => failing,
+      orderBy: () => failing,
+      limit: () => failing,
+      get: () => Promise.reject(error),
+    };
+    return {
+      collection: (collectionPath) => collectionPath === path ? failing : base.collection(collectionPath),
+      doc: (docPath) => base.doc(docPath),
+      batch: () => base.batch(),
+      runTransaction: (fn) => base.runTransaction(fn),
+    };
+  }
+
+  function expectNothingLoggedCarries(calls: unknown[][], leak: Error, secret: string): void {
+    for (const arg of calls.flat()) {
+      expect(arg).not.toBe(leak);
+      expect(`${String(arg)} ${JSON.stringify(arg)}`).not.toContain(secret);
+    }
+  }
+
+  it('logs only the status code when the escalation query itself fails (#990)', async () => {
+    const leak = Object.assign(
+      new Error('7 PERMISSION_DENIED: no access to players/user-123 (reporter uid user-123)'),
+      { code: 7 },
+    );
+    const db = cycleDbWhoseQueryRejects('bugReportEscalations', leak);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await runAdminAlertCycle(db, { now: () => NOW });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith('runAdminAlertCycle: abuse escalation sweep failed', { code: 7 });
+    expectNothingLoggedCarries(spy.mock.calls, leak, 'user-123');
+    spy.mockRestore();
+  });
+
+  it('logs only the status code when the digest sweep query itself fails (#990)', async () => {
+    const leak = Object.assign(
+      new Error('UNAVAILABLE: events/med-2026/adminAlerts unreachable (reporter uid user-123)'),
+      { code: 'unavailable' },
+    );
+    const db = cycleDbWhoseQueryRejects('events', leak);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await runAdminAlertCycle(db, { now: () => NOW });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith('runAdminAlertCycle: admin digest sweep failed', { code: 'unavailable' });
+    expectNothingLoggedCarries(spy.mock.calls, leak, 'user-123');
+    spy.mockRestore();
+  });
+
   it('does not let a stalled escalation leg consume the digest window', async () => {
     const send = vi.fn(async () => true);
     const baseDb = fakeDb(
