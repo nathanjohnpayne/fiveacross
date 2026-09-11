@@ -40,7 +40,11 @@ import {
   type AlertableDoc,
   type BugReportDoc,
 } from '../../functions/src/adminAlerts';
-import { deriveReporterHash } from '../../functions/src/bugReports';
+import {
+  BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS,
+  BUG_REPORT_ESCALATION_RETRY_WINDOW_MS,
+  deriveReporterHash,
+} from '../../functions/src/bugReports';
 import {
   ROWS_PER_SECTION,
   buildAdminDigestModel,
@@ -430,6 +434,71 @@ describe('durable abuse-escalation sweep (#859)', () => {
     );
     await runAbuseEscalationSweep(db, { now: () => NOW });
     expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'source-invalid' });
+  });
+
+  // #991: the stored deadline is honoured within a bounded range rather than
+  // re-derived exactly from the current constants, so shortening or lengthening
+  // either constant cannot terminalize in-flight tasks as 'source-invalid'.
+  it.each([
+    ['an older, shorter retry window and TTL margin', 1 / 2, 1 / 2],
+    ['a longer window and margin at the outer bound', 2, 2],
+  ])('honours a stored deadline written under %s', async (_label, windowScale, marginScale) => {
+    const createdAt = NOW - 60_000;
+    const deadlineAt = createdAt + BUG_REPORT_ESCALATION_RETRY_WINDOW_MS * windowScale;
+    const db = fakeDb(
+      {
+        bugReportEscalations: [pendingTask({
+          createdAt: new Date(createdAt),
+          deadlineAt: new Date(deadlineAt),
+          expiresAt: new Date(deadlineAt + BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS * marginScale),
+        })],
+      },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+  });
+
+  it.each([
+    ['a deadline at or before createdAt', -60_000, BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS],
+    [
+      'a deadline past twice the retry window',
+      2 * BUG_REPORT_ESCALATION_RETRY_WINDOW_MS + 1,
+      BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS,
+    ],
+    [
+      'a TTL past twice the pending margin',
+      BUG_REPORT_ESCALATION_RETRY_WINDOW_MS,
+      2 * BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS + 1,
+    ],
+    ['a TTL that does not outlive the deadline', BUG_REPORT_ESCALATION_RETRY_WINDOW_MS, 0],
+  ])('still fails %s closed as source-invalid', async (_label, deadlineOffset, ttlOffset) => {
+    const createdAt = NOW - 60_000;
+    const deadlineAt = createdAt + deadlineOffset;
+    const db = fakeDb(
+      {
+        bugReportEscalations: [pendingTask({
+          createdAt: new Date(createdAt),
+          deadlineAt: new Date(deadlineAt),
+          expiresAt: new Date(deadlineAt + ttlOffset),
+        })],
+      },
+      // An otherwise queueable binding: only the timestamps are out of range.
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'source-invalid' });
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
   });
 
   it('accepts both atomic legacy and complete intake report shapes', async () => {

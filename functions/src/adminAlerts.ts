@@ -725,6 +725,18 @@ function firestoreTimeMs(value: unknown): number | null {
   return typeof millis === 'number' && Number.isFinite(millis) ? millis : null;
 }
 
+// A pending task's own stored `deadlineAt`/`expiresAt` are honoured within a
+// bounded range rather than required to re-derive exactly from the CURRENT
+// BUG_REPORT_ESCALATION_RETRY_WINDOW_MS / BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS
+// (#991). Under exact equality, changing either constant would terminalize every
+// in-flight task written under the old value as 'source-invalid' on the next
+// sweep, silently dropping legitimate retries instead of letting them run out
+// their originally-computed deadline. The 2x ceilings still reject a tampered or
+// absurd timestamp, and the strict ordering still requires deadlineAt to sit
+// after createdAt and expiresAt after deadlineAt.
+const ESCALATION_DEADLINE_MAX_SKEW_MS = 2 * BUG_REPORT_ESCALATION_RETRY_WINDOW_MS;
+const ESCALATION_EXPIRES_MAX_SKEW_MS = 2 * BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS;
+
 function terminalEscalation(outcome: AbuseEscalationOutcome, now: number): Record<string, unknown> {
   return {
     state: 'terminal',
@@ -756,8 +768,12 @@ function validPendingEscalation(task: Record<string, unknown>): {
     firestoreTimeMs(task.nextAttemptAt) === null ||
     deadlineAt === null ||
     expiresAt === null ||
-    deadlineAt !== createdAt + BUG_REPORT_ESCALATION_RETRY_WINDOW_MS ||
-    expiresAt !== deadlineAt + BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS
+    !Number.isSafeInteger(deadlineAt) ||
+    !Number.isSafeInteger(expiresAt) ||
+    deadlineAt <= createdAt ||
+    deadlineAt > createdAt + ESCALATION_DEADLINE_MAX_SKEW_MS ||
+    expiresAt <= deadlineAt ||
+    expiresAt > deadlineAt + ESCALATION_EXPIRES_MAX_SKEW_MS
   ) return null;
   return {
     eventId,
