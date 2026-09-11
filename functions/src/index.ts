@@ -11,10 +11,12 @@ import vision from '@google-cloud/vision';
 import sharp from 'sharp';
 import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import {
+  markAdminAlertsUnsettled,
   recordAdminAlerts,
   recordBugReportAlerts,
   runAdminAlertCycle,
   settleAdminAlertsForArchivedEvent,
+  shouldClearAdminAlertsSettledOnReactivate,
   shouldSettleAdminAlertsOnArchive,
   type AdminAlertFirestore,
   type AlertableDoc,
@@ -631,6 +633,15 @@ export const notifyAbuseBugReport = onDocumentWritten(
  * digest performs the same archived-Event pass as a backstop for delayed
  * producers or a failed transition invocation. RESEND_API_KEY stays bound here
  * because a preserved frozen batch may need its exact request replayed.
+ *
+ * This handler also OWNS the settled marker's two lifecycle edges (#943). Both
+ * write `false`, and the order matters on the way in: marking BEFORE settlement
+ * is attempted is what leaves a settlement that throws visible to the scheduled
+ * sweep, which can only query for a marker that is present. Marking on the way
+ * out is what stops a reactivated Event carrying a stale `true` into its next
+ * archive. Both writes land on this same document, which re-enters this handler
+ * as an archived-to-archived (or active-to-active) write that both guards
+ * reject, so it cannot loop.
  */
 export const settleAdminAlertsOnArchive = onDocumentWritten(
   {
@@ -640,8 +651,16 @@ export const settleAdminAlertsOnArchive = onDocumentWritten(
     retry: true,
   },
   async (event) => {
-    if (!shouldSettleAdminAlertsOnArchive(event.data?.before.data(), event.data?.after.data())) return;
-    await settleAdminAlertsForArchivedEvent(db as unknown as AdminAlertFirestore, event.params.eventId);
+    const alertDb = db as unknown as AdminAlertFirestore;
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (shouldClearAdminAlertsSettledOnReactivate(before, after)) {
+      await markAdminAlertsUnsettled(alertDb, event.params.eventId);
+      return;
+    }
+    if (!shouldSettleAdminAlertsOnArchive(before, after)) return;
+    await markAdminAlertsUnsettled(alertDb, event.params.eventId);
+    await settleAdminAlertsForArchivedEvent(alertDb, event.params.eventId);
   },
 );
 
