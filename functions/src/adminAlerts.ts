@@ -490,6 +490,12 @@ export interface BugReportDoc {
   reporterInEvent?: boolean;
   escalationLookupFailed?: boolean;
   escalationEligible?: boolean;
+  /** Server-clock ms at which the DELAYED escalation resolver decided this
+   *  report and wrote its answer back over the three fields above (#988).
+   *  Written by `resolveAbuseEscalationTask` and by nothing else, so its
+   *  presence is what tells the on-write producer that a write is an escalation
+   *  write-back rather than a new report. */
+  escalationResolvedAt?: number;
   status?: string;
   intakeState?: string;
   submissionId?: string;
@@ -560,6 +566,10 @@ const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
  *
  * A DELETE (`after` undefined) earns nothing, matching `alertsForWrite`.
  *
+ * Neither does a write carrying `escalationResolvedAt`: that field marks the
+ * delayed resolver's write-back of its own decision (#988), and the resolver
+ * has already queued the single alert that decision earns.
+ *
  * AND THE REPORTER HAS TO BELONG TO THE EVENT. `eventId` is client-supplied, so
  * without this an authenticated player could name any Event in the project and
  * route arbitrary text into ITS admins' digest — the rate limit caps how much,
@@ -575,6 +585,21 @@ export function abuseAlertsForWrite(
   after: BugReportDoc | undefined,
 ): AdminAlertDraft[] {
   if (!after) return [];
+  // AN ESCALATION WRITE-BACK IS NOT A REPORT (#988). The delayed resolver now
+  // records its answer on the report itself, which turns `reporterInEvent`
+  // from an intake-only fact into one this trigger can observe arriving — and
+  // the resolver has ALREADY queued the one alert that decision earns, under
+  // its own deterministic `bug-report-escalation-{id}` identity. Alerting again
+  // here would mail the Event's admins a second copy of the same report.
+  //
+  // `escalationResolvedAt` has exactly one writer, so its presence on `after`
+  // identifies the write-back whether or not `before` carried it (a redelivery
+  // of an earlier write, or a later edit of an already-resolved report, both
+  // reach this with it present). The transition gate below would reject these
+  // writes anyway — every one of them has a `before` — but that gate is about
+  // intake's create-once shape, not about escalation, and a report decided by
+  // the resolver must stay un-alertable here however that gate is rewritten.
+  if (after.escalationResolvedAt !== undefined) return [];
   const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
   if (hasIntakeState) {
     if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
@@ -784,17 +809,55 @@ function validPendingEscalation(task: Record<string, unknown>): {
   };
 }
 
+/**
+ * The escalation's own answer, in the shape the report stores it (#988).
+ *
+ * MERGED onto `bugReports/{reportId}`, so an outcome that answered nothing
+ * about the reporter simply restates the unresolved pair and adds the marker —
+ * it must never invent a `reporterInEvent`. The exporter's invariant is that
+ * `reporterInEvent` is present exactly when `escalationLookupFailed` is false
+ * (`scripts/bug-reports-lib.mjs`), and only `queued` and `not-member` are
+ * reached by actually resolving the relationship. `alert-conflict`,
+ * `event-missing` and `event-inactive` terminalize BEFORE that read, so for
+ * them the honest record is still "unknown" — now stamped as final rather than
+ * still in flight.
+ */
+function escalationWriteBack(outcome: AbuseEscalationOutcome, now: number): Record<string, unknown> {
+  if (outcome !== 'queued' && outcome !== 'not-member') {
+    return { escalationLookupFailed: true, escalationEligible: false, escalationResolvedAt: now };
+  }
+  const member = outcome === 'queued';
+  return {
+    escalationLookupFailed: false,
+    reporterInEvent: member,
+    escalationEligible: member,
+    escalationResolvedAt: now,
+  };
+}
+
 function reportMatchesEscalation(
   reportId: string,
   report: BugReportDoc | undefined,
   task: ReturnType<typeof validPendingEscalation>,
 ): report is BugReportDoc {
   if (!report || !task) return false;
-  return (
-    report.kind === 'abuse' &&
+  // The report must still be the UNRESOLVED one this task was created for — or
+  // one this same resolver has already written its answer back onto (#988).
+  // Without the second case a replayed resolution of a written-back report
+  // would read as `source-invalid`, blaming the binding for a report the
+  // resolver itself edited; with it, the alert read below still decides, and a
+  // report whose alert already exists terminalizes as `alert-conflict`, which
+  // is what actually happened. `escalationResolvedAt` has one writer and
+  // `bugReports` takes no client writes, so the relaxation cannot be forged,
+  // and every binding check below (kind, coordination shape, `eventId`,
+  // `reporterHash`, hash derivation) still has to hold either way.
+  const unresolvedAtIntake =
     report.escalationLookupFailed === true &&
     report.reporterInEvent === undefined &&
-    report.escalationEligible === false &&
+    report.escalationEligible === false;
+  if (!unresolvedAtIntake && report.escalationResolvedAt === undefined) return false;
+  return (
+    report.kind === 'abuse' &&
     (
       validLegacyBugReportCoordination(report) ||
       validCompleteBugReportCoordination(reportId, report)
@@ -843,22 +906,37 @@ async function resolveAbuseEscalationTask(
       return;
     }
 
+    // Past this point the task and the report are PROVEN to be about each
+    // other, so every remaining outcome settles both documents in the one
+    // transaction (#988). Until this existed the report kept intake's
+    // `escalationLookupFailed: true` forever — an admin UI or `npm run
+    // bugs:pull` export read "reporter unverified" on a report whose alert had
+    // in fact been delivered, and no amount of reading the report could tell
+    // that the question had since been answered. The two `source-invalid`
+    // exits above deliberately settle only the task: there the report either
+    // does not exist or is not the one this task names, and writing to it
+    // would be writing to somebody else's record.
+    const settle = (outcome: AbuseEscalationOutcome) => {
+      tx.set(reportRef, escalationWriteBack(outcome, now), { merge: true });
+      tx.set(taskRef, terminalEscalation(outcome, now));
+    };
+
     const alertRef = db.doc(
       `events/${parsed.eventId}/adminAlerts/${alertDocId(`bug-report-escalation-${reportId}`, draft.kind)}`,
     );
     const eventRef = db.doc(`events/${parsed.eventId}`);
     const [alert, eventSnapshot] = await Promise.all([tx.get(alertRef), tx.get(eventRef)]);
     if (alert.data() !== undefined) {
-      tx.set(taskRef, terminalEscalation('alert-conflict', now));
+      settle('alert-conflict');
       return;
     }
     const event = eventSnapshot.data();
     if (!event) {
-      tx.set(taskRef, terminalEscalation('event-missing', now));
+      settle('event-missing');
       return;
     }
     if (event.status !== 'active') {
-      tx.set(taskRef, terminalEscalation('event-inactive', now));
+      settle('event-inactive');
       return;
     }
 
@@ -867,12 +945,12 @@ async function resolveAbuseEscalationTask(
       ? false
       : (await tx.get(db.doc(`events/${parsed.eventId}/players/${parsed.reporterUid}`))).data() !== undefined;
     if (!isAdmin && !isPlayer) {
-      tx.set(taskRef, terminalEscalation('not-member', now));
+      settle('not-member');
       return;
     }
 
     tx.set(alertRef, pendingAdminAlertRow(draft, now));
-    tx.set(taskRef, terminalEscalation('queued', now));
+    settle('queued');
   });
 }
 

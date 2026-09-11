@@ -576,6 +576,97 @@ describe('durable abuse-escalation sweep (#859)', () => {
     });
   });
 
+  // #988: the resolver's decision is written back onto the report, so an admin
+  // UI or `npm run bugs:pull` export stops reading "reporter unverified" on a
+  // report whose alert was in fact delivered — and the on-write abuse producer
+  // must not read that write-back as a second report to alert about.
+  it('writes a queued outcome back onto the report and still earns exactly one alert', async () => {
+    const intake = unresolvedReport() as BugReportDoc;
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()], bugReports: [{ id: REPORT_ID, ...intake }] },
+      { 'events/med-2026': { status: 'active', admins: ['user-123'] } },
+    );
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+    const resolved = db.rows('bugReports')[0] as BugReportDoc;
+    expect(resolved).toMatchObject({
+      escalationLookupFailed: false,
+      reporterInEvent: true,
+      escalationEligible: true,
+      escalationResolvedAt: NOW,
+    });
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
+
+    // The write-back IS a `bugReports` write, so `notifyAbuseBugReport` sees it
+    // — both as the update it really is, and (a redelivered create, a report
+    // restored from an export) in the one shape the transition gate would
+    // otherwise let through.
+    expect(abuseAlertsForWrite(REPORT_ID, intake, resolved)).toEqual([]);
+    expect(abuseAlertsForWrite(REPORT_ID, undefined, resolved)).toEqual([]);
+    expect(
+      await recordBugReportAlerts(db, REPORT_ID, 'escalation-write-back', intake, resolved, { now: () => NOW }),
+    ).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
+
+    // And the guard is about the marker, not about the values: the same report
+    // reached WITHOUT it is an ordinary intake-resolved abuse report and alerts.
+    expect(abuseAlertsForWrite(REPORT_ID, undefined, { ...resolved, escalationResolvedAt: undefined })).toHaveLength(1);
+  });
+
+  // Only `queued` and `not-member` reach the relationship read, so only they may
+  // record a membership answer. The exporter rejects a report carrying
+  // `reporterInEvent` alongside a failed lookup (`scripts/bug-reports-lib.mjs`).
+  const NO_ALERT_WRITE_BACKS: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+    [
+      'not-member',
+      { status: 'active', admins: [] },
+      { escalationLookupFailed: false, reporterInEvent: false, escalationEligible: false },
+    ],
+    [
+      'event-inactive',
+      { status: 'archived', admins: ['user-123'] },
+      { escalationLookupFailed: true, escalationEligible: false },
+    ],
+  ];
+  it.each(NO_ALERT_WRITE_BACKS)(
+    'stamps a %s decision final without inventing a membership answer',
+    async (outcome, event, expected) => {
+      const db = fakeDb(
+        { bugReportEscalations: [pendingTask()], bugReports: [{ id: REPORT_ID, ...unresolvedReport() }] },
+        { 'events/med-2026': event },
+      );
+
+      await runAbuseEscalationSweep(db, { now: () => NOW });
+
+      expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome });
+      const resolved = db.rows('bugReports')[0];
+      expect(resolved).toMatchObject({ ...expected, escalationResolvedAt: NOW });
+      expect('reporterInEvent' in resolved).toBe(expected.escalationLookupFailed === false);
+      expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    },
+  );
+
+  it('reads its own write-back as the report it decided, not as a broken binding', async () => {
+    const alertId = alertDocId(`bug-report-escalation-${REPORT_ID}`, 'abuse-reported');
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()], bugReports: [{ id: REPORT_ID, ...unresolvedReport() }] },
+      { 'events/med-2026': { status: 'active', admins: ['user-123'] } },
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+
+    // Escalation work re-created for a report this resolver already answered.
+    // Before the write-back existed the report could only ever be the intake
+    // shape, so a second pass now has to name the real reason it stops.
+    await db.doc(`bugReportEscalations/${REPORT_ID}`).set(pendingTask());
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'alert-conflict' });
+    expect(db.rows('events/med-2026/adminAlerts').map((row) => row.id)).toEqual([alertId]);
+  });
+
   it('expires the seven-day retry window before making another relationship decision', async () => {
     const db = fakeDb(
       { bugReportEscalations: [pendingTask({
