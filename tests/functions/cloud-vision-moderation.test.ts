@@ -452,16 +452,17 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     ]);
     expect(store[SCAN]).toBeUndefined();
     // The admin lifts it through the warned console Restore, which writes the
-    // explicit `false` marker beside the status...
+    // explicit `false` marker beside the status and leaves the verdict in place
+    // (restoreProof writes only `{ status, safetyHide: false }`)...
     store[PROOF] = {
-      ...(store[PROOF] as Record<string, unknown>), status: 'active', safetyHide: false, visionFlag: null,
+      ...(store[PROOF] as Record<string, unknown>), status: 'active', safetyHide: false,
     };
     // ...and the delayed create-trigger delivery finds nothing parked, so the
     // lift sticks: no second flag write, and the marker is not re-stamped `true`.
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
     expect(updates).toHaveLength(1);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'active', safetyHide: false, visionFlag: null, reportCount: 0,
+      uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
     });
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
