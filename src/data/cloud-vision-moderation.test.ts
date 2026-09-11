@@ -130,8 +130,18 @@ let liveProof: Partial<ProofDoc> | undefined;
  * one has by the time the transaction re-reads it. Two separate things on
  * purpose: `restoreProof` discovers candidates outside the transaction and
  * decides inside it, so a claim resolved in that gap must read as resolved.
+ *
+ * The lookup matches its equality filters against `snapshot` when one is seeded
+ * and against `live` otherwise. A claim that changes in the gap therefore seeds
+ * both — the state the query saw and the state the transaction sees — so the
+ * fake query, which filters on `status` like the real one (#1155), still returns
+ * it exactly as Firestore did.
  */
-let claimsForProof: Array<{ id: string; live: Partial<ClaimDoc> | undefined }> = [];
+let claimsForProof: Array<{
+  id: string;
+  snapshot?: Partial<ClaimDoc>;
+  live: Partial<ClaimDoc> | undefined;
+}> = [];
 
 function setPayload(frag: string): Record<string, unknown> | undefined {
   const call = txSet.mock.calls.find((c) => (c[0] as Ref).path.includes(frag));
@@ -160,7 +170,9 @@ beforeEach(() => {
   );
   // A real-enough query: the equality filters select, and the `limit` bounds the
   // page — in that order, exactly as Firestore does, so a test can prove that
-  // forged docs cannot occupy the page the owner's claim needs to be on.
+  // forged docs cannot occupy the page the owner's claim needs to be on. The
+  // filters match what the query SAW (a seeded `snapshot`, else the live state),
+  // so a claim resolved after the lookup is still returned by it.
   getDocsMock.mockImplementation((q: { constraints?: unknown[] }) => {
     const constraints = (q?.constraints ?? []) as Array<{
       field?: string;
@@ -171,13 +183,15 @@ beforeEach(() => {
     }>;
     const equalities = constraints.filter((c) => c.op === '==');
     const cap = constraints.find((c) => c.__kind === 'limit')?.count;
-    const selected = claimsForProof.filter(
-      ({ live }) =>
-        // A claim deleted between the lookup and the re-read was still returned
-        // by the lookup, so an absent LIVE state is not an absent match.
-        live === undefined ||
-        equalities.every((c) => (live as Record<string, unknown>)[c.field as string] === c.value),
-    );
+    const selected = claimsForProof.filter(({ snapshot, live }) => {
+      // A claim deleted between the lookup and the re-read was still returned
+      // by the lookup, so an absent state is not an absent match.
+      const seen = snapshot ?? live;
+      return (
+        seen === undefined ||
+        equalities.every((c) => (seen as Record<string, unknown>)[c.field as string] === c.value)
+      );
+    });
     return Promise.resolve({
       docs: (cap === undefined ? selected : selected.slice(0, cap)).map(({ id }) => ({ id })),
     });
@@ -492,10 +506,16 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
   it('decides on the LIVE claim, so one resolved since the lookup is not treated as pending', async () => {
     // The candidate ids come from a query outside the transaction (the web SDK's
     // Transaction.get takes a DocumentReference, never a query), so the claim is
-    // re-read inside it. Here the lookup found it and another admin confirmed it
-    // in the gap: the restore publishes rather than sending it back for a
-    // decision that has already been made.
-    claimsForProof = [{ id: 'claim-1', live: { status: 'confirmed', proofId: 'P', uid: 'u1' } }];
+    // re-read inside it. Here the lookup found it pending and another admin
+    // confirmed it in the gap: the restore publishes rather than sending it back
+    // for a decision that has already been made.
+    claimsForProof = [
+      {
+        id: 'claim-1',
+        snapshot: { status: 'pending', proofId: 'P', uid: 'u1' },
+        live: { status: 'confirmed', proofId: 'P', uid: 'u1' },
+      },
+    ];
 
     await restoreProof('P');
 
@@ -559,9 +579,9 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
   });
 
-  it("asks for the OWNER's claims, bounded — both equalities, then the cap", async () => {
-    // Two equality filters and a limit. Equality-only conjunctions are served by
-    // merging the single-field indexes Firestore maintains by default, so this
+  it("asks for the OWNER's PENDING claims, bounded — all three equalities, then the cap", async () => {
+    // Three equality filters and a limit. Equality-only conjunctions are served
+    // by merging the single-field indexes Firestore maintains by default, so this
     // needs no composite index (firestore.indexes.json is untouched).
     claimsForProof = [];
 
@@ -571,6 +591,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(lookup?.constraints).toEqual([
       { field: 'proofId', op: '==', value: 'P' },
       { field: 'uid', op: '==', value: 'u1' },
+      { field: 'status', op: '==', value: 'pending' },
       { __kind: 'limit', count: 25 },
     ]);
   });
@@ -598,6 +619,35 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
       'events/med-2026/proofs/P',
       'events/med-2026/claims/claim-1',
+    ]);
+  });
+
+  it("cannot be crowded out by the owner's OWN resolved claims either", async () => {
+    // #1155 (the Phase 4b P2 on #1143). The create rule binds `uid` to the caller
+    // and nothing else, so the owner can mint claims against their own Proof
+    // with `status: 'confirmed'` already written, under ids that sort before the
+    // genuine one — and an equality-only query with no `orderBy` pages by
+    // document id. 25 of those filled the page the same way the forged ones
+    // did; the pending claim fell off the end and Restore published it. The
+    // `status` filter removes them in the query, before the cap, so nothing that
+    // is not one of the owner's pending claims can occupy the page at all.
+    claimsForProof = [
+      ...Array.from({ length: 25 }, (_, i) => ({
+        // 'claim-00' … 'claim-24': every one sorts before 'claim-z'.
+        id: `claim-${String(i).padStart(2, '0')}`,
+        live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+      })),
+      { id: 'claim-z', live: { status: 'pending' as const, proofId: 'P', uid: 'u1' } },
+    ];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    // And the resolved claims are not read either: the transaction's read budget
+    // is spent on the Proof and the one claim that can still steer the restore.
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      'events/med-2026/claims/claim-z',
     ]);
   });
 

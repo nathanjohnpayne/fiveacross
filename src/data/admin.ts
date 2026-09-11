@@ -490,16 +490,32 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * in-transaction owner check below stays exactly as it was, because the query
  * reads a snapshot and only the live re-read can be trusted with the decision.
  *
- * Two equality filters need no composite index: Firestore serves an equality-only
- * conjunction by merging the single-field indexes it maintains by default, so
- * this adds nothing to `firestore.indexes.json`.
+ * And it asks for the owner's PENDING claims (#1155, the Phase 4b P2 on #1143).
+ * The claims create rule binds `uid` to the caller and nothing else, so the
+ * owner may mint further claims against their own Proof with `status:
+ * 'confirmed'` already written — and an equality-only query with no `orderBy`
+ * pages by document id, so 25 of them under ids that sort before the genuine
+ * claim fill the page just as the forged ones did, the pending claim falls off
+ * the end, and Restore publishes it. The `status` filter removes them the same
+ * way the `uid` filter removes forged ones — in the query, before the cap — and
+ * the in-transaction status check below still stands, because the snapshot the
+ * query matched can have been resolved by the time the transaction re-reads it.
+ *
+ * Three equality filters need no composite index: Firestore serves an
+ * equality-only conjunction by merging the single-field indexes it maintains by
+ * default, so this adds nothing to `firestore.indexes.json`.
  */
 /**
- * How many of the OWNER's claims the restore will consider. A Proof legitimately
- * backs exactly one (created in `attachProof`'s own transaction), so this is a
- * read-budget bound for the pathological case the query cannot exclude — a Player
- * minting many claims against their own Proof — rather than a defence against
- * forged ones, which the `uid` filter removes before the limit is reached.
+ * How many of the OWNER's PENDING claims the restore will consider. A Proof
+ * legitimately backs exactly one (created in `attachProof`'s own transaction), so
+ * this is a read-budget bound for the pathological case the query cannot exclude
+ * — a Player minting many still-pending claims against their own Proof — rather
+ * than a defence against anything else. Forged claims are removed by the `uid`
+ * filter and the owner's own resolved claims by the `status` filter, both before
+ * the limit is reached (#1155): neither is excluded by falling off the page, so
+ * neither can push the genuine claim off it. What the page can still be full of
+ * is the owner's own pending claims, and any one of those keeps the Proof
+ * `'pending'` — the outcome the genuine claim would have produced anyway.
  */
 const RESTORE_CLAIM_LOOKUP_LIMIT = 25;
 
@@ -519,6 +535,7 @@ export async function restoreProof(id: string, eventId: string = EVENT_ID): Prom
               claimsRaw(eventId),
               where('proofId', '==', id),
               where('uid', '==', owner),
+              where('status', '==', 'pending'),
               limit(RESTORE_CLAIM_LOOKUP_LIMIT),
             ),
           )
