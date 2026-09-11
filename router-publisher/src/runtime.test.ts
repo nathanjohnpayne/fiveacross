@@ -54,8 +54,10 @@ import { isRegistryHost, replicaPayloadFromEvent, validDesired } from './runtime
  * failing tests); `!rootTest` dropped to `rootTest` in the `route` branch (1);
  * `.test(host.toLowerCase())` on `syntheticRoot` (2); `isRegistryHost`'s
  * literal widened to `{2,26}` (4); its whole regex term replaced by `false`
- * (4). Two mutations survive and are EQUIVALENT rather than missed, which is
- * worth knowing before anyone strengthens the fixture to chase them:
+ * (4); `replicaPayloadFromEvent` skipping `validDesired` for `route` rows,
+ * both for every host and for `r2-root-*` hosts alone (1 each). Two mutations
+ * survive and are EQUIVALENT rather than missed, which is worth knowing before
+ * anyone strengthens the fixture to chase them:
  * `(syntheticRoot || rootClass !== undefined)` forced true changes no answer,
  * because the ternary below it consults `syntheticRoot` again and the
  * `rootClass` arm then fails on `edition`; and `.test(host.toLowerCase())` on
@@ -377,9 +379,21 @@ describe('rehearsal-class call sites in the registry publisher', () => {
     // The exported entry point, unchanged by #1135, reaching all three literals
     // through `validDesired`. A host uppercase or trailing-dotted enough to
     // trip the entry point's own guards is already a canonical negative, so the
-    // two predicates coincide over this fixture.
+    // predicates coincide over this fixture.
+    //
+    // All THREE kinds go through it, not just the two that end in a single
+    // literal. `tombstone` reaches `isRegistryHost` and `root` reaches
+    // `syntheticRoot`, but neither touches the `route` branch's `rootTest` —
+    // the one literal here that is consulted NEGATED. Without the `route` row
+    // below, an entry point that stopped consulting `validDesired` for route
+    // rows specifically would admit an ordinary Event row on an `r2-root-*`
+    // host while this suite and the publisher's own runtime suite both stayed
+    // green.
     for (const host of HOSTS) {
       expect(entryPointAccepts(host, tombstoneRow()), host).toBe(canonicalRegistryHost(host));
+      expect(entryPointAccepts(host, routeRow(host)), host).toBe(
+        canonicalRegistryHost(host) && !canonicalRootTestHost(host),
+      );
       expect(entryPointAccepts(host, rootRow()), host).toBe(canonicalRootTestHost(host));
     }
   });
