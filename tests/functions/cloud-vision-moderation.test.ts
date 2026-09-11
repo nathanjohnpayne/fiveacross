@@ -428,6 +428,144 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     expect(ops.some((o) => o.op === 'update' && o.path === PROOF)).toBe(false);
     expect(ops.some((o) => o.op === 'set' && o.path === PROOF)).toBe(false);
   });
+
+  it('retires a verdict a duplicate delivery parked, so the create cannot reverse a later Restore (#1154)', async () => {
+    // Storage triggers are at-least-once. One delivery of the scan beat the
+    // Proof and parked its verdict; its twin lands after attachProof's create
+    // and takes the direct arm. Left in place, the parked record outlived the
+    // direct write AND the admin's Restore, and the delayed create-trigger
+    // delivery then consumed it and reinstated the hide the admin had lifted.
+    const { db, updates, ops, store } = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5 },
+    });
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 6)).toBe('proof');
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'flagged', visionFlag: 'extreme', safetyHide: true, reportCount: 0,
+    });
+    // The record is retired in the SAME transaction as the direct write, and the
+    // delete is BLIND: the only read is the Proof's, so reads still precede writes.
+    expect(ops).toEqual([
+      { op: 'get', path: PROOF },
+      { op: 'update', path: PROOF, data: { status: 'flagged', visionFlag: 'extreme', safetyHide: true } },
+      { op: 'delete', path: SCAN },
+    ]);
+    expect(store[SCAN]).toBeUndefined();
+    // The admin lifts it through the warned console Restore, which writes the
+    // explicit `false` marker beside the status and leaves the verdict in place
+    // (restoreProof writes only `{ status, safetyHide: false }`)...
+    store[PROOF] = {
+      ...(store[PROOF] as Record<string, unknown>), status: 'active', safetyHide: false,
+    };
+    // ...and the delayed create-trigger delivery finds nothing parked, so the
+    // lift sticks: no second flag write, and the marker is not re-stamped `true`.
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
+    });
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+  });
+
+  it('is a NO-OP on a redelivery that lands AFTER the admin Restore, so the lift stands (#1154)', async () => {
+    // The other ordering, and the half retiring the record cannot reach (Codex P2
+    // on #1179). A redelivery arriving after the Restore takes this same
+    // existing-Proof arm with NO hand-off record anywhere in the story, so no
+    // delete could have stopped it writing `flagged` + `safetyHide: true` back
+    // over the lift. It is recognised from the Proof instead: `visionFlag` is
+    // server-written, never cleared, and deliberately survives a Restore, so a
+    // Proof that already RECORDS a verdict has already had its one scan applied.
+    const { db, updates, ops, store } = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+    });
+    // 1. The first delivery records the verdict, and the trigger hides it.
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 5)).toBe('proof');
+    expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
+    expect(store[PROOF]).toMatchObject({ status: 'hidden', safetyHide: true, visionFlag: 'extreme' });
+
+    // 2. The admin lifts it through the warned console Restore — modelled as
+    //    `restoreProof` (src/data/admin.ts) actually writes it: `{ status,
+    //    safetyHide: false }` and nothing else, so `visionFlag` stays put as the
+    //    audit record of what the admin overrode.
+    store[PROOF] = { ...(store[PROOF] as Record<string, unknown>), status: 'active', safetyHide: false };
+    const lifted = { ...(store[PROOF] as Record<string, unknown>) };
+
+    // 3. The redelivery arrives, with a record a twin delivery parked still
+    //    standing beside it.
+    store[SCAN] = { visionFlag: 'extreme', scannedAt: 5 };
+    const writesSoFar = updates.length;
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'extreme', 7);
+
+    // 4. The lift stands, byte for byte: active, unhidden, and still carrying the
+    //    admin's explicit `false`. This is the assertion the finding is about —
+    //    without the duplicate arm the Proof is back to `'flagged'` with
+    //    `safetyHide: true` and hidden again by the re-fire.
+    expect(store[PROOF]).toEqual(lifted);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
+    });
+    expect(updates).toHaveLength(writesSoFar); // not one write to the Proof
+    // …so no consumer arm re-hides it either, and no client's confirm gate holds it.
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(false);
+    // The call reports the no-op rather than claiming the write it did not make.
+    expect(target).toBe('duplicate');
+
+    // 5. And the parked record is retired all the same — the duplicate arm
+    //    withholds the Proof write, never the retirement — so no ordering of
+    //    deliveries leaves one behind for the create-trigger to re-apply.
+    expect(ops.slice(-2)).toEqual([{ op: 'get', path: PROOF }, { op: 'delete', path: SCAN }]);
+    expect(store[SCAN]).toBeUndefined();
+  });
+
+  it('is a NO-OP for a DIFFERENT verdict after a Restore too — the test is presence, not text (#1154)', async () => {
+    // The round-2 finding (Codex P2 on #1179): verdict text is not an event
+    // identity. `moderateProofHandler` re-runs `safeSearchDetection` on every
+    // delivery, so a redelivery of ONE Storage event can come back classified
+    // differently — and an equality test would read that disagreement as news
+    // and write it over the lift. One `proofId` is one create-only object is one
+    // scan, so a second verdict of ANY wording for it is the classifier
+    // disagreeing with itself about unchanged bytes, never fresh media.
+    const { db, updates, ops, store } = fakeDb({
+      // What a Restore leaves behind, here on a merely-racy flag an admin hand-Hid
+      // and then lifted: active, the explicit `false`, verdict still standing.
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: 'racy', safetyHide: false, reportCount: 0 },
+      [SCAN]: { visionFlag: 'racy', scannedAt: 5 },
+    });
+    const lifted = { ...(store[PROOF] as Record<string, unknown>) };
+    // The retry now says `violence` — an allowlisted verdict, so an equality arm
+    // would not merely re-flag it but stamp the hold and hide it again.
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', 9);
+    // The lift stands untouched. This is the assertion the finding is about: with
+    // the arm reverted to verdict EQUALITY the Proof is `'flagged'` with
+    // `safetyHide: true` here, reversed by a retry the admin never saw.
+    expect(store[PROOF]).toEqual(lifted);
+    expect(updates).toEqual([]);
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+    expect(target).toBe('duplicate');
+    // …and the parked record is retired all the same, on this arm as on the other.
+    expect(ops).toEqual([{ op: 'get', path: PROOF }, { op: 'delete', path: SCAN }]);
+    expect(store[SCAN]).toBeUndefined();
+  });
+
+  it('is a NO-OP for a different verdict on a STILL-HIDDEN Proof — no admin action required (#1154)', async () => {
+    // The guard is not about protecting a Restore specifically; it is about one
+    // scan being applied once. A Proof the trigger has already hidden takes no
+    // second verdict either, so a redelivery cannot churn `visionFlag` under the
+    // admin queue or re-stamp a marker the doc already carries.
+    const { db, updates, store } = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'hidden', visionFlag: 'extreme', safetyHide: true, reportCount: 0 },
+    });
+    const hidden = { ...(store[PROOF] as Record<string, unknown>) };
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', 9);
+    expect(store[PROOF]).toEqual(hidden);
+    expect(updates).toEqual([]);
+    // Still hidden, still held — the audit record says `extreme`, which is the
+    // verdict the admin queue was shown.
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+    expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(true);
+    expect(target).toBe('duplicate');
+  });
 });
 
 describe('applyPendingVisionScan — the parked verdict lands when the Proof appears (#1143)', () => {
@@ -481,6 +619,35 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
     // …and marker-less, because nothing racy ever earns a safety hold (ADR 0004).
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+  });
+
+  it('RETIRES without applying when the Proof already records a verdict (#1154)', async () => {
+    // The consumer half of the same presence rule. The snapshot gate
+    // (`awaitsPendingVisionScan`) asks this of the trigger's `after` doc, but
+    // `hideProofOnVisionFlag` is `retry: true`, so a redelivered create-trigger
+    // event carries the create's own verdict-less snapshot forever and passes it
+    // however long ago that create was. This is the LIVE re-confirm: the record
+    // is a redelivery of the scan already applied, so it is dropped, not applied.
+    const { db, updates, ops, store } = fakeDb({
+      // Flagged, hidden, then lifted by the console Restore — `visionFlag` retained.
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: 'violence', safetyHide: false, reportCount: 0 },
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+    });
+    const lifted = { ...(store[PROOF] as Record<string, unknown>) };
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(store[PROOF]).toEqual(lifted);
+    expect(updates).toEqual([]);
+    expect(store[SCAN]).toBeUndefined();
+    // Both reads still precede the only write, and the record is read first.
+    expect(ops).toEqual([
+      { op: 'get', path: SCAN },
+      { op: 'get', path: PROOF },
+      { op: 'delete', path: SCAN },
+    ]);
+    // `false` is the right answer for `applyVisionFlagHide`: nothing was applied,
+    // so it falls through to the ordinary arms on the Proof's live state, which
+    // leave a lifted Proof alone.
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
 
