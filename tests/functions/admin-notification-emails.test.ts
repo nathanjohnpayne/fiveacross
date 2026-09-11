@@ -2509,33 +2509,40 @@ describe('settleAdminAlertsForArchivedEvent', () => {
     });
   });
 
-  it('preserves and settles a frozen claim under its original bytes and key', async () => {
+  const FROZEN_A1 = {
+    to: ['u1@example.com'],
+    subject: 'Admin · frozen before archive',
+    html: '<p>frozen</p>',
+    text: 'frozen',
+    from: 'Five Across <alerts@example.com>',
+    alertCount: 1,
+  };
+  const replayDeps = (send: ReturnType<typeof vi.fn>) => ({
+    now: () => NOW,
+    send: send as never,
+    getAdminUids: async () => ['u1'],
+    getEmailForUid: async () => 'u1@example.com',
+    adminNotifyEmail: '',
+  });
+
+  it('settles a frozen claim under its original bytes and key, reporting it delivered rather than preserved (#945)', async () => {
     const send = vi.fn(async () => true);
     const db = fakeDb(
       { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
       {
         'events/med-2026': { ...EVENT, status: 'archived' },
         'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
-        'events/med-2026/adminAlertBatches/a1__1': {
-          to: ['u1@example.com'],
-          subject: 'Admin · frozen before archive',
-          html: '<p>frozen</p>',
-          text: 'frozen',
-          from: 'Five Across <alerts@example.com>',
-          alertCount: 1,
-        },
+        'events/med-2026/adminAlertBatches/a1__1': FROZEN_A1,
       },
     );
 
-    expect(
-      await settleAdminAlertsForArchivedEvent(db, 'med-2026', {
-        now: () => NOW,
-        send: send as never,
-        getAdminUids: async () => ['u1'],
-        getEmailForUid: async () => 'u1@example.com',
-        adminNotifyEmail: '',
-      }),
-    ).toEqual({ discarded: 0, preserved: 1 });
+    // The transaction preserved the row for its frozen claim, but the replay
+    // that follows DELIVERED it — so by the time the function returns nothing
+    // is preserved any more. The counts describe the rows as left, not as found.
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', replayDeps(send))).toEqual({
+      discarded: 0,
+      preserved: 0,
+    });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         subject: 'Admin · frozen before archive',
@@ -2547,6 +2554,77 @@ describe('settleAdminAlertsForArchivedEvent', () => {
       sentAt: NOW,
       expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
     });
+  });
+
+  it('keeps a frozen claim preserved when the replay cannot deliver it', async () => {
+    const send = vi.fn(async () => false);
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
+      {
+        'events/med-2026': { ...EVENT, status: 'archived' },
+        'events/med-2026/adminAlertBatches/a1__1': FROZEN_A1,
+      },
+    );
+
+    // A rejected send leaves the frozen batch exactly where the transaction
+    // left it — claimed, frozen, pending — for the next sweep's replay.
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', replayDeps(send))).toEqual({
+      discarded: 0,
+      preserved: 1,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(pending({ batchId: 'a1__1' }));
+    expect((await db.doc('events/med-2026/adminAlertBatches/a1__1').get()).data()).toBeDefined();
+  });
+
+  it('reports only the rows still pending when the replay loses its claim to a concurrent delivery (#945)', async () => {
+    // Two frozen batches on one page is the rare shape `planDrain` tolerates
+    // ("when several are somehow present"): a replay handles only the lowest.
+    // Both rows are preserved by the transaction, so the pre-replay count is 2.
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' }), pending({ id: 'b1', batchId: 'b1__1' })],
+      },
+      {
+        'events/med-2026': { ...EVENT, status: 'archived' },
+        'events/med-2026/adminAlertBatches/a1__1': FROZEN_A1,
+        'events/med-2026/adminAlertBatches/b1__1': { ...FROZEN_A1, subject: 'Admin · second frozen batch' },
+      },
+    );
+
+    expect(
+      await settleAdminAlertsForArchivedEvent(db, 'med-2026', {
+        ...replayDeps(send),
+        getAdminUids: async () => {
+          // Simulates the race: a concurrent invocation (the scheduled backstop
+          // beside the archive trigger) delivered batch `a1__1` after this
+          // replay read the frozen request but before its claim verification.
+          const concurrent = db.batch();
+          concurrent.set(db.doc('events/med-2026/adminAlerts/a1'), {
+            sentAt: NOW,
+            expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+          });
+          concurrent.delete(db.doc('events/med-2026/adminAlertBatches/a1__1'));
+          await concurrent.commit();
+          return ['u1'];
+        },
+      }),
+    ).toEqual({ discarded: 0, preserved: 1 });
+    // The replay ended claim-lost and sent nothing itself.
+    expect(send).not.toHaveBeenCalled();
+    // `a1` is exactly the delivered tombstone the winner wrote: neither
+    // preserved nor discarded by this settlement.
+    expect(db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1')).toEqual({
+      id: 'a1',
+      sentAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    // `b1` is the one row still pending under its frozen claim.
+    expect(db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'b1')).toEqual(
+      pending({ id: 'b1', batchId: 'b1__1' }),
+    );
+    expect((await db.doc('events/med-2026/adminAlertBatches/b1__1').get()).data()).toBeDefined();
   });
 
   it('discards an archived frozen claim atomically when recipient revalidation releases it', async () => {
