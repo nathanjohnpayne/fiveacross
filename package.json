@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:rules": "firebase emulators:exec --only firestore,storage \"vitest run --config vitest.rules.config.ts\"",
+    "test:origin": "vitest run --config vitest.origin.config.ts",
     "test:offline": "firebase emulators:exec --only auth,firestore \"vitest run --config vitest.offline.config.ts\"",
     "test:functions": "npm --prefix functions install && vitest run --config vitest.functions.config.ts",
     "test:deploy": "bash tests/test_deploy.sh",
