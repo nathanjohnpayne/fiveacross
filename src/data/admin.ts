@@ -71,8 +71,19 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
  *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
  *                     and `retained` then describe where it already stands.
  *   - `missing`     — NOT approved: no such item.
+ *   - `malformed`   — NOT approved: the caller's #558 classification for that
+ *                     row is not one approval can act on, so the row is SKIPPED
+ *                     and `reason` says what was wrong (#1070). The row stays
+ *                     `pending` and nothing is written for it, exactly as for
+ *                     `stale`/`missing`.
  */
-export type ApprovalOutcome = 'placed' | 'untargeted' | 'retained' | 'stale' | 'missing';
+export type ApprovalOutcome =
+  | 'placed'
+  | 'untargeted'
+  | 'retained'
+  | 'stale'
+  | 'missing'
+  | 'malformed';
 
 export interface ApprovalPlacement {
   itemId: string;
@@ -82,6 +93,12 @@ export interface ApprovalPlacement {
   retained: boolean;
   /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
   outcome: ApprovalOutcome;
+  /**
+   * Why a `malformed` row was skipped — one short line a console can show. It
+   * describes the CLASSIFICATION only, never the Prompt, so it carries no
+   * submitter prose. Absent on every other outcome.
+   */
+  reason?: string;
 }
 
 /**
@@ -133,6 +150,17 @@ function approvalSpicy(
   return callerSpicy === undefined ? storedSpicy === true : callerSpicy;
 }
 
+// The two classification guards above are the only per-ROW rejections in the
+// approval transaction, and the only ones a batch can isolate (#1070). Both
+// throw a written-for-a-human sentence about the CLASSIFICATION — never about
+// the Prompt — so it is carried straight through as the placement's `reason`.
+// A non-Error throw is not a shape this module produces; it still gets a line
+// rather than `undefined`, so a console never renders an empty explanation.
+const malformedReason = (error: unknown): string =>
+  error instanceof Error && error.message
+    ? error.message
+    : 'Community Prompt approval received a classification it cannot act on.';
+
 /**
  * Approve one or more pending Prompts, routing each to its intended Day (#557,
  * specs/community-prompt-targeting.md).
@@ -174,6 +202,13 @@ function approvalSpicy(
  * `bulkApproveItems` contract: one click is one approval event). That also keeps
  * the whole batch on the same side of every Day's cutoff, so a bulk approve can
  * never split across a freeze.
+ *
+ * Sharing the transaction does NOT make a bad row everyone's problem, though.
+ * Three per-row conditions are reported as that row's own outcome and skipped —
+ * `missing`, `stale`, and (#1070) a `malformed` caller classification — so the
+ * rest of the batch still approves. Every failure of the TRANSACTION itself
+ * still fails the whole call, which is the distinction that matters: the first
+ * three are facts about one row, and the rest are facts about the commit.
  */
 export async function approveItems(
   items: readonly ApprovableItem[],
@@ -238,8 +273,38 @@ export async function approveItems(
       // The STORED target is the one routing acts on. The caller's row is a hint
       // that may be stale; this is the value the rules and the snapshot will see.
       const targetDayIndex = row.targetDayIndex;
-      const difficulty = approvalDifficulty(it.pool, row.pool);
-      const spicy = approvalSpicy(it.spicy, row.spicy, difficulty);
+      // MALFORMED-CLASSIFICATION GUARD (#1070). Both classification guards throw,
+      // and an uncaught throw here aborts the whole transaction — so ONE bad row
+      // in an "Approve all" batch would fail every other, still-valid pending row
+      // in the same call. That is the wrong blast radius for a per-row input
+      // error: the queue's own dropdowns cannot produce such a value today, but
+      // any future caller of `approveItems`/`bulkApproveItems` carrying
+      // less-trusted data would turn a single bad row into an all-or-nothing
+      // failure. Catch it per row, report it as this row's own outcome, and
+      // carry on with the rest — the same shape the stale/missing no-ops already
+      // take, and with the same guarantee: nothing at all is written for it.
+      //
+      // Deliberately narrow. ONLY the classification throws are isolated: they
+      // are decided from the caller's row alone, so skipping one says nothing
+      // about any other. Every other failure mode is unchanged and still aborts
+      // the batch — a failed read, a rejected write, or a Firestore retry are
+      // facts about the transaction itself, and finishing the remaining rows
+      // after one would be reporting placements the commit may never make.
+      let difficulty: 'main' | 'easy';
+      let spicy: boolean;
+      try {
+        difficulty = approvalDifficulty(it.pool, row.pool);
+        spicy = approvalSpicy(it.spicy, row.spicy, difficulty);
+      } catch (error) {
+        placements.push({
+          itemId: it.id,
+          dayIndex: null,
+          retained: false,
+          outcome: 'malformed',
+          reason: malformedReason(error),
+        });
+        continue;
+      }
       const base = {
         status: 'active' as const,
         approvedBy: adminUid,
@@ -341,6 +406,48 @@ export const approveItem = (
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
+// `spicyRevision` is optional by contract (`ItemDoc.spicyRevision?`) and reaches
+// Firestore only through `setItemSpicy`'s transaction, one increment at a time.
+// The two ways to fail the guard are therefore nothing alike:
+//
+// ABSENT is the ordinary state of every row no Admin has corrected yet — a
+// legacy row, and every Prompt's first toggle. No create path writes the field,
+// so starting that fence at 0 is the contract working as designed and says
+// nothing.
+//
+// PRESENT but outside the contract — non-numeric, fractional, negative, or past
+// the safe-integer range — is corrupted or hand-edited data, a state this app's
+// own writes cannot reach. Restarting the fence at 0 keeps the correction
+// writable, but it silently re-bases the acknowledgement fence the queue
+// compares against, so the optimistic overlay for that row can retire a beat
+// earlier or later than intended (#1071). That is the restart worth saying out
+// loud. Warning on absence too would fire the line on every first toggle and
+// bury the corruption signal it exists to surface.
+//
+// The line carries the item id and the SHAPE of the offending value only —
+// never the value, and never the row, which holds submitter prose.
+const spicyRevisionShape = (raw: unknown): string => {
+  if (raw === null) return 'null';
+  if (typeof raw !== 'number') return `typeof ${typeof raw}`;
+  if (Number.isNaN(raw)) return 'NaN';
+  if (!Number.isInteger(raw)) return 'non-integer';
+  if (!Number.isSafeInteger(raw)) return 'unsafe-integer';
+  return 'negative';
+};
+
+// Decides the fence WITHOUT saying anything: what the read found is reported
+// back to the caller so the line can be spoken once, after the transaction that
+// acted on it commits (Codex P2 on PR #1201). `restartedFrom` is the shape of
+// the offending stored value, or `null` when the fence opened legitimately.
+const readSpicyRevision = (
+  raw: unknown,
+): { revision: number; restartedFrom: string | null } => {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0)
+    return { revision: raw, restartedFrom: null };
+  if (raw === undefined) return { revision: 0, restartedFrom: null };
+  return { revision: 0, restartedFrom: spicyRevisionShape(raw) };
+};
+
 // Lets an admin correct a submitter's 🔞 tagging from the Approvals queue BEFORE
 // approving it into the live pool. This must contend with approval, not race it:
 // the former bare update could land after an Easy approval and recreate the
@@ -353,9 +460,12 @@ export const rejectItem = (id: string, adminUid: string) =>
 // and another Admin can then correct it again before settlement. Comparing the
 // listener's monotonic revision with this return value distinguishes that newer
 // correction from a stale pre-commit snapshot without treating value equality
-// as authorship. Legacy rows have no revision and therefore start at 0. `null`
-// means the authoritative row was missing or no longer eligible, so no write
-// occurred and the caller must drop any optimistic overlay.
+// as authorship. A row with no stored revision — a legacy row, or any Prompt's
+// first correction — starts at 0 silently; a row whose stored revision is
+// present but out of contract starts at 0 too, and this function logs that
+// restart once, after the commit. `null` means the authoritative row was
+// missing or no longer eligible, so no write occurred and the caller must drop
+// any optimistic overlay.
 export async function setItemSpicy(
   id: string,
   spicy: boolean,
@@ -364,24 +474,36 @@ export async function setItemSpicy(
   // Firestore can invoke or retry the callback after the app has switched
   // Events. Resolve the acted document once, before entering that lifecycle.
   const ref = item(id, eventId);
-  return runTransaction(db, async (tx) => {
+  // The corruption line describes a fence restart that HAPPENED, so the callback
+  // only carries the finding out and the warning is spoken after settlement
+  // (Codex P2 on PR #1201). Warning inside the callback would say it once per
+  // ATTEMPT rather than once per correction: Firestore re-runs this callback on
+  // contention — the same retry the comment above relies on — and also runs it
+  // for transactions it ultimately abandons, so one toggle could log the same
+  // corruption several times, or announce a re-based fence that no write ever
+  // re-based. Returning the finding alongside the revision ties it to the
+  // attempt that actually committed.
+  const committed = await runTransaction(db, async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists()) return null;
     const row = snap.data() as Partial<ItemDoc>;
     if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
-    const previousRevision =
-      typeof row.spicyRevision === 'number' &&
-      Number.isSafeInteger(row.spicyRevision) &&
-      row.spicyRevision >= 0
-        ? row.spicyRevision
-        : 0;
-    if (previousRevision === Number.MAX_SAFE_INTEGER) {
+    const fence = readSpicyRevision(row.spicyRevision);
+    if (fence.revision === Number.MAX_SAFE_INTEGER) {
       throw new Error('Prompt spicy revision exhausted');
     }
-    const revision = previousRevision + 1;
+    const revision = fence.revision + 1;
     tx.update(ref, { spicy, spicyRevision: revision });
-    return revision;
+    return { revision, restartedFrom: fence.restartedFrom };
   });
+  if (!committed) return null;
+  if (committed.restartedFrom !== null) {
+    console.warn(
+      `[admin] item ${id} has an out-of-contract spicyRevision ` +
+        `(${committed.restartedFrom}); restarting the correction fence at 0`,
+    );
+  }
+  return committed.revision;
 }
 
 /**

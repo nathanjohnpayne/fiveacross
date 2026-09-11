@@ -496,6 +496,20 @@ export default function ReviewQueue({
   const [approvalDifficulties, setApprovalDifficulties] = useState<
     Record<string, 'main' | 'easy'>
   >({});
+  // The rows the last approve SKIPPED as malformed (#1070). Nothing else in this
+  // console would say so: the write resolves successfully — the rest of the batch
+  // really was approved — so AsyncButton clears, and a skipped row just quietly
+  // stays in the queue looking untouched. Held per-action rather than
+  // accumulated: this is the result of the approve the admin just tapped. Each
+  // approve clears it as it STARTS rather than only when it resolves — a
+  // rejected write reports itself through AsyncButton's own role=alert pill, and
+  // leaving the previous run's notice standing beside it would name a row as
+  // skipped by an action that never reached the server. This is the RECORD of
+  // that run; what is displayed is derived from it against the live queue —
+  // see `malformedNotices` below.
+  const [skippedAsMalformed, setSkippedAsMalformed] = useState<
+    { id: string; name: string; reason: string }[]
+  >([]);
   useEffect(() => {
     // Publish only committed props to the async settlement callback. Writing a
     // ref during render can leak an interrupted/discarded concurrent render;
@@ -597,9 +611,23 @@ export default function ReviewQueue({
     }
   };
   const explicitPending = pendingItems.filter(isSpicy);
+  // What the notice says has to stay true while it is on screen (Codex P2 on PR
+  // #1201). The stored list is the result of THIS admin's approve, but the queue
+  // behind it is live: another admin can correct and approve — or reject — the
+  // same row a moment later, and the realtime `pendingItems` update takes the
+  // row out of the queue while the notice keeps standing there claiming an
+  // absent Prompt was "not approved", until this admin happens to start another
+  // approval. So derive what is DISPLAYED rather than trusting what was stored:
+  // a notice lives exactly as long as its row is still pending, which is exactly
+  // as long as it still names something the admin has to decide. Rows that are
+  // still pending keep theirs — a realtime update elsewhere in the queue must
+  // not retire a skip that is still outstanding.
+  const pendingIds = new Set(pendingItems.map((it) => it.id));
+  const malformedNotices = skippedAsMalformed.filter((s) => pendingIds.has(s.id));
   // `prompt_suggestion_approved` (#559): one event per row that actually got
-  // approved — `stale`/`missing` wrote nothing (a double-click, a vanished
-  // row), so they fire nothing. No Prompt text; `outcome` + `dayIndex` only.
+  // approved — `stale`/`missing`/`malformed` wrote nothing (a double-click, a
+  // vanished row, a classification approval refused), so they fire nothing. No
+  // Prompt text; `outcome` + `dayIndex` only.
   // Wrapped around `run` ITSELF, not chained onto `guard`'s own return: the
   // 18+ flip-confirm dialog's `wouldFlip` branch resolves `guard`'s promise
   // immediately with `undefined` and defers the real call to `pending.run()`
@@ -610,7 +638,7 @@ export default function ReviewQueue({
     // contract (which always resolves one): test doubles for `data/admin`
     // commonly stub a bare `async () => {}`, and analytics is presentational
     // — it must never turn a mocked-away approval into a rejected promise.
-    if (p && p.outcome !== 'stale' && p.outcome !== 'missing') {
+    if (p && p.outcome !== 'stale' && p.outcome !== 'missing' && p.outcome !== 'malformed') {
       trackIfCurrentEvent(ownedEventId, 'prompt_suggestion_approved', {
         outcome: p.outcome,
         ...(p.dayIndex != null ? { dayIndex: p.dayIndex } : {}),
@@ -629,6 +657,27 @@ export default function ReviewQueue({
     Array.isArray(placements)
       ? placements.map((placement) => trackApproval(placement, ownedEventId))
       : placements;
+  // What the finished approve has to SAY (#1070). A `malformed` row was skipped
+  // rather than approved, so the admin has to be told which one and why —
+  // otherwise the only evidence is a row that stayed put. The Prompt's own text
+  // is resolved HERE, while the row is still in the queue, so the notice keeps
+  // naming it even after the rest of the batch drains the list. Same nullish /
+  // Array.isArray tolerance as the tracking helpers above: a mocked-away
+  // approval must never turn into a rejected promise.
+  const reportOutcomes = (placements: readonly ApprovalPlacement[] | undefined) => {
+    const named = new Map(pendingItems.map((it) => [it.id, it.text] as const));
+    setSkippedAsMalformed(
+      Array.isArray(placements)
+        ? placements
+            .filter((p) => p && p.outcome === 'malformed')
+            .map((p) => ({
+              id: p.itemId,
+              name: named.get(p.itemId) ?? p.itemId,
+              reason: p.reason ?? '',
+            }))
+        : [],
+    );
+  };
   // Pass the ROW, not the id (#557/#558): approval routes from the authoritative
   // stored target while atomically carrying the Admin's difficulty/spicy choice.
   // `Promise.resolve(...)` wraps each call rather than chaining `.then`
@@ -638,19 +687,27 @@ export default function ReviewQueue({
   // gets a chance to no-op harmlessly.
   const approveOne = (it: ItemDoc) => {
     const ownedEventId = EVENT_ID;
-    return guard(isSpicy(it), 'approve', () =>
-      Promise.resolve(approveItem(it, adminUid, ownedEventId)).then((placement) =>
-        trackApproval(placement, ownedEventId),
-      ),
-    );
+    return guard(isSpicy(it), 'approve', () => {
+      // Retire the previous run's notice the moment this one actually runs
+      // (inside `run`, for the same reason the tracking wrapper lives here: the
+      // flip-confirm can defer the real call into its own handler). A rejection
+      // then leaves the alert pill alone rather than beside a stale skip.
+      setSkippedAsMalformed([]);
+      return Promise.resolve(approveItem(it, adminUid, ownedEventId)).then((placement) => {
+        const tracked = trackApproval(placement, ownedEventId);
+        reportOutcomes(tracked ? [tracked] : []);
+        return tracked;
+      });
+    });
   };
   const approveAll = () => {
     const ownedEventId = EVENT_ID;
     return guard(
       explicitPending.length > 0,
       'bulk-approve',
-      () =>
-        Promise.resolve(
+      () => {
+        setSkippedAsMalformed([]);
+        return Promise.resolve(
           bulkApproveItems(
             pendingItems.map((it) => {
               const difficulty = difficultyFor(it);
@@ -663,7 +720,12 @@ export default function ReviewQueue({
             adminUid,
             ownedEventId,
           ),
-        ).then((placements) => trackApprovals(placements, ownedEventId)),
+        ).then((placements) => {
+          const tracked = trackApprovals(placements, ownedEventId);
+          reportOutcomes(tracked);
+          return tracked;
+        });
+      },
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
     );
   };
@@ -738,6 +800,21 @@ export default function ReviewQueue({
           <AsyncButton onAction={approveAll}>
             Approve all
           </AsyncButton>
+        )}
+        {/* The skipped-row notice (#1070). One live region for the whole result
+            rather than a pill per row: the approve either skipped something or it
+            did not, and an admin reading it wants the list in one announcement.
+            role=status, not role=alert — the action SUCCEEDED, and everything it
+            did not skip was approved; this says which rows still need a decision.
+            AsyncButton's own role=alert pill stays what a rejected write uses. */}
+        {!!malformedNotices.length && (
+          <div role="status">
+            {malformedNotices.map((s) => (
+              <p key={s.id} className="pill pill-error">
+                Skipped “{s.name}” as malformed — not approved. {s.reason}
+              </p>
+            ))}
+          </div>
         )}
         <div className="list">
           {pendingItems.map((it) => (

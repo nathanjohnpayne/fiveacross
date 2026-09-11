@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // specs/community-prompt-targeting.md (#557) — the client half: the pure
 // targeting decisions, the submission that records an intended Day, and the
@@ -42,7 +42,16 @@ const {
   // the stale-approval guard, so these two can deliberately disagree in tests.
   itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
   eventScope: { eventId: 'med-2026' },
-  transactionGate: { beforeCallback: null as Promise<void> | null },
+  // The transaction lifecycle these tests need to stage: a callback that starts
+  // late (`beforeCallback`), one Firestore RETRIES before committing
+  // (`attempts`), and one whose transaction is abandoned after running
+  // (`failWith`). The last two are the two ways a callback runs without its
+  // write landing.
+  transactionGate: {
+    beforeCallback: null as Promise<void> | null,
+    attempts: 1,
+    failWith: null as Error | null,
+  },
 }));
 
 /** Seed the stored item a later `approveItems` will read. */
@@ -97,10 +106,16 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     // `tx.get` (the stale guard's authoritative state) and writes only items.
     runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
       if (transactionGate.beforeCallback) await transactionGate.beforeCallback;
-      return fn({
+      const tx = {
         get: (ref: Ref) => txGetMock(ref),
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
-      });
+      };
+      let result: unknown;
+      for (let attempt = 0; attempt < transactionGate.attempts; attempt += 1) {
+        result = await fn(tx);
+      }
+      if (transactionGate.failWith) throw transactionGate.failWith;
+      return result;
     },
   };
 });
@@ -130,6 +145,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   eventScope.eventId = 'med-2026';
   transactionGate.beforeCallback = null;
+  transactionGate.attempts = 1;
+  transactionGate.failWith = null;
   for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
   txGetMock.mockImplementation((ref: Ref) => {
@@ -456,10 +473,40 @@ describe('approveItems — routing an approval into one Day', () => {
     },
   );
 
-  it('rejects a closing classification before writing a still-pending Prompt', async () => {
-    await expect(
-      approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'closing' }], 'admin-uid'),
-    ).rejects.toThrow(/easy or exploratory classification/);
+  // #1070. A classification approval cannot act on is a fact about ONE row, so
+  // it is reported as that row's own outcome and skipped — it used to throw out
+  // of the transaction, taking every other row in the batch with it.
+  it('reports a closing classification as that row\'s own malformed outcome, writing nothing', async () => {
+    const placements = await approveItems(
+      [{ id: 'p1', targetDayIndex: 2, pool: 'closing' }],
+      'admin-uid',
+    );
+    expect(placements).toEqual([
+      {
+        itemId: 'p1',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+    ]);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a non-boolean spicy choice as malformed too, naming the spicy reason', async () => {
+    const placements = await approveItems(
+      [{ id: 'p1', targetDayIndex: 2, pool: 'main', spicy: 'yes' as never }],
+      'admin-uid',
+    );
+    expect(placements).toEqual([
+      {
+        itemId: 'p1',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires a boolean spicy classification.',
+      },
+    ]);
     expect(updateMock).not.toHaveBeenCalled();
   });
 
@@ -703,6 +750,42 @@ describe('approveItems — routing an approval into one Day', () => {
     });
   });
 
+  // #1070, the case the whole change exists for: "Approve all" is no longer
+  // all-or-nothing on a malformed classification. One bad row is skipped as its
+  // own outcome and the rest of the batch still lands.
+  it('skips ONE malformed row in a bulk approve and still approves the other two', async () => {
+    const placements = await bulkApproveItems(
+      [
+        { id: 'a', targetDayIndex: 2, pool: 'easy' },
+        { id: 'b', targetDayIndex: 1, pool: 'closing' },
+        { id: 'd', pool: 'main', spicy: true },
+      ],
+      'admin-uid',
+    );
+
+    expect(placements).toEqual([
+      { itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' },
+      {
+        itemId: 'b',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+      { itemId: 'd', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
+    // Nothing at all for the skipped row — not an approval, not a
+    // classification-only update. It is still pending, exactly as it was.
+    expect(written().map(({ path }) => path)).toEqual([
+      'events/med-2026/items/a',
+      'events/med-2026/items/d',
+    ]);
+    // And the surviving rows still share the one approvedAt instant a bulk
+    // approve promises: skipping a row does not split the batch in two.
+    const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
+    expect(stamps.size).toBe(1);
+  });
+
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
     putItem('p1', { targetDayIndex: 3 });
     const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
@@ -757,6 +840,127 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       spicyRevision: 8,
     });
     expect(revision).toBe(8);
+  });
+
+  // #1071: `spicyRevision` only ever reaches Firestore through this
+  // transaction, one increment at a time, so a value that is STORED and outside
+  // the contract is corrupted or hand-edited data. The correction must stay
+  // writable, so the fence still restarts at 0 — but that silently re-bases the
+  // acknowledgement the queue retires its optimistic overlay on, so it is said
+  // out loud, naming the row and the SHAPE of the bad value (never the value,
+  // never the row, which holds submitter prose). An ABSENT field is not that:
+  // the field is optional, no create path writes it, and starting at 0 is the
+  // ordinary opening state of every row — see the legacy/first-toggle case
+  // below, which must stay silent.
+  describe('an out-of-contract stored revision is logged, not swallowed', () => {
+    // Scoped to this block: only these rows expect the warning, so capturing it
+    // here keeps a stray warning from any other case visible.
+    const spyOnWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let warn: ReturnType<typeof spyOnWarn>;
+
+    beforeEach(() => {
+      warn = spyOnWarn();
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    const outOfContract: Array<[string, unknown, string]> = [
+      ['negative', -1, 'negative'],
+      ['NaN', Number.NaN, 'NaN'],
+      ['fractional', 1.5, 'non-integer'],
+      ['a string', '3', 'typeof string'],
+    ];
+
+    it.each(outOfContract)(
+      'restarts the fence at 0 and warns once when the stored revision is %s',
+      async (_label, stored, shape) => {
+        putItem('p1', {
+          status: 'pending',
+          pool: 'main',
+          spicy: false,
+          spicyRevision: stored,
+        });
+
+        const revision = await setItemSpicy('p1', true);
+
+        expect(revision).toBe(1);
+        expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+          spicy: true,
+          spicyRevision: 1,
+        });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(`item p1 has an out-of-contract spicyRevision (${shape})`),
+        );
+      },
+    );
+
+    // Codex P2 on PR #1201. The restart is a fact about the write that
+    // COMMITTED, so the line belongs after settlement rather than inside the
+    // callback. Firestore re-runs this callback on contention — the very retry
+    // `setItemSpicy` relies on to lose to an approval — and a callback that ran
+    // twice is still one admin correcting one row once.
+    it('warns ONCE for a correction whose callback Firestore retried before committing', async () => {
+      putItem('p1', {
+        status: 'pending',
+        pool: 'main',
+        spicy: false,
+        spicyRevision: -1,
+      });
+      transactionGate.attempts = 2;
+
+      await expect(setItemSpicy('p1', true)).resolves.toBe(1);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    // The other half of the same rule: a callback can also run for a transaction
+    // Firestore then abandons. Nothing was re-based, so there is nothing to say
+    // — a warning here would report a corruption the queue never acted on.
+    it('says nothing when the transaction runs the callback and then fails', async () => {
+      putItem('p1', {
+        status: 'pending',
+        pool: 'main',
+        spicy: false,
+        spicyRevision: -1,
+      });
+      transactionGate.failWith = new Error('transaction aborted');
+
+      await expect(setItemSpicy('p1', true)).rejects.toThrow('transaction aborted');
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    // The two in-contract shapes, neither of which is a fault to report. The
+    // absent case is the one that matters here: `spicyRevision` is optional and
+    // written only by this transaction, so EVERY Prompt's first correction
+    // arrives with no stored revision. Warning there would put the line on 100%
+    // of first toggles and drown the corruption above in routine noise.
+    const inContract: Array<[string, number | undefined, number]> = [
+      ['a usable one', 4, 5],
+      ['absent, as on a legacy row or any first toggle', undefined, 1],
+    ];
+
+    it.each(inContract)(
+      'says nothing when the stored revision is %s',
+      async (_label, stored, expected) => {
+        putItem('p1', {
+          status: 'pending',
+          pool: 'main',
+          spicy: false,
+          spicyRevision: stored,
+        });
+
+        await expect(setItemSpicy('p1', true)).resolves.toBe(expected);
+        expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+          spicy: true,
+          spicyRevision: expected,
+        });
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps a spicy correction in its acted Event when the transaction callback starts after A to B', async () => {

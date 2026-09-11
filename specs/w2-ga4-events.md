@@ -79,7 +79,7 @@ A lightweight, dismissible disclosure—not a full consent-management platform a
 Three catalogued events for the Community Prompt entry point built on #557's Day-targeting model, appended to `GA4_EVENTS` alongside `text_size_change` / `reshuffle_card` / `heart_post` / `most_loved_photo_frozen` / `mark_rejected` / `unmark_square` / `echo_mark` in the "later tickets" bullet above. Full contract, params, and call sites live in `specs/community-prompt-targeting.md` § "Entry point, submitter states, and attribution (#559)"—summarized here only to keep this canonical catalog spec current with `GA4_EVENTS`' actual membership (Codex P2, PR #845):
 
 - **`prompt_suggestion_submitted`**—`components/ItemPool.tsx`, on a successful `addItem`. Params: `hasTargetDay`, `dayIndex` (the target the write actually committed, when usable).
-- **`prompt_suggestion_approved`**—`components/admin/ReviewQueue.tsx`, once per `ApprovalPlacement` whose `outcome` is not `'stale'`/`'missing'`. Params: `outcome`, `dayIndex` (when placed).
+- **`prompt_suggestion_approved`**—`components/admin/ReviewQueue.tsx`, once per `ApprovalPlacement` whose `outcome` is not `'stale'`/`'missing'`/`'malformed'`. Params: `outcome`, `dayIndex` (when placed).
 - **`community_prompt_dealt`**—`data/api.ts`, fired once per genuinely new deal (after each of the three deal transactions commits). Params: `dayIndex`, `count` (Community Prompt Squares on that card).
 
 None carries Prompt text—counts, ids, uids, and booleans only, per `specs/posthog-analytics.md` § "Payload hygiene".

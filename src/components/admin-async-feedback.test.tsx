@@ -21,6 +21,8 @@ const H = vi.hoisted(() => ({
   pendingItems: [] as ItemDoc[],
   deleteItem: vi.fn(),
   setItemSpicy: vi.fn(),
+  approveItem: vi.fn(),
+  bulkApproveItems: vi.fn(),
   confirmClaim: vi.fn(),
   unbanUser: vi.fn(),
   adminAddItem: vi.fn(),
@@ -68,9 +70,9 @@ vi.mock('../data/admin', () => ({
   restoreItem: vi.fn(),
   deleteItem: (...a: unknown[]) => H.deleteItem(...a),
   clearItemReports: vi.fn(),
-  approveItem: vi.fn(),
+  approveItem: (...a: unknown[]) => H.approveItem(...a),
   rejectItem: vi.fn(),
-  bulkApproveItems: vi.fn(),
+  bulkApproveItems: (...a: unknown[]) => H.bulkApproveItems(...a),
   setItemSpicy: (...a: unknown[]) => H.setItemSpicy(...a),
   adminAddItem: (...a: unknown[]) => H.adminAddItem(...a),
   adminUpdateItemText: (...a: unknown[]) => H.adminUpdateItemText(...a),
@@ -108,12 +110,17 @@ vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 import Admin from './Admin';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
-const renderAdmin = (path: string) =>
-  render(
-    <MemoryRouter initialEntries={[path]}>
-      <Admin />
-    </MemoryRouter>,
-  );
+// Kept as a named element so a test can re-render the SAME tree after mutating
+// the stubbed data hooks — the stand-in for a realtime snapshot arriving on a
+// console that stays mounted (`MemoryRouter` reads `initialEntries` only on
+// mount, so the route and every piece of console state survive).
+const adminTree = (path: string) => (
+  <MemoryRouter initialEntries={[path]}>
+    <Admin />
+  </MemoryRouter>
+);
+
+const renderAdmin = (path: string) => render(adminTree(path));
 
 const item = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
   ({
@@ -487,6 +494,201 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'main' } });
     expect(within(row).getByRole('checkbox')).not.toBeDisabled();
     expect(within(row).queryByRole('alert')).toBeNull();
+  });
+
+  // #1070. A `malformed` row is the one approval result that SUCCEEDS and still
+  // leaves work behind: the write resolved, the rest of the batch landed, and
+  // the skipped row just stays in the queue looking untouched. AsyncButton's own
+  // role=alert pill is for rejections and never fires here, so the queue has to
+  // say it itself — naming the row, because "one was skipped" over a list of
+  // pending Prompts is not something an Admin can act on.
+  const approvalsSection = () =>
+    screen.getByRole('heading', { name: /^Approvals/ }).closest('.admin-section') as HTMLElement;
+
+  it('names the row a successful Approve all SKIPPED as malformed, and clears it on a clean run', async () => {
+    H.pendingItems = [
+      item('i1', { text: 'Good prompt', status: 'pending' }),
+      item('i2', { text: 'Bad classification', status: 'pending' }),
+    ];
+    H.bulkApproveItems
+      .mockResolvedValueOnce([
+        { itemId: 'i1', dayIndex: 2, retained: false, outcome: 'placed' },
+        {
+          itemId: 'i2',
+          dayIndex: null,
+          retained: false,
+          outcome: 'malformed',
+          reason: 'Community Prompt approval requires an easy or exploratory classification.',
+        },
+      ])
+      .mockResolvedValueOnce([
+        { itemId: 'i1', dayIndex: 2, retained: false, outcome: 'placed' },
+        { itemId: 'i2', dayIndex: 3, retained: false, outcome: 'placed' },
+      ]);
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+
+    const notice = await within(approvalsSection()).findByRole('status');
+    expect(notice).toHaveTextContent('Skipped “Bad classification” as malformed — not approved.');
+    expect(notice).toHaveTextContent(/requires an easy or exploratory classification/);
+    // The rows that DID approve are not named: the notice is the list of Prompts
+    // that still need a decision, not a receipt for the whole batch.
+    expect(notice).not.toHaveTextContent('Good prompt');
+    // And it is a status, not an alert — the action succeeded.
+    expect(within(approvalsSection()).queryByRole('alert')).toBeNull();
+
+    // A later approve that skips nothing retires the notice rather than leaving
+    // a stale accusation against a row that has since been classified.
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+    await waitFor(() =>
+      expect(within(approvalsSection()).queryByRole('status')).toBeNull(),
+    );
+  });
+
+  // A REJECTED approve resolves nothing, so a notice that is only retired on
+  // settlement would survive it: AsyncButton raises its own role=alert pill and
+  // the previous run's skip would sit beside it, naming a row as skipped by an
+  // action that never reached the server. Clearing as the approve starts keeps
+  // the notice describing the latest ATTEMPT, not the latest one that resolved.
+  it('drops the skipped-row notice when the next Approve all is rejected', async () => {
+    H.pendingItems = [
+      item('i1', { text: 'Good prompt', status: 'pending' }),
+      item('i2', { text: 'Bad classification', status: 'pending' }),
+    ];
+    H.bulkApproveItems
+      .mockResolvedValueOnce([
+        { itemId: 'i1', dayIndex: 2, retained: false, outcome: 'placed' },
+        {
+          itemId: 'i2',
+          dayIndex: null,
+          retained: false,
+          outcome: 'malformed',
+          reason: 'Community Prompt approval requires an easy or exploratory classification.',
+        },
+      ])
+      .mockRejectedValueOnce(new Error('offline'));
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+    expect(await within(approvalsSection()).findByRole('status')).toHaveTextContent(
+      'Skipped “Bad classification” as malformed',
+    );
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+
+    // The rejection speaks for itself, alone.
+    expect(await within(approvalsSection()).findByRole('alert')).toHaveTextContent(
+      'Failed—try again.',
+    );
+    expect(within(approvalsSection()).queryByRole('status')).toBeNull();
+  });
+
+  it('names a single-row Approve that was skipped as malformed', async () => {
+    H.pendingItems = [item('i1', { text: 'Lone bad row', status: 'pending' })];
+    H.approveItem.mockResolvedValueOnce({
+      itemId: 'i1',
+      dayIndex: null,
+      retained: false,
+      outcome: 'malformed',
+      reason: 'Community Prompt approval requires a boolean spicy classification.',
+    });
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Lone bad row').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }));
+
+    expect(await within(approvalsSection()).findByRole('status')).toHaveTextContent(
+      'Skipped “Lone bad row” as malformed — not approved. Community Prompt approval requires a boolean spicy classification.',
+    );
+  });
+
+  // Codex P2 on PR #1201. The notice records what THIS admin's approve skipped,
+  // but the Approvals queue behind it is a live query. Another admin can correct
+  // and approve — or reject — the same row seconds later, and the realtime
+  // update takes that row out of the queue. A notice that only ever retires when
+  // this admin starts another approval would keep standing over an empty space
+  // insisting a Prompt was "not approved", about a row nobody can act on any
+  // more.
+  it('retires the malformed notice for a row another Admin resolved, keeping the one still pending', async () => {
+    H.pendingItems = [
+      item('i1', { text: 'Good prompt', status: 'pending' }),
+      item('i2', { text: 'Bad classification', status: 'pending' }),
+      item('i3', { text: 'Also unclassified', status: 'pending' }),
+    ];
+    H.bulkApproveItems.mockResolvedValueOnce([
+      { itemId: 'i1', dayIndex: 2, retained: false, outcome: 'placed' },
+      {
+        itemId: 'i2',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+      {
+        itemId: 'i3',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+    ]);
+    const view = renderAdmin('/more/admin/queue');
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+
+    const notice = await within(approvalsSection()).findByRole('status');
+    expect(notice).toHaveTextContent('Skipped “Bad classification”');
+    expect(notice).toHaveTextContent('Skipped “Also unclassified”');
+
+    // The other Admin's fix lands: the pending query no longer carries i2.
+    H.pendingItems = [item('i3', { text: 'Also unclassified', status: 'pending' })];
+    view.rerender(adminTree('/more/admin/queue'));
+
+    await waitFor(() =>
+      expect(within(approvalsSection()).getByRole('status')).not.toHaveTextContent(
+        'Bad classification',
+      ),
+    );
+    // i3 is still sitting in the queue unclassified, so its skip is still true
+    // and still the only thing telling the admin why.
+    expect(within(approvalsSection()).getByRole('status')).toHaveTextContent(
+      'Skipped “Also unclassified” as malformed — not approved.',
+    );
+    // And nothing else moved: the surviving row is still mounted in the queue,
+    // reconciled rather than torn down.
+    expect(within(approvalsSection()).getByText('Also unclassified')).toBeInTheDocument();
+  });
+
+  // The whole region goes, not just the line — with the queue itself still on
+  // screen, so this is the notice retiring rather than the console's "All
+  // clear." empty state swallowing it.
+  it('drops the notice region entirely once the skipped row has left the queue', async () => {
+    H.pendingItems = [
+      item('i2', { text: 'Bad classification', status: 'pending' }),
+      item('i1', { text: 'Untouched prompt', status: 'pending' }),
+    ];
+    H.approveItem.mockResolvedValueOnce({
+      itemId: 'i2',
+      dayIndex: null,
+      retained: false,
+      outcome: 'malformed',
+      reason: 'Community Prompt approval requires an easy or exploratory classification.',
+    });
+    const view = renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Bad classification').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }));
+    expect(await within(approvalsSection()).findByRole('status')).toHaveTextContent(
+      'Skipped “Bad classification”',
+    );
+
+    // Another Admin rejects it outright; the rest of the queue is untouched.
+    H.pendingItems = [item('i1', { text: 'Untouched prompt', status: 'pending' })];
+    view.rerender(adminTree('/more/admin/queue'));
+
+    await waitFor(() => expect(within(approvalsSection()).queryByRole('status')).toBeNull());
+    expect(within(approvalsSection()).getByText('Untouched prompt')).toBeInTheDocument();
   });
 
   it('a rejected Unban alerts inline in Players', async () => {
