@@ -57,22 +57,33 @@ async function seedEvent(
 
 // Structural locator (#1100): the arm is found by walking the root Event
 // match block's braces rather than by the first substring hit, so a second
-// `match /events/{eventId}` block, a nested match that carries its own
-// `allow create, update` arm, or an unterminated arm all fail loudly here
-// instead of silently pinning the wrong text. Both needles are
-// whitespace-tolerant regexes (Codex P2 on #1194): a duplicate block written
-// as `match /events/{eventId}  {` or with its brace on the next line is
-// counted, not skipped. Comments are already stripped from EXECUTABLE_RULES,
-// so only real braces are counted; the `{eventId}` segments of nested match
-// paths net to zero and never reach depth 1 at the start of an `allow`.
-const ROOT_EVENT_MATCH = /match\s+\/events\/\{eventId\}\s*\{/g;
-const CREATE_UPDATE_ARM = /allow\s+create\s*,\s*update\s*:\s*if\b/y;
+// `match /events/{...}` block, a nested match that carries its own arm, or an
+// unterminated arm all fail loudly here instead of silently pinning the
+// wrong text. The needles are whitespace-tolerant regexes (Codex P2 round 1
+// on #1194), the wildcard variable is matched generically because Firestore
+// treats `match /events/{id}` as the same path as `match /events/{eventId}`
+// (round 2), and every direct arm that grants `create` or `write` is
+// collected, not only the combined `create, update` spelling, so an extra
+// root create grant that bypasses eventConfigWriteAuthorized cannot hide
+// beside the intentional update-only lifecycle arms (round 2). Comments are
+// already stripped from EXECUTABLE_RULES, so only real braces are counted;
+// the `{...}` wildcard segments of nested match paths net to zero and never
+// reach depth 1 at the start of an `allow`.
+const ROOT_EVENT_MATCH = /match\s+\/events\/\{[A-Za-z_][A-Za-z0-9_]*\}\s*\{/g;
+const ALLOW_ARM = /allow\s+([a-z]+(?:\s*,\s*[a-z]+)*)\s*:\s*if\b/y;
+
+function grantsCreate(verbs: string): boolean {
+  return verbs
+    .split(',')
+    .map((verb) => verb.trim())
+    .some((verb) => verb === 'create' || verb === 'write');
+}
 
 function rootEventWriteAllow(): string {
   const blocks = [...EXECUTABLE_RULES.matchAll(ROOT_EVENT_MATCH)];
   if (blocks.length !== 1) {
     throw new Error(
-      `root Event match block: expected exactly one 'match /events/{eventId} {', found ${blocks.length}`,
+      `root Event match block: expected exactly one 'match /events/{<wildcard>} {', found ${blocks.length}`,
     );
   }
   const arms: string[] = [];
@@ -87,11 +98,12 @@ function rootEventWriteAllow(): string {
       depth -= 1;
       if (depth === 0) break;
     } else if (depth === 1 && ch === 'a') {
-      CREATE_UPDATE_ARM.lastIndex = i;
-      if (CREATE_UPDATE_ARM.test(EXECUTABLE_RULES)) {
+      ALLOW_ARM.lastIndex = i;
+      const arm = ALLOW_ARM.exec(EXECUTABLE_RULES);
+      if (arm !== null && grantsCreate(arm[1])) {
         const end = EXECUTABLE_RULES.indexOf(';', i);
         if (end < 0) {
-          throw new Error('root Event create/update allow arm is unterminated');
+          throw new Error('root Event create-granting allow arm is unterminated');
         }
         arms.push(EXECUTABLE_RULES.slice(i, end + 1).trim());
       }
@@ -102,7 +114,7 @@ function rootEventWriteAllow(): string {
   }
   if (arms.length !== 1) {
     throw new Error(
-      `root Event match block: expected exactly one direct 'allow create, update: if' arm, found ${arms.length}`,
+      `root Event match block: expected exactly one direct arm granting create or write, found ${arms.length}`,
     );
   }
   return arms[0];
