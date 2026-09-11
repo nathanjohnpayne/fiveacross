@@ -25,6 +25,13 @@
  * reads `date` and nothing else; `unlockAt` only decides WHEN in the morning the
  * send lands. See `dueDayForDailyEmail` for the rule and what it replaced.
  *
+ * AND IT STOPS AT THE STANDINGS FREEZE (#1121). The freeze is where the Event's
+ * scoring ends, so it is also where its daily engagement mail ends: past that
+ * instant nothing is due, and the finale carries whatever is left to say. The
+ * cutoff lives in `dueDayForDailyEmail` with the rest of the clock — the content
+ * builder stays clock-free — and it reads the SAME resolved instant the headline
+ * ⭐ is settled against, `standingsFreezeAtFor`.
+ *
  * SAFE TO RUN 96× A DAY because every beat is self-guarded, not schedule-timed:
  * the Event-level admin toggle is off by default, the due window closes six
  * hours after unlock, each recipient's `lastSentDayIndex` makes a second run a
@@ -252,13 +259,52 @@ function windowIsOpen(
  * hours are still running must not cancel the send. When two owners are somehow
  * due at once — a Day carried over from yesterday and today's — today's owner
  * wins, so the send is never a stale card.
+ *
+ * AND NOTHING IS EVER DUE AT OR AFTER THE STANDINGS FREEZE (#1121). The freeze
+ * is the Event's full stop for scoring (ADR 0011): from that instant no Mark can
+ * move the standings, the ⭐ is settled, and the finale — not this sweep — is the
+ * mail that speaks for what is left. A daily engagement email sent afterwards
+ * invites people into a competition that has permanently closed, which is
+ * exactly what the empty state was caught advertising: an Event whose only bingo
+ * landed post-freeze on a ceremonial Day shows an all-zero board with no ⭐
+ * holder, so the next morning's email read "every honor is wide open" about
+ * honours nobody could still win.
+ *
+ * IT IS A CUTOFF ON THE SEND INSTANT, not on the calendar date, because the two
+ * disagree on the Event this rule matters most to. Bodega Bay's freeze IS its
+ * 11:00 Sunday wrap-up unlock, and that same Sunday's email goes out at 06:00 —
+ * five hours of open scoring before the boundary. Suppressing the freeze's whole
+ * date would silence a morning that is still a playing morning; suppressing from
+ * the instant leaves it mailed and stops everything after, which is what "stop
+ * the daily email after the freeze" means. An Event with no freeze at all
+ * (`freezeAt` null — no configured `standingsFreezeAt` and no ceremonial Day)
+ * mails exactly as it always has.
+ *
+ * The residual is deliberate and small: a Day whose six-hour window is still
+ * open when the freeze lands stops being due mid-window, so an outage spanning
+ * the boundary loses that morning's email rather than delivering it late into a
+ * closed Event. Sent mail is irreversible; an unsent one is not.
  */
 export function dueDayForDailyEmail(
   days: readonly EmailDay[] | undefined,
   now: number,
   timeZone?: string,
-  windowMs: number = SEND_WINDOW_MS,
+  /** `windowMs` overrides the six-hour send window (tests). `freezeAt` is the
+   *  Event's RESOLVED Standings Freeze from `standingsFreezeAtFor` — never a raw
+   *  `standingsFreezeAt`, so the instant this stops at and the instant the ⭐
+   *  is settled against are the same one. Absent or `null` means an Event with
+   *  no freeze, which is every pre-ADR-0011 caller. An options bag rather than
+   *  two more positionals: both are numbers, and a freeze silently read as a
+   *  window length would suppress or extend every send in the Event. */
+  options: { windowMs?: number; freezeAt?: number | null } = {},
 ): EmailDay | null {
+  const windowMs = options.windowMs ?? SEND_WINDOW_MS;
+  const freezeAt = options.freezeAt ?? null;
+  // Ahead of every other decision, because it is the stronger statement: the
+  // competition is over, whatever the schedule still says. A `NaN` freeze fails
+  // this comparison and mails as before, which is the same fail-open posture
+  // `standingsFreezeAtFor` takes when it refuses a non-finite value.
+  if (freezeAt !== null && now >= freezeAt) return null;
   const schedule = (days ?? []).filter((day): day is EmailDay => !!day);
   const today = eventWallClock(now, timeZone);
   const opensAt = morningOpensAt(schedule, timeZone);
@@ -547,7 +593,14 @@ export async function sendDailyEmailForEvent(
   if (eventClosedToPlay(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
   if (!dailyEmailEnabled(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'disabled' };
 
-  const day = dueDayForDailyEmail(event.days, now, event.timezone);
+  // Resolved ONCE for this send and handed to both readers of it below: the
+  // freeze that stops the mail (#1121) and the freeze the headline ⭐ is settled
+  // against (#1052) must be the same instant, or an email could go out quoting a
+  // boundary the due check did not apply.
+  const freezeAt = standingsFreezeAtFor(event);
+  const day = dueDayForDailyEmail(event.days, now, event.timezone, { freezeAt });
+  // Covers the post-freeze morning too: nothing is due once scoring has closed,
+  // so the Event simply stops mailing rather than reporting a new state.
   if (!day) return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
@@ -605,12 +658,7 @@ export async function sendDailyEmailForEvent(
   // same tie over LIVE root totals this window cannot see, so handing either
   // selector an order to break ties by is what let the two disagree. Pre-ban, so
   // a presentational ban hides the row without promoting anyone.
-  const starUid = eventFirstBingoUid(
-    rosterPage.allPlayers,
-    day.index,
-    tutorialDays,
-    standingsFreezeAtFor(event),
-  );
+  const starUid = eventFirstBingoUid(rosterPage.allPlayers, day.index, tutorialDays, freezeAt);
   const banned = new Set(event.bannedUids ?? []);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
