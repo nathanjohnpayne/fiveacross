@@ -42,7 +42,16 @@ const {
   // the stale-approval guard, so these two can deliberately disagree in tests.
   itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
   eventScope: { eventId: 'med-2026' },
-  transactionGate: { beforeCallback: null as Promise<void> | null },
+  // The transaction lifecycle these tests need to stage: a callback that starts
+  // late (`beforeCallback`), one Firestore RETRIES before committing
+  // (`attempts`), and one whose transaction is abandoned after running
+  // (`failWith`). The last two are the two ways a callback runs without its
+  // write landing.
+  transactionGate: {
+    beforeCallback: null as Promise<void> | null,
+    attempts: 1,
+    failWith: null as Error | null,
+  },
 }));
 
 /** Seed the stored item a later `approveItems` will read. */
@@ -97,10 +106,16 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     // `tx.get` (the stale guard's authoritative state) and writes only items.
     runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
       if (transactionGate.beforeCallback) await transactionGate.beforeCallback;
-      return fn({
+      const tx = {
         get: (ref: Ref) => txGetMock(ref),
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
-      });
+      };
+      let result: unknown;
+      for (let attempt = 0; attempt < transactionGate.attempts; attempt += 1) {
+        result = await fn(tx);
+      }
+      if (transactionGate.failWith) throw transactionGate.failWith;
+      return result;
     },
   };
 });
@@ -130,6 +145,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   eventScope.eventId = 'med-2026';
   transactionGate.beforeCallback = null;
+  transactionGate.attempts = 1;
+  transactionGate.failWith = null;
   for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
   txGetMock.mockImplementation((ref: Ref) => {
@@ -879,6 +896,42 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
         );
       },
     );
+
+    // Codex P2 on PR #1201. The restart is a fact about the write that
+    // COMMITTED, so the line belongs after settlement rather than inside the
+    // callback. Firestore re-runs this callback on contention — the very retry
+    // `setItemSpicy` relies on to lose to an approval — and a callback that ran
+    // twice is still one admin correcting one row once.
+    it('warns ONCE for a correction whose callback Firestore retried before committing', async () => {
+      putItem('p1', {
+        status: 'pending',
+        pool: 'main',
+        spicy: false,
+        spicyRevision: -1,
+      });
+      transactionGate.attempts = 2;
+
+      await expect(setItemSpicy('p1', true)).resolves.toBe(1);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    // The other half of the same rule: a callback can also run for a transaction
+    // Firestore then abandons. Nothing was re-based, so there is nothing to say
+    // — a warning here would report a corruption the queue never acted on.
+    it('says nothing when the transaction runs the callback and then fails', async () => {
+      putItem('p1', {
+        status: 'pending',
+        pool: 'main',
+        spicy: false,
+        spicyRevision: -1,
+      });
+      transactionGate.failWith = new Error('transaction aborted');
+
+      await expect(setItemSpicy('p1', true)).rejects.toThrow('transaction aborted');
+
+      expect(warn).not.toHaveBeenCalled();
+    });
 
     // The two in-contract shapes, neither of which is a fault to report. The
     // absent case is the one that matters here: `spicyRevision` is optional and

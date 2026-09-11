@@ -435,14 +435,17 @@ const spicyRevisionShape = (raw: unknown): string => {
   return 'negative';
 };
 
-const readSpicyRevision = (raw: unknown, itemId: string): number => {
-  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw;
-  if (raw === undefined) return 0;
-  console.warn(
-    `[admin] item ${itemId} has an out-of-contract spicyRevision ` +
-      `(${spicyRevisionShape(raw)}); restarting the correction fence at 0`,
-  );
-  return 0;
+// Decides the fence WITHOUT saying anything: what the read found is reported
+// back to the caller so the line can be spoken once, after the transaction that
+// acted on it commits (Codex P2 on PR #1201). `restartedFrom` is the shape of
+// the offending stored value, or `null` when the fence opened legitimately.
+const readSpicyRevision = (
+  raw: unknown,
+): { revision: number; restartedFrom: string | null } => {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0)
+    return { revision: raw, restartedFrom: null };
+  if (raw === undefined) return { revision: 0, restartedFrom: null };
+  return { revision: 0, restartedFrom: spicyRevisionShape(raw) };
 };
 
 // Lets an admin correct a submitter's 🔞 tagging from the Approvals queue BEFORE
@@ -459,10 +462,10 @@ const readSpicyRevision = (raw: unknown, itemId: string): number => {
 // correction from a stale pre-commit snapshot without treating value equality
 // as authorship. A row with no stored revision — a legacy row, or any Prompt's
 // first correction — starts at 0 silently; a row whose stored revision is
-// present but out of contract starts at 0 too, and `readSpicyRevision` logs
-// that restart. `null` means the authoritative row was missing or no longer
-// eligible, so no write occurred and the caller must drop any optimistic
-// overlay.
+// present but out of contract starts at 0 too, and this function logs that
+// restart once, after the commit. `null` means the authoritative row was
+// missing or no longer eligible, so no write occurred and the caller must drop
+// any optimistic overlay.
 export async function setItemSpicy(
   id: string,
   spicy: boolean,
@@ -471,19 +474,36 @@ export async function setItemSpicy(
   // Firestore can invoke or retry the callback after the app has switched
   // Events. Resolve the acted document once, before entering that lifecycle.
   const ref = item(id, eventId);
-  return runTransaction(db, async (tx) => {
+  // The corruption line describes a fence restart that HAPPENED, so the callback
+  // only carries the finding out and the warning is spoken after settlement
+  // (Codex P2 on PR #1201). Warning inside the callback would say it once per
+  // ATTEMPT rather than once per correction: Firestore re-runs this callback on
+  // contention — the same retry the comment above relies on — and also runs it
+  // for transactions it ultimately abandons, so one toggle could log the same
+  // corruption several times, or announce a re-based fence that no write ever
+  // re-based. Returning the finding alongside the revision ties it to the
+  // attempt that actually committed.
+  const committed = await runTransaction(db, async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists()) return null;
     const row = snap.data() as Partial<ItemDoc>;
     if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
-    const previousRevision = readSpicyRevision(row.spicyRevision, id);
-    if (previousRevision === Number.MAX_SAFE_INTEGER) {
+    const fence = readSpicyRevision(row.spicyRevision);
+    if (fence.revision === Number.MAX_SAFE_INTEGER) {
       throw new Error('Prompt spicy revision exhausted');
     }
-    const revision = previousRevision + 1;
+    const revision = fence.revision + 1;
     tx.update(ref, { spicy, spicyRevision: revision });
-    return revision;
+    return { revision, restartedFrom: fence.restartedFrom };
   });
+  if (!committed) return null;
+  if (committed.restartedFrom !== null) {
+    console.warn(
+      `[admin] item ${id} has an out-of-contract spicyRevision ` +
+        `(${committed.restartedFrom}); restarting the correction fence at 0`,
+    );
+  }
+  return committed.revision;
 }
 
 /**

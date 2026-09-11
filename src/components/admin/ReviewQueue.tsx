@@ -504,7 +504,9 @@ export default function ReviewQueue({
   // approve clears it as it STARTS rather than only when it resolves — a
   // rejected write reports itself through AsyncButton's own role=alert pill, and
   // leaving the previous run's notice standing beside it would name a row as
-  // skipped by an action that never reached the server.
+  // skipped by an action that never reached the server. This is the RECORD of
+  // that run; what is displayed is derived from it against the live queue —
+  // see `malformedNotices` below.
   const [skippedAsMalformed, setSkippedAsMalformed] = useState<
     { id: string; name: string; reason: string }[]
   >([]);
@@ -609,6 +611,19 @@ export default function ReviewQueue({
     }
   };
   const explicitPending = pendingItems.filter(isSpicy);
+  // What the notice says has to stay true while it is on screen (Codex P2 on PR
+  // #1201). The stored list is the result of THIS admin's approve, but the queue
+  // behind it is live: another admin can correct and approve — or reject — the
+  // same row a moment later, and the realtime `pendingItems` update takes the
+  // row out of the queue while the notice keeps standing there claiming an
+  // absent Prompt was "not approved", until this admin happens to start another
+  // approval. So derive what is DISPLAYED rather than trusting what was stored:
+  // a notice lives exactly as long as its row is still pending, which is exactly
+  // as long as it still names something the admin has to decide. Rows that are
+  // still pending keep theirs — a realtime update elsewhere in the queue must
+  // not retire a skip that is still outstanding.
+  const pendingIds = new Set(pendingItems.map((it) => it.id));
+  const malformedNotices = skippedAsMalformed.filter((s) => pendingIds.has(s.id));
   // `prompt_suggestion_approved` (#559): one event per row that actually got
   // approved — `stale`/`missing`/`malformed` wrote nothing (a double-click, a
   // vanished row, a classification approval refused), so they fire nothing. No
@@ -792,9 +807,9 @@ export default function ReviewQueue({
             role=status, not role=alert — the action SUCCEEDED, and everything it
             did not skip was approved; this says which rows still need a decision.
             AsyncButton's own role=alert pill stays what a rejected write uses. */}
-        {!!skippedAsMalformed.length && (
+        {!!malformedNotices.length && (
           <div role="status">
-            {skippedAsMalformed.map((s) => (
+            {malformedNotices.map((s) => (
               <p key={s.id} className="pill pill-error">
                 Skipped “{s.name}” as malformed — not approved. {s.reason}
               </p>
