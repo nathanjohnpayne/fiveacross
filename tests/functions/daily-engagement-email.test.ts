@@ -2112,12 +2112,19 @@ describe('sendDailyEmailForEvent', () => {
           return readCollection(path);
         },
       };
-      const sent: string[] = [];
+      const sent: EmailPayload[] = [];
       const result = await sendDailyEmailForEvent(midFlight, 'med-2026', {
         ...baseDeps(),
         now: () => now,
         send: async (args) => {
-          sent.push(args.to[0]);
+          sent.push({
+            from: args.from ?? '',
+            to: args.to,
+            subject: args.subject,
+            html: args.html,
+            text: args.text,
+            headers: args.headers,
+          });
           return true;
         },
       });
@@ -2195,6 +2202,65 @@ describe('sendDailyEmailForEvent', () => {
       );
       expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
       expect(sent).toEqual([]);
+    });
+
+    it('settles the ⭐ against the freeze the delivery-time cutoff used, not the one the due check saw', async () => {
+      // Codex P2 round 2, PR #1202. An Admin EXTENDS the freeze mid-sweep. The
+      // delivery-time check permits the send on the new value — so the honour the
+      // email quotes has to be decided by that same value, or the mail goes out
+      // against a boundary the cutoff did not apply.
+      const opened = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const extended = opened + 4 * 60 * 60 * 1000;
+      const withBingos = (docs: Docs): Docs => {
+        // BOTH bingos land after the freeze this call opens with, so under that
+        // value nobody holds the ⭐ at all. Theo's is inside the extended freeze;
+        // Jess's is past even that, so the extension does not simply star
+        // everyone.
+        docs['events/med-2026/players/theo'] = {
+          ...docs['events/med-2026/players/theo'],
+          firstBingoAt: opened + 30 * 60 * 1000,
+        };
+        docs['events/med-2026/players/jess'] = {
+          ...docs['events/med-2026/players/jess'],
+          firstBingoAt: extended + 60_000,
+        };
+        return docs;
+      };
+      // The two freeze values genuinely disagree about the honour — which is what
+      // makes the assertions below about the rendered email meaningful.
+      const roster = [
+        { uid: 'theo', displayName: 'Theo', bingoCount: 1, squaresMarked: 19, firstBingoAt: opened + 30 * 60 * 1000 },
+        { uid: 'jess', displayName: 'Jess', bingoCount: 4, squaresMarked: 41, firstBingoAt: extended + 60_000 },
+      ];
+      expect(eventFirstBingoUid(roster, 3, new Set(), opened)).toBeNull();
+      expect(eventFirstBingoUid(roster, 3, new Set(), extended)).toBe('theo');
+
+      const { result, sent } = await runCrossingTheFreeze(
+        withBingos(seedFreeze(opened)),
+        opened - 60_000,
+        opened + 60 * 60 * 1000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: extended };
+        },
+      );
+      // The mail goes out — the extended freeze has not passed — and the headline
+      // is the one THAT freeze settles: Theo starred, Jess not.
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+      expect(sent[0].text).toContain('Theo *');
+      expect(sent[0].text).not.toContain('Jess *');
+      expect(sent[0].html).toContain('Theo ⭐');
+
+      // The counterfactual, same roster and same opening freeze, with no edit
+      // landing mid-sweep: the cutoff is the opening value, and the honour it
+      // settles is nobody's. A ⭐ here would mean the two values had been mixed.
+      const unchanged = await runCrossingTheFreeze(
+        withBingos(seedFreeze(opened)),
+        opened - 60_000,
+        opened - 1,
+      );
+      expect(unchanged.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(unchanged.sent[0].text).not.toContain('Theo *');
+      expect(unchanged.sent[0].text).not.toContain('Jess *');
     });
   });
 
