@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  APEX_HOST,
   assertReviewedDeployCredential,
   assertReviewedMainCheckout,
   BODEGA_EVENT_ID,
@@ -154,6 +155,7 @@ describe('Bodega canonical-host migration plan', () => {
 
   it('pins the complete serving inventory and exact two-field correction', () => {
     expect(BODEGA_HOSTS).toEqual([CANONICAL_HOST, LEGACY_HOST, 'fiveacross.app']);
+    expect(BODEGA_HOSTS).toContain(APEX_HOST);
 
     const plan = planCanonicalHostMigration(withLegacyDrift());
 
@@ -217,6 +219,16 @@ describe('Bodega canonical-host migration plan', () => {
     ['fiveacross.app', { isCanonical: true }, /alias metadata drifted/],
   ])('refuses unrelated canonical metadata drift on %s', (host, patch, message) => {
     expect(() => planCanonicalHostMigration(replace(withLegacyDrift(), host, patch))).toThrow(message);
+  });
+
+  it('keys the apex alias-metadata precondition by host name, not array position', () => {
+    // Every other document is in its exact accepted state, so the apex row is
+    // the only precondition that can fail. A positional lookup that resolved
+    // to the converged legacy row would pass silently or name the wrong host.
+    const rows = replace(canonicalDocuments(), APEX_HOST, { isCanonical: true });
+    expect(() => planCanonicalHostMigration(rows)).toThrow(
+      'bodega-canonical-host: alias metadata drifted on hostnames/fiveacross.app. No write performed.',
+    );
   });
 
   it.each([
