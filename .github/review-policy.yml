@@ -714,12 +714,28 @@ phase_4b_automation:
   # fiveacross 2026-08-27): collect-enablement-evidence.sh
   # reported READY (codex-cli 0.143.0 auth_mode=chatgpt; Claude Code
   # 2.1.214 apiProvider=firstParty; no API-key env vars set).
-  # Independent live Claude-adapter evidence: exact-head APPROVED review from
-  # nathanpayne-claude on merged PR #702:
-  # https://github.com/nathanjohnpayne/fiveacross/pull/702#pullrequestreview-4901655869
-  # Package CI evidence: main repo-lint job, including the successful
-  # check_phase_4b_automation step:
-  # https://github.com/nathanjohnpayne/fiveacross/actions/runs/32209450638/job/95939032735
+  # Evidence is recorded as immutable references first (#925): commit SHAs
+  # that git preserves, with the live GitHub URLs kept only as convenience
+  # pointers that may be edited, purged, or expire.
+  # Authority for the switch (#926): the enablement itself is a human act,
+  # not an automated approval. It was committed directly by the repository
+  # owner (nathanjohnpayne) in 23fd0c563f15d62bd9a20efca3be24fd88a5feda
+  # ("Enable phase_4b_automation for gaycruisebingo", 2026-07-19), and any
+  # later change to this block goes through the same human-merged path.
+  # The adapter evidence below proves the tooling is live; it is not the
+  # sign-off that enables it, so a prior automated approval never stands as
+  # the reason to keep trusting the automation.
+  # Live Claude-adapter evidence: exact-head APPROVED review from
+  # nathanpayne-claude at 2026-08-10T23:12:56Z on PR #702 head
+  # ee548805ecc72734e7adb86cb82e95798f792671, merged by the owner as
+  # 7c04b91bb93ffc12b1c29a8b35d0741b32aeafa2 (review id 4901655869;
+  # https://github.com/nathanjohnpayne/fiveacross/pull/702#pullrequestreview-4901655869).
+  # Package CI evidence: repo-lint on main at
+  # d6d9da09b7ad438d748bf28c3ce51ea1ee207218 (push, 2026-08-19T02:41:22Z)
+  # concluded success including the check_phase_4b_automation step; the
+  # step is re-runnable from that commit if the run log has expired
+  # (run 32209450638, job 95939032735;
+  # https://github.com/nathanjohnpayne/fiveacross/actions/runs/32209450638/job/95939032735).
   enabled: true
 
   # Execution model. 'local' = the authoring agent's session shells out to
