@@ -2,9 +2,10 @@
  * Shared strict validators for the two identifier shapes the registry Worker parses in many
  * places: Cloud KMS `CryptoKeyVersion` resource names and lowercase SHA-256 hex digests.
  *
- * Both patterns were previously copy-pasted into keys.ts, recovery.ts, recoveryHistory.ts,
- * service.ts, telemetry.ts, controlService.ts, probe.ts and storedState.ts, and the copies had
- * already drifted: keys.ts pinned the strict segment classes while every other copy accepted
+ * Both were previously copy-pasted, each into its own set of files: the KMS pattern into keys.ts,
+ * recovery.ts, recoveryHistory.ts, service.ts and telemetry.ts; the SHA-256 pattern into keys.ts,
+ * recovery.ts, recoveryHistory.ts, controlService.ts, probe.ts and storedState.ts. The KMS copies
+ * had already drifted: keys.ts pinned the strict segment classes while every other copy accepted
  * `[^/]+` for all four resource segments — so whitespace, control characters and any other
  * non-`/` byte passed validation outside keys.ts. This module is the single definition, and it
  * keeps the strict keys.ts shape (#1015).

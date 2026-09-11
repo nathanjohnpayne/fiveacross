@@ -422,6 +422,20 @@ describe('persisted recovery history validation', () => {
       'altered operator provenance',
       (value: RecoveryRecord) => ({ ...value, operatorSignedRole: 'publisher' }),
     ],
+    [
+      'operator key version whose key-ring segment is outside the Cloud KMS id alphabet',
+      (value: RecoveryRecord) => ({
+        ...value,
+        operatorKeyVersion: 'projects/p/locations/l/keyRings/ring.1/cryptoKeys/recovery/cryptoKeyVersions/1',
+      }),
+    ],
+    [
+      'operator key version carrying whitespace in the project segment',
+      (value: RecoveryRecord) => ({
+        ...value,
+        operatorKeyVersion: 'projects/p q/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+      }),
+    ],
   ])('rejects %s', async (_label, mutate) => {
     const value = record();
 

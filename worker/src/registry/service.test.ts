@@ -243,6 +243,38 @@ describe('registry default fetch sync endpoint', () => {
     expect(test.getByName).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'key-ring segment outside the Cloud KMS id alphabet',
+      'projects/p/locations/l/keyRings/ring.1/cryptoKeys/publisher/cryptoKeyVersions/1',
+    ],
+    [
+      'whitespace inside the project segment',
+      'projects/p q/locations/l/keyRings/r/cryptoKeys/publisher/cryptoKeyVersions/1',
+    ],
+    [
+      'percent-encoded separator in the key-ring segment',
+      'projects/p/locations/l/keyRings/r%2F/cryptoKeys/publisher/cryptoKeyVersions/1',
+    ],
+  ])(
+    'rejects an x-registry-key-version header with a %s before reading verification configuration',
+    async (_label, keyVersion) => {
+      const data = await fixture();
+      const test = harness(data);
+      // Pin the same malformed name into configuration: a looser header check would fall through to
+      // validateVerificationRecords, which rejects the record and answers 503. Only the strict header
+      // check produces 401 here, so this fails if service.ts stops sharing the strict validator.
+      const config: RegistryServiceConfig = {
+        ...test.config,
+        verificationRecords: [{ ...data.record, keyVersion }],
+      };
+      const response = await handleRegistryFetch(await signedRequest(data, { keyVersion }), config, test.deps);
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: 'unauthorized' });
+      expect(test.getByName).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns retryable 503 when Google JWKS is unavailable', async () => {
     const data = await fixture();
     const test = harness(data);

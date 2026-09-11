@@ -385,6 +385,31 @@ describe('source-attested recovery', () => {
     expect(() => parseRecovery(nestedExtra)).toThrow('provider request');
   });
 
+  it.each([
+    [
+      'key-ring segment outside the Cloud KMS id alphabet',
+      'projects/p/locations/l/keyRings/ring.1/cryptoKeys/recovery/cryptoKeyVersions/1',
+    ],
+    [
+      'whitespace inside the project segment',
+      'projects/p q/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+    ],
+    [
+      'percent-encoded separator in the key-ring segment',
+      'projects/p/locations/l/keyRings/r%2F/cryptoKeys/recovery/cryptoKeyVersions/1',
+    ],
+  ])('refuses an operator key version with a %s', async (_label, operatorKeyVersion) => {
+    const state = await committedState();
+
+    await expect(
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+        recoveryContext('lock-loose-operator-key', { operatorKeyVersion }),
+      ),
+    ).rejects.toThrow('recovery authorization provenance is malformed');
+  });
+
   it('applies an equal repair or higher jump, records skips, and never goes backward', async () => {
     const state = await committedState();
     const acquired = await applyRecovery(

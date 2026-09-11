@@ -171,6 +171,14 @@ describe('registry semantic telemetry', () => {
     ['non-canonical revision', { revision: '01' }],
     ['negative latency', { startedAt: 101, finishedAt: 100 }],
     ['non-KMS key version', { keyVersion: 'secret-key-alias' }],
+    [
+      'key-ring segment outside the Cloud KMS id alphabet',
+      { keyVersion: 'projects/p/locations/l/keyRings/ring.1/cryptoKeys/publisher/cryptoKeyVersions/1' },
+    ],
+    [
+      'whitespace inside the project segment',
+      { keyVersion: 'projects/p q/locations/l/keyRings/r/cryptoKeys/publisher/cryptoKeyVersions/1' },
+    ],
   ])('fails closed on %s', (_label, override) => {
     expect(() =>
       createSyncSemanticEvent({
