@@ -288,10 +288,12 @@ export function parseEventDraft(value: unknown): EventDraft | null {
     typeof value.endsOn !== 'string' ||
     typeof value.timezone !== 'string' ||
     typeof value.slugCandidate !== 'string' ||
-    // Absent in drafts saved before #911; treated as UNVERIFIED rather than
-    // rejected, so an older draft re-verifies on arrival instead of failing to
-    // load. `parseEventDraft` normalises it below.
+    // Absent in drafts saved before #911 (the Edition half) and before #993
+    // (the candidate half); treated as UNVERIFIED rather than rejected, so an
+    // older draft re-verifies on arrival instead of failing to load.
+    // `parseEventDraft` normalises both below.
     (value.slugVerifiedForEdition !== undefined && typeof value.slugVerifiedForEdition !== 'string') ||
+    (value.slugVerifiedCandidate !== undefined && typeof value.slugVerifiedCandidate !== 'string') ||
     !(
       value.claimMode === 'honor' ||
       value.claimMode === 'proof_required' ||
@@ -310,17 +312,28 @@ export function parseEventDraft(value: unknown): EventDraft | null {
     return null;
   }
   // NORMALISED, not cast through (Phase 4b P1, PR #911). Every other field is
-  // validated in place and the object is handed back as-is, but
-  // `slugVerifiedForEdition` is absent from drafts saved before it existed, and
-  // a bare cast would type it `string` while it is `undefined` at runtime — so
-  // the gate's `=== draft.edition` comparison would be comparing against
-  // nothing. Defaulting to `''` makes an older draft read as UNVERIFIED, which
-  // is the safe answer: it re-verifies on arrival at Basics rather than being
-  // trusted on the strength of a field that predates the check.
+  // validated in place and the object is handed back as-is, but the two
+  // verification fields are absent from drafts saved before they existed, and
+  // a bare cast would type them `string` while they are `undefined` at runtime
+  // — so the gate's `=== draft.edition` / `=== draft.slugCandidate` comparisons
+  // would be comparing against nothing. Defaulting to `''` makes an older
+  // draft read as UNVERIFIED, which is the safe answer: it re-verifies on
+  // arrival at Basics rather than being trusted on the strength of a field
+  // that predates the check. The halves are defaulted independently: a draft
+  // written between #911 and #993 carries the Edition but not the candidate,
+  // and the Edition alone cannot vouch for the label beside it, so the missing
+  // half reads `''` and the pair fails the gate until a fresh check records
+  // both.
   const parsed = value as unknown as EventDraft;
-  return typeof (value as { slugVerifiedForEdition?: unknown }).slugVerifiedForEdition === 'string'
-    ? parsed
-    : { ...parsed, slugVerifiedForEdition: '' };
+  const stored = value as { slugVerifiedForEdition?: unknown; slugVerifiedCandidate?: unknown };
+  const hasEdition = typeof stored.slugVerifiedForEdition === 'string';
+  const hasCandidate = typeof stored.slugVerifiedCandidate === 'string';
+  if (hasEdition && hasCandidate) return parsed;
+  return {
+    ...parsed,
+    slugVerifiedForEdition: hasEdition ? parsed.slugVerifiedForEdition : '',
+    slugVerifiedCandidate: hasCandidate ? parsed.slugVerifiedCandidate : '',
+  };
 }
 
 /** Optional seams for `createEventDraft`, so a test can pin both. */
@@ -389,6 +402,7 @@ export function createEventDraft(init: CreateEventDraftInit = {}): EventDraft {
     timezone: init.timezone ?? deviceTimezoneSuggestion(),
     slugCandidate: '',
     slugVerifiedForEdition: '',
+    slugVerifiedCandidate: '',
     claimMode: 'honor',
     cardFormat: 'daily_cards',
     hostedBy: '',

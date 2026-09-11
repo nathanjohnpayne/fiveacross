@@ -1461,6 +1461,22 @@ export interface EventDraft {
    * unverified candidate and false again the moment the Edition moves.
    */
   slugVerifiedForEdition: string;
+  /**
+   * The exact `slugCandidate` that `slugVerifiedForEdition` was confirmed
+   * for, or `''` when nothing has been confirmed (#993, observation from PR
+   * #911).
+   *
+   * The Edition marker alone said WHICH hostnames were checked but not WHICH
+   * label: a parsed or imported draft could carry `slugCandidate:
+   * 'new-address'` beside a same-Edition marker earned by an earlier address,
+   * and the gate accepted it without any availability read. The launch
+   * transaction still refuses an invalid claim, but the wizard would have let
+   * the organizer advance on a verification that belonged to a different
+   * candidate. The gate therefore requires this to equal `slugCandidate` as
+   * well: the pair is the verification key — same label, same Edition — and
+   * the step writes and clears both halves together.
+   */
+  slugVerifiedCandidate: string;
   /** Required, three real values — a flow that never asks hard-codes Honor. */
   claimMode: ClaimMode;
   cardFormat: DraftCardFormat;

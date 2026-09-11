@@ -185,6 +185,7 @@ describe('address — verification is recorded so the synchronous gate can consu
     const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
     expect(getDraft().slugCandidate).toBe('point-reyes'); // shown, and kept
     expect(getDraft().slugVerifiedForEdition).toBe(''); // but NOT yet verified
+    expect(getDraft().slugVerifiedCandidate).toBe('');
   });
 
   it('records the Edition it was confirmed against once the check resolves', async () => {
@@ -194,12 +195,49 @@ describe('address — verification is recorded so the synchronous gate can consu
     expect(getDraft().slugVerifiedForEdition).toBe('vacay');
   });
 
+  it('records the exact candidate the Edition marker was confirmed for, not the Edition alone (#993)', async () => {
+    // The Edition said WHICH hostnames were checked but not WHICH label. A
+    // parsed or imported draft could therefore carry a new `slugCandidate`
+    // beside a same-Edition marker earned by an earlier address, and the
+    // shared gate accepted it without any read. The pair is the key, so the
+    // step records both halves from the one confirmed check.
+    mocks.checkSlugAvailability.mockResolvedValue('available');
+    const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
+    await settleDebounce();
+    expect(getDraft().slugVerifiedCandidate).toBe('point-reyes');
+    expect(getDraft().slugVerifiedForEdition).toBe('vacay');
+  });
+
+  it('editing the address clears BOTH halves of the key with the candidate, and a fresh check re-records both (#993)', async () => {
+    mocks.checkSlugAvailability.mockResolvedValue('available');
+    const { getDraft } = renderStep(
+      draftWith({
+        slugCandidate: 'point-reyes',
+        edition: 'vacay',
+        slugVerifiedForEdition: 'vacay',
+        slugVerifiedCandidate: 'point-reyes',
+      }),
+    );
+    fireEvent.change(addressInput(), { target: { value: 'bodega-bay' } });
+    // Fails closed WHILE the new check is in flight: nothing vouches for the
+    // new label yet, and the old marker must not be left standing beside it.
+    expect(getDraft().slugCandidate).toBe('');
+    expect(getDraft().slugVerifiedForEdition).toBe('');
+    expect(getDraft().slugVerifiedCandidate).toBe('');
+
+    await settleDebounce();
+    expect(getDraft().slugCandidate).toBe('bodega-bay');
+    expect(getDraft().slugVerifiedForEdition).toBe('vacay');
+    expect(getDraft().slugVerifiedCandidate).toBe('bodega-bay');
+  });
+
   it('drops the verification when the background re-check finds the address gone', async () => {
     mocks.checkSlugAvailability.mockResolvedValue('taken');
     const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
     await settleDebounce();
     expect(getDraft().slugCandidate).toBe('');
     expect(getDraft().slugVerifiedForEdition).toBe('');
+    expect(getDraft().slugVerifiedCandidate).toBe('');
   });
 });
 

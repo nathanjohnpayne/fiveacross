@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { ClaimMode } from '../../types';
+import type { ClaimMode, EventDraft } from '../../types';
 import type { StepRenderProps } from './stepRegistry';
 import { deviceTimezoneSuggestion } from '../../data/eventDraft';
 import { isSupportedTimezone } from '../../data/draftValidation';
@@ -103,6 +103,24 @@ export function slugify(name: string): string {
     .replace(/-+$/g, '');
 }
 
+/**
+ * Every field a cleared address takes with it: the candidate and BOTH halves
+ * of its verification key. The key is a pair — the Edition the check ran
+ * against AND the exact label it confirmed (#993) — and the shared gate
+ * (`eventCompletenessIssues`) requires both to match the draft, so the halves
+ * are only ever written and cleared together. One spelling, used at every
+ * clear site below, so a future field cannot be dropped from three of the four.
+ */
+const CLEARED_ADDRESS: Pick<EventDraft, 'slugCandidate' | 'slugVerifiedForEdition' | 'slugVerifiedCandidate'> = {
+  slugCandidate: '',
+  slugVerifiedForEdition: '',
+  slugVerifiedCandidate: '',
+};
+
+function isAddressCleared(d: EventDraft): boolean {
+  return d.slugCandidate === '' && d.slugVerifiedForEdition === '' && d.slugVerifiedCandidate === '';
+}
+
 export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
   const timezoneHintId = useId();
   const addressStatusId = useId();
@@ -156,8 +174,8 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
 
     if (candidate === '') {
       setStatus({ kind: 'empty' });
-      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
-        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      if (!isAddressCleared(draft)) {
+        updateDraft((d) => ({ ...d, ...CLEARED_ADDRESS }));
       }
       return;
     }
@@ -168,8 +186,8 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // no network read (#785 acceptance: reserved labels are "rejected
       // client-side without a network read").
       setStatus({ kind: 'invalid', reason: format.reason });
-      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
-        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      if (!isAddressCleared(draft)) {
+        updateDraft((d) => ({ ...d, ...CLEARED_ADDRESS }));
       }
       return;
     }
@@ -190,8 +208,8 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // never left sitting in the draft for the shared launch gate to trust
       // on the strength of nothing.
       setStatus({ kind: 'checking' });
-      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
-        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      if (!isAddressCleared(draft)) {
+        updateDraft((d) => ({ ...d, ...CLEARED_ADDRESS }));
       }
     }
 
@@ -212,23 +230,29 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
           // Records WHICH Edition this was confirmed against, so the shell's
           // synchronous gate can tell a verified candidate from a merely
           // present one, and can invalidate it when the Edition moves (Phase
-          // 4b P1, PR #911). Written unconditionally rather than inside the
-          // `slugCandidate` comparison: on the optimistic path the candidate is
-          // already committed and only the verification is new.
+          // 4b P1, PR #911) — and WHICH label it confirmed (#993), so a
+          // same-Edition marker earned by an earlier address cannot vouch for
+          // a candidate that arrived later by parse or import. Written
+          // unconditionally rather than inside the `slugCandidate` comparison:
+          // on the optimistic path the candidate is already committed and only
+          // the verification is new.
           updateDraft((d) =>
-            d.slugCandidate === candidate && d.slugVerifiedForEdition === draft.edition
+            d.slugCandidate === candidate &&
+            d.slugVerifiedForEdition === draft.edition &&
+            d.slugVerifiedCandidate === candidate
               ? d
-              : { ...d, slugCandidate: candidate, slugVerifiedForEdition: draft.edition },
+              : {
+                  ...d,
+                  slugCandidate: candidate,
+                  slugVerifiedForEdition: draft.edition,
+                  slugVerifiedCandidate: candidate,
+                },
           );
         } else {
           // Downgrades an optimistic commit the instant the background
           // re-check learns it no longer holds (taken since, or the read
           // itself failed) — never left standing on stale trust.
-          updateDraft((d) =>
-            d.slugCandidate === '' && d.slugVerifiedForEdition === ''
-              ? d
-              : { ...d, slugCandidate: '', slugVerifiedForEdition: '' },
-          );
+          updateDraft((d) => (isAddressCleared(d) ? d : { ...d, ...CLEARED_ADDRESS }));
         }
       });
     }, CHECK_DEBOUNCE_MS);
@@ -252,10 +276,11 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // runs AFTER the shell's synchronous Continue gate has already let the
       // organizer advance — so it never prevented the navigation it was meant
       // to gate, and its only observable effect was making an
-      // already-advanced draft retroactively incomplete. `slugVerifiedForEdition`
-      // replaces it: the gate now reads verification directly and refuses an
-      // unverified candidate BEFORE the step changes, which is where the
-      // decision has to happen.
+      // already-advanced draft retroactively incomplete. The verification key
+      // (`slugVerifiedForEdition` + `slugVerifiedCandidate`) replaces it: the
+      // gate now reads verification directly and refuses an unverified
+      // candidate BEFORE the step changes, which is where the decision has to
+      // happen.
     };
     // `draft.slugCandidate` and `updateDraft` are deliberately excluded: this
     // effect WRITES the former (via the latter), so depending on it would
