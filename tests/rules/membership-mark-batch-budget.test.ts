@@ -37,6 +37,16 @@ const COMPATIBILITY_PATH = 'markerDeliveryCompatibility/current';
 const NOW = () => Date.now();
 const PAST = () => NOW() - 3_600_000;
 
+// The preview ruleset is built by exact-matching snippets of the live
+// firestore.rules and rewriting each exactly once, on purpose: a predicate
+// change that this suite has not been told about must fail closed. The same
+// occurrence checks also guard semantic clauses (the admission calls and the
+// budget-sensitive exists()/get() sites), so a mismatch has two possible
+// causes and the hint names both rather than diagnosing drift (#1088, Codex
+// P2 on #1194).
+const ANCHOR_DRIFT_HINT =
+  'Two possible causes: (a) fixture-anchor drift, i.e. a formatting, comment, or reindentation change to the anchored block in firestore.rules, in which case re-anchor the snippet in this test to the current text; or (b) a real predicate or access-budget regression, e.g. a duplicated or removed admission call or exists()/get() site. Confirm from the firestore.rules diff that the change is formatting-only before re-anchoring.';
+
 function replaceExactlyOnce(
   source: string,
   label: string,
@@ -46,7 +56,7 @@ function replaceExactlyOnce(
   const occurrences = source.split(from).length - 1;
   if (occurrences !== 1) {
     throw new Error(
-      `#1079 budget test expected exactly one ${label} anchor; found ${occurrences}`,
+      `#1079 budget test expected exactly one ${label} anchor; found ${occurrences}. ${ANCHOR_DRIFT_HINT}`,
     );
   }
   return source.replace(from, to);
@@ -61,7 +71,7 @@ function requireOccurrences(
   const actual = source.split(needle).length - 1;
   if (actual !== expected) {
     throw new Error(
-      `#1079 budget test expected ${expected} ${label} occurrence(s); found ${actual}`,
+      `#1079 budget test expected ${expected} ${label} occurrence(s); found ${actual}. ${ANCHOR_DRIFT_HINT}`,
     );
   }
 }

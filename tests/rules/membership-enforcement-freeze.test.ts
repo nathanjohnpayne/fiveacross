@@ -55,19 +55,231 @@ async function seedEvent(
   });
 }
 
-function rootEventWriteAllow(): string {
-  const matchStart = EXECUTABLE_RULES.indexOf('match /events/{eventId} {');
-  const allowStart = EXECUTABLE_RULES.indexOf(
-    'allow create, update: if',
-    matchStart,
-  );
-  const allowEnd = EXECUTABLE_RULES.indexOf(';', allowStart);
+// Structural locator (#1100). Rather than the first substring hit, the arm is
+// found by a small scanner over a string-aware, comment-free copy of the rules
+// source that understands what a substring search cannot:
+//
+//   - comments and string literals: `//` and `/* */` comments are removed by
+//     a pass that honours string literals (so a `//` inside a URL literal does
+//     not truncate the line), and a `'}'` or `';'` inside a literal is data,
+//     not structure (Codex P2 rounds 3 and 4 on #1194); removing comments
+//     first also lets `match /events/{id} /* note */ {` parse (round 4);
+//   - effective match paths: every `match <path> {` pushes its segments, so a
+//     block is identified by the path it governs, not by its spelling. The
+//     overlap test runs against the COMPLETE request path shape
+//     `databases/<db>/documents/events/<id>`, so a literal database segment
+//     such as `(default)` (round 5), a literal Event id (round 4), a nested
+//     `match /archives/{a} { match /events/{e} { ... } }` (round 3) and the
+//     wildcard's name (round 2) are all handled by one matcher;
+//   - recursive wildcards: `{name=**}` matches zero or more segments under
+//     rules_version 2, so a grant inside `match /{document=**}` or
+//     `match /events/{e}/{rest=**}` also reaches the root Event document
+//     (round 3).
+//
+// What is enumerated: every `allow <verbs>: if ... ;` whose effective path can
+// match some `databases/<db>/documents/events/<id>`, with the terminator found
+// by the same string-aware scan (round 4). Exactly one of them may grant
+// `create` or `write` and it is the arm this suite pins. Every other arm that
+// grants `update` must be one of the approved archive-lifecycle arms, pinned
+// by their exact normalised text below (round 5: a token check would have let
+// an appended `||` branch through), so any change to a lifecycle arm, however
+// small, fails here until the pin is deliberately updated alongside it. A
+// malformed source (an unbalanced block, an unterminated arm or literal)
+// throws instead of pinning the wrong text.
+const ROOT_EVENT_DOC: Array<string | null> = ['databases', null, 'documents', 'events', null];
+const MATCH_PATH = /match\s+(\/[^\s{}]*(?:\{[^}]*\}[^\s{}]*)*)\s*\{/y;
+const ALLOW_ARM = /allow\s+([a-z]+(?:\s*,\s*[a-z]+)*)\s*:\s*if\b/y;
 
-  if (matchStart < 0 || allowStart < 0 || allowEnd < 0) {
-    throw new Error('root Event create/update allow arm was not found');
+// The four archive-lifecycle update arms on the root Event document, as the
+// scanner normalises them (comments removed, whitespace collapsed). Editing a
+// lifecycle arm in firestore.rules must update the matching entry here, in
+// the same change, or this suite fails closed.
+const APPROVED_LIFECYCLE_ARMS: readonly string[] = [
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) != true && resource.data.get(\'status\', \'active\') != \'archived\' && isAdmittedAdmin(eventId) && request.resource.data.get(\'archiving\', false) == true && usableArchiveToken(request.resource.data.get(\'archiveToken\', 0)) && request.resource.data.get(\'archiveToken\', 0) > storedGeneration(resource.data) && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiving\', \'archiveToken\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && isAdmittedAdmin(eventId) && request.resource.data.get(\'archiving\', false) == false && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiving\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && boundToStoredQuiesce(resource.data, request.resource.data) && isAdmittedAdmin(eventId) && request.resource.data.status == \'archived\' && request.resource.data.archivedAt is number && request.resource.data.archivedAt > 0 && request.resource.data.archivedAt < 4102444800000 && completeArchiveRecord(request.resource.data.archive, request.resource.data.archivedAt) && request.resource.data.get(\'archiving\', false) == false && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'status\', \'archivedAt\', \'archiving\', \'archivedUnder\', \'archive\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && !usableArchiveToken(resource.data.get(\'archiveToken\', 0)) && isAdmittedAdmin(eventId) && usableArchiveToken(request.resource.data.get(\'archiveToken\', 0)) && request.resource.data.get(\'archiveToken\', 0) > storedGeneration(resource.data) && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiveToken\']);'
+];
+
+function verbsOf(arm: string): string[] {
+  return arm.split(',').map((verb) => verb.trim());
+}
+
+function isRecursiveWildcard(segment: string): boolean {
+  return /^\{[A-Za-z_][A-Za-z0-9_]*=\*\*\}$/.test(segment);
+}
+
+function isSingleWildcard(segment: string): boolean {
+  return /^\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(segment);
+}
+
+// Can the effective path pattern match a path of the target's shape? A target
+// segment of `null` stands for "any one segment"; a literal pattern segment
+// matches only itself or such a wildcard target, a `{x}` matches one segment,
+// a `{x=**}` zero or more.
+function pathCanMatch(pattern: string[], target: Array<string | null>): boolean {
+  if (pattern.length === 0) return target.length === 0;
+  const [head, ...rest] = pattern;
+  if (isRecursiveWildcard(head)) {
+    for (let take = 0; take <= target.length; take += 1) {
+      if (pathCanMatch(rest, target.slice(take))) return true;
+    }
+    return false;
   }
+  if (target.length === 0) return false;
+  const want = target[0];
+  if (want !== null && head !== want && !isSingleWildcard(head)) return false;
+  return pathCanMatch(rest, target.slice(1));
+}
 
-  return EXECUTABLE_RULES.slice(allowStart, allowEnd + 1).trim();
+// Remove `//` and `/* */` comments while honouring string literals; the result
+// is what the scanner walks, so no later step needs comment awareness.
+function withoutComments(src: string): string {
+  let out = '';
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== ch && src[j] !== '\n') {
+        if (src[j] === '\\') j += 1;
+        j += 1;
+      }
+      if (j >= src.length || src[j] === '\n') throw new Error('rules source has an unterminated string literal');
+      out += src.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      if (nl < 0) break;
+      out += ' ';
+      i = nl - 1;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      if (close < 0) throw new Error('rules source has an unterminated block comment');
+      out += ' ';
+      i = close + 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+// Index of the string literal's closing quote, or -1 if it does not close on
+// this line (rules literals never span lines).
+function endOfLiteral(src: string, open: number): number {
+  const quote = src[open];
+  let j = open + 1;
+  while (j < src.length && src[j] !== quote && src[j] !== '\n') {
+    if (src[j] === '\\') j += 1;
+    j += 1;
+  }
+  return j < src.length && src[j] === quote ? j : -1;
+}
+
+// Index of the `;` that terminates the arm starting at `start`, skipping any
+// `;` inside a string literal.
+function armTerminator(src: string, start: number): number {
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"') {
+      const close = endOfLiteral(src, i);
+      if (close < 0) throw new Error('an allow arm contains an unterminated string literal');
+      i = close;
+      continue;
+    }
+    if (ch === ';') return i;
+  }
+  return -1;
+}
+
+function rootEventWriteAllow(): string {
+  const src = withoutComments(RULES_SOURCE);
+  // One stack entry per open brace: the match path segments it introduced, or
+  // null for a brace that is not a match block (a function body, for example).
+  const scopes: Array<string[] | null> = [];
+  const createArms: string[] = [];
+  const updateOnlyArms: string[] = [];
+  let rootEventBlocks = 0;
+  let pendingMatch: string[] | null = null;
+  const effectivePath = () => scopes.flatMap((scope) => scope ?? []);
+  const boundary = (i: number) => i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]);
+
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"') {
+      const close = endOfLiteral(src, i);
+      if (close < 0) throw new Error('rules source has an unterminated string literal');
+      i = close;
+      continue;
+    }
+    if (ch === 'm' && boundary(i)) {
+      MATCH_PATH.lastIndex = i;
+      const m = MATCH_PATH.exec(src);
+      if (m !== null) {
+        pendingMatch = m[1].split('/').filter((segment) => segment.length > 0);
+        // Stop just before the block's own brace so the next iteration's `{`
+        // branch pushes the scope (lastIndex points past the brace).
+        i = MATCH_PATH.lastIndex - 2;
+        continue;
+      }
+    }
+    if (ch === '{') {
+      scopes.push(pendingMatch);
+      if (pendingMatch !== null) {
+        const path = effectivePath();
+        if (
+          path.length === ROOT_EVENT_DOC.length &&
+          !isRecursiveWildcard(path[path.length - 1]) &&
+          pathCanMatch(path, ROOT_EVENT_DOC)
+        ) {
+          rootEventBlocks += 1;
+        }
+      }
+      pendingMatch = null;
+      continue;
+    }
+    if (ch === '}') {
+      if (scopes.length === 0) throw new Error('rules source has an unbalanced closing brace');
+      scopes.pop();
+      continue;
+    }
+    if (ch === 'a' && boundary(i)) {
+      ALLOW_ARM.lastIndex = i;
+      const arm = ALLOW_ARM.exec(src);
+      if (arm !== null) {
+        if (pathCanMatch(effectivePath(), ROOT_EVENT_DOC)) {
+          const end = armTerminator(src, i);
+          if (end < 0) throw new Error('an allow arm reaching the root Event document is unterminated');
+          const text = src.slice(i, end + 1).replace(/\s+/g, ' ').trim();
+          const verbs = verbsOf(arm[1]);
+          if (verbs.includes('create') || verbs.includes('write')) createArms.push(text);
+          else if (verbs.includes('update')) updateOnlyArms.push(text);
+          i = end;
+        }
+      }
+    }
+  }
+  if (scopes.length !== 0) throw new Error('rules source has an unclosed block');
+  if (rootEventBlocks !== 1) {
+    throw new Error(`root Event match block: expected exactly one block governing events/{id}, found ${rootEventBlocks}`);
+  }
+  if (createArms.length !== 1) {
+    throw new Error(
+      `expected exactly one allow arm granting create or write that can reach events/{id}, found ${createArms.length}: ${createArms.map((a) => a.slice(0, 60)).join(' | ')}`,
+    );
+  }
+  const unpinned = updateOnlyArms.filter((arm) => !APPROVED_LIFECYCLE_ARMS.includes(arm));
+  const missing = APPROVED_LIFECYCLE_ARMS.filter((arm) => !updateOnlyArms.includes(arm));
+  if (unpinned.length > 0 || missing.length > 0) {
+    throw new Error(
+      `update-only arms reaching events/{id} must equal the pinned archive-lifecycle arms: ${unpinned.length} unpinned (${unpinned.map((a) => a.slice(0, 80)).join(' | ')}), ${missing.length} pinned but absent. Update APPROVED_LIFECYCLE_ARMS in the same change as the rule.`,
+    );
+  }
+  return createArms[0];
 }
 
 beforeAll(async () => {
@@ -147,6 +359,25 @@ describe('firestore.rules — membership enforcement switch freeze (#804 deploy 
         membershipEnforcement: deleteField(),
       }),
     );
+  });
+
+  it('denies a non-merge overwrite that drops the switch (#1101)', async () => {
+    // setDoc without { merge: true } is still an update to the rules engine
+    // once the document exists, but request.resource.data is the whole new
+    // document rather than updateDoc's implicit field-preserving merge, so a
+    // rewrite that simply omits membershipEnforcement would silently clear it
+    // if the freeze only compared present fields. Same Admin, same Event, same
+    // payload shape as the seed: the only variable is the switch field.
+    await seedEvent('off');
+    await assertFails(setDoc(doc(db(ADMIN), eventPath()), eventData()));
+    await assertFails(setDoc(doc(db(ADMIN), eventPath()), eventData('enforced')));
+    await assertSucceeds(setDoc(doc(db(ADMIN), eventPath()), eventData('off')));
+
+    // Absent stays absent: an overwrite that omits the field on an Event that
+    // never carried it is the frozen no-op, not a change.
+    await seedEvent();
+    await assertSucceeds(setDoc(doc(db(ADMIN), eventPath()), eventData()));
+    await assertFails(setDoc(doc(db(ADMIN), eventPath()), eventData('off')));
   });
 
   it('preserves the existing Event create and non-Admin denials', async () => {
