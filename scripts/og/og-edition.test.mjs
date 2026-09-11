@@ -126,9 +126,11 @@ describe('og-edition.html board.barInset guard (#997)', () => {
   it('throws, and never signals ogReady, when board.barInset is omitted', () => {
     // `barInset` is required by og-edition-art.d.mts and every shipped Edition
     // sets it, but the template used to fall back to zero horizontal padding
-    // when it was missing — a silently wrong render. The throw leaves
-    // `ogReady` unset, which is exactly what render-og-editions.mjs checks
-    // before it will write a PNG.
+    // when it was missing — a silently wrong render. The throw rejects the
+    // `page.evaluate` call in render-og-editions.mjs that invokes
+    // `__OG_RENDER__`, whose outer catch discards the staged renders and
+    // exits nonzero; the renderer's later `ogReady` check is only a backstop,
+    // pinned here so the backstop stays honest.
     const { dom, render } = renderWith((config) => {
       delete config.board.barInset;
     });
@@ -140,6 +142,7 @@ describe('og-edition.html board.barInset guard (#997)', () => {
     ['null', null],
     ['NaN', Number.NaN],
     ['a numeric string', '13'],
+    ['a negative number', -5],
   ])('rejects %s rather than coercing it into a padding value', (_label, value) => {
     const { render } = renderWith((config) => {
       config.board.barInset = value;

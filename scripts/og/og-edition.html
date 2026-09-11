@@ -394,9 +394,16 @@
     // config so each Edition owns its own inset. There is deliberately no
     // fallback: an Edition config that forgot it would otherwise render every
     // square with its rules flush to the cell border — a wrong image nothing
-    // downstream would notice (#997). Throwing here leaves `ogReady` unset,
-    // which render-og-editions.mjs already refuses to write.
-    if (!Number.isFinite(c.board.barInset)) throw new Error('og-edition: board.barInset is required');
+    // downstream would notice (#997). A negative inset is refused too:
+    // Chromium (and jsdom) silently drop a negative `padding` as invalid CSS,
+    // which is the same flush-to-border render by another route. Throwing
+    // here rejects the `page.evaluate` call in render-og-editions.mjs that
+    // invokes `__OG_RENDER__`, whose outer catch discards the staged renders
+    // and exits nonzero; the renderer's later `ogReady` check is only a
+    // backstop.
+    if (!(Number.isFinite(c.board.barInset) && c.board.barInset >= 0)) {
+      throw new Error('og-edition: board.barInset is required');
+    }
     for (let r = 0; r < c.board.pattern.length; r++) {
       const row = c.board.pattern[r];
       for (let ci = 0; ci < row.length; ci++) {
