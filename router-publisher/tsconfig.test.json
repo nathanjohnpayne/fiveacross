@@ -1,0 +1,20 @@
+{
+  "// why": "A sibling program for the publisher's specs, on the same reasoning worker/tsconfig.json gives for the edge router: the repo-root tsconfig.json stops at `src`, and this package's own program (tsconfig.json) has to EXCLUDE the specs because it emits the deployed artifact — so without this program the publisher's only test suite would be compiled by nothing at all. Everything here is noEmit, so no setting can reach `lib/`.",
+  "// scope": "The specs reach OUT of `src` on purpose — `../../src/slug` and `../../worker/src/host` are the canonical Slug rules and Namespace list the runtime mirrors — which is exactly what `rootDir: \"src\"` forbids in the emitting program and exactly what a parity test has to do. `vitest` is resolved from the repo-root install (nothing in router-publisher/package.json depends on it), so `moduleResolution: \"bundler\"` is required to read its `exports` map.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/**/*.test.ts"]
+}

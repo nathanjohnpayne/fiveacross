@@ -1,4 +1,5 @@
 {
+  "// emit": "This program EMITS — `npm run build` is what `gcp-build` runs in Cloud Build, and `lib/` is the deployed artifact. That is why the spec is excluded rather than merely unreferenced: leaving `src/**/*.test.ts` in would compile a Vitest spec into the deployed function, and `rootDir: \"src\"` would refuse it anyway the moment the spec imported the canonical `src/slug.ts` it exists to compare against. The spec is typechecked by the sibling `tsconfig.test.json`, which emits nothing, and is RUN by the repo-root Vitest layer (`vite.config.ts` `include` covers `router-publisher/**`).",
   "compilerOptions": {
     "module": "commonjs",
     "target": "es2021",
@@ -9,5 +10,6 @@
     "skipLibCheck": true,
     "moduleResolution": "node"
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

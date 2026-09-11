@@ -165,7 +165,23 @@ export function replicaPayloadFromFirestoreEvent(
   });
 }
 
-function isRegistryHost(host: string): boolean {
+/**
+ * Whether `host` is a hostname the private registry may hold a row for: one of
+ * the six operator root hosts, either closed rehearsal class, or an ordinary
+ * claimable Slug under a wildcard Namespace.
+ *
+ * EXPORTED FOR THE PARITY TEST, not for the deployed entry surface. Nothing in
+ * this service imports it — `index.ts` reaches only
+ * `replicaPayloadFromFirestoreEvent` — and nothing should. `src/slug.test.ts`
+ * pins the `r2-` literal below as TEXT, which is closed under every widening
+ * and narrowing but says nothing about the expression the literal is evaluated
+ * in: `.test(host.toLowerCase())` here leaves that text byte-identical and
+ * makes this predicate admit uppercase rehearsal hosts the canonical
+ * `validateSlug` refuses. Closing that needs the host fixture driven through
+ * the call site itself, which needs a name to drive it through (#1135).
+ * `src/runtime.test.ts` is the only caller outside this module.
+ */
+export function isRegistryHost(host: string): boolean {
   if (
     [
       'fiveacross.app',
@@ -186,7 +202,17 @@ function isRegistryHost(host: string): boolean {
   return isValidEventSlug(match[1]);
 }
 
-function validDesired(host: string, value: Record<string, unknown>): boolean {
+/**
+ * Whether `value` is a well-formed desired state FOR `host`, per kind.
+ *
+ * Exported for the same reason `isRegistryHost` is, and it carries two more of
+ * the three rehearsal-class literals in this file: the `route` branch's
+ * `rootTest` keeps an ordinary Event row off a root-test host, and the `root`
+ * branch's `syntheticRoot` admits a root row on one. Both are consulted
+ * NEGATED or GUARDED rather than returned, so a flipped operand at either call
+ * site is invisible to a check that reads the literal alone (#1135).
+ */
+export function validDesired(host: string, value: Record<string, unknown>): boolean {
   if (value.kind === 'tombstone') return hasExactKeys(value, ['kind']) && isRegistryHost(host);
   if (!['gcb', 'vacay', 'fiveacross'].includes(String(value.edition))) return false;
   if (

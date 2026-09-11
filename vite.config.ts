@@ -307,10 +307,29 @@ export default defineConfig(({ command, mode }) => {
     // Each `worker/` spec opts into the `node` environment with its own
     // `@vitest-environment` docblock: they exercise `Request`/`Response`, which
     // belong to the runtime rather than to jsdom.
+    //
+    // `router-publisher/**` joins on the same terms (#1135). Its runtime module
+    // is a Functions Framework CloudEvent handler, but the half under test —
+    // `isRegistryHost`, `validDesired`, `replicaPayloadFromEvent` — is pure
+    // string and record validation importing nothing from
+    // `router-publisher/package.json`, so it is self-contained on ROOT deps
+    // exactly as `worker/**` is. It joins THIS layer rather than getting a
+    // runner of its own for the same reason `worker/**` did: a separate config
+    // would buy nothing but a step in `.github/workflows/app-ci.yml` that CI
+    // could forget, and an unrun suite is exactly the gap #1135 is about. The
+    // spec opts into the `node` environment with its own docblock, and is
+    // excluded from `router-publisher/tsconfig.json` so the deployed `lib/`
+    // artifact stays exactly what it was — `router-publisher/tsconfig.test.json`
+    // is the sibling program that typechecks it.
     test: {
       globals: true,
       environment: 'jsdom',
-      include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs', 'worker/**/*.test.ts'],
+      include: [
+        'src/**/*.test.{ts,tsx}',
+        'scripts/**/*.test.mjs',
+        'worker/**/*.test.ts',
+        'router-publisher/**/*.test.ts'
+      ],
       setupFiles: ['./src/test/setup.ts']
     }
   };
