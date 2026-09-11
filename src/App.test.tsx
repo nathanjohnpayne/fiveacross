@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { saveCardSnapshot } from './data/cardCache';
@@ -64,7 +64,28 @@ vi.mock('./hooks/useData', () => ({
     };
   },
 }));
-vi.mock('./components/Board', () => ({ default: () => <div data-testid="board" /> }));
+// Board is stubbed, but deliberately not inertly. #1082 removed Board's own
+// inner `key={eventId}`, which makes App's `<EventApp key={EVENT_ID}>` the ONLY
+// thing that remounts the Card surface when the Event changes. So the stub
+// carries Board-local state and counts its own mounts: that is what makes the
+// boundary assertable here instead of a property nothing observes.
+const boardMounts = vi.hoisted(() => ({ count: 0 }));
+vi.mock('./components/Board', () => ({
+  default: function BoardStub() {
+    const [value, setValue] = useState('');
+    useEffect(() => {
+      boardMounts.count += 1;
+    }, []);
+    return (
+      <input
+        data-testid="board"
+        aria-label="Board-local state"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+    );
+  },
+}));
 vi.mock('./components/NoticeBanner', () => ({ default: () => null }));
 vi.mock('./components/Leaderboard', () => ({ default: () => <div data-testid="ranks" /> }));
 vi.mock('./components/ProofFeed', () => ({
@@ -200,6 +221,27 @@ describe('App — Card route deal-error routing (#434)', () => {
     expect(screen.getByLabelText('Feed-local draft')).toHaveValue('');
     expect(screen.getByLabelText('Global shell state')).toHaveValue('Global state');
     expect(screen.getByTestId('nav')).toBeInTheDocument();
+  });
+
+  it('remounts the Board across A → B — the one boundary, now that Board keys nothing itself (#1082)', () => {
+    boardMounts.count = 0;
+    const view = renderApp();
+    expect(boardMounts.count).toBe(1);
+    fireEvent.change(screen.getByLabelText('Board-local state'), { target: { value: 'Event A card state' } });
+    expect(screen.getByLabelText('Board-local state')).toHaveValue('Event A card state');
+
+    eventScope.eventId = 'event-b';
+    view.rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // A fresh mount, not a re-render of the surviving one: the Event-local
+    // state machine Board owns (viewed Day, sheets, coach gates, reconcile
+    // bookkeeping) starts over for Event B without Board keying itself.
+    expect(boardMounts.count).toBe(2);
+    expect(screen.getByLabelText('Board-local state')).toHaveValue('');
   });
 
   it('shows the durable cached card (not the reload screen) on a CONNECTION-class failure with a snapshot', () => {
