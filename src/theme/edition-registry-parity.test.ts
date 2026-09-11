@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const RENAMED_EDITION_IDS = Object.freeze({
+  // Deliberately NOT renamed: gcb is DEFAULT_EDITION, the id every unknown
+  // Edition falls back to. Renaming it would make a hardcoded 'gcb' in the GCB
+  // scope const or the EDITION_DEFAULT_THEME gcb row indistinguishable from
+  // the fallback branch, so the assertions could not tell the two apart.
+  // Coverage is therefore 2-of-3 by design: this test catches a hardcoded
+  // string for the two renamed ids below and cannot for gcb (#1054).
   GAY_CRUISE_BINGO: 'gcb',
   VACAY_BINGO: 'vacay-renamed',
   FIVE_ACROSS: 'fiveacross-renamed',
