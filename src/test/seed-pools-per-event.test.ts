@@ -291,32 +291,36 @@ describe('bodega-bay-2026 — Event payload pins', () => {
     ]);
   });
 
-  it('dual-writes both field generations so the SHIPPED reader and the live doc shape both render (Codex P1, PR #644)', () => {
-    // The live doc was seeded with the neutral names (place/placeEmoji,
-    // startsOn/endsOn), but the currently deployed bundle reads the legacy
-    // names — so the seed payload persists BOTH pairs with matching values.
-    // Drop the legacy pair when the #566 read-coercion is deployed.
+  it('writes Days in the live doc shape only — place/placeEmoji, never the retired port/portEmoji pair (#924)', () => {
+    // The live `events/bodega-bay-2026` doc carries `placeEmoji` on every
+    // Day, `port` on none, and `portEmoji` only on the wrap-up Day (a
+    // 2026-08-05 hand edit). Until #924 the seed ALSO wrote port/portEmoji on
+    // all four Days while claiming to mirror the live doc — and `seed.mjs`
+    // writes `days` verbatim on Event creation, so a fresh seed would have
+    // stamped the vocabulary #566 is retiring onto a new Event WITH read
+    // precedence (`migrateDayFields` prefers a string `portEmoji` over
+    // `placeEmoji`): the #652 trap, pre-armed. Asserted as key PRESENCE, not
+    // value, because an empty-string `portEmoji` is still a key that wins the
+    // converter's precedence.
     for (const day of EVENT_SEED.days) {
       expect(typeof day.place).toBe('string');
       expect(day.place.length).toBeGreaterThan(0);
       expect(typeof day.placeEmoji).toBe('string');
-      expect(day.port).toBe(day.place);
-      expect(typeof day.portEmoji).toBe('string');
+      expect('port' in day).toBe(false);
+      expect('portEmoji' in day).toBe(false);
     }
-    // #881: placeEmoji/portEmoji now agree on every Day. Days 0/1/3 used to
-    // duplicate their Theme's own glyph (or, for the wrap-up, diverge from
-    // the hand-corrected legacy field); all three now carry the de-duplicated
-    // glyph on BOTH fields, so there's no longer a deliberate divergence to
-    // pin here. Pinned to the exact intended pairs (CodeRabbit, PR #896
-    // round 3), not just field equality — a regression that set BOTH fields
-    // to the same WRONG glyph would still pass an equality-only check.
-    expect(EVENT_SEED.days.map(({ placeEmoji, portEmoji }) => [placeEmoji, portEmoji])).toEqual([
-      ['🐚', '🐚'],
-      ['🦪', '🦪'],
-      ['🌅', '🌅'],
-      ['👋', '👋'],
-    ]);
-    expect(EVENT_SEED.days[3].portEmoji).toBe('👋');
+    // #881: pinned to the exact intended glyphs (CodeRabbit, PR #896 round 3),
+    // not just presence — each was chosen to differ from its Day's own Theme
+    // glyph, and a regression back to the Theme's glyph is still a string.
+    expect(EVENT_SEED.days.map((d) => d.placeEmoji)).toEqual(['🐚', '🦪', '🌅', '👋']);
+  });
+
+  it('still dual-writes the Event window so the SHIPPED reader and the live doc shape both render (Codex P1, PR #644)', () => {
+    // The Event-level pair is a separate case from the Days (#924 leaves it
+    // alone on purpose): the live doc carries the neutral startsOn/endsOn,
+    // the currently deployed bundle reads sailStart/sailEnd, and a seed run
+    // must never leave the deployed app with a blank Event window. Drop the
+    // legacy pair when the #566 read-coercion is deployed.
     expect(EVENT_SEED.sailStart).toBe(EVENT_SEED.startsOn);
     expect(EVENT_SEED.sailEnd).toBe(EVENT_SEED.endsOn);
   });

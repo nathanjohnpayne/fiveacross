@@ -7,16 +7,16 @@ import type { SeedPrompt } from '../seed.d.mts';
  * Policy (`scoring`) ahead of the type-contract migrations, while `pool` still
  * persists the LEGACY values ('embark' = the easy pool, 'farewell' = the
  * closing pool) that deployed Cloud Functions and firestore.rules key off
- * (#565). This local shape states exactly what is persisted.
+ * (#565). This local shape states exactly what is persisted — and a Day
+ * persists ONLY the neutral names: the retired `port`/`portEmoji` pair is
+ * deliberately absent (#924), unlike the Event-level `sailStart`/`sailEnd`
+ * dual-write below.
  */
 export type BodegaSeedDay = {
   index: number;
   date: string;
   place: string;
   placeEmoji: string;
-  /** Transition dual-write: the legacy field names the shipped bundle reads. */
-  port: string;
-  portEmoji: string;
   theme: ThemeId;
   tonight: string[];
   pool: 'main' | 'embark' | 'farewell';
