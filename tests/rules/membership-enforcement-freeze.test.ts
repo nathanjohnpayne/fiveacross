@@ -56,40 +56,43 @@ async function seedEvent(
 }
 
 // Structural locator (#1100). Rather than the first substring hit, the arm is
-// found by a small scanner over the raw rules source (it skips `//` and `/* */`
-// comments itself, because the line-based comment strip that produces
-// EXECUTABLE_RULES cuts a `//` inside a string literal such as a URL and
-// leaves that literal unterminated) that understands the three things a
-// substring search cannot:
+// found by a small scanner over a string-aware, comment-free copy of the rules
+// source that understands what a substring search cannot:
 //
-//   - string literals: a `'}'` or `"{"` inside a condition never changes the
-//     brace depth (Codex P2 round 3 on #1194);
+//   - comments and string literals: `//` and `/* */` comments are removed by
+//     a pass that honours string literals (so a `//` inside a URL literal does
+//     not truncate the line), and a `'}'` or `';'` inside a literal is data,
+//     not structure (Codex P2 rounds 3 and 4 on #1194); removing comments
+//     first also lets `match /events/{id} /* note */ {` parse (round 4);
 //   - effective match paths: every `match <path> {` pushes its segments, so a
-//     block is identified by the path it actually governs, not by its spelling.
+//     block is identified by the path it governs, not by its spelling.
 //     `match /archives/{a} { match /events/{e} { ... } }` governs
-//     `archives/.../events/...` and is not a root Event block (round 3), while
-//     `match /events/{id}` and `match /events/{eventId}` are the same block
-//     (round 2);
+//     `archives/.../events/...` (round 3), `match /events/{id}` and
+//     `match /events/{eventId}` are the same block (round 2), and a literal
+//     `match /events/production-event {` is a root Event block for one Event
+//     and is counted too (round 4);
 //   - recursive wildcards: `{name=**}` matches zero or more segments under
-//     rules_version 2, so an `allow create` inside `match /{document=**}` or
-//     `match /events/{e}/{rest=**}` also reaches the root Event document and is
-//     counted as a grant on it (round 3).
+//     rules_version 2, so a grant inside `match /{document=**}` or
+//     `match /events/{e}/{rest=**}` also reaches the root Event document
+//     (round 3).
 //
-// Every `allow <verbs>: if` whose effective path can match `events/{id}` and
-// whose verb list grants `create` or `write` is collected, wherever it sits;
-// exactly one must exist and it is the arm this suite pins. The update-only
-// lifecycle arms stay out of the count (round 2). A malformed source (an
-// unbalanced block, an unterminated arm) throws instead of pinning the wrong
-// text.
+// What is enumerated: every `allow <verbs>: if ... ;` whose effective path can
+// match some `events/<id>`, with the terminator found by the same string-aware
+// scan (round 4). Exactly one of them may grant `create` or `write` and it is
+// the arm this suite pins. Every other arm that grants `update` must be one of
+// the approved archive-lifecycle arms, recognised structurally rather than
+// waved through: it is Admin-gated (`isAdmittedAdmin(eventId)`) and it reads
+// or writes the `archiving` handshake, and their number is pinned, so an
+// unexpected update grant that could reach an Event document fails loudly
+// instead of being ignored (round 4). A malformed source (an unbalanced block,
+// an unterminated arm or literal) throws instead of pinning the wrong text.
 const DOCUMENTS_ROOT = ['databases', '{database}', 'documents'];
 const MATCH_PATH = /match\s+(\/[^\s{}]*(?:\{[^}]*\}[^\s{}]*)*)\s*\{/y;
 const ALLOW_ARM = /allow\s+([a-z]+(?:\s*,\s*[a-z]+)*)\s*:\s*if\b/y;
+const APPROVED_UPDATE_ONLY_ARMS = 4; // the archive-lifecycle handshake arms
 
-function grantsCreate(verbs: string): boolean {
-  return verbs
-    .split(',')
-    .map((verb) => verb.trim())
-    .some((verb) => verb === 'create' || verb === 'write');
+function verbsOf(arm: string): string[] {
+  return arm.split(',').map((verb) => verb.trim());
 }
 
 function isRecursiveWildcard(segment: string): boolean {
@@ -100,9 +103,11 @@ function isSingleWildcard(segment: string): boolean {
   return /^\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(segment);
 }
 
-// Can the effective path pattern match the concrete path `target`? Literals
-// must match exactly, `{x}` matches one segment, `{x=**}` matches zero or more.
-function pathCanMatch(pattern: string[], target: string[]): boolean {
+// Can the effective path pattern match a path of the target's shape? A target
+// segment of `null` stands for "any one segment", so ['events', null] is every
+// root Event document; a literal pattern segment matches only itself or the
+// wildcard target, a `{x}` matches one segment, a `{x=**}` zero or more.
+function pathCanMatch(pattern: string[], target: Array<string | null>): boolean {
   if (pattern.length === 0) return target.length === 0;
   const [head, ...rest] = pattern;
   if (isRecursiveWildcard(head)) {
@@ -112,7 +117,8 @@ function pathCanMatch(pattern: string[], target: string[]): boolean {
     return false;
   }
   if (target.length === 0) return false;
-  if (head !== target[0] && !isSingleWildcard(head)) return false;
+  const want = target[0];
+  if (want !== null && head !== want && !isSingleWildcard(head)) return false;
   return pathCanMatch(rest, target.slice(1));
 }
 
@@ -123,57 +129,110 @@ function stripDocumentsRoot(path: string[]): string[] | null {
   return path.slice(DOCUMENTS_ROOT.length);
 }
 
-function rootEventWriteAllow(): string {
-  const src = RULES_SOURCE;
-  // One stack entry per open brace: the match path segments it introduced, or
-  // null for a brace that is not a match block (a function body, for example).
-  const scopes: Array<string[] | null> = [];
-  const arms: string[] = [];
-  let rootEventBlocks = 0;
-  let pendingMatch: string[] | null = null;
-  const effectivePath = () => scopes.flatMap((scope) => scope ?? []);
-
+// Remove `//` and `/* */` comments while honouring string literals; the result
+// is what the scanner walks, so no later step needs comment awareness.
+function withoutComments(src: string): string {
+  let out = '';
   for (let i = 0; i < src.length; i += 1) {
     const ch = src[i];
-    if (ch === '/' && src[i + 1] === '/') {
-      // Line comment: skip to the end of the line.
-      const nl = src.indexOf('\n', i);
-      i = nl < 0 ? src.length : nl;
-      continue;
-    }
-    if (ch === '/' && src[i + 1] === '*') {
-      const close = src.indexOf('*/', i + 2);
-      if (close < 0) throw new Error('rules source has an unterminated block comment');
-      i = close + 1;
-      continue;
-    }
     if (ch === "'" || ch === '"') {
-      // Skip a string literal wholesale; braces inside it are data. Rules
-      // string literals never span lines, so a newline also ends the scan.
       let j = i + 1;
       while (j < src.length && src[j] !== ch && src[j] !== '\n') {
         if (src[j] === '\\') j += 1;
         j += 1;
       }
       if (j >= src.length || src[j] === '\n') throw new Error('rules source has an unterminated string literal');
+      out += src.slice(i, j + 1);
       i = j;
       continue;
     }
-    if (ch === 'm') {
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      if (nl < 0) break;
+      out += ' ';
+      i = nl - 1;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      if (close < 0) throw new Error('rules source has an unterminated block comment');
+      out += ' ';
+      i = close + 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+// Index of the string literal's closing quote, or -1 if it does not close on
+// this line (rules literals never span lines).
+function endOfLiteral(src: string, open: number): number {
+  const quote = src[open];
+  let j = open + 1;
+  while (j < src.length && src[j] !== quote && src[j] !== '\n') {
+    if (src[j] === '\\') j += 1;
+    j += 1;
+  }
+  return j < src.length && src[j] === quote ? j : -1;
+}
+
+// Index of the `;` that terminates the arm starting at `start`, skipping any
+// `;` inside a string literal.
+function armTerminator(src: string, start: number): number {
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"') {
+      const close = endOfLiteral(src, i);
+      if (close < 0) throw new Error('an allow arm contains an unterminated string literal');
+      i = close;
+      continue;
+    }
+    if (ch === ';') return i;
+  }
+  return -1;
+}
+
+function isApprovedLifecycleArm(arm: string): boolean {
+  return /\bisAdmittedAdmin\(eventId\)/.test(arm) && /'archiving'/.test(arm);
+}
+
+function rootEventWriteAllow(): string {
+  const src = withoutComments(RULES_SOURCE);
+  // One stack entry per open brace: the match path segments it introduced, or
+  // null for a brace that is not a match block (a function body, for example).
+  const scopes: Array<string[] | null> = [];
+  const createArms: string[] = [];
+  const updateOnlyArms: string[] = [];
+  let rootEventBlocks = 0;
+  let pendingMatch: string[] | null = null;
+  const effectivePath = () => scopes.flatMap((scope) => scope ?? []);
+  const boundary = (i: number) => i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]);
+
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"') {
+      const close = endOfLiteral(src, i);
+      if (close < 0) throw new Error('rules source has an unterminated string literal');
+      i = close;
+      continue;
+    }
+    if (ch === 'm' && boundary(i)) {
       MATCH_PATH.lastIndex = i;
       const m = MATCH_PATH.exec(src);
-      if (m !== null && (i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]))) {
+      if (m !== null) {
         pendingMatch = m[1].split('/').filter((segment) => segment.length > 0);
         // Stop just before the block's own brace so the next iteration's `{`
         // branch pushes the scope (lastIndex points past the brace).
         i = MATCH_PATH.lastIndex - 2;
+        continue;
       }
     }
     if (ch === '{') {
       scopes.push(pendingMatch);
       if (pendingMatch !== null) {
         const relative = stripDocumentsRoot(effectivePath());
-        if (relative !== null && relative.length === 2 && relative[0] === 'events' && isSingleWildcard(relative[1])) {
+        if (relative !== null && relative.length === 2 && pathCanMatch(relative, ['events', null])) {
           rootEventBlocks += 1;
         }
       }
@@ -185,15 +244,18 @@ function rootEventWriteAllow(): string {
       scopes.pop();
       continue;
     }
-    if (ch === 'a' && (i === 0 || !/[A-Za-z0-9_]/.test(src[i - 1]))) {
+    if (ch === 'a' && boundary(i)) {
       ALLOW_ARM.lastIndex = i;
       const arm = ALLOW_ARM.exec(src);
-      if (arm !== null && grantsCreate(arm[1])) {
+      if (arm !== null) {
         const relative = stripDocumentsRoot(effectivePath());
-        if (relative !== null && pathCanMatch(relative, ['events', 'some-event'])) {
-          const end = src.indexOf(';', i);
+        if (relative !== null && pathCanMatch(relative, ['events', null])) {
+          const end = armTerminator(src, i);
           if (end < 0) throw new Error('an allow arm reaching the root Event document is unterminated');
-          arms.push(src.slice(i, end + 1).trim());
+          const text = src.slice(i, end + 1).replace(/\s+/g, ' ').trim();
+          const verbs = verbsOf(arm[1]);
+          if (verbs.includes('create') || verbs.includes('write')) createArms.push(text);
+          else if (verbs.includes('update')) updateOnlyArms.push(text);
           i = end;
         }
       }
@@ -203,12 +265,18 @@ function rootEventWriteAllow(): string {
   if (rootEventBlocks !== 1) {
     throw new Error(`root Event match block: expected exactly one block governing events/{id}, found ${rootEventBlocks}`);
   }
-  if (arms.length !== 1) {
+  if (createArms.length !== 1) {
     throw new Error(
-      `expected exactly one allow arm granting create or write that can reach events/{id}, found ${arms.length}: ${arms.map((a) => a.slice(0, 60)).join(' | ')}`,
+      `expected exactly one allow arm granting create or write that can reach events/{id}, found ${createArms.length}: ${createArms.map((a) => a.slice(0, 60)).join(' | ')}`,
     );
   }
-  return arms[0];
+  const unapproved = updateOnlyArms.filter((arm) => !isApprovedLifecycleArm(arm));
+  if (unapproved.length > 0 || updateOnlyArms.length !== APPROVED_UPDATE_ONLY_ARMS) {
+    throw new Error(
+      `update-only arms reaching events/{id}: expected exactly ${APPROVED_UPDATE_ONLY_ARMS} Admin-gated archive-lifecycle arms, found ${updateOnlyArms.length} (${unapproved.length} unrecognised): ${unapproved.map((a) => a.slice(0, 60)).join(' | ')}`,
+    );
+  }
+  return createArms[0];
 }
 
 beforeAll(async () => {
