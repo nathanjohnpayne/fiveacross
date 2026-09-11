@@ -1,3 +1,5 @@
+import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
+
 export type VerificationRole = 'publisher' | 'recovery' | 'source-attestor' | 'regional-probe';
 
 export type VerificationRecord = {
@@ -19,10 +21,7 @@ export type PublisherVerificationMapping = {
 };
 
 const PUBLIC_KEY_PEM = /^-----BEGIN PUBLIC KEY-----\n([A-Za-z0-9+/=\n]+)\n-----END PUBLIC KEY-----\n?$/;
-const LOWER_SHA_256 = /^[0-9a-f]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const KMS_CRYPTO_KEY_VERSION =
-  /^projects\/[^/\s]+\/locations\/[^/\s]+\/keyRings\/[A-Za-z0-9_-]+\/cryptoKeys\/[A-Za-z0-9_-]+\/cryptoKeyVersions\/[1-9]\d*$/;
 
 function decodeBase64(value: string): Uint8Array {
   try {
@@ -52,7 +51,7 @@ export async function importPinnedVerificationKey(record: VerificationRecord): P
   if (record.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256') {
     throw new Error('unsupported verification algorithm');
   }
-  if (!LOWER_SHA_256.test(record.spkiSha256)) throw new Error('invalid SPKI fingerprint');
+  if (!isSha256Hex(record.spkiSha256)) throw new Error('invalid SPKI fingerprint');
   const recomputed = await fingerprintSpkiPem(record.pem);
   if (recomputed !== record.spkiSha256) throw new Error('SPKI fingerprint mismatch');
   const key = await crypto.subtle.importKey(
@@ -81,7 +80,7 @@ export function validateVerificationRecordIdentities(
     if (record.subject.length === 0 || record.keyVersion.length === 0 || record.epochOrSlot.length === 0) {
       throw new Error('verification record has an empty identity field');
     }
-    if (!KMS_CRYPTO_KEY_VERSION.test(record.keyVersion)) {
+    if (!isKmsCryptoKeyVersion(record.keyVersion)) {
       throw new Error('verification key version must be a canonical Cloud KMS CryptoKeyVersion resource');
     }
     if (!POSITIVE_DECIMAL.test(record.subject)) {

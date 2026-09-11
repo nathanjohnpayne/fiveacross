@@ -1,4 +1,5 @@
 import { parseSyncRequest, projectionDigest } from './contracts';
+import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
 import type {
   ProviderRequestEvidence,
@@ -11,10 +12,7 @@ import type {
 
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
-const SHA256_HEX = /^[a-f0-9]{64}$/;
 const CLOUDFLARE_RESOURCE_ID = /^[a-f0-9]{32}$/;
-const KMS_KEY_VERSION =
-  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 const RECOVERY_PATH = /^\/__internal\/hostname-replicas\/v1\/recover(?:\?[^#]*)?$/;
 const ACTIONS = new Set(['acquire-lock', 'apply', 'clear-lock', 'abort-lock']);
 const ACCESS_PERMISSIONS = new Set([
@@ -52,7 +50,7 @@ function positiveDecimal(value: unknown): string {
 
 function sha256(value: unknown): string {
   const result = nonEmptyString(value);
-  if (!SHA256_HEX.test(result)) throw new Error('sha256');
+  if (!isSha256Hex(result)) throw new Error('sha256');
   return result;
 }
 
@@ -949,7 +947,7 @@ export async function parseRecoveryHistoryEntry(
     }
     validateActionBindings(value as RecoveryRecord, sourceAudit, action, probeEvidence);
     nonEmptyString(record.operatorSub);
-    if (typeof record.operatorKeyVersion !== 'string' || !KMS_KEY_VERSION.test(record.operatorKeyVersion)) {
+    if (!isKmsCryptoKeyVersion(record.operatorKeyVersion)) {
       throw new Error('operator key');
     }
     sha256(record.operatorKeyFingerprint);

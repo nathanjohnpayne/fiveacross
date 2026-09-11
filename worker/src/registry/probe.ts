@@ -1,4 +1,5 @@
-const SHA256_HEX = /^[a-f0-9]{64}$/;
+import { isSha256Hex } from './identifiers';
+
 const CHALLENGE_LIFETIME_MS = 5 * 60_000;
 const OBSERVATION_LIFETIME_MS = 60_000;
 export const STORED_ATTESTATION_LIFETIME_MS = 5 * 60_000;
@@ -257,10 +258,10 @@ export function issueProbeChallenge(
 ): ProbeChallenge {
   if (
     request.host.length === 0 ||
-    !SHA256_HEX.test(request.expectedStateDigest) ||
+    !isSha256Hex(request.expectedStateDigest) ||
     principal.subject.length === 0 ||
     principal.keyVersion.length === 0 ||
-    !SHA256_HEX.test(principal.keyFingerprint) ||
+    !isSha256Hex(principal.keyFingerprint) ||
     principal.region.length === 0 ||
     probeNonce.length < 7 ||
     (request.phase === 'canonical-after-unblock' &&
@@ -350,7 +351,7 @@ export function acceptProbeAttestation(
   }
   if (observation.phase === 'blocked-before-worker') {
     if (
-      !SHA256_HEX.test(observation.expectedBlockBodyDigest) ||
+      !isSha256Hex(observation.expectedBlockBodyDigest) ||
       observation.expectedBlockBodyDigest !== observation.observedBlockBodyDigest
     ) {
       refuse('probe block response mismatch');

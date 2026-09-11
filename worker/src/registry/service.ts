@@ -5,6 +5,7 @@ import {
   parseSyncRequest,
   type RouterReplicaDesired,
 } from './contracts';
+import { isKmsCryptoKeyVersion } from './identifiers';
 import { validateVerificationRecords, verifyPinnedSignature, type VerificationRecord } from './keys';
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { SyncResponse } from './state';
@@ -22,8 +23,6 @@ import { createSyncSemanticEvent, type RegistrySemanticEvent } from './telemetry
 
 const MAX_SIGNATURE_AGE_MS = 60_000;
 const CANONICAL_POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const KMS_KEY_VERSION =
-  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 const SYNC_RESULTS = new Set([
   'applied',
   'replay',
@@ -202,7 +201,7 @@ async function syncResponse(
     epoch === null ||
     !CANONICAL_POSITIVE_DECIMAL.test(epoch) ||
     keyVersion === null ||
-    !KMS_KEY_VERSION.test(keyVersion) ||
+    !isKmsCryptoKeyVersion(keyVersion) ||
     issuedAtRaw === null ||
     !CANONICAL_POSITIVE_DECIMAL.test(issuedAtRaw) ||
     signature === null ||
