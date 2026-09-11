@@ -172,6 +172,23 @@ import { drainRetractions } from '../data/moments';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * The Event boundary Board actually lives behind (#1082).
+ *
+ * App owns the ONE Event key in the client tree — `<EventApp key={EVENT_ID}>`
+ * (src/App.tsx) — so an Event transition remounts every Event-owned surface,
+ * Board included, from ABOVE Board. Board carries no second key of its own, so
+ * a bare `rerender(<Board />)` after moving `H.eventId` would be a transition
+ * production cannot produce: it would hand one mounted instance a changed
+ * Event id. The Event-transition tests below drive the switch through this
+ * stand-in for App's boundary instead, which is the same single remount the
+ * real tree performs. Tests that re-render WITHOUT changing `H.eventId` keep
+ * using `<Board />` directly — they depend on the instance surviving.
+ */
+function EventScopedBoard() {
+  return <Board key={H.eventId} />;
+}
+
 function dealt(pool = 'i'): Cell[] {
   return Array.from({ length: 25 }, (_, index) => ({
     index,
@@ -315,7 +332,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
       ],
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 1, seed: 807_010, createdAt: 0, cells: dealt('a') };
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
     await act(async () => {});
 
     const aTabs = screen.getAllByRole('tab');
@@ -330,7 +347,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
       days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS })],
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 0, seed: 807_011, createdAt: 0, cells: dealt('b') };
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {});
 
     expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
@@ -369,7 +386,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
       uid: 'u1', displayName: 'Event A Name', photoURL: 'a.jpg',
       bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false,
     } as unknown as PlayerDoc;
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
 
     fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.grid .cell-claim')[3]);
     fireEvent.click(screen.getByText(/Cross My Heart/));
@@ -386,7 +403,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
       uid: 'u1', displayName: 'Event B Name', photoURL: 'b.jpg',
       bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false,
     } as unknown as PlayerDoc;
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {});
 
     const winningCells = dealt('a').map((cell, index) =>
@@ -416,14 +433,14 @@ describe('Event-scoped Board lifecycle (#807)', () => {
 
   it('restarts direct analytics for the same user when the Event changes', async () => {
     H.eventId = 'event-a';
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
     await act(async () => {});
     expect(H.subscribeDirectMarkAnalytics).toHaveBeenCalledTimes(1);
     expect(H.subscribeDirectMarkAnalytics).toHaveBeenLastCalledWith('u1', 'event-a');
     const unsubscribeA = H.subscribeDirectMarkAnalytics.mock.results[0].value;
 
     H.eventId = 'event-b';
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {});
     expect(unsubscribeA).toHaveBeenCalledTimes(1);
     expect(H.subscribeDirectMarkAnalytics).toHaveBeenCalledTimes(2);
@@ -443,13 +460,13 @@ describe('Event-scoped Board lifecycle (#807)', () => {
     );
     H.eventId = 'event-a';
     H.event = { claimMode: 'honor', timezone: 'UTC', days: [readyDay] } as unknown as EventDoc;
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
     await act(async () => {});
     expect(H.dealDayCard).toHaveBeenCalledTimes(1);
 
     H.eventId = 'event-b';
     H.event = { claimMode: 'honor', timezone: 'UTC', days: [{ ...readyDay }] } as unknown as EventDoc;
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {});
     expect(H.dealDayCard).toHaveBeenCalledTimes(2);
 
@@ -461,15 +478,15 @@ describe('Event-scoped Board lifecycle (#807)', () => {
   it('treats the same card identity in Event B as a fresh deal cascade', async () => {
     H.eventId = 'event-cascade-a';
     H.board = { uid: 'u1', dayIndex: 0, seed: 807_001, createdAt: 0, cells: dealt() };
-    const first = render(<Board />);
+    const first = render(<EventScopedBoard />);
     await act(async () => {});
     first.unmount();
 
-    const returning = render(<Board />);
+    const returning = render(<EventScopedBoard />);
     await act(async () => {});
     expect(document.querySelector('.bingo-head')).toHaveClass('bingo-head-dealt');
     H.eventId = 'event-cascade-b';
-    returning.rerender(<Board />);
+    returning.rerender(<EventScopedBoard />);
     expect(document.querySelector('.bingo-head')).not.toHaveClass('bingo-head-dealt');
   });
 
@@ -491,7 +508,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
         dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
       } as unknown as PlayerDoc;
       H.board = { uid: 'u1', dayIndex: 0, seed: 807_002, createdAt: 0, cells: dealt() };
-      const view = render(<Board />);
+      const view = render(<EventScopedBoard />);
       await act(async () => {});
       expect(mocked).toHaveBeenCalledTimes(1);
 
@@ -500,7 +517,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
         uid: 'u1', bingoCount: 0, squaresMarked: 3,
         dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
       } as unknown as PlayerDoc;
-      view.rerender(<Board />);
+      view.rerender(<EventScopedBoard />);
       await act(async () => {});
       expect(mocked).toHaveBeenCalledTimes(1);
 
@@ -509,7 +526,7 @@ describe('Event-scoped Board lifecycle (#807)', () => {
       H.eventId = 'event-b';
       H.event = { claimMode: 'honor', timezone: 'UTC', days: [...days] } as unknown as EventDoc;
       H.player = { uid: 'retained-a-row' } as unknown as PlayerDoc;
-      view.rerender(<Board />);
+      view.rerender(<EventScopedBoard />);
       await act(async () => {});
       expect(mocked).toHaveBeenCalledTimes(2);
       const rendersBeforeLateA = H.authReads;
@@ -1943,12 +1960,12 @@ describe('Feed → Board square-opening intent (#261)', () => {
     requestOpenSquare({ eventId: 'event-a', dayIndex: 0, itemId: 'i5' });
 
     H.eventId = 'event-b';
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
     await act(async () => {});
     expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
 
     H.eventId = 'event-a';
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {});
     expect(screen.getByText(/Proof for/)).toBeInTheDocument();
     expect(screen.getByText(/Cross My Heart/)).toBeInTheDocument();
@@ -1992,14 +2009,14 @@ describe('Feed → Board square-opening intent (#261)', () => {
         }),
     );
 
-    const view = render(<Board />);
+    const view = render(<EventScopedBoard />);
     fireEvent.click(document.querySelectorAll<HTMLButtonElement>('.grid .cell-claim')[3]);
     fireEvent.click(screen.getByText(/Cross My Heart/));
     await vi.waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
 
     H.eventId = 'event-b';
     H.board = { uid: 'u1', dayIndex: 0, seed: 807_021, createdAt: 0, cells: dealt('b') };
-    view.rerender(<Board />);
+    view.rerender(<EventScopedBoard />);
     await act(async () => {
       finishMark({
         cells: withMarked([0, 1, 2, 3, 4]),
