@@ -218,6 +218,7 @@ describe('deep link / resume landing', () => {
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       slugVerifiedForEdition: 'vacay',
+      slugVerifiedCandidate: 'point-reyes',
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
 
@@ -280,6 +281,7 @@ describe('deep link / resume landing', () => {
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       slugVerifiedForEdition: 'vacay',
+      slugVerifiedCandidate: 'point-reyes',
     });
     renderApp(setupStepPath('seeded-draft', 'basics'));
     await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
@@ -304,6 +306,7 @@ describe('back navigation to a completed step', () => {
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       slugVerifiedForEdition: 'vacay',
+      slugVerifiedCandidate: 'point-reyes',
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
     // Squares is a real step body now (#791) rather than a placeholder; these
@@ -366,6 +369,7 @@ describe('step indicator inertness (Codex P2, PR #840, round 2)', () => {
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       slugVerifiedForEdition: 'vacay',
+      slugVerifiedCandidate: 'point-reyes',
       defaultTheme: 'the-birds',
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
@@ -582,6 +586,7 @@ describe('Save draft (local)', () => {
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       slugVerifiedForEdition: 'vacay',
+      slugVerifiedCandidate: 'point-reyes',
       defaultTheme: 'the-birds',
       // Every earlier step's gate must ALSO clear, or the deep-link landing
       // rule redirects this request back to whichever one is not — Squares

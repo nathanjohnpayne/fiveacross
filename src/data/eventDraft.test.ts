@@ -95,6 +95,40 @@ describe('parseEventDraft', () => {
     expect(parseEventDraft({ ...draft(), hostname: 'point-reyes.fiveacross.app' })).toBeNull();
   });
 
+  it('reads a draft saved before the verification fields as UNVERIFIED, never as a miss', () => {
+    // Both fields are younger than the schema version they ride on (#911 the
+    // Edition half, #993 the candidate half): an older blob lacks them and
+    // must still load, but must NOT be trusted on the strength of a field
+    // that predates the check. `''` is what the gate reads as unverified, so
+    // the draft re-verifies on arrival at Basics.
+    const legacy: Record<string, unknown> = JSON.parse(JSON.stringify(draft({ slugCandidate: 'point-reyes' })));
+    delete legacy.slugVerifiedForEdition;
+    delete legacy.slugVerifiedCandidate;
+    const parsed = parseEventDraft(legacy);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.slugVerifiedForEdition).toBe('');
+    expect(parsed?.slugVerifiedCandidate).toBe('');
+  });
+
+  it('reads a draft that recorded the Edition but not the candidate as unverified for the candidate (#993)', () => {
+    // The shape written between #911 and #993. The Edition marker alone said
+    // which hostnames were checked but not which label, so it cannot vouch for
+    // the candidate beside it: it is kept as data, and the missing half reads
+    // `''` so the pair fails the gate until a fresh check records both.
+    const partial: Record<string, unknown> = JSON.parse(
+      JSON.stringify(draft({ slugCandidate: 'point-reyes', edition: 'vacay', slugVerifiedForEdition: 'vacay' })),
+    );
+    delete partial.slugVerifiedCandidate;
+    const parsed = parseEventDraft(partial);
+    expect(parsed?.slugVerifiedForEdition).toBe('vacay');
+    expect(parsed?.slugVerifiedCandidate).toBe('');
+  });
+
+  it('rejects a verification field that is present but not a string', () => {
+    expect(parseEventDraft({ ...draft(), slugVerifiedForEdition: 7 })).toBeNull();
+    expect(parseEventDraft({ ...draft(), slugVerifiedCandidate: null })).toBeNull();
+  });
+
   it('rejects a spicy flag on a curated-pool Prompt', () => {
     const bad = {
       ...draft(),

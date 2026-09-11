@@ -56,7 +56,8 @@ function launchableDraft(over: Partial<EventDraft> = {}): EventDraft {
     startsOn: '2026-08-07',
     endsOn: '2026-08-09',
     slugCandidate: 'point-reyes',
-      slugVerifiedForEdition: 'vacay',
+    slugVerifiedForEdition: 'vacay',
+    slugVerifiedCandidate: 'point-reyes',
     defaultTheme: 'fog-froth-farewells' as ThemeId,
     edition: 'vacay',
     prompts: {
