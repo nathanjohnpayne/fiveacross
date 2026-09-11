@@ -252,6 +252,14 @@ const FIVEACROSS: readonly EditionId[] = [EDITION_IDS.FIVE_ACROSS];
  * type-checking. There is deliberately no "shared" escape hatch: if a Theme
  * ever genuinely belongs to both, it lists both.
  *
+ * The VALUE side is pinned to the registry for the same reason: `readonly
+ * EditionId[]`, not `readonly string[]`. Every row reuses one of the three
+ * consts above, so the shipped data was correct either way, but under
+ * `string[]` a typo such as `['definately-gcb']` type-checked cleanly and its
+ * only symptom was `themesForEdition` quietly never returning that Theme — a
+ * thinner picker, not an error. Deriving the value type from the registry
+ * turns that into a `tsc` failure instead (#1054).
+ *
  * A platform-chrome Theme (`ThemeMeta.chrome`, #882) still needs an entry
  * here — the map is total — and lists the Edition it is brand-affiliated
  * with, exactly like an ordinary Theme. That entry alone does NOT make it
@@ -261,7 +269,7 @@ const FIVEACROSS: readonly EditionId[] = [EDITION_IDS.FIVE_ACROSS];
  * the two questions coincide for every ordinary Theme, which is the only
  * reason this doc comment used to conflate them.
  */
-const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
+const THEME_EDITIONS: Record<ThemeId, readonly EditionId[]> = {
   // Gay Cruise Bingo party Themes — Atlantis signature nights, cruise-specific
   // content down to the dress codes.
   'neon-playground': GCB,
@@ -350,13 +358,22 @@ export function defaultThemeForEdition(edition: string = activeEdition()): Theme
  */
 export function themesForEdition(edition?: string | null): ThemeMeta[] {
   const ed = edition || activeEdition();
-  const known = THEMES.some((t) => THEME_EDITIONS[t.id].includes(ed));
+  // The table's values are `readonly EditionId[]` (registry-derived, see its
+  // doc comment) while `ed` is whatever string the caller passed. Widen the
+  // LOOKUP to `readonly string[]` rather than narrowing `ed` through
+  // `isRegisteredEdition`: `known` deliberately asks "does any Theme claim
+  // this id", so a registered Edition that owns no Themes still degrades to
+  // gcb's list rather than an empty picker. Narrowing at the boundary would
+  // silently change that (#1054).
+  const known = THEMES.some((t) => (THEME_EDITIONS[t.id] as readonly string[]).includes(ed));
   const scope = known ? ed : DEFAULT_EDITION;
   // `!t.chrome` excludes platform-chrome Themes (#882) from every picker —
   // registered, contrast-audited and Edition-bound like any other Theme, but
   // never a Day a player or organizer can pick. See the ThemeMeta.chrome doc
   // comment and specs/w1-themes.md § Registry vs. picker.
-  return THEMES.filter((t) => !t.chrome && THEME_EDITIONS[t.id].includes(scope));
+  return THEMES.filter(
+    (t) => !t.chrome && (THEME_EDITIONS[t.id] as readonly string[]).includes(scope),
+  );
 }
 
 /**
