@@ -1698,12 +1698,18 @@ describe('dueDayForDailyEmail stops at the Standings Freeze (#1121)', () => {
   });
 
   it('cuts off on the send INSTANT, not the freeze\'s calendar date — the live Bodega shape', () => {
-    // Bodega Bay configures no freeze, so it resolves to its 11:00 Sunday
-    // ceremonial unlock — five hours AFTER that same Sunday's 06:00 email. A
+    // Bodega Bay's freeze is the 11:00 Sunday check-out, which it both
+    // CONFIGURES and derives: the seed pins `standingsFreezeAt` to the
+    // ceremonial wrap-up Day's own `unlockAt`. Resolve it off the whole seeded
+    // Event, the shape a real Bodega Event doc has, so the configured field is
+    // the one exercised — five hours AFTER that same Sunday's 06:00 email. A
     // date-wide suppression would silence a morning that is still a playing
     // morning and drop the trip from three emails to two.
-    const bodegaFreeze = standingsFreezeAtFor({ days: BODEGA_SEED.days });
+    const bodegaFreeze = standingsFreezeAtFor(BODEGA_SEED);
     expect(bodegaFreeze).toBe(at('2026-08-09T11:00:00-07:00'));
+    // ... and the schedule-only derivation agrees with it to the millisecond,
+    // which is what makes the two readings of this Event interchangeable.
+    expect(standingsFreezeAtFor({ days: BODEGA_SEED.days })).toBe(bodegaFreeze);
     const when = (iso: string) => dueDayForDailyEmail(BODEGA_SEED.days, at(iso), BODEGA_SEED.timezone, {
       freezeAt: bodegaFreeze,
     });
