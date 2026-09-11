@@ -1,10 +1,14 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
+import { isKmsCryptoKeyVersion } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
 import type { ProviderRequestEvidence, PublisherReplacement, RecoveryRecord } from './recovery';
 import { parseRecoveryHistoryEntry, recoveryHistoryKey } from './recoveryHistory';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
+const SOURCE_KEY_VERSION = 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1';
+const probeKeyVersion = (index: number) =>
+  `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${index}/cryptoKeyVersions/1`;
 const DIGEST = '99bf68a026a95b1138b7c4817574612436f29c8ae0ea1fe8fd623012026f9755';
 const BLOCK_DIGEST = '4e248ff71724eb2329a89411cc42e0066126c183d48483a5a0e58c28b9f800a5';
 const QUERY_DIGESTS = [
@@ -47,7 +51,7 @@ function record(): RecoveryRecord {
       },
       ledgerDocumentDigest: 'c'.repeat(64),
       attestorSub: 'source-attestor',
-      attestorKeyVersion: 'source-key/1',
+      attestorKeyVersion: SOURCE_KEY_VERSION,
       attestorKeyFingerprint: 'd'.repeat(64),
       attestationIssuedAt: '2020-01-01T00:00:00.000Z',
       attestationSignature: 'signed-source-audit',
@@ -200,7 +204,7 @@ function publisherReplacement(): NonNullable<PublisherReplacement> {
         },
       ],
       attestorSub: 'source-attestor',
-      attestorKeyVersion: 'source-key/1',
+      attestorKeyVersion: SOURCE_KEY_VERSION,
       attestorKeyFingerprint: 'd'.repeat(64),
       attestationIssuedAt: '2020-01-01T00:00:00.000Z',
       attestationSignature: 'signed-control-evidence',
@@ -238,7 +242,7 @@ function consumedEvidence(index: number, phase: 'blocked-before-worker' | 'canon
     id: `attestation-${index}`,
     receivedAt: '2020-01-01T00:00:03.000Z',
     subject: `probe-${index}`,
-    keyVersion: `probe-key/${index}`,
+    keyVersion: probeKeyVersion(index),
     keyFingerprint: String(index + 1).repeat(64),
     region: ['us-west1', 'us-east1', 'europe-west1'][index],
   };
@@ -366,6 +370,13 @@ function replacementRecord(): RecoveryRecord {
       publisherReplacement: publisherReplacement(),
     },
   };
+}
+
+function replacementOf(value: RecoveryRecord): NonNullable<PublisherReplacement> {
+  if (value.evidence.kind !== 'apply' || value.evidence.publisherReplacement === null) {
+    throw new Error('test setup');
+  }
+  return value.evidence.publisherReplacement;
 }
 
 describe('persisted recovery history validation', () => {
@@ -702,6 +713,92 @@ describe('persisted recovery history validation', () => {
     await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).rejects.toThrow(
       'recovery history malformed',
     );
+  });
+
+  it.each([
+    {
+      label: 'source attestor key version carrying whitespace in the project segment',
+      build: () => {
+        const value = record();
+        value.sourceAudit.attestorKeyVersion =
+          'projects/p q/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1';
+        return value;
+      },
+    },
+    {
+      label: 'source attestor key version whose key-ring segment is outside the Cloud KMS id alphabet',
+      build: () => {
+        const value = record();
+        value.sourceAudit.attestorKeyVersion =
+          'projects/p/locations/l/keyRings/ring.1/cryptoKeys/source/cryptoKeyVersions/1';
+        return value;
+      },
+    },
+    {
+      label: 'probe key version carrying whitespace on both the attestation and the challenge it answers',
+      build: () => {
+        const value = recordFor('acquire-lock');
+        const lax = 'projects/p/locations/l/keyRings/r/cryptoKeys/probe 0/cryptoKeyVersions/1';
+        value.probeEvidence[0].keyVersion = lax;
+        value.probeEvidence[0].challenge.keyVersion = lax;
+        return value;
+      },
+    },
+    {
+      label: 'active epoch mapping and its enabled-version readback outside the Cloud KMS id alphabet',
+      build: () => {
+        const value = replacementRecord();
+        const replacement = replacementOf(value);
+        const lax = 'projects/p/locations/l/keyRings/r/cryptoKeys/old.1/cryptoKeyVersions/1';
+        replacement.controlEvidence.activeEpochMappings[0].keyVersion = lax;
+        replacement.controlEvidence.keyAccess[0].cryptoKey = 'projects/p/locations/l/keyRings/r/cryptoKeys/old.1';
+        replacement.controlEvidence.keyAccess[0].enabledVersions[0].keyVersion = lax;
+        return value;
+      },
+    },
+    {
+      label: 'replacement key version carrying whitespace across every field that binds to it',
+      build: () => {
+        const value = replacementRecord();
+        const replacement = replacementOf(value);
+        const lax = 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement 1/cryptoKeyVersions/1';
+        replacement.replacementKeyVersion = lax;
+        replacement.controlEvidence.activeEpochMappings[1].keyVersion = lax;
+        replacement.controlEvidence.keyAccess[1].cryptoKey =
+          'projects/p/locations/l/keyRings/r/cryptoKeys/replacement 1';
+        replacement.controlEvidence.keyAccess[1].enabledVersions[0].keyVersion = lax;
+        replacement.controlEvidence.quarantinedAccessDecisions[0].fullResourceName =
+          `//cloudkms.googleapis.com/${lax}`;
+        return value;
+      },
+    },
+  ])('rejects a persisted $label', async ({ build }) => {
+    const value = build();
+
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).rejects.toThrow(
+      'recovery history malformed',
+    );
+  });
+
+  it('still parses the canonical fixtures, whose every nested key version is a canonical KMS name', async () => {
+    const lock = recordFor('acquire-lock');
+    const value = replacementRecord();
+    const replacement = replacementOf(value);
+    const control = replacement.controlEvidence;
+
+    expect(
+      [
+        lock.sourceAudit.attestorKeyVersion,
+        lock.operatorKeyVersion,
+        ...lock.probeEvidence.flatMap((evidence) => [evidence.keyVersion, evidence.challenge.keyVersion]),
+        replacement.replacementKeyVersion,
+        control.attestorKeyVersion,
+        ...control.activeEpochMappings.map((mapping) => mapping.keyVersion),
+        ...control.keyAccess.flatMap((access) => access.enabledVersions.map((version) => version.keyVersion)),
+      ].filter((keyVersion) => !isKmsCryptoKeyVersion(keyVersion)),
+    ).toEqual([]);
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(lock.sequence), lock, HOST)).resolves.toEqual(lock);
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).resolves.toEqual(value);
   });
 
   it.each([

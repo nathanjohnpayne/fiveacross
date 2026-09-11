@@ -38,6 +38,9 @@ const ROOT_TEST_HOST = `r2-root-${'e'.repeat(20)}.vacaybingo.com`;
 const CAPABILITY_PATH = '/.well-known/fiveacross-path-capability';
 const ORIGIN_HOST = 'fiveacross.web.app';
 const COMPATIBILITY_DATE = '2026-07-30';
+const SOURCE_KEY_VERSION = 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1';
+const probeKeyVersion = (slot: string) =>
+  `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${slot}/cryptoKeyVersions/1`;
 
 let registryBundle = '';
 let routerBundle = '';
@@ -490,7 +493,7 @@ function sha256(value: string): string {
 function principals(phase: string): [ProbePrincipal, ProbePrincipal, ProbePrincipal] {
   return [0, 1, 2].map((index) => ({
     subject: `${phase}-runner-${index}`,
-    keyVersion: `probe-key/${phase}/${index}`,
+    keyVersion: probeKeyVersion(`${phase}-${index}`),
     keyFingerprint: sha256(`${phase}-key-${index}`),
     region: ['us-west1', 'us-east1', 'europe-west1'][index],
   })) as [ProbePrincipal, ProbePrincipal, ProbePrincipal];
@@ -544,7 +547,7 @@ async function sourceAuditFor(payload: RouterReplicaDesired, at: number): Promis
     ledgerPayload: payload,
     ledgerDocumentDigest: sha256(`ledger-${payload.host}-${payload.revision}`),
     attestorSub: 'source-attestor',
-    attestorKeyVersion: 'source-key/1',
+    attestorKeyVersion: SOURCE_KEY_VERSION,
     attestorKeyFingerprint: sha256('source-attestor-key'),
     attestationIssuedAt: new Date(at).toISOString(),
     attestationSignature: 'signed-source',

@@ -12,6 +12,9 @@ const NOW = Date.now();
 const ZONE_ID = '1'.repeat(32);
 const RULESET_ID = '2'.repeat(32);
 const RULE_ID = '3'.repeat(32);
+const SOURCE_KEY_VERSION = 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1';
+const probeKeyVersion = (slot: string | number) =>
+  `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${slot}/cryptoKeyVersions/1`;
 let registryBundle = '';
 const instances: Miniflare[] = [];
 
@@ -201,7 +204,7 @@ describe('HostRegistryObject runtime transactions', () => {
         },
         principal: {
           subject: 'pre-lock-runner',
-          keyVersion: 'probe-key/pre-lock',
+          keyVersion: probeKeyVersion('pre-lock'),
           keyFingerprint: 'f'.repeat(64),
           region: 'us-west1',
         },
@@ -238,7 +241,7 @@ describe('HostRegistryObject runtime transactions', () => {
     for (const index of [0, 1, 2] as const) {
       const principal: ProbePrincipal = {
         subject: `probe-${index}`,
-        keyVersion: `probe-key/${index}`,
+        keyVersion: probeKeyVersion(index),
         keyFingerprint: String(index + 1).repeat(64),
         region: ['us-west1', 'us-east1', 'europe-west1'][index],
       };
@@ -290,7 +293,7 @@ describe('HostRegistryObject runtime transactions', () => {
       ledgerPayload: accepted,
       ledgerDocumentDigest: 'b'.repeat(64),
       attestorSub: 'source-attestor',
-      attestorKeyVersion: 'source-key/1',
+      attestorKeyVersion: SOURCE_KEY_VERSION,
       attestorKeyFingerprint: 'c'.repeat(64),
       attestationIssuedAt: new Date(NOW).toISOString(),
       attestationSignature: 'signed-source',
@@ -362,7 +365,7 @@ describe('HostRegistryObject runtime transactions', () => {
         },
         principal: {
           subject: 'equal-boundary-runner',
-          keyVersion: 'probe-key/equal-boundary',
+          keyVersion: probeKeyVersion('equal-boundary'),
           keyFingerprint: '9'.repeat(64),
           region: 'us-west1',
         },
@@ -416,7 +419,7 @@ describe('HostRegistryObject runtime transactions', () => {
     const digest = projectionDigest(committed);
     const principal: ProbePrincipal = {
       subject: 'probe-principal-cap',
-      keyVersion: 'probe-key/principal-cap',
+      keyVersion: probeKeyVersion('principal-cap'),
       keyFingerprint: 'a'.repeat(64),
       region: 'us-west1',
     };
@@ -450,7 +453,7 @@ describe('HostRegistryObject runtime transactions', () => {
           request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
           principal: {
             subject: `probe-host-cap-${index}`,
-            keyVersion: `probe-key/host-cap-${index}`,
+            keyVersion: probeKeyVersion(`host-cap-${index}`),
             keyFingerprint: createHash('sha256').update(`host-cap-${index}`).digest('hex'),
             region: `region-${index}`,
           },
@@ -465,7 +468,7 @@ describe('HostRegistryObject runtime transactions', () => {
         request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
         principal: {
           subject: 'probe-host-cap-overflow',
-          keyVersion: 'probe-key/host-cap-overflow',
+          keyVersion: probeKeyVersion('host-cap-overflow'),
           keyFingerprint: 'b'.repeat(64),
           region: 'overflow-region',
         },
@@ -484,7 +487,7 @@ describe('HostRegistryObject runtime transactions', () => {
     const nearlyExpiredNow = runtimeNow - 5 * 60_000 + 250;
     const principal = (suffix: string): ProbePrincipal => ({
       subject: `probe-${suffix}`,
-      keyVersion: `probe-key/${suffix}`,
+      keyVersion: probeKeyVersion(suffix),
       keyFingerprint: createHash('sha256').update(suffix).digest('hex'),
       region: `region-${suffix}`,
     });

@@ -54,6 +54,12 @@ function sha256(value: unknown): string {
   return result;
 }
 
+function kmsKeyVersion(value: unknown): string {
+  const result = nonEmptyString(value);
+  if (!isKmsCryptoKeyVersion(result)) throw new Error('key version');
+  return result;
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -107,7 +113,7 @@ async function validateSourceAudit(value: unknown, expectedHost: string): Promis
   const observedAt = timestamp(source.observedAt);
   sha256(source.ledgerDocumentDigest);
   nonEmptyString(source.attestorSub);
-  nonEmptyString(source.attestorKeyVersion);
+  kmsKeyVersion(source.attestorKeyVersion);
   sha256(source.attestorKeyFingerprint);
   timestamp(source.attestationIssuedAt);
   nonEmptyString(source.attestationSignature);
@@ -280,7 +286,7 @@ function validatePublisherReplacement(value: unknown): void {
   positiveDecimal(replacement.quarantinedEpochCeiling);
   positiveDecimal(replacement.nextPublisherEpoch);
   nonEmptyString(replacement.replacementSubject);
-  nonEmptyString(replacement.replacementKeyVersion);
+  kmsKeyVersion(replacement.replacementKeyVersion);
   sha256(replacement.replacementKeyFingerprint);
   sha256(replacement.registryConfigDigest);
 
@@ -308,7 +314,7 @@ function validatePublisherReplacement(value: unknown): void {
     const mapping = exactRecord(entry, ['epoch', 'subject', 'keyVersion', 'algorithm', 'spkiSha256']);
     positiveDecimal(mapping.epoch);
     nonEmptyString(mapping.subject);
-    nonEmptyString(mapping.keyVersion);
+    kmsKeyVersion(mapping.keyVersion);
     if (mapping.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256') throw new Error('algorithm');
     sha256(mapping.spkiSha256);
   });
@@ -327,7 +333,7 @@ function validatePublisherReplacement(value: unknown): void {
     if (!Array.isArray(access.enabledVersions)) throw new Error('enabled versions');
     access.enabledVersions.forEach((entry) => {
       const version = exactRecord(entry, ['keyVersion', 'algorithm', 'spkiSha256']);
-      nonEmptyString(version.keyVersion);
+      kmsKeyVersion(version.keyVersion);
       if (version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256') throw new Error('algorithm');
       sha256(version.spkiSha256);
     });
@@ -383,7 +389,7 @@ function validatePublisherReplacement(value: unknown): void {
     sha256(decision.responseDigest);
   });
   nonEmptyString(control.attestorSub);
-  nonEmptyString(control.attestorKeyVersion);
+  kmsKeyVersion(control.attestorKeyVersion);
   sha256(control.attestorKeyFingerprint);
   timestamp(control.attestationIssuedAt);
   nonEmptyString(control.attestationSignature);
@@ -578,15 +584,10 @@ function validateProbeChallenge(value: unknown, expectedHost: string): Record<st
     'recoverySequence',
     'wafRemovedAt',
   ]);
-  for (const field of [
-    challenge.probeNonce,
-    challenge.subject,
-    challenge.keyVersion,
-    challenge.region,
-    challenge.host,
-  ]) {
+  for (const field of [challenge.probeNonce, challenge.subject, challenge.region, challenge.host]) {
     nonEmptyString(field);
   }
+  kmsKeyVersion(challenge.keyVersion);
   if (challenge.host !== expectedHost) throw new Error('challenge host');
   sha256(challenge.keyFingerprint);
   sha256(challenge.expectedStateDigest);
@@ -688,7 +689,7 @@ function validateProbeEvidence(value: unknown, expectedHost: string): ConsumedPr
   nonEmptyString(evidence.id);
   timestamp(evidence.receivedAt);
   nonEmptyString(evidence.subject);
-  nonEmptyString(evidence.keyVersion);
+  kmsKeyVersion(evidence.keyVersion);
   sha256(evidence.keyFingerprint);
   nonEmptyString(evidence.region);
   const challenge = validateProbeChallenge(evidence.challenge, expectedHost);
@@ -947,9 +948,7 @@ export async function parseRecoveryHistoryEntry(
     }
     validateActionBindings(value as RecoveryRecord, sourceAudit, action, probeEvidence);
     nonEmptyString(record.operatorSub);
-    if (!isKmsCryptoKeyVersion(record.operatorKeyVersion)) {
-      throw new Error('operator key');
-    }
+    kmsKeyVersion(record.operatorKeyVersion);
     sha256(record.operatorKeyFingerprint);
     nonEmptyString(record.operatorSignature);
     if (
