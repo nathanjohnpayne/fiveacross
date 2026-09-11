@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const RENAMED_EDITION_IDS = Object.freeze({
-  // Deliberately NOT renamed: gcb is DEFAULT_EDITION, the id every unknown
-  // Edition falls back to. Renaming it would make a hardcoded 'gcb' in the GCB
-  // scope const or the EDITION_DEFAULT_THEME gcb row indistinguishable from
-  // the fallback branch, so the assertions could not tell the two apart.
-  // Coverage is therefore 2-of-3 by design: this test catches a hardcoded
-  // string for the two renamed ids below and cannot for gcb (#1054).
-  GAY_CRUISE_BINGO: 'gcb',
+  // All three ids are renamed, gcb included. gcb is DEFAULT_EDITION, the id
+  // every unknown Edition falls back to, but DEFAULT_EDITION is itself
+  // registry-derived (`EDITION_IDS.GAY_CRUISE_BINGO`), so under this mock the
+  // fallback branch resolves to the renamed id too and a hardcoded 'gcb' stays
+  // distinguishable from it: one in the GCB scope const makes the gcb picker
+  // come back empty, one in the EDITION_DEFAULT_THEME gcb row makes the gcb
+  // default come back undefined. Both are asserted below, so coverage is
+  // 3-of-3 (#1054).
+  GAY_CRUISE_BINGO: 'gcb-renamed',
   VACAY_BINGO: 'vacay-renamed',
   FIVE_ACROSS: 'fiveacross-renamed',
 } as const);
@@ -36,6 +38,27 @@ describe('Edition registry drives brand and Theme behavior together', () => {
 
     const editions = await import('../editions');
     const themes = await import('./themes');
+
+    editions.setActiveEdition(RENAMED_EDITION_IDS.GAY_CRUISE_BINGO);
+    expect(editions.editionBrand().wordmark).toBe('GAY CRUISE BINGO');
+    expect(themes.themesForEdition().map((theme) => theme.id)).toEqual([
+      'neon-playground',
+      'get-sporty',
+      'duty-free',
+      'glamiators',
+      'summer-white',
+      'dog-tag',
+      'revival-disco',
+      'seriously-pink',
+      'welcome-aboard',
+      'so-long-farewell',
+      'uniforms-without-borders',
+      'neon-pink-playground',
+      'sporty-splash',
+      'under-the-stars',
+      'atlantis-classics',
+    ]);
+    expect(themes.defaultThemeForEdition()).toBe('neon-playground');
 
     editions.setActiveEdition(RENAMED_EDITION_IDS.VACAY_BINGO);
     expect(editions.editionBrand().wordmark).toBe('VACAY BINGO');
