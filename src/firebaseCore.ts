@@ -27,7 +27,7 @@ export const functions = getFunctions(app, 'us-central1');
 
 /** The one production/e2e boundary shared by every Firebase service instance. */
 export function firebaseEmulatorsEnabled(): boolean {
-  return import.meta.env.MODE === 'e2e' && import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-');
+  return import.meta.env.MODE === 'e2e' && import.meta.env.VITE_FIREBASE_PROJECT_ID?.startsWith('demo-') === true;
 }
 
 if (firebaseEmulatorsEnabled()) {
