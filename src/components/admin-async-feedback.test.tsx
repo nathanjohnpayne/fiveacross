@@ -541,6 +541,44 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     );
   });
 
+  // A REJECTED approve resolves nothing, so a notice that is only retired on
+  // settlement would survive it: AsyncButton raises its own role=alert pill and
+  // the previous run's skip would sit beside it, naming a row as skipped by an
+  // action that never reached the server. Clearing as the approve starts keeps
+  // the notice describing the latest ATTEMPT, not the latest one that resolved.
+  it('drops the skipped-row notice when the next Approve all is rejected', async () => {
+    H.pendingItems = [
+      item('i1', { text: 'Good prompt', status: 'pending' }),
+      item('i2', { text: 'Bad classification', status: 'pending' }),
+    ];
+    H.bulkApproveItems
+      .mockResolvedValueOnce([
+        { itemId: 'i1', dayIndex: 2, retained: false, outcome: 'placed' },
+        {
+          itemId: 'i2',
+          dayIndex: null,
+          retained: false,
+          outcome: 'malformed',
+          reason: 'Community Prompt approval requires an easy or exploratory classification.',
+        },
+      ])
+      .mockRejectedValueOnce(new Error('offline'));
+    renderAdmin('/more/admin/queue');
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+    expect(await within(approvalsSection()).findByRole('status')).toHaveTextContent(
+      'Skipped “Bad classification” as malformed',
+    );
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+
+    // The rejection speaks for itself, alone.
+    expect(await within(approvalsSection()).findByRole('alert')).toHaveTextContent(
+      'Failed—try again.',
+    );
+    expect(within(approvalsSection()).queryByRole('status')).toBeNull();
+  });
+
   it('names a single-row Approve that was skipped as malformed', async () => {
     H.pendingItems = [item('i1', { text: 'Lone bad row', status: 'pending' })];
     H.approveItem.mockResolvedValueOnce({

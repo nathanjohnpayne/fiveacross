@@ -500,8 +500,11 @@ export default function ReviewQueue({
   // console would say so: the write resolves successfully — the rest of the batch
   // really was approved — so AsyncButton clears, and a skipped row just quietly
   // stays in the queue looking untouched. Held per-action rather than
-  // accumulated: this is the result of the approve the admin just tapped, so the
-  // next one replaces it, and a clean run clears it.
+  // accumulated: this is the result of the approve the admin just tapped. Each
+  // approve clears it as it STARTS rather than only when it resolves — a
+  // rejected write reports itself through AsyncButton's own role=alert pill, and
+  // leaving the previous run's notice standing beside it would name a row as
+  // skipped by an action that never reached the server.
   const [skippedAsMalformed, setSkippedAsMalformed] = useState<
     { id: string; name: string; reason: string }[]
   >([]);
@@ -669,21 +672,27 @@ export default function ReviewQueue({
   // gets a chance to no-op harmlessly.
   const approveOne = (it: ItemDoc) => {
     const ownedEventId = EVENT_ID;
-    return guard(isSpicy(it), 'approve', () =>
-      Promise.resolve(approveItem(it, adminUid, ownedEventId)).then((placement) => {
+    return guard(isSpicy(it), 'approve', () => {
+      // Retire the previous run's notice the moment this one actually runs
+      // (inside `run`, for the same reason the tracking wrapper lives here: the
+      // flip-confirm can defer the real call into its own handler). A rejection
+      // then leaves the alert pill alone rather than beside a stale skip.
+      setSkippedAsMalformed([]);
+      return Promise.resolve(approveItem(it, adminUid, ownedEventId)).then((placement) => {
         const tracked = trackApproval(placement, ownedEventId);
         reportOutcomes(tracked ? [tracked] : []);
         return tracked;
-      }),
-    );
+      });
+    });
   };
   const approveAll = () => {
     const ownedEventId = EVENT_ID;
     return guard(
       explicitPending.length > 0,
       'bulk-approve',
-      () =>
-        Promise.resolve(
+      () => {
+        setSkippedAsMalformed([]);
+        return Promise.resolve(
           bulkApproveItems(
             pendingItems.map((it) => {
               const difficulty = difficultyFor(it);
@@ -700,7 +709,8 @@ export default function ReviewQueue({
           const tracked = trackApprovals(placements, ownedEventId);
           reportOutcomes(tracked);
           return tracked;
-        }),
+        });
+      },
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
     );
   };

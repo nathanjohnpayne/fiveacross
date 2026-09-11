@@ -136,10 +136,10 @@ export const GA4_EVENTS = [
   'prompt_suggestion_submitted',
   // An Admin approved a submission out of the Approvals queue. Params:
   // `outcome` (the `ApprovalPlacement.outcome` #557 already computes: 'placed'
-  // | 'untargeted' | 'retained' — never the no-op 'stale'/'missing' verdicts,
-  // which approved nothing), `dayIndex` (the Day it landed on, or absent for
-  // 'untargeted'/'retained'). Fired once per approved row, including each row
-  // of a bulk approve. Call site: components/admin/ReviewQueue.tsx.
+  // | 'untargeted' | 'retained' — never the no-op 'stale'/'missing'/'malformed'
+  // verdicts, which approved nothing), `dayIndex` (the Day it landed on, or
+  // absent for 'untargeted'/'retained'). Fired once per approved row, including
+  // each row of a bulk approve. Call site: components/admin/ReviewQueue.tsx.
   'prompt_suggestion_approved',
   // A freshly-DEALT Board was observed to carry one or more Community Prompt
   // Squares — client-observed, like `most_loved_photo_frozen`, and aggregate

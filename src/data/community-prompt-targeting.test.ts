@@ -777,20 +777,6 @@ describe('approveItems — routing an approval into one Day', () => {
 });
 
 describe('setItemSpicy — approval-race fence (#558)', () => {
-  // The fence restart is now logged (#1071), and several rows here legitimately
-  // have no stored revision, so the warning is expected rather than incidental.
-  // Capture it instead of letting the suite print it, and assert on the spy.
-  const spyOnWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
-  let warn: ReturnType<typeof spyOnWarn>;
-
-  beforeEach(() => {
-    warn = spyOnWarn();
-  });
-
-  afterEach(() => {
-    warn.mockRestore();
-  });
-
   it('refuses a late stale toggle after Easy approval has made the row active', async () => {
     putItem('p1', {
       status: 'active',
@@ -840,19 +826,34 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
   });
 
   // #1071: `spicyRevision` only ever reaches Firestore through this
-  // transaction, one increment at a time, so a stored value outside the
-  // contract is corrupted or hand-edited data. The correction must stay
+  // transaction, one increment at a time, so a value that is STORED and outside
+  // the contract is corrupted or hand-edited data. The correction must stay
   // writable, so the fence still restarts at 0 — but that silently re-bases the
   // acknowledgement the queue retires its optimistic overlay on, so it is said
   // out loud, naming the row and the SHAPE of the bad value (never the value,
-  // never the row, which holds submitter prose).
+  // never the row, which holds submitter prose). An ABSENT field is not that:
+  // the field is optional, no create path writes it, and starting at 0 is the
+  // ordinary opening state of every row — see the legacy/first-toggle case
+  // below, which must stay silent.
   describe('an out-of-contract stored revision is logged, not swallowed', () => {
+    // Scoped to this block: only these rows expect the warning, so capturing it
+    // here keeps a stray warning from any other case visible.
+    const spyOnWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let warn: ReturnType<typeof spyOnWarn>;
+
+    beforeEach(() => {
+      warn = spyOnWarn();
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
     const outOfContract: Array<[string, unknown, string]> = [
       ['negative', -1, 'negative'],
       ['NaN', Number.NaN, 'NaN'],
       ['fractional', 1.5, 'non-integer'],
       ['a string', '3', 'typeof string'],
-      ['absent', undefined, 'missing'],
     ];
 
     it.each(outOfContract)(
@@ -879,21 +880,34 @@ describe('setItemSpicy — approval-race fence (#558)', () => {
       },
     );
 
-    it('says nothing when the stored revision is a usable one', async () => {
-      putItem('p1', {
-        status: 'pending',
-        pool: 'main',
-        spicy: false,
-        spicyRevision: 4,
-      });
+    // The two in-contract shapes, neither of which is a fault to report. The
+    // absent case is the one that matters here: `spicyRevision` is optional and
+    // written only by this transaction, so EVERY Prompt's first correction
+    // arrives with no stored revision. Warning there would put the line on 100%
+    // of first toggles and drown the corruption above in routine noise.
+    const inContract: Array<[string, number | undefined, number]> = [
+      ['a usable one', 4, 5],
+      ['absent, as on a legacy row or any first toggle', undefined, 1],
+    ];
 
-      await expect(setItemSpicy('p1', true)).resolves.toBe(5);
-      expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
-        spicy: true,
-        spicyRevision: 5,
-      });
-      expect(warn).not.toHaveBeenCalled();
-    });
+    it.each(inContract)(
+      'says nothing when the stored revision is %s',
+      async (_label, stored, expected) => {
+        putItem('p1', {
+          status: 'pending',
+          pool: 'main',
+          spicy: false,
+          spicyRevision: stored,
+        });
+
+        await expect(setItemSpicy('p1', true)).resolves.toBe(expected);
+        expect(updateMock).toHaveBeenCalledWith('events/med-2026/items/p1', {
+          spicy: true,
+          spicyRevision: expected,
+        });
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps a spicy correction in its acted Event when the transaction callback starts after A to B', async () => {

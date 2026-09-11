@@ -406,19 +406,27 @@ export const approveItem = (
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
-// `spicyRevision` is written only by `setItemSpicy`'s transaction, one
-// increment at a time, so a stored value outside the contract — missing,
-// non-numeric, fractional, negative, or past the safe-integer range — is
-// corrupted or hand-edited data rather than a state the app can reach through
-// its own writes. Restarting the fence at 0 keeps the correction writable, but
-// it silently re-bases the acknowledgement fence the queue compares against, so
-// the optimistic overlay for that row can retire a beat earlier or later than
-// intended (#1071). Say so at the coercion rather than absorbing it.
+// `spicyRevision` is optional by contract (`ItemDoc.spicyRevision?`) and reaches
+// Firestore only through `setItemSpicy`'s transaction, one increment at a time.
+// The two ways to fail the guard are therefore nothing alike:
+//
+// ABSENT is the ordinary state of every row no Admin has corrected yet — a
+// legacy row, and every Prompt's first toggle. No create path writes the field,
+// so starting that fence at 0 is the contract working as designed and says
+// nothing.
+//
+// PRESENT but outside the contract — non-numeric, fractional, negative, or past
+// the safe-integer range — is corrupted or hand-edited data, a state this app's
+// own writes cannot reach. Restarting the fence at 0 keeps the correction
+// writable, but it silently re-bases the acknowledgement fence the queue
+// compares against, so the optimistic overlay for that row can retire a beat
+// earlier or later than intended (#1071). That is the restart worth saying out
+// loud. Warning on absence too would fire the line on every first toggle and
+// bury the corruption signal it exists to surface.
 //
 // The line carries the item id and the SHAPE of the offending value only —
 // never the value, and never the row, which holds submitter prose.
 const spicyRevisionShape = (raw: unknown): string => {
-  if (raw === undefined) return 'missing';
   if (raw === null) return 'null';
   if (typeof raw !== 'number') return `typeof ${typeof raw}`;
   if (Number.isNaN(raw)) return 'NaN';
@@ -429,6 +437,7 @@ const spicyRevisionShape = (raw: unknown): string => {
 
 const readSpicyRevision = (raw: unknown, itemId: string): number => {
   if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw;
+  if (raw === undefined) return 0;
   console.warn(
     `[admin] item ${itemId} has an out-of-contract spicyRevision ` +
       `(${spicyRevisionShape(raw)}); restarting the correction fence at 0`,
@@ -448,10 +457,12 @@ const readSpicyRevision = (raw: unknown, itemId: string): number => {
 // and another Admin can then correct it again before settlement. Comparing the
 // listener's monotonic revision with this return value distinguishes that newer
 // correction from a stale pre-commit snapshot without treating value equality
-// as authorship. A row with no usable revision — a legacy row, or a corrupted
-// one — starts at 0, and `readSpicyRevision` logs every such restart. `null`
-// means the authoritative row was missing or no longer eligible, so no write
-// occurred and the caller must drop any optimistic overlay.
+// as authorship. A row with no stored revision — a legacy row, or any Prompt's
+// first correction — starts at 0 silently; a row whose stored revision is
+// present but out of contract starts at 0 too, and `readSpicyRevision` logs
+// that restart. `null` means the authoritative row was missing or no longer
+// eligible, so no write occurred and the caller must drop any optimistic
+// overlay.
 export async function setItemSpicy(
   id: string,
   spicy: boolean,
