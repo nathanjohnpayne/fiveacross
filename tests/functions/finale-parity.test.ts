@@ -6,6 +6,7 @@ import {
   sanitizeFinaleDayStats,
   standingsFreezeAtFor as fnsStandingsFreezeAtFor,
   withReadableFinaleRanking,
+  canonicalDayStatsKey as fnsCanonicalDayStatsKey,
   clampArchiveNumber as fnsClampArchiveNumber,
   clampReaggregatedTotal as fnsClampReaggregatedTotal,
   ARCHIVE_NUMBER_BOUND as FNS_ARCHIVE_NUMBER_BOUND,
@@ -34,6 +35,7 @@ import { withReadableDayStats } from '../../src/data/eventArchive';
 import {
   ARCHIVE_NUMBER_BOUND,
   MAX_ARCHIVE_NUMBER,
+  canonicalDayStatsKey,
   clampArchiveNumber,
   clampReaggregatedTotal,
 } from '../../src/data/eventLimits';
@@ -768,6 +770,216 @@ describe('client/functions parity — the archive bound the podium ranks by (#11
       bingoCount: 1,
       squaresMarked: 3,
     });
+  });
+});
+
+// --- The dayStats ENTRY rule: keys and bucket shapes (#1168) --------------------
+//
+// #1165 left two divergences out of scope, and this pins their resolution. The
+// client kept a bucket KEY verbatim, junk included — `"7.5"`, `"seven"`, `"07"`,
+// `" 7"` — while the Functions read boundary canonicalised every key through
+// `Number(key)`: dropping `"7.5"` and `"seven"`, but KEEPING `"07"` and `""` as
+// Days 7 and 0, merged over whatever real bucket sat under that Day. And the
+// client kept an ARRAY where a bucket was expected, coercing its fields, while
+// the Functions side dropped it. Neither shape is one a real client writes, so
+// no rendered surface moved — but the mirror's whole promise is that no row
+// ranks differently on the two sides, and these could.
+//
+// Both sides now DROP. An entry survives only under a key `Number(key)`
+// round-trips (`canonicalDayStatsKey`, one predicate per package) and only with
+// a plain, non-array object for a bucket; a map left with nothing — or that was
+// never a plain object — reads as ABSENT, so the row ranks as a legacy row by
+// its roots everywhere. Dropping was chosen over keep-and-coerce because it is
+// the stricter contract, the one under which no two entries can collapse into
+// one Day, and the one the Functions boundary already promised. The empty-map
+// answer is the corollary the alignment surfaced: `podiumStandingRow` re-
+// aggregates a `{}` to 0/0 and passes an absent map through to the roots, so
+// the client's old `{}` and the Functions side's `undefined` crowned different
+// champions from one row.
+
+/** A well-formed bucket, reused across the shapes below. */
+const BUCKET = { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 };
+
+/** A ceremonial final Day, so `podiumStandingRow` RE-AGGREGATES — the path on
+ *  which an empty map and an absent one answer differently. */
+const CEREMONIAL_CLOSE: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'>> = [
+  { index: 0, pool: 'main', tutorial: false },
+  { index: 1, pool: 'farewell', tutorial: false },
+];
+
+describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
+  // Every spelling the rule has to answer, with the answer pinned so a symmetric
+  // regression on both predicates still fails here.
+  const KEY_SPELLINGS: Array<[key: string, canonical: boolean]> = [
+    ['0', true],
+    ['1', true],
+    ['7', true],
+    ['9', true],
+    ['10', true],
+    ['-1', true],
+    [String(Number.MAX_SAFE_INTEGER), true],
+    ['07', false],
+    [' 7', false],
+    ['7 ', false],
+    ['+7', false],
+    ['7.5', false],
+    ['7.0', false],
+    ['seven', false],
+    ['', false],
+    ['-0', false],
+    ['1e3', false],
+    ['1e+21', false],
+    ['0x10', false],
+    ['NaN', false],
+    ['Infinity', false],
+    [String(Number.MAX_SAFE_INTEGER + 2), false],
+    ['12345678901234567890', false],
+  ];
+
+  it.each(KEY_SPELLINGS)('answers key %j identically on both sides (%s)', (key, canonical) => {
+    expect(fnsCanonicalDayStatsKey(key)).toBe(canonicalDayStatsKey(key));
+    expect(canonicalDayStatsKey(key)).toBe(canonical);
+  });
+
+  /** Every map and entry shape the rule names, each with the ONE answer both
+   *  sides must reach. `reads` is `undefined` wherever nothing survives. */
+  const SHAPES: Array<{ name: string; dayStats: unknown; reads: PlayerDoc['dayStats'] }> = [
+    { name: 'a key that is not a number', dayStats: { seven: BUCKET }, reads: undefined },
+    { name: 'a fractional key', dayStats: { '7.5': BUCKET }, reads: undefined },
+    {
+      name: 'a zero-padded key whose Number() is an integer — dropped, never merged into Day 7',
+      dayStats: { 7: BUCKET, '07': { bingoCount: 9, squaresMarked: 9, firstBingoAt: 1 } },
+      reads: { 7: BUCKET },
+    },
+    { name: 'a key with surrounding whitespace', dayStats: { ' 7': BUCKET, '7 ': BUCKET }, reads: undefined },
+    { name: 'an empty key, which Number() reads as Day 0', dayStats: { '': BUCKET }, reads: undefined },
+    { name: 'a negative-zero key', dayStats: { '-0': BUCKET }, reads: undefined },
+    { name: 'an ARRAY bucket', dayStats: { 1: [1, 2, 3] }, reads: undefined },
+    { name: 'an empty array bucket', dayStats: { 1: [] }, reads: undefined },
+    { name: 'a null bucket', dayStats: { 1: null }, reads: undefined },
+    { name: 'a primitive bucket', dayStats: { 1: 'nonsense', 2: 7 }, reads: undefined },
+    {
+      name: 'a bucket whose FIELDS are arrays — kept, each field unreadable',
+      dayStats: { 1: { bingoCount: [1], squaresMarked: [], firstBingoAt: [900] } },
+      reads: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    },
+    {
+      name: 'every shape at once beside one real bucket',
+      dayStats: { 2: BUCKET, '7.5': BUCKET, seven: BUCKET, '02': BUCKET, 3: [BUCKET], 4: null, 5: 'x' },
+      reads: { 2: BUCKET },
+    },
+    { name: 'an empty map', dayStats: {}, reads: undefined },
+    { name: 'a map that is an ARRAY', dayStats: [BUCKET], reads: undefined },
+    { name: 'a map that is a string', dayStats: 'nonsense', reads: undefined },
+    { name: 'a null map', dayStats: null, reads: undefined },
+  ];
+
+  it.each(SHAPES)('reads $name identically on both sides', ({ dayStats, reads }) => {
+    const row = oversized('shape', 'Shape', { dayStats: dayStats as PlayerDoc['dayStats'] });
+    const client = withReadableDayStats(row).dayStats;
+    // The read boundary (sanitiser, then normaliser), the sanitiser alone, and
+    // the normaliser alone: three routes on the Functions side, one answer.
+    expect(asReadFinalePlayers([row])[0].dayStats).toEqual(client);
+    expect(sanitizeFinaleDayStats(dayStats)).toEqual(client);
+    expect(withReadableFinaleRanking(asFinalePlayers([row])[0]).dayStats).toEqual(client);
+    expect(client).toEqual(reads);
+  });
+
+  it('still returns a well-formed row by identity on both sides', () => {
+    const row = oversized('ok', 'Ok', {
+      bingoCount: 1,
+      squaresMarked: 2,
+      firstBingoAt: 3,
+      dayStats: { 0: BUCKET, 9: BUCKET, 10: BUCKET },
+    });
+    expect(withReadableDayStats(row)).toBe(row);
+    const fnsRow = asFinalePlayers([row])[0];
+    expect(withReadableFinaleRanking(fnsRow)).toBe(fnsRow);
+    // …and the boundary's rebuilt map is the same map, so running both is a
+    // round-trip rather than a second opinion.
+    expect(asReadFinalePlayers([row])[0]).toEqual(fnsRow);
+  });
+
+  it('ranks a row whose every bucket is unreadable by its ROOTS on both podiums and in the email', () => {
+    // Nothing survives, so the map reads as absent: `podiumStandingRow` passes
+    // the roots through on the re-aggregating schedule, exactly as it does for
+    // a legacy row, and the effective first-bingo falls back to the root stamp.
+    const players = [
+      oversized('junk', 'Junk', {
+        bingoCount: 3,
+        squaresMarked: 9,
+        firstBingoAt: 500,
+        dayStats: { '7.5': BUCKET, seven: BUCKET, 1: [BUCKET] } as unknown as PlayerDoc['dayStats'],
+      }),
+      oversized('real', 'Real', {
+        bingoCount: 1,
+        squaresMarked: 5,
+        firstBingoAt: 900,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 } },
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), CEREMONIAL_CLOSE as DayDef[]);
+    const fns = buildPodiumPayload(asReadFinalePlayers(players), asFinaleDays(CEREMONIAL_CLOSE));
+
+    expect(fns.champion).toEqual(client.champion);
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(client.champion).toEqual({ uid: 'junk', displayName: 'Junk', bingoCount: 3, squaresMarked: 9 });
+    expect(client.firstBingo).toEqual({ uid: 'junk', displayName: 'Junk', at: 500 });
+
+    // The email's window fold reads an absent map the same way — roots.
+    const email = standingsThrough(
+      asReadFinalePlayers(players),
+      1,
+      new Set(),
+      ceremonialDayIndexes(asFinaleDays(CEREMONIAL_CLOSE)),
+    );
+    expect(email.map((r) => `${r.uid}:${r.bingoCount}/${r.squaresMarked}`)).toEqual(['junk:3/9', 'real:1/5']);
+
+    // The corollary, stated directly: an EMPTY map handed straight to the client
+    // builder is a breakdown that sums to nothing, so the row is not a rank and
+    // the other Player is crowned — the champion the client used to name here
+    // while the Functions side, reading the map as absent, named Junk.
+    const emptied = players.map((p) => (p.uid === 'junk' ? { ...p, dayStats: {} } : p));
+    expect(buildPodium(emptied, CEREMONIAL_CLOSE as DayDef[]).champion).toEqual({
+      uid: 'real',
+      displayName: 'Real',
+      bingoCount: 1,
+      squaresMarked: 5,
+    });
+  });
+
+  it('never merges a zero-padded key into the real Day beside it, so the honour reads the same', () => {
+    // `"07"` carries the EARLIER stamp. Under the old Functions rule it was read
+    // as Day 7 and overwrote the real bucket, and under the old client rule it
+    // was a second Day-7 bucket the earliest-of fold still saw — so both sides
+    // named Zed, by two different mechanisms. Dropped on both, Ada holds it.
+    const schedule: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'>> = [
+      { index: 7, pool: 'main', tutorial: false },
+    ];
+    const players = [
+      oversized('zed', 'Zed', {
+        bingoCount: 2,
+        squaresMarked: 2,
+        firstBingoAt: 100,
+        dayStats: {
+          7: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 700 },
+          '07': { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
+        } as unknown as PlayerDoc['dayStats'],
+      }),
+      oversized('ada', 'Ada', {
+        bingoCount: 1,
+        squaresMarked: 1,
+        firstBingoAt: 400,
+        dayStats: { 7: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 400 } },
+      }),
+    ];
+    const client = buildPodium(asLiveRoster(players), schedule as DayDef[]);
+    const fns = buildPodiumPayload(asReadFinalePlayers(players), asFinaleDays(schedule));
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(client.firstBingo).toEqual({ uid: 'ada', displayName: 'Ada', at: 400 });
+    // …and the UNREAD roster really does name the other Player on both sides.
+    expect(buildPodium(players, schedule as DayDef[]).firstBingo?.uid).toBe('zed');
+    expect(buildPodiumPayload(asFinalePlayers(players), asFinaleDays(schedule)).firstBingo?.uid).toBe('zed');
   });
 });
 
