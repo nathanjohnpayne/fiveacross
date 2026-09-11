@@ -401,7 +401,17 @@ export type VisionVerdictTarget = 'proof' | 'scan';
  *     than a trigger-hop later (see `visionVerdictWrite`). `update` rather than
  *     `set` is the guarantee: a Proof deleted since the upload is never
  *     resurrected as a ghost, the same promise `hideVisionFlaggedIfQualifies`
- *     already makes.
+ *     already makes. The same arm also `tx.delete`s the hand-off record, and
+ *     it does so BLIND. Storage triggers are at-least-once, so a duplicate
+ *     delivery of one scan can reach the Proof after `attachProof`'s create
+ *     while its twin's parked verdict is still waiting for the create-trigger;
+ *     the direct write supersedes that record. Left standing, it outlived both
+ *     the direct write and an admin's Restore, and the delayed create-trigger
+ *     delivery then consumed it and re-hid the Proof the admin had just lifted
+ *     — an override reversed without a fresh upload (#1154). A blind delete
+ *     needs no read of its own, so the transaction's reads-before-writes rule
+ *     holds, and on the ordinary scan — nothing parked — it is a no-op that
+ *     costs less than the read a conditional delete would need.
  *   - the Proof is ABSENT → `tx.set` parks the verdict in `proofScans` (above),
  *     and `applyPendingVisionScan` applies it when the Proof arrives.
  *
@@ -431,6 +441,10 @@ export async function writeVisionVerdict(
     const snap = await tx.get(proofRef);
     if (snap.exists) {
       tx.update(proofRef, visionVerdictWrite(visionFlag));
+      // Retire any verdict a duplicate delivery parked before the create
+      // (#1154). Blind — no read precedes it — and a no-op on the ordinary
+      // scan, where nothing is parked.
+      tx.delete(scanRef);
       return 'proof';
     }
     tx.set(scanRef, { visionFlag, scannedAt: now });

@@ -428,6 +428,43 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     expect(ops.some((o) => o.op === 'update' && o.path === PROOF)).toBe(false);
     expect(ops.some((o) => o.op === 'set' && o.path === PROOF)).toBe(false);
   });
+
+  it('retires a verdict a duplicate delivery parked, so the create cannot reverse a later Restore (#1154)', async () => {
+    // Storage triggers are at-least-once. One delivery of the scan beat the
+    // Proof and parked its verdict; its twin lands after attachProof's create
+    // and takes the direct arm. Left in place, the parked record outlived the
+    // direct write AND the admin's Restore, and the delayed create-trigger
+    // delivery then consumed it and reinstated the hide the admin had lifted.
+    const { db, updates, ops, store } = fakeDb({
+      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5 },
+    });
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 6)).toBe('proof');
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'flagged', visionFlag: 'extreme', safetyHide: true, reportCount: 0,
+    });
+    // The record is retired in the SAME transaction as the direct write, and the
+    // delete is BLIND: the only read is the Proof's, so reads still precede writes.
+    expect(ops).toEqual([
+      { op: 'get', path: PROOF },
+      { op: 'update', path: PROOF, data: { status: 'flagged', visionFlag: 'extreme', safetyHide: true } },
+      { op: 'delete', path: SCAN },
+    ]);
+    expect(store[SCAN]).toBeUndefined();
+    // The admin lifts it through the warned console Restore, which writes the
+    // explicit `false` marker beside the status...
+    store[PROOF] = {
+      ...(store[PROOF] as Record<string, unknown>), status: 'active', safetyHide: false, visionFlag: null,
+    };
+    // ...and the delayed create-trigger delivery finds nothing parked, so the
+    // lift sticks: no second flag write, and the marker is not re-stamped `true`.
+    expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(store[PROOF]).toEqual({
+      uid: 'u1', status: 'active', safetyHide: false, visionFlag: null, reportCount: 0,
+    });
+    expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
+  });
 });
 
 describe('applyPendingVisionScan — the parked verdict lands when the Proof appears (#1143)', () => {
