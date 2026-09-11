@@ -7,6 +7,7 @@
 // fake Firestore. No Functions runtime, no emulator, no live Resend key.
 import { describe, it, expect, vi } from 'vitest';
 import {
+  ADMIN_ALERTS_SETTLED_FIELD,
   LABEL_MAX,
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
@@ -23,6 +24,7 @@ import {
   bugReportEventId,
   drainKey,
   isRetryableFirestoreError,
+  markAdminAlertsUnsettled,
   planDrain,
   alertsForWrite,
   currentRowFor,
@@ -34,6 +36,7 @@ import {
   runAdminAlertCycle,
   runAbuseEscalationSweep,
   settleAdminAlertsForArchivedEvent,
+  shouldClearAdminAlertsSettledOnReactivate,
   shouldSettleAdminAlertsOnArchive,
   sendAdminDigestForEvent,
   type AdminAlertFirestore,
@@ -151,13 +154,20 @@ function fakeDb(
       const found = findRow(path);
       return { data: () => (found ? { ...found.data } : undefined) };
     },
-    set: async (data: Record<string, unknown>) => {
-      if (failFreeze) throw new Error('freeze write failed');
+    set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
+      if (failFreeze && path.includes('/adminAlertBatches/')) throw new Error('freeze write failed');
+      const merge = options?.merge === true;
+      // A document can be seeded BOTH as a single and as a row of the
+      // collection the sweep queries — an Event is read by path and found by
+      // `where`. Real Firestore has one document, so a write updates whichever
+      // copies exist rather than silently splitting them.
+      const single = singles.get(path);
+      if (single) singles.set(path, merge ? { ...single, ...data } : { ...data });
       const { collectionPath, id } = split(path);
       const rows = collections.get(collectionPath) ?? [];
       const found = rows.find((r) => r.id === id);
-      if (found) found.data = { ...data };
-      else rows.push({ id, data: { ...data } });
+      if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
+      else if (!single) rows.push({ id, data: { ...data } });
       collections.set(collectionPath, rows);
       return undefined;
     },
@@ -2611,7 +2621,10 @@ describe('runAdminAlertSweep', () => {
     const send = vi.fn(async () => true);
     const db = fakeDb(
       {
-        events: [{ id: 'med-2026', status: 'archived' }],
+        // `adminAlertsSettled: false` is what puts an archived Event in the
+        // sweep's reach at all (#943); the archive edge writes it before
+        // settlement is attempted.
+        events: [{ id: 'med-2026', status: 'archived', adminAlertsSettled: false }],
         'events/med-2026/adminAlerts': [
           {
             id: 'late',
@@ -2634,6 +2647,84 @@ describe('runAdminAlertSweep', () => {
     expect(send).not.toHaveBeenCalled();
     expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
       id: 'late',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+  });
+
+  // #943. The archived set only grows, so the backstop pass is bounded by a
+  // durable marker rather than re-reading every archived Event forever.
+  const lateRow = (id: string) => ({
+    id,
+    kind: 'item-created',
+    collection: 'items',
+    docId: 'i1',
+    label: 'Late producer',
+    status: 'pending',
+    visionFlag: null,
+    reportCount: 0,
+    createdAt: 1,
+    sentAt: null,
+  });
+
+  it('visits only the archived Events whose marker says work is outstanding (#943)', async () => {
+    const db = fakeDb({
+      events: [
+        { id: 'outstanding', status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: false },
+        { id: 'settled', status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: true },
+        // No marker at all — an Event archived before this shipped. The archive
+        // edge is what writes the `false`, and Firestore cannot query for an
+        // ABSENT field, so this one is deliberately out of the sweep's reach;
+        // its rows are bounded by `PENDING_TTL_MS` instead.
+        { id: 'legacy', status: 'archived' },
+      ],
+      'events/outstanding/adminAlerts': [lateRow('a1')],
+      'events/settled/adminAlerts': [lateRow('a1')],
+      'events/legacy/adminAlerts': [lateRow('a1')],
+    });
+
+    await runAdminAlertSweep(db, { now: () => NOW });
+
+    expect(db.rows('events/outstanding/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect(db.rows('events/settled/adminAlerts')[0]).toEqual(lateRow('a1'));
+    expect(db.rows('events/legacy/adminAlerts')[0]).toEqual(lateRow('a1'));
+  });
+
+  it('stamps the marker once an archived queue is fully reconciled (#943)', async () => {
+    const db = fakeDb({
+      events: [{ id: 'med-2026', status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: false }],
+      'events/med-2026/adminAlerts': [lateRow('a1')],
+    });
+
+    await runAdminAlertSweep(db, { now: () => NOW });
+
+    expect(db.rows('events')[0]).toMatchObject({
+      id: 'med-2026',
+      [ADMIN_ALERTS_SETTLED_FIELD]: true,
+    });
+  });
+
+  it('re-enters the sweep once a reactivation clears the marker (#943)', async () => {
+    const db = fakeDb({
+      events: [{ id: 'med-2026', status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: true }],
+      'events/med-2026/adminAlerts': [lateRow('a1')],
+    });
+
+    // Settled, so the sweep does not visit it and the row is left alone.
+    await runAdminAlertSweep(db, { now: () => NOW });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(lateRow('a1'));
+
+    // Reactivation is the lifecycle edge that clears the marker. Whatever the
+    // Event accumulates while it is live again is back in reach the moment it
+    // is archived once more — which is the whole reason the clear exists.
+    await markAdminAlertsUnsettled(db, 'med-2026');
+    await runAdminAlertSweep(db, { now: () => NOW });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
       discardedAt: NOW,
       expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
     });
@@ -2706,6 +2797,53 @@ describe('settleAdminAlertsForArchivedEvent', () => {
       preserved: 0,
     });
     expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(pending());
+    // …and it must not claim the queue is settled either (#943): the row is
+    // live work again, and a marker here would hide it from the sweep.
+    expect((await db.doc('events/med-2026').get()).data()?.[ADMIN_ALERTS_SETTLED_FIELD]).toBeUndefined();
+  });
+
+  it('leaves the marker unset when the reconcile throws part-way (#943)', async () => {
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending()] },
+      { 'events/med-2026': { ...EVENT, status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: false } },
+    );
+    db.failTransactions();
+
+    await expect(settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW })).rejects.toThrow(
+      /transactions unavailable/,
+    );
+    // The marker is EARNED by a completed pass, never assumed by an attempted
+    // one: the Event stays in the sweep's query and the row is retried.
+    expect((await db.doc('events/med-2026').get()).data()).toMatchObject({
+      [ADMIN_ALERTS_SETTLED_FIELD]: false,
+    });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(pending());
+  });
+
+  it('does not settle a page that filled the limit, so the rows behind it are swept again (#943)', async () => {
+    const full = Array.from({ length: MAX_ALERTS_PER_DIGEST }, (_, i) => pending({ id: `a${i + 1}` }));
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': full },
+      { 'events/med-2026': { ...EVENT, status: 'archived', [ADMIN_ALERTS_SETTLED_FIELD]: false } },
+    );
+
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW })).toEqual({
+      discarded: MAX_ALERTS_PER_DIGEST,
+      preserved: 0,
+    });
+    // A page at the limit may have another behind it, so the marker waits.
+    expect((await db.doc('events/med-2026').get()).data()).toMatchObject({
+      [ADMIN_ALERTS_SETTLED_FIELD]: false,
+    });
+
+    // The next pass finds the queue empty, which is what earns the marker.
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW + 1 })).toEqual({
+      discarded: 0,
+      preserved: 0,
+    });
+    expect((await db.doc('events/med-2026').get()).data()).toMatchObject({
+      [ADMIN_ALERTS_SETTLED_FIELD]: true,
+    });
   });
 
   it('discards a claim that never acquired a frozen request', async () => {
@@ -2791,6 +2929,9 @@ describe('settleAdminAlertsForArchivedEvent', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(pending({ batchId: 'a1__1' }));
     expect((await db.doc('events/med-2026/adminAlertBatches/a1__1').get()).data()).toBeDefined();
+    // A preserved frozen batch is still WORK, retried on every sweep until it
+    // delivers, so this pass does not earn the settled marker (#943).
+    expect((await db.doc('events/med-2026').get()).data()?.[ADMIN_ALERTS_SETTLED_FIELD]).toBeUndefined();
   });
 
   it('reports only the rows still pending when the replay loses its claim to a concurrent delivery (#945)', async () => {
@@ -2920,6 +3061,30 @@ describe('settleAdminAlertsForArchivedEvent', () => {
       expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
     });
     expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+});
+
+describe('the durable settled marker (#943)', () => {
+  it('clears on the way OUT of archived, and only for a document that still exists', () => {
+    expect(shouldClearAdminAlertsSettledOnReactivate({ status: 'archived' }, { status: 'active' })).toBe(true);
+    expect(shouldClearAdminAlertsSettledOnReactivate({ status: 'archived' }, { status: 'draft' })).toBe(true);
+    expect(shouldClearAdminAlertsSettledOnReactivate({ status: 'archived' }, { status: 'archived' })).toBe(false);
+    expect(shouldClearAdminAlertsSettledOnReactivate({ status: 'active' }, { status: 'active' })).toBe(false);
+    expect(shouldClearAdminAlertsSettledOnReactivate(undefined, { status: 'active' })).toBe(false);
+    // A DELETED Event is not a reactivation: there is no queue left to sweep,
+    // and no document left to carry a marker.
+    expect(shouldClearAdminAlertsSettledOnReactivate({ status: 'archived' }, undefined)).toBe(false);
+  });
+
+  it('MERGES onto the Event document rather than rewriting its configuration', async () => {
+    const db = fakeDb({}, { 'events/med-2026': { ...EVENT, [ADMIN_ALERTS_SETTLED_FIELD]: true } });
+
+    await markAdminAlertsUnsettled(db, 'med-2026');
+
+    expect((await db.doc('events/med-2026').get()).data()).toEqual({
+      ...EVENT,
+      [ADMIN_ALERTS_SETTLED_FIELD]: false,
+    });
   });
 });
 

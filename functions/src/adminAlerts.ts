@@ -62,8 +62,11 @@ interface AlertSnapshot {
 }
 interface AlertDocRef {
   get(): Promise<{ data(): Record<string, unknown> | undefined }>;
-  /** Unconditional write — used only to FREEZE a batch's outbound request. */
-  set(data: Record<string, unknown>): Promise<unknown>;
+  /** Admin-SDK `DocumentReference.set`. Unconditional by default, which is
+   *  what FREEZES a batch's outbound request; a MERGE when asked, which is how
+   *  the archived-queue settled marker (#943) joins an Event document without
+   *  rewriting the configuration around it. */
+  set(data: Record<string, unknown>, options?: { merge?: boolean }): Promise<unknown>;
   /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
    *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing for the
    *  immutable frozen request: two senders can render, but only one byte-for-
@@ -1292,6 +1295,90 @@ export function shouldSettleAdminAlertsOnArchive(
   return before?.status === 'active' && after?.status === 'archived';
 }
 
+/**
+ * The Event-document field that BOUNDS the archived backstop sweep (#943).
+ *
+ * `true` means every admin-alert row under this archived Event has reached a
+ * terminal state — delivered, discarded, or replayed — so the five-minute sweep
+ * has nothing left to do here. `false` means it still has work. The sweep reads
+ * it as a query filter rather than as a per-Event document read, which is the
+ * whole point: the archived set only GROWS over a project's lifetime, so an
+ * unfiltered `status == 'archived'` scan costs one read per archived Event on
+ * every sweep forever, almost always to discover there is nothing to do.
+ *
+ * WHY A FIELD ON THE EVENT, AND NOT A DOCUMENT BESIDE IT. A marker the sweep
+ * can FILTER on must live on the documents the sweep queries. A dedicated
+ * `events/{id}/meta/adminAlerts` document would have to be read per Event,
+ * which is the cost this exists to remove. The field is written only by the
+ * Admin SDK from this module, and it is deliberately NOT named by any rule:
+ * `firestore.rules` needs no change to ship it, because the Admin SDK bypasses
+ * rules and no client reads it. The residual is stated in
+ * `specs/admin-notification-emails.md` § "The archived backstop is bounded by
+ * a durable settled marker".
+ */
+export const ADMIN_ALERTS_SETTLED_FIELD = 'adminAlertsSettled';
+
+/** Merge the settled marker onto the Event document, leaving every other field
+ *  alone. A merge, never a `set`: this document is the Event's configuration. */
+async function writeAdminAlertsSettled(
+  db: AdminAlertFirestore,
+  eventId: string,
+  settled: boolean,
+): Promise<void> {
+  await db.doc(`events/${eventId}`).set({ [ADMIN_ALERTS_SETTLED_FIELD]: settled }, { merge: true });
+}
+
+/**
+ * Pure trigger guard: an Event LEAVING `archived` must forget that its queue was
+ * reconciled. Without this a reactivated Event would carry its old `true` into
+ * its next archive, and the sweep — which only ever looks at unsettled Events —
+ * would never visit the work that accumulated while it was live again.
+ *
+ * A DELETED Event is not a reactivation. There is no document left to sweep and
+ * nothing to mark, so an absent `after` is deliberately not a clear.
+ */
+export function shouldClearAdminAlertsSettledOnReactivate(
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+): boolean {
+  return before?.status === 'archived' && after !== undefined && after.status !== 'archived';
+}
+
+/**
+ * Mark an Event's admin-alert queue as NOT reconciled, so the backstop sweep
+ * visits it.
+ *
+ * Written on the lifecycle edge in BOTH directions, and both are load-bearing:
+ *
+ *   ENTERING `archived`, before settlement is even attempted. That is what
+ *   keeps the sweep's reach when the archive trigger's settlement THROWS — the
+ *   marker is already there saying "unsettled", so the next sweep picks the
+ *   Event up rather than never seeing it. Marking only on success would make an
+ *   absent marker mean both "never archived" and "archive handling failed", and
+ *   Firestore cannot query for an absent field.
+ *
+ *   LEAVING `archived` (reactivation), so the next archive is swept rather than
+ *   inheriting a stale `true`.
+ */
+export async function markAdminAlertsUnsettled(db: AdminAlertFirestore, eventId: string): Promise<void> {
+  await writeAdminAlertsSettled(db, eventId, false);
+}
+
+/**
+ * Record that an archived Event's queue is fully reconciled — but only while it
+ * is still archived.
+ *
+ * Re-reading `status` here is what stops a reactivation that raced the
+ * settlement from inheriting a `true` it never earned: the reactivation edge
+ * clears the marker, and this read either happens after that clear or sees the
+ * reactivated status itself and declines to write at all.
+ */
+async function markAdminAlertsSettled(db: AdminAlertFirestore, eventId: string): Promise<void> {
+  const event = (await db.doc(`events/${eventId}`).get()).data();
+  if (event?.status !== 'archived') return;
+  await writeAdminAlertsSettled(db, eventId, true);
+}
+
 /** Read one alert snapshot into the record the digest renders, dropping rows
  *  whose shape is unusable. A hand-written or half-migrated document must not
  *  throw here — one bad row would suppress the whole Event's digest. */
@@ -2131,6 +2218,13 @@ async function finishBatch(
  * the transaction found them (#945): a preserved batch is replayed before
  * returning, and whether the replay delivered it, discarded it, or left it
  * queued is read back from the rows afterwards.
+ *
+ * A pass that reconciled the WHOLE queue stamps the durable settled marker, and
+ * that is the only thing that writes it (#943). Everything else deliberately
+ * leaves it alone: a full page has more behind it, a preserved frozen batch is
+ * still work, a reactivated Event settled nothing, and a pass that THROWS never
+ * reaches the stamp at all. So the marker is earned, never assumed, and a
+ * half-finished sweep is retried on the next one rather than skipped forever.
  */
 export async function settleAdminAlertsForArchivedEvent(
   db: AdminAlertFirestore,
@@ -2143,11 +2237,19 @@ export async function settleAdminAlertsForArchivedEvent(
     .where('sentAt', '==', null)
     .limit(MAX_ALERTS_PER_DIGEST)
     .get();
-  if (pending.docs.length === 0) return { discarded: 0, preserved: 0 };
+  // The page is the WHOLE queue only when it came back SHORT of the limit. A
+  // full page may have another behind it, and settling on one page would strand
+  // every row in the next — so a full page deliberately leaves the marker
+  // alone, and the sweep comes back for the remainder (#943).
+  const wholeQueue = pending.docs.length < MAX_ALERTS_PER_DIGEST;
+  if (pending.docs.length === 0) {
+    await markAdminAlertsSettled(db, eventId);
+    return { discarded: 0, preserved: 0 };
+  }
 
   const settled = await db.runTransaction(async (tx) => {
     const event = (await tx.get(db.doc(`events/${eventId}`))).data();
-    if (event?.status !== 'archived') return { discarded: 0, preserved: [] as string[] };
+    if (event?.status !== 'archived') return { archived: false, discarded: 0, preserved: [] as string[] };
 
     const rows = await Promise.all(
       pending.docs.map(async (snapshot) => ({
@@ -2185,9 +2287,15 @@ export async function settleAdminAlertsForArchivedEvent(
       });
       discarded++;
     });
-    return { discarded, preserved };
+    return { archived: true, discarded, preserved };
   });
-  if (settled.preserved.length === 0) return { discarded: settled.discarded, preserved: 0 };
+  // A stale invocation against a REACTIVATED Event settled nothing and must not
+  // claim it did: the marker would then hide live work from the sweep.
+  if (!settled.archived) return { discarded: 0, preserved: 0 };
+  if (settled.preserved.length === 0) {
+    if (wholeQueue) await markAdminAlertsSettled(db, eventId);
+    return { discarded: settled.discarded, preserved: 0 };
+  }
 
   // The replay decides what becomes of the preserved rows, so the counts are
   // READ BACK from those rows afterwards rather than reported from the
@@ -2209,6 +2317,10 @@ export async function settleAdminAlertsForArchivedEvent(
     if (data?.sentAt === null) preserved++;
     else if (data?.discardedAt !== undefined) discarded++;
   }
+  // Still-preserved rows are still WORK — a frozen batch the replay could not
+  // deliver is retried on every sweep until it does — so the marker is only
+  // earned when the whole page reached a terminal state.
+  if (wholeQueue && preserved === 0) await markAdminAlertsSettled(db, eventId);
   return { discarded, preserved };
 }
 
@@ -2220,7 +2332,9 @@ export async function settleAdminAlertsForArchivedEvent(
  *
  * The two status queries intentionally cover both live delivery and archive
  * cleanup. The archive pass is the retrying backstop for transition-trigger
- * failure and for any delayed producer that lost the archive race.
+ * failure and for any delayed producer that lost the archive race — and it is
+ * bounded by the durable settled marker (#943), so its cost tracks OUTSTANDING
+ * archived work rather than the ever-growing count of archived Events.
  */
 export async function runAdminAlertSweep(
   db: AdminAlertFirestore,
@@ -2234,7 +2348,20 @@ export async function runAdminAlertSweep(
       console.error('runAdminAlertSweep: event failed', ev.id, err);
     }
   }
-  const archived = await db.collection('events').where('status', '==', 'archived').get();
+  // #943: the archived set only GROWS over a project's lifetime, so an
+  // unfiltered `status == 'archived'` scan costs one read per archived Event on
+  // every five-minute sweep forever — almost always to discover there is
+  // nothing left to do. The durable settled marker turns that into a query over
+  // OUTSTANDING WORK: an Event appears here only while its queue has something
+  // left (a page that did not fit, a frozen batch that has not delivered, a
+  // settlement that threw), and disappears for good once it is reconciled. Two
+  // equality filters ride the automatic single-field indexes, so this adds no
+  // composite index.
+  const archived = await db
+    .collection('events')
+    .where('status', '==', 'archived')
+    .where(ADMIN_ALERTS_SETTLED_FIELD, '==', false)
+    .get();
   for (const ev of archived.docs) {
     try {
       await settleAdminAlertsForArchivedEvent(db, ev.id, deps);
