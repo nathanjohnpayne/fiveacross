@@ -824,9 +824,26 @@ function validPendingEscalation(task: Record<string, unknown>): {
  * `event-missing` and `event-inactive` terminalize BEFORE that read, so for
  * them the honest record is still "unknown" — now stamped as final rather than
  * still in flight.
+ *
+ * Because it MERGES, "restate the unresolved pair" is only honest on a report
+ * that has no answer yet. `reportMatchesEscalation` deliberately accepts a
+ * report this resolver has already written back, so escalation work re-created
+ * for a decided report reaches `alert-conflict` — and a merge of
+ * `escalationLookupFailed: true` on top of a stored `reporterInEvent` would
+ * leave exactly the shape the exporter refuses (`Unexpected reporterInEvent`),
+ * which it throws for the WHOLE export rather than for the one row. So a
+ * no-answer outcome on an already-decided report restamps `escalationResolvedAt`
+ * and nothing else: the earlier answer was reached by actually reading the
+ * relationship and is the more informative record, while clearing it would
+ * discard a real authorization fact to satisfy a shape check.
  */
-function escalationWriteBack(outcome: AbuseEscalationOutcome, now: number): Record<string, unknown> {
+function escalationWriteBack(
+  outcome: AbuseEscalationOutcome,
+  report: BugReportDoc,
+  now: number,
+): Record<string, unknown> {
   if (outcome !== 'queued' && outcome !== 'not-member') {
+    if (report.escalationResolvedAt !== undefined) return { escalationResolvedAt: now };
     return { escalationLookupFailed: true, escalationEligible: false, escalationResolvedAt: now };
   }
   const member = outcome === 'queued';
@@ -920,7 +937,7 @@ async function resolveAbuseEscalationTask(
     // does not exist or is not the one this task names, and writing to it
     // would be writing to somebody else's record.
     const settle = (outcome: AbuseEscalationOutcome) => {
-      tx.set(reportRef, escalationWriteBack(outcome, now), { merge: true });
+      tx.set(reportRef, escalationWriteBack(outcome, report, now), { merge: true });
       tx.set(taskRef, terminalEscalation(outcome, now));
     };
 
@@ -1368,10 +1385,16 @@ export async function markAdminAlertsUnsettled(db: AdminAlertFirestore, eventId:
  * Record that an archived Event's queue is fully reconciled — but only while it
  * is still archived.
  *
- * Re-reading `status` here is what stops a reactivation that raced the
- * settlement from inheriting a `true` it never earned: the reactivation edge
- * clears the marker, and this read either happens after that clear or sees the
- * reactivated status itself and declines to write at all.
+ * Re-reading `status` here NARROWS the window in which a reactivation that
+ * raced the settlement inherits a `true` it never earned — it does not close
+ * it. The read and the write are two round-trips, not one transaction, so a
+ * reactivation landing between them still leaves `adminAlertsSettled: true` on
+ * a now-active Event. What actually recovers from that stale `true` is the
+ * lifecycle edge: the NEXT archive marks the Event unsettled before it attempts
+ * anything, so the stale value only strands work if that later archive trigger
+ * also fails to write. A transaction here would close the window outright and
+ * is the right change if this ever matters; the cost today is one extra
+ * contended write on a path that runs once per archived Event per sweep.
  */
 async function markAdminAlertsSettled(db: AdminAlertFirestore, eventId: string): Promise<void> {
   const event = (await db.doc(`events/${eventId}`).get()).data();

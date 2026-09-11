@@ -671,10 +671,29 @@ describe('durable abuse-escalation sweep (#859)', () => {
     // Before the write-back existed the report could only ever be the intake
     // shape, so a second pass now has to name the real reason it stops.
     await db.doc(`bugReportEscalations/${REPORT_ID}`).set(pendingTask());
-    await runAbuseEscalationSweep(db, { now: () => NOW });
+    await runAbuseEscalationSweep(db, { now: () => NOW + 1 });
 
     expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'alert-conflict' });
     expect(db.rows('events/med-2026/adminAlerts').map((row) => row.id)).toEqual([alertId]);
+
+    // And the REPORT survives that second pass intact. `alert-conflict`
+    // terminalizes before the relationship read, so on an undecided report it
+    // restates the unresolved pair — merged on top of the answer pass one
+    // already stored, that would leave `escalationLookupFailed: true` beside
+    // `reporterInEvent: true`, which `scripts/bug-reports-lib.mjs` rejects with
+    // `Unexpected reporterInEvent` for the whole `npm run bugs:pull` export.
+    // A no-answer outcome on an already-decided report therefore moves only the
+    // stamp.
+    const resolved = db.rows('bugReports')[0];
+    expect(resolved).toEqual({
+      id: REPORT_ID,
+      ...unresolvedReport({
+        escalationLookupFailed: false,
+        reporterInEvent: true,
+        escalationEligible: true,
+        escalationResolvedAt: NOW + 1,
+      }),
+    });
   });
 
   it('expires the seven-day retry window before making another relationship decision', async () => {
