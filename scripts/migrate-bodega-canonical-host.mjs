@@ -37,11 +37,12 @@ import { initFirestore } from './seed.mjs';
 export { BODEGA_EVENT_ID, BODEGA_PROJECT_ID };
 export const CANONICAL_HOST = 'bodega-bay.fiveacross.app';
 export const LEGACY_HOST = 'bodega-bay.vacaybingo.com';
+export const APEX_HOST = 'fiveacross.app';
 export const BODEGA_HOSTS = BODEGA_PREVIEW_HOSTS;
 const expectedEditionByHost = Object.freeze({
   [CANONICAL_HOST]: 'vacay',
   [LEGACY_HOST]: 'vacay',
-  'fiveacross.app': 'fiveacross',
+  [APEX_HOST]: 'fiveacross',
 });
 
 const targetMetadata = Object.freeze({ canonicalHost: CANONICAL_HOST, isCanonical: false });
@@ -84,11 +85,10 @@ export function planCanonicalHostMigration(hostDocuments) {
     );
   }
 
-  const apexHost = BODEGA_HOSTS[2];
-  const apex = metadataOf(rows.get(apexHost));
+  const apex = metadataOf(rows.get(APEX_HOST));
   if (!sameMetadata(apex, targetMetadata)) {
     throw new Error(
-      `bodega-canonical-host: alias metadata drifted on hostnames/${apexHost}. No write performed.`,
+      `bodega-canonical-host: alias metadata drifted on hostnames/${APEX_HOST}. No write performed.`,
     );
   }
 

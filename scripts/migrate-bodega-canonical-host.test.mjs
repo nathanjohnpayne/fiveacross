@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  APEX_HOST,
   assertReviewedDeployCredential,
   assertReviewedMainCheckout,
   BODEGA_EVENT_ID,
@@ -154,6 +155,7 @@ describe('Bodega canonical-host migration plan', () => {
 
   it('pins the complete serving inventory and exact two-field correction', () => {
     expect(BODEGA_HOSTS).toEqual([CANONICAL_HOST, LEGACY_HOST, 'fiveacross.app']);
+    expect(BODEGA_HOSTS).toContain(APEX_HOST);
 
     const plan = planCanonicalHostMigration(withLegacyDrift());
 
@@ -217,6 +219,18 @@ describe('Bodega canonical-host migration plan', () => {
     ['fiveacross.app', { isCanonical: true }, /alias metadata drifted/],
   ])('refuses unrelated canonical metadata drift on %s', (host, patch, message) => {
     expect(() => planCanonicalHostMigration(replace(withLegacyDrift(), host, patch))).toThrow(message);
+  });
+
+  it('refuses apex alias-metadata drift on an otherwise converged inventory', () => {
+    // The converged inventory would otherwise plan `changed: false`, so this
+    // pins that the apex precondition still runs on the idempotent path and
+    // that the refusal names the apex host exactly. It cannot tell a by-name
+    // lookup from a positional one: BODEGA_HOSTS is frozen with the apex host
+    // at index 2, so the inventory order pin above is what guards a reorder.
+    const rows = replace(canonicalDocuments(), APEX_HOST, { isCanonical: true });
+    expect(() => planCanonicalHostMigration(rows)).toThrow(
+      'bodega-canonical-host: alias metadata drifted on hostnames/fiveacross.app. No write performed.',
+    );
   });
 
   it.each([
