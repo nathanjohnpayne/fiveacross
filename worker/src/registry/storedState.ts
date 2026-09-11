@@ -1,8 +1,8 @@
 import { parseSyncRequest, projectionDigest, type RegistryState } from './contracts';
+import { isSha256Hex } from './identifiers';
 
 const POSITIVE = /^[1-9]\d*$/;
 const NON_NEGATIVE = /^(?:0|[1-9]\d*)$/;
-const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -22,7 +22,7 @@ function validCommittedRef(value: unknown): boolean {
       typeof value.revision === 'string' &&
       POSITIVE.test(value.revision) &&
       typeof value.digest === 'string' &&
-      SHA256_HEX.test(value.digest))
+      isSha256Hex(value.digest))
   );
 }
 
@@ -57,7 +57,7 @@ export async function parseStoredRegistryState(value: unknown, expectedHost: str
         typeof value.committed.revision !== 'string' ||
         !POSITIVE.test(value.committed.revision) ||
         typeof value.committed.digest !== 'string' ||
-        !SHA256_HEX.test(value.committed.digest)
+        !isSha256Hex(value.committed.digest)
       ) {
         throw new Error('committed');
       }

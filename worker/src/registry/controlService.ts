@@ -1,6 +1,7 @@
 import { normalizeHost } from '../host';
 import { REGISTRY_LOCATION_HINT, parseSyncRequest } from './contracts';
 import { ControlAuthUnavailableError, authenticatePinnedRole, type PinnedRoleRequest } from './controlAuth';
+import { isSha256Hex } from './identifiers';
 import {
   publisherVerificationMappings,
   validateAuditSubjectIdentity,
@@ -19,7 +20,6 @@ export const RECOVERY_MAX_BYTES = 16 * 1_024;
 
 const AUDIT_PREFIX = '/__internal/hostname-replicas/v1/';
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
-const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 type ControlRole = 'audit' | 'recovery' | 'source-attestor' | 'regional-probe';
 
@@ -639,8 +639,7 @@ export function parseProbePayload(value: unknown, kind: 'challenge' | 'attest'):
   if (kind === 'challenge') {
     if (
       (outer.phase !== 'blocked-before-worker' && outer.phase !== 'canonical-after-unblock') ||
-      typeof outer.expectedStateDigest !== 'string' ||
-      !SHA256_HEX.test(outer.expectedStateDigest) ||
+      !isSha256Hex(outer.expectedStateDigest) ||
       (outer.phase === 'canonical-after-unblock' &&
         (typeof outer.recoveryLockId !== 'string' ||
           outer.recoveryLockId.length === 0 ||

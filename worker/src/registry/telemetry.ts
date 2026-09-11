@@ -1,5 +1,6 @@
 import { classifyHost, normalizeHost } from '../host';
 import { isRegistryRootHost, isSyntheticRegistryHost } from './contracts';
+import { isKmsCryptoKeyVersion } from './identifiers';
 import type { RecoveryRequest } from './recovery';
 import type { SyncResult } from './state';
 
@@ -34,8 +35,6 @@ type SemanticLogger = (event: RegistrySemanticEvent) => void;
 
 const REGISTRY_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const KMS_KEY_VERSION =
-  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 
 export function isRegistryTelemetryVersion(value: unknown): value is string {
   return typeof value === 'string' && REGISTRY_VERSION.test(value);
@@ -79,7 +78,7 @@ function requireCommon(args: {
   ) {
     throw new Error('invalid registry telemetry timing');
   }
-  if (args.keyVersion !== null && !KMS_KEY_VERSION.test(args.keyVersion)) {
+  if (args.keyVersion !== null && !isKmsCryptoKeyVersion(args.keyVersion)) {
     throw new Error('invalid registry telemetry key version');
   }
   return { latencyMs: args.finishedAt - args.startedAt };

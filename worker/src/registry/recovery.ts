@@ -5,12 +5,10 @@ import {
   type ReplicaDesired,
   type RouterReplicaDesired,
 } from './contracts';
+import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
 
-const SHA256_HEX = /^[a-f0-9]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
-const KMS_KEY_VERSION =
-  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 const CLOUDFLARE_RESOURCE_ID = /^[a-f0-9]{32}$/;
 const MAX_SOURCE_AGE_MS = 5 * 60_000;
 const MAX_ATTESTATION_AGE_MS = 60_000;
@@ -279,7 +277,7 @@ export async function validateSourceAudit(
 ): Promise<RouterReplicaDesired> {
   requireFresh(audit.observedAt, now, MAX_SOURCE_AGE_MS, 'source audit');
   requireFresh(audit.attestationIssuedAt, now, MAX_ATTESTATION_AGE_MS, 'source attestation');
-  if (!POSITIVE_DECIMAL.test(audit.revision) || !SHA256_HEX.test(audit.digest)) {
+  if (!POSITIVE_DECIMAL.test(audit.revision) || !isSha256Hex(audit.digest)) {
     throw new Error('source revision or digest malformed');
   }
   if (
@@ -290,9 +288,9 @@ export async function validateSourceAudit(
     throw new Error('source audit host or revision mismatch');
   }
   if (
-    !SHA256_HEX.test(audit.canonicalProjection.sourceDocumentDigest) ||
-    !SHA256_HEX.test(audit.ledgerDocumentDigest) ||
-    !SHA256_HEX.test(audit.attestorKeyFingerprint)
+    !isSha256Hex(audit.canonicalProjection.sourceDocumentDigest) ||
+    !isSha256Hex(audit.ledgerDocumentDigest) ||
+    !isSha256Hex(audit.attestorKeyFingerprint)
   ) {
     throw new Error('source document or attestor fingerprint malformed');
   }
@@ -330,15 +328,15 @@ function validateRecoveryEnvelope(request: RecoveryRequest): void {
 function validateRecoveryAuthorization(context: RecoveryContext): void {
   if (
     context.operatorSub.length === 0 ||
-    !KMS_KEY_VERSION.test(context.operatorKeyVersion) ||
-    !SHA256_HEX.test(context.operatorKeyFingerprint) ||
+    !isKmsCryptoKeyVersion(context.operatorKeyVersion) ||
+    !isSha256Hex(context.operatorKeyFingerprint) ||
     context.operatorSignature.length === 0 ||
     context.operatorSignatureScheme !== 'v1' ||
     context.operatorSignedRole !== 'recovery' ||
     context.operatorSignedMethod !== 'POST' ||
     !/^\/__internal\/hostname-replicas\/v1\/recover(?:\?[^#]*)?$/.test(context.operatorSignedPath) ||
     !/^[1-9]\d*$/.test(context.operatorIssuedAt) ||
-    !SHA256_HEX.test(context.requestBodyDigest)
+    !isSha256Hex(context.requestBodyDigest)
   ) {
     throw new Error('recovery authorization provenance is malformed');
   }
@@ -413,9 +411,9 @@ async function validateProviderRequests(
       request.path.includes('#') ||
       request.query.startsWith('?') ||
       request.query.includes('#') ||
-      !SHA256_HEX.test(request.queryDigest) ||
+      !isSha256Hex(request.queryDigest) ||
       request.queryDigest !== (await sha256Hex(request.query)) ||
-      !SHA256_HEX.test(request.httpLogResponseDigest)
+      !isSha256Hex(request.httpLogResponseDigest)
     ) {
       throw new Error('provider response digest malformed');
     }
@@ -430,7 +428,7 @@ async function validateProviderRequests(
         request.firewall.matchIndex !== 0 ||
         request.firewall.ruleId !== waf?.ruleId ||
         request.firewall.ref !== waf.providerRule.ref ||
-        !SHA256_HEX.test(request.firewall.logResponseDigest)
+        !isSha256Hex(request.firewall.logResponseDigest)
       ) {
         throw new Error('blocked provider request does not match exact WAF rule');
       }
@@ -462,7 +460,7 @@ async function validateWafEvidence(
     evidence.providerRule.expression !== `http.host eq "${host}"` ||
     evidence.providerRule.ref.length === 0 ||
     evidence.blockNonce.length === 0 ||
-    !SHA256_HEX.test(evidence.providerRule.responseDigest)
+    !isSha256Hex(evidence.providerRule.responseDigest)
   ) {
     throw new Error('WAF rule is not the exact-host recovery rule');
   }
@@ -485,8 +483,8 @@ function validateReplacement(
   if (
     !POSITIVE_DECIMAL.test(replacement.quarantinedEpochCeiling) ||
     !POSITIVE_DECIMAL.test(replacement.nextPublisherEpoch) ||
-    !SHA256_HEX.test(replacement.replacementKeyFingerprint) ||
-    !SHA256_HEX.test(replacement.registryConfigDigest)
+    !isSha256Hex(replacement.replacementKeyFingerprint) ||
+    !isSha256Hex(replacement.registryConfigDigest)
   ) {
     throw new Error('publisher replacement mapping malformed');
   }
@@ -543,9 +541,9 @@ function validateReplacement(
     !runtimeIdentityIsCanonical(control.quarantinedRuntime) ||
     !runtimeIdentityIsCanonical(control.replacementRuntime) ||
     control.quarantinedRuntime.functionRevision.length === 0 ||
-    !SHA256_HEX.test(control.quarantinedRuntime.responseDigest) ||
+    !isSha256Hex(control.quarantinedRuntime.responseDigest) ||
     control.replacementRuntime.functionRevision.length === 0 ||
-    !SHA256_HEX.test(control.replacementRuntime.responseDigest)
+    !isSha256Hex(control.replacementRuntime.responseDigest)
   ) {
     throw new Error('publisher runtime readback is malformed or not distinct');
   }
@@ -564,7 +562,7 @@ function validateReplacement(
       !POSITIVE_DECIMAL.test(active.epoch) ||
       active.subject.length === 0 ||
       active.keyVersion.length === 0 ||
-      !SHA256_HEX.test(active.spkiSha256) ||
+      !isSha256Hex(active.spkiSha256) ||
       active.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256'
     ) {
       throw new Error('active epoch mapping malformed');
@@ -674,9 +672,9 @@ function validateReplacement(
       readback.signMembers.length > 16 ||
       readback.enabledVersions.length > 16 ||
       readback.signMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
-      !SHA256_HEX.test(readback.responseDigest) ||
+      !isSha256Hex(readback.responseDigest) ||
       readback.enabledVersions.some(
-        (version) => version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256' || !SHA256_HEX.test(version.spkiSha256),
+        (version) => version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256' || !isSha256Hex(version.spkiSha256),
       )
     ) {
       throw new Error('replacement key policy does not quarantine the old publisher');
@@ -698,7 +696,7 @@ function validateReplacement(
     if (
       readback.tokenCreatorMembers.length > 16 ||
       readback.tokenCreatorMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
-      !SHA256_HEX.test(readback.responseDigest)
+      !isSha256Hex(readback.responseDigest)
     ) {
       throw new Error('replacement service-account policy does not quarantine the old publisher');
     }
@@ -717,7 +715,7 @@ function validateReplacement(
             ? `//cloudkms.googleapis.com/${replacement.replacementKeyVersion}`
             : canonicalServiceAccountResource(control.replacementRuntime.serviceAccountEmail)) ||
         decision.inheritedPoliciesComplete !== true ||
-        !SHA256_HEX.test(decision.responseDigest) ||
+        !isSha256Hex(decision.responseDigest) ||
         !Number.isFinite(Date.parse(decision.requestTime)),
     )
   ) {
@@ -726,7 +724,7 @@ function validateReplacement(
   if (
     control.attestorSub.length === 0 ||
     control.attestorKeyVersion.length === 0 ||
-    !SHA256_HEX.test(control.attestorKeyFingerprint) ||
+    !isSha256Hex(control.attestorKeyFingerprint) ||
     control.attestationSignature.length === 0
   ) {
     throw new Error('publisher control attestation is incomplete');

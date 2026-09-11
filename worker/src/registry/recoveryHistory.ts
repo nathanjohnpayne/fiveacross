@@ -1,4 +1,5 @@
 import { parseSyncRequest, projectionDigest } from './contracts';
+import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
 import type {
   ProviderRequestEvidence,
@@ -11,10 +12,7 @@ import type {
 
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
-const SHA256_HEX = /^[a-f0-9]{64}$/;
 const CLOUDFLARE_RESOURCE_ID = /^[a-f0-9]{32}$/;
-const KMS_KEY_VERSION =
-  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 const RECOVERY_PATH = /^\/__internal\/hostname-replicas\/v1\/recover(?:\?[^#]*)?$/;
 const ACTIONS = new Set(['acquire-lock', 'apply', 'clear-lock', 'abort-lock']);
 const ACCESS_PERMISSIONS = new Set([
@@ -52,7 +50,13 @@ function positiveDecimal(value: unknown): string {
 
 function sha256(value: unknown): string {
   const result = nonEmptyString(value);
-  if (!SHA256_HEX.test(result)) throw new Error('sha256');
+  if (!isSha256Hex(result)) throw new Error('sha256');
+  return result;
+}
+
+function kmsKeyVersion(value: unknown): string {
+  const result = nonEmptyString(value);
+  if (!isKmsCryptoKeyVersion(result)) throw new Error('key version');
   return result;
 }
 
@@ -109,7 +113,7 @@ async function validateSourceAudit(value: unknown, expectedHost: string): Promis
   const observedAt = timestamp(source.observedAt);
   sha256(source.ledgerDocumentDigest);
   nonEmptyString(source.attestorSub);
-  nonEmptyString(source.attestorKeyVersion);
+  kmsKeyVersion(source.attestorKeyVersion);
   sha256(source.attestorKeyFingerprint);
   timestamp(source.attestationIssuedAt);
   nonEmptyString(source.attestationSignature);
@@ -282,7 +286,7 @@ function validatePublisherReplacement(value: unknown): void {
   positiveDecimal(replacement.quarantinedEpochCeiling);
   positiveDecimal(replacement.nextPublisherEpoch);
   nonEmptyString(replacement.replacementSubject);
-  nonEmptyString(replacement.replacementKeyVersion);
+  kmsKeyVersion(replacement.replacementKeyVersion);
   sha256(replacement.replacementKeyFingerprint);
   sha256(replacement.registryConfigDigest);
 
@@ -310,7 +314,7 @@ function validatePublisherReplacement(value: unknown): void {
     const mapping = exactRecord(entry, ['epoch', 'subject', 'keyVersion', 'algorithm', 'spkiSha256']);
     positiveDecimal(mapping.epoch);
     nonEmptyString(mapping.subject);
-    nonEmptyString(mapping.keyVersion);
+    kmsKeyVersion(mapping.keyVersion);
     if (mapping.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256') throw new Error('algorithm');
     sha256(mapping.spkiSha256);
   });
@@ -329,7 +333,7 @@ function validatePublisherReplacement(value: unknown): void {
     if (!Array.isArray(access.enabledVersions)) throw new Error('enabled versions');
     access.enabledVersions.forEach((entry) => {
       const version = exactRecord(entry, ['keyVersion', 'algorithm', 'spkiSha256']);
-      nonEmptyString(version.keyVersion);
+      kmsKeyVersion(version.keyVersion);
       if (version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256') throw new Error('algorithm');
       sha256(version.spkiSha256);
     });
@@ -385,7 +389,7 @@ function validatePublisherReplacement(value: unknown): void {
     sha256(decision.responseDigest);
   });
   nonEmptyString(control.attestorSub);
-  nonEmptyString(control.attestorKeyVersion);
+  kmsKeyVersion(control.attestorKeyVersion);
   sha256(control.attestorKeyFingerprint);
   timestamp(control.attestationIssuedAt);
   nonEmptyString(control.attestationSignature);
@@ -580,15 +584,10 @@ function validateProbeChallenge(value: unknown, expectedHost: string): Record<st
     'recoverySequence',
     'wafRemovedAt',
   ]);
-  for (const field of [
-    challenge.probeNonce,
-    challenge.subject,
-    challenge.keyVersion,
-    challenge.region,
-    challenge.host,
-  ]) {
+  for (const field of [challenge.probeNonce, challenge.subject, challenge.region, challenge.host]) {
     nonEmptyString(field);
   }
+  kmsKeyVersion(challenge.keyVersion);
   if (challenge.host !== expectedHost) throw new Error('challenge host');
   sha256(challenge.keyFingerprint);
   sha256(challenge.expectedStateDigest);
@@ -690,7 +689,7 @@ function validateProbeEvidence(value: unknown, expectedHost: string): ConsumedPr
   nonEmptyString(evidence.id);
   timestamp(evidence.receivedAt);
   nonEmptyString(evidence.subject);
-  nonEmptyString(evidence.keyVersion);
+  kmsKeyVersion(evidence.keyVersion);
   sha256(evidence.keyFingerprint);
   nonEmptyString(evidence.region);
   const challenge = validateProbeChallenge(evidence.challenge, expectedHost);
@@ -949,9 +948,7 @@ export async function parseRecoveryHistoryEntry(
     }
     validateActionBindings(value as RecoveryRecord, sourceAudit, action, probeEvidence);
     nonEmptyString(record.operatorSub);
-    if (typeof record.operatorKeyVersion !== 'string' || !KMS_KEY_VERSION.test(record.operatorKeyVersion)) {
-      throw new Error('operator key');
-    }
+    kmsKeyVersion(record.operatorKeyVersion);
     sha256(record.operatorKeyFingerprint);
     nonEmptyString(record.operatorSignature);
     if (
