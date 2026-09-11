@@ -89,16 +89,9 @@ export function validateTargetOperationalMetadata(target, config) {
   if (!isRegisteredEdition(config.identity?.VITE_EDITION)) {
     throw new Error(`Refusing target ${target}: identity.VITE_EDITION must name a registered Edition id.`);
   }
-  if (
-    config.staticFallbackEdition !== undefined &&
-    (typeof config.staticFallbackEdition !== 'string' || !config.staticFallbackEdition.trim())
-  ) {
-    throw new Error(`Refusing target ${target}: staticFallbackEdition must be a nonblank Edition id.`);
-  }
-  if (
-    config.staticFallbackEdition !== undefined &&
-    !isRegisteredEdition(config.staticFallbackEdition)
-  ) {
+  // One check, one message (#1057): a registered Edition id is by construction
+  // a nonblank string, so the registry test subsumes the shape test.
+  if (config.staticFallbackEdition !== undefined && !isRegisteredEdition(config.staticFallbackEdition)) {
     throw new Error(`Refusing target ${target}: staticFallbackEdition must name a registered Edition id.`);
   }
   // Required rather than defaulted (#768). An omitted skipInvokerReconcile
