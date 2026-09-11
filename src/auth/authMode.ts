@@ -100,6 +100,16 @@ export function parseAuthOrigin(raw: string | undefined | null): string | null {
   const isLoopback =
     url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback)) return null;
+  // A non-default port is refused on every non-loopback origin on purpose
+  // (#956): a production auth origin is a first-party https host on 443, and
+  // the registrations that make sign-in work there (Firebase authorized
+  // domains, the OAuth redirect allowlist, the exact-origin handoff allowlist)
+  // are all keyed on that default-port origin. A proxied staging origin on a
+  // custom port cannot be registered that way, so accepting it here would
+  // only defer the failure to the provider. Loopback keeps its port because
+  // local development and the Auth emulator run on non-default ports by
+  // design. Pinned by 'rejects a non-default port on a production auth origin'
+  // in authMode.test.ts.
   if (!isLoopback && url.port !== '') return null;
   return url.origin;
 }

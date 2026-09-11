@@ -112,7 +112,7 @@ function deferred<T>() {
 }
 
 // Builds a durable `${timestamp}:${token}` record (Phase 4b P1 round 3 on
-// #836 — see AuthContext.tsx's `liveStampedToken`/`rawStampedToken`). Tests
+// #836 — the format AuthContext.tsx's `liveStampedRecord` parses). Tests
 // pass a fixed `token` (often 'tok-a' for "this attempt" vs 'tok-b' for "a
 // different, unrelated same-origin tab's attempt") so cross-attempt
 // correlation scenarios are deterministic rather than relying on two calls
@@ -121,6 +121,11 @@ function stamp(token: string, at: number = Date.now()): string {
   return `${at}:${token}`;
 }
 
+// Deliberately mirrors the module-private `attemptRecordKey` in AuthContext.tsx
+// rather than exporting it for tests (#1053, disposed as won't-fix there): the
+// `${baseKey}:${token}` contract is one line, and the token-addressed
+// assertions below read records back through the production code path, so a
+// format change on the production side surfaces as a failing read here.
 function attemptRecordKey(baseKey: string, token: string): string {
   return `${baseKey}:${token}`;
 }

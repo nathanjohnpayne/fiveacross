@@ -31,6 +31,13 @@ export function createFirebaseHandoffCommitWorkerAdapter(
   let tenantId: string | null = null;
   let emulatorUrl: string | null = null;
   let initialized = false;
+  // Set at the top of `commit()`, before any default-Auth work: the persistent
+  // [DEFAULT] app is a one-shot mutation, so a second call is refused by this
+  // module itself rather than only by the Worker controller's phase machine
+  // (#1077). The flag is also never cleared on failure: a commit that threw
+  // part-way may already have initialized [DEFAULT], and `initializeApp` would
+  // throw on the retry anyway, so the adapter is disposable after one attempt.
+  let committed = false;
 
   return {
     async initialize(input) {
@@ -81,6 +88,8 @@ export function createFirebaseHandoffCommitWorkerAdapter(
       if (!initialized || firebaseOptions === null || candidateUser === null) {
         throw new Error('handoff-worker-not-prepared');
       }
+      if (committed) throw new Error('handoff-worker-already-committed');
+      committed = true;
       // No name argument: the persistent target MUST be [DEFAULT], matching the
       // page's Firebase Auth persistence key. This entire initialization/read/
       // migration/write sequence runs only after the page has verified fence
