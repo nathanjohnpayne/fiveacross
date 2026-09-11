@@ -65,31 +65,41 @@ async function seedEvent(
 //     not structure (Codex P2 rounds 3 and 4 on #1194); removing comments
 //     first also lets `match /events/{id} /* note */ {` parse (round 4);
 //   - effective match paths: every `match <path> {` pushes its segments, so a
-//     block is identified by the path it governs, not by its spelling.
-//     `match /archives/{a} { match /events/{e} { ... } }` governs
-//     `archives/.../events/...` (round 3), `match /events/{id}` and
-//     `match /events/{eventId}` are the same block (round 2), and a literal
-//     `match /events/production-event {` is a root Event block for one Event
-//     and is counted too (round 4);
+//     block is identified by the path it governs, not by its spelling. The
+//     overlap test runs against the COMPLETE request path shape
+//     `databases/<db>/documents/events/<id>`, so a literal database segment
+//     such as `(default)` (round 5), a literal Event id (round 4), a nested
+//     `match /archives/{a} { match /events/{e} { ... } }` (round 3) and the
+//     wildcard's name (round 2) are all handled by one matcher;
 //   - recursive wildcards: `{name=**}` matches zero or more segments under
 //     rules_version 2, so a grant inside `match /{document=**}` or
 //     `match /events/{e}/{rest=**}` also reaches the root Event document
 //     (round 3).
 //
 // What is enumerated: every `allow <verbs>: if ... ;` whose effective path can
-// match some `events/<id>`, with the terminator found by the same string-aware
-// scan (round 4). Exactly one of them may grant `create` or `write` and it is
-// the arm this suite pins. Every other arm that grants `update` must be one of
-// the approved archive-lifecycle arms, recognised structurally rather than
-// waved through: it is Admin-gated (`isAdmittedAdmin(eventId)`) and it reads
-// or writes the `archiving` handshake, and their number is pinned, so an
-// unexpected update grant that could reach an Event document fails loudly
-// instead of being ignored (round 4). A malformed source (an unbalanced block,
-// an unterminated arm or literal) throws instead of pinning the wrong text.
-const DOCUMENTS_ROOT = ['databases', '{database}', 'documents'];
+// match some `databases/<db>/documents/events/<id>`, with the terminator found
+// by the same string-aware scan (round 4). Exactly one of them may grant
+// `create` or `write` and it is the arm this suite pins. Every other arm that
+// grants `update` must be one of the approved archive-lifecycle arms, pinned
+// by their exact normalised text below (round 5: a token check would have let
+// an appended `||` branch through), so any change to a lifecycle arm, however
+// small, fails here until the pin is deliberately updated alongside it. A
+// malformed source (an unbalanced block, an unterminated arm or literal)
+// throws instead of pinning the wrong text.
+const ROOT_EVENT_DOC: Array<string | null> = ['databases', null, 'documents', 'events', null];
 const MATCH_PATH = /match\s+(\/[^\s{}]*(?:\{[^}]*\}[^\s{}]*)*)\s*\{/y;
 const ALLOW_ARM = /allow\s+([a-z]+(?:\s*,\s*[a-z]+)*)\s*:\s*if\b/y;
-const APPROVED_UPDATE_ONLY_ARMS = 4; // the archive-lifecycle handshake arms
+
+// The four archive-lifecycle update arms on the root Event document, as the
+// scanner normalises them (comments removed, whitespace collapsed). Editing a
+// lifecycle arm in firestore.rules must update the matching entry here, in
+// the same change, or this suite fails closed.
+const APPROVED_LIFECYCLE_ARMS: readonly string[] = [
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) != true && resource.data.get(\'status\', \'active\') != \'archived\' && isAdmittedAdmin(eventId) && request.resource.data.get(\'archiving\', false) == true && usableArchiveToken(request.resource.data.get(\'archiveToken\', 0)) && request.resource.data.get(\'archiveToken\', 0) > storedGeneration(resource.data) && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiving\', \'archiveToken\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && isAdmittedAdmin(eventId) && request.resource.data.get(\'archiving\', false) == false && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiving\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && boundToStoredQuiesce(resource.data, request.resource.data) && isAdmittedAdmin(eventId) && request.resource.data.status == \'archived\' && request.resource.data.archivedAt is number && request.resource.data.archivedAt > 0 && request.resource.data.archivedAt < 4102444800000 && completeArchiveRecord(request.resource.data.archive, request.resource.data.archivedAt) && request.resource.data.get(\'archiving\', false) == false && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'status\', \'archivedAt\', \'archiving\', \'archivedUnder\', \'archive\']);',
+  'allow update: if resource != null && resource.data.get(\'archiving\', false) == true && resource.data.get(\'status\', \'active\') != \'archived\' && !usableArchiveToken(resource.data.get(\'archiveToken\', 0)) && isAdmittedAdmin(eventId) && usableArchiveToken(request.resource.data.get(\'archiveToken\', 0)) && request.resource.data.get(\'archiveToken\', 0) > storedGeneration(resource.data) && request.resource.data.diff(resource.data).affectedKeys() .hasOnly([\'archiveToken\']);'
+];
 
 function verbsOf(arm: string): string[] {
   return arm.split(',').map((verb) => verb.trim());
@@ -104,9 +114,9 @@ function isSingleWildcard(segment: string): boolean {
 }
 
 // Can the effective path pattern match a path of the target's shape? A target
-// segment of `null` stands for "any one segment", so ['events', null] is every
-// root Event document; a literal pattern segment matches only itself or the
-// wildcard target, a `{x}` matches one segment, a `{x=**}` zero or more.
+// segment of `null` stands for "any one segment"; a literal pattern segment
+// matches only itself or such a wildcard target, a `{x}` matches one segment,
+// a `{x=**}` zero or more.
 function pathCanMatch(pattern: string[], target: Array<string | null>): boolean {
   if (pattern.length === 0) return target.length === 0;
   const [head, ...rest] = pattern;
@@ -120,13 +130,6 @@ function pathCanMatch(pattern: string[], target: Array<string | null>): boolean 
   const want = target[0];
   if (want !== null && head !== want && !isSingleWildcard(head)) return false;
   return pathCanMatch(rest, target.slice(1));
-}
-
-function stripDocumentsRoot(path: string[]): string[] | null {
-  for (let i = 0; i < DOCUMENTS_ROOT.length; i += 1) {
-    if (path[i] !== DOCUMENTS_ROOT[i] && !(i === 1 && isSingleWildcard(path[i] ?? ''))) return null;
-  }
-  return path.slice(DOCUMENTS_ROOT.length);
 }
 
 // Remove `//` and `/* */` comments while honouring string literals; the result
@@ -193,10 +196,6 @@ function armTerminator(src: string, start: number): number {
   return -1;
 }
 
-function isApprovedLifecycleArm(arm: string): boolean {
-  return /\bisAdmittedAdmin\(eventId\)/.test(arm) && /'archiving'/.test(arm);
-}
-
 function rootEventWriteAllow(): string {
   const src = withoutComments(RULES_SOURCE);
   // One stack entry per open brace: the match path segments it introduced, or
@@ -231,8 +230,12 @@ function rootEventWriteAllow(): string {
     if (ch === '{') {
       scopes.push(pendingMatch);
       if (pendingMatch !== null) {
-        const relative = stripDocumentsRoot(effectivePath());
-        if (relative !== null && relative.length === 2 && pathCanMatch(relative, ['events', null])) {
+        const path = effectivePath();
+        if (
+          path.length === ROOT_EVENT_DOC.length &&
+          !isRecursiveWildcard(path[path.length - 1]) &&
+          pathCanMatch(path, ROOT_EVENT_DOC)
+        ) {
           rootEventBlocks += 1;
         }
       }
@@ -248,8 +251,7 @@ function rootEventWriteAllow(): string {
       ALLOW_ARM.lastIndex = i;
       const arm = ALLOW_ARM.exec(src);
       if (arm !== null) {
-        const relative = stripDocumentsRoot(effectivePath());
-        if (relative !== null && pathCanMatch(relative, ['events', null])) {
+        if (pathCanMatch(effectivePath(), ROOT_EVENT_DOC)) {
           const end = armTerminator(src, i);
           if (end < 0) throw new Error('an allow arm reaching the root Event document is unterminated');
           const text = src.slice(i, end + 1).replace(/\s+/g, ' ').trim();
@@ -270,10 +272,11 @@ function rootEventWriteAllow(): string {
       `expected exactly one allow arm granting create or write that can reach events/{id}, found ${createArms.length}: ${createArms.map((a) => a.slice(0, 60)).join(' | ')}`,
     );
   }
-  const unapproved = updateOnlyArms.filter((arm) => !isApprovedLifecycleArm(arm));
-  if (unapproved.length > 0 || updateOnlyArms.length !== APPROVED_UPDATE_ONLY_ARMS) {
+  const unpinned = updateOnlyArms.filter((arm) => !APPROVED_LIFECYCLE_ARMS.includes(arm));
+  const missing = APPROVED_LIFECYCLE_ARMS.filter((arm) => !updateOnlyArms.includes(arm));
+  if (unpinned.length > 0 || missing.length > 0) {
     throw new Error(
-      `update-only arms reaching events/{id}: expected exactly ${APPROVED_UPDATE_ONLY_ARMS} Admin-gated archive-lifecycle arms, found ${updateOnlyArms.length} (${unapproved.length} unrecognised): ${unapproved.map((a) => a.slice(0, 60)).join(' | ')}`,
+      `update-only arms reaching events/{id} must equal the pinned archive-lifecycle arms: ${unpinned.length} unpinned (${unpinned.map((a) => a.slice(0, 80)).join(' | ')}), ${missing.length} pinned but absent. Update APPROVED_LIFECYCLE_ARMS in the same change as the rule.`,
     );
   }
   return createArms[0];
