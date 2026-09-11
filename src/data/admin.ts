@@ -71,8 +71,19 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
  *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
  *                     and `retained` then describe where it already stands.
  *   - `missing`     — NOT approved: no such item.
+ *   - `malformed`   — NOT approved: the caller's #558 classification for that
+ *                     row is not one approval can act on, so the row is SKIPPED
+ *                     and `reason` says what was wrong (#1070). The row stays
+ *                     `pending` and nothing is written for it, exactly as for
+ *                     `stale`/`missing`.
  */
-export type ApprovalOutcome = 'placed' | 'untargeted' | 'retained' | 'stale' | 'missing';
+export type ApprovalOutcome =
+  | 'placed'
+  | 'untargeted'
+  | 'retained'
+  | 'stale'
+  | 'missing'
+  | 'malformed';
 
 export interface ApprovalPlacement {
   itemId: string;
@@ -82,6 +93,12 @@ export interface ApprovalPlacement {
   retained: boolean;
   /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
   outcome: ApprovalOutcome;
+  /**
+   * Why a `malformed` row was skipped — one short line a console can show. It
+   * describes the CLASSIFICATION only, never the Prompt, so it carries no
+   * submitter prose. Absent on every other outcome.
+   */
+  reason?: string;
 }
 
 /**
@@ -133,6 +150,17 @@ function approvalSpicy(
   return callerSpicy === undefined ? storedSpicy === true : callerSpicy;
 }
 
+// The two classification guards above are the only per-ROW rejections in the
+// approval transaction, and the only ones a batch can isolate (#1070). Both
+// throw a written-for-a-human sentence about the CLASSIFICATION — never about
+// the Prompt — so it is carried straight through as the placement's `reason`.
+// A non-Error throw is not a shape this module produces; it still gets a line
+// rather than `undefined`, so a console never renders an empty explanation.
+const malformedReason = (error: unknown): string =>
+  error instanceof Error && error.message
+    ? error.message
+    : 'Community Prompt approval received a classification it cannot act on.';
+
 /**
  * Approve one or more pending Prompts, routing each to its intended Day (#557,
  * specs/community-prompt-targeting.md).
@@ -174,6 +202,13 @@ function approvalSpicy(
  * `bulkApproveItems` contract: one click is one approval event). That also keeps
  * the whole batch on the same side of every Day's cutoff, so a bulk approve can
  * never split across a freeze.
+ *
+ * Sharing the transaction does NOT make a bad row everyone's problem, though.
+ * Three per-row conditions are reported as that row's own outcome and skipped —
+ * `missing`, `stale`, and (#1070) a `malformed` caller classification — so the
+ * rest of the batch still approves. Every failure of the TRANSACTION itself
+ * still fails the whole call, which is the distinction that matters: the first
+ * three are facts about one row, and the rest are facts about the commit.
  */
 export async function approveItems(
   items: readonly ApprovableItem[],
@@ -238,8 +273,38 @@ export async function approveItems(
       // The STORED target is the one routing acts on. The caller's row is a hint
       // that may be stale; this is the value the rules and the snapshot will see.
       const targetDayIndex = row.targetDayIndex;
-      const difficulty = approvalDifficulty(it.pool, row.pool);
-      const spicy = approvalSpicy(it.spicy, row.spicy, difficulty);
+      // MALFORMED-CLASSIFICATION GUARD (#1070). Both classification guards throw,
+      // and an uncaught throw here aborts the whole transaction — so ONE bad row
+      // in an "Approve all" batch would fail every other, still-valid pending row
+      // in the same call. That is the wrong blast radius for a per-row input
+      // error: the queue's own dropdowns cannot produce such a value today, but
+      // any future caller of `approveItems`/`bulkApproveItems` carrying
+      // less-trusted data would turn a single bad row into an all-or-nothing
+      // failure. Catch it per row, report it as this row's own outcome, and
+      // carry on with the rest — the same shape the stale/missing no-ops already
+      // take, and with the same guarantee: nothing at all is written for it.
+      //
+      // Deliberately narrow. ONLY the classification throws are isolated: they
+      // are decided from the caller's row alone, so skipping one says nothing
+      // about any other. Every other failure mode is unchanged and still aborts
+      // the batch — a failed read, a rejected write, or a Firestore retry are
+      // facts about the transaction itself, and finishing the remaining rows
+      // after one would be reporting placements the commit may never make.
+      let difficulty: 'main' | 'easy';
+      let spicy: boolean;
+      try {
+        difficulty = approvalDifficulty(it.pool, row.pool);
+        spicy = approvalSpicy(it.spicy, row.spicy, difficulty);
+      } catch (error) {
+        placements.push({
+          itemId: it.id,
+          dayIndex: null,
+          retained: false,
+          outcome: 'malformed',
+          reason: malformedReason(error),
+        });
+        continue;
+      }
       const base = {
         status: 'active' as const,
         approvedBy: adminUid,

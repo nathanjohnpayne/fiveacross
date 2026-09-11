@@ -456,10 +456,40 @@ describe('approveItems — routing an approval into one Day', () => {
     },
   );
 
-  it('rejects a closing classification before writing a still-pending Prompt', async () => {
-    await expect(
-      approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'closing' }], 'admin-uid'),
-    ).rejects.toThrow(/easy or exploratory classification/);
+  // #1070. A classification approval cannot act on is a fact about ONE row, so
+  // it is reported as that row's own outcome and skipped — it used to throw out
+  // of the transaction, taking every other row in the batch with it.
+  it('reports a closing classification as that row\'s own malformed outcome, writing nothing', async () => {
+    const placements = await approveItems(
+      [{ id: 'p1', targetDayIndex: 2, pool: 'closing' }],
+      'admin-uid',
+    );
+    expect(placements).toEqual([
+      {
+        itemId: 'p1',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+    ]);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a non-boolean spicy choice as malformed too, naming the spicy reason', async () => {
+    const placements = await approveItems(
+      [{ id: 'p1', targetDayIndex: 2, pool: 'main', spicy: 'yes' as never }],
+      'admin-uid',
+    );
+    expect(placements).toEqual([
+      {
+        itemId: 'p1',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires a boolean spicy classification.',
+      },
+    ]);
     expect(updateMock).not.toHaveBeenCalled();
   });
 
@@ -701,6 +731,42 @@ describe('approveItems — routing an approval into one Day', () => {
       path: 'events/med-2026/items/p1',
       data: { status: 'active', pool: 'embark', spicy: false },
     });
+  });
+
+  // #1070, the case the whole change exists for: "Approve all" is no longer
+  // all-or-nothing on a malformed classification. One bad row is skipped as its
+  // own outcome and the rest of the batch still lands.
+  it('skips ONE malformed row in a bulk approve and still approves the other two', async () => {
+    const placements = await bulkApproveItems(
+      [
+        { id: 'a', targetDayIndex: 2, pool: 'easy' },
+        { id: 'b', targetDayIndex: 1, pool: 'closing' },
+        { id: 'd', pool: 'main', spicy: true },
+      ],
+      'admin-uid',
+    );
+
+    expect(placements).toEqual([
+      { itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' },
+      {
+        itemId: 'b',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+      { itemId: 'd', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
+    // Nothing at all for the skipped row — not an approval, not a
+    // classification-only update. It is still pending, exactly as it was.
+    expect(written().map(({ path }) => path)).toEqual([
+      'events/med-2026/items/a',
+      'events/med-2026/items/d',
+    ]);
+    // And the surviving rows still share the one approvedAt instant a bulk
+    // approve promises: skipping a row does not split the batch in two.
+    const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
+    expect(stamps.size).toBe(1);
   });
 
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
