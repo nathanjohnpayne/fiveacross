@@ -49,6 +49,7 @@ import { dealDelayMs, winOrder } from '../game/motion';
 const dealCascadePlayed = new Set<string>();
 import { useOnline } from '../hooks/useOnline';
 import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { setClaimSheetOpen } from '../hooks/useToastStack';
 import { useOpenSquareIntent, clearOpenSquare } from '../hooks/useOpenSquare';
 import Celebration from './Celebration';
@@ -2227,7 +2228,7 @@ function EventBoard({ eventId }: { eventId: string }) {
       // The write is pinned to this Event, but analytics defaults follow the
       // currently active Event. A late A completion must never be emitted with
       // B's dimensions after the keyed Board has retired this continuation.
-      if (nextMarked && res.bingo && EVENT_ID === eventId) track('bingo');
+      if (nextMarked && res.bingo) trackIfCurrentEvent(eventId, 'bingo');
       if (nextMarked) {
         // Feed Moment broadcast on the ACTION path (issue #104): the win is tied
         // to the mark that COMPLETED it — setMark's synchronous transition

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { track } from '../analytics';
+import { isCurrentEvent } from '../data/currentEvent';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { useEventDoc } from '../hooks/useData';
@@ -165,7 +166,7 @@ export default function Celebration({
     // settled, so this await resolves on the microtask queue and
     // navigator.share below runs within the tap's activation window.
     const blob = await pending;
-    if (EVENT_ID !== actedEventId) return;
+    if (!isCurrentEvent(actedEventId)) return;
 
     try {
       await shareCardBlob({
@@ -183,9 +184,7 @@ export default function Celebration({
       // fallback leg, or a render failure — so a cancelled share still counts
       // as a tap (Codex P2, PR #111 finding 3). A completion under another
       // Event is stale, however, and must not emit analytics into that Event.
-      if (EVENT_ID === actedEventId) {
-        track('share_click', { surface: 'celebration' });
-      }
+      trackIfCurrentEvent(actedEventId, 'share_click', { surface: 'celebration' });
     }
   };
 

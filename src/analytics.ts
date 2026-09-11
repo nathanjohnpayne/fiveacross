@@ -267,6 +267,12 @@ function markLocalSquareIfNeeded(name: GA4EventName, params: Record<string, unkn
   }
 }
 
+/**
+ * The one dispatch seam. A call site that must NOT emit once another Event
+ * has activated — any continuation past an await that captured `EVENT_ID`
+ * first — goes through `trackIfCurrentEvent` (src/eventScopedAnalytics.ts,
+ * #1083) instead of hand-rolling `if (EVENT_ID === actedEventId) track(...)`.
+ */
 export function track(name: GA4EventName, params?: Record<string, unknown>, options?: TrackOptions): void {
   trackToAnalyticsSinks(name, params, options);
 }

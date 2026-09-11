@@ -1,7 +1,7 @@
 import { collection, doc, getDocFromCache, setDoc } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
-import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import type { DoubtDoc, ProofDoc } from '../types';
 
 // Doubts (ADR 0001): a Doubt is one Player publicly asking another to back up a
@@ -86,7 +86,7 @@ async function cachedPlayerName(uid: string, eventId: string): Promise<unknown> 
  * nothing stores `id`; `satisfied*` is left absent because satisfaction is
  * DERIVED from Proofs (see `isDoubtSatisfied`), not written here.
  *
- * Fires the `demand_proof` GA4/PostHog event via `track()` only once the write
+ * Fires the `demand_proof` GA4/PostHog event via `trackIfCurrentEvent()` only once the write
  * SETTLES SUCCESSFULLY (Codex P2, PR #106 round 3 finding 2) — one of the two PRD
  * events the pre-Doubt catalog was missing. Only a PERSISTED Doubt counts: every
  * skipped duplicate (local guard, cache pre-check) and every rejected write (the
@@ -196,7 +196,7 @@ export async function raiseDoubt(args: RaiseDoubtArgs): Promise<void> {
       // first. Accurate-but-delayed beats inflated for a counting metric.
       // Startup dimensions cannot be rebound safely after an in-session Event
       // transition. Never attribute an Event-A write to the now-active Event B.
-      if (EVENT_ID === eventId) track('demand_proof', { itemId });
+      trackIfCurrentEvent(eventId, 'demand_proof', { itemId });
     },
     (err: unknown) => {
       // Not the offline case: offline the write PENDS in the persistent cache and

@@ -2675,6 +2675,56 @@ describe('ArchivedLeaderboard — share affordance', () => {
     // position invented inside the truncated prefix.
     expect(pinned[0].querySelector('.share-card-rank')?.textContent).toBe('260');
   });
+
+  it('emits share_click for the archive surface once its native share settles under the same Event', async () => {
+    let finishShare!: () => void;
+    const shareMock = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishShare = resolve;
+        }),
+    );
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    expect(track).not.toHaveBeenCalled(); // reported once the sheet settles, not on the tap
+
+    finishShare();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(track).toHaveBeenCalledWith('share_click', { surface: 'leaderboard_archive' });
+    expect(track).toHaveBeenCalledTimes(1);
+  });
+
+  // #1083: the archive's share handler captures the Event at the tap and hands
+  // that capture to `trackIfCurrentEvent` once the sheet settles, so a share
+  // that completes after another Event has activated reports nothing — the
+  // same guard the live Leaderboard proves above and FarewellPodium below.
+  it('does not attribute Event A archive-share analytics after Event B activates during native share', async () => {
+    let finishShare!: () => void;
+    const shareMock = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishShare = resolve;
+        }),
+    );
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+    eventScope.eventId = 'event-a';
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    eventScope.eventId = 'event-b';
+    finishShare();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(track).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

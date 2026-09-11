@@ -1,6 +1,6 @@
 import { deleteDoc, setDoc } from 'firebase/firestore';
 import { heartRef } from './paths';
-import { track } from '../analytics';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { EVENT_ID } from '../firebase';
 import { isBanned } from './moderation';
 import type { HeartDoc, HeartTargetKind } from '../types';
@@ -53,7 +53,7 @@ export function setHeart(params: {
         // Analytics dimensions are registered from the active Event and cannot
         // be rebound for this late continuation. Park the stale completion
         // instead of reporting Event A's action as Event B's.
-        if (EVENT_ID === eventId) track('heart_post', { targetKind, on: false });
+        trackIfCurrentEvent(eventId, 'heart_post', { targetKind, on: false });
       },
       (err: unknown) => {
         console.warn('[hearts] unheart rejected; the listener will re-sync', err);
@@ -72,7 +72,7 @@ export function setHeart(params: {
   // allow owner create AND update under the same full validation).
   return setDoc(ref, payload).then(
     () => {
-      if (EVENT_ID === eventId) track('heart_post', { targetKind, on: true });
+      trackIfCurrentEvent(eventId, 'heart_post', { targetKind, on: true });
     },
     (err: unknown) => {
       console.warn('[hearts] heart rejected; the listener will re-sync', err);
