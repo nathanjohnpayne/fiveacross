@@ -13,12 +13,12 @@ import { EVENT_ID } from '../firebase';
  * freeze the pre-resolution value. Analytics emission has its own wrapper on
  * this predicate, `trackIfCurrentEvent` (`src/eventScopedAnalytics.ts`).
  *
- * Its own module, not an export of `./eventScope`: `eventScopeKey` is pure and
- * `board-freshness.ts` (a pure registry) is its only-import consumer, so
- * folding the live-binding read in there would make that registry — and every
- * double-free unit test of it — initialize the Firebase singleton. Every
- * consumer of THIS predicate already imports `../firebase`, so it grows no
- * module's import graph.
+ * Its own module, not an export of `./eventScope`: `eventScopeKey` is pure, and
+ * `board-freshness.ts` (a pure registry whose only import is `./eventScope`)
+ * consumes it, so folding the live-binding read in there would make that
+ * registry — and its double-free unit test — initialize the Firebase
+ * singleton. Every consumer of THIS predicate already imports `../firebase`,
+ * so it grows no module's import graph.
  */
 export function isCurrentEvent(eventId: string): boolean {
   return EVENT_ID === eventId;

@@ -35,9 +35,9 @@ import { isCurrentEvent } from './data/currentEvent';
  * `track`, so keeping `track()` the one dispatch seam means those doubles
  * exercise this guard for real and none of them needs a second export. And
  * deliberately NOT beside `isCurrentEvent` in `data/currentEvent.ts`: that
- * predicate stays free of the analytics graph so its Firestore-only consumers
- * (moments.ts, directMarkAnalytics.ts) and their `{ db, EVENT_ID }` firebase
- * doubles never load `analytics.ts`.
+ * predicate stays free of the analytics graph so `moments.ts` — the one
+ * consumer whose import graph does not already reach `analytics.ts` — and its
+ * `{ db, EVENT_ID }` firebase doubles never load it.
  */
 export function trackIfCurrentEvent(actedEventId: string, ...args: Parameters<typeof track>): boolean {
   if (!isCurrentEvent(actedEventId)) return false;
