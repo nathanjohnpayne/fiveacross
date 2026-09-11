@@ -231,6 +231,32 @@ describe('W4 bug-report inbox', () => {
     await screen.findByText('report-1');
   });
 
+  it('styles the mid-submit status line with its own semantic hook, not the privacy-copy class (#985)', async () => {
+    // "Sending report…" borrowed `.bug-report-privacy` for its subdued type, so
+    // a reader had to know the class was a copy-paste artifact rather than a
+    // claim that the status IS privacy copy. `.bug-report-status` names what the
+    // paragraph is and sits in the same rule group, so nothing visible moves —
+    // and the `role="status"` / `tabIndex` pair the focus trap relies on stays.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    let resolveSubmit!: (result: { reportId: string; escalationEligible: boolean }) => void;
+    submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    fireEvent.change(await screen.findByLabelText('What happened?'), { target: { value: 'Something broke.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent('Sending report…');
+    expect(status).toHaveClass('bug-report-status');
+    expect(status).not.toHaveClass('bug-report-privacy');
+    expect(status).toHaveAttribute('tabindex', '0');
+    // The hook has to resolve to a rule, or the rename would silently drop the
+    // subdued styling the privacy class was supplying.
+    expect(INDEX_CSS).toMatch(/\.bug-report-privacy,\s*\.bug-report-status,\s*\.bug-report-capture p\s*\{/);
+    resolveSubmit({ reportId: 'report-1', escalationEligible: false });
+    await screen.findByText('report-1');
+  });
+
   it('gives each report-kind label a real 44px tap target', () => {
     // A 13px line plus a few px of padding measures ~24px, which is the sort of
     // thing a comment can claim and the box model quietly refuse. Phone-first
