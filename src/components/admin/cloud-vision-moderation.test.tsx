@@ -206,6 +206,46 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
     expect(rowFor('Not Hidden').queryByText(/Restore returns it for review/)).toBeNull();
   });
 
+  it('says nothing about a pending claim that names the Proof but belongs to ANOTHER Player', () => {
+    // The claims create rule binds `uid` to the caller, not `proofId` to the
+    // caller's own Proof, so any signed-in Player can mint a pending claim naming
+    // someone else's photo. `restoreProof` ignores such a claim and publishes
+    // (src/data/admin.ts, Codex P2 on #1143) — so the row must not promise the
+    // opposite. Only the OWNER's claim steers the destination copy (#1156).
+    adminConfirmedEvent();
+    H.flagged = [
+      proof('P', 0, { displayName: 'Held Photo', status: 'hidden', safetyHide: true, visionFlag: 'violence' }),
+    ];
+    H.claims = [claim({ id: 'forged', uid: 'u-stranger', displayName: 'Stranger', proofId: 'P' })];
+    renderQueue();
+
+    const row = rowFor('Held Photo');
+    expect(row.queryByText(/Restore returns it for review, not to the Feed/)).toBeNull();
+    expect(row.getByRole('button', { name: 'Restore' })).toHaveAttribute(
+      'title',
+      'Put this proof back in the Feed. The AI screen flagged it: violence.',
+    );
+  });
+
+  it("still names the claim-review destination when the owner's claim sits beside a stranger's", () => {
+    // A forged claim must not mask the real one in the other direction either:
+    // the owner's pending claim steers `restoreProof` whatever else names the Proof.
+    adminConfirmedEvent();
+    H.flagged = [proof('P', 6, { displayName: 'Report Hidden', status: 'hidden' })];
+    H.claims = [
+      claim({ id: 'forged', uid: 'u-stranger', displayName: 'Stranger', proofId: 'P' }),
+      claim({ uid: 'u-P' }),
+    ];
+    renderQueue();
+
+    const row = rowFor('Report Hidden');
+    expect(row.getByText(/Restore returns it for review, not to the Feed/)).toBeInTheDocument();
+    expect(row.getByRole('button', { name: 'Restore' })).toHaveAttribute(
+      'title',
+      'Put this proof back for claim review; it stays out of the Feed until the claim is confirmed.',
+    );
+  });
+
   it('shows the reason WITHOUT the hidden marker while a flagged Proof is still awaiting its hide', () => {
     // The window between moderateProof's flag write and hideProofOnVisionFlag's
     // hide — and the state a merely-racy verdict would never leave (nothing racy
@@ -273,7 +313,11 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
 const claim = (over: Partial<ClaimDoc> = {}): ClaimDoc =>
   ({
     id: 'claim-1',
-    uid: 'u-1',
+    // The OWNER of proof('P') — the `proof` helper mints `u-${id}` — so the
+    // default claim is a Player's claim on their OWN Proof, which is the only
+    // claim `restoreProof` lets steer a Restore. A claim from another Player
+    // overrides this (#1156).
+    uid: 'u-P',
     displayName: 'Deck Daddy',
     cellIndex: 4,
     itemText: 'Saw a sailor in Speedos',

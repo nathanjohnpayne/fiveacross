@@ -119,7 +119,8 @@ function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boo
  * `claimUndecided` is the other thing Restore has to say. In admin_confirmed mode
  * a hidden Proof may still be backing a claim nobody has judged, and `restoreProof`
  * returns THAT Proof to `'pending'` rather than publishing it — so the row says so
- * before the click, not after (#133, Codex P1 round 2).
+ * before the click, not after (#133, Codex P1 round 2). Only the Proof OWNER's
+ * claim counts, because only the owner's claim steers that write (#1156).
  */
 function ProofQueueRow({
   proof: p,
@@ -133,7 +134,7 @@ function ProofQueueRow({
 }: {
   proof: ProofDoc;
   threshold: number | undefined;
-  /** Is a still-pending claim backing this Proof? Restore returns it for review, not to the Feed. */
+  /** Is the OWNER's still-pending claim backing this Proof? Restore returns it for review, not to the Feed. */
   claimUndecided: boolean;
   bannedUids: string[];
   admins: string[];
@@ -456,9 +457,25 @@ export default function ReviewQueue({
   // `usePendingClaims`, which the console already subscribes to for the group
   // below, and read whatever the claim mode is: a Proof left pending by a mode
   // switch is still a Proof no confirm has published.
-  const undecidedClaimProofs = new Set<string>();
+  //
+  // Keyed by proof id AND claimant uid, because only the Proof OWNER's claim
+  // steers the destination. The claims create rule binds `uid` to the caller but
+  // not `proofId` to the caller's own Proof, so any signed-in Player can mint a
+  // pending claim naming someone else's photo — and `restoreProof` deliberately
+  // ignores those (src/data/admin.ts, Codex P2 on #1143). A proofId-only set
+  // would let a stranger's claim make the row promise "back for review" while
+  // the write publishes to the Feed. The row resolves `claim.uid === proof.uid`
+  // at the call site below, so it states the SAME predicate the write decides
+  // on — status pending, this proofId, this owner (#1156).
+  const undecidedClaimProofs = new Map<string, Set<string>>();
   for (const c of claims) {
-    if (c.proofId) undecidedClaimProofs.add(c.proofId);
+    if (c.status !== 'pending' || !c.proofId) continue;
+    let claimants = undecidedClaimProofs.get(c.proofId);
+    if (!claimants) {
+      claimants = new Set<string>();
+      undecidedClaimProofs.set(c.proofId, claimants);
+    }
+    claimants.add(c.uid);
   }
   // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
   // paths go through it, and the bulk one is the easy miss: a batch containing
@@ -688,7 +705,7 @@ export default function ReviewQueue({
                 key={`proof-${entry.proof.id}`}
                 proof={entry.proof}
                 threshold={threshold}
-                claimUndecided={undecidedClaimProofs.has(entry.proof.id)}
+                claimUndecided={undecidedClaimProofs.get(entry.proof.id)?.has(entry.proof.uid) ?? false}
                 bannedUids={bannedUids}
                 admins={admins}
                 days={event?.days}
