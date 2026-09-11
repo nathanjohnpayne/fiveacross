@@ -6,6 +6,13 @@ import { isLocalDevHost } from './local-host';
 // `https://<host>/__/auth/handler` on the Google OAuth web client, neither of
 // which accepts a wildcard; a pattern here would silently pin `authDomain` to a
 // host Google will reject.
+//
+// This set is NOT the source of truth for whether sign-in is reachable on a
+// host (#852). It is the direct, same-origin override: a host listed here signs
+// in without leaving the page. Every other host reaches sign-in through the
+// ADR 0010 handoff to the central auth origin (`resolveSignInStrategy` in
+// src/auth/authMode.ts), which is why a newly provisioned wildcard Event host
+// needs no entry here and no redeploy.
 const FIRST_PARTY_AUTH_HOSTS = new Set([
   'gaycruisebingo.com',
   'gaycruisebingo.vercel.app',
