@@ -215,22 +215,25 @@ export const EVENT_SEED = {
   // because the podium mirrors key First-to-BINGO exclusion off the `tutorial`
   // flag alone (tests/functions/finale-parity.test.ts pins both sides).
   days: [
-    // Days carry the SAME dual-write posture: place/placeEmoji (the live
-    // doc's shape, and the post-#566 reader) PLUS port/portEmoji (what the
-    // currently shipped DaySwitcher/Board/Leaderboard render). Values mirror
-    // the live doc field-for-field.
+    // Days carry ONLY place/placeEmoji — the live `events/bodega-bay-2026`
+    // doc's shape, and the post-#566 reader's. They do NOT share the Event's
+    // sailStart/sailEnd dual-write posture above (#924): no live Day carries
+    // `port`, and only the wrap-up Day carries a `portEmoji` (Nathan's
+    // 2026-08-05 hand edit — the sole reason that key exists on this Event).
+    // `seed.mjs` writes `days` verbatim when it creates an Event, so re-adding
+    // the legacy pair here would stamp the vocabulary #566 is retiring onto a
+    // fresh Event WITH read precedence — `migrateDayFields` prefers a string
+    // `portEmoji` over `placeEmoji` — i.e. the #652 trap, pre-armed. A Day
+    // that omits the pair resolves through that same converter to
+    // place/placeEmoji, so nothing shipped needs it.
     {
       index: 0,
       date: '2026-08-07',
       place: 'Bodega Bay',
       // #881: was 🐦, matching the Theme's own glyph and rendering the bird
       // twice in the header (`{placeEmoji} {place}` over `{themeEmoji}
-      // {themeLabel}`). placeEmoji/portEmoji move together so the #566
-      // legacy-field coercion (migrateDayFields — the legacy portEmoji wins
-      // when the two disagree) doesn't keep serving the retired glyph.
+      // {themeLabel}`).
       placeEmoji: '🐚',
-      port: 'Bodega Bay',
-      portEmoji: '🐚',
       theme: 'the-birds',
       tonight: ['🍷 Arrival pours', '🌊 First look at the water'],
       pool: 'embark',
@@ -253,11 +256,8 @@ export const EVENT_SEED = {
       date: '2026-08-08',
       place: 'Bodega Bay',
       // #881: was 🌊, matching the Theme's own glyph (same duplicate-header
-      // problem as Day 0). placeEmoji/portEmoji move together — see the Day 0
-      // comment above.
+      // problem as Day 0).
       placeEmoji: '🦪',
-      port: 'Bodega Bay',
-      portEmoji: '🦪',
       theme: 'side-quests',
       // Live-edited 2026-08-05: '🌅 Sunset' replaced the fire pit.
       tonight: ['🦀 Harbor dinner', '🌅 Sunset'],
@@ -272,8 +272,6 @@ export const EVENT_SEED = {
       date: '2026-08-09',
       place: 'Bodega Bay',
       placeEmoji: '🌅',
-      port: 'Bodega Bay',
-      portEmoji: '🌅',
       theme: 'fog-froth-farewells',
       tonight: ['☕ Last coffee', '🧳 The slow pack'],
       pool: 'main',
@@ -288,11 +286,11 @@ export const EVENT_SEED = {
       place: 'The drive home',
       // #881: was 🌫️, matching the Theme's own glyph (same duplicate-header
       // problem as Days 0/1). Live-edited 2026-08-05, Nathan had already set
-      // the legacy portEmoji to 👋 by hand; placeEmoji now matches it, so the
-      // two fields agree instead of diverging.
+      // the LIVE Day's legacy portEmoji to 👋 by hand; placeEmoji matches it,
+      // so the one live Day that still carries the legacy key agrees with the
+      // canonical one. That 👋 is a hand edit on the live doc, not a seed
+      // value — the seed does not write portEmoji (see the days header).
       placeEmoji: '👋',
-      port: 'The drive home',
-      portEmoji: '👋',
       theme: 'fog-froth-farewells',
       tonight: ['📸 The photo dump', '📅 Next one'],
       pool: 'farewell',
