@@ -714,12 +714,38 @@ phase_4b_automation:
   # fiveacross 2026-08-27): collect-enablement-evidence.sh
   # reported READY (codex-cli 0.143.0 auth_mode=chatgpt; Claude Code
   # 2.1.214 apiProvider=firstParty; no API-key env vars set).
-  # Independent live Claude-adapter evidence: exact-head APPROVED review from
-  # nathanpayne-claude on merged PR #702:
-  # https://github.com/nathanjohnpayne/fiveacross/pull/702#pullrequestreview-4901655869
-  # Package CI evidence: main repo-lint job, including the successful
-  # check_phase_4b_automation step:
-  # https://github.com/nathanjohnpayne/fiveacross/actions/runs/32209450638/job/95939032735
+  # Evidence is recorded as immutable references first (#925): commit SHAs
+  # that git preserves, with the live GitHub URLs kept only as convenience
+  # pointers that may be edited, purged, or expire.
+  # Authority for the switch (#926, owner decision 2026-09-11): the
+  # authority is the operator's out-of-band instruction, recorded in the
+  # enablement commit 23fd0c563f15d62bd9a20efca3be24fd88a5feda ("Enable
+  # phase_4b_automation for gaycruisebingo", 2026-07-19). That commit's
+  # author identity is NOT proof of a human act: agents in this repository
+  # commit, sign, and post under the same nathanjohnpayne identity and the
+  # same machine-held signing key (AGENTS.md), so no git author, signature,
+  # or GitHub login here distinguishes the human from the automation. No
+  # durable human-only attestation mechanism exists in this repository, by
+  # design; an audit of whether Phase 4b received human authorisation must
+  # rely on the operator's instruction, not on identity evidence. The
+  # adapter evidence below proves the tooling is live; it is not the
+  # sign-off that enables it, so a prior automated approval never stands as
+  # the reason to keep trusting the automation.
+  # Live Claude-adapter evidence: exact-head APPROVED review from
+  # nathanpayne-claude at 2026-08-10T23:12:56Z on PR #702 head
+  # ee548805ecc72734e7adb86cb82e95798f792671. PR #702 was squash-merged as
+  # 7c04b91bb93ffc12b1c29a8b35d0741b32aeafa2, so the reviewed head is not
+  # reachable from main on its own; the tag
+  # evidence/phase-4b-702-reviewed-head pins it in this repository so the
+  # approval stays connected to the exact reviewed tree without GitHub's
+  # PR refs (review id 4901655869;
+  # https://github.com/nathanjohnpayne/fiveacross/pull/702#pullrequestreview-4901655869).
+  # Package CI evidence: repo-lint on main at
+  # d6d9da09b7ad438d748bf28c3ce51ea1ee207218 (push, 2026-08-19T02:41:22Z)
+  # concluded success including the check_phase_4b_automation step; the
+  # step is re-runnable from that commit if the run log has expired
+  # (run 32209450638, job 95939032735;
+  # https://github.com/nathanjohnpayne/fiveacross/actions/runs/32209450638/job/95939032735).
   enabled: true
 
   # Execution model. 'local' = the authoring agent's session shells out to
