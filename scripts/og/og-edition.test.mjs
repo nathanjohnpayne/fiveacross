@@ -35,6 +35,7 @@ function baseConfig(wordmarkOverrides) {
       freeLabel: 'FREE',
       barShort: 60,
       barLong: 100,
+      barInset: 13,
     },
     stamp: null,
     caption: 'BINGO',
@@ -99,7 +100,6 @@ describe('og-edition.html board geometry (#884)', () => {
       resources: undefined,
     });
     const config = baseConfig({ lead: 'GAY CRUISE', bold: 'BINGO' });
-    config.board.barInset = 13;
 
     dom.window.__OG_RENDER__(config);
 
@@ -108,5 +108,42 @@ describe('og-edition.html board geometry (#884)', () => {
     expect(squares[0].style.padding).toBe('0px 13px');
     expect(freeSquare.style.padding).toBe('');
     expect(dom.window.getComputedStyle(freeSquare).padding).toBe('0px');
+  });
+});
+
+describe('og-edition.html board.barInset guard (#997)', () => {
+  function renderWith(mutate) {
+    const dom = new JSDOM(templateHtml, {
+      url: pathToFileURL(join(here, 'og-edition.html')).href,
+      runScripts: 'dangerously',
+      resources: undefined,
+    });
+    const config = baseConfig({ lead: 'GAY CRUISE', bold: 'BINGO' });
+    mutate(config);
+    return { dom, render: () => dom.window.__OG_RENDER__(config) };
+  }
+
+  it('throws, and never signals ogReady, when board.barInset is omitted', () => {
+    // `barInset` is required by og-edition-art.d.mts and every shipped Edition
+    // sets it, but the template used to fall back to zero horizontal padding
+    // when it was missing — a silently wrong render. The throw leaves
+    // `ogReady` unset, which is exactly what render-og-editions.mjs checks
+    // before it will write a PNG.
+    const { dom, render } = renderWith((config) => {
+      delete config.board.barInset;
+    });
+    expect(render).toThrow('og-edition: board.barInset is required');
+    expect(dom.window.document.body.dataset.ogReady).toBeUndefined();
+  });
+
+  it.each([
+    ['null', null],
+    ['NaN', Number.NaN],
+    ['a numeric string', '13'],
+  ])('rejects %s rather than coercing it into a padding value', (_label, value) => {
+    const { render } = renderWith((config) => {
+      config.board.barInset = value;
+    });
+    expect(render).toThrow('og-edition: board.barInset is required');
   });
 });
