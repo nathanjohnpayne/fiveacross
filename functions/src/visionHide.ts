@@ -385,35 +385,82 @@ async function defaultHideVisionFlaggedIfQualifies(eventId: string, proofId: str
   return hideVisionFlaggedIfQualifies(await adminFirestore(), eventId, proofId);
 }
 
-/** Where `writeVisionVerdict` put the verdict: onto the Proof, or into the hand-off. */
-export type VisionVerdictTarget = 'proof' | 'scan';
+/**
+ * Where `writeVisionVerdict` put the verdict: onto the Proof, into the hand-off,
+ * or — `'duplicate'` — nowhere, because the Proof already recorded this exact
+ * verdict and the delivery is therefore a redelivery of a scan already applied
+ * (see `writeVisionVerdict`). The third member is not cosmetic: `'proof'` is a
+ * claim that this call WROTE the verdict, and on the duplicate arm it does not,
+ * so reporting `'proof'` would misdescribe a no-op to every caller, log line and
+ * test that reads it.
+ */
+export type VisionVerdictTarget = 'proof' | 'scan' | 'duplicate';
 
 /**
  * The PRODUCER-side write, and the half of the #1143 fix that lives with the
  * scanner: record a Vision verdict WITHOUT ever creating the Proof document.
  *
- * One transaction, two arms, chosen by whether `attachProof` has committed yet:
+ * One transaction, three arms, chosen by whether `attachProof` has committed yet
+ * and by what the Proof already records:
  *
- *   - the Proof EXISTS → `tx.update` writes `visionVerdictWrite`'s payload onto
- *     it: the `{ status: 'flagged', visionFlag }` the scanner's merge-set used
- *     to write, plus the `safetyHide` marker when the verdict is one this module
- *     hides, so the hold is recorded in the SAME write as the verdict rather
- *     than a trigger-hop later (see `visionVerdictWrite`). `update` rather than
- *     `set` is the guarantee: a Proof deleted since the upload is never
- *     resurrected as a ghost, the same promise `hideVisionFlaggedIfQualifies`
- *     already makes. The same arm also `tx.delete`s the hand-off record, and
- *     it does so BLIND. Storage triggers are at-least-once, so a duplicate
- *     delivery of one scan can reach the Proof after `attachProof`'s create
- *     while its twin's parked verdict is still waiting for the create-trigger;
- *     the direct write supersedes that record. Left standing, it outlived both
- *     the direct write and an admin's Restore, and the delayed create-trigger
- *     delivery then consumed it and re-hid the Proof the admin had just lifted
- *     — an override reversed without a fresh upload (#1154). A blind delete
- *     needs no read of its own, so the transaction's reads-before-writes rule
- *     holds, and on the ordinary scan — nothing parked — it is a no-op that
- *     costs less than the read a conditional delete would need.
+ *   - the Proof EXISTS and does NOT already carry this verdict → `tx.update`
+ *     writes `visionVerdictWrite`'s payload onto it: the
+ *     `{ status: 'flagged', visionFlag }` the scanner's merge-set used to write,
+ *     plus the `safetyHide` marker when the verdict is one this module hides, so
+ *     the hold is recorded in the SAME write as the verdict rather than a
+ *     trigger-hop later (see `visionVerdictWrite`). `update` rather than `set`
+ *     is the guarantee: a Proof deleted since the upload is never resurrected as
+ *     a ghost, the same promise `hideVisionFlaggedIfQualifies` already makes.
+ *   - the Proof EXISTS and ALREADY carries this exact verdict → a DUPLICATE
+ *     delivery, and the Proof is left entirely alone. See below.
  *   - the Proof is ABSENT → `tx.set` parks the verdict in `proofScans` (above),
  *     and `applyPendingVisionScan` applies it when the Proof arrives.
+ *
+ * BOTH existing-Proof arms `tx.delete` the hand-off record, and they do so
+ * BLIND. Storage triggers are at-least-once, so a duplicate delivery of one scan
+ * can reach the Proof after `attachProof`'s create while its twin's parked
+ * verdict is still waiting for the create-trigger; the direct write supersedes
+ * that record. Left standing, it outlived both the direct write and an admin's
+ * Restore, and the delayed create-trigger delivery then consumed it and re-hid
+ * the Proof the admin had just lifted — an override reversed without a fresh
+ * upload (#1154). A blind delete needs no read of its own, so the transaction's
+ * reads-before-writes rule holds, and on the ordinary scan — nothing parked — it
+ * is a no-op that costs less than the read a conditional delete would need.
+ *
+ * THE DUPLICATE ARM IS THE OTHER HALF OF THAT SAME GUARANTEE, and it is the half
+ * that does not depend on ordering (Codex P2 on #1179). Retiring the parked
+ * record only helps when the redelivery arrives BEFORE the admin's Restore. A
+ * redelivery that arrives AFTER it took this same existing-Proof arm and wrote
+ * `{ status: 'flagged', safetyHide: true }` straight back over the lift — no
+ * hand-off record involved, so no delete could have prevented it. So the
+ * redelivery is recognised for what it is, from the Proof itself:
+ *
+ *   - `visionFlag` is written by exactly two paths, this one and
+ *     `applyPendingVisionScan`, both through `visionVerdictWrite`; no client may
+ *     write it at all, and NOTHING ever clears it. `restoreProof`
+ *     (src/data/admin.ts) writes only `{ status, safetyHide: false }` and leaves
+ *     the verdict standing ON PURPOSE, as the audit record of what the admin
+ *     overrode (see `SAFETY_HIDE_MARKER`).
+ *   - So `proof.visionFlag === visionFlag` means precisely "this exact verdict
+ *     has already been applied to this Proof" — whether the hide it earned still
+ *     stands or an admin has since lifted it. Either way the verdict has already
+ *     had its effect, and re-applying it cannot add information.
+ *   - And it can only be the SAME SCAN. `proofId` is a fresh Firestore auto-id
+ *     per `attachProof`, the scanned object's name is derived from it
+ *     (`proofs/{eventId}/{uid}/{proofId}.jpg`), and that object is CREATE-ONLY —
+ *     `storage.rules` makes a proof object immutable and lets no client delete
+ *     one while its Proof document stands (#1153). One `proofId` is therefore
+ *     one object and one scan, so a second event carrying the same verdict for
+ *     it is that scan delivered twice, never a fresh look at fresh media.
+ *
+ * A GENUINELY DIFFERENT VERDICT STILL APPLIES, which is why the test is equality
+ * with the recorded verdict rather than "the Proof has been flagged before". A
+ * Proof carrying `racy` that a later scan reads as `violence` is re-flagged and
+ * earns its marker exactly as before, and so is one carrying no verdict yet.
+ *
+ * The duplicate arm therefore costs nothing and gives up nothing: it reads the
+ * doc this transaction had already fetched, and the only write it withholds is
+ * one that would have re-asserted a decision the Proof already records.
  *
  * The transaction is what makes the hand-off airtight, and this is the whole
  * argument for it. A Firestore read-write transaction commits only if every
@@ -440,12 +487,17 @@ export async function writeVisionVerdict(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(proofRef);
     if (snap.exists) {
-      tx.update(proofRef, visionVerdictWrite(visionFlag));
-      // Retire any verdict a duplicate delivery parked before the create
-      // (#1154). Blind — no read precedes it — and a no-op on the ordinary
-      // scan, where nothing is parked.
+      // Already recorded ⇒ this delivery is a redelivery of the scan that
+      // recorded it, and the Proof is left untouched — the lift an admin may
+      // have made since is not overwritten (#1154, Codex P2 on #1179).
+      const alreadyRecorded = (snap.data() as VisionFlaggedDoc | undefined)?.visionFlag === visionFlag;
+      if (!alreadyRecorded) tx.update(proofRef, visionVerdictWrite(visionFlag));
+      // Retire any verdict a duplicate delivery parked before the create, on
+      // BOTH arms: a record left standing is re-applied by the create-trigger,
+      // which reverses that same lift. Blind — no read precedes it — and a
+      // no-op on the ordinary scan, where nothing is parked.
       tx.delete(scanRef);
-      return 'proof';
+      return alreadyRecorded ? 'duplicate' : 'proof';
     }
     tx.set(scanRef, { visionFlag, scannedAt: now });
     return 'scan';
