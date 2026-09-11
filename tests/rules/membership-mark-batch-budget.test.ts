@@ -37,6 +37,15 @@ const COMPATIBILITY_PATH = 'markerDeliveryCompatibility/current';
 const NOW = () => Date.now();
 const PAST = () => NOW() - 3_600_000;
 
+// The preview ruleset is built by exact-matching snippets of the live
+// firestore.rules and rewriting each exactly once, on purpose: a predicate
+// change that this suite has not been told about must fail closed. The cost
+// is that an unrelated formatting, comment, or reindentation change to one of
+// those blocks also trips the anchor. This hint tells that failure apart from
+// a real predicate regression (#1088).
+const ANCHOR_DRIFT_HINT =
+  'This is a fixture-anchor drift in firestore.rules (a formatting, comment, or reindentation change to the anchored block), not a predicate regression: re-anchor the snippet in this test to the current rules text and re-run.';
+
 function replaceExactlyOnce(
   source: string,
   label: string,
@@ -46,7 +55,7 @@ function replaceExactlyOnce(
   const occurrences = source.split(from).length - 1;
   if (occurrences !== 1) {
     throw new Error(
-      `#1079 budget test expected exactly one ${label} anchor; found ${occurrences}`,
+      `#1079 budget test expected exactly one ${label} anchor; found ${occurrences}. ${ANCHOR_DRIFT_HINT}`,
     );
   }
   return source.replace(from, to);
@@ -61,7 +70,7 @@ function requireOccurrences(
   const actual = source.split(needle).length - 1;
   if (actual !== expected) {
     throw new Error(
-      `#1079 budget test expected ${expected} ${label} occurrence(s); found ${actual}`,
+      `#1079 budget test expected ${expected} ${label} occurrence(s); found ${actual}. ${ANCHOR_DRIFT_HINT}`,
     );
   }
 }
