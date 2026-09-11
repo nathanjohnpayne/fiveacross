@@ -62,8 +62,11 @@ interface AlertSnapshot {
 }
 interface AlertDocRef {
   get(): Promise<{ data(): Record<string, unknown> | undefined }>;
-  /** Unconditional write — used only to FREEZE a batch's outbound request. */
-  set(data: Record<string, unknown>): Promise<unknown>;
+  /** Admin-SDK `DocumentReference.set`. Unconditional by default, which is
+   *  what FREEZES a batch's outbound request; a MERGE when asked, which is how
+   *  the archived-queue settled marker (#943) joins an Event document without
+   *  rewriting the configuration around it. */
+  set(data: Record<string, unknown>, options?: { merge?: boolean }): Promise<unknown>;
   /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
    *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing for the
    *  immutable frozen request: two senders can render, but only one byte-for-
@@ -490,6 +493,12 @@ export interface BugReportDoc {
   reporterInEvent?: boolean;
   escalationLookupFailed?: boolean;
   escalationEligible?: boolean;
+  /** Server-clock ms at which the DELAYED escalation resolver decided this
+   *  report and wrote its answer back over the three fields above (#988).
+   *  Written by `resolveAbuseEscalationTask` and by nothing else, so its
+   *  presence is what tells the on-write producer that a write is an escalation
+   *  write-back rather than a new report. */
+  escalationResolvedAt?: number;
   status?: string;
   intakeState?: string;
   submissionId?: string;
@@ -560,6 +569,10 @@ const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
  *
  * A DELETE (`after` undefined) earns nothing, matching `alertsForWrite`.
  *
+ * Neither does a write carrying `escalationResolvedAt`: that field marks the
+ * delayed resolver's write-back of its own decision (#988), and the resolver
+ * has already queued the single alert that decision earns.
+ *
  * AND THE REPORTER HAS TO BELONG TO THE EVENT. `eventId` is client-supplied, so
  * without this an authenticated player could name any Event in the project and
  * route arbitrary text into ITS admins' digest — the rate limit caps how much,
@@ -575,6 +588,21 @@ export function abuseAlertsForWrite(
   after: BugReportDoc | undefined,
 ): AdminAlertDraft[] {
   if (!after) return [];
+  // AN ESCALATION WRITE-BACK IS NOT A REPORT (#988). The delayed resolver now
+  // records its answer on the report itself, which turns `reporterInEvent`
+  // from an intake-only fact into one this trigger can observe arriving — and
+  // the resolver has ALREADY queued the one alert that decision earns, under
+  // its own deterministic `bug-report-escalation-{id}` identity. Alerting again
+  // here would mail the Event's admins a second copy of the same report.
+  //
+  // `escalationResolvedAt` has exactly one writer, so its presence on `after`
+  // identifies the write-back whether or not `before` carried it (a redelivery
+  // of an earlier write, or a later edit of an already-resolved report, both
+  // reach this with it present). The transition gate below would reject these
+  // writes anyway — every one of them has a `before` — but that gate is about
+  // intake's create-once shape, not about escalation, and a report decided by
+  // the resolver must stay un-alertable here however that gate is rewritten.
+  if (after.escalationResolvedAt !== undefined) return [];
   const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
   if (hasIntakeState) {
     if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
@@ -725,6 +753,18 @@ function firestoreTimeMs(value: unknown): number | null {
   return typeof millis === 'number' && Number.isFinite(millis) ? millis : null;
 }
 
+// A pending task's own stored `deadlineAt`/`expiresAt` are honoured within a
+// bounded range rather than required to re-derive exactly from the CURRENT
+// BUG_REPORT_ESCALATION_RETRY_WINDOW_MS / BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS
+// (#991). Under exact equality, changing either constant would terminalize every
+// in-flight task written under the old value as 'source-invalid' on the next
+// sweep, silently dropping legitimate retries instead of letting them run out
+// their originally-computed deadline. The 2x ceilings still reject a tampered or
+// absurd timestamp, and the strict ordering still requires deadlineAt to sit
+// after createdAt and expiresAt after deadlineAt.
+const ESCALATION_DEADLINE_MAX_SKEW_MS = 2 * BUG_REPORT_ESCALATION_RETRY_WINDOW_MS;
+const ESCALATION_EXPIRES_MAX_SKEW_MS = 2 * BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS;
+
 function terminalEscalation(outcome: AbuseEscalationOutcome, now: number): Record<string, unknown> {
   return {
     state: 'terminal',
@@ -756,8 +796,12 @@ function validPendingEscalation(task: Record<string, unknown>): {
     firestoreTimeMs(task.nextAttemptAt) === null ||
     deadlineAt === null ||
     expiresAt === null ||
-    deadlineAt !== createdAt + BUG_REPORT_ESCALATION_RETRY_WINDOW_MS ||
-    expiresAt !== deadlineAt + BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS
+    !Number.isSafeInteger(deadlineAt) ||
+    !Number.isSafeInteger(expiresAt) ||
+    deadlineAt <= createdAt ||
+    deadlineAt > createdAt + ESCALATION_DEADLINE_MAX_SKEW_MS ||
+    expiresAt <= deadlineAt ||
+    expiresAt > deadlineAt + ESCALATION_EXPIRES_MAX_SKEW_MS
   ) return null;
   return {
     eventId,
@@ -768,17 +812,72 @@ function validPendingEscalation(task: Record<string, unknown>): {
   };
 }
 
+/**
+ * The escalation's own answer, in the shape the report stores it (#988).
+ *
+ * MERGED onto `bugReports/{reportId}`, so an outcome that answered nothing
+ * about the reporter simply restates the unresolved pair and adds the marker —
+ * it must never invent a `reporterInEvent`. The exporter's invariant is that
+ * `reporterInEvent` is present exactly when `escalationLookupFailed` is false
+ * (`scripts/bug-reports-lib.mjs`), and only `queued` and `not-member` are
+ * reached by actually resolving the relationship. `alert-conflict`,
+ * `event-missing` and `event-inactive` terminalize BEFORE that read, so for
+ * them the honest record is still "unknown" — now stamped as final rather than
+ * still in flight.
+ *
+ * Because it MERGES, "restate the unresolved pair" is only honest on a report
+ * that has no answer yet. `reportMatchesEscalation` deliberately accepts a
+ * report this resolver has already written back, so escalation work re-created
+ * for a decided report reaches `alert-conflict` — and a merge of
+ * `escalationLookupFailed: true` on top of a stored `reporterInEvent` would
+ * leave exactly the shape the exporter refuses (`Unexpected reporterInEvent`),
+ * which it throws for the WHOLE export rather than for the one row. So a
+ * no-answer outcome on an already-decided report restamps `escalationResolvedAt`
+ * and nothing else: the earlier answer was reached by actually reading the
+ * relationship and is the more informative record, while clearing it would
+ * discard a real authorization fact to satisfy a shape check.
+ */
+function escalationWriteBack(
+  outcome: AbuseEscalationOutcome,
+  report: BugReportDoc,
+  now: number,
+): Record<string, unknown> {
+  if (outcome !== 'queued' && outcome !== 'not-member') {
+    if (report.escalationResolvedAt !== undefined) return { escalationResolvedAt: now };
+    return { escalationLookupFailed: true, escalationEligible: false, escalationResolvedAt: now };
+  }
+  const member = outcome === 'queued';
+  return {
+    escalationLookupFailed: false,
+    reporterInEvent: member,
+    escalationEligible: member,
+    escalationResolvedAt: now,
+  };
+}
+
 function reportMatchesEscalation(
   reportId: string,
   report: BugReportDoc | undefined,
   task: ReturnType<typeof validPendingEscalation>,
 ): report is BugReportDoc {
   if (!report || !task) return false;
-  return (
-    report.kind === 'abuse' &&
+  // The report must still be the UNRESOLVED one this task was created for — or
+  // one this same resolver has already written its answer back onto (#988).
+  // Without the second case a replayed resolution of a written-back report
+  // would read as `source-invalid`, blaming the binding for a report the
+  // resolver itself edited; with it, the alert read below still decides, and a
+  // report whose alert already exists terminalizes as `alert-conflict`, which
+  // is what actually happened. `escalationResolvedAt` has one writer and
+  // `bugReports` takes no client writes, so the relaxation cannot be forged,
+  // and every binding check below (kind, coordination shape, `eventId`,
+  // `reporterHash`, hash derivation) still has to hold either way.
+  const unresolvedAtIntake =
     report.escalationLookupFailed === true &&
     report.reporterInEvent === undefined &&
-    report.escalationEligible === false &&
+    report.escalationEligible === false;
+  if (!unresolvedAtIntake && report.escalationResolvedAt === undefined) return false;
+  return (
+    report.kind === 'abuse' &&
     (
       validLegacyBugReportCoordination(report) ||
       validCompleteBugReportCoordination(reportId, report)
@@ -827,22 +926,37 @@ async function resolveAbuseEscalationTask(
       return;
     }
 
+    // Past this point the task and the report are PROVEN to be about each
+    // other, so every remaining outcome settles both documents in the one
+    // transaction (#988). Until this existed the report kept intake's
+    // `escalationLookupFailed: true` forever — an admin UI or `npm run
+    // bugs:pull` export read "reporter unverified" on a report whose alert had
+    // in fact been delivered, and no amount of reading the report could tell
+    // that the question had since been answered. The two `source-invalid`
+    // exits above deliberately settle only the task: there the report either
+    // does not exist or is not the one this task names, and writing to it
+    // would be writing to somebody else's record.
+    const settle = (outcome: AbuseEscalationOutcome) => {
+      tx.set(reportRef, escalationWriteBack(outcome, report, now), { merge: true });
+      tx.set(taskRef, terminalEscalation(outcome, now));
+    };
+
     const alertRef = db.doc(
       `events/${parsed.eventId}/adminAlerts/${alertDocId(`bug-report-escalation-${reportId}`, draft.kind)}`,
     );
     const eventRef = db.doc(`events/${parsed.eventId}`);
     const [alert, eventSnapshot] = await Promise.all([tx.get(alertRef), tx.get(eventRef)]);
     if (alert.data() !== undefined) {
-      tx.set(taskRef, terminalEscalation('alert-conflict', now));
+      settle('alert-conflict');
       return;
     }
     const event = eventSnapshot.data();
     if (!event) {
-      tx.set(taskRef, terminalEscalation('event-missing', now));
+      settle('event-missing');
       return;
     }
     if (event.status !== 'active') {
-      tx.set(taskRef, terminalEscalation('event-inactive', now));
+      settle('event-inactive');
       return;
     }
 
@@ -851,12 +965,12 @@ async function resolveAbuseEscalationTask(
       ? false
       : (await tx.get(db.doc(`events/${parsed.eventId}/players/${parsed.reporterUid}`))).data() !== undefined;
     if (!isAdmin && !isPlayer) {
-      tx.set(taskRef, terminalEscalation('not-member', now));
+      settle('not-member');
       return;
     }
 
     tx.set(alertRef, pendingAdminAlertRow(draft, now));
-    tx.set(taskRef, terminalEscalation('queued', now));
+    settle('queued');
   });
 }
 
@@ -1196,6 +1310,96 @@ export function shouldSettleAdminAlertsOnArchive(
   after: Record<string, unknown> | undefined,
 ): boolean {
   return before?.status === 'active' && after?.status === 'archived';
+}
+
+/**
+ * The Event-document field that BOUNDS the archived backstop sweep (#943).
+ *
+ * `true` means every admin-alert row under this archived Event has reached a
+ * terminal state — delivered, discarded, or replayed — so the five-minute sweep
+ * has nothing left to do here. `false` means it still has work. The sweep reads
+ * it as a query filter rather than as a per-Event document read, which is the
+ * whole point: the archived set only GROWS over a project's lifetime, so an
+ * unfiltered `status == 'archived'` scan costs one read per archived Event on
+ * every sweep forever, almost always to discover there is nothing to do.
+ *
+ * WHY A FIELD ON THE EVENT, AND NOT A DOCUMENT BESIDE IT. A marker the sweep
+ * can FILTER on must live on the documents the sweep queries. A dedicated
+ * `events/{id}/meta/adminAlerts` document would have to be read per Event,
+ * which is the cost this exists to remove. The field is written only by the
+ * Admin SDK from this module, and it is deliberately NOT named by any rule:
+ * `firestore.rules` needs no change to ship it, because the Admin SDK bypasses
+ * rules and no client reads it. The residual is stated in
+ * `specs/admin-notification-emails.md` § "The archived backstop is bounded by
+ * a durable settled marker".
+ */
+export const ADMIN_ALERTS_SETTLED_FIELD = 'adminAlertsSettled';
+
+/** Merge the settled marker onto the Event document, leaving every other field
+ *  alone. A merge, never a `set`: this document is the Event's configuration. */
+async function writeAdminAlertsSettled(
+  db: AdminAlertFirestore,
+  eventId: string,
+  settled: boolean,
+): Promise<void> {
+  await db.doc(`events/${eventId}`).set({ [ADMIN_ALERTS_SETTLED_FIELD]: settled }, { merge: true });
+}
+
+/**
+ * Pure trigger guard: an Event LEAVING `archived` must forget that its queue was
+ * reconciled. Without this a reactivated Event would carry its old `true` into
+ * its next archive, and the sweep — which only ever looks at unsettled Events —
+ * would never visit the work that accumulated while it was live again.
+ *
+ * A DELETED Event is not a reactivation. There is no document left to sweep and
+ * nothing to mark, so an absent `after` is deliberately not a clear.
+ */
+export function shouldClearAdminAlertsSettledOnReactivate(
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+): boolean {
+  return before?.status === 'archived' && after !== undefined && after.status !== 'archived';
+}
+
+/**
+ * Mark an Event's admin-alert queue as NOT reconciled, so the backstop sweep
+ * visits it.
+ *
+ * Written on the lifecycle edge in BOTH directions, and both are load-bearing:
+ *
+ *   ENTERING `archived`, before settlement is even attempted. That is what
+ *   keeps the sweep's reach when the archive trigger's settlement THROWS — the
+ *   marker is already there saying "unsettled", so the next sweep picks the
+ *   Event up rather than never seeing it. Marking only on success would make an
+ *   absent marker mean both "never archived" and "archive handling failed", and
+ *   Firestore cannot query for an absent field.
+ *
+ *   LEAVING `archived` (reactivation), so the next archive is swept rather than
+ *   inheriting a stale `true`.
+ */
+export async function markAdminAlertsUnsettled(db: AdminAlertFirestore, eventId: string): Promise<void> {
+  await writeAdminAlertsSettled(db, eventId, false);
+}
+
+/**
+ * Record that an archived Event's queue is fully reconciled — but only while it
+ * is still archived.
+ *
+ * Re-reading `status` here NARROWS the window in which a reactivation that
+ * raced the settlement inherits a `true` it never earned — it does not close
+ * it. The read and the write are two round-trips, not one transaction, so a
+ * reactivation landing between them still leaves `adminAlertsSettled: true` on
+ * a now-active Event. What actually recovers from that stale `true` is the
+ * lifecycle edge: the NEXT archive marks the Event unsettled before it attempts
+ * anything, so the stale value only strands work if that later archive trigger
+ * also fails to write. A transaction here would close the window outright and
+ * is the right change if this ever matters; the cost today is one extra
+ * contended write on a path that runs once per archived Event per sweep.
+ */
+async function markAdminAlertsSettled(db: AdminAlertFirestore, eventId: string): Promise<void> {
+  const event = (await db.doc(`events/${eventId}`).get()).data();
+  if (event?.status !== 'archived') return;
+  await writeAdminAlertsSettled(db, eventId, true);
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -2037,6 +2241,13 @@ async function finishBatch(
  * the transaction found them (#945): a preserved batch is replayed before
  * returning, and whether the replay delivered it, discarded it, or left it
  * queued is read back from the rows afterwards.
+ *
+ * A pass that reconciled the WHOLE queue stamps the durable settled marker, and
+ * that is the only thing that writes it (#943). Everything else deliberately
+ * leaves it alone: a full page has more behind it, a preserved frozen batch is
+ * still work, a reactivated Event settled nothing, and a pass that THROWS never
+ * reaches the stamp at all. So the marker is earned, never assumed, and a
+ * half-finished sweep is retried on the next one rather than skipped forever.
  */
 export async function settleAdminAlertsForArchivedEvent(
   db: AdminAlertFirestore,
@@ -2049,11 +2260,19 @@ export async function settleAdminAlertsForArchivedEvent(
     .where('sentAt', '==', null)
     .limit(MAX_ALERTS_PER_DIGEST)
     .get();
-  if (pending.docs.length === 0) return { discarded: 0, preserved: 0 };
+  // The page is the WHOLE queue only when it came back SHORT of the limit. A
+  // full page may have another behind it, and settling on one page would strand
+  // every row in the next — so a full page deliberately leaves the marker
+  // alone, and the sweep comes back for the remainder (#943).
+  const wholeQueue = pending.docs.length < MAX_ALERTS_PER_DIGEST;
+  if (pending.docs.length === 0) {
+    await markAdminAlertsSettled(db, eventId);
+    return { discarded: 0, preserved: 0 };
+  }
 
   const settled = await db.runTransaction(async (tx) => {
     const event = (await tx.get(db.doc(`events/${eventId}`))).data();
-    if (event?.status !== 'archived') return { discarded: 0, preserved: [] as string[] };
+    if (event?.status !== 'archived') return { archived: false, discarded: 0, preserved: [] as string[] };
 
     const rows = await Promise.all(
       pending.docs.map(async (snapshot) => ({
@@ -2091,9 +2310,15 @@ export async function settleAdminAlertsForArchivedEvent(
       });
       discarded++;
     });
-    return { discarded, preserved };
+    return { archived: true, discarded, preserved };
   });
-  if (settled.preserved.length === 0) return { discarded: settled.discarded, preserved: 0 };
+  // A stale invocation against a REACTIVATED Event settled nothing and must not
+  // claim it did: the marker would then hide live work from the sweep.
+  if (!settled.archived) return { discarded: 0, preserved: 0 };
+  if (settled.preserved.length === 0) {
+    if (wholeQueue) await markAdminAlertsSettled(db, eventId);
+    return { discarded: settled.discarded, preserved: 0 };
+  }
 
   // The replay decides what becomes of the preserved rows, so the counts are
   // READ BACK from those rows afterwards rather than reported from the
@@ -2115,6 +2340,10 @@ export async function settleAdminAlertsForArchivedEvent(
     if (data?.sentAt === null) preserved++;
     else if (data?.discardedAt !== undefined) discarded++;
   }
+  // Still-preserved rows are still WORK — a frozen batch the replay could not
+  // deliver is retried on every sweep until it does — so the marker is only
+  // earned when the whole page reached a terminal state.
+  if (wholeQueue && preserved === 0) await markAdminAlertsSettled(db, eventId);
   return { discarded, preserved };
 }
 
@@ -2126,7 +2355,9 @@ export async function settleAdminAlertsForArchivedEvent(
  *
  * The two status queries intentionally cover both live delivery and archive
  * cleanup. The archive pass is the retrying backstop for transition-trigger
- * failure and for any delayed producer that lost the archive race.
+ * failure and for any delayed producer that lost the archive race — and it is
+ * bounded by the durable settled marker (#943), so its cost tracks OUTSTANDING
+ * archived work rather than the ever-growing count of archived Events.
  */
 export async function runAdminAlertSweep(
   db: AdminAlertFirestore,
@@ -2140,7 +2371,20 @@ export async function runAdminAlertSweep(
       console.error('runAdminAlertSweep: event failed', ev.id, err);
     }
   }
-  const archived = await db.collection('events').where('status', '==', 'archived').get();
+  // #943: the archived set only GROWS over a project's lifetime, so an
+  // unfiltered `status == 'archived'` scan costs one read per archived Event on
+  // every five-minute sweep forever — almost always to discover there is
+  // nothing left to do. The durable settled marker turns that into a query over
+  // OUTSTANDING WORK: an Event appears here only while its queue has something
+  // left (a page that did not fit, a frozen batch that has not delivered, a
+  // settlement that threw), and disappears for good once it is reconciled. Two
+  // equality filters ride the automatic single-field indexes, so this adds no
+  // composite index.
+  const archived = await db
+    .collection('events')
+    .where('status', '==', 'archived')
+    .where(ADMIN_ALERTS_SETTLED_FIELD, '==', false)
+    .get();
   for (const ev of archived.docs) {
     try {
       await settleAdminAlertsForArchivedEvent(db, ev.id, deps);

@@ -29,6 +29,15 @@ export default function App() {
   // a half-composed Notice, paging windows, sheets, and retry controls. The
   // Auth/Theme providers live above App, so global identity and preferences
   // deliberately survive the same A → B transition.
+  //
+  // It is also the ONLY Event key in the tree (#1082), which makes it
+  // load-bearing rather than belt-and-braces: `Board` used to re-key its own
+  // implementation on `EVENT_ID` as well, and everything that second key
+  // implied — the "Event changed while still mounted" refs and their layout
+  // effects — was unreachable, because a subtree this key has already
+  // remounted can never hand a child a changed Event id. Board now relies on
+  // this boundary outright, so do not remove it without giving the surfaces
+  // below it their own.
   return <EventApp key={EVENT_ID} />;
 }
 

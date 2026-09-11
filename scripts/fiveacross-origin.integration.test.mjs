@@ -100,6 +100,12 @@ beforeEach(() => {
   });
   setActiveEdition('gcb');
   resetAdultContentForTests();
+  // Neither the installed Firebase EVENT_ID nor the card-cache Event id has a
+  // reset seam by design, and three fixture rows expect the same Event id, so
+  // without this a row could inherit the previous row's value and still pass.
+  // A sentinel no fixture uses forces every row to install its own (#965).
+  firebaseIdentity.applyResolvedEventId('__unset__');
+  cardCache.setCardCacheEventId('__unset__');
   mocks.getDocFromServer.mockImplementation(({ path }) => {
     const hostname = path.slice('hostnames/'.length);
     return Promise.resolve(snap(hostnameDocs[hostname] ?? null));

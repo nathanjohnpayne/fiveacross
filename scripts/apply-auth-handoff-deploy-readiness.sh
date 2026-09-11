@@ -34,6 +34,14 @@ fi
 credential_is_exact_deployer() {
   local file="${1:-}"
   [[ -n "$file" && -f "$file" && -s "$file" ]] || return 1
+  # A missing interpreter is a tooling gap, not "not the exact deployer" (#995):
+  # returning 1 here would silently fall through to vault materialization or
+  # keyless impersonation, so it aborts before anything is built or published.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "FAIL: python3 is required to read the deploy credential's identity, and it is not on PATH." >&2
+    echo "Nothing has been built or published." >&2
+    exit 1
+  fi
   python3 - "$file" "$EXPECTED_SERVICE_ACCOUNT" <<'PY'
 import json
 import pathlib

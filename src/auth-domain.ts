@@ -6,6 +6,19 @@ import { isLocalDevHost } from './local-host';
 // `https://<host>/__/auth/handler` on the Google OAuth web client, neither of
 // which accepts a wildcard; a pattern here would silently pin `authDomain` to a
 // host Google will reject.
+//
+// This set is NOT the source of truth for whether sign-in is reachable on a
+// host (#852). It is one of the direct, same-origin routes: a host listed here
+// signs in without leaving the page, as does any host whose build bakes
+// `authDomain` equal to the serving hostname, a local or emulator host, and the
+// documented `web.app` redirect host (`isSignInReachableOnHost`). A host on
+// none of those routes is not thereby on the handoff: under a handoff-mode
+// Five Across build with a valid `VITE_AUTH_HANDOFF_ORIGIN`, such a host
+// reaches sign-in through the ADR 0010 handoff to the central auth origin
+// (`resolveSignInStrategy` in src/auth/authMode.ts), which is why a newly
+// provisioned wildcard Event host needs no entry here and no redeploy; under
+// `same_origin` mode or an invalid handoff configuration it reports
+// `unavailable` at mount instead.
 const FIRST_PARTY_AUTH_HOSTS = new Set([
   'gaycruisebingo.com',
   'gaycruisebingo.vercel.app',

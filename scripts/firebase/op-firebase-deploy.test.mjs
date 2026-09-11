@@ -90,6 +90,71 @@ describe('op-firebase-deploy authenticated hostname verification', () => {
     await expect(readFile(firebaseMarker, 'utf8')).rejects.toThrow();
   }, 15_000);
 
+  it('fails closed outside the repository root instead of running a missing verifier (#1001)', async () => {
+    // The installed copy resolves the verifier from the caller's working
+    // directory, so a caller outside the repo must get the documented refusal
+    // and no node or firebase invocation, not a raw MODULE_NOT_FOUND.
+    const directory = await mkdtemp(join(tmpdir(), 'op-firebase-outside-root-'));
+    temporaryDirectories.push(directory);
+    const credentialPath = join(directory, 'credential.json');
+    const verifyMarker = join(directory, 'verify.json');
+    const firebaseMarker = join(directory, 'firebase-called');
+    const fakeBin = join(directory, 'fake-bin');
+    const installedBin = join(directory, 'installed', 'bin');
+    const installedLib = join(installedBin, 'lib');
+    const installedWrapper = join(installedBin, 'op-firebase-deploy');
+    await writeFile(
+      credentialPath,
+      JSON.stringify({
+        type: 'service_account',
+        client_email: 'source-credential@example.iam.gserviceaccount.com',
+      }),
+    );
+    await mkdir(fakeBin);
+    await mkdir(installedLib, { recursive: true });
+    await copyFile(resolve('scripts/firebase/op-firebase-deploy'), installedWrapper);
+    await copyFile(
+      resolve('scripts/firebase/lib/credential-materialization.sh'),
+      join(installedLib, 'credential-materialization.sh'),
+    );
+    await chmod(installedWrapper, 0o755);
+    const fakeNode = join(fakeBin, 'node');
+    await writeFile(fakeNode, '#!/usr/bin/env bash\nprintf called >"$VERIFY_MARKER"\n');
+    await chmod(fakeNode, 0o755);
+    const fakeFirebase = join(fakeBin, 'firebase');
+    await writeFile(fakeFirebase, '#!/usr/bin/env bash\nprintf called >"$FIREBASE_MARKER"\n');
+    await chmod(fakeFirebase, 0o755);
+    const outsideRoot = join(directory, 'elsewhere');
+    await mkdir(outsideRoot);
+
+    const result = spawnSync(
+      installedWrapper,
+      ['fiveacross', '--verify-fiveacross-hostnames'],
+      {
+        cwd: outsideRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          GOOGLE_APPLICATION_CREDENTIALS: credentialPath,
+          VERIFY_MARKER: verifyMarker,
+          FIREBASE_MARKER: firebaseMarker,
+        },
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(1);
+    // The wrapper reports the path it resolved from $PWD; on macOS that is the
+    // realpath of the temp dir, so match on the resolved tail rather than the
+    // symlinked prefix.
+    expect(result.stderr).toContain('Five Across hostname verifier not found at ');
+    expect(result.stderr).toContain(join('elsewhere', 'scripts', 'verify-deploy-hostnames.mjs'));
+    expect(result.stderr).toContain('Run this mode from the repository root.');
+    expect(result.stderr).not.toContain('MODULE_NOT_FOUND');
+    await expect(readFile(verifyMarker, 'utf8')).rejects.toThrow();
+    await expect(readFile(firebaseMarker, 'utf8')).rejects.toThrow();
+  }, 15_000);
+
   it('rejects arbitrary authenticated command execution', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'op-firebase-exec-rejection-'));
     temporaryDirectories.push(directory);

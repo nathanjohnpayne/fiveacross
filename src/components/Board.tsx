@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, type CSSProperties } from 'react';
 import { Lock, Shuffle } from 'lucide-react';
 import { getDoc } from 'firebase/firestore';
 import { EVENT_ID } from '../firebase';
@@ -657,25 +657,21 @@ function LockedDayPreview({
 }
 
 export default function Board() {
-  const eventId = EVENT_ID;
   // Every piece of Board-local UI state belongs to one Event: viewed Day,
   // open sheets, coach/launch gates, animations, and reconcile bookkeeping.
-  // Keying the implementation remounts that whole state machine atomically on
-  // an in-session Event transition, so the first committed B frame cannot
-  // inherit an A-only index, overlay, or delayed interaction.
-  return <EventBoard key={eventId} eventId={eventId} />;
-}
-
-function EventBoard({ eventId }: { eventId: string }) {
+  // That whole state machine is remounted atomically on an Event transition by
+  // the ONE Event boundary the client has — App's `<EventApp key={EVENT_ID}>`
+  // (src/App.tsx), which remounts every Event-owned route and overlay together.
+  // Board deliberately carries no second key of its own (#1082): a key inside
+  // an already-remounted subtree can never observe a change its parent has not
+  // already acted on, so `eventId` is a constant for the life of this instance
+  // and the "Event changed while still mounted" guards it used to imply were
+  // unreachable. A late continuation that must stay on the Event it acted
+  // under captures `eventId` in its own closure (see `broadcastWinVerdict`),
+  // rather than watching a live binding.
+  const eventId = EVENT_ID;
   const { user, retryDeal, dealing } = useAuth();
   const uid = user?.uid;
-  const liveEventIdRef = useRef(eventId);
-  // Commit the active Event in the layout phase. Mutating this guard while
-  // rendering lets an abandoned concurrent render poison callbacks owned by
-  // the still-committed tree.
-  useLayoutEffect(() => {
-    liveEventIdRef.current = eventId;
-  }, [eventId]);
   // Direct mark/unmark analytics is server-observed rather than emitted from
   // an optimistic Board callback: a durable record appears after an offline
   // queue drains even if this tab was closed before acknowledgement. Dynamic
@@ -931,7 +927,7 @@ function EventBoard({ eventId }: { eventId: string }) {
         // A denied/failed deal leaves the board null; surface a retry for the
         // viewed Day rather than an indefinite "Dealing…" spinner. Scoped to the
         // acted Day so switching away/among Days never shows a stale error.
-        if (liveEventIdRef.current === eventId) setDayDealError({ eventId, dayIndex: dealIndex });
+        setDayDealError({ eventId, dayIndex: dealIndex });
       })
       .finally(() => dealingDaysRef.current.delete(key));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days`/`day` derive from event?.days; deps track the fields the deal actually reads.
@@ -1016,19 +1012,10 @@ function EventBoard({ eventId }: { eventId: string }) {
   // nonce; the re-armed run then serves the still-owed heal on whatever
   // board is open at that moment.
   const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
-  // A completion from a retired Event may clean up its own Event-qualified
-  // in-flight key, but must not consume the current Event's row-lag debt, pin
-  // its visit, or schedule a retry render.
-  const reconcileEventRef = useRef(eventId);
-  useLayoutEffect(() => {
-    if (reconcileEventRef.current === eventId) return;
-    reconcileEventRef.current = eventId;
-    incompleteReconcileVisitRef.current = null;
-    reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
-    reconcileRowLagEpisodeRef.current = null;
-    reconcileRowLagOwedRef.current = false;
-    reconcileRowLagRearmKeyRef.current = null;
-  }, [eventId]);
+  // No Event-change reset lives here (#1082): App's `<EventApp key={EVENT_ID}>`
+  // remounts this component on an Event transition, so every ref above is born
+  // fresh for Event B and a retired Event A completion can only ever run
+  // against the unmounted A instance's own refs.
   useEffect(() => {
     const schedule = event?.days ?? [];
     // #506/#508: the once-per-board guard is retained for the session, but
@@ -1168,7 +1155,6 @@ function EventBoard({ eventId }: { eventId: string }) {
     //   • different card → nothing; the old card's next open retries.
     const settle = (complete: boolean) => {
       reconcileInFlightRef.current.delete(key);
-      if (reconcileEventRef.current !== eventId) return;
       if (reconcileRowLagRearmKeyRef.current === key) {
         // A row lag surfaced DURING this pass, and this pass may have raced
         // past its own predicate on the previously consistent row — the

@@ -67,6 +67,14 @@ jobs:
       - name: Unit + component tests (jsdom)
         run: npm test
 
+      # The production-origin integration seam (#965): a full
+      # `vite build --mode production` under the real fiveacross deploy
+      # environment plus the hostname-resolution boot. Its own layer and step,
+      # separate from `npm test`, so the unit suite carries no hard dependency
+      # on a working production build and a failure here names the layer.
+      - name: Origin integration (production build seam)
+        run: npm run test:origin
+
       - name: Build
         run: npm run build
 

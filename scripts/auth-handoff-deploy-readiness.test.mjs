@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { access, chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -172,6 +172,50 @@ describe('Five Across auth-handoff deploy readiness', () => {
     expect(result.status, result.stderr).toBe(0);
     const calls = await readFile(fixture.log, 'utf8');
     expect(calls).not.toContain('run services update');
+  });
+
+  it('fails closed with a tooling error when python3 is missing, instead of reading it as "not the exact deployer" (#995)', async () => {
+    // A PATH that carries every tool the script touches before the identity
+    // check (bash itself is invoked explicitly) but no python3: the credential
+    // identity cannot be read, so the script must say so and stop rather than
+    // fall through to vault materialization or keyless impersonation.
+    const fixture = await makeFixture({
+      credential: { type: 'service_account', client_email: expectedServiceAccount },
+    });
+    const noPythonBin = join(fixture.root, 'no-python-bin');
+    await mkdir(noPythonBin);
+    for (const tool of ['dirname', 'rm', 'mktemp', 'cp', 'cat', 'chmod', 'mkdir']) {
+      const located = spawnSync('/usr/bin/which', [tool], { encoding: 'utf8' }).stdout.trim();
+      await symlink(located, join(noPythonBin, tool));
+    }
+    const result = spawnSync('/bin/bash', [readinessScript], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${noPythonBin}:${fixture.root}`,
+        TMPDIR: fixture.root,
+        GCLOUD_BIN: join(fixture.root, 'gcloud'),
+        GCLOUD_LOG: fixture.log,
+        BLOCK_FILE: '',
+        OP_BLOCK_FILE: '',
+        FAIL_SERVICE: fixture.failService,
+        DESCRIBE_VALUE: fixture.describeValue,
+        ACTIVATION_FAILS: String(fixture.activationFails),
+        OP_CREDENTIAL_PATH: fixture.opCredentialPath,
+        OP_FAILURE: fixture.opFailure,
+        GOOGLE_APPLICATION_CREDENTIALS: fixture.credentialPath,
+        AUTH_HANDOFF_PROJECT: 'fiveacross',
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain('python3 is required to read the deploy credential');
+    expect(result.stderr).toContain('Nothing has been built or published.');
+    // No credential activation, impersonation, or vault materialization was
+    // attempted: the fake gcloud writes its log on first call, so the log never
+    // came into existence.
+    await expect(readFile(fixture.log, 'utf8')).rejects.toThrow();
   });
 
   it('fails closed instead of falling back to ambient gcloud when the exact deploy-SA key cannot activate', async () => {

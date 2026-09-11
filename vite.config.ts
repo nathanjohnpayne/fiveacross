@@ -330,6 +330,11 @@ export default defineConfig(({ command, mode }) => {
         'worker/**/*.test.ts',
         'router-publisher/**/*.test.ts'
       ],
+      // The production-origin integration seam runs a full vite build and has
+      // its own layer (`npm run test:origin`, vitest.origin.config.ts, #965).
+      // Overriding `exclude` replaces vitest's defaults, so the dependency and
+      // build directories are restated here.
+      exclude: ['**/node_modules/**', '**/dist/**', 'scripts/fiveacross-origin.integration.test.mjs'],
       setupFiles: ['./src/test/setup.ts']
     }
   };
