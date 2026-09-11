@@ -2019,6 +2019,12 @@ describe('sendDailyEmailForEvent', () => {
   // competition whose standings can no longer move.
   describe('the Standings Freeze stops the mail', () => {
     const DAY5_UNLOCK = DAY4_UNLOCK + 24 * 60 * 60 * 1000;
+    /** The seed with a freeze configured on it. */
+    const seedFreeze = (freezeAt: number): Docs => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: freezeAt };
+      return docs;
+    };
 
     it('sends nothing once the configured freeze has passed', async () => {
       // The sweep's clock is DAY4_UNLOCK + 1 minute, so a freeze ON the Day-4
@@ -2078,6 +2084,117 @@ describe('sendDailyEmailForEvent', () => {
       expect(standingsFreezeAtFor(seedEvent()['events/med-2026'] as EmailEvent)).toBeNull();
       const { result } = await run(seedEvent());
       expect(result).toMatchObject({ sent: 2, failed: 0 });
+    });
+
+    // Codex P2, PR #1202. The due check above is one clock reading taken at the
+    // top of the call; the hostname resolution and the roster page then sit
+    // between it and the first send. A sweep that starts just before the freeze
+    // spends that preparation crossing it — and nothing else downstream stops
+    // the send, because an Event is frozen long before it is archived.
+    /** Runs the send with a clock the caller can advance, and advances it when
+     *  the roster page is read — the preparation the boundary is crossed in. */
+    const runCrossingTheFreeze = async (
+      docs: Docs,
+      opensAt: number,
+      atDelivery: number,
+      mutate: (docs: Docs) => void = () => {},
+    ) => {
+      const db = makeDb(docs);
+      let now = opensAt;
+      const readCollection = db.collection;
+      const midFlight: typeof db = {
+        ...db,
+        collection: (path: string) => {
+          if (path.endsWith('/players')) {
+            now = atDelivery;
+            mutate(db.docs);
+          }
+          return readCollection(path);
+        },
+      };
+      const sent: string[] = [];
+      const result = await sendDailyEmailForEvent(midFlight, 'med-2026', {
+        ...baseDeps(),
+        now: () => now,
+        send: async (args) => {
+          sent.push(args.to[0]);
+          return true;
+        },
+      });
+      return { result, sent };
+    };
+
+    it('re-checks the freeze at delivery, so a sweep that crosses it mid-flight mails nothing', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      // Opens a minute short of the freeze — the due check passes, and this same
+      // Event mails in full on the control above — then arrives at delivery one
+      // minute past it.
+      const { result, sent } = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt + 60_000);
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+    });
+
+    it('stops exactly AT the freeze, and not a millisecond before it', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const at = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt);
+      expect(at.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      const before = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt - 1);
+      expect(before.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(before.sent).toHaveLength(2);
+    });
+
+    it('honours the freeze on the FRESH read, not the one the due check saw', async () => {
+      // Configured mid-flight, on an Event that opened with no freeze at all: the
+      // stale value cannot answer this, because there was no stale value.
+      const opened = seedEvent();
+      expect(standingsFreezeAtFor(opened['events/med-2026'] as EmailEvent)).toBeNull();
+      const appeared = await runCrossingTheFreeze(opened, DAY4_UNLOCK + 60_000, DAY4_UNLOCK + 60_000, (docs) => {
+        docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: DAY4_UNLOCK };
+      });
+      expect(appeared.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(appeared.sent).toEqual([]);
+
+      // And the other direction, the control that proves it is the fresh value
+      // doing the deciding rather than a second helping of caution: the Event
+      // opens with a freeze the clock then passes, and an Admin moves that freeze
+      // two hours out while the sweep is in flight. The morning is open again, so
+      // it mails.
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const moved = await runCrossingTheFreeze(
+        seedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            standingsFreezeAt: freezeAt + 2 * 60 * 60 * 1000,
+          };
+        },
+      );
+      expect(moved.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(moved.sent).toHaveLength(2);
+    });
+
+    it('reads the DERIVED freeze at delivery too, not only a configured one', async () => {
+      // The live Events carry no `standingsFreezeAt`; a ceremonial Day added
+      // mid-flight is the same fallback the due check resolves, and it must stop
+      // the send just as a configured instant does.
+      const { result, sent } = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            days: [
+              ...(gcbEvent.days ?? []),
+              { index: 4, date: '2026-07-19', unlockAt: DAY4_UNLOCK, theme: 'fog-froth-farewells', scoring: 'ceremonial', pool: 'closing' },
+            ],
+          };
+        },
+      );
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
     });
   });
 

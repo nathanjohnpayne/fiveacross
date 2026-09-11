@@ -30,7 +30,9 @@
  * instant nothing is due, and the finale carries whatever is left to say. The
  * cutoff lives in `dueDayForDailyEmail` with the rest of the clock — the content
  * builder stays clock-free — and it reads the SAME resolved instant the headline
- * ⭐ is settled against, `standingsFreezeAtFor`.
+ * ⭐ is settled against, `standingsFreezeAtFor`. It is applied twice, the second
+ * time against the fresh Event read immediately before delivery, because the
+ * preparation between the two is long enough to cross the boundary.
  *
  * SAFE TO RUN 96× A DAY because every beat is self-guarded, not schedule-timed:
  * the Event-level admin toggle is off by default, the due window closes six
@@ -234,6 +236,17 @@ function windowIsOpen(
   return date === today.date && today.minutes >= opensAt && today.minutes < opensAt + windowMs / 60_000;
 }
 
+/** Whether `now` is at or after the Event's RESOLVED Standings Freeze — the one
+ *  spelling of that comparison, because it is asked twice: once in the due check
+ *  below, and again immediately before delivery in `sendDailyEmailForEvent`,
+ *  where a freeze re-read off the fresh Event decides whether this run may still
+ *  mail. Absent or `null` is an Event with no freeze, which never passes. A
+ *  `NaN` freeze fails the comparison and mails as before, the same fail-open
+ *  posture `standingsFreezeAtFor` takes when it refuses a non-finite value. */
+function freezeHasPassed(freezeAt: number | null | undefined, now: number): boolean {
+  return freezeAt != null && now >= freezeAt;
+}
+
 /**
  * The Day whose email is due at `now`, or `null`.
  *
@@ -299,12 +312,9 @@ export function dueDayForDailyEmail(
   options: { windowMs?: number; freezeAt?: number | null } = {},
 ): EmailDay | null {
   const windowMs = options.windowMs ?? SEND_WINDOW_MS;
-  const freezeAt = options.freezeAt ?? null;
   // Ahead of every other decision, because it is the stronger statement: the
-  // competition is over, whatever the schedule still says. A `NaN` freeze fails
-  // this comparison and mails as before, which is the same fail-open posture
-  // `standingsFreezeAtFor` takes when it refuses a non-finite value.
-  if (freezeAt !== null && now >= freezeAt) return null;
+  // competition is over, whatever the schedule still says.
+  if (freezeHasPassed(options.freezeAt, now)) return null;
   const schedule = (days ?? []).filter((day): day is EmailDay => !!day);
   const today = eventWallClock(now, timeZone);
   const opensAt = morningOpensAt(schedule, timeZone);
@@ -578,13 +588,29 @@ export interface DailySendResult {
  * is what closes the selection-to-delivery window; the residual it leaves is
  * stated in the spec — a freeze landing mid-loop still finishes the roster it
  * had already started.
+ *
+ * AND THE STANDINGS FREEZE IS RE-EVALUATED THERE TOO (#1121, Codex P2 on PR
+ * #1202). It is the same window and the same document, so it takes the same
+ * answer: the due check compares one clock reading against the freeze the Event
+ * carried when this call opened, and a sweep that starts moments before the
+ * boundary can cross it during that preparation — at which point the archive
+ * guard alone lets the mail out, because an Event is frozen long before it is
+ * archived and `eventClosedToPlay` reads only `status` and `archiving`, neither
+ * of which the freeze itself touches. The fresh
+ * read therefore resolves the freeze as well as the status, and the clock is
+ * read again against it, so the value that decides is the CURRENT one on both
+ * sides: a freeze configured, moved or removed since the due check is honoured
+ * rather than the stale one this call started with.
  */
 export async function sendDailyEmailForEvent(
   db: DailyEmailFirestore,
   eventId: string,
   deps: DailyEmailDeps = {},
 ): Promise<DailySendResult> {
-  const now = (deps.now ?? Date.now)();
+  // The CLOCK, not one reading of it: the freeze is compared against it twice,
+  // and the second comparison is only worth making if it can see time passing.
+  const clock = deps.now ?? Date.now;
+  const now = clock();
   const eventRef = db.doc(`events/${eventId}`);
   const event = (await eventRef.get()).data() as EmailEvent | undefined;
   if (!event) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
@@ -671,6 +697,19 @@ export async function sendDailyEmailForEvent(
   const atDelivery = (await eventRef.get()).data() as EmailEvent | undefined;
   if (!atDelivery) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
   if (eventClosedToPlay(atDelivery)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
+  // The Standings Freeze, asked again of the SAME fresh document and against a
+  // fresh clock reading (#1121). The due check above answered for the instant
+  // this call opened at, and an Event that crossed the freeze since then is
+  // neither archived nor archiving — those are the archive flow's own fields,
+  // stamped days later or never — so the guard on the line above waves it
+  // through and the send lands after the instant the spec promises nothing is
+  // mailed at. Resolved off `atDelivery`, not reused from above, so a freeze
+  // configured, moved or removed since the due check is the one that decides.
+  // Answered `not-due`, exactly as the due check's own cutoff is: this Event has
+  // nothing to send this morning, which is not a new state.
+  if (freezeHasPassed(standingsFreezeAtFor(atDelivery), clock())) {
+    return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
+  }
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
   // EXAMINED, not attempted (Codex #623 P2). The cap used to count only real
