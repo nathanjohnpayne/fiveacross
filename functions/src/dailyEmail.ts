@@ -25,6 +25,17 @@
  * reads `date` and nothing else; `unlockAt` only decides WHEN in the morning the
  * send lands. See `dueDayForDailyEmail` for the rule and what it replaced.
  *
+ * AND IT STOPS AT THE STANDINGS FREEZE (#1121). The freeze is where the Event's
+ * scoring ends, so it is also where its daily engagement mail ends: past that
+ * instant nothing is due, and the finale carries whatever is left to say. The
+ * cutoff lives in `dueDayForDailyEmail` with the rest of the clock — the content
+ * builder stays clock-free — and it reads the SAME resolved instant the headline
+ * ⭐ is settled against, `standingsFreezeAtFor`. It is applied twice, the second
+ * time against the fresh Event read immediately before delivery, because the
+ * preparation between the two is long enough to cross the boundary — and that
+ * second resolution is the one the ⭐ reads, so the cutoff and the honour can
+ * never be settled against two different instants.
+ *
  * SAFE TO RUN 96× A DAY because every beat is self-guarded, not schedule-timed:
  * the Event-level admin toggle is off by default, the due window closes six
  * hours after unlock, each recipient's `lastSentDayIndex` makes a second run a
@@ -227,6 +238,17 @@ function windowIsOpen(
   return date === today.date && today.minutes >= opensAt && today.minutes < opensAt + windowMs / 60_000;
 }
 
+/** Whether `now` is at or after the Event's RESOLVED Standings Freeze — the one
+ *  spelling of that comparison, because it is asked twice: once in the due check
+ *  below, and again immediately before delivery in `sendDailyEmailForEvent`,
+ *  where a freeze re-read off the fresh Event decides whether this run may still
+ *  mail. Absent or `null` is an Event with no freeze, which never passes. A
+ *  `NaN` freeze fails the comparison and mails as before, the same fail-open
+ *  posture `standingsFreezeAtFor` takes when it refuses a non-finite value. */
+function freezeHasPassed(freezeAt: number | null | undefined, now: number): boolean {
+  return freezeAt != null && now >= freezeAt;
+}
+
 /**
  * The Day whose email is due at `now`, or `null`.
  *
@@ -252,13 +274,49 @@ function windowIsOpen(
  * hours are still running must not cancel the send. When two owners are somehow
  * due at once — a Day carried over from yesterday and today's — today's owner
  * wins, so the send is never a stale card.
+ *
+ * AND NOTHING IS EVER DUE AT OR AFTER THE STANDINGS FREEZE (#1121). The freeze
+ * is the Event's full stop for scoring (ADR 0011): from that instant no Mark can
+ * move the standings, the ⭐ is settled, and the finale — not this sweep — is the
+ * mail that speaks for what is left. A daily engagement email sent afterwards
+ * invites people into a competition that has permanently closed, which is
+ * exactly what the empty state was caught advertising: an Event whose only bingo
+ * landed post-freeze on a ceremonial Day shows an all-zero board with no ⭐
+ * holder, so the next morning's email read "every honor is wide open" about
+ * honours nobody could still win.
+ *
+ * IT IS A CUTOFF ON THE SEND INSTANT, not on the calendar date, because the two
+ * disagree on the Event this rule matters most to. Bodega Bay's freeze IS its
+ * 11:00 Sunday wrap-up unlock, and that same Sunday's email goes out at 06:00 —
+ * five hours of open scoring before the boundary. Suppressing the freeze's whole
+ * date would silence a morning that is still a playing morning; suppressing from
+ * the instant leaves it mailed and stops everything after, which is what "stop
+ * the daily email after the freeze" means. An Event with no freeze at all
+ * (`freezeAt` null — no configured `standingsFreezeAt` and no ceremonial Day)
+ * mails exactly as it always has.
+ *
+ * The residual is deliberate and small: a Day whose six-hour window is still
+ * open when the freeze lands stops being due mid-window, so an outage spanning
+ * the boundary loses that morning's email rather than delivering it late into a
+ * closed Event. Sent mail is irreversible; an unsent one is not.
  */
 export function dueDayForDailyEmail(
   days: readonly EmailDay[] | undefined,
   now: number,
   timeZone?: string,
-  windowMs: number = SEND_WINDOW_MS,
+  /** `windowMs` overrides the six-hour send window (tests). `freezeAt` is the
+   *  Event's RESOLVED Standings Freeze from `standingsFreezeAtFor` — never a raw
+   *  `standingsFreezeAt`, so the instant this stops at and the instant the ⭐
+   *  is settled against are the same one. Absent or `null` means an Event with
+   *  no freeze, which is every pre-ADR-0011 caller. An options bag rather than
+   *  two more positionals: both are numbers, and a freeze silently read as a
+   *  window length would suppress or extend every send in the Event. */
+  options: { windowMs?: number; freezeAt?: number | null } = {},
 ): EmailDay | null {
+  const windowMs = options.windowMs ?? SEND_WINDOW_MS;
+  // Ahead of every other decision, because it is the stronger statement: the
+  // competition is over, whatever the schedule still says.
+  if (freezeHasPassed(options.freezeAt, now)) return null;
   const schedule = (days ?? []).filter((day): day is EmailDay => !!day);
   const today = eventWallClock(now, timeZone);
   const opensAt = morningOpensAt(schedule, timeZone);
@@ -532,13 +590,35 @@ export interface DailySendResult {
  * is what closes the selection-to-delivery window; the residual it leaves is
  * stated in the spec — a freeze landing mid-loop still finishes the roster it
  * had already started.
+ *
+ * AND THE STANDINGS FREEZE IS RE-EVALUATED THERE TOO (#1121, Codex P2 on PR
+ * #1202). It is the same window and the same document, so it takes the same
+ * answer: the due check compares one clock reading against the freeze the Event
+ * carried when this call opened, and a sweep that starts moments before the
+ * boundary can cross it during that preparation — at which point the archive
+ * guard alone lets the mail out, because an Event is frozen long before it is
+ * archived and `eventClosedToPlay` reads only `status` and `archiving`, neither
+ * of which the freeze itself touches. The fresh read therefore resolves the
+ * freeze as well as the status, and the clock is read again against it, so the
+ * value that decides is the CURRENT one on both sides: a freeze configured,
+ * moved or removed since the due check is honoured rather than the stale one
+ * this call started with.
+ *
+ * AND THAT ONE VALUE ALSO SETTLES THE HEADLINE ⭐ (Codex P2 round 2). Every
+ * freeze-dependent thing this send quotes is computed BELOW the delivery-time
+ * check, from the variable the check itself used — otherwise an extended freeze
+ * would permit an email whose honour the superseded freeze had decided, which is
+ * exactly the divergence the spec forbids.
  */
 export async function sendDailyEmailForEvent(
   db: DailyEmailFirestore,
   eventId: string,
   deps: DailyEmailDeps = {},
 ): Promise<DailySendResult> {
-  const now = (deps.now ?? Date.now)();
+  // The CLOCK, not one reading of it: the freeze is compared against it twice,
+  // and the second comparison is only worth making if it can see time passing.
+  const clock = deps.now ?? Date.now;
+  const now = clock();
   const eventRef = db.doc(`events/${eventId}`);
   const event = (await eventRef.get()).data() as EmailEvent | undefined;
   if (!event) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
@@ -547,7 +627,15 @@ export async function sendDailyEmailForEvent(
   if (eventClosedToPlay(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
   if (!dailyEmailEnabled(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'disabled' };
 
-  const day = dueDayForDailyEmail(event.days, now, event.timezone);
+  // The freeze as this call opens, for the due check alone. The two readers that
+  // must agree — the cutoff that stops the mail (#1121) and the instant the
+  // headline ⭐ is settled against (#1052) — both read the DELIVERY-time
+  // resolution below instead, off one variable, so no edit landing mid-sweep can
+  // mail an email quoting a boundary the cutoff did not apply.
+  const freezeAt = standingsFreezeAtFor(event);
+  const day = dueDayForDailyEmail(event.days, now, event.timezone, { freezeAt });
+  // Covers the post-freeze morning too: nothing is due once scoring has closed,
+  // so the Event simply stops mailing rather than reporting a new state.
   if (!day) return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
@@ -598,19 +686,6 @@ export async function sendDailyEmailForEvent(
   const tutorialDays = tutorialDayIndexes(schedule);
   const ceremonialDays = ceremonialDayIndexes(schedule);
   const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays, ceremonialDays);
-  // The RAW pre-ban roster, in whatever order the query returned it: the honour
-  // is read off each Player's own buckets, and an exact-millisecond tie is broken
-  // by uid rather than by any roster's order, so no ordering of this argument can
-  // move the answer (Codex P2). That is the point — the in-app pin resolves the
-  // same tie over LIVE root totals this window cannot see, so handing either
-  // selector an order to break ties by is what let the two disagree. Pre-ban, so
-  // a presentational ban hides the row without promoting anyone.
-  const starUid = eventFirstBingoUid(
-    rosterPage.allPlayers,
-    day.index,
-    tutorialDays,
-    standingsFreezeAtFor(event),
-  );
   const banned = new Set(event.bannedUids ?? []);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
@@ -623,6 +698,45 @@ export async function sendDailyEmailForEvent(
   const atDelivery = (await eventRef.get()).data() as EmailEvent | undefined;
   if (!atDelivery) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
   if (eventClosedToPlay(atDelivery)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
+  // The Standings Freeze, asked again of the SAME fresh document and against a
+  // fresh clock reading (#1121). The due check above answered for the instant
+  // this call opened at, and an Event that crossed the freeze since then is
+  // neither archived nor archiving — those are the archive flow's own fields,
+  // stamped days later or never — so the guard on the line above waves it
+  // through and the send lands after the instant the spec promises nothing is
+  // mailed at. Resolved off `atDelivery`, not reused from above, so a freeze
+  // configured, moved or removed since the due check is the one that decides.
+  // Answered `not-due`, exactly as the due check's own cutoff is: this Event has
+  // nothing to send this morning, which is not a new state.
+  const freezeAtDelivery = standingsFreezeAtFor(atDelivery);
+  if (freezeHasPassed(freezeAtDelivery, clock())) {
+    return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
+  }
+
+  // THE ⭐ IS SETTLED AGAINST THE FREEZE THE CUTOFF JUST USED, which is why it is
+  // resolved here rather than up in the preparation block (#1121, Codex P2 round
+  // 2 on PR #1202). It was previously computed from the freeze read when this
+  // call opened, so an Admin who EXTENDED the freeze mid-sweep got an email the
+  // fresh value had just permitted, carrying an honour the stale value had
+  // decided: a bingo landing between the old cutoff and the roster read is valid
+  // under the extended freeze and was dropped from the headline anyway. The spec
+  // requires the instant the mail stops at and the instant the ⭐ is settled
+  // against to be the same instant, and one variable serving both is the only
+  // way that survives an edit landing mid-sweep. Recomputed rather than refused,
+  // because it is a moved line against a new terminal state, and because the
+  // morning's email is then still sent — correctly — instead of deferred to a
+  // sweep that may find the window closed.
+  //
+  // The RAW pre-ban roster, in whatever order the query returned it: the honour
+  // is read off each Player's own buckets, and an exact-millisecond tie is broken
+  // by uid rather than by any roster's order, so no ordering of this argument can
+  // move the answer (Codex P2). That is the point — the in-app pin resolves the
+  // same tie over LIVE root totals this window cannot see, so handing either
+  // selector an order to break ties by is what let the two disagree. Pre-ban, so
+  // a presentational ban hides the row without promoting anyone. Passed to
+  // `buildDailyEmailModel` EXPLICITLY, which is what keeps the model from
+  // resolving a second freeze of its own off the Event this call opened with.
+  const starUid = eventFirstBingoUid(rosterPage.allPlayers, day.index, tutorialDays, freezeAtDelivery);
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
   // EXAMINED, not attempted (Codex #623 P2). The cap used to count only real

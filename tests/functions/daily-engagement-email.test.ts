@@ -1647,6 +1647,93 @@ describe('dueDayForDailyEmail against the live Bodega Bay schedule (#723)', () =
   });
 });
 
+// specs/daily-engagement-email.md § Scheduling, "the Standings Freeze stops the
+// mail" (#1121). The daily engagement email is a competition's morning
+// touchpoint, and the freeze is where that competition permanently ends: the
+// state this closes is an Event whose post-freeze morning mailed an empty
+// standings module still selling "every honor is wide open", about honours
+// nobody could win any more.
+describe('dueDayForDailyEmail stops at the Standings Freeze (#1121)', () => {
+  const tz = 'America/Los_Angeles';
+  const at = (iso: string) => Date.parse(iso);
+  // Three mornings, each with its own Day, and the ADR 0011 shape the rule is
+  // written for: a CONFIGURED `standingsFreezeAt` landing on the last one's
+  // 08:00 unlock, so the freeze and that morning's send are the same instant.
+  const days: EmailDay[] = [
+    { index: 0, date: '2026-08-07', unlockAt: at('2026-08-07T08:00:00-07:00') },
+    { index: 1, date: '2026-08-08', unlockAt: at('2026-08-08T08:00:00-07:00') },
+    { index: 2, date: '2026-08-09', unlockAt: at('2026-08-09T08:00:00-07:00') },
+  ];
+  const freezeAt = at('2026-08-09T08:00:00-07:00');
+
+  it('still mails the morning before the freeze, for its whole window', () => {
+    expect(dueDayForDailyEmail(days, at('2026-08-08T08:00:00-07:00'), tz, { freezeAt })?.index).toBe(1);
+    expect(dueDayForDailyEmail(days, at('2026-08-08T13:59:00-07:00'), tz, { freezeAt })?.index).toBe(1);
+  });
+
+  it('mails nothing on the freeze morning, nor on any morning after it', () => {
+    // The boundary is closed at the bottom: the send that would have landed at
+    // the freeze instant itself is the first one suppressed.
+    expect(dueDayForDailyEmail(days, freezeAt, tz, { freezeAt })).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-08-09T08:15:00-07:00'), tz, { freezeAt })).toBeNull();
+    // And the morning #1121 was actually filed about: a ceremonial Day still on
+    // the schedule after the freeze, whose email would have rendered the empty
+    // state over an all-zero board.
+    const withCeremonialMorning: EmailDay[] = [
+      ...days,
+      { index: 3, date: '2026-08-10', unlockAt: at('2026-08-10T08:00:00-07:00'), scoring: 'ceremonial' },
+    ];
+    expect(
+      dueDayForDailyEmail(withCeremonialMorning, at('2026-08-10T08:00:00-07:00'), tz, { freezeAt }),
+    ).toBeNull();
+  });
+
+  it('leaves an Event with no freeze at all mailing exactly as before', () => {
+    // Every pre-ADR-0011 Event: no configured `standingsFreezeAt`, no ceremonial
+    // Day, so the resolution is `null` and nothing is ever suppressed.
+    expect(standingsFreezeAtFor({ days })).toBeNull();
+    expect(dueDayForDailyEmail(days, freezeAt, tz)?.index).toBe(2);
+    expect(dueDayForDailyEmail(days, freezeAt, tz, { freezeAt: null })?.index).toBe(2);
+    expect(dueDayForDailyEmail(days, at('2026-08-09T13:59:00-07:00'), tz, {})?.index).toBe(2);
+  });
+
+  it('cuts off on the send INSTANT, not the freeze\'s calendar date — the live Bodega shape', () => {
+    // Bodega Bay's freeze is the 11:00 Sunday check-out, which it both
+    // CONFIGURES and derives: the seed pins `standingsFreezeAt` to the
+    // ceremonial wrap-up Day's own `unlockAt`. Resolve it off the whole seeded
+    // Event, the shape a real Bodega Event doc has, so the configured field is
+    // the one exercised — five hours AFTER that same Sunday's 06:00 email. A
+    // date-wide suppression would silence a morning that is still a playing
+    // morning and drop the trip from three emails to two.
+    const bodegaFreeze = standingsFreezeAtFor(BODEGA_SEED);
+    expect(bodegaFreeze).toBe(at('2026-08-09T11:00:00-07:00'));
+    // ... and the schedule-only derivation agrees with it to the millisecond,
+    // which is what makes the two readings of this Event interchangeable.
+    expect(standingsFreezeAtFor({ days: BODEGA_SEED.days })).toBe(bodegaFreeze);
+    const when = (iso: string) => dueDayForDailyEmail(BODEGA_SEED.days, at(iso), BODEGA_SEED.timezone, {
+      freezeAt: bodegaFreeze,
+    });
+    expect(when('2026-08-09T06:00:00-07:00')?.index).toBe(2);
+    expect(when('2026-08-09T10:59:00-07:00')?.index).toBe(2);
+    // From the freeze on, nothing — including the wrap-up Day, which never owned
+    // the date anyway.
+    expect(when('2026-08-09T11:00:00-07:00')).toBeNull();
+    expect(when('2026-08-09T11:30:00-07:00')).toBeNull();
+  });
+
+  it('keeps the malformed-unlock fallback and the window override working alongside it', () => {
+    // The options bag replaced a positional `windowMs`, so the override the
+    // window tests rely on has to survive being moved — and the freeze applies to
+    // a Day mailed on the wall clock exactly as it does to a real unlock.
+    const noHour = [{ index: 0, date: '2026-08-09' }] as unknown as EmailDay[];
+    expect(dueDayForDailyEmail(noHour, at('2026-08-09T08:30:00-07:00'), tz, { windowMs: 60 * 60 * 1000 })?.index).toBe(0);
+    expect(dueDayForDailyEmail(noHour, at('2026-08-09T09:30:00-07:00'), tz, { windowMs: 60 * 60 * 1000 })).toBeNull();
+    expect(
+      dueDayForDailyEmail(noHour, at('2026-08-09T08:30:00-07:00'), tz, { freezeAt: at('2026-08-09T08:00:00-07:00') }),
+    ).toBeNull();
+  });
+});
+
 describe('shouldSendTo (suppression)', () => {
   it('suppresses an opt-out, a repeat for the same Day, and a participant with no prefs doc', () => {
     expect(shouldSendTo({ optedOut: false }, 3)).toBe(true);
@@ -1923,6 +2010,257 @@ describe('sendDailyEmailForEvent', () => {
       docs['events/med-2026'] = { ...docs['events/med-2026'], status: 'active', archiving: false };
       const { result } = await run(docs);
       expect(result).toMatchObject({ sent: 2, failed: 0 });
+    });
+  });
+
+  // specs/daily-engagement-email.md § Scheduling (#1121). The other full stop,
+  // and the earlier one: an Event is frozen long before it is archived, and
+  // between the two the sweep is still mailing "here is today's card" at a
+  // competition whose standings can no longer move.
+  describe('the Standings Freeze stops the mail', () => {
+    const DAY5_UNLOCK = DAY4_UNLOCK + 24 * 60 * 60 * 1000;
+    /** The seed with a freeze configured on it. */
+    const seedFreeze = (freezeAt: number): Docs => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: freezeAt };
+      return docs;
+    };
+
+    it('sends nothing once the configured freeze has passed', async () => {
+      // The sweep's clock is DAY4_UNLOCK + 1 minute, so a freeze ON the Day-4
+      // unlock is already behind it.
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: DAY4_UNLOCK };
+      const { result, sent } = await run(docs);
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+    });
+
+    it('still mails a morning that runs up to a freeze later the same day', async () => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = {
+        ...docs['events/med-2026'],
+        standingsFreezeAt: DAY4_UNLOCK + 2 * 60 * 60 * 1000,
+      };
+      const { result, sent } = await run(docs);
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+      expect(sent).toHaveLength(2);
+    });
+
+    it('reads the DERIVED freeze too, so a legacy Event with a ceremonial Day stops as well', async () => {
+      // Neither live Event carries `standingsFreezeAt`; both resolve the freeze
+      // from their first ceremonial Day, which is the same fallback the headline
+      // ⭐ already uses. The post-freeze morning here is the #1121 state itself:
+      // a ceremonial Day with a card, on the calendar, after scoring closed.
+      const ceremonial = {
+        index: 4,
+        date: '2026-07-19',
+        unlockAt: DAY5_UNLOCK,
+        theme: 'fog-froth-farewells',
+        scoring: 'ceremonial',
+        pool: 'closing',
+      };
+      const docs = seedEvent();
+      docs['events/med-2026'] = {
+        ...docs['events/med-2026'],
+        days: [...(gcbEvent.days ?? []), ceremonial],
+      };
+      const { result, sent } = await run(docs, { now: () => DAY5_UNLOCK + 60_000 });
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+
+      // The control, same morning and same schedule: make that last Day
+      // competitive and the Event has no freeze at all, so it mails.
+      const open = seedEvent();
+      open['events/med-2026'] = {
+        ...open['events/med-2026'],
+        days: [...(gcbEvent.days ?? []), { ...ceremonial, scoring: 'competitive', pool: 'main' }],
+      };
+      const control = await run(open, { now: () => DAY5_UNLOCK + 60_000 });
+      expect(control.result).toMatchObject({ sent: 2, failed: 0 });
+    });
+
+    it('leaves an Event carrying no freeze field untouched (the control)', async () => {
+      expect(standingsFreezeAtFor(seedEvent()['events/med-2026'] as EmailEvent)).toBeNull();
+      const { result } = await run(seedEvent());
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+    });
+
+    // Codex P2, PR #1202. The due check above is one clock reading taken at the
+    // top of the call; the hostname resolution and the roster page then sit
+    // between it and the first send. A sweep that starts just before the freeze
+    // spends that preparation crossing it — and nothing else downstream stops
+    // the send, because an Event is frozen long before it is archived.
+    /** Runs the send with a clock the caller can advance, and advances it when
+     *  the roster page is read — the preparation the boundary is crossed in. */
+    const runCrossingTheFreeze = async (
+      docs: Docs,
+      opensAt: number,
+      atDelivery: number,
+      mutate: (docs: Docs) => void = () => {},
+    ) => {
+      const db = makeDb(docs);
+      let now = opensAt;
+      const readCollection = db.collection;
+      const midFlight: typeof db = {
+        ...db,
+        collection: (path: string) => {
+          if (path.endsWith('/players')) {
+            now = atDelivery;
+            mutate(db.docs);
+          }
+          return readCollection(path);
+        },
+      };
+      const sent: EmailPayload[] = [];
+      const result = await sendDailyEmailForEvent(midFlight, 'med-2026', {
+        ...baseDeps(),
+        now: () => now,
+        send: async (args) => {
+          sent.push({
+            from: args.from ?? '',
+            to: args.to,
+            subject: args.subject,
+            html: args.html,
+            text: args.text,
+            headers: args.headers,
+          });
+          return true;
+        },
+      });
+      return { result, sent };
+    };
+
+    it('re-checks the freeze at delivery, so a sweep that crosses it mid-flight mails nothing', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      // Opens a minute short of the freeze — the due check passes, and this same
+      // Event mails in full on the control above — then arrives at delivery one
+      // minute past it.
+      const { result, sent } = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt + 60_000);
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+    });
+
+    it('stops exactly AT the freeze, and not a millisecond before it', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const at = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt);
+      expect(at.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      const before = await runCrossingTheFreeze(seedFreeze(freezeAt), freezeAt - 60_000, freezeAt - 1);
+      expect(before.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(before.sent).toHaveLength(2);
+    });
+
+    it('honours the freeze on the FRESH read, not the one the due check saw', async () => {
+      // Configured mid-flight, on an Event that opened with no freeze at all: the
+      // stale value cannot answer this, because there was no stale value.
+      const opened = seedEvent();
+      expect(standingsFreezeAtFor(opened['events/med-2026'] as EmailEvent)).toBeNull();
+      const appeared = await runCrossingTheFreeze(opened, DAY4_UNLOCK + 60_000, DAY4_UNLOCK + 60_000, (docs) => {
+        docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: DAY4_UNLOCK };
+      });
+      expect(appeared.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(appeared.sent).toEqual([]);
+
+      // And the other direction, the control that proves it is the fresh value
+      // doing the deciding rather than a second helping of caution: the Event
+      // opens with a freeze the clock then passes, and an Admin moves that freeze
+      // two hours out while the sweep is in flight. The morning is open again, so
+      // it mails.
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const moved = await runCrossingTheFreeze(
+        seedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            standingsFreezeAt: freezeAt + 2 * 60 * 60 * 1000,
+          };
+        },
+      );
+      expect(moved.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(moved.sent).toHaveLength(2);
+    });
+
+    it('reads the DERIVED freeze at delivery too, not only a configured one', async () => {
+      // The live Events carry no `standingsFreezeAt`; a ceremonial Day added
+      // mid-flight is the same fallback the due check resolves, and it must stop
+      // the send just as a configured instant does.
+      const { result, sent } = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            days: [
+              ...(gcbEvent.days ?? []),
+              { index: 4, date: '2026-07-19', unlockAt: DAY4_UNLOCK, theme: 'fog-froth-farewells', scoring: 'ceremonial', pool: 'closing' },
+            ],
+          };
+        },
+      );
+      expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+    });
+
+    it('settles the ⭐ against the freeze the delivery-time cutoff used, not the one the due check saw', async () => {
+      // Codex P2 round 2, PR #1202. An Admin EXTENDS the freeze mid-sweep. The
+      // delivery-time check permits the send on the new value — so the honour the
+      // email quotes has to be decided by that same value, or the mail goes out
+      // against a boundary the cutoff did not apply.
+      const opened = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const extended = opened + 4 * 60 * 60 * 1000;
+      const withBingos = (docs: Docs): Docs => {
+        // BOTH bingos land after the freeze this call opens with, so under that
+        // value nobody holds the ⭐ at all. Theo's is inside the extended freeze;
+        // Jess's is past even that, so the extension does not simply star
+        // everyone.
+        docs['events/med-2026/players/theo'] = {
+          ...docs['events/med-2026/players/theo'],
+          firstBingoAt: opened + 30 * 60 * 1000,
+        };
+        docs['events/med-2026/players/jess'] = {
+          ...docs['events/med-2026/players/jess'],
+          firstBingoAt: extended + 60_000,
+        };
+        return docs;
+      };
+      // The two freeze values genuinely disagree about the honour — which is what
+      // makes the assertions below about the rendered email meaningful.
+      const roster = [
+        { uid: 'theo', displayName: 'Theo', bingoCount: 1, squaresMarked: 19, firstBingoAt: opened + 30 * 60 * 1000 },
+        { uid: 'jess', displayName: 'Jess', bingoCount: 4, squaresMarked: 41, firstBingoAt: extended + 60_000 },
+      ];
+      expect(eventFirstBingoUid(roster, 3, new Set(), opened)).toBeNull();
+      expect(eventFirstBingoUid(roster, 3, new Set(), extended)).toBe('theo');
+
+      const { result, sent } = await runCrossingTheFreeze(
+        withBingos(seedFreeze(opened)),
+        opened - 60_000,
+        opened + 60 * 60 * 1000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], standingsFreezeAt: extended };
+        },
+      );
+      // The mail goes out — the extended freeze has not passed — and the headline
+      // is the one THAT freeze settles: Theo starred, Jess not.
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+      expect(sent[0].text).toContain('Theo *');
+      expect(sent[0].text).not.toContain('Jess *');
+      expect(sent[0].html).toContain('Theo ⭐');
+
+      // The counterfactual, same roster and same opening freeze, with no edit
+      // landing mid-sweep: the cutoff is the opening value, and the honour it
+      // settles is nobody's. A ⭐ here would mean the two values had been mixed.
+      const unchanged = await runCrossingTheFreeze(
+        withBingos(seedFreeze(opened)),
+        opened - 60_000,
+        opened - 1,
+      );
+      expect(unchanged.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(unchanged.sent[0].text).not.toContain('Theo *');
+      expect(unchanged.sent[0].text).not.toContain('Jess *');
     });
   });
 
