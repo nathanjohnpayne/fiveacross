@@ -447,7 +447,12 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     ctaLabel: 'Open the Feed',
     ctaUrl: args.feedUrl,
     footerBrandLine: register.brandLine,
-    footerWhyLine: register.whyYouGotThis(args.eventName),
+    // FLATTENED LIKE EVERY OTHER FIRESTORE-SOURCED FIELD (Codex P2, round 13 on
+    // PR #1207). Round 8 normalised Player names and Proof prompts and stopped
+    // there, but the Event name is equally un-validated and lands in the footer
+    // — where the HTML part escapes it and the text part did not, so a newline
+    // could fabricate extra footer lines in a text-only client.
+    footerWhyLine: register.whyYouGotThis(singleLine(args.eventName)),
     unsubscribeUrl: args.unsubscribeUrl,
     preferencesUrl: args.preferencesUrl,
   };

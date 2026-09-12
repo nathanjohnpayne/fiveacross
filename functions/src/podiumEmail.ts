@@ -75,6 +75,17 @@ export interface PodiumEmailInput {
   /** Whether the Event's board was empty at the freeze, read off the Moment
    *  before its honours were ban-filtered. */
   boardWasEmpty: boolean;
+  /**
+   * The award's PERSISTED winner list, before the visibility join filtered it.
+   *
+   * Revalidation rejoins from THIS rather than from `mostLoved.winners` (Codex
+   * P2, round 13): starting from the already-filtered list can never rediscover
+   * a winner whose Proof was hidden during input assembly and restored while the
+   * sender resolved, or whose first read failed transiently — and when EVERY
+   * winner was initially omitted, `mostLoved` is `null`, so no check ran at all
+   * and the email shipped with the award silently missing.
+   */
+  persistedWinners?: readonly MostLovedPhotoWinner[];
   /** The ban roster the honours and the recipient list were filtered against,
    *  carried so the completion guard can compare like with like. */
   bannedUids?: readonly string[];
@@ -397,7 +408,8 @@ async function freshEventGuard(
   // the rest of the list. A co-winner removed while the sender resolved left
   // that count claiming a photo the reader cannot see, which is the same defect
   // the round-6 finding fixed one layer down.
-  const tieToRecheck = revalidateAward ? (input.mostLoved?.winners ?? []) : [];
+  // FROM THE PERSISTED SET, not the filtered one — see `persistedWinners`.
+  const tieToRecheck = revalidateAward ? (input.persistedWinners ?? []) : [];
   if (tieToRecheck.length > 0) {
     const still = await visibleWinners(
       db,
@@ -413,11 +425,15 @@ async function freshEventGuard(
     // the list as a whole. Aborting rather than recomputing here: the next sweep
     // rebuilds the award through the same join it was first built by, so there
     // is one derivation path rather than a second one inside a guard.
-    if (
-      still.surviving.length === 0 ||
+    // Compared against what the SNAPSHOT rendered, so a winner restored since
+    // input assembly counts as a change too — the tie the email states would
+    // otherwise be smaller than the one a reader can now see.
+    const rendered = input.mostLoved?.winners ?? [];
+    const changed =
       !still.allChecked ||
-      still.surviving.length !== tieToRecheck.length
-    ) {
+      still.surviving.length !== rendered.length ||
+      still.surviving.some((w, i) => w.proofId !== rendered[i]?.proofId);
+    if (changed) {
       console.log(`sendPodiumEmailForEvent ${eventId}: award photo changed during preparation`);
       return { ...result, reason: 'award-changed' };
     }
@@ -563,10 +579,44 @@ export async function sendPodiumEmailForEvent(
       // two want different reasons, since one is terminal and one is reversible.
       const disabledMidFlight =
         snap.exists && !dailyEmailEnabled(mid as Parameters<typeof dailyEmailEnabled>[0]);
-      if (!snap.exists || eventClosedToPlay(mid) || disabledMidFlight) {
-        const why = !snap.exists ? 'deleted' : disabledMidFlight ? 'disabled' : 'archived';
+      // THE AWARD'S HERO IS RECHECKED AT THE CHECKPOINTS TOO (Codex P2, round 13
+      // on PR #1207). A paced fan-out runs for minutes and the hidden-after-freeze
+      // contract says a suppressed Proof must not render — but this checkpoint
+      // covered the Event document only, so a moderator hiding the winning photo
+      // after delivery started had it broadcast to every remaining recipient.
+      //
+      // The HERO alone here, not the whole tie: it is the name and prompt the
+      // mail prints, and rechecking a hundred-winner tie every 25 recipients
+      // would make the loop read-bound. The tie COUNT is verified once, before
+      // delivery, where the cost is paid a single time.
+      const heroGone =
+        input.mostLoved?.winners[0] != null &&
+        (
+          await visibleWinners(
+            db,
+            eventId,
+            [input.mostLoved.winners[0]],
+            normalizeBanSet(input.bannedUids),
+            typeof (mid?.settings as { reportHideThreshold?: unknown } | undefined)
+              ?.reportHideThreshold === 'number'
+              ? ((mid?.settings as { reportHideThreshold?: number }).reportHideThreshold as number)
+              : undefined,
+          )
+        ).surviving.length === 0;
+      if (!snap.exists || eventClosedToPlay(mid) || disabledMidFlight || heroGone) {
+        const why = !snap.exists
+          ? 'deleted'
+          : eventClosedToPlay(mid)
+            ? 'archived'
+            : disabledMidFlight
+              ? 'disabled'
+              : 'award photo removed';
         console.log(`sendPodiumEmailForEvent ${eventId}: ${why} mid-delivery, stopping`);
-        result.reason = disabledMidFlight ? 'disabled' : 'archived';
+        result.reason = heroGone && snap.exists && !eventClosedToPlay(mid) && !disabledMidFlight
+          ? 'award-changed'
+          : disabledMidFlight
+            ? 'disabled'
+            : 'archived';
         // EARLY STOP FEEDS THE DRAIN PREDICATE (Codex P2, round 9). Breaking out
         // left `capHit`, `failed` and `blocked` all clear, so `drained` computed
         // to TRUE and completion was then offered the whole of `input.ranked` as
@@ -645,6 +695,7 @@ export async function sendPodiumEmailForEvent(
           text: renderPodiumEmailText(model),
           from,
           unsubscribeUrl: unsubUrl,
+          banFingerprint: banFingerprintOf(input.bannedUids),
         },
         deps,
       );
@@ -930,12 +981,22 @@ interface FrozenPodiumRequest {
   text: string;
   from: string;
   unsubscribeUrl: string;
+  /** The ban roster these bytes were filtered against, as a stable fingerprint.
+   *  A replay whose current roster differs is STALE: the stored message may name
+   *  somebody since banned (Codex P2, round 13 on PR #1207). */
+  banFingerprint: string;
 }
 
 function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodiumRequest | null {
   if (!raw) return null;
   const fields = ['to', 'subject', 'html', 'text', 'from', 'unsubscribeUrl'] as const;
   if (!fields.every((f) => typeof raw[f] === 'string' && (raw[f] as string) !== '')) return null;
+  // `banFingerprint` must be a string but may legitimately be EMPTY — that is
+  // what an Event with no bans fingerprints to, which is the common case. Held
+  // to a different rule than the fields above rather than folded in with them,
+  // because requiring it non-empty rejected every unbanned Event's frozen
+  // request and blocked its whole retry path.
+  if (typeof raw.banFingerprint !== 'string') return null;
   return {
     to: raw.to as string,
     subject: raw.subject as string,
@@ -943,7 +1004,14 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
     text: raw.text as string,
     from: raw.from as string,
     unsubscribeUrl: raw.unsubscribeUrl as string,
+    banFingerprint: raw.banFingerprint as string,
   };
+}
+
+/** A ban roster as a stable, order-insensitive fingerprint, normalised exactly
+ *  as `bansDiffer` normalises it so the two can never disagree about equality. */
+function banFingerprintOf(raw: unknown): string {
+  return [...normalizeBanSet(raw)].sort().join(',');
 }
 
 /**
@@ -986,6 +1054,26 @@ async function freezeOrReplay(
     // ones Resend accepted under this key.
     try {
       const stored = toFrozenRequest((await ref.get()).data());
+      // STALE BYTES ARE NOT REPLAYED (Codex P2, round 13). The guards upstream
+      // cannot catch this: on a retry sweep the due check rebuilds the input from
+      // the CURRENT roster, so `bansDiffer` compares equal and passes — only the
+      // frozen bytes are old, and replaying them would name somebody since
+      // banned in the standings, the ⭐ line or the award.
+      //
+      // Blocked rather than superseded, deliberately. Re-freezing different bytes
+      // under the same key risks a 409 if the original was accepted, and a new
+      // key risks a SECOND email to someone who already received one — a
+      // transport `false` does not prove nothing was delivered. Refusing is the
+      // only branch that cannot make it worse, and it is loud so an operator can
+      // resolve the one recipient by hand.
+      if (stored && stored.banFingerprint !== request.banFingerprint) {
+        console.error(
+          'freezeOrReplay: frozen request predates a ban change; refusing to replay it',
+          eventId,
+          uid,
+        );
+        return null;
+      }
       if (stored) return stored;
     } catch (err) {
       console.error('freezeOrReplay: could not read the frozen request', eventId, uid, err);
@@ -1207,6 +1295,7 @@ export async function podiumEmailInputFor(
       },
       ranked,
       mostLoved: award,
+      persistedWinners: filtered?.winners ?? [],
       photoDayLabel:
         award?.winners[0]?.dayIndex != null
           ? photoDayLabels[award.winners[0].dayIndex as number]

@@ -2065,6 +2065,147 @@ describe('round-11 findings (Codex P2)', () => {
   });
 });
 
+describe('round-13 findings (Codex P2)', () => {
+  it('refuses to replay frozen bytes that predate a ban change', async () => {
+    // Upstream guards cannot catch this: on a retry sweep the due check rebuilds
+    // the input from the CURRENT roster, so `bansDiffer` compares equal and
+    // passes. Only the frozen bytes are old.
+    const db = makeDb(seed());
+    // First attempt: the transport refuses, so the frozen request persists.
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => false,
+    });
+    expect(db.docs[podiumOutboxPath('med-2026', 'zac')]).toBeDefined();
+
+    // A ban lands on the EVENT as well as in the retry's input, so
+    // `freshEventGuard`'s `bansDiffer` compares equal and passes — leaving the
+    // frozen bytes as the only stale thing, which is the whole point.
+    db.docs['events/med-2026'].bannedUids = ['logan'];
+    const result = await sendPodiumEmailForEvent(
+      db,
+      'med-2026',
+      input({ bannedUids: ['logan'] }),
+      {
+        ...baseDeps(),
+        send: async () => {
+          throw new Error('stale bytes must not be replayed');
+        },
+      },
+    );
+    expect(result.sent).toBe(0);
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+
+  it('still replays when the ban roster is unchanged', async () => {
+    const db = makeDb(seed());
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), { ...baseDeps(), send: async () => false });
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(result.sent).toBe(3);
+    expect(sent).toHaveLength(3);
+  });
+
+  it('rediscovers a winner whose Proof was restored during preparation', async () => {
+    // Revalidating from the already-FILTERED award could never find this; and
+    // when every winner was initially omitted, `mostLoved` is null so no check
+    // ran at all and the email shipped with the award missing.
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+        ],
+        winnerCount: 1,
+        heartCount: 9,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    // Hidden at input-assembly time, so the join drops it and `mostLoved` is null.
+    docs['events/med-2026/proofs/p1'].status = 'hidden';
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+    // …but the persisted list still travels, so revalidation can see it return.
+    expect(got.input.persistedWinners).toHaveLength(1);
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        if (path === 'hostnames') db.docs['events/med-2026/proofs/p1'].status = 'active';
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('an email whose award is stale must not go out');
+      },
+    });
+    expect(result.reason).toBe('award-changed');
+  });
+
+  it('stops mid-delivery when the winning photo is removed', async () => {
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+        ],
+        winnerCount: 1,
+        heartCount: 9,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    for (let i = 0; i < 60; i++) {
+      docs[`events/med-2026/players/p${i}`] = { displayName: `P${i}`, bingoCount: 0, squaresMarked: i, firstBingoAt: null };
+    }
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 5) delete db.docs['events/med-2026/proofs/p1'];
+        return true;
+      },
+    });
+    expect(result.reason).toBe('award-changed');
+    expect(result.sent).toBeLessThan(30);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('flattens the EVENT NAME in the footer, in both alternatives', () => {
+    const model = modelFor('gcb', {});
+    const withNewline = buildPodiumEmailModel({
+      eventName: 'Atlantis Med\nUnsubscribe: https://evil.test',
+      podium: input().podium,
+      mostLoved: input().mostLoved,
+      ranked: input().ranked,
+      boardWasEmpty: false,
+      closingDay: input().closingDay,
+      honorDayLabels: input().honorDayLabels,
+      recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
+      edition: 'gcb',
+      feedUrl: 'https://x.test/feed',
+      unsubscribeUrl: 'https://x.test/u',
+      preferencesUrl: 'https://x.test/p',
+    });
+    expect(withNewline.footerWhyLine).not.toMatch(/[\r\n]/);
+    expect(withNewline.footerWhyLine).toContain('Atlantis Med Unsubscribe: https://evil.test');
+    expect(renderPodiumEmailText(withNewline).split('\n').filter((l) => l.startsWith('Unsubscribe: https://evil'))).toEqual([]);
+    expect(model.footerWhyLine).toContain('Atlantis Med—Trieste to Barcelona');
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a
