@@ -239,7 +239,26 @@ export async function ensureEmailPrefs(
           typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
             ? data.lastSentDayIndex
             : undefined;
-        if (stored !== '') return { optedOut, token: stored, lastSentDayIndex };
+        // EVERY SEND MARKER TRAVELS THROUGH BOTH RETURNS, not just the daily
+        // card's (CodeRabbit, round 2 on PR #1207). This transaction rebuilds the
+        // prefs object field by field, so a marker it forgets reads as absent to
+        // the caller — and `shouldSendPodiumTo` treats an absent
+        // `podiumEmailSentAt` as "not yet mailed", which on a token-less document
+        // that HAS been mailed is a duplicate winner email. The daily card's
+        // marker was carried from the start; these two were added later and the
+        // list did not grow with them.
+        const podiumEmailSentAt =
+          typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
+            ? data.podiumEmailSentAt
+            : undefined;
+        const podiumEmailSkippedAt =
+          typeof data.podiumEmailSkippedAt === 'number' &&
+          Number.isFinite(data.podiumEmailSkippedAt)
+            ? data.podiumEmailSkippedAt
+            : undefined;
+        if (stored !== '') {
+          return { optedOut, token: stored, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
+        }
         const token = mint();
         // Name `optedOut` ONLY when the document has vanished under us (it must
         // exist for the merge to mean anything). On an existing doc the write
@@ -249,7 +268,7 @@ export async function ensureEmailPrefs(
           snap.exists ? { token, updatedAt: now } : { optedOut: false, token, createdAt: now, updatedAt: now },
           { merge: true },
         );
-        return { optedOut, token, lastSentDayIndex };
+        return { optedOut, token, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
       });
     } catch (err) {
       console.error('ensureEmailPrefs: token back-fill failed', eventId, uid, err);

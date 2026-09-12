@@ -803,6 +803,38 @@ describe('the sweep selects only active Events (Codex + CodeRabbit r2)', () => {
   });
 });
 
+describe('the token back-fill preserves every send marker (CodeRabbit r2, review body)', () => {
+  it('does not re-mail a token-less participant who already received the winner email', async () => {
+    const docs = seed();
+    // A legacy doc: already mailed the winner email, but carrying no token, so
+    // `ensureEmailPrefs` takes the back-fill transaction rather than returning
+    // the stored prefs directly.
+    docs['events/med-2026/emailPrefs/zac'] = { optedOut: false, token: '', podiumEmailSentAt: 111 };
+    const { result, sent } = await run(docs);
+    expect(sent.some((s) => s.to[0] === 'zac@example.com')).toBe(false);
+    expect(result.sent).toBe(2);
+    expect(result.skipped).toBe(1);
+    // …and the back-fill still did its job: the token is minted and persisted.
+    expect(docs['events/med-2026/emailPrefs/zac']).toBeDefined();
+  });
+
+  it('preserves a token-less participant’s undeliverable marker too', async () => {
+    const docs = seed();
+    docs['events/med-2026/emailPrefs/logan'] = { optedOut: false, token: '', podiumEmailSkippedAt: 222 };
+    const { sent } = await run(docs);
+    expect(sent.some((s) => s.to[0] === 'logan@example.com')).toBe(false);
+  });
+
+  it('still mails a token-less participant carrying no podium marker', async () => {
+    const docs = seed();
+    docs['events/med-2026/emailPrefs/zac'] = { optedOut: false, token: '', lastSentDayIndex: 9 };
+    const { sent } = await run(docs);
+    // The daily card's marker must not suppress this send — the two are
+    // independent, which is why they are separate fields.
+    expect(sent.some((s) => s.to[0] === 'zac@example.com')).toBe(true);
+  });
+});
+
 // --- ④ Both registers render ----------------------------------------------------
 
 /** The model as a real send would build it, for one Edition. */
