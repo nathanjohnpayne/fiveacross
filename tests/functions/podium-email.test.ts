@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  podiumEmailInputFor,
+  podiumMomentPath,
+  runPodiumEmailSweep,
   sendPodiumEmailForEvent,
   type PodiumEmailInput,
 } from '../../functions/src/podiumEmail';
 import type { DailyEmailFirestore } from '../../functions/src/dailyEmail';
 import { shouldSendPodiumTo } from '../../functions/src/emailOptOut';
-import { finaleActions, type FinaleTimes } from '../../functions/src/unlockDay';
 import { buildPodiumEmailModel } from '../../functions/src/podiumEmailContent';
 import {
   renderPodiumEmailHtml,
@@ -38,45 +40,6 @@ describe('shouldSendPodiumTo (#1192)', () => {
     // `lastSentDayIndex`: the farewell Day's card send must not suppress the
     // winner mail, and the winner mail must not suppress a card.
     expect(shouldSendPodiumTo({ optedOut: false, lastSentDayIndex: 9 } as never)).toBe(true);
-  });
-});
-
-// --- ② The beat's decision ------------------------------------------------------
-
-describe('finaleActions — the winner-email arm (#1192)', () => {
-  const times: FinaleTimes = {
-    lastCallAt: 1_000,
-    standingsFreezeAt: 2_000,
-    lastCallDayIndex: 8,
-    podiumDayIndex: 9,
-  };
-  const state = {
-    frozenAt: null,
-    lastCallPosted: false,
-    podiumPosted: false,
-    mostLovedComputed: false,
-  };
-
-  it('does not fire before the freeze', () => {
-    expect(finaleActions(times, 1_999, state).sendPodiumEmail).toBe(false);
-  });
-
-  it('fires at the freeze instant', () => {
-    expect(finaleActions(times, 2_000, state).sendPodiumEmail).toBe(true);
-  });
-
-  it('STAYS OWED after the podium Moment has landed', () => {
-    // The decoupling that matters: an arm gated on `postPodium` would get one
-    // attempt at a fan-out that legitimately needs several.
-    const decision = finaleActions(times, 5_000, { ...state, podiumPosted: true, frozenAt: 2_000 });
-    expect(decision.postPodium).toBe(false);
-    expect(decision.sendPodiumEmail).toBe(true);
-  });
-
-  it('goes quiet once the fan-out is recorded as finished', () => {
-    expect(
-      finaleActions(times, 5_000, { ...state, podiumEmailDone: true }).sendPodiumEmail,
-    ).toBe(false);
   });
 });
 
@@ -312,6 +275,289 @@ describe('sendPodiumEmailForEvent (#1192)', () => {
     const { result } = await run(seed(), { maxRecipients: 2 });
     expect(result.sent).toBe(2);
     expect(result.drained).toBe(false);
+  });
+});
+
+describe('the drain verdict distinguishes permanent from transient (#1192, Codex P1)', () => {
+  it('keeps the run UNDRAINED when an address lookup throws, and retries it', async () => {
+    // An Auth outage must not look like "no address on file". Before the fix
+    // both landed in `skipped`, which the verdict ignored — so a full outage
+    // reported drained, stamped the marker, and nobody was ever mailed.
+    const { result } = await run(seed(), {
+      getEmailForUid: async () => {
+        throw new Error('auth/internal-error');
+      },
+    });
+    expect(result.sent).toBe(0);
+    expect(result.blocked).toBe(3);
+    expect(result.skipped).toBe(0);
+    expect(result.drained).toBe(false);
+  });
+
+  it('keeps a participant with genuinely no address as a permanent skip', async () => {
+    const { result } = await run(seed(), { getEmailForUid: async () => null });
+    expect(result.skipped).toBe(3);
+    expect(result.blocked).toBe(0);
+    // Nothing is owed — no retry would find an address.
+    expect(result.drained).toBe(true);
+  });
+
+  it('keeps the run UNDRAINED when the prefs doc cannot be read or minted', async () => {
+    const docs = seed();
+    const db = makeDb(docs);
+    const broken = {
+      ...db,
+      doc: (path: string) =>
+        path.includes('/emailPrefs/')
+          ? {
+              get: async () => {
+                throw new Error('UNAVAILABLE');
+              },
+              set: async () => undefined,
+              create: async () => {
+                throw new Error('UNAVAILABLE');
+              },
+            }
+          : db.doc(path),
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('an undecidable recipient must not be mailed');
+      },
+    });
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+});
+
+describe('the ⭐ line dates the honour by its own instant (#1192, Codex P2)', () => {
+  it('names the QUALIFYING Day, not the holder’s earliest pinned honour', async () => {
+    // The holder also took an earlier TUTORIAL Day. The Event-wide honour
+    // excludes Tutorial Days, so that pin is ineligible for it — dating the
+    // honour to Day 1 would name a morning that did not win it.
+    const model = modelFor('gcb', {
+      podium: {
+        champion: PAYLOAD.champion,
+        firstBingo: { uid: 'logan', displayName: 'Logan Murdock', at: 200 },
+        dailyHonors: [
+          { dayIndex: 0, uid: 'logan', displayName: 'Logan Murdock', at: 50 },
+          { dayIndex: 1, uid: 'logan', displayName: 'Logan Murdock', at: 200 },
+        ],
+      },
+      honorDayLabels: { 0: 'Day 1 in 🇮🇹 Trieste', 1: 'Day 2 in 🇭🇷 Split' },
+    });
+    expect(model.starLine).toContain('Day 2 in 🇭🇷 Split');
+    expect(model.starLine).not.toContain('Trieste');
+  });
+
+  it('drops the Day qualifier rather than guessing when no honour matches', () => {
+    const model = modelFor('gcb', {
+      podium: { champion: PAYLOAD.champion, firstBingo: { uid: 'ghost', displayName: 'Ghost', at: 7 }, dailyHonors: [] },
+    });
+    expect(model.starLine).toBe('Ghost took the cruise-wide First to BINGO.');
+  });
+});
+
+describe('the preheader promises only what the email carries (#1192, Codex P2)', () => {
+  it('names both honours when both render', () => {
+    expect(modelFor('gcb').preheader).toBe(
+      'The podium is in—see who took the ⭐ and the Most-Loved Photo.',
+    );
+  });
+
+  it('names only the ⭐ when there is no eligible photo', () => {
+    expect(modelFor('gcb', { mostLoved: null }).preheader).toBe(
+      'The podium is in—see who took the ⭐.',
+    );
+  });
+
+  it('names only the photo when no bingo qualified for the ⭐', () => {
+    const model = modelFor('gcb', {
+      podium: { champion: PAYLOAD.champion, firstBingo: null, dailyHonors: [] },
+    });
+    expect(model.preheader).toBe('The podium is in—see who took the Most-Loved Photo.');
+  });
+
+  it('claims neither on an empty board, in the Edition’s own noun', () => {
+    const bare = { podium: { champion: null, firstBingo: null, dailyHonors: [] }, mostLoved: null, ranked: [] };
+    expect(modelFor('gcb', bare).preheader).toBe("The final standings are in—that's the cruise.");
+    expect(modelFor('vacay', bare).preheader).toBe("The final standings are in—that's the trip.");
+  });
+});
+
+// --- ③b The due check: the Moment is the source ---------------------------------
+
+const PAYLOAD = {
+  champion: { uid: 'zac', displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124 },
+  firstBingo: { uid: 'logan', displayName: 'Logan Murdock', at: 200 },
+  dailyHonors: [{ dayIndex: 1, uid: 'logan', displayName: 'Logan Murdock', at: 200 }],
+};
+
+/** An Event past its podium: roster, hostname, schedule and the posted Moment. */
+const seedDue = (over: Record<string, unknown> = {}, momentOver?: Record<string, unknown>): Docs => ({
+  ...seed(),
+  'events/med-2026': {
+    name: 'Atlantis Med—Trieste to Barcelona',
+    status: 'active',
+    settings: { dailyEmailEnabled: true },
+    days: [
+      { index: 0, date: '2026-07-15', pool: 'embark', tutorial: true, place: 'Trieste', placeEmoji: '🇮🇹' },
+      { index: 1, date: '2026-07-16', pool: 'main', tutorial: false, place: 'Split', placeEmoji: '🇭🇷' },
+      { index: 2, date: '2026-07-24', pool: 'farewell', tutorial: true, place: 'Barcelona', placeEmoji: '🇪🇸', theme: 'so-long-farewell' },
+    ],
+    ...over,
+  },
+  'events/med-2026/players/zac': { displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124, firstBingoAt: 800 },
+  'events/med-2026/players/logan': { displayName: 'Logan Murdock', bingoCount: 14, squaresMarked: 117, firstBingoAt: 200 },
+  'events/med-2026/players/nathan': { displayName: 'Nathan Payne', bingoCount: 13, squaresMarked: 110, firstBingoAt: 900 },
+  [podiumMomentPath('med-2026')]: {
+    kind: 'podium',
+    dayIndex: 2,
+    podium: PAYLOAD,
+    ...(momentOver ?? {}),
+  },
+});
+
+describe('podiumEmailInputFor — the due check (#1192)', () => {
+  it('is due once the podium Moment carries a payload', async () => {
+    const got = await podiumEmailInputFor(makeDb(seedDue()), 'med-2026');
+    expect(got.due).toBe(true);
+  });
+
+  it('takes the champion and ⭐ from the MOMENT, not from the live roster', async () => {
+    // The property the whole shape exists for: a post-freeze edit to a
+    // client-authoritative Player document cannot move the honours, because they
+    // are read off the immutable Moment. Here the roster is rewritten to make
+    // Nathan the runaway leader; the email still names the Moment's champion.
+    const docs = seedDue();
+    docs['events/med-2026/players/nathan'] = {
+      displayName: 'Nathan Payne (edited)',
+      bingoCount: 99,
+      squaresMarked: 999,
+      firstBingoAt: 1,
+    };
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.podium.champion).toEqual(PAYLOAD.champion);
+    expect(got.input.podium.firstBingo).toEqual(PAYLOAD.firstBingo);
+    // …while the RANKING, which the Moment does not carry, does follow the
+    // roster. That residual is stated in the spec rather than hidden.
+    expect(got.input.ranked[0].uid).toBe('nathan');
+  });
+
+  it('withholds a currently-banned champion and ⭐ holder from the email', async () => {
+    // The Moment keeps the unfiltered record — a ban is reversible and must not
+    // erase finale data — but this email is a rendered view and hides the row.
+    const docs = seedDue({ bannedUids: ['zac', 'logan'] });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.podium.champion).toBeNull();
+    expect(got.input.podium.firstBingo).toBeNull();
+    expect(got.input.podium.dailyHonors).toEqual([]);
+    // And the banned players are not recipients either.
+    expect(got.input.ranked.map((p) => p.uid)).toEqual(['nathan']);
+  });
+
+  it('labels the ⭐ Day and the closing Day from the schedule', async () => {
+    const got = await podiumEmailInputFor(makeDb(seedDue()), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.honorDayLabels[1]).toBe('Day 2 in 🇭🇷 Split');
+    expect(got.input.closingDay).toMatchObject({
+      themeId: 'so-long-farewell',
+      dayNumber: 3,
+      dayCount: 3,
+      dateLabel: 'Friday, Jul 24',
+      placeLabel: '🇪🇸 Barcelona',
+    });
+  });
+
+  it.each([
+    ['no-podium', (d: Docs) => { delete d[podiumMomentPath('med-2026')]; }],
+    ['already-sent', (d: Docs) => { d['events/med-2026'].podiumEmailAt = 1; }],
+    ['archived', (d: Docs) => { d['events/med-2026'].status = 'archived'; }],
+    ['disabled', (d: Docs) => { d['events/med-2026'].settings = { dailyEmailEnabled: false }; }],
+  ])('is not due: %s', async (reason, mutate) => {
+    const docs = seedDue();
+    mutate(docs);
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    expect(got).toEqual({ due: false, reason });
+  });
+
+  it('is not due when the Moment landed without its payload', async () => {
+    // The beat posts a minimal Moment when its content build fails, and does not
+    // retry a landed Moment — so this is terminal, and silence is the answer.
+    const docs = seedDue({}, { podium: undefined });
+    delete (docs[podiumMomentPath('med-2026')] as Record<string, unknown>).podium;
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    expect(got).toEqual({ due: false, reason: 'no-payload' });
+  });
+
+  it('is not due for a CLOSING Event, whose status is still active', async () => {
+    // The archive's quiesce deliberately leaves `status` alone, so the guard has
+    // to read `archiving` too.
+    const got = await podiumEmailInputFor(makeDb(seedDue({ archiving: true })), 'med-2026');
+    expect(got).toEqual({ due: false, reason: 'archived' });
+  });
+});
+
+describe('runPodiumEmailSweep (#1192)', () => {
+  it('mails a due Event, stamps podiumEmailAt with a MERGE, and skips it next time', async () => {
+    const db = makeDb(seedDue());
+    const sent: Captured[] = [];
+    const send = async (args: EmailPayload) => {
+      sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+      return true;
+    };
+    await runPodiumEmailSweep(db, { ...baseDeps(), send });
+    expect(sent).toHaveLength(3);
+
+    // THE MERGE, which is the P1 this test exists for: the Event document must
+    // still carry everything it had, not be replaced by { podiumEmailAt }.
+    const event = db.docs['events/med-2026'];
+    expect(event.podiumEmailAt).toBe(3_000);
+    expect(event.status).toBe('active');
+    expect(event.name).toBe('Atlantis Med—Trieste to Barcelona');
+    expect(Array.isArray(event.days)).toBe(true);
+    expect(event.settings).toEqual({ dailyEmailEnabled: true });
+
+    // A second sweep finds the marker and never reaches the transport.
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a marked Event must not be re-swept');
+      },
+    });
+    expect(sent).toHaveLength(3);
+  });
+
+  it('leaves podiumEmailAt absent when the transport fails, so the next sweep retries', async () => {
+    const db = makeDb(seedDue());
+    await runPodiumEmailSweep(db, { ...baseDeps(), send: async () => false });
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent).toHaveLength(3);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+
+  it('mails nothing for an Event with no podium Moment', async () => {
+    const docs = seedDue();
+    delete docs[podiumMomentPath('med-2026')];
+    const db = makeDb(docs);
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('an Event with no podium must not be mailed');
+      },
+    });
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
   });
 });
 

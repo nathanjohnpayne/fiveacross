@@ -155,12 +155,15 @@ function starLineFor(
 ): string | null {
   const star = podium.firstBingo;
   if (!star) return null;
-  // The holder's own Day, found by uid among the pinned daily honours: the
-  // Event-wide honour IS one of the daily ones (the earliest eligible), so the
-  // Day it fell on is the earliest honour this uid holds.
-  const own = podium.dailyHonors
-    .filter((h) => h.uid === star.uid)
-    .sort((a, b) => a.dayIndex - b.dayIndex)[0];
+  // MATCHED BY TIMESTAMP, NOT BY EARLIEST INDEX (Codex P2 on PR #1207). The
+  // Event-wide honour IS one of the pinned daily honours, but "the earliest Day
+  // this uid holds" is a different row whenever the holder ALSO took a Tutorial
+  // Day: the Event-wide honour excludes Tutorial Days, so that earlier pin is
+  // ineligible for it, and naming its Day would date the honour to a morning
+  // that did not win it. `firstBingo.at` identifies the qualifying bingo
+  // exactly, so the Day is the honour whose instant equals it — and a uid check
+  // beside it, because two Players can hold separate honours at one instant.
+  const own = podium.dailyHonors.find((h) => h.uid === star.uid && h.at === star.at);
   const label = own && honorDayLabels ? honorDayLabels[own.dayIndex] : undefined;
   const where = label ? `—${label}` : '';
   return `${star.displayName} took the ${register.occasionWide} First to BINGO${where}.`;
@@ -204,6 +207,25 @@ function mostLovedLineFor(
   );
 }
 
+/**
+ * The ~85-character preheader, naming only the honours this email actually
+ * carries. Four cases, because both honours are independently absent: an Event
+ * can have a ⭐ and no eligible photo, a photo and no ⭐ (every bingo landed on
+ * a Tutorial Day), both, or — on an empty board — neither.
+ */
+function podiumPreheader(
+  hasStar: boolean,
+  hasMostLoved: boolean,
+  register: EditionRegister,
+): string {
+  if (hasStar && hasMostLoved) {
+    return 'The podium is in—see who took the ⭐ and the Most-Loved Photo.';
+  }
+  if (hasStar) return 'The podium is in—see who took the ⭐.';
+  if (hasMostLoved) return 'The podium is in—see who took the Most-Loved Photo.';
+  return `The final standings are in—that's the ${register.occasion}.`;
+}
+
 /** The reader's own final placing, or `null` when they are not on the roster.
  *  Past tense throughout: nothing moves after the freeze. */
 function youLineFor(
@@ -229,6 +251,9 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
   const register = registerFor(args.edition);
   const theme = emailThemeTokens(args.closingDay.themeId, args.edition);
   const champion = args.podium.champion;
+  // Resolved BEFORE the preheader, which is built from which of them rendered.
+  const starLine = starLineFor(args.podium, register, args.honorDayLabels);
+  const mostLovedLine = mostLovedLineFor(args.mostLoved ?? null, register);
 
   // ① The subject names the champion (#1192 decision), the register supplies
   // the verb, and an empty board falls back to the occasion close because there
@@ -236,7 +261,18 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
   const subject = `Final standings 🏆—${
     champion ? register.finaleSubjectTail(champion.displayName) : register.finaleSubjectTailNoChampion
   }`;
-  const preheader = 'The podium is in—see who took the ⭐ and the Most-Loved Photo.';
+  // BUILT FROM THE HONOURS THAT ACTUALLY RENDER (Codex P2 on PR #1207). The
+  // body already omits the ⭐ and the award when the Event has no holder, for
+  // the reason #1121 exists — but a constant preheader made exactly the claim
+  // those omissions avoid, and an inbox preview shows it BEFORE the message is
+  // opened, so the misleading version is the one most people would read. The
+  // honours are named only when they are there, and an Event with neither gets
+  // neutral finale copy rather than a sentence about nothing.
+  const preheader = podiumPreheader(
+    starLine !== null,
+    mostLovedLine !== null,
+    register,
+  );
 
   const rows: FinaleStandingsRow[] = args.ranked
     .slice(0, FINALE_STANDINGS_ROWS)
@@ -273,9 +309,9 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
       ? `Nobody marked a square this ${register.occasion}—the board closed empty.`
       : null,
     starHeading: 'The ⭐',
-    starLine: starLineFor(args.podium, register, args.honorDayLabels),
+    starLine,
     mostLovedHeading: 'Most-loved photo',
-    mostLovedLine: mostLovedLineFor(args.mostLoved ?? null, register),
+    mostLovedLine,
     youLine: youLineFor(args.ranked, args.recipient.uid),
     signOffLine: register.finaleSignOff,
     ctaLabel: 'Open the Feed',

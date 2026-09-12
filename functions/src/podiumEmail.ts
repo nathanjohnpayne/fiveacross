@@ -1,27 +1,46 @@
 /**
- * Winner-announcement email SEND (issue #1192). The last mail an Event sends:
- * one per opted-in participant at the finale's podium beat, replacing the daily
- * card that #1121 stops at the Standings Freeze.
+ * Winner-announcement email (issue #1192). The last mail an Event sends: one per
+ * opted-in participant once the finale's `podium` Moment has been posted,
+ * replacing the daily card that #1121 stops at the Standings Freeze.
  *
- * WHAT THIS FILE IS AND IS NOT. It owns the email concerns only — consent,
- * addresses, the Edition's sender and canonical host, pacing, the transport and
- * the per-recipient marker. It owns NO finale logic: the podium payload, the
- * ranked standings and the frozen Most-Loved award all arrive as arguments,
- * computed once by the beat in `unlockDay.ts` from the roster it has already
- * read. That is deliberate, and it is what makes the parity requirement
- * structural rather than asserted: the email is handed the SAME payload object
- * the `podium` Moment is written from, so there is no second computation for it
- * to disagree with.
+ * ITS OWN SCHEDULED SWEEP, not a finale beat (Codex on PR #1207). The first
+ * implementation ran the fan-out inside `runFinaleBeats`, and three separate
+ * findings were all that coupling: the `unlockDay` scheduler binds no
+ * `RESEND_API_KEY` and defaults to a 60-second timeout, its Event loop is
+ * SERIAL — so one Event's paced per-recipient fan-out delayed every later
+ * Event's Day snapshot — and an email-only retry rebuilt the podium from live,
+ * client-authoritative Player documents, which a post-freeze display-name or
+ * count edit could make disagree with the Moment already posted. A separate
+ * trigger, shaped exactly like `dailyEngagementEmail`, answers all three.
  *
- * AND IT IS INJECTED, NOT IMPORTED BY THE BEAT. `runFinaleBeats` reaches this
- * code through an optional `UnlockDeps.sendPodiumEmail` dep, so `unlockDay.ts`
- * keeps a Firestore-only dependency graph and every existing finale test runs
- * with no transport at all. `index.ts` binds the default at the composition
- * root, where the real Admin SDK Firestore satisfies both this module's
- * surface and the beat's.
+ * AND THE MOMENT IS THE SOURCE, not the roster. The `podium` Moment is written
+ * once at a deterministic id and never amended, so reading its stored payload is
+ * what makes the email quote the frozen record BY CONSTRUCTION rather than by a
+ * recomputation that happens to agree — #1052 being the record of what it costs
+ * when several readers of one honour each derive it themselves.
+ *
+ * The residual is stated in the spec: the Moment carries a single `champion`, so
+ * ranks 2 and 3 are read from the roster through `podiumStandings`. They can
+ * therefore drift from what the Moment would have shown if a Player edits their
+ * own document after the freeze — the freeze cutoff bounds timestamps, not
+ * counts. The honours that the Moment DOES carry — the champion, the ⭐ — never
+ * drift.
  */
 import { dailyEmailEnabled, resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
 import type { DailyEmailDeps, DailyEmailFirestore } from './dailyEmail';
+// The SAME readers and the SAME normalisation the finale beat uses, imported
+// rather than restated: #1152 is the record of what a second copy of the roster
+// normalisation costs. `eventClosedToPlay` is the same freeze predicate the
+// daily card consults at this boundary.
+import {
+  eventClosedToPlay,
+  readDayHonors,
+  readFinaleRoster,
+  visibleFinaleRoster,
+  type FinaleReadSource,
+} from './unlockDay';
+import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
+import { podiumStandings, type FinaleDay } from './finaleContent';
 import {
   ensureEmailPrefs,
   markPodiumEmailSent,
@@ -68,10 +87,24 @@ export interface PodiumEmailInput {
 export interface PodiumSendResult {
   /** Emails accepted by the transport. */
   sent: number;
-  /** Suppressed before send: opted out, already sent, or no verified address. */
+  /** PERMANENTLY suppressed: opted out, already sent, or no address on file.
+   *  Nothing about a skipped recipient is worth retrying. */
   skipped: number;
   /** Transport failures — logged, never thrown. */
   failed: number;
+  /**
+   * Recipients this run could not DECIDE about, because a dependency failed:
+   * the prefs doc could not be read or minted, or the address lookup threw.
+   *
+   * SEPARATE FROM `skipped` because the drain verdict turns on the difference
+   * (Codex P1 on PR #1207). `ensureEmailPrefs` returns `null` on a Firestore
+   * failure and an address lookup returns nothing on an Auth outage, and both
+   * used to land in `skipped` — which the verdict ignored. A transient outage
+   * could therefore skip an entire roster, report `drained: true`, stamp the
+   * Event marker, and mean nobody was ever mailed. A blocked recipient is a
+   * question still open, so it keeps the run undrained.
+   */
+  blocked: number;
   /**
    * Whether this run finished the Event's fan-out, so the beat may stop asking.
    *
@@ -93,18 +126,85 @@ export interface PodiumSendResult {
 const DEFAULT_MAX_RECIPIENTS = 2000;
 const DEFAULT_PACING_MS = 550;
 
+/**
+ * The verified-address lookup, matching `notify.ts`'s verified-only policy.
+ *
+ * IT DOES NOT SWALLOW ITS OWN FAILURE, unlike the daily card's copy of this
+ * (Codex P1 on PR #1207): a `user-not-found` is a permanent "no address", but
+ * an Auth outage is not, and a lookup that returns `null` for both makes them
+ * indistinguishable to the drain verdict. Throwing lets `resolveAddress` keep
+ * the outage retryable; the throw never escapes the recipient loop's own
+ * try/catch, so one broken uid still cannot sink the send.
+ */
 async function defaultGetEmailForUid(uid: string): Promise<string | null> {
+  const { getAuth } = await import('firebase-admin/auth');
   try {
-    const { getAuth } = await import('firebase-admin/auth');
     const user = await getAuth().getUser(uid);
     return user.email && user.emailVerified ? user.email : null;
-  } catch {
-    return null; // one broken uid must never sink the whole send
+  } catch (err) {
+    // A uid with no Auth record will never acquire one retroactively — that is
+    // a permanent absence, not an outage, so it stays a skip.
+    if ((err as { code?: string })?.code === 'auth/user-not-found') return null;
+    throw err;
   }
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+
+/**
+ * One recipient's address, as THREE outcomes rather than `string | null`.
+ *
+ * The lookup's own contract cannot tell them apart — `defaultGetEmailForUid`
+ * catches an Auth failure and returns `null`, which is the same value it
+ * returns for a participant with no verified address — and those two must not
+ * share a fate: the first is worth retrying and the second never will be. A
+ * THROW is read as the transient case, which is why the default above is
+ * wrapped here rather than swallowing its own error. An injected lookup that
+ * returns `null` is taken at its word ("no address"), because a caller that
+ * wants the transient answer can throw for it.
+ */
+async function resolveAddress(
+  lookup: (uid: string) => Promise<string | null>,
+  uid: string,
+): Promise<{ status: 'ok'; email: string } | { status: 'none' } | { status: 'error' }> {
+  try {
+    const email = await lookup(uid);
+    return email ? { status: 'ok', email } : { status: 'none' };
+  } catch {
+    return { status: 'error' };
+  }
+}
+
+/**
+ * Record that this Event's fan-out is finished, so the sweep stops asking.
+ *
+ * A MERGE, EMPHATICALLY (Codex P1 on PR #1207). The first implementation stamped
+ * this with a one-argument Admin SDK `set()`, which REPLACES the document: the
+ * Event would have been reduced to `{ podiumEmailAt }`, losing its status,
+ * schedule, admins, settings and every finale field, and vanishing from the next
+ * `status == 'active'` selection. The Admin SDK's `set` is a replace unless told
+ * otherwise, and this is the write that has to say so.
+ *
+ * Best-effort: a failure here leaves the marker absent, which is the honest
+ * answer and which the next sweep resolves — every recipient already carries
+ * `podiumEmailSentAt`, so the retry mails nobody twice. It re-reads nothing,
+ * because it is not a gate: `podiumEmailSentAt` is what prevents duplication,
+ * and this only quiets the sweep.
+ */
+async function stampFanOutComplete(
+  db: DailyEmailFirestore,
+  eventId: string,
+  deps: DailyEmailDeps,
+): Promise<void> {
+  try {
+    await db
+      .doc(`events/${eventId}`)
+      .set({ podiumEmailAt: (deps.now ?? Date.now)() }, { merge: true });
+  } catch (err) {
+    console.error('sendPodiumEmailForEvent: podiumEmailAt stamp failed', eventId, err);
+  }
+}
 
 /**
  * Send the winner-announcement email for ONE Event.
@@ -126,16 +226,23 @@ export async function sendPodiumEmailForEvent(
   input: PodiumEmailInput,
   deps: DailyEmailDeps = {},
 ): Promise<PodiumSendResult> {
-  const result: PodiumSendResult = { sent: 0, skipped: 0, failed: 0, drained: false };
+  const result: PodiumSendResult = { sent: 0, skipped: 0, failed: 0, blocked: 0, drained: false };
 
   // The SAME Event-level opt-in the daily card reads: the ticket adds no new
   // category, so an Event that never turned the daily email on does not start
   // mailing at its finale either. `drained: true` — there is nothing owed, so
   // the beat should stop asking rather than retry forever.
+  // Re-asserted here rather than trusted from the due check: this function is
+  // also called directly (by tests, and by any future manual replay), and the
+  // Event-level opt-in is the one condition that must hold at the send itself.
   if (!dailyEmailEnabled(input.event as Parameters<typeof dailyEmailEnabled>[0])) {
     return { ...result, drained: true, reason: 'disabled' };
   }
   if (input.ranked.length === 0) {
+    // Terminal, and stamped: an Event that reached its podium with an empty
+    // visible roster has nobody to mail, and re-reading it every sweep for the
+    // rest of its life answers the same way.
+    await stampFanOutComplete(db, eventId, deps);
     return { ...result, drained: true, reason: 'no-roster' };
   }
 
@@ -172,15 +279,28 @@ export async function sendPodiumEmailForEvent(
       // never looked up, and one whose prefs doc cannot be minted is skipped
       // rather than mailed without a working unsubscribe.
       const prefs = await ensureEmailPrefs(db, eventId, player.uid, deps);
-      if (prefs === null || !shouldSendPodiumTo(prefs)) {
+      // `null` here is NOT an opt-out — `ensureEmailPrefs` returns it when the
+      // doc could not be read or minted, which is a Firestore failure and a
+      // question still open. The opt-out and already-sent answers are
+      // `shouldSendPodiumTo`'s, and those are permanent.
+      if (prefs === null) {
+        result.blocked++;
+        continue;
+      }
+      if (!shouldSendPodiumTo(prefs)) {
         result.skipped++;
         continue;
       }
-      const to = await getEmailForUid(player.uid);
-      if (!to) {
+      const address = await resolveAddress(getEmailForUid, player.uid);
+      if (address.status === 'error') {
+        result.blocked++;
+        continue;
+      }
+      if (address.status === 'none') {
         result.skipped++;
         continue;
       }
+      const to = address.email;
       const linkArgs = { baseUrl: unsubscribeBaseUrl, eventId, uid: player.uid, token: prefs.token };
       const unsubUrl = unsubscribeLink(linkArgs);
       const model = buildPodiumEmailModel({
@@ -229,10 +349,230 @@ export async function sendPodiumEmailForEvent(
     }
   }
 
-  result.drained = !capHit && result.failed === 0;
+  // Drained means every recipient got a PERMANENT answer: mailed, or suppressed
+  // for a reason no retry would change. A transport failure or a blocked
+  // dependency leaves the question open, so the marker is withheld and the next
+  // sweep resumes (Codex P1 on PR #1207).
+  result.drained = !capHit && result.failed === 0 && result.blocked === 0;
+  if (result.drained) await stampFanOutComplete(db, eventId, deps);
   console.log(
     `sendPodiumEmailForEvent ${eventId}: sent=${result.sent} skipped=${result.skipped} ` +
-      `failed=${result.failed} drained=${result.drained}`,
+      `failed=${result.failed} blocked=${result.blocked} drained=${result.drained}`,
   );
   return result;
+}
+
+// --- Due check and the sweep ----------------------------------------------------
+
+/** The Event fields the sweep reads. Raw Firestore view, like every other
+ *  boundary in this package. */
+interface PodiumEmailEvent {
+  name?: unknown;
+  days?: unknown;
+  bannedUids?: unknown;
+  standingsFreezeAt?: unknown;
+  mostLovedPhoto?: unknown;
+  /** The fan-out marker: present means this Event is finished (#1192). */
+  podiumEmailAt?: unknown;
+  settings?: { dailyEmailEnabled?: unknown } | undefined;
+  /** Typed as the archive predicate reads them rather than as `unknown`, so the
+   *  guard is called with the shape it declares instead of through a cast. A raw
+   *  document can hold any value in either, which is exactly what
+   *  `eventClosedToPlay` already defaults for. */
+  status?: string;
+  archiving?: boolean;
+}
+
+/** The stored `podium` Moment, at its deterministic id. `podium` is absent when
+ *  the beat posted the Moment but its content build had failed. */
+interface PodiumMomentDoc {
+  kind?: unknown;
+  dayIndex?: unknown;
+  podium?: PodiumPayload;
+}
+
+export type PodiumDueReason =
+  | 'no-event'
+  | 'archived'
+  | 'disabled'
+  | 'already-sent'
+  | 'no-podium'
+  | 'no-payload';
+
+/** `events/{eventId}/moments/podium` — the one place this path is spelled. */
+export function podiumMomentPath(eventId: string): string {
+  return `events/${eventId}/moments/podium`;
+}
+
+/**
+ * The closing Day's labels for the email's context line, and one label per Day
+ * that pinned an honour.
+ *
+ * Formatted HERE rather than in the content module because the Day's stored
+ * `date` is a plain wall-clock calendar date and `formatDayDate` owns the one
+ * correct way to render it — see its own comment on the double-offset trap.
+ */
+function dayLabels(
+  days: readonly EmailDay[],
+  podiumDayIndex: number,
+  honorDayIndexes: readonly number[],
+): {
+  closingDay: PodiumEmailInput['closingDay'];
+  honorDayLabels: Record<number, string>;
+} {
+  const raw = days.find((d) => d.index === podiumDayIndex);
+  const honorDayLabels: Record<number, string> = {};
+  for (const index of honorDayIndexes) {
+    const day = days.find((d) => d.index === index);
+    const where = day ? placeLabel(day) : '';
+    // A Day with no Place yields "Day 2" alone rather than a dangling
+    // preposition.
+    honorDayLabels[index] = where ? `Day ${index + 1} in ${where}` : `Day ${index + 1}`;
+  }
+  return {
+    closingDay: {
+      themeId: raw?.theme ?? null,
+      dayNumber: podiumDayIndex + 1,
+      dayCount: days.length,
+      dateLabel: raw ? formatDayDate(raw.date) : '',
+      placeLabel: raw ? placeLabel(raw) : '',
+    },
+    honorDayLabels,
+  };
+}
+
+/**
+ * Assemble the send input for one Event from its stored state, or say why it is
+ * not due.
+ *
+ * READS THE MOMENT FOR THE HONOURS AND THE ROSTER ONLY FOR THE RANKING. The
+ * champion and the ⭐ come out of the Moment's own payload, so no amount of
+ * post-freeze Player editing can make this email disagree with the Feed. The
+ * roster supplies ranks 2 and 3 and the recipient list, ban-filtered and ranked
+ * by `podiumStandings` — the same function whose head `buildPodiumPayload` took
+ * its champion from.
+ *
+ * BAN-FILTERED FOR THE EMAIL, DELIBERATELY, even though the Moment's payload is
+ * not (Codex P2 on PR #1207). `readFinaleRoster`'s own contract says ban
+ * filtering "is applied only to the rendered view/copy, so reversible bans do
+ * not permanently erase finale data" — the Moment is the record and keeps the
+ * unfiltered truth; this email is a rendered view and must hide a banned row.
+ * So a champion or ⭐ holder who is currently banned is dropped from the email's
+ * honours rather than named in its subject while row 1 shows somebody else.
+ */
+export async function podiumEmailInputFor(
+  db: DailyEmailFirestore & FinaleReadSource,
+  eventId: string,
+): Promise<{ due: true; input: PodiumEmailInput } | { due: false; reason: PodiumDueReason }> {
+  const event = (await db.doc(`events/${eventId}`).get()).data() as PodiumEmailEvent | undefined;
+  if (!event) return { due: false, reason: 'no-event' };
+  // Checked ahead of the toggle, because it is the stronger statement: the
+  // occasion is over, whatever the settings say. This is also where an archived
+  // Event stops being retried at all — the same posture the daily card takes,
+  // and the reason the spec states archival as terminal for this send.
+  if (eventClosedToPlay(event)) return { due: false, reason: 'archived' };
+  if (!dailyEmailEnabled(event as Parameters<typeof dailyEmailEnabled>[0])) {
+    return { due: false, reason: 'disabled' };
+  }
+  if (event.podiumEmailAt != null) return { due: false, reason: 'already-sent' };
+
+  const moment = (await db.doc(podiumMomentPath(eventId)).get()).data() as
+    | PodiumMomentDoc
+    | undefined;
+  // The Moment IS the due condition: no podium, no winner email. The finale beat
+  // retries the Moment on its own guard until it lands, so "not yet" is a wait,
+  // not a failure.
+  if (!moment) return { due: false, reason: 'no-podium' };
+  const payload = moment.podium;
+  // A Moment posted without its payload (the beat's content build failed) has
+  // nothing for this email to print. The beat does not retry a landed Moment, so
+  // this is terminal in practice — and silence is the right answer, which is why
+  // it is a distinct reason rather than folded into `no-podium`.
+  if (!payload || !Array.isArray(payload.dailyHonors)) return { due: false, reason: 'no-payload' };
+
+  const days = (Array.isArray(event.days) ? event.days : []) as EmailDay[];
+  const banned = (Array.isArray(event.bannedUids) ? event.bannedUids : []) as string[];
+  const roster = await readFinaleRoster(db, eventId);
+  const visible = visibleFinaleRoster(roster, banned);
+  const freezeAt = typeof event.standingsFreezeAt === 'number' ? event.standingsFreezeAt : null;
+  const ranked = podiumStandings(visible, days as unknown as FinaleDay[], freezeAt);
+  const bannedSet = new Set(banned);
+  const { closingDay, honorDayLabels } = dayLabels(
+    days,
+    typeof moment.dayIndex === 'number' ? moment.dayIndex : Math.max(days.length - 1, 0),
+    payload.dailyHonors.map((h) => h.dayIndex),
+  );
+
+  return {
+    due: true,
+    input: {
+      event,
+      // The Moment's honours, with a currently-banned holder withheld.
+      podium: {
+        champion:
+          payload.champion && !bannedSet.has(payload.champion.uid) ? payload.champion : null,
+        firstBingo:
+          payload.firstBingo && !bannedSet.has(payload.firstBingo.uid) ? payload.firstBingo : null,
+        dailyHonors: payload.dailyHonors.filter((h) => !bannedSet.has(h.uid)),
+      },
+      ranked,
+      mostLoved: (event.mostLovedPhoto ?? null) as MostLovedPhotoAward | null,
+      closingDay,
+      honorDayLabels,
+    },
+  };
+}
+
+/**
+ * One sweep across every active Event, mirroring `runDailyEmailSweep`: Event
+ * work starts concurrently so a large or slow first Event cannot consume the
+ * whole invocation, while every transport call still passes through ONE shared
+ * pacing queue — concurrency is for fairness across Events, never a multiplier
+ * on Resend's account-wide request rate.
+ */
+export async function runPodiumEmailSweep(
+  db: DailyEmailFirestore & FinaleReadSource,
+  deps: DailyEmailDeps = {},
+): Promise<void> {
+  // Not the freeze check, and not the marker check: this selection only excludes
+  // an ARCHIVED Event, and it runs once before any Event is processed.
+  // `podiumEmailInputFor` reads both off the document itself.
+  const events = await db.collection('events').get();
+  const transport = deps.send ?? (await import('./email')).sendEmail;
+  const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
+  const sleep = deps.sleep ?? defaultSleep;
+  let deliveryTail: Promise<void> = Promise.resolve();
+  const pacedTransport: typeof transport = async (args) => {
+    const turn = deliveryTail;
+    let release!: () => void;
+    deliveryTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await turn;
+    try {
+      return await transport(args);
+    } finally {
+      try {
+        await sleep(pacingMs);
+      } finally {
+        release();
+      }
+    }
+  };
+
+  await Promise.all(
+    events.docs.map(async (ev) => {
+      try {
+        const due = await podiumEmailInputFor(db, ev.id);
+        if (!due.due) return;
+        await sendPodiumEmailForEvent(db, ev.id, due.input, {
+          ...deps,
+          send: pacedTransport,
+          pacingMs: 0,
+        });
+      } catch (err) {
+        console.error('runPodiumEmailSweep: event failed', ev.id, err);
+      }
+    }),
+  );
 }

@@ -46,9 +46,10 @@ import {
   runScheduledUnlock,
   UnlockPermissionError,
   type AdminFirestore,
-  type UnlockDeps,
+  type FinaleReadSource,
 } from './unlockDay';
 import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
+import { runPodiumEmailSweep } from './podiumEmail';
 import { handleUnsubscribeRequest } from './emailOptOut';
 import { firestoreCommitOrder, recordDirectMarkAnalytics } from './directMarkAnalytics';
 import {
@@ -970,26 +971,9 @@ export const reconcileHostnameOnWrite = onDocumentWritten(
 async function runScheduledUnlockForActiveEvents(): Promise<void> {
   const adminDb = db as unknown as AdminFirestore;
   const events = await db.collection('events').where('status', '==', 'active').get();
-  // THE COMPOSITION ROOT for the winner-announcement email (#1192). `unlockDay.ts`
-  // declares the sender as an injectable dep so it keeps a Firestore-only
-  // dependency graph and its whole suite runs with no transport; this is the one
-  // place the real one is bound, and the one place the same `db` is seen as both
-  // the beat's Firestore surface and the email's (which additionally needs the
-  // `emailPrefs` doc shape, `create` included).
-  const sendPodiumEmail: NonNullable<UnlockDeps['sendPodiumEmail']> = async (input) => {
-    const { sendPodiumEmailForEvent } = await import('./podiumEmail');
-    return sendPodiumEmailForEvent(db as unknown as DailyEmailFirestore, input.eventId, {
-      event: input.event,
-      podium: input.podium,
-      ranked: input.ranked,
-      mostLoved: input.mostLoved,
-      closingDay: input.closingDay,
-      honorDayLabels: input.honorDayLabels,
-    });
-  };
   for (const ev of events.docs) {
     try {
-      await runScheduledUnlock(adminDb, ev.id, { sendPodiumEmail });
+      await runScheduledUnlock(adminDb, ev.id);
     } catch (err) {
       console.error('runScheduledUnlock failed', ev.id, err);
     }
@@ -1120,6 +1104,42 @@ export const dailyEngagementEmail = onSchedule(
     memory: '512MiB',
   },
   () => runDailyEmailSweep(db as unknown as DailyEmailFirestore),
+);
+
+/**
+ * The winner-announcement email (#1192) — the last mail an Event sends, one per
+ * opted-in participant once the finale's `podium` Moment has been posted. #1121
+ * stops the daily card at the Standings Freeze; this is what speaks in its
+ * place.
+ *
+ * ITS OWN TRIGGER, NOT A FINALE BEAT, and that is the whole point of the shape
+ * (Codex on PR #1207). The first implementation ran the fan-out inside
+ * `runScheduledUnlockForActiveEvents` above, which is wrong three ways at once:
+ * that scheduler binds no `RESEND_API_KEY`, so every transport setup would have
+ * failed; it takes Firebase's 60-second default timeout, which a paced
+ * per-recipient fan-out exhausts at roughly a hundred recipients; and its Event
+ * loop is SERIAL, so one Event's mail would have delayed every later Event's Day
+ * snapshot and finale beats. This declaration is `dailyEngagementEmail`'s twin
+ * instead — same cadence, same service account, same secret, same generous
+ * timeout — because it does the same kind of work.
+ *
+ * Quarter-hourly and safe to run 96× a day for the same reasons the daily card
+ * is: the Event-level toggle is off by default, the `podium` Moment is the due
+ * condition, each recipient's `podiumEmailSentAt` makes a second sweep a no-op,
+ * the Event's `podiumEmailAt` stops the sweep re-reading a finished Event, and
+ * the Resend idempotency key (`podium-email/{eventId}/{uid}`) collapses any
+ * duplicate that slips through a failed marker write.
+ */
+export const podiumAnnouncementEmail = onSchedule(
+  {
+    schedule: '*/15 * * * *',
+    timeZone: 'Etc/UTC',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    secrets: [RESEND_API_KEY],
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
+  () => runPodiumEmailSweep(db as unknown as DailyEmailFirestore & FinaleReadSource),
 );
 
 // --- Admin notification digest (#638) --------------------------------------------
