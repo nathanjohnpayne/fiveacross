@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   podiumEmailInputFor,
   podiumMomentPath,
@@ -133,6 +135,7 @@ const input = (over: Partial<PodiumEmailInput> = {}): PodiumEmailInput => ({
     placeLabel: '🇪🇸 Barcelona',
   },
   honorDayLabels: { 1: 'Day 2 in 🇭🇷 Split' },
+  photoDayLabel: 'Day 7 · 🇮🇹 Rome (Civitavecchia)',
   ...over,
 });
 
@@ -1038,6 +1041,45 @@ describe('the token back-fill preserves every send marker (CodeRabbit r2, review
   });
 });
 
+describe('the rendered copy matches the wireframe frame it is drawn from', () => {
+  // `specs/daily-engagement-email.md`: where the spec and the frames disagree
+  // about what the email looks like, the FRAMES win. These pin the two module
+  // sentences against `#fx-email-finale-gcb` so a paraphrase cannot creep back
+  // in — which is exactly what happened to the Most-Loved line, whose first
+  // implementation dropped the photo's Day entirely.
+  const frame = readFileSync(
+    fileURLToPath(new URL('../../plans/daily-cards-wireframes.html', import.meta.url)),
+    'utf8',
+  );
+
+  it('renders the ⭐ sentence the frame shows', () => {
+    const model = modelFor('gcb');
+    expect(model.starLine).toBe(
+      'Logan Murdock took the cruise-wide First to BINGO—Day 2 in 🇭🇷 Split.',
+    );
+    expect(frame).toContain(
+      '<b>Logan Murdock</b> took the cruise-wide First to BINGO—Day 2 in 🇭🇷 Split.',
+    );
+  });
+
+  it('renders the Most-Loved sentence the frame shows, dated', () => {
+    const model = modelFor('gcb');
+    expect(model.mostLovedLine).toBe(
+      'Ido Marcus—"Mirror-hall selfie," Day 7 · 🇮🇹 Rome (Civitavecchia). ❤ 31, frozen at the Standings Freeze.',
+    );
+    expect(frame).toContain(
+      '📷 <b>Ido Marcus</b>—"Mirror-hall selfie," Day 7 · 🇮🇹 Rome (Civitavecchia). <b>❤ 31</b>, frozen at the Standings Freeze.',
+    );
+  });
+
+  it('drops the date rather than inventing one when the photo names no Day', () => {
+    const model = modelFor('gcb', { photoDayLabel: undefined });
+    expect(model.mostLovedLine).toBe(
+      'Ido Marcus—"Mirror-hall selfie," ❤ 31, frozen at the Standings Freeze.',
+    );
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a
@@ -1098,6 +1140,7 @@ const modelFor = (edition: string, over: Record<string, unknown> = {}) => {
     ranked: beat.ranked,
     closingDay: beat.closingDay,
     honorDayLabels: beat.honorDayLabels,
+    photoDayLabel: beat.photoDayLabel,
     boardWasEmpty: false,
     recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
     edition,

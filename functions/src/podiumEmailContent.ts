@@ -150,9 +150,13 @@ export interface BuildPodiumEmailArgs {
     placeLabel: string;
   };
   /** The Day each honour was won on, for the ⭐ line: `dayIndex` → its label
-   *  ("Day 2 in Split 🇭🇷"). A missing entry drops the qualifier rather than
+   *  ("Day 2 in 🇭🇷 Split"). A missing entry drops the qualifier rather than
    *  inventing one. */
   honorDayLabels?: Readonly<Record<number, string>>;
+  /** The Most-Loved photo's own Day, already formatted ("Day 7 · 🇮🇹 Rome
+   *  (Civitavecchia)"). Omitted when the winner carries no `dayIndex`, in which
+   *  case the line simply does not date the photo. */
+  photoDayLabel?: string;
   recipient: { uid: string; displayName: string };
   edition: string | null | undefined;
   feedUrl: string;
@@ -239,7 +243,7 @@ function starLineFor(
  */
 function mostLovedLineFor(
   award: VisibleMostLovedAward | null | undefined,
-  register: EditionRegister,
+  photoDayLabel: string | undefined,
 ): string | null {
   if (!award) return null;
   const hero = award.winners[0];
@@ -248,7 +252,6 @@ function mostLovedLineFor(
   // no module rather than as a zero.
   if (!hero || award.heartCount < 1) return null;
   const prompt = hero.promptText.trim();
-  const quoted = prompt ? ` "${prompt}"` : '';
   const hearts = `❤ ${award.heartCount}`;
   // `winnerCount` is ABSENT on records written before the bounded format, where
   // `winners` WAS the complete tie — so the retained prefix's length is the
@@ -265,10 +268,16 @@ function mostLovedLineFor(
       : award.winnerCountExact === false
         ? ' Shared with others on the same count.'
         : ` Shared with ${others} other photo${others === 1 ? '' : 's'} on the same count.`;
-  return (
-    `${hero.displayName}—the most-loved photo of the ${register.occasion}:` +
-    `${quoted}. ${hearts}, frozen at the Standings Freeze.${shared}`
-  );
+  // THE FRAME'S SENTENCE, not a paraphrase of it (`#fx-email-finale-gcb`). The
+  // module heading already says "Most-loved photo", so the line does not repeat
+  // the award's name; it names the photographer, quotes the prompt and dates the
+  // photo. `specs/daily-engagement-email.md` makes the frames the design of
+  // record where the two disagree about what the email looks like, and the
+  // earlier draft of this line paraphrased instead — dropping the Day entirely.
+  const quoted = prompt ? `"${prompt},"` : '';
+  const where = photoDayLabel ? ` ${photoDayLabel}.` : '';
+  const head = [hero.displayName, quoted].filter(Boolean).join('—');
+  return `${head}${where} ${hearts}, frozen at the Standings Freeze.${shared}`;
 }
 
 /**
@@ -317,7 +326,7 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
   const champion = args.podium.champion;
   // Resolved BEFORE the preheader, which is built from which of them rendered.
   const starLine = starLineFor(args.podium, register, args.honorDayLabels);
-  const mostLovedLine = mostLovedLineFor(args.mostLoved ?? null, register);
+  const mostLovedLine = mostLovedLineFor(args.mostLoved ?? null, args.photoDayLabel);
 
   // ① The subject names the champion (#1192 decision), the register supplies
   // the verb, and an empty board falls back to the occasion close because there

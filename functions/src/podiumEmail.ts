@@ -89,6 +89,8 @@ export interface PodiumEmailInput {
   };
   /** `dayIndex` → "Day 2 in Split 🇭🇷", for the ⭐ line's qualifier. */
   honorDayLabels?: Readonly<Record<number, string>>;
+  /** The Most-Loved photo's own Day, already formatted. */
+  photoDayLabel?: string;
 }
 
 export interface PodiumSendResult {
@@ -410,6 +412,7 @@ export async function sendPodiumEmailForEvent(
         boardWasEmpty: input.boardWasEmpty,
         closingDay: input.closingDay,
         honorDayLabels: input.honorDayLabels,
+        photoDayLabel: input.photoDayLabel,
         recipient: { uid: player.uid, displayName: player.displayName },
         edition,
         feedUrl,
@@ -615,6 +618,10 @@ function dayLabels(
 ): {
   closingDay: PodiumEmailInput['closingDay'];
   honorDayLabels: Record<number, string>;
+  /** `dayIndex` → "Day 7 · 🇮🇹 Rome (Civitavecchia)", the shape the Most-Loved
+   *  line dates its photo with. A different separator from the ⭐ line's, which
+   *  reads "Day 2 in 🇭🇷 Split" — both are the frame's own wording. */
+  photoDayLabels: Record<number, string>;
 } {
   const raw = days.find((d) => d.index === podiumDayIndex);
   const honorDayLabels: Record<number, string> = {};
@@ -625,7 +632,15 @@ function dayLabels(
     // preposition.
     honorDayLabels[index] = where ? `Day ${index + 1} in ${where}` : `Day ${index + 1}`;
   }
+  const photoDayLabels: Record<number, string> = {};
+  for (const day of days) {
+    const where = placeLabel(day);
+    photoDayLabels[day.index] = where
+      ? `Day ${day.index + 1} · ${where}`
+      : `Day ${day.index + 1}`;
+  }
   return {
+    photoDayLabels,
     closingDay: {
       themeId: raw?.theme ?? null,
       dayNumber: podiumDayIndex + 1,
@@ -725,7 +740,8 @@ export async function podiumEmailInputFor(
   });
   const ranked = podiumStandings(visible, days, freezeAt);
   const bannedSet = new Set(banned);
-  const { closingDay, honorDayLabels } = dayLabels(
+  const award = visibleMostLovedAward(event.mostLovedPhoto, bannedSet);
+  const { closingDay, honorDayLabels, photoDayLabels } = dayLabels(
     days,
     typeof moment.dayIndex === 'number' ? moment.dayIndex : Math.max(days.length - 1, 0),
     payload.dailyHonors.map((h) => h.dayIndex),
@@ -744,7 +760,11 @@ export async function podiumEmailInputFor(
         dailyHonors: payload.dailyHonors.filter((h) => !bannedSet.has(h.uid)),
       },
       ranked,
-      mostLoved: visibleMostLovedAward(event.mostLovedPhoto, bannedSet),
+      mostLoved: award,
+      photoDayLabel:
+        award?.winners[0]?.dayIndex != null
+          ? photoDayLabels[award.winners[0].dayIndex as number]
+          : undefined,
       // Read from the Moment BEFORE the honour filtering above, so a withheld
       // banned champion is never mistaken for a board nobody played.
       boardWasEmpty: payload.champion == null,
