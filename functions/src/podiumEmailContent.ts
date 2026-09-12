@@ -211,8 +211,14 @@ export function subjectSafeName(raw: string, maxLength = 48): string {
  * is the property a `multipart/alternative` pair has to hold.
  */
 export function singleLine(raw: string): string {
+  // C0 **AND C1**, plus DEL (Codex P2, round 11 on PR #1207). The first version
+  // covered `\u0000-\u001f\u007f` and leaned on `\s+` for the rest — but
+  // JavaScript's `\s` does NOT match U+0085 NEXT LINE, and some clients render
+  // NEL as a line break. So a C1 control survived into subjects and plain-text
+  // bodies and could still fabricate structure, which is the whole thing this
+  // function exists to prevent. U+0080–U+009F is the range that was missing.
   // eslint-disable-next-line no-control-regex -- flattening control characters IS the point.
-  return raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /** "16 bingos · 124 sq" — the stat cell, pluralised. Shared by both parts so

@@ -436,6 +436,31 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
   });
 
+  it('DENIES every client read and write of the winner-email outbox', async () => {
+    // #1192. Each document holds a participant's email address, their
+    // unsubscribe capability URL and the fully rendered message — so a readable
+    // outbox would leak the roster's addresses and hand out tokens that
+    // authorise unsubscribing somebody else. A writable one would let a retry
+    // replay different bytes, which is the failure the freeze exists to prevent.
+    const outbox = () => doc(db(ADMIN), `events/${EVENT}/podiumEmailOutbox/u1`);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/podiumEmailOutbox/u1`), {
+        to: 'u1@example.com',
+        subject: 'Final standings',
+        html: '<p>x</p>',
+        text: 'x',
+        from: 'x <x@example.com>',
+        unsubscribeUrl: 'https://fn.example.com/emailUnsubscribe?t=secret',
+        createdAt: 1,
+      });
+    });
+    // Even the Event admin — the most privileged client — gets nothing.
+    await assertFails(getDoc(outbox()));
+    await assertFails(setDoc(outbox(), { subject: 'forged' }));
+    await assertFails(updateDoc(outbox(), { to: 'attacker@example.com' }));
+    await assertFails(deleteDoc(outbox()));
+  });
+
   it('DENIES an admin writing the winner-email fan-out marker, in every state', async () => {
     // #1192. `podiumEmailAt` records that the Event's winner-announcement email
     // reached its whole roster, and its ABSENCE is what makes the finale beat

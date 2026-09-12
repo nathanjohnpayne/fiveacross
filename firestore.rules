@@ -1380,6 +1380,34 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // `events/{eventId}/podiumEmailOutbox/{uid}` — the winner-announcement email
+    // FROZEN as it was first sent (#1192): `{ to, subject, html, text, from,
+    // unsubscribeUrl, createdAt }`.
+    //
+    // It exists because Resend's idempotency is a promise about the REQUEST and
+    // not merely the key: replaying a key with a different body is rejected
+    // rather than deduplicated, and this send renders from live state, so a
+    // retry after a failed marker write would otherwise differ by construction.
+    // Freezing the bytes is what makes the retry a true replay
+    // (`adminAlerts.ts` takes the same approach for the admin digest).
+    //
+    // FULLY DENIED TO CLIENTS, and the read side matters more here than for
+    // `emailPrefs` above: each document holds a participant's EMAIL ADDRESS,
+    // their unsubscribe capability URL, and the fully rendered message — so a
+    // readable outbox would leak the roster's addresses to any signed-in reader
+    // and hand out the tokens that authorise unsubscribing somebody else. No
+    // write, because the frozen request is the evidence of what was accepted:
+    // a client able to edit it could make a retry replay different bytes, which
+    // is the exact failure the freeze prevents.
+    //
+    // Written out rather than left to the default-deny, for the reason the
+    // block above gives. It nests inside no other match block, so no wildcard
+    // can widen it.
+    match /events/{eventId}/podiumEmailOutbox/{uid} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     // Admin notification alerts (#638, specs/admin-notification-emails.md).
     //
     // `events/{eventId}/adminAlerts/{alertId}` — the server-owned queue the

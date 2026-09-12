@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   podiumEmailInputFor,
   podiumMomentPath,
+  podiumOutboxPath,
   runPodiumEmailSweep,
   sendPodiumEmailForEvent,
   type PodiumEmailInput,
@@ -12,6 +13,7 @@ import type { DailyEmailFirestore } from '../../functions/src/dailyEmail';
 import { shouldSendPodiumTo } from '../../functions/src/emailOptOut';
 import {
   buildPodiumEmailModel,
+  singleLine,
   subjectSafeName,
 } from '../../functions/src/podiumEmailContent';
 import {
@@ -1896,6 +1898,170 @@ describe('round-9 findings (Codex P2)', () => {
     expect(result.skipped).toBe(1);
     expect(result.blocked).toBe(0);
     expect(result.drained).toBe(true);
+  });
+});
+
+describe('round-11 findings (Codex P2)', () => {
+  it('REPLAYS the frozen bytes on a retry, even when the live state has moved', async () => {
+    // Resend's idempotency is a promise about the REQUEST, not just the key:
+    // replaying a key with a different body is a 409, not a dedupe. My earlier
+    // dispositions claimed a retry "lands inside the dedup window where the key
+    // still collapses it" — which is wrong, and `adminAlerts.ts` had already
+    // documented why.
+    const db = makeDb(seed());
+    const sent: Captured[] = [];
+    // First attempt: transport accepts, marker write fails, so the run retries.
+    const brokenMarker = {
+      ...db,
+      doc: (path: string) =>
+        path === 'events/med-2026/emailPrefs/zac'
+          ? {
+              ...db.doc(path),
+              set: async (d: Record<string, unknown>) => {
+                if ('podiumEmailSentAt' in d) throw new Error('UNAVAILABLE');
+                return db.doc(path).set(d, { merge: true });
+              },
+            }
+          : db.doc(path),
+    } as unknown as typeof db;
+    await sendPodiumEmailForEvent(brokenMarker, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    const first = sent.find((s) => s.to[0] === 'zac@example.com');
+    expect(first).toBeDefined();
+    expect(db.docs[podiumOutboxPath('med-2026', 'zac')]).toBeDefined();
+
+    // The live state MOVES before the retry — a renamed champion would rebuild
+    // a different subject and body.
+    const moved = input({
+      podium: {
+        champion: { uid: 'zac', displayName: 'Renamed Entirely', bingoCount: 99, squaresMarked: 999 },
+        firstBingo: null,
+        dailyHonors: [],
+      },
+    });
+    sent.length = 0;
+    await sendPodiumEmailForEvent(db, 'med-2026', moved, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    const retry = sent.find((s) => s.to[0] === 'zac@example.com');
+    expect(retry).toBeDefined();
+    // Same key AND the same bytes, so Resend dedupes instead of 409-ing.
+    expect(retry!.idempotencyKey).toBe(first!.idempotencyKey);
+    expect(retry!.subject).toBe(first!.subject);
+    expect(retry!.html).toBe(first!.html);
+    expect(retry!.text).toBe(first!.text);
+    expect(retry!.subject).not.toContain('Renamed Entirely');
+  });
+
+  it('blocks rather than sends when the request can be neither frozen nor read', async () => {
+    const db = makeDb(seed());
+    const broken = {
+      ...db,
+      doc: (path: string) =>
+        path.includes('/podiumEmailOutbox/')
+          ? {
+              get: async () => {
+                throw new Error('UNAVAILABLE');
+              },
+              set: async () => undefined,
+              create: async () => {
+                throw new Error('UNAVAILABLE');
+              },
+            }
+          : db.doc(path),
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('must not send without a recorded request');
+      },
+    });
+    expect(result.sent).toBe(0);
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+
+  it('strips C1 controls, including U+0085 NEXT LINE', () => {
+    // JavaScript's `\s` does NOT match U+0085, so the previous C0-only range
+    // let it through into subjects and plain-text bodies.
+    expect(singleLine('Zac\u0085Bcc: victim@example.com')).toBe('Zac Bcc: victim@example.com');
+    expect(singleLine('a\u0080b\u009fc')).toBe('a b c');
+    expect(subjectSafeName('Zac\u0085Second line')).toBe('Zac Second line');
+    const model = modelFor('gcb', {
+      podium: {
+        champion: { uid: 'zac', displayName: 'Zac\u00851. Fake Row', bingoCount: 16, squaresMarked: 124 },
+        firstBingo: null,
+        dailyHonors: [],
+      },
+    });
+    expect(renderPodiumEmailText(model)).not.toMatch(/\u0085/);
+    expect(model.subject).not.toMatch(/\u0085/);
+  });
+
+  it('stops the fan-out when the email is DISABLED mid-delivery', async () => {
+    const docs = seedDue();
+    for (let i = 0; i < 60; i++) {
+      docs[`events/med-2026/players/p${i}`] = { displayName: `P${i}`, bingoCount: 0, squaresMarked: i, firstBingoAt: null };
+    }
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 5) db.docs['events/med-2026'].settings = { dailyEmailEnabled: false };
+        return true;
+      },
+    });
+    expect(result.reason).toBe('disabled');
+    expect(result.sent).toBeLessThan(30);
+    // No completion, so a later re-enable resumes.
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('aborts when a tied CO-winner is removed while the sender resolves', async () => {
+    const db = makeDb(
+      seedDue({
+        mostLovedPhoto: {
+          winners: [
+            { proofId: 'p1', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+            { proofId: 'p2', uid: 'sam', displayName: 'Sam', promptText: 'Two', dayIndex: 1, proofCreatedAt: 2 },
+          ],
+          winnerCount: 2,
+          heartCount: 9,
+          frozenAt: 1,
+          computedAt: 2,
+        },
+      }),
+    );
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners).toHaveLength(2);
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        // The HERO stays visible; a co-winner behind it is taken down.
+        if (path === 'hostnames') delete db.docs['events/med-2026/proofs/p2'];
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a stale tie count must not be broadcast');
+      },
+    });
+    expect(result.reason).toBe('award-changed');
   });
 });
 

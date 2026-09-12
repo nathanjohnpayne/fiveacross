@@ -391,19 +391,33 @@ async function freshEventGuard(
   // list has nothing to verify, `surviving.length === 0` read as "the photo went
   // away", and the send aborted with `award-changed` on every attempt. An award
   // with no winner is simply an email with no award module.
-  const heroToRecheck = revalidateAward ? input.mostLoved?.winners[0] : undefined;
-  if (heroToRecheck) {
+  // THE WHOLE VISIBLE TIE, not just the hero (Codex P2, round 11 on PR #1207).
+  // Round 8 rechecked only `winners[0]`, reasoning that it is the one winner the
+  // email renders — but the tie COUNT is rendered too, and it is derived from
+  // the rest of the list. A co-winner removed while the sender resolved left
+  // that count claiming a photo the reader cannot see, which is the same defect
+  // the round-6 finding fixed one layer down.
+  const tieToRecheck = revalidateAward ? (input.mostLoved?.winners ?? []) : [];
+  if (tieToRecheck.length > 0) {
     const still = await visibleWinners(
       db,
       eventId,
-      [heroToRecheck],
+      tieToRecheck,
       normalizeBanSet(input.bannedUids),
       typeof (atDelivery?.settings as { reportHideThreshold?: unknown } | undefined)
         ?.reportHideThreshold === 'number'
         ? ((atDelivery?.settings as { reportHideThreshold?: number }).reportHideThreshold as number)
         : undefined,
     );
-    if (still.surviving.length === 0 || !still.allChecked) {
+    // ANY member changing invalidates the snapshot, because the count came from
+    // the list as a whole. Aborting rather than recomputing here: the next sweep
+    // rebuilds the award through the same join it was first built by, so there
+    // is one derivation path rather than a second one inside a guard.
+    if (
+      still.surviving.length === 0 ||
+      !still.allChecked ||
+      still.surviving.length !== tieToRecheck.length
+    ) {
       console.log(`sendPodiumEmailForEvent ${eventId}: award photo changed during preparation`);
       return { ...result, reason: 'award-changed' };
     }
@@ -538,11 +552,21 @@ export async function sendPodiumEmailForEvent(
       // remaining link point at a document that no longer exists. The round-6
       // transaction fix only stopped the marker recreating it; this stops the
       // mail.
-      if (!snap.exists || eventClosedToPlay(mid)) {
-        console.log(
-          `sendPodiumEmailForEvent ${eventId}: ${snap.exists ? 'archived' : 'deleted'} mid-delivery, stopping`,
-        );
-        result.reason = 'archived';
+      // THE TOGGLE IS CHECKED HERE TOO (Codex P2, round 11). It is the sole
+      // Event-level control over whether anyone is mailed at all, and a paced
+      // loop runs for minutes — so an admin switching it off after the first
+      // recipient kept mailing the rest. Stopping WITHOUT completion is what
+      // lets a later re-enable resume, exactly as the pre-send check does.
+      // Only meaningful for a document that EXISTS: `dailyEmailEnabled(undefined)`
+      // is false by design (off unless explicitly true), so asking it about a
+      // deleted Event would report the deletion as a disabled toggle — and the
+      // two want different reasons, since one is terminal and one is reversible.
+      const disabledMidFlight =
+        snap.exists && !dailyEmailEnabled(mid as Parameters<typeof dailyEmailEnabled>[0]);
+      if (!snap.exists || eventClosedToPlay(mid) || disabledMidFlight) {
+        const why = !snap.exists ? 'deleted' : disabledMidFlight ? 'disabled' : 'archived';
+        console.log(`sendPodiumEmailForEvent ${eventId}: ${why} mid-delivery, stopping`);
+        result.reason = disabledMidFlight ? 'disabled' : 'archived';
         // EARLY STOP FEEDS THE DRAIN PREDICATE (Codex P2, round 9). Breaking out
         // left `capHit`, `failed` and `blocked` all clear, so `drained` computed
         // to TRUE and completion was then offered the whole of `input.ranked` as
@@ -607,18 +631,43 @@ export async function sendPodiumEmailForEvent(
         unsubscribeUrl: unsubUrl,
         preferencesUrl: preferencesLink(linkArgs),
       });
+      // FROZEN BEFORE THE SEND, replayed on a retry. Everything below reads
+      // `outbound`, never the freshly rendered model, so the bytes under this
+      // idempotency key are the same on every attempt.
+      const outbound = await freezeOrReplay(
+        db,
+        eventId,
+        player.uid,
+        {
+          to,
+          subject: model.subject,
+          html: renderPodiumEmailHtml(model),
+          text: renderPodiumEmailText(model),
+          from,
+          unsubscribeUrl: unsubUrl,
+        },
+        deps,
+      );
+      if (!outbound) {
+        // Neither frozen nor readable: sending now could 409 on a later retry
+        // with no record of what was accepted. An open question, not a skip.
+        result.blocked++;
+        continue;
+      }
       const ok = await send({
-        to: [to],
-        subject: model.subject,
-        html: renderPodiumEmailHtml(model),
-        text: renderPodiumEmailText(model),
-        from,
+        to: [outbound.to],
+        subject: outbound.subject,
+        html: outbound.html,
+        text: outbound.text,
+        from: outbound.from,
         // NO Day index in the key, unlike the daily card's: there is exactly one
         // winner mail per Event per recipient, so the Event and the uid are the
         // whole identity of the send. A retry after a failed marker write
         // dedupes at Resend rather than arriving twice.
         idempotencyKey: `podium-email/${eventId}/${player.uid}`,
-        headers: listUnsubscribeHeaders(unsubUrl),
+        // From the frozen request too: a re-minted token would otherwise change
+        // the header set between attempts under one key.
+        headers: listUnsubscribeHeaders(outbound.unsubscribeUrl),
       });
       if (ok) {
         result.sent++;
@@ -865,6 +914,86 @@ export function visibleMostLovedAward(
     frozenAt: typeof award.frozenAt === 'number' ? award.frozenAt : 0,
     computedAt: typeof award.computedAt === 'number' ? award.computedAt : 0,
   };
+}
+
+/** `events/{eventId}/podiumEmailOutbox/{uid}` — the frozen outbound request for
+ *  one recipient. One place this path is spelled. */
+export function podiumOutboxPath(eventId: string, uid: string): string {
+  return `events/${eventId}/podiumEmailOutbox/${uid}`;
+}
+
+/** The exact outbound request one recipient was FROZEN as. */
+interface FrozenPodiumRequest {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  from: string;
+  unsubscribeUrl: string;
+}
+
+function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodiumRequest | null {
+  if (!raw) return null;
+  const fields = ['to', 'subject', 'html', 'text', 'from', 'unsubscribeUrl'] as const;
+  if (!fields.every((f) => typeof raw[f] === 'string' && (raw[f] as string) !== '')) return null;
+  return {
+    to: raw.to as string,
+    subject: raw.subject as string,
+    html: raw.html as string,
+    text: raw.text as string,
+    from: raw.from as string,
+    unsubscribeUrl: raw.unsubscribeUrl as string,
+  };
+}
+
+/**
+ * Freeze one recipient's request before it is sent, or replay the frozen one.
+ *
+ * RESEND'S IDEMPOTENCY IS A PROMISE ABOUT THE REQUEST, NOT JUST THE KEY (Codex
+ * P2, round 11 on PR #1207): replaying a key with a DIFFERENT body is rejected
+ * as `409 invalid_idempotent_request`, not deduplicated. This send renders from
+ * live state, so a retry after a failed marker write is different by
+ * construction — a Player edits their stats or display name, the award's
+ * visibility moves, the unsubscribe token is re-minted — and the retry would
+ * 409, `sendEmail` would surface that as `false`, the marker could STILL never
+ * land, and the recipient would sit stuck until the 24-hour key expired, at
+ * which point the rebuilt request delivers a duplicate.
+ *
+ * My earlier dispositions on this PR asserted the opposite — that a retry lands
+ * "inside the dedup window where the key still collapses it" — and that was
+ * simply wrong. `adminAlerts.ts` had already solved it and says so: "a claim
+ * does not merely reserve an identity: it reserves an EMAIL", pinned by
+ * `tests/functions/admin-notification-emails.test.ts` § the frozen outbound
+ * request. This mirrors that mechanism per recipient.
+ *
+ * A `create` rather than a `set`: it is the write that has to lose a race, so
+ * whichever attempt froze first is the one replayed by every other.
+ */
+async function freezeOrReplay(
+  db: DailyEmailFirestore,
+  eventId: string,
+  uid: string,
+  request: FrozenPodiumRequest,
+  deps: DailyEmailDeps,
+): Promise<FrozenPodiumRequest | null> {
+  const ref = db.doc(podiumOutboxPath(eventId, uid));
+  try {
+    await ref.create({ ...request, createdAt: (deps.now ?? Date.now)() });
+    return request;
+  } catch {
+    // ALREADY_EXISTS, or a read/write failure. Either way the authority is
+    // whatever is stored: if a previous attempt froze these bytes, they are the
+    // ones Resend accepted under this key.
+    try {
+      const stored = toFrozenRequest((await ref.get()).data());
+      if (stored) return stored;
+    } catch (err) {
+      console.error('freezeOrReplay: could not read the frozen request', eventId, uid, err);
+    }
+    // Nothing readable and nothing written — sending now would risk a 409 on a
+    // later retry with no record of what was accepted. Treat as blocked.
+    return null;
+  }
 }
 
 /** `events/{eventId}/moments/podium` — the one place this path is spelled. */
