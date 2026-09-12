@@ -140,14 +140,12 @@ feedback_policy:
 # disabled for private ones. The template ships with enabled: false; this repo
 # is public and sets it TRUE (see the posture note above the key below).
 #
-# CodeRabbit findings can block a merge here, by two independent mechanisms:
-#   1. `severity_gate.enabled: true` on this repo — a blocking-tier finding
-#      fails the required `CodeRabbit unresolved blocking findings` check.
-#      (The generic claim that CodeRabbit "does not block merge via CI" holds
-#      only where that key is false, which is the default elsewhere.)
-#   2. GitHub's required-conversation-resolution branch protection — unresolved
-#      review conversations block merge until cleared under REVIEW_POLICY.md's
-#      pre-merge review conversation gate, whatever the severity gate is set to.
+# CodeRabbit review is ADVISORY here (operator decision, 2026-09-11): the
+# severity gate below is false, so a CodeRabbit finding never fails a required
+# check on its own. That does not make it consequence-free — GitHub's
+# required-conversation-resolution branch protection still blocks merge on
+# unresolved review conversations until they are cleared under REVIEW_POLICY.md's
+# pre-merge review conversation gate, whatever the severity gate is set to.
 # The agent is required to read and address substantive CodeRabbit findings
 # before proceeding past Phase 2.5.
 #
@@ -192,20 +190,20 @@ feedback_policy:
 # human direction (REVIEW_POLICY.md, and
 # scripts/coderabbit-automerge-rate-limit-gate.sh).
 #
-# ADVISORY WITH ONE EXCEPTION, and the exception is live on this repo. The
-# review PATH is Codex: `@codex review` (Phase 4a) plus the automated Phase 4b
-# cross-agent leg where the classifier calls for it. But `severity_gate.enabled`
-# below is TRUE here, so `scripts/coderabbit-severity-gate.sh` runs as the
-# `CodeRabbit unresolved blocking findings` check and FAILS while a
-# blocking-tier CodeRabbit finding is unresolved. With auto-review on, that gate
-# now fires on every PR rather than only on hand-triggered reviews, so a
-# CodeRabbit finding can hold a merge on its own. The note at the severity_gate
-# key calling it "CONFIG-ONLY ... inert" is STALE: the gate script shipped
-# (#577) and the check is live — observed failing on PR #1209 itself.
+# ADVISORY, and it takes both keys to stay that way. The merge gate is Codex:
+# `@codex review` (Phase 4a) plus the automated Phase 4b cross-agent leg where
+# the classifier calls for it. `severity_gate.enabled` below is FALSE per the
+# operator's 2026-09-11 decision, so `scripts/coderabbit-severity-gate.sh` is a
+# green no-op and a CodeRabbit finding cannot hold a merge by itself.
 #
-# Set `severity_gate.enabled: false` if CodeRabbit should be advisory in the
-# strict sense. That is a separate policy decision from this flag and is
-# deliberately NOT bundled into it.
+# That pairing is deliberate and worth keeping. The gate is live, not inert —
+# it was observed FAILING on PR #1209 while it was still true. Turning it back
+# on while auto-review is enabled would let an advisory bot block every PR, and
+# CodeRabbit does not auto-retry once a rate-limit window elapses, so a provider
+# stall would become a stuck merge. Flip it only as a deliberate policy change.
+#
+# CodeRabbit findings still have to be dispositioned and their threads resolved:
+# required-conversation-resolution is branch protection, not this gate.
 #
 # To reverse, flip BOTH keys back — do not delete `.coderabbit.yml`.
 # `auto_review.enabled` defaults to TRUE, so an absent config means "review
@@ -376,13 +374,26 @@ coderabbit:
   # derived heuristically from its category + Critical/Major/Minor qualifier
   # by scripts/lib/feedback-policy-helpers.sh (coderabbit_tier_of).
   #
-  # NOTE: the gate SCRIPT lands in #577. This key is CONFIG-ONLY until then —
-  # no consumer reads it yet, so setting it here is inert. Narrow-start
-  # posture, identical to codex.p1_gate / external_review_gate: default false
-  # everywhere, true in mergepath first. A no-op (always green) when disabled,
-  # so it is safe to add to required checks everywhere.
+  # STALE NOTE, corrected 2026-09-11: an earlier comment here said the gate
+  # SCRIPT lands in #577 and that this key was "CONFIG-ONLY ... inert". The
+  # script shipped, and the check is live — it was observed failing on PR #1209
+  # with `CodeRabbit blocking-tier unresolved: 1`. The key is load-bearing.
+  #
+  # FALSE per operator decision (2026-09-11, PR #1209): CodeRabbit is advisory
+  # on this repo. The merge gate is Codex — `@codex review` (Phase 4a) plus the
+  # automated Phase 4b cross-agent leg — and an advisory bot should not be able
+  # to hold a merge on its own. That matters more now auto-review is on: with
+  # the gate true, every PR could be blocked by a bot nobody waits on, and
+  # CodeRabbit's rate-limit behavior (no auto-retry after a window elapses)
+  # would turn a provider stall into a stuck merge.
+  #
+  # This does NOT make CodeRabbit consequence-free. Its unresolved threads
+  # still count toward GitHub's required-conversation-resolution branch
+  # protection, so findings must still be dispositioned and resolved — they
+  # just no longer fail a required check on their own. A no-op (always green)
+  # when disabled, so it stays safe in the required-checks list.
   severity_gate:
-    enabled: true
+    enabled: false
 
 # ---------------------------------------------------------------------------
 # Codex (Automated External Review — Phase 4a)
