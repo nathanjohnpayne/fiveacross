@@ -177,8 +177,12 @@ feedback_policy:
 # paused because it was the dominant source of latency and stalls, and is back
 # on from 2026-09-11. Nothing about that cost profile has changed, so expect:
 #
-#   * No auto-retry after a rate-limit window elapses — `coderabbit-wait.sh`
-#     parses the published window, sleeps it and re-triggers (#138).
+#   * The PROVIDER never retries itself after a rate-limit window elapses; our
+#     tooling does the retrying. `coderabbit-wait.sh` parses the published
+#     window, sleeps it and re-triggers (#138). So an operator does not restart
+#     a rate-limited review by hand while the wait script is running — but a
+#     stall outside that script stays stalled, because nothing on CodeRabbit's
+#     side will pick it back up.
 #   * Measured review latency p50 414s / p99 1136s, 1245s poll ceiling (#623),
 #     paid on every PR that waits on Phase 2.5.
 #   * One invocation of the per-developer hourly allowance per review run,
