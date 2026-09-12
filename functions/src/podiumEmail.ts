@@ -495,6 +495,9 @@ export async function sendPodiumEmailForEvent(
 
   let capHit = false;
   let examined = 0;
+  /** Set when the loop broke before walking the roster — an early stop can never
+   *  be a completed fan-out, whatever the counters say. */
+  let stoppedEarly = false;
   for (const player of input.ranked) {
     if (examined >= maxRecipients) {
       console.error(
@@ -518,12 +521,28 @@ export async function sendPodiumEmailForEvent(
     // here — it is the irreversible one, and the others are recoverable by a
     // later sweep.
     if (examined > 0 && examined % LIFECYCLE_RECHECK_EVERY === 0) {
-      const mid = (await db.doc(`events/${eventId}`).get()).data() as
-        | PodiumEmailEvent
-        | undefined;
-      if (eventClosedToPlay(mid)) {
-        console.log(`sendPodiumEmailForEvent ${eventId}: archived mid-delivery, stopping`);
+      const snap = await db.doc(`events/${eventId}`).get();
+      const mid = snap.data() as PodiumEmailEvent | undefined;
+      // A MISSING DOCUMENT IS TERMINAL HERE, and `eventClosedToPlay` will not
+      // say so (Codex P2, round 9 on PR #1207): it treats an absent Event as
+      // OPEN by design, mirroring the `exists()` guard in `firestore.rules`.
+      // That is the right default for a rules mirror and the wrong one for this
+      // loop — an admin deleting the Event mid-fan-out would have had every
+      // remaining link point at a document that no longer exists. The round-6
+      // transaction fix only stopped the marker recreating it; this stops the
+      // mail.
+      if (!snap.exists || eventClosedToPlay(mid)) {
+        console.log(
+          `sendPodiumEmailForEvent ${eventId}: ${snap.exists ? 'archived' : 'deleted'} mid-delivery, stopping`,
+        );
         result.reason = 'archived';
+        // EARLY STOP FEEDS THE DRAIN PREDICATE (Codex P2, round 9). Breaking out
+        // left `capHit`, `failed` and `blocked` all clear, so `drained` computed
+        // to TRUE and completion was then offered the whole of `input.ranked` as
+        // examined — and archival is reversible, so an admin cancelling it
+        // before the transaction read would have let the marker land and skip
+        // every unsent recipient permanently.
+        stoppedEarly = true;
         break;
       }
     }
@@ -554,8 +573,13 @@ export async function sendPodiumEmailForEvent(
         // Recorded durably, so the next sweep does not pay this Auth lookup
         // again — a long leading prefix of address-less Players could otherwise
         // consume a whole invocation and starve the deliverable tail behind it.
-        await markPodiumEmailUndeliverable(db, eventId, player.uid, deps);
-        result.skipped++;
+        //
+        // A FAILED marker write is `blocked`, not `skipped` (Codex P2, round 9):
+        // the skip is only PERMANENT once the record of it persists, so without
+        // that write the question is still open and the Event must not drain.
+        const marked = await markPodiumEmailUndeliverable(db, eventId, player.uid, deps);
+        if (marked) result.skipped++;
+        else result.blocked++;
         continue;
       }
       const to = address.email;
@@ -621,7 +645,7 @@ export async function sendPodiumEmailForEvent(
   // for a reason no retry would change. A transport failure or a blocked
   // dependency leaves the question open, so the marker is withheld and the next
   // sweep resumes (Codex P1 on PR #1207).
-  result.drained = !capHit && result.failed === 0 && result.blocked === 0;
+  result.drained = !stoppedEarly && !capHit && result.failed === 0 && result.blocked === 0;
   if (result.drained) {
     // THE ROSTER MAY HAVE GROWN WHILE THIS RAN (Codex P2, round 2 on PR #1207).
     // `firestore.rules` permits `players/{uid}` creation until archival and a

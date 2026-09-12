@@ -1791,6 +1791,94 @@ describe('round-8 findings (Codex P2)', () => {
   });
 });
 
+describe('round-9 findings (Codex P2)', () => {
+  const bigRoster = () => {
+    const docs = seedDue();
+    for (let i = 0; i < 60; i++) {
+      docs[`events/med-2026/players/p${i}`] = {
+        displayName: `Player ${i}`,
+        bingoCount: 0,
+        squaresMarked: i,
+        firstBingoAt: null,
+      };
+    }
+    return docs;
+  };
+
+  it('never completes after an early stop, even if archival is cancelled', async () => {
+    // Archival is REVERSIBLE, so an admin cancelling it before the completion
+    // transaction reads would have let the marker land over the unsent tail.
+    const db = makeDb(bigRoster());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 5) db.docs['events/med-2026'].archiving = true;
+        // …and the admin changes their mind before the transaction runs.
+        if (n === 30) delete db.docs['events/med-2026'].archiving;
+        return true;
+      },
+    });
+    expect(result.reason).toBe('archived');
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('stops delivery when the Event is DELETED mid-fan-out', async () => {
+    // `eventClosedToPlay(undefined)` is false by design — it mirrors the rules'
+    // `exists()` guard — so the mid-loop check has to test existence itself.
+    const db = makeDb(bigRoster());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 5) delete db.docs['events/med-2026'];
+        return true;
+      },
+    });
+    expect(result.reason).toBe('archived');
+    expect(result.sent).toBeLessThan(30);
+    expect(result.drained).toBe(false);
+  });
+
+  it('does not drain when the undeliverable marker fails to persist', async () => {
+    // The skip is only PERMANENT once the record of it persists, so a failed
+    // write leaves the question open.
+    const db = makeDb(seed());
+    const broken = {
+      ...db,
+      doc: (path: string) =>
+        path === 'events/med-2026/emailPrefs/zac'
+          ? { ...db.doc(path), set: async () => { throw new Error('UNAVAILABLE'); } }
+          : db.doc(path),
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => (uid === 'zac' ? null : `${uid}@example.com`),
+      send: async () => true,
+    });
+    expect(result.skipped).toBe(0);
+    expect(result.blocked).toBe(1);
+    expect(result.drained).toBe(false);
+  });
+
+  it('still counts a persisted undeliverable as a permanent skip', async () => {
+    const db = makeDb(seed());
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => (uid === 'zac' ? null : `${uid}@example.com`),
+      send: async () => true,
+    });
+    expect(result.skipped).toBe(1);
+    expect(result.blocked).toBe(0);
+    expect(result.drained).toBe(true);
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a

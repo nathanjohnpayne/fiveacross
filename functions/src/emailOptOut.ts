@@ -376,16 +376,24 @@ export async function markPodiumEmailUndeliverable(
   eventId: string,
   uid: string,
   deps: OptOutDeps = {},
-): Promise<void> {
+): Promise<boolean> {
   const at = (deps.now ?? Date.now)();
   try {
     await db
       .doc(emailPrefsPath(eventId, uid))
       .set({ podiumEmailSkippedAt: at, updatedAt: at }, { merge: true });
+    return true;
   } catch (err) {
-    // Best-effort: the only cost of a failure is repeating the lookup next
-    // sweep, which is the behaviour this exists to improve, not to guarantee.
+    // REPORTS ITS FAILURE, like `markPodiumEmailSent` (Codex P2, round 9 on PR
+    // #1207). The first version swallowed it and returned nothing, so the caller
+    // still counted the recipient as a PERMANENT skip and the Event could drain
+    // — at which point no later sweep repeats the lookup and the durable
+    // disposition this function promises is permanently absent. The asymmetry
+    // with the sent-marker was the whole bug: both writes are the evidence that
+    // makes a recipient's outcome final, so both have to be able to say they
+    // did not land.
     console.error('markPodiumEmailUndeliverable failed', eventId, uid, err);
+    return false;
   }
 }
 
