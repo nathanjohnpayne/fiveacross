@@ -8,7 +8,10 @@ import {
 } from '../../functions/src/podiumEmail';
 import type { DailyEmailFirestore } from '../../functions/src/dailyEmail';
 import { shouldSendPodiumTo } from '../../functions/src/emailOptOut';
-import { buildPodiumEmailModel } from '../../functions/src/podiumEmailContent';
+import {
+  buildPodiumEmailModel,
+  subjectSafeName,
+} from '../../functions/src/podiumEmailContent';
 import {
   renderPodiumEmailHtml,
   renderPodiumEmailText,
@@ -1000,6 +1003,54 @@ describe('the token back-fill preserves every send marker (CodeRabbit r2, review
     // The daily card's marker must not suppress this send — the two are
     // independent, which is why they are separate fields.
     expect(sent.some((s) => s.to[0] === 'zac@example.com')).toBe(true);
+  });
+});
+
+describe('the subject header carries no unsanitised participant text', () => {
+  it('strips newlines and control characters from a display name', () => {
+    // This email is the first in the family to put user-written text in a
+    // header at all — `players/{uid}` validates no field (ADR 0001), and
+    // `sendEmail` passes `subject` through untouched.
+    expect(subjectSafeName('Zac\r\nBcc: victim@example.com')).toBe(
+      'Zac Bcc: victim@example.com',
+    );
+    expect(subjectSafeName('Za\u0000c\u007f')).toBe('Za c');
+    expect(subjectSafeName('  Zacaria   Arab  ')).toBe('Zacaria Arab');
+  });
+
+  it('bounds the length so one name cannot crowd out the register’s words', () => {
+    const long = 'Z'.repeat(200);
+    const safe = subjectSafeName(long);
+    expect(safe.length).toBeLessThanOrEqual(48);
+    expect(safe.endsWith('…')).toBe(true);
+  });
+
+  it('falls back rather than emitting an empty name', () => {
+    expect(subjectSafeName('   ')).toBe('The winner');
+    expect(subjectSafeName('\n\t')).toBe('The winner');
+  });
+
+  it('produces a single-line subject for a hostile display name', () => {
+    const model = modelFor('gcb', {
+      podium: {
+        champion: {
+          uid: 'zac',
+          displayName: 'Zac\nSubject: You have won a prize',
+          bingoCount: 16,
+          squaresMarked: 124,
+        },
+        firstBingo: null,
+        dailyHonors: [],
+      },
+    });
+    expect(model.subject).not.toMatch(/[\r\n]/);
+    expect(model.subject).toBe(
+      'Final standings 🏆—Zac Subject: You have won a prize takes the cruise',
+    );
+  });
+
+  it('leaves an ordinary name untouched', () => {
+    expect(modelFor('gcb').subject).toBe('Final standings 🏆—Zacaria Arab takes the cruise');
   });
 });
 

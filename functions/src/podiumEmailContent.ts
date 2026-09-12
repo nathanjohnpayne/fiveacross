@@ -160,6 +160,37 @@ export interface BuildPodiumEmailArgs {
   preferencesUrl: string;
 }
 
+/**
+ * A display name made safe to put in the SUBJECT header.
+ *
+ * This email is the first in the family to interpolate user-written text into a
+ * header at all — the daily card's subject is built entirely from the Theme
+ * registry and the Edition register, so nothing it sends carries participant
+ * content there. `players/{uid}` validates no field (ADR 0001), so a display
+ * name is arbitrary text, and `sendEmail` passes `subject` through to the
+ * provider untouched.
+ *
+ * Two things are therefore stripped here rather than trusted to the transport:
+ *
+ *   - CONTROL CHARACTERS AND NEWLINES, which is the header-injection shape. The
+ *     provider is called over a JSON API rather than by writing SMTP, so a CRLF
+ *     is very unlikely to split a header in practice — but "unlikely, because of
+ *     how a dependency happens to serialise" is not a property this send should
+ *     rest on, and the same input would produce a visibly mangled subject
+ *     regardless;
+ *   - LENGTH, bounded so one participant cannot push the register's own words
+ *     out of every inbox preview in the Event.
+ *
+ * The body needs none of this: every rendered field goes through `esc` in the
+ * template, and the text part carries no markup to break.
+ */
+export function subjectSafeName(raw: string, maxLength = 48): string {
+  // eslint-disable-next-line no-control-regex -- stripping control characters IS the point.
+  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (flattened === '') return 'The winner';
+  return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1).trimEnd()}…` : flattened;
+}
+
 /** "16 bingos · 124 sq" — the stat cell, pluralised. Shared by both parts so
  *  the HTML and the text cannot disagree about a singular. */
 export function finaleStatLine(row: FinaleStandingsRow | FinaleRankedPlayer): string {
@@ -292,7 +323,9 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
   // the verb, and an empty board falls back to the occasion close because there
   // is no name to print.
   const subject = `Final standings 🏆—${
-    champion ? register.finaleSubjectTail(champion.displayName) : register.finaleSubjectTailNoChampion
+    champion
+      ? register.finaleSubjectTail(subjectSafeName(champion.displayName))
+      : register.finaleSubjectTailNoChampion
   }`;
   // BUILT FROM THE HONOURS THAT ACTUALLY RENDER (Codex P2 on PR #1207). The
   // body already omits the ⭐ and the award when the Event has no holder, for
