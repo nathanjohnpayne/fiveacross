@@ -159,9 +159,9 @@ feedback_policy:
 #   3. Grep inline comments for "Potential issue" or "⚠️" — every flagged
 #      finding must be explicitly addressed (fixed or dismissed with reasoning).
 #
-# To reverse: set enabled: false, delete .coderabbit.yml, uninstall the
-# CodeRabbit GitHub App. All agent instructions use conditional language
-# and will skip Phase 2.5 automatically.
+# To reverse: see the single rollback procedure below (flip BOTH keys; do
+# NOT delete .coderabbit.yml). All agent instructions use conditional language
+# and skip Phase 2.5 automatically once `enabled: false` is set here.
 #
 # RE-ENABLED 2026-09-11 per operator request, paired with
 # `reviews.auto_review.enabled: true` in `.coderabbit.yml`. The keys move
@@ -188,9 +188,20 @@ feedback_policy:
 # human direction (REVIEW_POLICY.md, and
 # scripts/coderabbit-automerge-rate-limit-gate.sh).
 #
-# CodeRabbit remains ADVISORY. The merge gate is `@codex review` (Phase 4a)
-# plus the automated Phase 4b cross-agent leg where the classifier calls for
-# it; CodeRabbit has never carried it, in either posture.
+# ADVISORY WITH ONE EXCEPTION, and the exception is live on this repo. The
+# review PATH is Codex: `@codex review` (Phase 4a) plus the automated Phase 4b
+# cross-agent leg where the classifier calls for it. But `severity_gate.enabled`
+# below is TRUE here, so `scripts/coderabbit-severity-gate.sh` runs as the
+# `CodeRabbit unresolved blocking findings` check and FAILS while a
+# blocking-tier CodeRabbit finding is unresolved. With auto-review on, that gate
+# now fires on every PR rather than only on hand-triggered reviews, so a
+# CodeRabbit finding can hold a merge on its own. The note at the severity_gate
+# key calling it "CONFIG-ONLY ... inert" is STALE: the gate script shipped
+# (#577) and the check is live — observed failing on PR #1209 itself.
+#
+# Set `severity_gate.enabled: false` if CodeRabbit should be advisory in the
+# strict sense. That is a separate policy decision from this flag and is
+# deliberately NOT bundled into it.
 #
 # To reverse, flip BOTH keys back — do not delete `.coderabbit.yml`.
 # `auto_review.enabled` defaults to TRUE, so an absent config means "review

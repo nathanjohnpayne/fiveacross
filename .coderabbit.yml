@@ -27,8 +27,13 @@ reviews:
     # spends one of the per-developer hourly allowance
     # (docs/agents/coderabbit-audit.md § rate limits).
     #
-    # CodeRabbit stays ADVISORY in both postures: the merge gate is Codex
-    # (Phase 4a) plus the automated Phase 4b leg, and it has never carried it.
+    # NOT purely advisory on this repo. The review PATH is Codex (Phase 4a plus
+    # the automated Phase 4b leg), but `coderabbit.severity_gate.enabled` in
+    # .github/review-policy.yml is TRUE here, so a blocking-tier CodeRabbit
+    # finding fails the `CodeRabbit unresolved blocking findings` check and
+    # holds the merge on its own. Turning auto-review on means that gate now
+    # fires on every PR, not just hand-triggered ones. See the severity_gate
+    # discussion in .github/review-policy.yml before assuming "advisory".
     enabled: true
     drafts: false
     # base_branches EXTENDS the auto-review set; it does NOT replace the
