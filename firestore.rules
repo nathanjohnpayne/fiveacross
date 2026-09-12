@@ -1380,6 +1380,34 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // `events/{eventId}/podiumEmailOutbox/{uid}` — the winner-announcement email
+    // FROZEN as it was first sent (#1192): `{ to, subject, html, text, from,
+    // unsubscribeUrl, createdAt }`.
+    //
+    // It exists because Resend's idempotency is a promise about the REQUEST and
+    // not merely the key: replaying a key with a different body is rejected
+    // rather than deduplicated, and this send renders from live state, so a
+    // retry after a failed marker write would otherwise differ by construction.
+    // Freezing the bytes is what makes the retry a true replay
+    // (`adminAlerts.ts` takes the same approach for the admin digest).
+    //
+    // FULLY DENIED TO CLIENTS, and the read side matters more here than for
+    // `emailPrefs` above: each document holds a participant's EMAIL ADDRESS,
+    // their unsubscribe capability URL, and the fully rendered message — so a
+    // readable outbox would leak the roster's addresses to any signed-in reader
+    // and hand out the tokens that authorise unsubscribing somebody else. No
+    // write, because the frozen request is the evidence of what was accepted:
+    // a client able to edit it could make a retry replay different bytes, which
+    // is the exact failure the freeze prevents.
+    //
+    // Written out rather than left to the default-deny, for the reason the
+    // block above gives. It nests inside no other match block, so no wildcard
+    // can widen it.
+    match /events/{eventId}/podiumEmailOutbox/{uid} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     // Admin notification alerts (#638, specs/admin-notification-emails.md).
     //
     // `events/{eventId}/adminAlerts/{alertId}` — the server-owned queue the
@@ -1580,6 +1608,19 @@ service cloud.firestore {
       // with the four fields beside it rather than for reach: no client create
       // of an Event document can succeed at all, because `eventConfigWriteAuthorized(eventId)`
       // reads the very document being created and a missing `get()` denies.
+      //
+      // `podiumEmailAt` JOINS THE UPDATE LIST AND DELIBERATELY NOT THE CREATE
+      // ONE (#1192). It is the winner-announcement fan-out marker, server-written
+      // by the finale beat, and an admin able to stamp it could suppress the
+      // Event's last email for the whole roster — so it belongs in the
+      // no-client-writes set exactly as `finaleCompletedAt` does. It is absent
+      // from the create half because this arm sits at the 1000-expression cap
+      // noted above: another element in the `hasAny` literal costs nothing (the
+      // arm already evaluates that literal once), while another
+      // `!('x' in request.resource.data)` clause is a new expression on an arm
+      // that has no room for one. Nothing is lost by the asymmetry — the create
+      // half is symmetry rather than reach, per the sentence above, since no
+      // client create of an Event document can succeed at all.
       allow create, update: if eventConfigWriteAuthorized(eventId)
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
@@ -1590,7 +1631,8 @@ service cloud.firestore {
                 && !('finaleCompletedAt' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
                  .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken',
-                          'archivedUnder', 'archive', 'finaleCompletedAt']))
+                          'archivedUnder', 'archive', 'finaleCompletedAt',
+                          'podiumEmailAt']))
         && (!('standingsFreezeAt' in request.resource.data)
             || (request.resource.data.standingsFreezeAt is number
                 && request.resource.data.standingsFreezeAt > 0

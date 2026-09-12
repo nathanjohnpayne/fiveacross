@@ -660,6 +660,29 @@ interface Transaction {
   set(ref: DocRef, data: Record<string, unknown>): void;
 }
 /** The minimal admin-SDK Firestore surface the scheduler uses. */
+/**
+ * The narrow READ surface the finale's roster and honour readers need — a
+ * collection it can list and a document it can get, nothing more.
+ *
+ * Stated separately from `AdminFirestore` so the winner-announcement sweep
+ * (#1192, `podiumEmail.ts`) can reuse `readFinaleRoster` and `readDayHonors`
+ * instead of carrying a second copy of the roster normalisation. That
+ * normalisation is exactly the thing that must not be duplicated: #1152 is the
+ * record of the live board and the frozen record ranking two rows differently
+ * because one side clamped and the other did not. `AdminFirestore` satisfies
+ * this structurally, so no existing caller changes.
+ */
+export interface FinaleReadSource {
+  doc(path: string): { get(): Promise<DocSnapshot> };
+  collection(path: string): {
+    get(): Promise<{ docs: DocSnapshot[] }>;
+    /** Optional, because `AdminFirestore`'s own `CollectionRef` does not declare
+     *  it: a caller that HAS it can bound the roster read (#1192), and one that
+     *  does not reads unbounded exactly as every finale beat always has. */
+    limit?(count: number): { get(): Promise<{ docs: DocSnapshot[] }> };
+  };
+}
+
 export interface AdminFirestore {
   doc(path: string): DocRef;
   collection(path: string): CollectionRef;
@@ -791,11 +814,17 @@ function finiteNumber(value: unknown, fallback: number): number {
  *  point, so every finale beat reading this roster reads the same numbers. The
  *  per-Day buckets travel with them, through the shared `sanitizeFinaleDayStats`
  *  whose bucket rule is the client's own (#1152, CodeRabbit on PR #1165). */
-async function readFinaleRoster(
-  db: AdminFirestore,
+export async function readFinaleRoster(
+  db: FinaleReadSource,
   eventId: string,
+  /** Bound the QUERY, not just the loop that consumes it (#1192, Codex P2 on PR
+   *  #1207). A corrupted `players` collection would otherwise be materialised and
+   *  sorted in full before any ceiling applied. Omitted by the finale beats,
+   *  which read the whole roster by design — the podium payload ranks everyone. */
+  cap?: number,
 ): Promise<FinalePlayer[]> {
-  const snap = await db.collection(`events/${eventId}/players`).get();
+  const ref = db.collection(`events/${eventId}/players`);
+  const snap = await (cap != null && ref.limit ? ref.limit(cap).get() : ref.get());
   return snap.docs
     .map((d) => {
       const data = (d.data() ?? {}) as Partial<FinalePlayer>;
@@ -813,14 +842,14 @@ async function readFinaleRoster(
     .map(withReadableFinaleRanking);
 }
 
-function visibleFinaleRoster(roster: readonly FinalePlayer[], bannedUids: readonly string[]): FinalePlayer[] {
+export function visibleFinaleRoster(roster: readonly FinalePlayer[], bannedUids: readonly string[]): FinalePlayer[] {
   if (bannedUids.length === 0) return [...roster];
   return roster.filter((p) => !bannedUids.includes(p.uid));
 }
 
 /** Every pinned per-Day honor doc (#266) — days/{i}/meta/{i}, present ones only. */
-async function readDayHonors(
-  db: AdminFirestore,
+export async function readDayHonors(
+  db: FinaleReadSource,
   eventId: string,
   days: readonly FinaleDay[],
 ): Promise<FinaleDayHonorDoc[]> {
@@ -1222,8 +1251,8 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   if (postPodium) {
     try {
       // #266: the podium payload — champion, cruise-wide First to BINGO, and
-      // the pinned daily honors — computed AT the freeze from the ban-filtered
-      // roster + day-meta pins. Best-effort like the last-call content.
+      // the pinned daily honors — computed AT the freeze from the roster +
+      // day-meta pins. Best-effort like the last-call content.
       let extra: Record<string, unknown> | undefined;
       try {
         const days = (Array.isArray(event.days) ? event.days : []) as FinaleDay[];
@@ -1254,6 +1283,15 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       console.error('runFinaleBeats: podium post failed', eventId, err);
     }
   }
+  // THE WINNER-ANNOUNCEMENT EMAIL IS NOT A BEAT HERE (#1192). It is its own
+  // scheduled sweep (`runPodiumEmailSweep`, `podiumEmail.ts`), due off the
+  // `podium` Moment this arm posts, for the reasons Codex raised on PR #1207: a
+  // paced per-recipient fan-out inside THIS serial, 60-second, secret-less sweep
+  // would have starved every later Event's Day snapshot, needed a
+  // `RESEND_API_KEY` binding on a scheduler that wants none, and — worst — would
+  // have rebuilt the podium from live client-authoritative Player documents on
+  // every retry. Reading the Moment instead makes the email quote the frozen
+  // record by construction. Nothing about the email can fail this function.
   // LAST, because it is a statement about everything above it (#1151, Codex P1
   // on PR #1162). `frozenAt` says the freeze stamp landed; only this says the
   // finale FINISHED, which is the question the irreversible post-Event archive

@@ -46,8 +46,10 @@ import {
   runScheduledUnlock,
   UnlockPermissionError,
   type AdminFirestore,
+  type FinaleReadSource,
 } from './unlockDay';
 import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
+import { runPodiumEmailSweep } from './podiumEmail';
 import { handleUnsubscribeRequest } from './emailOptOut';
 import { firestoreCommitOrder, recordDirectMarkAnalytics } from './directMarkAnalytics';
 import {
@@ -1102,6 +1104,51 @@ export const dailyEngagementEmail = onSchedule(
     memory: '512MiB',
   },
   () => runDailyEmailSweep(db as unknown as DailyEmailFirestore),
+);
+
+/**
+ * The winner-announcement email (#1192) — the last mail an Event sends, one per
+ * opted-in participant once the finale's `podium` Moment has been posted. #1121
+ * stops the daily card at the Standings Freeze; this is what speaks in its
+ * place.
+ *
+ * ITS OWN TRIGGER, NOT A FINALE BEAT, and that is the whole point of the shape
+ * (Codex on PR #1207). The first implementation ran the fan-out inside
+ * `runScheduledUnlockForActiveEvents` above, which is wrong three ways at once:
+ * that scheduler binds no `RESEND_API_KEY`, so every transport setup would have
+ * failed; it takes Firebase's 60-second default timeout, which a paced
+ * per-recipient fan-out exhausts at roughly a hundred recipients; and its Event
+ * loop is SERIAL, so one Event's mail would have delayed every later Event's Day
+ * snapshot and finale beats. This declaration is `dailyEngagementEmail`'s twin
+ * instead — same cadence, same service account, same secret, same generous
+ * timeout — because it does the same kind of work.
+ *
+ * Quarter-hourly and safe to run 96× a day for the same reasons the daily card
+ * is: the Event-level toggle is off by default, the `podium` Moment is the due
+ * condition, each recipient's `podiumEmailSentAt` makes a second sweep a no-op,
+ * the Event's `podiumEmailAt` stops the sweep re-reading a finished Event, and
+ * the Resend idempotency key (`podium-email/{eventId}/{uid}`) collapses any
+ * duplicate that slips through a failed marker write.
+ */
+export const podiumAnnouncementEmail = onSchedule(
+  {
+    // OFFSET FROM THE DAILY CARD'S SWEEP BY DESIGN (Codex P2, round 2 on PR
+    // #1207). The two families pace their own sends through their own in-memory
+    // queue, so two invocations overlapping in time can each send at the paced
+    // rate and together exceed what either intends. A shared durable limiter is
+    // the real answer and is out of this ticket's scope; staggering the two
+    // schedules by seven minutes makes the common case — a short podium burst
+    // against a daily sweep — not overlap at all. The residual is stated in the
+    // spec rather than papered over: a long-running sweep can still span into
+    // the other's slot.
+    schedule: '7-59/15 * * * *',
+    timeZone: 'Etc/UTC',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    secrets: [RESEND_API_KEY],
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
+  () => runPodiumEmailSweep(db as unknown as DailyEmailFirestore & FinaleReadSource),
 );
 
 // --- Admin notification digest (#638) --------------------------------------------

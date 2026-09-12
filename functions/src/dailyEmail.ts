@@ -497,6 +497,11 @@ export interface DailyEmailDeps extends OptOutDeps {
   /** Resolve a uid to its verified email, or null. Defaults to a Firebase Auth
    *  lookup, matching `notify.ts`'s verified-only policy. */
   getEmailForUid?: (uid: string) => Promise<string | null>;
+  /** `Reply-To` override. Needed by the winner-announcement send (#1192), which
+   *  must FREEZE this value with the rest of its request: `sendEmail` otherwise
+   *  resolves `EMAIL_REPLY_TO` at send time, so a param change between attempts
+   *  alters the payload under one idempotency key. */
+  replyTo?: string;
   /** Sender identity override; wins outright over Edition resolution. Defaults
    *  to `resolveEmailFrom(edition)` — the Edition's `EMAIL_FROM_*` override if
    *  one is configured, else the project-wide `EMAIL_FROM` param (#671). */

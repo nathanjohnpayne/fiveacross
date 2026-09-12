@@ -10,7 +10,14 @@
  * STORAGE. `events/{eventId}/emailPrefs/{uid}`, one doc per participant per
  * Event:
  *
- *   { optedOut: boolean, token: string, lastSentDayIndex?: number, updatedAt: number }
+ *   { optedOut: boolean, token: string, lastSentDayIndex?: number,
+ *     podiumEmailSentAt?: number, updatedAt: number }
+ *
+ * The two send markers are separate fields because they answer different
+ * questions — `lastSentDayIndex` is "have I mailed this Day", and
+ * `podiumEmailSentAt` is "have I sent the one winner mail for this Event"
+ * (#1192). One field serving both would let a farewell-Day card send suppress
+ * the winner mail.
  *
  * Event-scoped rather than global because that is what the unsubscribe link in
  * a given Event's email actually promises ("stop sending me THIS Event's daily
@@ -50,9 +57,30 @@ interface PrefsDocRef {
 /** The minimal transaction surface the token back-fill needs. Mirrors the
  *  admin-SDK `Transaction`: reads inside it are serialized against concurrent
  *  writers, and the whole function re-runs on contention. */
+/** A collection or query a transaction can read. Declared alongside the doc
+ *  surface because the Admin SDK's `Transaction.get` genuinely accepts both, and
+ *  the winner-announcement completion stamp (#1192) needs the query form: it
+ *  must verify the recipient set and write the marker in ONE serialized unit, or
+ *  a Player created between the two is stranded. */
+export interface TxQueryRef {
+  get(): Promise<{ docs: Array<{ id: string; data(): Record<string, unknown> | undefined }> }>;
+}
+
 interface PrefsTransaction {
   get(ref: PrefsDocRef): Promise<PrefsSnapshot>;
+  get(query: TxQueryRef): Promise<{
+    docs: Array<{ id: string; data(): Record<string, unknown> | undefined }>;
+  }>;
   set(ref: PrefsDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+  /** The completion stamp writes the EVENT document, which is not a prefs doc.
+   *  Same Admin SDK method; the narrower overload above keeps every existing
+   *  call site checked against the prefs shape. */
+  set(ref: TxWritableRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+}
+
+/** Any document reference a transaction may write. */
+export interface TxWritableRef {
+  get(): Promise<unknown>;
 }
 
 /** The minimal surface the opt-out store uses. */
@@ -68,6 +96,41 @@ export interface EmailPrefs {
   /** The last Day index this participant was emailed for — the once-per-day
    *  guard. Absent until the first send. */
   lastSentDayIndex?: number;
+  /**
+   * When this participant was sent the winner-announcement email (#1192) — the
+   * exactly-once-per-Event guard for the finale's send.
+   *
+   * ITS OWN MARKER, DELIBERATELY NOT `lastSentDayIndex`. The two sends are
+   * asked different questions: the daily card asks "have I already mailed this
+   * DAY", which a Day index answers, while the finale asks "have I already
+   * mailed the one podium mail for this EVENT", which no Day index can answer —
+   * the podium fires on the farewell Day, whose index the daily card may also
+   * have stamped, so one field serving both would let a card send suppress the
+   * winner mail (or the reverse). A timestamp rather than a boolean because a
+   * support question about the finale is always "when did this go out".
+   */
+  podiumEmailSentAt?: number;
+  /** When this participant was found to have no deliverable address at the
+   *  Event's finale (#1192). Its own field rather than a `podiumEmailSentAt`
+   *  value, because "we decided not to mail you" and "we mailed you" must stay
+   *  distinguishable to anyone reading this doc in support. */
+  podiumEmailSkippedAt?: number;
+  /**
+   * When the winner email was FIRST attempted for this participant (#1192).
+   *
+   * The durable half of the frozen-request scheme, and it lives HERE rather than
+   * on the outbox document precisely because this doc has no TTL (Codex P2 +
+   * CodeRabbit P1, final round on PR #1207). The outbox expires after a week; if
+   * the send was accepted but the marker write never landed, that expiry removes
+   * the only record of what was accepted — and a later sweep then re-freezes new
+   * bytes and sends under the same idempotency key whose 24-hour window has long
+   * closed, which is a genuine duplicate delivery.
+   *
+   * So this timestamp outlives the outbox and is what bounds automatic retrying:
+   * past the provider's dedup window with no `podiumEmailSentAt`, the outcome is
+   * unknowable and only an operator can resolve it.
+   */
+  podiumEmailFirstAttemptAt?: number;
 }
 
 export interface OptOutDeps {
@@ -122,6 +185,20 @@ export async function readEmailPrefsOutcome(
         lastSentDayIndex:
           typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
             ? data.lastSentDayIndex
+            : undefined,
+        podiumEmailSentAt:
+          typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
+            ? data.podiumEmailSentAt
+            : undefined,
+        podiumEmailSkippedAt:
+          typeof data.podiumEmailSkippedAt === 'number' &&
+          Number.isFinite(data.podiumEmailSkippedAt)
+            ? data.podiumEmailSkippedAt
+            : undefined,
+        podiumEmailFirstAttemptAt:
+          typeof data.podiumEmailFirstAttemptAt === 'number' &&
+          Number.isFinite(data.podiumEmailFirstAttemptAt)
+            ? data.podiumEmailFirstAttemptAt
             : undefined,
       },
     };
@@ -204,7 +281,26 @@ export async function ensureEmailPrefs(
           typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
             ? data.lastSentDayIndex
             : undefined;
-        if (stored !== '') return { optedOut, token: stored, lastSentDayIndex };
+        // EVERY SEND MARKER TRAVELS THROUGH BOTH RETURNS, not just the daily
+        // card's (CodeRabbit, round 2 on PR #1207). This transaction rebuilds the
+        // prefs object field by field, so a marker it forgets reads as absent to
+        // the caller — and `shouldSendPodiumTo` treats an absent
+        // `podiumEmailSentAt` as "not yet mailed", which on a token-less document
+        // that HAS been mailed is a duplicate winner email. The daily card's
+        // marker was carried from the start; these two were added later and the
+        // list did not grow with them.
+        const podiumEmailSentAt =
+          typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
+            ? data.podiumEmailSentAt
+            : undefined;
+        const podiumEmailSkippedAt =
+          typeof data.podiumEmailSkippedAt === 'number' &&
+          Number.isFinite(data.podiumEmailSkippedAt)
+            ? data.podiumEmailSkippedAt
+            : undefined;
+        if (stored !== '') {
+          return { optedOut, token: stored, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
+        }
         const token = mint();
         // Name `optedOut` ONLY when the document has vanished under us (it must
         // exist for the merge to mean anything). On an existing doc the write
@@ -214,7 +310,7 @@ export async function ensureEmailPrefs(
           snap.exists ? { token, updatedAt: now } : { optedOut: false, token, createdAt: now, updatedAt: now },
           { merge: true },
         );
-        return { optedOut, token, lastSentDayIndex };
+        return { optedOut, token, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
       });
     } catch (err) {
       console.error('ensureEmailPrefs: token back-fill failed', eventId, uid, err);
@@ -254,6 +350,137 @@ export async function markDailyEmailSent(
       .set({ lastSentDayIndex: dayIndex, updatedAt: (deps.now ?? Date.now)() }, { merge: true });
   } catch (err) {
     console.error('markDailyEmailSent failed', eventId, uid, dayIndex, err);
+  }
+}
+
+/** Record that this participant has been sent the winner-announcement email
+ *  (#1192). Best-effort, exactly like `markDailyEmailSent`: a failure here
+ *  re-sends at most once on the next finale sweep, and Resend's idempotency key
+ *  — stable per Event and recipient, with no Day in it — collapses that
+ *  duplicate inside its 24h window. */
+export async function markPodiumEmailSent(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  deps: OptOutDeps = {},
+): Promise<boolean> {
+  const at = (deps.now ?? Date.now)();
+  try {
+    await db
+      .doc(emailPrefsPath(eventId, uid))
+      .set({ podiumEmailSentAt: at, updatedAt: at }, { merge: true });
+    return true;
+  } catch (err) {
+    console.error('markPodiumEmailSent failed', eventId, uid, err);
+    return false;
+  }
+}
+
+/**
+ * Record that this participant will NOT be sent the winner email, for a reason
+ * no retry would change — they have no deliverable address at the Event's
+ * finale.
+ *
+ * DURABLE, because the alternative starves the tail of a large roster (Codex P2,
+ * round 2 on PR #1207). Each sweep walks the roster in ranked order and every
+ * address-less Player costs a Firebase Auth lookup; a long leading prefix of
+ * them could consume the whole invocation before any deliverable recipient was
+ * reached, and the next sweep would start again from the same first Player. A
+ * successful send is already durable through `podiumEmailSentAt`; this is its
+ * counterpart for the one outcome that is equally final.
+ *
+ * NOT written for an opt-out — that answer is already in the doc and costs a
+ * single read — and not for a transient failure, which must stay retryable.
+ */
+export async function markPodiumEmailUndeliverable(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  deps: OptOutDeps = {},
+): Promise<boolean> {
+  const at = (deps.now ?? Date.now)();
+  try {
+    await db
+      .doc(emailPrefsPath(eventId, uid))
+      .set({ podiumEmailSkippedAt: at, updatedAt: at }, { merge: true });
+    return true;
+  } catch (err) {
+    // REPORTS ITS FAILURE, like `markPodiumEmailSent` (Codex P2, round 9 on PR
+    // #1207). The first version swallowed it and returned nothing, so the caller
+    // still counted the recipient as a PERMANENT skip and the Event could drain
+    // — at which point no later sweep repeats the lookup and the durable
+    // disposition this function promises is permanently absent. The asymmetry
+    // with the sent-marker was the whole bug: both writes are the evidence that
+    // makes a recipient's outcome final, so both have to be able to say they
+    // did not land.
+    console.error('markPodiumEmailUndeliverable failed', eventId, uid, err);
+    return false;
+  }
+}
+
+/** Whether this participant should be sent the winner-announcement email:
+ *  opted in, and not already sent. The finale twin of `shouldSendTo`
+ *  (`dailyEmail.ts`), pure for the same reason — the suppression rule is the
+ *  part worth testing on its own.
+ *
+ *  A MISSING PREFS DOC IS A NO, as it is for the daily card: no honourable
+ *  unsubscribe means no email, and that holds for the last mail of the Event
+ *  exactly as it does for every other one. */
+export function shouldSendPodiumTo(
+  prefs: { optedOut: boolean; podiumEmailSentAt?: number; podiumEmailSkippedAt?: number } | null,
+): boolean {
+  if (!prefs) return false;
+  if (prefs.optedOut) return false;
+  if (typeof prefs.podiumEmailSkippedAt === 'number') return false;
+  return typeof prefs.podiumEmailSentAt !== 'number';
+}
+
+/**
+ * Record that a first send attempt is about to be made, once.
+ *
+ * Written BEFORE the send and never overwritten: it is the start of the window
+ * inside which a replay is safe, so a later attempt must not be able to reset
+ * it. Returns the effective value — the stored one when it already exists — so
+ * the caller compares against the FIRST attempt rather than this one.
+ */
+export async function markPodiumEmailAttempted(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  existing: number | undefined,
+  deps: OptOutDeps = {},
+): Promise<number | null> {
+  if (typeof existing === 'number') return existing;
+  const at = (deps.now ?? Date.now)();
+  try {
+    // CLAIMED-ABSENT IS NOT ABSENT, so the check and the write share a
+    // transaction (CodeRabbit P1, current head). The caller's `existing` comes
+    // from a read taken several remote operations earlier, so two overlapping
+    // sweeps — Cloud Scheduler delivers at least once, and nothing pins this
+    // function to one instance — can both observe no stamp and both write one.
+    // An unconditional merge then lets the LATER write win, which moves the
+    // start of the retry window forward: exactly what the contract above
+    // forbids. The consequence is not cosmetic. The window bounds retrying at
+    // the provider's 24-hour idempotency retention, so a start stamped later
+    // than the true first send extends our window past the point where Resend
+    // still recognises the key, and a retry in that overhang delivers a second
+    // copy. Re-reading inside the transaction and writing only when the field is
+    // still absent makes the stamp write-once, and the loser of the race adopts
+    // the winner's value rather than replacing it.
+    return await db.runTransaction(async (tx) => {
+      const ref = db.doc(emailPrefsPath(eventId, uid));
+      const snap = await tx.get(ref);
+      const stored = snap.exists ? (snap.data() ?? {}) : {};
+      const already = stored.podiumEmailFirstAttemptAt;
+      if (typeof already === 'number' && Number.isFinite(already)) return already;
+      tx.set(ref, { podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
+      return at;
+    });
+  } catch (err) {
+    // Unrecorded means the retry window cannot be bounded, so the caller must
+    // not send: an accepted send with no durable start is the duplicate case.
+    console.error('markPodiumEmailAttempted failed', eventId, uid, err);
+    return null;
   }
 }
 
