@@ -137,15 +137,19 @@ feedback_policy:
 # review and before the threshold check for agent handoff.
 #
 # CodeRabbit is typically enabled for public repositories (free plan) and
-# disabled for private ones. The template ships with enabled: false; set to
-# true when deploying to a public repo.
+# disabled for private ones. The template ships with enabled: false; this repo
+# is public and sets it TRUE (see the posture note above the key below).
 #
-# CodeRabbit review is advisory — it does not block merge via CI. That does
-# not override GitHub's required-conversation-resolution branch protection:
-# unresolved review conversations still block merge until cleared under
-# REVIEW_POLICY.md's pre-merge review conversation gate. The agent is required
-# to read and address substantive CodeRabbit findings before proceeding past
-# Phase 2.5.
+# CodeRabbit findings can block a merge here, by two independent mechanisms:
+#   1. `severity_gate.enabled: true` on this repo — a blocking-tier finding
+#      fails the required `CodeRabbit unresolved blocking findings` check.
+#      (The generic claim that CodeRabbit "does not block merge via CI" holds
+#      only where that key is false, which is the default elsewhere.)
+#   2. GitHub's required-conversation-resolution branch protection — unresolved
+#      review conversations block merge until cleared under REVIEW_POLICY.md's
+#      pre-merge review conversation gate, whatever the severity gate is set to.
+# The agent is required to read and address substantive CodeRabbit findings
+# before proceeding past Phase 2.5.
 #
 # When enabled, the agent MUST:
 #   1. Wait for CodeRabbit to post before proceeding — prefer
