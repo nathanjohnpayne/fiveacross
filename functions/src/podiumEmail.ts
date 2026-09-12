@@ -62,7 +62,7 @@ export interface PodiumEmailInput {
    *  archive guard. */
   event: {
     name?: unknown;
-    settings?: { dailyEmailEnabled?: unknown } | undefined;
+    settings?: { dailyEmailEnabled?: unknown; reportHideThreshold?: unknown } | undefined;
   };
   /** The payload written to the `podium` Moment, passed through verbatim. */
   podium: PodiumPayload;
@@ -196,33 +196,41 @@ function bansDiffer(filteredAgainst: readonly string[], current: unknown): boole
 }
 
 /**
- * Whether the Event's visible roster now contains anyone this run did not
- * examine.
+ * Verify the recipient set and write `podiumEmailAt` in ONE transaction, and say
+ * whether the marker landed.
  *
- * Compares the VISIBLE count against the SAME ban roster the run walked, which
- * is carried on `PodiumEmailInput` rather than re-read. Both halves of that
- * matter:
+ * ATOMIC BECAUSE THE TWO-STEP VERSION HAD A CREATION WINDOW (Codex P2, round 5
+ * on PR #1207). Reading the roster and then writing the Event document left a
+ * gap in which a Player could create their row: the marker still landed, every
+ * later sweep answered `already-sent`, and that participant was never examined
+ * or mailed. `firestore.rules` permits `players/{uid}` creation until archival,
+ * so the window was reachable rather than theoretical — narrow, but the loss is
+ * silent and permanent, which is the combination worth paying a transaction for.
  *
- *   - visible, because `readFinaleRoster` returns the raw roster by design (the
- *     record keeps banned rows) and comparing it against the ban-filtered list
- *     the send walked counts every banned player as an arrival — an Event with a
- *     single banned player would then never stamp and would be re-read until
- *     archival;
- *   - the CARRIED roster rather than a fresh one, because re-reading would make
- *     an unban read as an arrival, and an Event that has ever banned anyone
- *     could have its marker deferred indefinitely by ordinary moderation. The
- *     question this guard asks is "did anybody JOIN while I was sending", and
- *     the ban roster the send used is the right baseline for it.
+ * The read is the players COLLECTION, so Firestore serializes this write against
+ * any creation in it: a row added during the transaction aborts and retries, and
+ * the retry sees it.
  *
- * THE RESIDUAL, stated in the spec rather than left implicit: a ban lifted after
- * the fan-out completes does not reopen it, so a Player unbanned later does not
- * receive the winner email. That is the deliberate cost of `podiumEmailAt` being
- * writable at all on an Event with any moderation history.
+ * WHAT IT COMPARES, and why each half matters:
  *
- * A read failure answers `true` — withholding the marker costs one more sweep,
- * while wrongly stamping it costs a participant their only copy of this email.
+ *   - the VISIBLE roster, filtered by the same ban list the send walked, because
+ *     `readFinaleRoster` keeps banned rows by design and comparing raw against
+ *     filtered counts every banned player as an arrival;
+ *   - the uid SET rather than its size, because an admin deleting one Player
+ *     while another joins leaves the count unchanged while an unexamined
+ *     recipient has replaced an examined one;
+ *   - the CARRIED ban list rather than a fresh one, because re-reading would
+ *     make an unban read as an arrival and an Event that has ever banned anyone
+ *     could have its marker deferred indefinitely by ordinary moderation.
+ *
+ * A MERGE, emphatically: a one-argument `set` replaces the document, which would
+ * reduce the Event to `{ podiumEmailAt }`.
+ *
+ * Best-effort overall — a failure answers `false`, which withholds the marker and
+ * costs one more sweep. Every recipient already carries `podiumEmailSentAt`, so
+ * the retry mails nobody twice.
  */
-async function rosterGrewSince(
+async function verifyAndStampCompletion(
   db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
   examined: ReadonlySet<string>,
@@ -230,50 +238,23 @@ async function rosterGrewSince(
   deps: DailyEmailDeps,
 ): Promise<boolean> {
   try {
-    const cap = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
-    const roster = await readFinaleRoster(db, eventId, cap + 1);
-    const visible = visibleFinaleRoster(roster, bannedUids).map((p) => p.uid);
-    // THE SET, NOT THE COUNT (Codex P2, round 4 on PR #1207). An admin deleting
-    // one Player while another joins leaves the count unchanged while an
-    // UNEXAMINED recipient has replaced an examined one — both writes are
-    // permitted by the rules during a fan-out that runs for minutes — and a
-    // count comparison would stamp completion over the newcomer, who is then
-    // skipped by every later sweep. Only "every visible uid now was one I
-    // examined" is the question worth asking.
-    return visible.some((uid) => !examined.has(uid));
+    return await db.runTransaction(async (tx) => {
+      const snap = await tx.get(db.collection(`events/${eventId}/players`));
+      const banned = new Set(bannedUids);
+      const unexamined = snap.docs
+        .map((d) => d.id || (d.data()?.uid as string | undefined) || '')
+        .filter((uid) => uid !== '' && !banned.has(uid) && !examined.has(uid));
+      if (unexamined.length > 0) return false;
+      tx.set(
+        db.doc(`events/${eventId}`),
+        { podiumEmailAt: (deps.now ?? Date.now)() },
+        { merge: true },
+      );
+      return true;
+    });
   } catch (err) {
-    console.error('rosterGrewSince failed', eventId, err);
-    return true;
-  }
-}
-
-/**
- * Record that this Event's fan-out is finished, so the sweep stops asking.
- *
- * A MERGE, EMPHATICALLY (Codex P1 on PR #1207). The first implementation stamped
- * this with a one-argument Admin SDK `set()`, which REPLACES the document: the
- * Event would have been reduced to `{ podiumEmailAt }`, losing its status,
- * schedule, admins, settings and every finale field, and vanishing from the next
- * `status == 'active'` selection. The Admin SDK's `set` is a replace unless told
- * otherwise, and this is the write that has to say so.
- *
- * Best-effort: a failure here leaves the marker absent, which is the honest
- * answer and which the next sweep resolves — every recipient already carries
- * `podiumEmailSentAt`, so the retry mails nobody twice. It re-reads nothing,
- * because it is not a gate: `podiumEmailSentAt` is what prevents duplication,
- * and this only quiets the sweep.
- */
-async function stampFanOutComplete(
-  db: DailyEmailFirestore,
-  eventId: string,
-  deps: DailyEmailDeps,
-): Promise<void> {
-  try {
-    await db
-      .doc(`events/${eventId}`)
-      .set({ podiumEmailAt: (deps.now ?? Date.now)() }, { merge: true });
-  } catch (err) {
-    console.error('sendPodiumEmailForEvent: podiumEmailAt stamp failed', eventId, err);
+    console.error('verifyAndStampCompletion failed', eventId, err);
+    return false;
   }
 }
 
@@ -378,9 +359,14 @@ export async function sendPodiumEmailForEvent(
     // between the due check's query and this line would have been locked out
     // permanently: every later sweep answers `already-sent`. The zero-recipient
     // case needs the same verification as every other, not less.
-    const grew = await rosterGrewSince(db, eventId, new Set<string>(), input.bannedUids ?? [], deps);
-    if (!grew) await stampFanOutComplete(db, eventId, deps);
-    return { ...result, drained: !grew, reason: 'no-roster' };
+    const stamped = await verifyAndStampCompletion(
+      db,
+      eventId,
+      new Set<string>(),
+      input.bannedUids ?? [],
+      deps,
+    );
+    return { ...result, drained: stamped, reason: 'no-roster' };
   }
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
@@ -515,18 +501,16 @@ export async function sendPodiumEmailForEvent(
     // has already paid to walk; a mismatch simply withholds the marker, and the
     // next sweep examines the new member while everybody else is skipped by
     // their own `podiumEmailSentAt`.
-    const grew = await rosterGrewSince(
+    const stamped = await verifyAndStampCompletion(
       db,
       eventId,
       new Set(input.ranked.map((p) => p.uid)),
       input.bannedUids ?? [],
       deps,
     );
-    if (grew) {
+    if (!stamped) {
       console.log(`sendPodiumEmailForEvent ${eventId}: roster changed mid-send, deferring the marker`);
       result.drained = false;
-    } else {
-      await stampFanOutComplete(db, eventId, deps);
     }
   }
   console.log(
@@ -548,6 +532,9 @@ interface PodiumEmailEvent {
   mostLovedPhoto?: unknown;
   /** The fan-out marker: present means this Event is finished (#1192). */
   podiumEmailAt?: unknown;
+  /** The freeze stamp. Its PRESENCE is what says the Most-Loved award has been
+   *  decided, because both are written by one transaction. */
+  frozenAt?: unknown;
   settings?: { dailyEmailEnabled?: unknown } | undefined;
   /** Typed as the archive predicate reads them rather than as `unknown`, so the
    *  guard is called with the shape it declares instead of through a cast. A raw
@@ -571,7 +558,66 @@ export type PodiumDueReason =
   | 'disabled'
   | 'already-sent'
   | 'no-podium'
-  | 'no-payload';
+  | 'no-payload'
+  | 'not-frozen';
+
+/**
+ * Drop award winners whose live Proof no longer survives the Feed filter — the
+ * documented "hidden later" rule (Codex P2, round 5 on PR #1207).
+ *
+ * `buildMostLovedPhotoAward`'s own contract says display "always re-joins the
+ * LIVE Proof doc (`mostLovedDisplayWinners`, src/data/mostLoved.ts), so a
+ * later-hidden photo can never render from a stale stored URL". The email is a
+ * display surface and was not performing that join: a Proof deleted, hidden, or
+ * pushed over the report threshold AFTER the freeze still had its frozen winner
+ * entry, so the mail broadcast that Player's name and prompt to the whole roster
+ * while the Feed and the in-app finale suppressed it.
+ *
+ * Mirrors `mostLovedDisplayWinners` plus the Feed filter its caller is required
+ * to have applied — `status === 'active'`, not report-hidden (fail-open
+ * threshold), owner not banned — because this package stays decoupled from the
+ * app package exactly as `finaleContent.ts` does.
+ *
+ * READS IN AWARD ORDER AND STOPS AT THE FIRST SURVIVOR, so the common case costs
+ * ONE document read rather than a hundred: only the hero is rendered, and the
+ * order is the award's own.
+ */
+async function firstVisibleWinner(
+  db: FinaleReadSource,
+  eventId: string,
+  winners: readonly MostLovedPhotoWinner[],
+  bannedUids: ReadonlySet<string>,
+  reportHideThreshold: number | undefined,
+): Promise<{ winner: MostLovedPhotoWinner; index: number } | null> {
+  for (let i = 0; i < winners.length; i++) {
+    const winner = winners[i];
+    try {
+      const proof = (await db.doc(`events/${eventId}/proofs/${winner.proofId}`).get()).data() as
+        | { type?: unknown; status?: unknown; reportCount?: unknown; createdAt?: unknown; uid?: unknown }
+        | undefined;
+      if (!proof) continue; // deleted after the freeze — display-only drop
+      if (proof.createdAt !== winner.proofCreatedAt) continue; // another incarnation
+      if (proof.type !== 'photo') continue; // defensive: the award only names photos
+      if (proof.status !== 'active') continue; // hidden, pending or flagged
+      const reports = typeof proof.reportCount === 'number' ? proof.reportCount : 0;
+      if (
+        typeof reportHideThreshold === 'number' &&
+        reportHideThreshold > 0 &&
+        reports >= reportHideThreshold
+      ) {
+        continue; // report-hidden since the freeze
+      }
+      if (typeof proof.uid === 'string' && bannedUids.has(proof.uid)) continue;
+      return { winner, index: i };
+    } catch (err) {
+      // A read failure is not evidence the photo is fine. Skipping it renders a
+      // shorter email; naming it could broadcast a suppressed Proof.
+      console.error('firstVisibleWinner: proof read failed', eventId, winner.proofId, err);
+      continue;
+    }
+  }
+  return null;
+}
 
 /**
  * The frozen Most-Loved award, VALIDATED and ban-filtered, or `null`.
@@ -748,6 +794,23 @@ export async function podiumEmailInputFor(
   // retries the Moment on its own guard until it lands, so "not yet" is a wait,
   // not a failure.
   if (!moment) return { due: false, reason: 'no-podium' };
+  // THE FREEZE STAMP GATES THE AWARD, and the podium Moment does not (Codex P2,
+  // round 5 on PR #1207). `runFinaleBeats` posts the Moment under its own guard,
+  // independently of the freeze — that decoupling is deliberate (#228) — so a
+  // run whose freeze transaction failed can leave a posted podium beside an
+  // Event with NO `mostLovedPhoto` at all. The field's contract is explicit that
+  // absence means "not yet computed", while `{ winners: [], heartCount: 0 }`
+  // means "computed, no award": collapsing the two would let this sweep mail the
+  // Event, stamp completion, and permanently omit an award the next unlock retry
+  // was about to persist.
+  //
+  // `frozenAt` is the right gate rather than `mostLovedPhoto` itself, because
+  // the award and the freeze stamp are written by ONE transaction. Waiting on
+  // the award directly would hang forever on the defensive `freezeStandings`
+  // path, which stamps the freeze for an Event that already had an award and
+  // writes none; waiting on the freeze is bounded, because that beat retries
+  // until it lands.
+  if (event.frozenAt == null) return { due: false, reason: 'not-frozen' };
   const payload = moment.podium;
   // A Moment posted without its payload (the beat's content build failed) has
   // nothing for this email to print. The beat does not retry a landed Moment, so
@@ -785,7 +848,34 @@ export async function podiumEmailInputFor(
   });
   const ranked = podiumStandings(visible, days, freezeAt);
   const bannedSet = new Set(banned);
-  const award = visibleMostLovedAward(event.mostLovedPhoto, bannedSet);
+  const filtered = visibleMostLovedAward(event.mostLovedPhoto, bannedSet);
+  // The render-time visibility join, applied AFTER the ban filter so a banned
+  // winner is never even looked up. The hero is the first winner whose live
+  // Proof still survives the Feed filter; the rest of the award travels with it
+  // so the tie tail keeps meaning what it meant.
+  const hero = filtered
+    ? await firstVisibleWinner(
+        db,
+        eventId,
+        filtered.winners,
+        bannedSet,
+        typeof (event.settings as { reportHideThreshold?: unknown } | undefined)?.reportHideThreshold ===
+          'number'
+          ? ((event.settings as { reportHideThreshold?: number }).reportHideThreshold as number)
+          : undefined,
+      )
+    : null;
+  const award: VisibleMostLovedAward | null =
+    filtered && hero
+      ? {
+          ...filtered,
+          // The surviving hero leads, and the winners dropped BEFORE it are gone
+          // from the tail count too — they are as invisible to this reader as a
+          // banned one.
+          winners: filtered.winners.slice(hero.index),
+          winnerCount: Math.max(1, (filtered.winnerCount ?? filtered.winners.length) - hero.index),
+        }
+      : null;
   const { closingDay, honorDayLabels, photoDayLabels } = dayLabels(
     days,
     typeof moment.dayIndex === 'number' ? moment.dayIndex : Math.max(days.length - 1, 0),

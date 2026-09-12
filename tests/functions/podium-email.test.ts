@@ -88,7 +88,11 @@ function makeDb(seed: Docs): DailyEmailFirestore & { docs: Docs } {
   });
   const runTransaction = async <T,>(fn: (tx: never) => Promise<T>): Promise<T> =>
     fn({
-      get: async (ref: { path: string }) => snapshotOf(ref.path),
+      // The Admin SDK's `Transaction.get` takes a DocumentReference OR a Query,
+      // and the completion stamp reads the players collection inside the
+      // transaction. A doc ref carries `path`; a query carries only `get`.
+      get: async (ref: { path?: string; get?: () => Promise<unknown> }) =>
+        typeof ref.path === 'string' ? snapshotOf(ref.path) : await ref.get!(),
       set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
         docs[ref.path] = options?.merge ? { ...(docs[ref.path] ?? {}), ...data } : { ...data };
       },
@@ -403,12 +407,29 @@ const PAYLOAD = {
 };
 
 /** An Event past its podium: roster, hostname, schedule and the posted Moment. */
-const seedDue = (over: Record<string, unknown> = {}, momentOver?: Record<string, unknown>): Docs => ({
+/** A live, Feed-visible Proof for an award winner. The email re-joins the frozen
+ *  winner against this at render time (the "hidden later" rule), so a fixture
+ *  that omits it is asserting the photo was deleted. */
+const visibleProof = (w: Record<string, unknown>): Record<string, unknown> => ({
+  uid: w.uid,
+  displayName: w.displayName,
+  type: 'photo',
+  status: 'active',
+  reportCount: 0,
+  createdAt: w.proofCreatedAt,
+  itemText: w.promptText,
+  dayIndex: w.dayIndex,
+});
+
+const seedDue = (over: Record<string, unknown> = {}, momentOver?: Record<string, unknown>): Docs => withWinnerProofs({
   ...seed(),
   'events/med-2026': {
     name: 'Atlantis Med—Trieste to Barcelona',
     status: 'active',
     settings: { dailyEmailEnabled: true },
+    // The freeze stamp: its presence is what says the Most-Loved award has been
+    // decided, because one transaction writes both.
+    frozenAt: 5_000,
     days: [
       { index: 0, date: '2026-07-15', pool: 'embark', tutorial: true, place: 'Trieste', placeEmoji: '🇮🇹' },
       { index: 1, date: '2026-07-16', pool: 'main', tutorial: false, place: 'Split', placeEmoji: '🇭🇷' },
@@ -426,6 +447,19 @@ const seedDue = (over: Record<string, unknown> = {}, momentOver?: Record<string,
     ...(momentOver ?? {}),
   },
 });
+
+/** Seed a live Proof for every winner the fixture's award names, so the default
+ *  case exercises a surviving photo. A test that wants the hidden-later path
+ *  deletes the proof doc it cares about. */
+function withWinnerProofs(docs: Docs): Docs {
+  const award = docs['events/med-2026']?.mostLovedPhoto as
+    | { winners?: Array<Record<string, unknown>> }
+    | undefined;
+  for (const w of award?.winners ?? []) {
+    docs[`events/med-2026/proofs/${w.proofId as string}`] = visibleProof(w);
+  }
+  return docs;
+}
 
 describe('podiumEmailInputFor — the due check (#1192)', () => {
   it('is due once the podium Moment carries a payload', async () => {
@@ -837,8 +871,14 @@ describe('the ranking uses the RESOLVED freeze, like the Moment does', () => {
       displayName: 'Logan Murdock',
       bingoCount: 13,
       squaresMarked: 110,
-      // Pre-freeze, so Logan wins the tie on the earliest qualifying bingo.
-      firstBingoAt: 200,
+      // NULL, not an early timestamp (CodeRabbit, round 5). With `200` here the
+      // assertion held with or WITHOUT the cutoff — `compareFinalePlayers` sorts
+      // finite instants ascending, so 200 beats 9_000 either way, and the test
+      // proved nothing about the fix it was written for. With `null` (which the
+      // comparator reads as `Infinity`) the two rows tie only once the cutoff
+      // has cleared Nathan's post-freeze instant, and `seedDue` inserts Logan
+      // first, so the stable sort preserves this order ONLY when the cutoff ran.
+      firstBingoAt: null,
     };
     const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
     if (!got.due) throw new Error('expected due');
@@ -1204,6 +1244,154 @@ describe('round-4 findings (Codex P2, CodeRabbit P1)', () => {
     if (!got.due) throw new Error('expected due');
     expect(got.input.mostLoved?.winnerCountExact).toBe(true);
     expect(got.input.mostLoved?.winnerCount).toBe(150);
+  });
+});
+
+describe('round-5 findings (Codex P2, CodeRabbit)', () => {
+  const award = () => ({
+    winners: [
+      { proofId: 'p1', uid: 'ido', displayName: 'Ido Marcus', promptText: 'Mirror-hall selfie', dayIndex: 6, proofCreatedAt: 500 },
+      { proofId: 'p2', uid: 'sam', displayName: 'Sam', promptText: 'Deck sunrise', dayIndex: 5, proofCreatedAt: 600 },
+    ],
+    winnerCount: 2,
+    heartCount: 31,
+    frozenAt: 1,
+    computedAt: 2,
+  });
+
+  it('waits for the freeze stamp rather than treating an absent award as "no award"', async () => {
+    // `runFinaleBeats` posts the podium Moment independently of the freeze, so a
+    // failed freeze transaction leaves a posted podium beside an Event with no
+    // `mostLovedPhoto`. Mailing then would permanently omit an award the next
+    // unlock retry is about to persist.
+    const docs = seedDue();
+    delete docs['events/med-2026'].frozenAt;
+    expect(await podiumEmailInputFor(makeDb(docs), 'med-2026')).toEqual({
+      due: false,
+      reason: 'not-frozen',
+    });
+  });
+
+  it('is due once the freeze stamp lands, with an explicit no-award record', async () => {
+    // `{ winners: [], heartCount: 0 }` is "computed, none" — distinct from
+    // absence — so this must send, with no award module.
+    const docs = seedDue({ mostLovedPhoto: { winners: [], heartCount: 0, frozenAt: 1, computedAt: 2 } });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+  });
+
+  it('drops a winner whose photo was deleted after the freeze', async () => {
+    const docs = seedDue({ mostLovedPhoto: award() });
+    delete docs['events/med-2026/proofs/p1'];
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // Sam, the next surviving winner, becomes the hero.
+    expect(got.input.mostLoved?.winners[0].uid).toBe('sam');
+  });
+
+  it.each([
+    ['hidden', { status: 'hidden' }],
+    ['report-hidden', { reportCount: 3 }],
+    ['a different incarnation', { createdAt: 999 }],
+    ['no longer a photo', { type: 'text' }],
+  ])('drops a winner whose live proof is %s', async (_name, mutation) => {
+    const docs = seedDue({ mostLovedPhoto: award(), settings: { dailyEmailEnabled: true, reportHideThreshold: 3 } });
+    Object.assign(docs['events/med-2026/proofs/p1'], mutation);
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners[0].uid).toBe('sam');
+  });
+
+  it('omits the module when NO winner survives the visibility join', async () => {
+    const docs = seedDue({ mostLovedPhoto: award() });
+    delete docs['events/med-2026/proofs/p1'];
+    delete docs['events/med-2026/proofs/p2'];
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+    // …and the send still completes; a suppressed photo is not a failure.
+    const model = modelFor('gcb', { mostLoved: got.input.mostLoved });
+    expect(model.mostLovedLine).toBeNull();
+  });
+
+  it('costs ONE proof read when the hero survives', async () => {
+    const docs = seedDue({ mostLovedPhoto: award() });
+    const db = makeDb(docs);
+    const read: string[] = [];
+    const traced = {
+      ...db,
+      doc: (path: string) => {
+        if (path.includes('/proofs/')) read.push(path);
+        return db.doc(path);
+      },
+    } as unknown as typeof db;
+    await podiumEmailInputFor(traced, 'med-2026');
+    expect(read).toEqual(['events/med-2026/proofs/p1']);
+  });
+});
+
+describe('completion is verified and stamped atomically (Codex P2 r5)', () => {
+  it('does not stamp when a Player is created inside the verification window', async () => {
+    // The two-step version read the roster and THEN wrote the marker, so a row
+    // created between them was stranded: the marker landed and every later
+    // sweep answered `already-sent`. The transaction closes that window by
+    // reading the collection inside it — here the joiner appears before the
+    // read, which is the state the old ordering could not have seen.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    db.docs['events/med-2026/players/late'] = {
+      displayName: 'Late Joiner',
+      bingoCount: 0,
+      squaresMarked: 1,
+      firstBingoAt: null,
+    };
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('reads the players collection INSIDE the transaction, not before it', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let insideTx = false;
+    let readInside = false;
+    const traced = {
+      ...db,
+      runTransaction: async <T,>(fn: (tx: never) => Promise<T>): Promise<T> => {
+        insideTx = true;
+        try {
+          return await db.runTransaction(fn);
+        } finally {
+          insideTx = false;
+        }
+      },
+      collection: (path: string) => {
+        if (path.endsWith('/players') && insideTx) readInside = true;
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(readInside).toBe(true);
+  });
+
+  it('writes the marker with a MERGE inside the transaction', async () => {
+    const db = makeDb(seedDue());
+    await runPodiumEmailSweep(db, { ...baseDeps(), send: async () => true });
+    const event = db.docs['events/med-2026'];
+    expect(event.podiumEmailAt).toBe(3_000);
+    // Everything else survives the transactional write.
+    expect(event.status).toBe('active');
+    expect(event.frozenAt).toBe(5_000);
+    expect(Array.isArray(event.days)).toBe(true);
   });
 });
 

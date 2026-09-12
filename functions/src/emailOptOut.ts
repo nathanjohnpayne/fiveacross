@@ -57,9 +57,30 @@ interface PrefsDocRef {
 /** The minimal transaction surface the token back-fill needs. Mirrors the
  *  admin-SDK `Transaction`: reads inside it are serialized against concurrent
  *  writers, and the whole function re-runs on contention. */
+/** A collection or query a transaction can read. Declared alongside the doc
+ *  surface because the Admin SDK's `Transaction.get` genuinely accepts both, and
+ *  the winner-announcement completion stamp (#1192) needs the query form: it
+ *  must verify the recipient set and write the marker in ONE serialized unit, or
+ *  a Player created between the two is stranded. */
+export interface TxQueryRef {
+  get(): Promise<{ docs: Array<{ id: string; data(): Record<string, unknown> | undefined }> }>;
+}
+
 interface PrefsTransaction {
   get(ref: PrefsDocRef): Promise<PrefsSnapshot>;
+  get(query: TxQueryRef): Promise<{
+    docs: Array<{ id: string; data(): Record<string, unknown> | undefined }>;
+  }>;
   set(ref: PrefsDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+  /** The completion stamp writes the EVENT document, which is not a prefs doc.
+   *  Same Admin SDK method; the narrower overload above keeps every existing
+   *  call site checked against the prefs shape. */
+  set(ref: TxWritableRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+}
+
+/** Any document reference a transaction may write. */
+export interface TxWritableRef {
+  get(): Promise<unknown>;
 }
 
 /** The minimal surface the opt-out store uses. */
