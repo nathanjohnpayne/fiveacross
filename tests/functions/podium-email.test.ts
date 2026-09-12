@@ -1551,6 +1551,53 @@ describe('round-6 findings (Codex P2)', () => {
   });
 });
 
+describe('round-7 finding (Codex P2)', () => {
+  it('refuses completion when the bounded page overflows, even if bans mask it', async () => {
+    // The trap: ban filtering can shrink a `cap + 1` page back to `cap`, so the
+    // send loop's `capHit` never trips (it counts EXAMINED players, already
+    // filtered) and the transaction's filtered view of a truncated page looks
+    // complete. Stamping then strands every visible Player past the page.
+    const docs = seedDue({ bannedUids: ['b1'] });
+    docs['events/med-2026/players/b1'] = { displayName: 'Banned', bingoCount: 0, squaresMarked: 0, firstBingoAt: null };
+    for (let i = 0; i < 4; i++) {
+      docs[`events/med-2026/players/extra${i}`] = {
+        displayName: `Extra ${i}`,
+        bingoCount: 0,
+        squaresMarked: i,
+        firstBingoAt: null,
+      };
+    }
+    // Raw roster is 8 (3 seeded + 1 banned + 4 extra); the ceiling is 3, so the
+    // page is 4 rows of which one is banned — three visible, at the cap.
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026', undefined, 3);
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      maxRecipients: 3,
+      send: async () => true,
+    });
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('still completes a roster that sits exactly AT the ceiling', async () => {
+    // The boundary must not refuse a legitimate full roster: three visible
+    // players against a ceiling of three is complete, not overflowing.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026', undefined, 3);
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      maxRecipients: 3,
+      send: async () => true,
+    });
+    expect(result.sent).toBe(3);
+    expect(result.drained).toBe(true);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a

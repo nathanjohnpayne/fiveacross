@@ -282,6 +282,26 @@ async function verifyAndStampCompletion(
       const event = await tx.get(eventRef);
       if (!event.exists) return false;
       const snap = await tx.get(bounded);
+      // OVERFLOW REFUSES COMPLETION, and it must be checked BEFORE the ban
+      // filter (Codex P2, round 7 on PR #1207). The page is `cap + 1` precisely
+      // so a full one proves there is more beyond it — but ban filtering can
+      // shrink `cap + 1` rows back to `cap` or fewer, which is also why the send
+      // loop's own `capHit` never trips: it counts EXAMINED players, and the
+      // examined list was already filtered. So the filtered view of a truncated
+      // page looks complete, and stamping on it strands every visible Player
+      // past the page behind a permanent `already-sent`.
+      //
+      // An Event over the ceiling therefore never completes and is re-read every
+      // sweep. That is the correct answer rather than a cost to avoid: there are
+      // recipients it is not mailing, so it is not finished, and the due check
+      // logs the overflow loudly for whoever has to act on it.
+      if (snap.docs.length > cap) {
+        console.error(
+          `verifyAndStampCompletion: roster exceeds the ${cap} ceiling; refusing to mark complete`,
+          eventId,
+        );
+        return false;
+      }
       const banned = normalizeBanSet(bannedUids);
       const unexamined = snap.docs
         .map((d) => d.id || (d.data()?.uid as string | undefined) || '')
