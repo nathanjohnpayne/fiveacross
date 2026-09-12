@@ -436,6 +436,39 @@ describe('post-sailing-archive — the archive toggle is admin-only and write-on
     await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
   });
 
+  it('DENIES an admin writing the winner-email fan-out marker, in every state', async () => {
+    // #1192. `podiumEmailAt` records that the Event's winner-announcement email
+    // reached its whole roster, and its ABSENCE is what makes the finale beat
+    // keep trying. An admin who could stamp it would silently suppress the
+    // Event's last email for everyone on the roster — so it is server-written
+    // only, exactly like `finaleCompletedAt` above.
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: NOW() }));
+    await quiesce();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: NOW() }));
+    // The archive flip may not smuggle it either.
+    await assertFails(flip(ADMIN, { podiumEmailAt: NOW() }));
+    await freeze();
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: NOW() }));
+    // The same admin still edits everything else in every one of those states.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+  });
+
+  it('leaves the winner-email marker alone on an ordinary admin write', async () => {
+    // The same "unwritable, not a tripwire" property `finaleCompletedAt` has:
+    // restating the stored value passes, moving or clearing it does not.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), eventPath()), { podiumEmailAt: 1_700_000_090_000 });
+    });
+    await assertSucceeds(updateDoc(doc(db(ADMIN), eventPath()), { claimMode: 'proof_required' }));
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: 1_700_000_090_000 }),
+    );
+    await assertFails(
+      updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: 1_700_000_090_001 }),
+    );
+    await assertFails(updateDoc(doc(db(ADMIN), eventPath()), { podiumEmailAt: deleteField() }));
+  });
+
   it('leaves the SERVER’s own marker alone on an ordinary admin write', async () => {
     // Restating an unchanged value is not a change, so a whole-document admin
     // write still passes on an Event the scheduler has already marked — the

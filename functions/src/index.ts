@@ -46,6 +46,7 @@ import {
   runScheduledUnlock,
   UnlockPermissionError,
   type AdminFirestore,
+  type UnlockDeps,
 } from './unlockDay';
 import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
 import { handleUnsubscribeRequest } from './emailOptOut';
@@ -969,9 +970,26 @@ export const reconcileHostnameOnWrite = onDocumentWritten(
 async function runScheduledUnlockForActiveEvents(): Promise<void> {
   const adminDb = db as unknown as AdminFirestore;
   const events = await db.collection('events').where('status', '==', 'active').get();
+  // THE COMPOSITION ROOT for the winner-announcement email (#1192). `unlockDay.ts`
+  // declares the sender as an injectable dep so it keeps a Firestore-only
+  // dependency graph and its whole suite runs with no transport; this is the one
+  // place the real one is bound, and the one place the same `db` is seen as both
+  // the beat's Firestore surface and the email's (which additionally needs the
+  // `emailPrefs` doc shape, `create` included).
+  const sendPodiumEmail: NonNullable<UnlockDeps['sendPodiumEmail']> = async (input) => {
+    const { sendPodiumEmailForEvent } = await import('./podiumEmail');
+    return sendPodiumEmailForEvent(db as unknown as DailyEmailFirestore, input.eventId, {
+      event: input.event,
+      podium: input.podium,
+      ranked: input.ranked,
+      mostLoved: input.mostLoved,
+      closingDay: input.closingDay,
+      honorDayLabels: input.honorDayLabels,
+    });
+  };
   for (const ev of events.docs) {
     try {
-      await runScheduledUnlock(adminDb, ev.id);
+      await runScheduledUnlock(adminDb, ev.id, { sendPodiumEmail });
     } catch (err) {
       console.error('runScheduledUnlock failed', ev.id, err);
     }

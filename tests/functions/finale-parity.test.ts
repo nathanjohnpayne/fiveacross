@@ -11,9 +11,11 @@ import {
   clampReaggregatedTotal as fnsClampReaggregatedTotal,
   ARCHIVE_NUMBER_BOUND as FNS_ARCHIVE_NUMBER_BOUND,
   MAX_ARCHIVE_NUMBER as FNS_MAX_ARCHIVE_NUMBER,
+  podiumStandings,
   type FinaleDay,
   type FinalePlayer,
 } from '../../functions/src/finaleContent';
+import { buildPodiumEmailModel } from '../../functions/src/podiumEmailContent';
 import { scoringForDay as fnsScoringForDay } from '../../functions/src/scoringVocab';
 import {
   eventFirstBingoUid,
@@ -1673,5 +1675,136 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
       '3:dee:false',
       '4:cera:true',
     ]);
+  });
+});
+
+// --- #1192: the winner-announcement email against the podium Moment ------------
+//
+// The email is the FOURTH reader of these honours, after the Leaderboard, the
+// podium Moment and the daily card — and #1052 is the record of what it costs
+// when several readers of one honour each derive it from their own input. So the
+// email is handed `buildPodiumPayload`'s output rather than a roster, and these
+// assertions pin what "handed" has to mean.
+describe('winner-announcement email — parity with the podium Moment (#1192)', () => {
+  // The same four schedule shapes the champion/⭐ parity block above runs, so
+  // the email is checked against every exclusion combination rather than only
+  // the cruise's. Restated locally because that block scopes its own copy.
+  const EMAIL_SHAPES: Array<{
+    name: string;
+    days: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'> & { scoring?: string }>;
+  }> = [
+    { name: 'the cruise shape (curated ends, ceremonial close)', days: CRUISE_SHAPE },
+    { name: 'a Five Across shape (competitive easy opener)', days: SCHEDULE },
+    { name: 'a weekend shape whose final morning still counts', days: COMPETITIVE_CLOSE },
+    {
+      name: 'a schedule with no ceremonial Day at all',
+      days: [
+        { index: 0, pool: 'main', tutorial: false },
+        { index: 1, pool: 'main', tutorial: false },
+        { index: 2, pool: 'main', tutorial: false },
+      ],
+    },
+  ];
+
+  const CLOSING_DAY = {
+    themeId: 'so-long-farewell',
+    dayNumber: 3,
+    dayCount: 3,
+    dateLabel: 'Friday, Jul 24',
+    placeLabel: '🇪🇸 Barcelona',
+  };
+
+  const modelFor = (
+    days: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'> & { scoring?: string }>,
+    opts: { recipientUid?: string } = {},
+  ) => {
+    const players = asFinalePlayers(roster());
+    const finaleDays = asFinaleDays(days);
+    const payload = buildPodiumPayload(players, finaleDays);
+    const ranked = podiumStandings(players, finaleDays);
+    return {
+      payload,
+      ranked,
+      model: buildPodiumEmailModel({
+        eventName: 'Atlantis Med—Trieste to Barcelona',
+        podium: payload,
+        ranked,
+        closingDay: CLOSING_DAY,
+        recipient: { uid: opts.recipientUid ?? 'ana', displayName: 'Ana' },
+        edition: 'gcb',
+        feedUrl: 'https://example.test/feed',
+        unsubscribeUrl: 'https://example.test/unsubscribe',
+        preferencesUrl: 'https://example.test/preferences',
+      }),
+    };
+  };
+
+  it.each(EMAIL_SHAPES)('row 1 IS the podium champion for $name', ({ days }) => {
+    const { payload, model } = modelFor(days);
+    // The one row the Moment actually carries. Not "equivalent" — the same
+    // four values, because `podiumStandings` is where both come from.
+    expect(model.standingsRows[0]).toMatchObject({
+      uid: payload.champion?.uid,
+      displayName: payload.champion?.displayName,
+      bingoCount: payload.champion?.bingoCount,
+      squaresMarked: payload.champion?.squaresMarked,
+    });
+    expect(model.standingsRows[0]?.rank).toBe(1);
+  });
+
+  it.each(EMAIL_SHAPES)('names the podium’s own ⭐ holder for $name', ({ days }) => {
+    const { payload, model } = modelFor(days);
+    if (payload.firstBingo) {
+      expect(model.starLine).toContain(payload.firstBingo.displayName);
+    } else {
+      // No eligible holder means NO module, rather than an empty state that
+      // advertises a closed honour — which is the defect #1121 was filed for.
+      expect(model.starLine).toBeNull();
+    }
+  });
+
+  it.each(EMAIL_SHAPES)('ranks its rows exactly as the podium ranks them for $name', ({ days }) => {
+    const { ranked, model } = modelFor(days);
+    expect(model.standingsRows.map((r) => r.uid)).toEqual(
+      ranked.slice(0, model.standingsRows.length).map((p) => p.uid),
+    );
+  });
+
+  it('reports the recipient’s own placing as their index in the podium ranking', () => {
+    const { ranked, model } = modelFor(CRUISE_SHAPE, { recipientUid: 'bo' });
+    const expected = ranked.findIndex((p) => p.uid === 'bo') + 1;
+    expect(model.youLine).toBe(
+      `You finished #${expected}—${ranked[expected - 1].bingoCount} bingo${
+        ranked[expected - 1].bingoCount === 1 ? '' : 's'
+      } and ${ranked[expected - 1].squaresMarked} squares.`,
+    );
+  });
+
+  it('renders no placing line for an address that is not on the roster', () => {
+    const { model } = modelFor(CRUISE_SHAPE, { recipientUid: 'not-a-participant' });
+    expect(model.youLine).toBeNull();
+    // And the standings still render — an off-roster reader loses only their
+    // own line, which is the daily card's rule unchanged.
+    expect(model.standingsRows.length).toBeGreaterThan(0);
+  });
+
+  it('falls back to the occasion close when the board is empty, and prints no rows', () => {
+    const finaleDays = asFinaleDays(CRUISE_SHAPE);
+    const payload = buildPodiumPayload([], finaleDays);
+    expect(payload.champion).toBeNull();
+    const model = buildPodiumEmailModel({
+      eventName: 'Atlantis Med—Trieste to Barcelona',
+      podium: payload,
+      ranked: [],
+      closingDay: CLOSING_DAY,
+      recipient: { uid: 'ana', displayName: 'Ana' },
+      edition: 'gcb',
+      feedUrl: 'https://example.test/feed',
+      unsubscribeUrl: 'https://example.test/unsubscribe',
+      preferencesUrl: 'https://example.test/preferences',
+    });
+    expect(model.subject).toBe('Final standings 🏆—the cruise is done');
+    expect(model.standingsRows).toEqual([]);
+    expect(model.standingsEmptyLine).toContain('closed empty');
   });
 });

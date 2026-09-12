@@ -1580,6 +1580,19 @@ service cloud.firestore {
       // with the four fields beside it rather than for reach: no client create
       // of an Event document can succeed at all, because `eventConfigWriteAuthorized(eventId)`
       // reads the very document being created and a missing `get()` denies.
+      //
+      // `podiumEmailAt` JOINS THE UPDATE LIST AND DELIBERATELY NOT THE CREATE
+      // ONE (#1192). It is the winner-announcement fan-out marker, server-written
+      // by the finale beat, and an admin able to stamp it could suppress the
+      // Event's last email for the whole roster — so it belongs in the
+      // no-client-writes set exactly as `finaleCompletedAt` does. It is absent
+      // from the create half because this arm sits at the 1000-expression cap
+      // noted above: another element in the `hasAny` literal costs nothing (the
+      // arm already evaluates that literal once), while another
+      // `!('x' in request.resource.data)` clause is a new expression on an arm
+      // that has no room for one. Nothing is lost by the asymmetry — the create
+      // half is symmetry rather than reach, per the sentence above, since no
+      // client create of an Event document can succeed at all.
       allow create, update: if eventConfigWriteAuthorized(eventId)
         && (resource == null
             ? (request.resource.data.get('status', 'active') == 'active'
@@ -1590,7 +1603,8 @@ service cloud.firestore {
                 && !('finaleCompletedAt' in request.resource.data))
             : !request.resource.data.diff(resource.data).affectedKeys()
                  .hasAny(['status', 'archiving', 'archivedAt', 'archiveToken',
-                          'archivedUnder', 'archive', 'finaleCompletedAt']))
+                          'archivedUnder', 'archive', 'finaleCompletedAt',
+                          'podiumEmailAt']))
         && (!('standingsFreezeAt' in request.resource.data)
             || (request.resource.data.standingsFreezeAt is number
                 && request.resource.data.standingsFreezeAt > 0

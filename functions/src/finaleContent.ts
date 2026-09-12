@@ -671,6 +671,40 @@ export interface PodiumPayload {
  *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
  *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted).
  */
+/**
+ * The podium's FULL frozen standings, ranked — every Player's re-aggregated row
+ * (ceremonial Days excluded) sorted by `compareFinalePlayers`.
+ *
+ * `buildPodiumPayload` reads its `champion` off `[0]` of this, and the
+ * winner-announcement email (#1192) reads its top three off the same array, so
+ * the email's first row and the Moment's champion are ONE value rather than two
+ * computations that happen to agree. That was the alternative — the email
+ * re-deriving a ranking of its own — and #1052 is the record of what it costs
+ * when several selectors of one honour are each handed their own input.
+ *
+ * Returns EVERY Player, unsliced and unfiltered: `champion` is the head, the
+ * email takes a prefix, and the recipient's own placing is an index into the
+ * whole thing. Callers ban-filter BEFORE calling (`visibleFinaleRoster`), which
+ * is what keeps a presentational ban from promoting the next Player into an
+ * honour they did not win.
+ */
+export function podiumStandings(
+  players: readonly FinalePlayer[],
+  days: readonly FinaleDay[] | undefined,
+  freezeAt?: number | null,
+): FinalePlayer[] {
+  // Identical to the cutoff `buildPodiumPayload` applies — see its own comment
+  // for why a retried beat needs one at all.
+  const withinFreeze = (at: number | null): number | null =>
+    at != null && freezeAt != null && at >= freezeAt ? null : at;
+  const tutorial = tutorialDayIndexes(days);
+  const isTutorialDay = (i: number): boolean => tutorial.has(i);
+  const ceremonial = ceremonialDayIndexes(days);
+  return players
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
+    .sort(compareFinalePlayers);
+}
+
 export function buildPodiumPayload(
   players: readonly FinalePlayer[],
   days: readonly FinaleDay[] | undefined,
@@ -691,9 +725,7 @@ export function buildPodiumPayload(
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexes(days);
 
-  const standings = players
-    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
-    .sort(compareFinalePlayers);
+  const standings = podiumStandings(players, days, freezeAt);
   const top = standings[0];
   const champion: PodiumChampion | null =
     top && (top.bingoCount > 0 || top.squaresMarked > 0)

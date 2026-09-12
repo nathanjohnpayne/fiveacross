@@ -128,6 +128,16 @@ export interface EditionRegister {
   photosRest: string;
   /** Footer: why this person is receiving the email, given the Event's name. */
   whyYouGotThis: (eventName: string) => string;
+  /** Winner-announcement subject tail, given the champion's display name
+   *  (#1192): "Zacaria Arab takes the cruise". The subject names the champion
+   *  because it is the strongest true thing that mail has to say. */
+  finaleSubjectTail: (championName: string) => string;
+  /** Winner-announcement subject tail for an Event that ends with an EMPTY
+   *  board — nobody marked anything, so `PodiumPayload.champion` is `null` and
+   *  there is no name to print: "the cruise is done". */
+  finaleSubjectTailNoChampion: string;
+  /** Winner-announcement sign-off, the one closing line before the Feed CTA. */
+  finaleSignOff: string;
 }
 
 const REGISTERS: Record<string, EditionRegister> = {
@@ -143,6 +153,10 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'BINGO without a photo is a rumor.',
     photosRest: 'Post a pic with every claim—the boat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're sailing ${eventName}.`,
+    finaleSubjectTail: (championName) => `${championName} takes the cruise`,
+    finaleSubjectTailNoChampion: 'the cruise is done',
+    finaleSignOff:
+      "That's the cruise. Every photo is still in the Feed—go back through the whole thing.",
   },
   // 🧳 Vacay Bingo — trip register at moderate camp.
   vacay: {
@@ -156,6 +170,9 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'Got BINGO? Post a photo with it.',
     photosRest: 'Every claim is a photo op, and the group chat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're on the ${eventName} trip.`,
+    finaleSubjectTail: (championName) => `${championName} takes the trip`,
+    finaleSubjectTailNoChampion: 'the trip is done',
+    finaleSignOff: "That's the trip. Every photo is still in the Feed—go back through it.",
   },
   // ✳ Five Across — the platform register: plain, occasion-neutral.
   fiveacross: {
@@ -169,6 +186,9 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'Post a photo with every BINGO.',
     photosRest: "That's what the Feed is for.",
     whyYouGotThis: (eventName) => `You're getting this because you're part of ${eventName}.`,
+    finaleSubjectTail: (championName) => `${championName} takes it`,
+    finaleSubjectTailNoChampion: 'the event is done',
+    finaleSignOff: "That's the event. Every photo is still in the Feed.",
   },
 };
 
@@ -604,8 +624,12 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string | n
 
 /** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. The
  *  neutral place label wins; legacy `portEmoji` takes precedence while both
- *  fields are dual-written, preserving a live operator correction. */
-function placeLabel(day: EmailDay): string {
+ *  fields are dual-written, preserving a live operator correction.
+ *
+ *  Exported because the finale beat labels the closing Day and each honour's
+ *  Day for the winner-announcement email (#1192). One spelling of the
+ *  place label, including its legacy-field precedence, is the point. */
+export function placeLabel(day: EmailDay): string {
   const place = (day.place ?? day.port ?? '').trim();
   if (!place) return '';
   const emoji = (day.portEmoji ?? day.placeEmoji ?? '').trim();

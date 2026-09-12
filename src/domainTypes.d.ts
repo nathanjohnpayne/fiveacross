@@ -473,6 +473,23 @@ export interface EventDoc {
    * in the meantime is asked for at most once per Event.
    */
   finaleCompletedAt?: number;
+  /**
+   * The winner-announcement fan-out marker (ms epoch, #1192): when a finale
+   * sweep finished mailing the Event's podium email to its whole roster.
+   *
+   * ABSENT = still owed, which is what makes the beat ask. Stamped only by a run
+   * that examined every participant with nothing failing, so a fan-out that
+   * outlasted its invocation — or one whose transport failed partway — leaves
+   * this absent and the next sweep resumes. Per-recipient duplication is
+   * prevented separately, by `podiumEmailSentAt` on each participant's
+   * `emailPrefs` doc; this field only stops the beat re-asking a finished
+   * question every quarter hour for the rest of the Event's life.
+   *
+   * Server-written like `finaleCompletedAt`, and unwritable by any client for
+   * the same class of reason: an admin able to stamp it could silently suppress
+   * the Event's last email for everyone on the roster.
+   */
+  podiumEmailAt?: number;
   // The frozen Most-Loved Photo award (#534/#560, specs/most-loved-photo.md):
   // computed and persisted exactly once by the same scheduler sweep that stamps
   // `frozenAt`, as a sibling field because the award is Event-level frozen

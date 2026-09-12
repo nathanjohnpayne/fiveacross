@@ -10,7 +10,14 @@
  * STORAGE. `events/{eventId}/emailPrefs/{uid}`, one doc per participant per
  * Event:
  *
- *   { optedOut: boolean, token: string, lastSentDayIndex?: number, updatedAt: number }
+ *   { optedOut: boolean, token: string, lastSentDayIndex?: number,
+ *     podiumEmailSentAt?: number, updatedAt: number }
+ *
+ * The two send markers are separate fields because they answer different
+ * questions — `lastSentDayIndex` is "have I mailed this Day", and
+ * `podiumEmailSentAt` is "have I sent the one winner mail for this Event"
+ * (#1192). One field serving both would let a farewell-Day card send suppress
+ * the winner mail.
  *
  * Event-scoped rather than global because that is what the unsubscribe link in
  * a given Event's email actually promises ("stop sending me THIS Event's daily
@@ -68,6 +75,20 @@ export interface EmailPrefs {
   /** The last Day index this participant was emailed for — the once-per-day
    *  guard. Absent until the first send. */
   lastSentDayIndex?: number;
+  /**
+   * When this participant was sent the winner-announcement email (#1192) — the
+   * exactly-once-per-Event guard for the finale's send.
+   *
+   * ITS OWN MARKER, DELIBERATELY NOT `lastSentDayIndex`. The two sends are
+   * asked different questions: the daily card asks "have I already mailed this
+   * DAY", which a Day index answers, while the finale asks "have I already
+   * mailed the one podium mail for this EVENT", which no Day index can answer —
+   * the podium fires on the farewell Day, whose index the daily card may also
+   * have stamped, so one field serving both would let a card send suppress the
+   * winner mail (or the reverse). A timestamp rather than a boolean because a
+   * support question about the finale is always "when did this go out".
+   */
+  podiumEmailSentAt?: number;
 }
 
 export interface OptOutDeps {
@@ -122,6 +143,10 @@ export async function readEmailPrefsOutcome(
         lastSentDayIndex:
           typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
             ? data.lastSentDayIndex
+            : undefined,
+        podiumEmailSentAt:
+          typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
+            ? data.podiumEmailSentAt
             : undefined,
       },
     };
@@ -255,6 +280,43 @@ export async function markDailyEmailSent(
   } catch (err) {
     console.error('markDailyEmailSent failed', eventId, uid, dayIndex, err);
   }
+}
+
+/** Record that this participant has been sent the winner-announcement email
+ *  (#1192). Best-effort, exactly like `markDailyEmailSent`: a failure here
+ *  re-sends at most once on the next finale sweep, and Resend's idempotency key
+ *  — stable per Event and recipient, with no Day in it — collapses that
+ *  duplicate inside its 24h window. */
+export async function markPodiumEmailSent(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  deps: OptOutDeps = {},
+): Promise<void> {
+  const at = (deps.now ?? Date.now)();
+  try {
+    await db
+      .doc(emailPrefsPath(eventId, uid))
+      .set({ podiumEmailSentAt: at, updatedAt: at }, { merge: true });
+  } catch (err) {
+    console.error('markPodiumEmailSent failed', eventId, uid, err);
+  }
+}
+
+/** Whether this participant should be sent the winner-announcement email:
+ *  opted in, and not already sent. The finale twin of `shouldSendTo`
+ *  (`dailyEmail.ts`), pure for the same reason — the suppression rule is the
+ *  part worth testing on its own.
+ *
+ *  A MISSING PREFS DOC IS A NO, as it is for the daily card: no honourable
+ *  unsubscribe means no email, and that holds for the last mail of the Event
+ *  exactly as it does for every other one. */
+export function shouldSendPodiumTo(
+  prefs: { optedOut: boolean; podiumEmailSentAt?: number } | null,
+): boolean {
+  if (!prefs) return false;
+  if (prefs.optedOut) return false;
+  return typeof prefs.podiumEmailSentAt !== 'number';
 }
 
 /** Constant-time token comparison. Length is compared first because

@@ -58,7 +58,7 @@
 // absent) are widened at this boundary alone. The pins below make that widening
 // checkable: a canonical document must remain assignable to its raw view, so a
 // rename or an incompatible retype on the contract side fails `tsc` HERE.
-import type { DayDef, EventDoc } from '../../src/domainTypes';
+import type { DayDef, EventDoc, MostLovedPhotoAward } from '../../src/domainTypes';
 
 /** The subset of a `DayDef` the scheduler reads/writes. */
 export type DayLike = Pick<DayDef, 'index' | 'unlockAt'> &
@@ -150,6 +150,10 @@ export type EventLike = Partial<
    *  (`!= null` = already computed, the beat's idempotence key), so the type
    *  stays `unknown` rather than restating the shared shape here. */
   mostLovedPhoto?: unknown;
+  /** The winner-announcement fan-out marker (#1192): `EventDoc['podiumEmailAt']`
+   *  — declared THERE, not here — plus the `null` a raw read can find where the
+   *  contract says absent. The beat reads presence only. */
+  podiumEmailAt?: EventDoc['podiumEmailAt'] | null;
 };
 
 /**
@@ -181,6 +185,7 @@ import {
   buildPodiumPayload,
   buildMostLovedPhotoAward,
   freezePhraseForUnlock,
+  podiumStandings,
   sanitizeFinaleDayStats,
   standingsFreezeAtFor,
   withReadableFinaleRanking,
@@ -189,7 +194,12 @@ import {
   type FinaleDayHonorDoc,
   type MostLovedProofLike,
   type MostLovedHeartLike,
+  type PodiumPayload,
 } from './finaleContent';
+// The winner-announcement email's context line (#1192). CONTENT helpers only —
+// the transport is injected through `UnlockDeps.sendPodiumEmail`, so importing
+// these keeps this module's dependency graph Firestore-only.
+import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
 import { normalizePool } from './poolVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent) —
 // the persisted award shape both compiler roots agree on.
@@ -527,6 +537,7 @@ export interface FinaleDecision {
   freeze: boolean;
   postPodium: boolean;
   computeMostLoved: boolean;
+  sendPodiumEmail: boolean;
   markComplete: boolean;
 }
 
@@ -551,6 +562,17 @@ export interface FinaleDecision {
  *     moderation state and the Proof/Heart collections, then writes both frozen
  *     fields together. A retry therefore cannot rebuild an award from a later ban
  *     roster, report threshold, or Proof visibility state.
+ *   - `sendPodiumEmail` (#1192): `now` has reached the farewell unlock and the
+ *     Event's winner-announcement fan-out is not yet recorded as finished.
+ *     DECOUPLED FROM `postPodium` for the same reason `postPodium` is decoupled
+ *     from the freeze (Codex #228), and the coupling would have been worse here:
+ *     `postPodium` goes false the moment the Moment lands, so an arm gated on it
+ *     would get exactly one attempt at a fan-out that legitimately needs several
+ *     — a roster can outlast one invocation, and a transport failure deserves a
+ *     retry. The guard is instead the Event's own `podiumEmailAt`, stamped only
+ *     once a run has examined the whole roster with nothing failing; per-recipient
+ *     duplication is prevented separately by `podiumEmailSentAt` on each
+ *     participant's prefs doc, which is what makes a resumed run safe.
  *   - `markComplete` (#1151): `now` has reached the farewell unlock and no
  *     completion marker is stored yet. It says only that the marker is still
  *     OWED — whether it is actually written is `markFinaleComplete`'s decision,
@@ -568,6 +590,10 @@ export function finaleActions(
     lastCallPosted: boolean;
     podiumPosted: boolean;
     mostLovedComputed: boolean;
+    /** Whether the winner-announcement fan-out is recorded as finished (#1192).
+     *  Optional for the same reason `finaleCompleted` is: absent reads as "still
+     *  owed", which is every Event's state before the marker existed. */
+    podiumEmailDone?: boolean;
     /** Optional so a caller that predates the marker still typechecks: absent
      *  reads as "not yet marked", which is the state every Event was in before
      *  #1151 and the state that makes the sweep ask. */
@@ -580,6 +606,7 @@ export function finaleActions(
     freeze: atFreeze && state.frozenAt == null,
     postPodium: atFreeze && !state.podiumPosted,
     computeMostLoved: atFreeze && state.frozenAt == null && !state.mostLovedComputed,
+    sendPodiumEmail: atFreeze && !state.podiumEmailDone,
     markComplete: atFreeze && !state.finaleCompleted,
   };
 }
@@ -677,9 +704,78 @@ export type SnapshotResult =
    *  closed Event has done its job correctly. */
   | 'archived';
 
+/** What the finale beat hands the winner-announcement sender (#1192). Declared
+ *  structurally rather than imported from `podiumEmail.ts` so this module keeps
+ *  a Firestore-only dependency graph: the sender's own `PodiumEmailInput` is
+ *  pinned against this shape at the composition root in `index.ts`. */
+export interface PodiumEmailBeatInput {
+  eventId: string;
+  event: EventLike;
+  podium: PodiumPayload;
+  ranked: readonly FinalePlayer[];
+  mostLoved: MostLovedPhotoAward | null;
+  closingDay: {
+    themeId?: string | null;
+    dayNumber: number;
+    dayCount: number;
+    dateLabel: string;
+    placeLabel: string;
+  };
+  honorDayLabels: Readonly<Record<number, string>>;
+}
+
 export interface UnlockDeps {
   /** Current time; defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * The winner-announcement email sender (#1192), INJECTED rather than imported.
+   *
+   * Absent means the beat mails nothing — which is what the existing finale
+   * suite and an emulator run both want, and why adding this field changed no
+   * existing test. `index.ts` binds the real one, where the Admin SDK Firestore
+   * satisfies both this module's surface and the sender's (which needs the
+   * `emailPrefs` doc shape this one does not have).
+   *
+   * Returns only the drain verdict, because that is the only part of the send's
+   * outcome the beat acts on.
+   */
+  sendPodiumEmail?: (input: PodiumEmailBeatInput) => Promise<{ drained: boolean }>;
+}
+
+/** The closing Day's labels for the winner email's context line. Formatted
+ *  here, not in the content module, because the Day's stored `date` is a plain
+ *  wall-clock calendar date and `formatDayDate` owns the one correct way to
+ *  render it (see its own comment on the double-offset trap). */
+function closingDayLabels(
+  days: readonly FinaleDay[],
+  podiumDayIndex: number,
+): PodiumEmailBeatInput['closingDay'] {
+  const raw = days.find((d) => d.index === podiumDayIndex) as EmailDay | undefined;
+  return {
+    themeId: raw?.theme ?? null,
+    dayNumber: podiumDayIndex + 1,
+    dayCount: days.length,
+    dateLabel: raw ? formatDayDate(raw.date) : '',
+    placeLabel: raw ? placeLabel(raw) : '',
+  };
+}
+
+/** `dayIndex` → "Day 2 in Split 🇭🇷" for every Day that pinned an honour, so the
+ *  email's ⭐ line can say where the Event-wide honour was won. A Day with no
+ *  Place yields "Day 2" alone rather than a dangling preposition. */
+function honorDayLabelsFor(
+  days: readonly FinaleDay[],
+  honors: readonly FinaleDayHonorDoc[],
+): Record<number, string> {
+  const out: Record<number, string> = {};
+  for (const honor of honors) {
+    const raw = days.find((d) => d.index === honor.dayIndex) as EmailDay | undefined;
+    const where = raw ? placeLabel(raw) : '';
+    out[honor.dayIndex] = where
+      ? `Day ${honor.dayIndex + 1} in ${where}`
+      : `Day ${honor.dayIndex + 1}`;
+  }
+  return out;
 }
 
 function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
@@ -1149,17 +1245,15 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
     hasMoment(db, eventId, 'last_call'),
     hasMoment(db, eventId, 'podium'),
   ]);
-  const { postLastCall, freeze, postPodium, computeMostLoved, markComplete } = finaleActions(
-    times,
-    now,
-    {
+  const { postLastCall, freeze, postPodium, computeMostLoved, sendPodiumEmail, markComplete } =
+    finaleActions(times, now, {
       frozenAt: event.frozenAt,
       lastCallPosted,
       podiumPosted,
       mostLovedComputed: event.mostLovedPhoto != null,
+      podiumEmailDone: event.podiumEmailAt != null,
       finaleCompleted: event.finaleCompletedAt != null,
-    },
-  );
+    });
 
   if (postLastCall) {
     try {
@@ -1219,39 +1313,105 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       console.error('runFinaleBeats: freeze failed', eventId, err);
     }
   }
+  // THE PODIUM CONTENT IS BUILT ONCE FOR BOTH ARMS THAT NEED IT (#1192). The
+  // Moment and the winner-announcement email must state one result, and the
+  // cheapest way to guarantee that is for there to be one computation: the
+  // payload written to the Moment is the very object the email is rendered
+  // from, so there is no second derivation for it to disagree with. It is built
+  // when EITHER arm is owed, because the two are independent — the email arm
+  // legitimately retries on later sweeps, after `postPodium` has gone false.
+  //
+  // #266: champion, cruise-wide First to BINGO, and the pinned daily honors,
+  // computed AT the freeze from the ban-filtered roster + day-meta pins.
+  // Best-effort like the last-call content.
+  let podiumContent: {
+    payload: PodiumPayload;
+    /** The ranked, ban-filtered standings whose head IS `payload.champion`. */
+    ranked: FinalePlayer[];
+    days: FinaleDay[];
+    honors: FinaleDayHonorDoc[];
+  } | null = null;
+  if (postPodium || sendPodiumEmail) {
+    try {
+      const days = (Array.isArray(event.days) ? event.days : []) as FinaleDay[];
+      const [roster, honors] = await Promise.all([
+        readFinaleRoster(db, eventId),
+        readDayHonors(db, eventId, days),
+      ]);
+      // The freeze cutoff is NOT optional here (Phase 4b P1). This beat is
+      // retried until the podium Moment actually lands, so a run that happens
+      // after the cutoff — a delayed sweep, or a retry following a transient
+      // write failure — reads LIVE ceremonial-Day buckets. Without the
+      // cutoff a post-freeze bingo could be selected and then PERMANENTLY
+      // posted as the Event-wide First to BINGO, which is the immutable
+      // record the client is asked to agree with.
+      //
+      // BAN-FILTERED BEFORE RANKING, exactly as the last-call copy is: a
+      // presentational ban must hide the row without promoting the next Player
+      // into an honour they did not win.
+      const visible = visibleFinaleRoster(roster, event.bannedUids ?? []);
+      podiumContent = {
+        payload: buildPodiumPayload(roster, days, honors, times.standingsFreezeAt),
+        ranked: podiumStandings(visible, days, times.standingsFreezeAt),
+        days,
+        honors,
+      };
+    } catch (err) {
+      console.error('runFinaleBeats: podium content build failed', eventId, err);
+    }
+  }
   if (postPodium) {
     try {
-      // #266: the podium payload — champion, cruise-wide First to BINGO, and
-      // the pinned daily honors — computed AT the freeze from the ban-filtered
-      // roster + day-meta pins. Best-effort like the last-call content.
-      let extra: Record<string, unknown> | undefined;
-      try {
-        const days = (Array.isArray(event.days) ? event.days : []) as FinaleDay[];
-        const [roster, honors] = await Promise.all([
-          readFinaleRoster(db, eventId),
-          readDayHonors(db, eventId, days),
-        ]);
-        // The freeze cutoff is NOT optional here (Phase 4b P1). This beat is
-        // retried until the podium Moment actually lands, so a run that happens
-        // after the cutoff — a delayed sweep, or a retry following a transient
-        // write failure — reads LIVE ceremonial-Day buckets. Without the
-        // cutoff a post-freeze bingo could be selected and then PERMANENTLY
-        // posted as the Event-wide First to BINGO, which is the immutable
-        // record the client is asked to agree with.
-        extra = {
-          podium: buildPodiumPayload(
-            roster,
-            days,
-            honors,
-            times.standingsFreezeAt,
-          ) as unknown as Record<string, unknown>,
-        };
-      } catch (err) {
-        console.error('runFinaleBeats: podium content build failed', eventId, err);
-      }
-      await postFinaleMoment(db, eventId, 'podium', times.podiumDayIndex, now, extra);
+      await postFinaleMoment(
+        db,
+        eventId,
+        'podium',
+        times.podiumDayIndex,
+        now,
+        podiumContent
+          ? { podium: podiumContent.payload as unknown as Record<string, unknown> }
+          : undefined,
+      );
     } catch (err) {
       console.error('runFinaleBeats: podium post failed', eventId, err);
+    }
+  }
+  // THE WINNER-ANNOUNCEMENT EMAIL (#1192) — the last mail of the Event, replacing
+  // the daily card that #1121 stops at this very instant.
+  //
+  // AFTER the freeze and the Moment, in its own try/catch, and through an
+  // INJECTED sender: the ticket requires a failed send not to block either write,
+  // and the dep keeps this module's dependency graph Firestore-only so every
+  // finale test runs with no transport at all. A run with no sender injected
+  // simply mails nothing, which is what an emulator run and the existing suite
+  // both want.
+  //
+  // Skipped when the content build above failed: an email with no payload would
+  // have no standings to print, and staying silent until the next sweep is
+  // better than sending a hollow one.
+  if (sendPodiumEmail && deps.sendPodiumEmail && podiumContent) {
+    try {
+      const { payload, ranked, days, honors } = podiumContent;
+      const result = await deps.sendPodiumEmail({
+        eventId,
+        event,
+        podium: payload,
+        ranked,
+        mostLoved: (event.mostLovedPhoto ?? null) as MostLovedPhotoAward | null,
+        closingDay: closingDayLabels(days, times.podiumDayIndex),
+        honorDayLabels: honorDayLabelsFor(days, honors),
+      });
+      // Stamped only once the fan-out is actually finished, so a partial or
+      // failed run is retried by the next sweep rather than abandoned.
+      if (result.drained) {
+        try {
+          await db.doc(`events/${eventId}`).set({ podiumEmailAt: now });
+        } catch (err) {
+          console.error('runFinaleBeats: podiumEmailAt stamp failed', eventId, err);
+        }
+      }
+    } catch (err) {
+      console.error('runFinaleBeats: podium email failed', eventId, err);
     }
   }
   // LAST, because it is a statement about everything above it (#1151, Codex P1
