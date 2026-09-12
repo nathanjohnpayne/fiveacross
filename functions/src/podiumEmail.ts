@@ -126,7 +126,7 @@ export interface PodiumSendResult {
    */
   drained: boolean;
   /** Why nothing was sent, when nothing was. */
-  reason?: 'disabled' | 'no-roster' | 'archived';
+  reason?: 'disabled' | 'no-roster' | 'archived' | 'bans-changed';
 }
 
 /** The per-run recipient ceiling — a runaway guard on a corrupted roster, not a
@@ -185,8 +185,19 @@ async function resolveAddress(
   }
 }
 
+/** Whether the Event's ban roster differs from the one a snapshot was filtered
+ *  against. Order-insensitive and tolerant of a malformed stored value, which
+ *  reads as an empty roster exactly as `visibleFinaleRoster` treats it. */
+function bansDiffer(filteredAgainst: readonly string[], current: unknown): boolean {
+  const now = Array.isArray(current) ? current.filter((u): u is string => typeof u === 'string') : [];
+  if (now.length !== filteredAgainst.length) return true;
+  const before = new Set(filteredAgainst);
+  return now.some((uid) => !before.has(uid));
+}
+
 /**
- * Whether the Event's roster has more members than this run examined.
+ * Whether the Event's visible roster now contains anyone this run did not
+ * examine.
  *
  * Compares the VISIBLE count against the SAME ban roster the run walked, which
  * is carried on `PodiumEmailInput` rather than re-read. Both halves of that
@@ -214,14 +225,22 @@ async function resolveAddress(
 async function rosterGrewSince(
   db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
-  examinedCount: number,
+  examined: ReadonlySet<string>,
   bannedUids: readonly string[],
   deps: DailyEmailDeps,
 ): Promise<boolean> {
   try {
     const cap = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
     const roster = await readFinaleRoster(db, eventId, cap + 1);
-    return visibleFinaleRoster(roster, bannedUids).length > examinedCount;
+    const visible = visibleFinaleRoster(roster, bannedUids).map((p) => p.uid);
+    // THE SET, NOT THE COUNT (Codex P2, round 4 on PR #1207). An admin deleting
+    // one Player while another joins leaves the count unchanged while an
+    // UNEXAMINED recipient has replaced an examined one — both writes are
+    // permitted by the rules during a fan-out that runs for minutes — and a
+    // count comparison would stamp completion over the newcomer, who is then
+    // skipped by every later sweep. Only "every visible uid now was one I
+    // examined" is the question worth asking.
+    return visible.some((uid) => !examined.has(uid));
   } catch (err) {
     console.error('rosterGrewSince failed', eventId, err);
     return true;
@@ -297,35 +316,6 @@ export async function sendPodiumEmailForEvent(
   if (!dailyEmailEnabled(input.event as Parameters<typeof dailyEmailEnabled>[0])) {
     return { ...result, reason: 'disabled' };
   }
-  if (input.ranked.length === 0) {
-    // AN EMPTY ROSTER IS STILL A ROSTER THAT CAN GAIN A MEMBER (Codex P2, round
-    // 3 on PR #1207). This fast path stamped completion directly and so skipped
-    // the membership recount the normal path ends with — and `firestore.rules`
-    // permits `players/{uid}` creation until archival, so a participant joining
-    // between the due check's query and this line would have been locked out
-    // permanently: every later sweep answers `already-sent`. The zero-recipient
-    // case needs the same verification as every other, not less.
-    const grew = await rosterGrewSince(db, eventId, 0, input.bannedUids ?? [], deps);
-    if (!grew) await stampFanOutComplete(db, eventId, deps);
-    return { ...result, drained: !grew, reason: 'no-roster' };
-  }
-
-  const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
-  const unsubscribeBaseUrl =
-    deps.unsubscribeBaseUrl ?? (await import('./params')).EMAIL_UNSUBSCRIBE_URL.value();
-  const send = deps.send ?? (await import('./email')).sendEmail;
-  const getEmailForUid = deps.getEmailForUid ?? defaultGetEmailForUid;
-  const sleep = deps.sleep ?? defaultSleep;
-  const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
-  const maxRecipients = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
-
-  // Resolved before `from`, because the sender is Edition-aware (#671) and the
-  // Edition only becomes known once the Event's host resolves.
-  const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
-  const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
-  const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
-  const eventName = typeof input.event.name === 'string' ? input.event.name : '';
-
   // THE FRESH READ, immediately before the first send (Codex P2, round 2 on PR
   // #1207). Everything above this line is preparation — the due check's Moment
   // and roster reads, the hostname resolution, the sender identity — and that is
@@ -358,6 +348,56 @@ export async function sendPodiumEmailForEvent(
   if (!dailyEmailEnabled(atDelivery as Parameters<typeof dailyEmailEnabled>[0])) {
     return { ...result, reason: 'disabled' };
   }
+  // AND THE BAN ROSTER IS RE-COMPARED (Codex P2, round 4 on PR #1207). Every
+  // ban-filtered thing this send carries — the recipient list, the podium
+  // honours, the Most-Loved winner — was filtered against the roster the due
+  // check read, and a ban landing during preparation would otherwise mail the
+  // newly banned Player AND keep naming them in everybody else's copy, which is
+  // exactly what the ban-filtered presentation contract forbids.
+  //
+  // ABORT RATHER THAN REBUILD: the snapshot is internally consistent and
+  // rebuilding it here would mean re-deriving the honours, the ranking and the
+  // award mid-function. Returning undrained sends this Event through the whole
+  // due check again on the next sweep, which produces a correctly filtered
+  // snapshot by construction, and every recipient already mailed is skipped by
+  // their own marker.
+  //
+  // The residual matches the daily card's: a ban landing after delivery has
+  // BEGUN still finishes the roster already in flight, because the check is per
+  // send, not per recipient.
+  if (bansDiffer(input.bannedUids ?? [], atDelivery?.bannedUids)) {
+    console.log(`sendPodiumEmailForEvent ${eventId}: ban roster changed during preparation`);
+    return { ...result, reason: 'bans-changed' };
+  }
+
+  if (input.ranked.length === 0) {
+    // AN EMPTY ROSTER IS STILL A ROSTER THAT CAN GAIN A MEMBER (Codex P2, round
+    // 3 on PR #1207). This fast path stamped completion directly and so skipped
+    // the membership recount the normal path ends with — and `firestore.rules`
+    // permits `players/{uid}` creation until archival, so a participant joining
+    // between the due check's query and this line would have been locked out
+    // permanently: every later sweep answers `already-sent`. The zero-recipient
+    // case needs the same verification as every other, not less.
+    const grew = await rosterGrewSince(db, eventId, new Set<string>(), input.bannedUids ?? [], deps);
+    if (!grew) await stampFanOutComplete(db, eventId, deps);
+    return { ...result, drained: !grew, reason: 'no-roster' };
+  }
+
+  const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
+  const unsubscribeBaseUrl =
+    deps.unsubscribeBaseUrl ?? (await import('./params')).EMAIL_UNSUBSCRIBE_URL.value();
+  const send = deps.send ?? (await import('./email')).sendEmail;
+  const getEmailForUid = deps.getEmailForUid ?? defaultGetEmailForUid;
+  const sleep = deps.sleep ?? defaultSleep;
+  const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
+  const maxRecipients = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
+
+  // Resolved before `from`, because the sender is Edition-aware (#671) and the
+  // Edition only becomes known once the Event's host resolves.
+  const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
+  const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
+  const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
+  const eventName = typeof input.event.name === 'string' ? input.event.name : '';
 
   let capHit = false;
   let examined = 0;
@@ -478,7 +518,7 @@ export async function sendPodiumEmailForEvent(
     const grew = await rosterGrewSince(
       db,
       eventId,
-      input.ranked.length,
+      new Set(input.ranked.map((p) => p.uid)),
       input.bannedUids ?? [],
       deps,
     );
@@ -578,20 +618,25 @@ export function visibleMostLovedAward(
       ? award.winnerCount
       : award.winners.length;
   const removed = award.winners.length - winners.length;
-  // A TRUNCATED TIE CANNOT BE COUNTED EXACTLY (Codex P2, round 3 on PR #1207).
-  // `winners` is a bounded prefix — `MAX_PERSISTED_MOST_LOVED_WINNERS` — while
-  // `winnerCount` deliberately preserves the FULL cardinality beyond it, so a
-  // banned winner outside the prefix is invisible here and `removed` cannot
-  // account for them. Subtracting only what we can see would then report a
-  // larger visible tie than actually exists, naming hidden Players by implication
-  // — the very thing the ban filter is for. The identities are not recoverable
-  // at this boundary, so the honest answer is to stop claiming an exact number:
-  // `winnerCountExact` is false, and the copy drops to a non-numeric tail.
+  // A TRUNCATED TIE CANNOT BE COUNTED EXACTLY (Codex P2, rounds 3 and 4 on PR
+  // #1207). `winners` is a bounded prefix — `MAX_PERSISTED_MOST_LOVED_WINNERS` —
+  // while `winnerCount` deliberately preserves the FULL cardinality beyond it, so
+  // a banned winner outside the prefix is invisible here and cannot be
+  // subtracted. Reporting a number would then overstate the visible tie, naming
+  // hidden Players by implication — the very thing the ban filter is for.
+  //
+  // ROUND 3'S VERSION OF THIS TEST WAS TOO WEAK: it asked whether a ban had been
+  // found INSIDE the prefix (`removed > 0`), which is precisely the case that
+  // does not need the guard. The unprovable case is a ban that lies only BEYOND
+  // the prefix, where `removed` is zero. A truncated award simply cannot prove
+  // its hidden remainder is ban-free, so the only honest test is whether any ban
+  // roster is in play at all — with none, no filtering happened and the declared
+  // count stands.
   const truncated = declared > award.winners.length;
   return {
     winners,
     winnerCount: Math.max(winners.length, declared - removed),
-    winnerCountExact: !(truncated && removed > 0),
+    winnerCountExact: !truncated || bannedUids.size === 0,
     heartCount: award.heartCount,
     frozenAt: typeof award.frozenAt === 'number' ? award.frozenAt : 0,
     computedAt: typeof award.computedAt === 'number' ? award.computedAt : 0,

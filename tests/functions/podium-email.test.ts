@@ -1080,6 +1080,133 @@ describe('the rendered copy matches the wireframe frame it is drawn from', () =>
   });
 });
 
+describe('round-4 findings (Codex P2, CodeRabbit P1)', () => {
+  it('does not stamp completion for an empty roster on a DISABLED Event', async () => {
+    // CodeRabbit P1: the empty-roster branch ran before the fresh Event read, so
+    // it could write `podiumEmailAt` while the owner had just switched the email
+    // off. Re-enabling then answers `already-sent` forever.
+    const db = makeDb(seedDue({ bannedUids: ['zac', 'logan', 'nathan'] }));
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    db.docs['events/med-2026'].settings = { dailyEmailEnabled: false };
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.reason).toBe('disabled');
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('does not stamp completion for an empty roster on an ARCHIVING Event', async () => {
+    const db = makeDb(seedDue({ bannedUids: ['zac', 'logan', 'nathan'] }));
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    db.docs['events/med-2026'].archiving = true;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.reason).toBe('archived');
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('aborts when a ban lands between the due check and delivery', async () => {
+    // Every ban-filtered thing the snapshot carries — recipients, honours, the
+    // award — was filtered against the roster the due check read.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    db.docs['events/med-2026'].bannedUids = ['logan'];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a stale ban-filtered snapshot must not be delivered');
+      },
+    });
+    expect(result.reason).toBe('bans-changed');
+    expect(result.drained).toBe(false);
+
+    // The next sweep rebuilds a correctly filtered snapshot and mails the rest.
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent.map((s) => s.to[0]).sort()).toEqual(['nathan@example.com', 'zac@example.com']);
+  });
+
+  it('detects a delete-and-join swap that leaves the roster COUNT unchanged', async () => {
+    // A count comparison cannot see this: one examined Player leaves, one
+    // unexamined Player arrives, and the total is identical.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 1) {
+          delete db.docs['events/med-2026/players/nathan'];
+          db.docs['events/med-2026/players/swap'] = {
+            displayName: 'Swapped In',
+            bingoCount: 0,
+            squaresMarked: 2,
+            firstBingoAt: null,
+          };
+        }
+        return true;
+      },
+    });
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('treats a truncated tie as inexact even when the ban is only BEYOND the prefix', async () => {
+    // Round 3's test asked whether a ban was found INSIDE the prefix, which is
+    // the case that does not need the guard. Here every prefix entry is visible
+    // and the banned uid lies in the hidden remainder.
+    const many = Array.from({ length: 100 }, (_, i) => ({
+      proofId: `p${i}`,
+      uid: `u${i}`,
+      displayName: `P${i}`,
+      promptText: 'Shot',
+      dayIndex: 1,
+      proofCreatedAt: 100 + i,
+    }));
+    const docs = seedDue({
+      mostLovedPhoto: { winners: many, winnerCount: 150, heartCount: 9, frozenAt: 1, computedAt: 2 },
+      bannedUids: ['hidden-winner-beyond-the-prefix'],
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners).toHaveLength(100);
+    expect(got.input.mostLoved?.winnerCountExact).toBe(false);
+  });
+
+  it('still counts a truncated tie exactly when NO ban roster is in play', async () => {
+    // With no bans there is no filtering, so the stored cardinality stands even
+    // though the prefix is truncated.
+    const many = Array.from({ length: 100 }, (_, i) => ({
+      proofId: `p${i}`,
+      uid: `u${i}`,
+      displayName: `P${i}`,
+      promptText: 'Shot',
+      dayIndex: 1,
+      proofCreatedAt: 100 + i,
+    }));
+    const docs = seedDue({
+      mostLovedPhoto: { winners: many, winnerCount: 150, heartCount: 9, frozenAt: 1, computedAt: 2 },
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winnerCountExact).toBe(true);
+    expect(got.input.mostLoved?.winnerCount).toBe(150);
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a
