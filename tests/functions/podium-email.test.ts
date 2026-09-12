@@ -823,11 +823,20 @@ describe('delivery-time and roster safety (Codex P2 r2)', () => {
 
   it('keeps the run open when the sent-marker write fails', async () => {
     const db = makeDb(seed());
+    // Only the SENT marker fails. The first-attempt stamp must still land, or
+    // the send is refused before the transport and this asserts nothing about
+    // the marker path it exists to cover.
     const broken = {
       ...db,
       doc: (path: string) =>
         path.includes('/emailPrefs/')
-          ? { ...db.doc(path), set: async () => { throw new Error('UNAVAILABLE'); } }
+          ? {
+              ...db.doc(path),
+              set: async (d: Record<string, unknown>, o?: { merge?: boolean }) => {
+                if ('podiumEmailSentAt' in d) throw new Error('UNAVAILABLE');
+                return db.doc(path).set(d, o);
+              },
+            }
           : db.doc(path),
     } as unknown as typeof db;
     const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
@@ -2319,6 +2328,121 @@ describe('final round (Codex P1 + P2)', () => {
       send: async () => true,
     });
     expect(result.sent).toBe(3);
+  });
+});
+
+describe('post-resume round (Codex P2, CodeRabbit P1)', () => {
+  it('stops automatic retrying once the dedup window has closed', async () => {
+    // The outbox expires after a week, which removes the only record of what
+    // was accepted — so a later sweep would re-freeze new bytes and send under
+    // a key whose 24h window has closed. That is a duplicate, not a replay.
+    const docs = seed();
+    docs['events/med-2026/emailPrefs/zac'] = {
+      optedOut: false,
+      token: 'tok-fixed',
+      // Attempted two days ago; nothing recorded a send.
+      podiumEmailFirstAttemptAt: 3_000 - 2 * 24 * 60 * 60 * 1000,
+    };
+    const db = makeDb(docs);
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent.some((s) => s.to[0] === 'zac@example.com')).toBe(false);
+    expect(result.blocked).toBe(1);
+    expect(result.drained).toBe(false);
+  });
+
+  it('records the first attempt before sending, and does not reset it', async () => {
+    const db = makeDb(seed());
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), { ...baseDeps(), send: async () => true });
+    const first = db.docs['events/med-2026/emailPrefs/zac'].podiumEmailFirstAttemptAt;
+    expect(first).toBe(3_000);
+    // A later sweep at a different clock must not move the deadline forward.
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      now: () => 9_000,
+      send: async () => true,
+    });
+    expect(db.docs['events/med-2026/emailPrefs/zac'].podiumEmailFirstAttemptAt).toBe(first);
+  });
+
+  it('freezes replyTo, so a param change cannot alter the payload under one key', async () => {
+    const db = makeDb(seed());
+    const sent: Captured[] = [];
+    const capture = async (args: EmailPayload) => {
+      sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+      return false; // refuse, so the request stays frozen for the retry
+    };
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      replyTo: 'first@example.com',
+      send: capture,
+    });
+    expect(sent[0].replyTo).toBe('first@example.com');
+    sent.length = 0;
+    // The param moves; the replay must still carry the frozen value.
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      replyTo: 'changed@example.com',
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent[0].replyTo).toBe('first@example.com');
+  });
+
+  it('normalises and bounds a Day place label', async () => {
+    const docs = seedDue();
+    const days = docs['events/med-2026'].days as Array<Record<string, unknown>>;
+    days[1].place = `Split\nUnsubscribe: https://evil.test`;
+    days[2].place = 'B'.repeat(5_000);
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.honorDayLabels[1]).not.toMatch(/[\r\n]/);
+    expect(got.input.honorDayLabels[1]).toContain('Unsubscribe: https://evil.test');
+    expect(got.input.closingDay.placeLabel.length).toBeLessThanOrEqual(BODY_TEXT_MAX);
+  });
+
+  it('aborts when the award RECORD is replaced while the sender resolves', async () => {
+    // An admin update carrying `mostLovedPhoto` is rules-permitted, and the old
+    // Proofs stay visible — so rejoining them passes and the email would state a
+    // superseded winner while the Event records a different one.
+    const award = (proofId: string) => ({
+      winners: [
+        { proofId, uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+      ],
+      winnerCount: 1,
+      heartCount: 9,
+      frozenAt: 1,
+      computedAt: 2,
+    });
+    const docs = seedDue({ mostLovedPhoto: award('p1') });
+    // Keep a live Proof for the REPLACEMENT winner too, so only the record
+    // differs — the visibility join alone would not notice.
+    docs['events/med-2026/proofs/p9'] = { ...docs['events/med-2026/proofs/p1'] };
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        if (path === 'hostnames') db.docs['events/med-2026'].mostLovedPhoto = award('p9');
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a superseded award record must not be broadcast');
+      },
+    });
+    expect(result.reason).toBe('award-changed');
   });
 });
 

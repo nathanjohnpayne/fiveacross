@@ -43,6 +43,7 @@ import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
 import { podiumStandings, standingsFreezeAtFor } from './finaleContent';
 import {
   ensureEmailPrefs,
+  markPodiumEmailAttempted,
   markPodiumEmailSent,
   markPodiumEmailUndeliverable,
   preferencesLink,
@@ -51,7 +52,11 @@ import {
   listUnsubscribeHeaders,
 } from './emailOptOut';
 import type { FinalePlayer, PodiumPayload } from './finaleContent';
-import { buildPodiumEmailModel, type VisibleMostLovedAward } from './podiumEmailContent';
+import {
+  buildPodiumEmailModel,
+  singleLine,
+  type VisibleMostLovedAward,
+} from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
 import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
 
@@ -86,6 +91,19 @@ export interface PodiumEmailInput {
    * and the email shipped with the award silently missing.
    */
   persistedWinners?: readonly MostLovedPhotoWinner[];
+  /**
+   * A fingerprint of the Event's `mostLovedPhoto` RECORD as the snapshot read it.
+   *
+   * Distinct from the rendered award's fingerprint on the frozen request: that
+   * one detects the PROOFS behind the winners moving, while this detects the
+   * record ITSELF being replaced. `tests/rules/most-loved-photo.test.ts`
+   * confirms an admin update carrying `mostLovedPhoto` is permitted, so an award
+   * rewritten while the sender resolved would otherwise pass every check — the
+   * old Proofs are still visible — and the email would state a superseded winner
+   * or count while the Event records a different one (Codex P2, final round on
+   * PR #1207).
+   */
+  awardRecordFingerprint?: string;
   /** The ban roster the honours and the recipient list were filtered against,
    *  carried so the completion guard can compare like with like. */
   bannedUids?: readonly string[];
@@ -169,6 +187,18 @@ const LIFECYCLE_RECHECK_EVERY = 25;
  * `docs/app/phase-1-deploy.md` carries the command.
  */
 const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Resend's idempotency retention. Past this, a key no longer dedupes, so a send
+ * under it is a NEW delivery rather than a replay.
+ *
+ * It is the deadline for automatic retrying (Codex P2 + CodeRabbit P1, final
+ * round on PR #1207): if a recipient has a first-attempt stamp older than this
+ * and still no sent marker, the outcome of that first attempt is unknowable —
+ * accepted-then-unrecorded looks identical to never-accepted — and sending again
+ * risks a second copy. Automation stops there and says so.
+ */
+const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The verified-address lookup, matching `notify.ts`'s verified-only policy.
@@ -431,6 +461,19 @@ async function freshEventGuard(
   // list has nothing to verify, `surviving.length === 0` read as "the photo went
   // away", and the send aborted with `award-changed` on every attempt. An award
   // with no winner is simply an email with no award module.
+  // THE AWARD RECORD ITSELF, before its Proofs (Codex P2, final round). An admin
+  // update carrying `mostLovedPhoto` is rules-permitted, so the record can be
+  // REPLACED while the sender resolves — and rejoining the old winners against
+  // live Proofs passes happily when those Proofs are still visible, sending a
+  // superseded winner or count and then stamping completion on it.
+  if (
+    revalidateAward &&
+    input.awardRecordFingerprint !== undefined &&
+    awardRecordFingerprintOf(atDelivery?.mostLovedPhoto) !== input.awardRecordFingerprint
+  ) {
+    console.log(`sendPodiumEmailForEvent ${eventId}: award record replaced during preparation`);
+    return { ...result, reason: 'award-changed' };
+  }
   // THE WHOLE VISIBLE TIE, not just the hero (Codex P2, round 11 on PR #1207).
   // Round 8 rechecked only `winners[0]`, reasoning that it is the one winner the
   // email renders — but the tie COUNT is rendered too, and it is derived from
@@ -548,6 +591,9 @@ export async function sendPodiumEmailForEvent(
   // Edition only becomes known once the Event's host resolves.
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
   const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
+  // Resolved ONCE here so it can be frozen; `sendEmail` would otherwise read the
+  // param on every attempt.
+  const replyTo = deps.replyTo ?? (await import('./params')).EMAIL_REPLY_TO.value();
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
   const eventName = typeof input.event.name === 'string' ? input.event.name : '';
 
@@ -713,6 +759,30 @@ export async function sendPodiumEmailForEvent(
       // FROZEN BEFORE THE SEND, replayed on a retry. Everything below reads
       // `outbound`, never the freshly rendered model, so the bytes under this
       // idempotency key are the same on every attempt.
+      // THE DURABLE DEADLINE, recorded before the first send and outliving the
+      // outbox's TTL. Past the provider's dedup window with no sent marker, the
+      // first attempt's outcome cannot be established, so automation stops
+      // rather than risking a duplicate.
+      const firstAttemptAt = await markPodiumEmailAttempted(
+        db,
+        eventId,
+        player.uid,
+        prefs.podiumEmailFirstAttemptAt,
+        deps,
+      );
+      if (firstAttemptAt === null) {
+        result.blocked++;
+        continue;
+      }
+      if ((deps.now ?? Date.now)() - firstAttemptAt >= DEDUP_WINDOW_MS) {
+        console.error(
+          'sendPodiumEmailForEvent: first attempt is older than the dedup window and no send is recorded; operator resolution required',
+          eventId,
+          player.uid,
+        );
+        result.blocked++;
+        continue;
+      }
       const outbound = await freezeOrReplay(
         db,
         eventId,
@@ -723,6 +793,7 @@ export async function sendPodiumEmailForEvent(
           html: renderPodiumEmailHtml(model),
           text: renderPodiumEmailText(model),
           from,
+          replyTo,
           unsubscribeUrl: unsubUrl,
           banFingerprint: banFingerprintOf(input.bannedUids),
           awardFingerprint: awardFingerprintOf(input.mostLoved),
@@ -741,6 +812,7 @@ export async function sendPodiumEmailForEvent(
         html: outbound.html,
         text: outbound.text,
         from: outbound.from,
+        replyTo: outbound.replyTo,
         // NO Day index in the key, unlike the daily card's: there is exactly one
         // winner mail per Event per recipient, so the Event and the uid are the
         // whole identity of the send. A retry after a failed marker write
@@ -1010,6 +1082,12 @@ interface FrozenPodiumRequest {
   html: string;
   text: string;
   from: string;
+  /** RESOLVED AND FROZEN, not left to the transport (Codex P2, final round on PR
+   *  #1207). `sendEmail` resolves `EMAIL_REPLY_TO` itself when this is
+   *  undefined, so an unfrozen value means a param change between attempts
+   *  sends a different payload under one idempotency key — rejected until the
+   *  key expires, and then a duplicate. */
+  replyTo: string;
   unsubscribeUrl: string;
   /** The ban roster these bytes were filtered against, as a stable fingerprint.
    *  A replay whose current roster differs is STALE: the stored message may name
@@ -1039,6 +1117,10 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
   // because requiring it non-empty rejected every unbanned Event's frozen
   // request and blocked its whole retry path.
   if (typeof raw.banFingerprint !== 'string') return null;
+  // May legitimately be EMPTY, like the fingerprints: an unset `EMAIL_REPLY_TO`
+  // is the default, and `sendEmail` drops a blank one rather than sending a
+  // malformed header.
+  if (typeof raw.replyTo !== 'string') return null;
   if (typeof raw.awardFingerprint !== 'string') return null;
   return {
     to: raw.to as string,
@@ -1047,6 +1129,7 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
     text: raw.text as string,
     from: raw.from as string,
     unsubscribeUrl: raw.unsubscribeUrl as string,
+    replyTo: raw.replyTo as string,
     banFingerprint: raw.banFingerprint as string,
     awardFingerprint: raw.awardFingerprint as string,
   };
@@ -1062,6 +1145,23 @@ function banFingerprintOf(raw: unknown): string {
  *  incarnation, in render order. `''` means "no award module", which is itself a
  *  state a replay must not contradict — bytes naming a winner cannot be served
  *  once the current snapshot has none. */
+function awardRecordFingerprintOf(raw: unknown): string {
+  // The STORED record, read straight off the Event rather than through the
+  // validator, so any change — a new winner set, a moved heart count, a
+  // re-freeze — reads as different. Stable ordering is the document's own.
+  if (!raw || typeof raw !== 'object') return '';
+  const a = raw as { winners?: unknown; winnerCount?: unknown; heartCount?: unknown; frozenAt?: unknown };
+  const winners = Array.isArray(a.winners)
+    ? a.winners
+        .map((w) => {
+          const x = (w ?? {}) as { proofId?: unknown; proofCreatedAt?: unknown };
+          return `${String(x.proofId)}:${String(x.proofCreatedAt)}`;
+        })
+        .join(',')
+    : '';
+  return `${winners}|${String(a.winnerCount)}|${String(a.heartCount)}|${String(a.frozenAt)}`;
+}
+
 function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): string {
   if (!award) return '';
   return award.winners.map((w) => `${w.proofId}:${w.proofCreatedAt}`).join(',');
@@ -1170,17 +1270,25 @@ function dayLabels(
   photoDayLabels: Record<number, string>;
 } {
   const raw = days.find((d) => d.index === podiumDayIndex);
+  // NORMALISED AND BOUNDED like every other Firestore-sourced label (Codex P2,
+  // final round on PR #1207). `placeLabel` only trims, so a Day's stored place
+  // or emoji carrying a newline broke the plain-text alternative's structure —
+  // the HTML part escapes and collapses it — and a large enough value could push
+  // the frozen outbox document over Firestore's 1 MiB limit, which blocks every
+  // recipient. The Event name got this treatment a round ago; these labels are
+  // the same kind of value and were missed.
+  const place = (day: EmailDay | undefined): string => (day ? singleLine(placeLabel(day)) : '');
   const honorDayLabels: Record<number, string> = {};
   for (const index of honorDayIndexes) {
     const day = days.find((d) => d.index === index);
-    const where = day ? placeLabel(day) : '';
+    const where = place(day);
     // A Day with no Place yields "Day 2" alone rather than a dangling
     // preposition.
     honorDayLabels[index] = where ? `Day ${index + 1} in ${where}` : `Day ${index + 1}`;
   }
   const photoDayLabels: Record<number, string> = {};
   for (const day of days) {
-    const where = placeLabel(day);
+    const where = place(day);
     photoDayLabels[day.index] = where
       ? `Day ${day.index + 1} · ${where}`
       : `Day ${day.index + 1}`;
@@ -1191,8 +1299,8 @@ function dayLabels(
       themeId: raw?.theme ?? null,
       dayNumber: podiumDayIndex + 1,
       dayCount: days.length,
-      dateLabel: raw ? formatDayDate(raw.date) : '',
-      placeLabel: raw ? placeLabel(raw) : '',
+      dateLabel: raw ? singleLine(formatDayDate(raw.date)) : '',
+      placeLabel: place(raw),
     },
     honorDayLabels,
   };
@@ -1356,6 +1464,7 @@ export async function podiumEmailInputFor(
       ranked,
       mostLoved: award,
       persistedWinners: filtered?.winners ?? [],
+      awardRecordFingerprint: awardRecordFingerprintOf(event.mostLovedPhoto),
       photoDayLabel:
         award?.winners[0]?.dayIndex != null
           ? photoDayLabels[award.winners[0].dayIndex as number]

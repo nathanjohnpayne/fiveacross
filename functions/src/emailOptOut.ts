@@ -115,6 +115,22 @@ export interface EmailPrefs {
    *  value, because "we decided not to mail you" and "we mailed you" must stay
    *  distinguishable to anyone reading this doc in support. */
   podiumEmailSkippedAt?: number;
+  /**
+   * When the winner email was FIRST attempted for this participant (#1192).
+   *
+   * The durable half of the frozen-request scheme, and it lives HERE rather than
+   * on the outbox document precisely because this doc has no TTL (Codex P2 +
+   * CodeRabbit P1, final round on PR #1207). The outbox expires after a week; if
+   * the send was accepted but the marker write never landed, that expiry removes
+   * the only record of what was accepted — and a later sweep then re-freezes new
+   * bytes and sends under the same idempotency key whose 24-hour window has long
+   * closed, which is a genuine duplicate delivery.
+   *
+   * So this timestamp outlives the outbox and is what bounds automatic retrying:
+   * past the provider's dedup window with no `podiumEmailSentAt`, the outcome is
+   * unknowable and only an operator can resolve it.
+   */
+  podiumEmailFirstAttemptAt?: number;
 }
 
 export interface OptOutDeps {
@@ -178,6 +194,11 @@ export async function readEmailPrefsOutcome(
           typeof data.podiumEmailSkippedAt === 'number' &&
           Number.isFinite(data.podiumEmailSkippedAt)
             ? data.podiumEmailSkippedAt
+            : undefined,
+        podiumEmailFirstAttemptAt:
+          typeof data.podiumEmailFirstAttemptAt === 'number' &&
+          Number.isFinite(data.podiumEmailFirstAttemptAt)
+            ? data.podiumEmailFirstAttemptAt
             : undefined,
       },
     };
@@ -412,6 +433,36 @@ export function shouldSendPodiumTo(
   if (prefs.optedOut) return false;
   if (typeof prefs.podiumEmailSkippedAt === 'number') return false;
   return typeof prefs.podiumEmailSentAt !== 'number';
+}
+
+/**
+ * Record that a first send attempt is about to be made, once.
+ *
+ * Written BEFORE the send and never overwritten: it is the start of the window
+ * inside which a replay is safe, so a later attempt must not be able to reset
+ * it. Returns the effective value — the stored one when it already exists — so
+ * the caller compares against the FIRST attempt rather than this one.
+ */
+export async function markPodiumEmailAttempted(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  existing: number | undefined,
+  deps: OptOutDeps = {},
+): Promise<number | null> {
+  if (typeof existing === 'number') return existing;
+  const at = (deps.now ?? Date.now)();
+  try {
+    await db
+      .doc(emailPrefsPath(eventId, uid))
+      .set({ podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
+    return at;
+  } catch (err) {
+    // Unrecorded means the retry window cannot be bounded, so the caller must
+    // not send: an accepted send with no durable start is the duplicate case.
+    console.error('markPodiumEmailAttempted failed', eventId, uid, err);
+    return null;
+  }
 }
 
 /** Constant-time token comparison. Length is compared first because
