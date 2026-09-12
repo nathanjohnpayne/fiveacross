@@ -186,9 +186,24 @@ feedback_policy:
 #     (docs/agents/coderabbit-audit.md § rate limits).
 #   * Unresolved threads counting toward the conversation-resolution gate.
 #
-# A rate-limit stall is explicitly NOT an auto-merge trigger: it waits for
-# human direction (REVIEW_POLICY.md, and
-# scripts/coderabbit-automerge-rate-limit-gate.sh).
+#   * A SECOND blocking effect that survives the severity gate being false:
+#     `p4b_same_head_barrier` (scripts/phase-4b/lib.sh) consults every provider
+#     whose top-level `enabled` is true, so with CodeRabbit enabled a Phase 4b
+#     run waits for a terminal CodeRabbit report on the exact head. No report,
+#     and the run is held and eventually routed to the manual fallback — even
+#     with no CodeRabbit finding anywhere. Disabling a provider in policy is the
+#     only route to "will-not-report"; the barrier cannot be told to skip one
+#     that is enabled. Budget the extra wait when running Phase 4b here.
+#
+# A rate-limit stall does NOT automatically page the human, and an earlier
+# version of this note said it did. The failover is live: when
+# `coderabbit-wait.sh` returns `rate_limit_stalled` with
+# `codex_failover_requested: true`, `coderabbit-automerge-rate-limit-gate.sh`
+# exits 0 and automation PROCEEDS if either external-review protection is
+# active or the failover's Codex review cleared the current head (#825). Every
+# other combination blocks fail-closed, and only then does it wait for human
+# direction. AGENTS.md documents the same exception — do not stop and page on a
+# stall without checking which arm applies.
 #
 # ADVISORY, and it takes both keys to stay that way. The merge gate is Codex:
 # `@codex review` (Phase 4a) plus the automated Phase 4b cross-agent leg where
