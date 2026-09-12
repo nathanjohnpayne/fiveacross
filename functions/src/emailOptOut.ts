@@ -453,10 +453,29 @@ export async function markPodiumEmailAttempted(
   if (typeof existing === 'number') return existing;
   const at = (deps.now ?? Date.now)();
   try {
-    await db
-      .doc(emailPrefsPath(eventId, uid))
-      .set({ podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
-    return at;
+    // CLAIMED-ABSENT IS NOT ABSENT, so the check and the write share a
+    // transaction (CodeRabbit P1, current head). The caller's `existing` comes
+    // from a read taken several remote operations earlier, so two overlapping
+    // sweeps — Cloud Scheduler delivers at least once, and nothing pins this
+    // function to one instance — can both observe no stamp and both write one.
+    // An unconditional merge then lets the LATER write win, which moves the
+    // start of the retry window forward: exactly what the contract above
+    // forbids. The consequence is not cosmetic. The window bounds retrying at
+    // the provider's 24-hour idempotency retention, so a start stamped later
+    // than the true first send extends our window past the point where Resend
+    // still recognises the key, and a retry in that overhang delivers a second
+    // copy. Re-reading inside the transaction and writing only when the field is
+    // still absent makes the stamp write-once, and the loser of the race adopts
+    // the winner's value rather than replacing it.
+    return await db.runTransaction(async (tx) => {
+      const ref = db.doc(emailPrefsPath(eventId, uid));
+      const snap = await tx.get(ref);
+      const stored = snap.exists ? (snap.data() ?? {}) : {};
+      const already = stored.podiumEmailFirstAttemptAt;
+      if (typeof already === 'number' && Number.isFinite(already)) return already;
+      tx.set(ref, { podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
+      return at;
+    });
   } catch (err) {
     // Unrecorded means the retry window cannot be bounded, so the caller must
     // not send: an accepted send with no durable start is the duplicate case.

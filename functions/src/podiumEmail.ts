@@ -631,9 +631,11 @@ export async function sendPodiumEmailForEvent(
     // Every `LIFECYCLE_RECHECK_EVERY` recipients rather than every one: the
     // check is a document read against a loop whose own step is a network send,
     // so once per batch bounds the overrun to a few recipients while adding
-    // roughly a 4% read overhead. Archival is the only condition re-checked
-    // here — it is the irreversible one, and the others are recoverable by a
-    // later sweep.
+    // roughly a 4% read overhead. FOUR conditions are re-checked here, not just
+    // archival: deletion, archival, the toggle and the award's hero, each added
+    // by a later round below. Deletion and archival are irreversible; the toggle
+    // and a hidden hero are recoverable — so all four stop without writing
+    // completion, which is what lets a recoverable one resume.
     if (examined > 0 && examined % LIFECYCLE_RECHECK_EVERY === 0) {
       const snap = await db.doc(`events/${eventId}`).get();
       const mid = snap.data() as PodiumEmailEvent | undefined;

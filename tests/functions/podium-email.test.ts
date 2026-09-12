@@ -10,7 +10,7 @@ import {
   type PodiumEmailInput,
 } from '../../functions/src/podiumEmail';
 import type { DailyEmailFirestore } from '../../functions/src/dailyEmail';
-import { shouldSendPodiumTo } from '../../functions/src/emailOptOut';
+import { markPodiumEmailAttempted, shouldSendPodiumTo } from '../../functions/src/emailOptOut';
 import {
   BODY_TEXT_MAX,
   buildPodiumEmailModel,
@@ -198,6 +198,53 @@ const run = async (
   });
   return { result, sent, db };
 };
+
+describe('the first-attempt stamp is write-once (#1192, CodeRabbit P1)', () => {
+  // THE STALE `existing` IS THE RACE. Both overlapping sweeps read the prefs doc
+  // several remote operations before they stamp, so each one calls with
+  // `existing === undefined` — and that is faithfully reproduced by calling
+  // twice with the value the first caller held, rather than by real concurrency.
+  const prefsPath = 'events/med-2026/emailPrefs/zac';
+
+  it('does not let a second sweep move the retry window forward', async () => {
+    const db = makeDb({ [prefsPath]: { optedOut: false, token: 't' } });
+
+    const first = await markPodiumEmailAttempted(db, 'med-2026', 'zac', undefined, {
+      now: () => 1_000,
+    });
+    // The second sweep still believes there is no stamp: its own read predates
+    // the write above.
+    const second = await markPodiumEmailAttempted(db, 'med-2026', 'zac', undefined, {
+      now: () => 9_999_000,
+    });
+
+    expect(first).toBe(1_000);
+    // Both the stored stamp and the value handed back name the FIRST attempt.
+    // If the later write won, the 24-hour cutoff would be measured from 9_999_000
+    // and keep retrying past the point where Resend still collapses the key.
+    expect(second).toBe(1_000);
+    expect(db.docs[prefsPath]?.podiumEmailFirstAttemptAt).toBe(1_000);
+  });
+
+  it('keeps the loser of the race from clearing the winner by merge', async () => {
+    const db = makeDb({ [prefsPath]: { optedOut: false, token: 't' } });
+    await markPodiumEmailAttempted(db, 'med-2026', 'zac', undefined, { now: () => 5_000 });
+    await markPodiumEmailAttempted(db, 'med-2026', 'zac', undefined, { now: () => 6_000 });
+    await markPodiumEmailAttempted(db, 'med-2026', 'zac', undefined, { now: () => 7_000 });
+
+    expect(db.docs[prefsPath]?.podiumEmailFirstAttemptAt).toBe(5_000);
+    // The surrounding document is untouched by the no-op writes.
+    expect(db.docs[prefsPath]?.token).toBe('t');
+  });
+
+  it('still short-circuits without a read when the caller already has the stamp', async () => {
+    const db = makeDb({ [prefsPath]: { optedOut: false, token: 't' } });
+    const at = await markPodiumEmailAttempted(db, 'med-2026', 'zac', 42, { now: () => 1_000 });
+    expect(at).toBe(42);
+    // Nothing was written: the caller's own read already proved the stamp exists.
+    expect(db.docs[prefsPath]?.podiumEmailFirstAttemptAt).toBeUndefined();
+  });
+});
 
 describe('sendPodiumEmailForEvent (#1192)', () => {
   it('mails every opted-in participant exactly once', async () => {
