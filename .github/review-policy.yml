@@ -137,15 +137,17 @@ feedback_policy:
 # review and before the threshold check for agent handoff.
 #
 # CodeRabbit is typically enabled for public repositories (free plan) and
-# disabled for private ones. The template ships with enabled: false; set to
-# true when deploying to a public repo.
+# disabled for private ones. The template ships with enabled: false; this repo
+# is public and sets it TRUE (see the posture note above the key below).
 #
-# CodeRabbit review is advisory — it does not block merge via CI. That does
-# not override GitHub's required-conversation-resolution branch protection:
-# unresolved review conversations still block merge until cleared under
-# REVIEW_POLICY.md's pre-merge review conversation gate. The agent is required
-# to read and address substantive CodeRabbit findings before proceeding past
-# Phase 2.5.
+# CodeRabbit review is ADVISORY here (operator decision, 2026-09-11): the
+# severity gate below is false, so a CodeRabbit finding never fails a required
+# check on its own. That does not make it consequence-free — GitHub's
+# required-conversation-resolution branch protection still blocks merge on
+# unresolved review conversations until they are cleared under REVIEW_POLICY.md's
+# pre-merge review conversation gate, whatever the severity gate is set to.
+# The agent is required to read and address substantive CodeRabbit findings
+# before proceeding past Phase 2.5.
 #
 # When enabled, the agent MUST:
 #   1. Wait for CodeRabbit to post before proceeding — prefer
@@ -159,39 +161,76 @@ feedback_policy:
 #   3. Grep inline comments for "Potential issue" or "⚠️" — every flagged
 #      finding must be explicitly addressed (fixed or dismissed with reasoning).
 #
-# To reverse: set enabled: false, delete .coderabbit.yml, uninstall the
-# CodeRabbit GitHub App. All agent instructions use conditional language
-# and will skip Phase 2.5 automatically.
+# To reverse: see the single rollback procedure below (flip BOTH keys; do
+# NOT delete .coderabbit.yml). All agent instructions use conditional language
+# and skip Phase 2.5 automatically once `enabled: false` is set here.
 #
-# DISABLED 2026-08-04 per operator request. CodeRabbit is advisory here — it
-# never carried the merge gate, which is Codex (Phase 4a) plus the automated
-# Phase 4b leg — but its rate-limit behavior made it the dominant source of
-# latency and stalls: it does not auto-retry after its window elapses, so
-# `coderabbit-wait.sh` had to parse the published window, sleep it, and
-# re-trigger (#138), with a measured p99 review latency of ~19 minutes and a
-# 1245s poll ceiling (#623) on every PR. Its unresolved threads also count
-# toward branch protection's conversation-resolution gate, so an advisory bot
-# could block a merge outright.
+# RE-ENABLED 2026-09-11 per operator request, paired with
+# `reviews.auto_review.enabled: true` in `.coderabbit.yml`. The keys move
+# together: that one makes CodeRabbit REVIEW, this one makes the agent WAIT for
+# it in Phase 2.5. Enabling the App without this key leaves its threads
+# unwatched, and an unresolved thread still holds branch protection's
+# conversation-resolution gate — so the bot could block a merge no phase was
+# tracking.
 #
-# Review path after this change: `@codex review` (Phase 4a) on every PR, with
-# the automated Phase 4b cross-agent leg where the classifier calls for it.
+# History and the costs this re-accepts. CodeRabbit ran until 2026-08-04, was
+# paused because it was the dominant source of latency and stalls, and is back
+# on from 2026-09-11. Nothing about that cost profile has changed, so expect:
 #
-# The repo-level opt-out is `.coderabbit.yml`'s `reviews.auto_review.enabled:
-# false` — CodeRabbit's documented way to disable auto-review for a repository
-# (docs.coderabbit.ai/configuration/auto-review). DELETING the file does not
-# achieve this: `auto_review.enabled` defaults to TRUE, so an absent config
-# means "review everything", not "review nothing". The file is therefore kept
-# with the flag off, paired with `coderabbit.enabled: false` here so the agent
-# also stops waiting on Phase 2.5.
+#   * The PROVIDER never retries itself after a rate-limit window elapses; our
+#     tooling does the retrying. `coderabbit-wait.sh` parses the published
+#     window, sleeps it and re-triggers (#138). So an operator does not restart
+#     a rate-limited review by hand while the wait script is running — but a
+#     stall outside that script stays stalled, because nothing on CodeRabbit's
+#     side will pick it back up.
+#   * Measured review latency p50 414s / p99 1136s, 1245s poll ceiling (#623),
+#     paid on every PR that waits on Phase 2.5.
+#   * One invocation of the per-developer hourly allowance per review run,
+#     incremental passes on each push included
+#     (docs/agents/coderabbit-audit.md § rate limits).
+#   * Unresolved threads counting toward the conversation-resolution gate.
 #
-# `scripts/ci/check_coderabbit_config` originally failed that pairing: its
-# safety-posture floor rejects a present file with the flag off, because a lone
-# flip "silently turns CodeRabbit off". That reasoning does not apply to a
-# PAIRED opt-out, which is explicit in review-policy.yml — the same argument the
-# gate already accepts for the file-absent case (#248). The gate now treats the
-# paired form as valid; see .sync-overrides.yml for the propagation exception.
+#   * A SECOND blocking effect that survives the severity gate being false:
+#     `p4b_same_head_barrier` (scripts/phase-4b/lib.sh) consults every provider
+#     whose top-level `enabled` is true, so with CodeRabbit enabled a Phase 4b
+#     run waits for a terminal CodeRabbit report on the exact head. No report,
+#     and the run is held and eventually routed to the manual fallback — even
+#     with no CodeRabbit finding anywhere. Disabling a provider in policy is the
+#     only route to "will-not-report"; the barrier cannot be told to skip one
+#     that is enabled. Budget the extra wait when running Phase 4b here.
+#
+# A rate-limit stall does NOT automatically page the human, and an earlier
+# version of this note said it did. The failover is live: when
+# `coderabbit-wait.sh` returns `rate_limit_stalled` with
+# `codex_failover_requested: true`, `coderabbit-automerge-rate-limit-gate.sh`
+# exits 0 and automation PROCEEDS if either external-review protection is
+# active or the failover's Codex review cleared the current head (#825). Every
+# other combination blocks fail-closed, and only then does it wait for human
+# direction. AGENTS.md documents the same exception — do not stop and page on a
+# stall without checking which arm applies.
+#
+# ADVISORY, and it takes both keys to stay that way. The merge gate is Codex:
+# `@codex review` (Phase 4a) plus the automated Phase 4b cross-agent leg where
+# the classifier calls for it. `severity_gate.enabled` below is FALSE per the
+# operator's 2026-09-11 decision, so `scripts/coderabbit-severity-gate.sh` is a
+# green no-op and a CodeRabbit finding cannot hold a merge by itself.
+#
+# That pairing is deliberate and worth keeping. The gate is live, not inert —
+# it was observed FAILING on PR #1209 while it was still true. Turning it back
+# on while auto-review is enabled would let an advisory bot block every PR, and
+# CodeRabbit does not auto-retry once a rate-limit window elapses, so a provider
+# stall would become a stuck merge. Flip it only as a deliberate policy change.
+#
+# CodeRabbit findings still have to be dispositioned and their threads resolved:
+# required-conversation-resolution is branch protection, not this gate.
+#
+# To reverse, flip BOTH keys back — do not delete `.coderabbit.yml`.
+# `auto_review.enabled` defaults to TRUE, so an absent config means "review
+# everything", not "review nothing"; the file is kept with the flag set either
+# way. `scripts/ci/check_coderabbit_config` accepts both the paired opt-out and
+# the enabled form (#248, mergepath#911).
 coderabbit:
-  enabled: false
+  enabled: true
 
   # GitHub login of the CodeRabbit bot. Comments by this login are what
   # `scripts/coderabbit-wait.sh` filters on when classifying PR activity.
@@ -354,13 +393,26 @@ coderabbit:
   # derived heuristically from its category + Critical/Major/Minor qualifier
   # by scripts/lib/feedback-policy-helpers.sh (coderabbit_tier_of).
   #
-  # NOTE: the gate SCRIPT lands in #577. This key is CONFIG-ONLY until then —
-  # no consumer reads it yet, so setting it here is inert. Narrow-start
-  # posture, identical to codex.p1_gate / external_review_gate: default false
-  # everywhere, true in mergepath first. A no-op (always green) when disabled,
-  # so it is safe to add to required checks everywhere.
+  # STALE NOTE, corrected 2026-09-11: an earlier comment here said the gate
+  # SCRIPT lands in #577 and that this key was "CONFIG-ONLY ... inert". The
+  # script shipped, and the check is live — it was observed failing on PR #1209
+  # with `CodeRabbit blocking-tier unresolved: 1`. The key is load-bearing.
+  #
+  # FALSE per operator decision (2026-09-11, PR #1209): CodeRabbit is advisory
+  # on this repo. The merge gate is Codex — `@codex review` (Phase 4a) plus the
+  # automated Phase 4b cross-agent leg — and an advisory bot should not be able
+  # to hold a merge on its own. That matters more now auto-review is on: with
+  # the gate true, every PR could be blocked by a bot nobody waits on, and
+  # CodeRabbit's rate-limit behavior (no auto-retry after a window elapses)
+  # would turn a provider stall into a stuck merge.
+  #
+  # This does NOT make CodeRabbit consequence-free. Its unresolved threads
+  # still count toward GitHub's required-conversation-resolution branch
+  # protection, so findings must still be dispositioned and resolved — they
+  # just no longer fail a required check on their own. A no-op (always green)
+  # when disabled, so it stays safe in the required-checks list.
   severity_gate:
-    enabled: true
+    enabled: false
 
 # ---------------------------------------------------------------------------
 # Codex (Automated External Review — Phase 4a)
