@@ -65,7 +65,7 @@ Three things to check after the deploy:
 2. **A recipient resolves.** Recipients are the Event's `admins` roster (verified Firebase Auth emails only) unioned with `ADMIN_NOTIFY_EMAIL`. If neither resolves, alerts queue and nothing sends—which is logged, not lost, but it is silent from the outside. Populate `ADMIN_NOTIFY_EMAIL` per project unless the roster is known to resolve.
 3. **Smoke-test the DIGEST, not the triggers.** Report a Prompt in the app (or submit one as a non-admin, which lands `pending`), then wait for the next five-minute sweep. A queue row appearing under `events/{eventId}/adminAlerts` with no email inside two sweeps means the scheduler job or the recipient list is the problem, in that order.
 
-**THREE one-time Firestore TTL policies, and since #670/#859 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the others:
+**FOUR one-time Firestore TTL policies, and since #670/#859 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the others:
 
 ```bash
 gcloud firestore fields ttls update expiresAt \
@@ -74,9 +74,11 @@ gcloud firestore fields ttls update expiresAt \
   --collection-group=adminAlertBatches --enable-ttl --project <projectId>
 gcloud firestore fields ttls update expiresAt \
   --collection-group=bugReportEscalations --enable-ttl --project <projectId>
+gcloud firestore fields ttls update expiresAt \
+  --collection-group=podiumEmailOutbox --enable-ttl --project <projectId>
 ```
 
-Run all three commands once with `<projectId>` set to `gaycruisebingo` and once with it set to `fiveacross`. The `bugReportEscalations` policy MUST reach `ACTIVE` before deploying the #859 Functions release, because its pending row temporarily contains a raw reporter uid and the policy is the privacy backstop if the scheduler cannot terminalize it. Verify that policy in each project before release:
+Run all four commands once with `<projectId>` set to `gaycruisebingo` and once with it set to `fiveacross`. The `podiumEmailOutbox` policy is the winner-announcement email's frozen outbound request (#1192): each document holds a participant's email address, their unsubscribe capability URL and the fully rendered message, retained only so a retry inside Resend's 24-hour idempotency window replays the same bytes rather than a rebuilt request. Nothing reads it after that, so without the policy those documents accumulate addresses and capability URLs for the life of the project. The `bugReportEscalations` policy MUST reach `ACTIVE` before deploying the #859 Functions release, because its pending row temporarily contains a raw reporter uid and the policy is the privacy backstop if the scheduler cannot terminalize it. Verify that policy in each project before release:
 
 ```bash
 gcloud firestore fields ttls list \

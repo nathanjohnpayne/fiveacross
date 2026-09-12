@@ -153,6 +153,24 @@ const DEFAULT_PACING_MS = 550;
 const LIFECYCLE_RECHECK_EVERY = 25;
 
 /**
+ * How long a frozen outbound request is retained.
+ *
+ * It must comfortably outlive Resend's 24-hour idempotency window, because a
+ * replay inside that window has to find the bytes — and it must not outlive it
+ * by much, because each document holds a participant's email address, their
+ * unsubscribe capability URL and the rendered message (CodeRabbit, final round
+ * on PR #1207: CWE-359). A week is several sweeps past any fan-out that is going
+ * to finish, and a fan-out that has not finished in a week needs an operator
+ * rather than a cached request.
+ *
+ * The FIELD IS INERT WITHOUT A POLICY. Firestore TTL is scoped to a collection
+ * group, so `podiumEmailOutbox` needs its own `gcloud firestore fields ttls
+ * update` — the `adminAlerts` and `adminAlertBatches` policies do not reach it.
+ * `docs/app/phase-1-deploy.md` carries the command.
+ */
+const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
  * The verified-address lookup, matching `notify.ts`'s verified-only policy.
  *
  * IT DOES NOT SWALLOW ITS OWN FAILURE, unlike the daily card's copy of this
@@ -1070,7 +1088,10 @@ async function freezeOrReplay(
 ): Promise<FrozenPodiumRequest | null> {
   const ref = db.doc(podiumOutboxPath(eventId, uid));
   try {
-    await ref.create({ ...request, createdAt: (deps.now ?? Date.now)() });
+    const at = (deps.now ?? Date.now)();
+    // `expiresAt` is a DATE, not the numeric `createdAt` beside it: Firestore's
+    // TTL only reads timestamp fields, so a number here would be silently inert.
+    await ref.create({ ...request, createdAt: at, expiresAt: new Date(at + OUTBOX_TTL_MS) });
     return request;
   } catch {
     // ALREADY_EXISTS, or a read/write failure. Either way the authority is

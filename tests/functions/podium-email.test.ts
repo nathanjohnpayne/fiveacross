@@ -2295,6 +2295,22 @@ describe('final round (Codex P1 + P2)', () => {
     expect(result.drained).toBe(false);
   });
 
+  it('stamps a TIMESTAMP expiry on the frozen request, not a number', async () => {
+    // Each document holds an address, an unsubscribe capability URL and the
+    // rendered message, so it must not be retained for the life of the project.
+    // Firestore's TTL only reads timestamp fields — a number is silently inert,
+    // which is why `createdAt` cannot serve as the expiry.
+    const db = makeDb(seed());
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), { ...baseDeps(), send: async () => true });
+    const frozen = db.docs[podiumOutboxPath('med-2026', 'zac')];
+    expect(frozen.expiresAt).toBeInstanceOf(Date);
+    expect(typeof frozen.createdAt).toBe('number');
+    // Comfortably past Resend's 24-hour idempotency window, so a replay inside
+    // it still finds the bytes.
+    const ms = (frozen.expiresAt as Date).getTime() - (frozen.createdAt as number);
+    expect(ms).toBeGreaterThan(24 * 60 * 60 * 1000);
+  });
+
   it('still replays when the award is unchanged', async () => {
     const db = makeDb(seed());
     await sendPodiumEmailForEvent(db, 'med-2026', input(), { ...baseDeps(), send: async () => false });
