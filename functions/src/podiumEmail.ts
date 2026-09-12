@@ -75,6 +75,9 @@ export interface PodiumEmailInput {
   /** Whether the Event's board was empty at the freeze, read off the Moment
    *  before its honours were ban-filtered. */
   boardWasEmpty: boolean;
+  /** The ban roster the honours and the recipient list were filtered against,
+   *  carried so the completion guard can compare like with like. */
+  bannedUids?: readonly string[];
   /** The closing Day, already formatted in the Event's timezone by the beat —
    *  this module holds no clock and no timezone logic. */
   closingDay: {
@@ -192,12 +195,20 @@ async function rosterGrewSince(
   db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
   examinedCount: number,
+  bannedUids: readonly string[],
   deps: DailyEmailDeps,
 ): Promise<boolean> {
   try {
     const cap = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
     const roster = await readFinaleRoster(db, eventId, cap + 1);
-    return roster.length > examinedCount;
+    // BAN-FILTERED, because `examinedCount` is. `readFinaleRoster` returns the
+    // raw roster by design — the record keeps banned rows — so comparing it
+    // against the visible list this run walked counts every banned player as an
+    // arrival, and an Event with a single banned player would report growth on
+    // every sweep, never stamp the marker, and be re-read for the rest of its
+    // life. Re-read here rather than carried from the due check, so a ban lifted
+    // mid-send is seen as the arrival it effectively is.
+    return visibleFinaleRoster(roster, bannedUids).length > examinedCount;
   } catch (err) {
     console.error('rosterGrewSince failed', eventId, err);
     return true;
@@ -424,7 +435,13 @@ export async function sendPodiumEmailForEvent(
     // has already paid to walk; a mismatch simply withholds the marker, and the
     // next sweep examines the new member while everybody else is skipped by
     // their own `podiumEmailSentAt`.
-    const grew = await rosterGrewSince(db, eventId, input.ranked.length, deps);
+    const grew = await rosterGrewSince(
+      db,
+      eventId,
+      input.ranked.length,
+      input.bannedUids ?? [],
+      deps,
+    );
     if (grew) {
       console.log(`sendPodiumEmailForEvent ${eventId}: roster changed mid-send, deferring the marker`);
       result.drained = false;
@@ -597,6 +614,11 @@ export async function podiumEmailInputFor(
   /** The Event document the sweep already read, to save a second fetch of it. A
    *  caller with none (a test, a manual replay) omits it and this reads. */
   known?: PodiumEmailEvent,
+  /** The recipient ceiling the send will apply, so the roster QUERY is bounded
+   *  by the same number the loop is. Defaults to the module's own ceiling; the
+   *  sweep passes whatever `deps.maxRecipients` configures, so the two halves
+   *  cannot bound at different sizes. */
+  maxRecipients?: number,
 ): Promise<{ due: true; input: PodiumEmailInput } | { due: false; reason: PodiumDueReason }> {
   const event =
     known ?? ((await db.doc(`events/${eventId}`).get()).data() as PodiumEmailEvent | undefined);
@@ -630,7 +652,7 @@ export async function podiumEmailInputFor(
   // BOUNDED AT THE QUERY, ceiling plus one so overflow is detectable from the
   // raw page rather than from the ban-filtered roster — a banned row inside the
   // page must not hide the fact that valid participants beyond it were cut off.
-  const cap = DEFAULT_MAX_RECIPIENTS;
+  const cap = maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
   const roster = await readFinaleRoster(db, eventId, cap + 1);
   if (roster.length > cap) {
     console.error(
@@ -665,6 +687,7 @@ export async function podiumEmailInputFor(
       // Read from the Moment BEFORE the honour filtering above, so a withheld
       // banned champion is never mistaken for a board nobody played.
       boardWasEmpty: payload.champion == null,
+      bannedUids: banned,
       closingDay,
       honorDayLabels,
     },
@@ -730,7 +753,12 @@ export async function runPodiumEmailSweep(
         // The snapshot this sweep already holds, passed through rather than
         // re-fetched: the due check needed a second read of the same document
         // on every Event on every sweep.
-        const due = await podiumEmailInputFor(db, ev.id, ev.data() as PodiumEmailEvent | undefined);
+        const due = await podiumEmailInputFor(
+          db,
+          ev.id,
+          ev.data() as PodiumEmailEvent | undefined,
+          deps.maxRecipients,
+        );
         if (!due.due) return;
         await sendPodiumEmailForEvent(db, ev.id, due.input, {
           ...deps,

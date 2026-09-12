@@ -786,6 +786,28 @@ describe('delivery-time and roster safety (Codex P2 r2)', () => {
   });
 });
 
+describe('the fan-out marker lands on an Event that has banned players', () => {
+  it('stamps podiumEmailAt when a ban is the only difference from the raw roster', async () => {
+    // The growth guard compares what this run WALKED against what the roster
+    // holds now. The walked list is ban-filtered, so the comparison has to be
+    // too — otherwise every Event with a single banned player reports "grew"
+    // forever, never stamps the marker, and is re-read by every future sweep.
+    const db = makeDb(seedDue({ bannedUids: ['zac'] }));
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    // The banned player is not mailed…
+    expect(sent.map((s) => s.to[0]).sort()).toEqual(['logan@example.com', 'nathan@example.com']);
+    // …and the Event is nonetheless finished.
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
 describe('the sweep selects only active Events (Codex + CodeRabbit r2)', () => {
   it('never reads an archived Event’s Moment or roster', async () => {
     const docs = { ...seedDue(), 'events/old-2024': { status: 'archived', name: 'Old' } };
