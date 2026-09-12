@@ -186,10 +186,28 @@ async function resolveAddress(
 /**
  * Whether the Event's roster has more members than this run examined.
  *
- * Compares the VISIBLE count, because that is what the send walked: a ban
- * landing mid-send shrinks the roster and must not read as growth. A read
- * failure answers `true` — withholding the marker costs one more sweep, while
- * wrongly stamping it costs a participant their only copy of this email.
+ * Compares the VISIBLE count against the SAME ban roster the run walked, which
+ * is carried on `PodiumEmailInput` rather than re-read. Both halves of that
+ * matter:
+ *
+ *   - visible, because `readFinaleRoster` returns the raw roster by design (the
+ *     record keeps banned rows) and comparing it against the ban-filtered list
+ *     the send walked counts every banned player as an arrival — an Event with a
+ *     single banned player would then never stamp and would be re-read until
+ *     archival;
+ *   - the CARRIED roster rather than a fresh one, because re-reading would make
+ *     an unban read as an arrival, and an Event that has ever banned anyone
+ *     could have its marker deferred indefinitely by ordinary moderation. The
+ *     question this guard asks is "did anybody JOIN while I was sending", and
+ *     the ban roster the send used is the right baseline for it.
+ *
+ * THE RESIDUAL, stated in the spec rather than left implicit: a ban lifted after
+ * the fan-out completes does not reopen it, so a Player unbanned later does not
+ * receive the winner email. That is the deliberate cost of `podiumEmailAt` being
+ * writable at all on an Event with any moderation history.
+ *
+ * A read failure answers `true` — withholding the marker costs one more sweep,
+ * while wrongly stamping it costs a participant their only copy of this email.
  */
 async function rosterGrewSince(
   db: DailyEmailFirestore & FinaleReadSource,
@@ -201,13 +219,6 @@ async function rosterGrewSince(
   try {
     const cap = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
     const roster = await readFinaleRoster(db, eventId, cap + 1);
-    // BAN-FILTERED, because `examinedCount` is. `readFinaleRoster` returns the
-    // raw roster by design — the record keeps banned rows — so comparing it
-    // against the visible list this run walked counts every banned player as an
-    // arrival, and an Event with a single banned player would report growth on
-    // every sweep, never stamp the marker, and be re-read for the rest of its
-    // life. Re-read here rather than carried from the due check, so a ban lifted
-    // mid-send is seen as the arrival it effectively is.
     return visibleFinaleRoster(roster, bannedUids).length > examinedCount;
   } catch (err) {
     console.error('rosterGrewSince failed', eventId, err);
