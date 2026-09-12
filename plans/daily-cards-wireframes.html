@@ -3743,7 +3743,7 @@
       <div class="hname">Zacaria Arab</div>
       <div class="hstat">16 bingos · 124 squares</div>
       <div class="hrole">👑 First to BINGO</div>
-      <div class="hname">Turntilla</div>
+      <div class="hname">Logan Murdock</div>
       <div class="htitle">Daily honors</div>
       <div class="hrows">
         <div class="hrow"><span class="hd">Day 1 · Trieste 🇮🇹</span><span class="hn">Andrew Levad</span></div>
@@ -3760,7 +3760,7 @@
       <div class="stat">Final standings · 10 days</div>
       <div class="foot">Gay Cruise Bingo 🚢</div>
     </div>
-    <p class="cap"><b>"🏆 Cruise champion" · podium aria "Cruise podium"</b>Day labels are Ports (seeded verbatim, parentheticals included) with their flag emoji—per-Event <code>placeEmoji</code> data, not code, so they need no Edition scoping. Share text <i>"Final standings from Gay Cruise Bingo 🏆"</i>; file <code>gay-cruise-bingo-final-standings.png</code>. Names clamp to one line; honor names ellipsize before day labels give way.</p>
+    <p class="cap"><b>"🏆 Cruise champion" · podium aria "Cruise podium"</b>Day labels are Ports (seeded verbatim, parentheticals included) with their flag emoji—per-Event <code>placeEmoji</code> data, not code, so they need no Edition scoping. <b>The 👑 holder is Day 2’s honoree, not Day 4’s:</b> Day 1 (Trieste) is <code>tutorial: true</code> in the Med seed and the Event-wide honor excludes Tutorial Days, so it belongs to the earliest <i>main</i>-Day bingo—Day 2 · Split, whose daily honor the list below already gives Logan Murdock. Turntilla’s earliest honor is Day 4, which cannot precede a Day 2 bingo, so naming Turntilla here is not a taste call but an impossible figure. Share text <i>"Final standings from Gay Cruise Bingo 🏆"</i>; file <code>gay-cruise-bingo-final-standings.png</code>. Names clamp to one line; honor names ellipsize before day labels give way.</p>
   </div>
 
   <div class="unit" id="fx-share-final-vacay">
@@ -3825,14 +3825,14 @@
         <div class="mlrow champ"><span class="r">1</span><span class="nm2">Zacaria Arab</span><span class="mlrole">🏆 Cruise champion</span><span class="s">16 bingos</span></div>
         <div class="mlrow"><span class="r">2</span><b>Logan Murdock</b><span class="s">14 bingos · 117 sq</span></div>
         <div class="mlrow"><span class="r">3</span><b>Nathan Payne</b><span class="s">13 bingos · 110 sq</span></div>
-        <div class="mlrow"><span class="r">👑</span><b>Turntilla</b><span class="mlrole">First to BINGO</span></div>
+        <div class="mlrow"><span class="r">👑</span><b>Logan Murdock</b><span class="mlrole">First to BINGO</span></div>
       </div>
       <div class="stat">Final standings · 10 days</div>
       <div class="foot">Gay Cruise Bingo 🚢</div>
     </div>
-    <p class="cap"><b>The photo is the flex now</b>Sunset-warm <code>so-long-farewell</code> tokens tint the placeholder scene; the ❤ count is the frozen eligible-Heart total, not a live number. "🏆 Cruise champion" keeps its qualifier; the honors list stays on the fallback card. The 👑 row renders name + role only—an earlier draft gave it a stat, dropped as a recorded deviation (<code>specs/most-loved-photo.md</code> § Deviations, item 6: the card system renders no timezone-formatted times). Share text <i>"Final standings from Gay Cruise Bingo 🏆"</i>; file <code>gay-cruise-bingo-final-standings.png</code>—the slug does not fork, because this is the same surface in its photo-hero composition.</p>
+    <p class="cap"><b>The photo is the flex now</b>Sunset-warm <code>so-long-farewell</code> tokens tint the placeholder scene; the ❤ count is the frozen eligible-Heart total, not a live number. "🏆 Cruise champion" keeps its qualifier; the honors list stays on the fallback card. The 👑 row renders name + role only—an earlier draft gave it a stat, dropped as a recorded deviation (<code>specs/most-loved-photo.md</code> § Deviations, item 6: the card system renders no timezone-formatted times). The 👑 row names Logan Murdock for the reason the fallback card above states—Day 1 (Trieste) is <code>tutorial: true</code>, so the Event-wide honor starts at Day 2 · Split—and a Player may hold a rank row and the 👑 row at once, exactly as Maya does on <a href="#fx-share-final-photo-vacay">fx-share-final-photo-vacay</a>. Share text <i>"Final standings from Gay Cruise Bingo 🏆"</i>; file <code>gay-cruise-bingo-final-standings.png</code>—the slug does not fork, because this is the same surface in its photo-hero composition.</p>
     <img class="shpimg" src="og-images/share-final-photo-gcb.png" alt="Gay Cruise Bingo final standings share card with the Most-Loved Photo as centerpiece" width="600" height="750">
-    <p class="ogmeta"><b>file</b> plans/og-images/share-final-photo-gcb.png · 600×750</p>
+    <p class="ogmeta"><b>file</b> plans/og-images/share-final-photo-gcb.png · 600×750<br><b>stale</b> this capture predates the 👑 correction above and still reads Turntilla. <code>scripts/og/render-share-footer.mjs</code> redraws only the brand footer by design, so the row cannot be patched here—the fix is a re-screenshot of the real component.</p>
   </div>
 
   <div class="unit" id="fx-share-final-photo-vacay">
@@ -4360,11 +4360,14 @@ const DAYS = [
  tonight:"🪩 Revival! Classic Disco T-Dance · 🎉 Last Dance",
  desc:"A '70s disco afternoon—artificial fabrics, facial hair, oversized shoes, obnoxious accessories.",
  pool:MAIN, free:"Complain about circuit music"},
+// The banner's First to BINGO is Jess, NOT Day 1's honoree Marco: Day 1 (Trieste) is
+// `tutorial: true` in the Med seed, so the Event-wide honor starts at Day 2 · Split, which
+// the leaderboard frame above already gives Jess. Champion and ⭐ can be one Player.
 {n:10, date:"Fri Jul 24", port:"Barcelona", flag:"🇪🇸", theme:"so-long-farewell", emoji:"👋", label:"So Long, Farewell",
  tonight:"🧳 Disembark in Barcelona · 👋 Until next year",
  desc:"Last one. Mark your goodbyes—then go book next year.",
  pool:FAREWELL, free:"We had the best damn time", tag:"Goodbye",
- banner:"<b>🏆 Final standings—Champion: Jess · First to BINGO: Marco · 10 daily honors inside</b>Last one. 🥲 Mark your goodbyes—then go book next year. Standings froze at unlock; this card is pure ceremony.",
+ banner:"<b>🏆 Final standings—Champion: Jess · First to BINGO: Jess · 10 daily honors inside</b>Last one. 🥲 Mark your goodbyes—then go book next year. Standings froze at unlock; this card is pure ceremony.",
  note:"Unlocks 8:00 a.m. disembark morning—the standard rule, same as every main Day."}
 ];
 
