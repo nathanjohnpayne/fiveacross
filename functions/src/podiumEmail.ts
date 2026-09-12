@@ -781,29 +781,6 @@ export async function sendPodiumEmailForEvent(
         result.blocked++;
         continue;
       }
-      const outbound = await freezeOrReplay(
-        db,
-        eventId,
-        player.uid,
-        {
-          to,
-          subject: model.subject,
-          html: renderPodiumEmailHtml(model),
-          text: renderPodiumEmailText(model),
-          from,
-          replyTo,
-          unsubscribeUrl: unsubUrl,
-          banFingerprint: banFingerprintOf(input.bannedUids),
-          awardFingerprint: awardFingerprintOf(input.mostLoved),
-        },
-        deps,
-      );
-      if (!outbound) {
-        // Neither frozen nor readable: sending now could 409 on a later retry
-        // with no record of what was accepted. An open question, not a skip.
-        result.blocked++;
-        continue;
-      }
       // THE LAST THING BEFORE THE FIRST MESSAGE (Codex P2, current head). The
       // pre-loop guard's comment claimed nothing awaits before delivery, and the
       // spec claimed the Event is re-read "immediately before the first send" —
@@ -815,6 +792,16 @@ export async function sendPodiumEmailForEvent(
       // Once per Event, not per recipient: the batch checkpoint below already
       // covers the rest of the roster, and this only has to close the gap the
       // checkpoint cannot see — the stretch before any message has gone out.
+      //
+      // AND AHEAD OF THE FREEZE, SO A CANCELLED SEND LEAVES NOTHING BEHIND (Codex
+      // P2, final round). Freezing first persisted a request the guard then
+      // cancelled, and the outbox outlives the run by a week — so on a later retry
+      // `freezeOrReplay` replayed those bytes, including their `to` address. A
+      // participant who changed their verified Auth address in between was mailed
+      // at the obsolete one, for a request no idempotency key ever needed
+      // preserving. Not freezing until the guard has passed is why there is
+      // nothing to clean up: the address is only pinned once a send is genuinely
+      // going to be attempted.
       //
       // AHEAD OF THE ATTEMPT STAMP, NOT BEHIND IT (Codex P2 + CodeRabbit P1,
       // final round). This guard can CANCEL the send, and the stamp starts a
@@ -851,6 +838,29 @@ export async function sendPodiumEmailForEvent(
           break;
         }
       }
+      const outbound = await freezeOrReplay(
+        db,
+        eventId,
+        player.uid,
+        {
+          to,
+          subject: model.subject,
+          html: renderPodiumEmailHtml(model),
+          text: renderPodiumEmailText(model),
+          from,
+          replyTo,
+          unsubscribeUrl: unsubUrl,
+          banFingerprint: banFingerprintOf(input.bannedUids),
+          awardFingerprint: awardFingerprintOf(input.mostLoved),
+        },
+        deps,
+      );
+      if (!outbound) {
+        // Neither frozen nor readable: sending now could 409 on a later retry
+        // with no record of what was accepted. An open question, not a skip.
+        result.blocked++;
+        continue;
+      }
       // THE DEADLINE IS RECORDED ONLY ONCE A SEND IS ACTUALLY IMMINENT (Codex
       // P2, current head). It used to be written BEFORE the freeze, so an outbox
       // that could not be created started the 24-hour clock on a recipient who
@@ -865,6 +875,14 @@ export async function sendPodiumEmailForEvent(
         recordedAttemptAt,
         deps,
       );
+      // AN UNSUBSCRIBE SEEN BY THAT TRANSACTION IS A SKIP, NOT A BLOCK (Codex P1,
+      // final round). It is permanent, so no retry could change it and the Event
+      // must still be allowed to drain — counting it as blocked would keep the
+      // Event undrained forever over a recipient who asked not to be mailed.
+      if (firstAttemptAt === 'opted-out') {
+        result.skipped++;
+        continue;
+      }
       if (firstAttemptAt === null) {
         result.blocked++;
         continue;

@@ -284,6 +284,55 @@ describe('the final guard runs BEFORE the stamp, and owns its own flag (#1192, f
   });
 });
 
+describe('consent and the freeze both respect a late change (#1192, final round)', () => {
+  const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;
+
+  it('honours an unsubscribe that lands after the prefs read', async () => {
+    const docs = seedDue();
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      docs[prefsPath(uid)] = { optedOut: false, token: 'tok-fixed' };
+    }
+    // The unsubscribe completes during this recipient's own preparation — after
+    // `ensureEmailPrefs` read the doc, before the attempt transaction re-reads it.
+    const { result, sent } = await run(docs, {
+      getEmailForUid: async (uid: string) => {
+        (docs[prefsPath(uid)] as Record<string, unknown>).optedOut = true;
+        return `${uid}@example.com`;
+      },
+    });
+
+    expect(sent).toHaveLength(0);
+    // Skipped, not blocked: an opt-out is permanent, so the Event must still be
+    // able to drain rather than being held open forever over it.
+    expect(result.skipped).toBe(3);
+    expect(result.blocked).toBe(0);
+    // And no attempt stamp is written for somebody who asked not to be mailed.
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      expect(docs[prefsPath(uid)]?.podiumEmailFirstAttemptAt).toBeUndefined();
+    }
+  });
+
+  it('freezes nothing when the pre-delivery guard cancels the send', async () => {
+    const docs = seedDue();
+    const event = docs['events/med-2026'] as Record<string, unknown>;
+    const { result, sent, db } = await run(docs, {
+      getEmailForUid: async (uid: string) => {
+        event.settings = { dailyEmailEnabled: false };
+        return `${uid}@example.com`;
+      },
+    });
+
+    expect(sent).toHaveLength(0);
+    expect(result.reason).toBe('disabled');
+    // THE POINT: no frozen request survives a send that never happened. The outbox
+    // outlives the run by a week, so a leftover freeze would pin an address that a
+    // later retry replays even after the participant changed their Auth email.
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      expect(db.docs[podiumOutboxPath('med-2026', uid)]).toBeUndefined();
+    }
+  });
+});
+
 describe('the dedup window is re-checked against the effective start (#1192, final round)', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;

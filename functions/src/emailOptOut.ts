@@ -449,7 +449,7 @@ export async function markPodiumEmailAttempted(
   uid: string,
   existing: number | undefined,
   deps: OptOutDeps = {},
-): Promise<number | null> {
+): Promise<number | 'opted-out' | null> {
   if (typeof existing === 'number') return existing;
   const at = (deps.now ?? Date.now)();
   try {
@@ -471,6 +471,18 @@ export async function markPodiumEmailAttempted(
       const ref = db.doc(emailPrefsPath(eventId, uid));
       const snap = await tx.get(ref);
       const stored = snap.exists ? (snap.data() ?? {}) : {};
+      // THE FRESHEST CONSENT READ WINS, and this is it (Codex P1, final round).
+      // Pre-send consent is non-negotiable, and this transaction re-reads the very
+      // document that records it — several remote operations after
+      // `ensureEmailPrefs` did. The Auth lookup, the outbox write and the
+      // pre-delivery guard all sit in between, so an unsubscribe completed in that
+      // window was already durable HERE while the caller went on to send. Ignoring
+      // a suppression this read is holding in its hand is the one failure this
+      // whole opt-out surface exists to prevent. Reported distinctly from a
+      // failure, because the two are opposites: an opt-out is PERMANENT and must
+      // let the Event drain, whereas `null` keeps it open for a retry — answering
+      // an unsubscribe with `null` would block the Event forever.
+      if (stored.optedOut === true) return 'opted-out';
       const already = stored.podiumEmailFirstAttemptAt;
       if (typeof already === 'number' && Number.isFinite(already)) return already;
       tx.set(ref, { podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
