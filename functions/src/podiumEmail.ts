@@ -51,7 +51,7 @@ import {
   listUnsubscribeHeaders,
 } from './emailOptOut';
 import type { FinalePlayer, PodiumPayload } from './finaleContent';
-import { buildPodiumEmailModel } from './podiumEmailContent';
+import { buildPodiumEmailModel, type VisibleMostLovedAward } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
 import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
 
@@ -71,7 +71,7 @@ export interface PodiumEmailInput {
    *  uid and display name the send needs, so the fan-out costs no extra read. */
   ranked: readonly FinalePlayer[];
   /** The frozen award, already validated and ban-filtered, or `null`. */
-  mostLoved?: MostLovedPhotoAward | null;
+  mostLoved?: VisibleMostLovedAward | null;
   /** Whether the Event's board was empty at the freeze, read off the Moment
    *  before its honours were ban-filtered. */
   boardWasEmpty: boolean;
@@ -274,15 +274,27 @@ export async function sendPodiumEmailForEvent(
   // Re-asserted here rather than trusted from the due check: this function is
   // also called directly (by tests, and by any future manual replay), and the
   // Event-level opt-in is the one condition that must hold at the send itself.
+  //
+  // NOT DRAINED, AND NOT STAMPED, because the toggle is REVERSIBLE. An owner who
+  // turns the daily email on after the podium has posted should still get the
+  // winner announcement, and a completion marker written while it was off would
+  // silently make that impossible. The cost of leaving the question open is one
+  // Event document read per sweep, which the active-Event selection already
+  // bounds; the cost of closing it wrongly is the Event's last email, forever.
   if (!dailyEmailEnabled(input.event as Parameters<typeof dailyEmailEnabled>[0])) {
-    return { ...result, drained: true, reason: 'disabled' };
+    return { ...result, reason: 'disabled' };
   }
   if (input.ranked.length === 0) {
-    // Terminal, and stamped: an Event that reached its podium with an empty
-    // visible roster has nobody to mail, and re-reading it every sweep for the
-    // rest of its life answers the same way.
-    await stampFanOutComplete(db, eventId, deps);
-    return { ...result, drained: true, reason: 'no-roster' };
+    // AN EMPTY ROSTER IS STILL A ROSTER THAT CAN GAIN A MEMBER (Codex P2, round
+    // 3 on PR #1207). This fast path stamped completion directly and so skipped
+    // the membership recount the normal path ends with — and `firestore.rules`
+    // permits `players/{uid}` creation until archival, so a participant joining
+    // between the due check's query and this line would have been locked out
+    // permanently: every later sweep answers `already-sent`. The zero-recipient
+    // case needs the same verification as every other, not less.
+    const grew = await rosterGrewSince(db, eventId, 0, input.bannedUids ?? [], deps);
+    if (!grew) await stampFanOutComplete(db, eventId, deps);
+    return { ...result, drained: !grew, reason: 'no-roster' };
   }
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
@@ -311,13 +323,27 @@ export async function sendPodiumEmailForEvent(
   // started" into "it is still open now". Mirrors `sendDailyEmailForEvent`'s own
   // pre-delivery re-read, for the same reason.
   const atDelivery = (await db.doc(`events/${eventId}`).get()).data() as
-    | { status?: string; archiving?: boolean }
+    | PodiumEmailEvent
     | undefined;
   if (eventClosedToPlay(atDelivery)) {
     // Not drained: the fan-out is genuinely unfinished. It will not be retried
     // either, because an archived Event is never due again — that residual is
     // the spec's, not this guard's, and stopping here is what it promises.
     return { ...result, reason: 'archived' };
+  }
+  // AND THE TOGGLE IS RE-APPLIED HERE TOO (Codex P2, round 3 on PR #1207). The
+  // projected shape this read used to take could not even express `settings`, so
+  // the fresh read closed the archive window and left the enablement one open —
+  // an admin turning `settings.dailyEmailEnabled` off during the same
+  // preparation was simply not seen, and the fan-out began anyway. It is the
+  // documented sole control over whether anyone is mailed at all, so it gets the
+  // same treatment as the archive state: read fresh, applied last.
+  //
+  // Not drained and not stamped, for the same reason the opening check is not:
+  // the toggle is reversible, and a marker written while it is off would deny
+  // the Event its last email permanently if the owner turned it back on.
+  if (!dailyEmailEnabled(atDelivery as Parameters<typeof dailyEmailEnabled>[0])) {
+    return { ...result, reason: 'disabled' };
   }
 
   let capHit = false;
@@ -515,7 +541,7 @@ export type PodiumDueReason =
 export function visibleMostLovedAward(
   raw: unknown,
   bannedUids: ReadonlySet<string>,
-): MostLovedPhotoAward | null {
+): VisibleMostLovedAward | null {
   if (!raw || typeof raw !== 'object') return null;
   const award = raw as Partial<MostLovedPhotoAward>;
   if (!Array.isArray(award.winners)) return null;
@@ -538,9 +564,20 @@ export function visibleMostLovedAward(
       ? award.winnerCount
       : award.winners.length;
   const removed = award.winners.length - winners.length;
+  // A TRUNCATED TIE CANNOT BE COUNTED EXACTLY (Codex P2, round 3 on PR #1207).
+  // `winners` is a bounded prefix — `MAX_PERSISTED_MOST_LOVED_WINNERS` — while
+  // `winnerCount` deliberately preserves the FULL cardinality beyond it, so a
+  // banned winner outside the prefix is invisible here and `removed` cannot
+  // account for them. Subtracting only what we can see would then report a
+  // larger visible tie than actually exists, naming hidden Players by implication
+  // — the very thing the ban filter is for. The identities are not recoverable
+  // at this boundary, so the honest answer is to stop claiming an exact number:
+  // `winnerCountExact` is false, and the copy drops to a non-numeric tail.
+  const truncated = declared > award.winners.length;
   return {
     winners,
     winnerCount: Math.max(winners.length, declared - removed),
+    winnerCountExact: !(truncated && removed > 0),
     heartCount: award.heartCount,
     frozenAt: typeof award.frozenAt === 'number' ? award.frozenAt : 0,
     computedAt: typeof award.computedAt === 'number' ? award.computedAt : 0,

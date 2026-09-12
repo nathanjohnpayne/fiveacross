@@ -242,8 +242,9 @@ describe('sendPodiumEmailForEvent (#1192)', () => {
     });
     expect(result.reason).toBe('disabled');
     expect(sent).toEqual([]);
-    // Nothing is owed, so the beat should stop asking rather than retry forever.
-    expect(result.drained).toBe(true);
+    // NOT drained: the toggle is reversible, so nothing durable may record this
+    // Event as finished while it is merely switched off.
+    expect(result.drained).toBe(false);
   });
 
   it('reports NOT drained when the transport refuses, so the next sweep retries', async () => {
@@ -805,6 +806,141 @@ describe('the fan-out marker lands on an Event that has banned players', () => {
     expect(sent.map((s) => s.to[0]).sort()).toEqual(['logan@example.com', 'nathan@example.com']);
     // …and the Event is nonetheless finished.
     expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
+describe('round-3 findings (Codex P2)', () => {
+  it('does not complete an EMPTY fan-out that gained a member mid-flight', async () => {
+    // `firestore.rules` permits `players/{uid}` creation until archival, so the
+    // zero-recipient fast path must verify membership like every other path —
+    // otherwise a participant joining right after the due check is locked out
+    // permanently by an `already-sent` answer on every later sweep.
+    const db = makeDb(seedDue({ bannedUids: ['zac', 'logan', 'nathan'] }));
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.ranked).toHaveLength(0);
+    // Somebody joins between the due check and the send.
+    db.docs['events/med-2026/players/late'] = {
+      displayName: 'Late Joiner',
+      bingoCount: 0,
+      squaresMarked: 1,
+      firstBingoAt: null,
+    };
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.reason).toBe('no-roster');
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+
+    // …and the next sweep mails exactly the new member.
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent.map((s) => s.to[0])).toEqual(['late@example.com']);
+  });
+
+  it('still completes an empty fan-out when nobody joins', async () => {
+    const db = makeDb(seedDue({ bannedUids: ['zac', 'logan', 'nathan'] }));
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.drained).toBe(true);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+
+  it('re-applies the admin toggle at delivery, not only the archive state', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // The owner turns the email off while the send is being prepared.
+    db.docs['events/med-2026'].settings = { dailyEmailEnabled: false };
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a disabled Event must not be mailed');
+      },
+    });
+    expect(result.reason).toBe('disabled');
+    expect(result.sent).toBe(0);
+    // NOT drained and NOT stamped: the toggle is reversible, so a marker here
+    // would deny the Event its last email forever if the owner turned it back
+    // on. Leaving the question open costs one document read per sweep.
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('mails the Event if the owner turns the email back on', async () => {
+    const db = makeDb(seedDue({ settings: { dailyEmailEnabled: false } }));
+    // Off at first: not due, and nothing is recorded that would prevent a later
+    // send.
+    expect(await podiumEmailInputFor(db, 'med-2026')).toEqual({ due: false, reason: 'disabled' });
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+    db.docs['events/med-2026'].settings = { dailyEmailEnabled: true };
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent).toHaveLength(3);
+  });
+
+  it('stops claiming an exact tie size when the winner list was truncated', async () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({
+      proofId: `p${i}`,
+      uid: `u${i}`,
+      displayName: `P${i}`,
+      promptText: 'Shot',
+      dayIndex: 1,
+      proofCreatedAt: 100 + i,
+    }));
+    // A tie of 150 whose persisted prefix holds 100, with one banned INSIDE the
+    // prefix. The 50 beyond it may hold more banned Players that cannot be seen
+    // here, so no derived number is trustworthy.
+    const docs = seedDue({
+      mostLovedPhoto: { winners: many, winnerCount: 150, heartCount: 9, frozenAt: 1, computedAt: 2 },
+      bannedUids: ['u0'],
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winnerCountExact).toBe(false);
+    const model = modelFor('gcb', { mostLoved: got.input.mostLoved });
+    expect(model.mostLovedLine).toContain('Shared with others on the same count.');
+    expect(model.mostLovedLine).not.toMatch(/Shared with \d+ other/);
+  });
+
+  it('still states an exact tie size when nothing was truncated', async () => {
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          { proofId: 'a', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+          { proofId: 'b', uid: 'sam', displayName: 'Sam', promptText: 'Two', dayIndex: 1, proofCreatedAt: 2 },
+          { proofId: 'c', uid: 'kai', displayName: 'Kai', promptText: 'Three', dayIndex: 1, proofCreatedAt: 3 },
+        ],
+        winnerCount: 3,
+        heartCount: 9,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+      bannedUids: ['sam'],
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winnerCountExact).toBe(true);
+    const model = modelFor('gcb', { mostLoved: got.input.mostLoved });
+    expect(model.mostLovedLine).toContain('Shared with 1 other photo on the same count.');
   });
 });
 

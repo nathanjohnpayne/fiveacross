@@ -28,6 +28,20 @@ import type { PodiumPayload } from './finaleContent';
 // package types, not this module's own.
 import type { MostLovedPhotoAward } from '../../src/domainTypes';
 
+/**
+ * The frozen award as the EMAIL sees it: validated, ban-filtered, and carrying
+ * whether its tie size can still be stated exactly.
+ *
+ * `winnerCountExact` is false when the persisted winner list was truncated AND
+ * a banned winner was removed from the prefix — the hidden remainder may contain
+ * more banned Players, so no number derived here is trustworthy. The stored
+ * contract type has no such field because this is a presentation concern, not a
+ * property of the frozen record.
+ */
+export interface VisibleMostLovedAward extends MostLovedPhotoAward {
+  winnerCountExact?: boolean;
+}
+
 /** One rendered standings row. Structurally the daily card's `StandingsRow`
  *  minus `starred`: the ⭐ is its own module here, because the Event-wide
  *  honour excludes Tutorial Days and so frequently belongs to someone outside
@@ -101,7 +115,7 @@ export interface BuildPodiumEmailArgs {
   /** The frozen Most-Loved award, or `null`/`undefined` for an Event whose
    *  award was never computed. Already ban-filtered and shape-validated by the
    *  caller — this module renders it, it does not vet it. */
-  mostLoved?: MostLovedPhotoAward | null;
+  mostLoved?: VisibleMostLovedAward | null;
   /**
    * Whether the Event's board was EMPTY at the freeze — nobody marked anything.
    *
@@ -193,7 +207,7 @@ function starLineFor(
  * bounded form, and it matches the share card's own choice of hero.
  */
 function mostLovedLineFor(
-  award: MostLovedPhotoAward | null | undefined,
+  award: VisibleMostLovedAward | null | undefined,
   register: EditionRegister,
 ): string | null {
   if (!award) return null;
@@ -210,10 +224,16 @@ function mostLovedLineFor(
   // right fallback, and a legacy record reports its true tie rather than none.
   const tied = award.winnerCount ?? award.winners.length;
   const others = tied - 1;
+  // A truncated, ban-filtered tie has no trustworthy size (Codex P2, round 3):
+  // the hidden remainder beyond the persisted prefix may hold more banned
+  // Players, so any number here could overstate the visible tie. The tail still
+  // says a tie happened — dropping it entirely would be its own distortion.
   const shared =
-    others > 0
-      ? ` Shared with ${others} other photo${others === 1 ? '' : 's'} on the same count.`
-      : '';
+    others <= 0
+      ? ''
+      : award.winnerCountExact === false
+        ? ' Shared with others on the same count.'
+        : ` Shared with ${others} other photo${others === 1 ? '' : 's'} on the same count.`;
   return (
     `${hero.displayName}—the most-loved photo of the ${register.occasion}:` +
     `${quoted}. ${hearts}, frozen at the Standings Freeze.${shared}`
