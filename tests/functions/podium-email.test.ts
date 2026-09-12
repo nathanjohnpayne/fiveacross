@@ -199,6 +199,175 @@ const run = async (
   return { result, sent, db };
 };
 
+describe('the final guard runs BEFORE the stamp, and owns its own flag (#1192, final round)', () => {
+  // `getEmailForUid` runs per recipient AFTER the pre-loop guard and BEFORE the
+  // final one, so mutating the Event there lands in exactly the window these
+  // fixes are about — the first recipient's preparation.
+  const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;
+
+  it('does not stamp an attempt the guard then cancels', async () => {
+    const docs = seedDue();
+    // `makeDb` shallow-copies the seed, so the Event object is shared — mutating
+    // it here is what the sender's own re-read will see. (Reaching for the
+    // returned `db` instead would touch it inside its own initializer.)
+    const event = docs['events/med-2026'] as Record<string, unknown>;
+    const { result, sent, db } = await run(docs, {
+      getEmailForUid: async (uid: string) => {
+        // Disabled mid-preparation, before anything has been sent.
+        event.settings = { dailyEmailEnabled: false };
+        return `${uid}@example.com`;
+      },
+    });
+
+    expect(sent).toHaveLength(0);
+    expect(result.reason).toBe('disabled');
+    // THE POINT: no recipient carries a first-attempt stamp for a send that was
+    // cancelled. A stamp here starts a 24-hour clock that the cutoff turns into a
+    // permanent refusal, so a re-enable a day later would block this recipient
+    // for an attempt that never happened.
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      expect(db.docs[prefsPath(uid)]?.podiumEmailFirstAttemptAt).toBeUndefined();
+    }
+  });
+
+  it('leaves the guard unperformed when its own read fails', async () => {
+    const docs = seedDue();
+    const db = makeDb(docs);
+    const sent: Captured[] = [];
+    let recipient = 0;
+    let armThrow = false;
+    const realDoc = db.doc;
+    // Throw on the guard read for the FIRST recipient only — armed from the
+    // address lookup, which immediately precedes it.
+    db.doc = ((path: string) => {
+      const ref = realDoc(path);
+      if (path !== 'events/med-2026') return ref;
+      return {
+        ...ref,
+        get: async () => {
+          if (armThrow) {
+            armThrow = false;
+            throw new Error('UNAVAILABLE');
+          }
+          return ref.get();
+        },
+      };
+    }) as typeof db.doc;
+
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => {
+        recipient += 1;
+        if (recipient === 1) {
+          armThrow = true;
+        } else {
+          // By the second recipient the Event is off. If the failed guard had
+          // marked itself done, this recipient would be mailed anyway.
+          (db.docs['events/med-2026'] as Record<string, unknown>).settings = {
+            dailyEmailEnabled: false,
+          };
+        }
+        return `${uid}@example.com`;
+      },
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Nobody is mailed: the first recipient's guard threw, and the second's guard
+    // — which only runs because the first never claimed the flag — sees the
+    // disable and stops the fan-out.
+    expect(sent).toHaveLength(0);
+    expect(result.failed).toBe(1);
+    expect(result.drained).toBe(false);
+  });
+});
+
+describe('a malformed Day label cannot fail the whole sweep (#1192, final round)', () => {
+  // `firestore.rules` validates only a Day's `scoring` (`dayScoringValid` is the
+  // whole of it), so these fields arrive as raw Firestore values. `placeLabel`
+  // trims them directly, and the throw would land in input assembly — ahead of
+  // the per-recipient catch — so ONE bad field failed the Event's every sweep
+  // before a single recipient was mailed.
+  const withDay0 = (over: Record<string, unknown>): Docs => {
+    const docs = seedDue();
+    const event = docs['events/med-2026'] as Record<string, unknown>;
+    const days = [...(event.days as Array<Record<string, unknown>>)];
+    days[0] = { ...days[0], ...over };
+    event.days = days;
+    return docs;
+  };
+
+  it('survives a non-string place', async () => {
+    const got = await podiumEmailInputFor(makeDb(withDay0({ place: 12345 })), 'med-2026');
+    expect(got.due).toBe(true);
+  });
+
+  it('survives a non-string emoji, port and portEmoji', async () => {
+    const got = await podiumEmailInputFor(
+      makeDb(withDay0({ place: null, port: { a: 1 }, placeEmoji: 7, portEmoji: ['x'] })),
+      'med-2026',
+    );
+    expect(got.due).toBe(true);
+  });
+
+  it('drops the malformed value rather than rendering it', async () => {
+    const got = await podiumEmailInputFor(makeDb(withDay0({ place: 12345 })), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // No label anywhere carries the coerced number.
+    const labels = [
+      got.input.closingDay.placeLabel,
+      ...Object.values(got.input.honorDayLabels),
+      got.input.photoDayLabel ?? '',
+    ];
+    for (const label of labels) expect(label).not.toContain('12345');
+  });
+});
+
+describe('fingerprints cannot collide across their own separators (#1192, final round)', () => {
+  const outbox = (db: { docs: Docs }, uid: string) =>
+    db.docs[podiumOutboxPath('med-2026', uid)] as Record<string, unknown> | undefined;
+
+  it('distinguishes a uid containing the ban separator from two uids', async () => {
+    // Seeded on the Event too: the fresh guard compares the two and refuses the
+    // whole send when they differ, so a mismatched fixture would freeze nothing.
+    const a = await run(seedDue({ bannedUids: ['a,b'] }), {}, { bannedUids: ['a,b'] });
+    const b = await run(seedDue({ bannedUids: ['a', 'b'] }), {}, { bannedUids: ['a', 'b'] });
+
+    const fpA = outbox(a.db, 'zac')?.banFingerprint;
+    const fpB = outbox(b.db, 'zac')?.banFingerprint;
+    expect(typeof fpA).toBe('string');
+    // `join(',')` rendered both as the single string `a,b`, so a retry after this
+    // ban change replayed bytes the guard should have refused.
+    expect(fpA).not.toBe(fpB);
+  });
+
+  it('distinguishes award text that differs only by where the separator falls', async () => {
+    const withNames = (displayName: string, promptText: string) => ({
+      mostLoved: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName, promptText, dayIndex: 6, proofCreatedAt: 500 },
+        ],
+        winnerCount: 1,
+        heartCount: 31,
+        frozenAt: 2_000,
+        computedAt: 2_050,
+      },
+    });
+
+    // Both tuples joined to the identical `…:ido:Ido:Mirror:selfie:6` under the
+    // old encoding, and `displayName` is participant-controlled.
+    const a = await run(seedDue(), {}, withNames('Ido', 'Mirror:selfie'));
+    const b = await run(seedDue(), {}, withNames('Ido:Mirror', 'selfie'));
+
+    const fpA = outbox(a.db, 'zac')?.awardFingerprint;
+    const fpB = outbox(b.db, 'zac')?.awardFingerprint;
+    expect(typeof fpA).toBe('string');
+    expect(fpA).not.toBe(fpB);
+  });
+});
+
 describe('the first-attempt stamp is write-once (#1192, CodeRabbit P1)', () => {
   // THE STALE `existing` IS THE RACE. Both overlapping sweeps read the prefs doc
   // several remote operations before they stamp, so each one calls with

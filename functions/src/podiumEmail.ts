@@ -804,41 +804,40 @@ export async function sendPodiumEmailForEvent(
         result.blocked++;
         continue;
       }
-      // THE DEADLINE IS RECORDED ONLY ONCE A SEND IS ACTUALLY IMMINENT (Codex
-      // P2, current head). It used to be written BEFORE the freeze, so an outbox
-      // that could not be created started the 24-hour clock on a recipient who
-      // was never mailed — and if that failure outlasted the window, the cutoff
-      // above blocked them permanently for an attempt that never happened.
-      // Permanent recipient loss caused by the guard meant to prevent a
-      // duplicate. It still precedes the transport, which is the property that
-      // matters: an accepted send always has a durable start.
-      const firstAttemptAt = await markPodiumEmailAttempted(
-        db,
-        eventId,
-        player.uid,
-        recordedAttemptAt,
-        deps,
-      );
-      if (firstAttemptAt === null) {
-        result.blocked++;
-        continue;
-      }
       // THE LAST THING BEFORE THE FIRST MESSAGE (Codex P2, current head). The
       // pre-loop guard's comment claimed nothing awaits before delivery, and the
       // spec claimed the Event is re-read "immediately before the first send" —
-      // but four remote operations run per recipient after that guard: the prefs
-      // read, the address lookup, the freeze and the attempt stamp. An Event
-      // archived or disabled during the FIRST recipient's preparation was
-      // therefore still mailed, against a boundary the spec calls terminal.
+      // but several remote operations run per recipient after that guard: the
+      // prefs read, the address lookup and the freeze. An Event archived or
+      // disabled during the FIRST recipient's preparation was therefore still
+      // mailed, against a boundary the spec calls terminal.
       //
       // Once per Event, not per recipient: the batch checkpoint below already
       // covers the rest of the roster, and this only has to close the gap the
       // checkpoint cannot see — the stretch before any message has gone out.
+      //
+      // AHEAD OF THE ATTEMPT STAMP, NOT BEHIND IT (Codex P2 + CodeRabbit P1,
+      // final round). This guard can CANCEL the send, and the stamp starts a
+      // 24-hour clock that the cutoff above turns into a permanent refusal once
+      // it expires. Stamping first therefore charged a recipient for an attempt
+      // this guard then cancelled: disable email during the first recipient's
+      // preparation, re-enable it a day later, and that one recipient is blocked
+      // for operator resolution having never been mailed. The stamp still
+      // precedes the transport, which is the property that actually matters —
+      // an accepted send always has a durable start.
       if (!guardedBeforeFirstSend) {
-        guardedBeforeFirstSend = true;
         const atFirst = (await db.doc(`events/${eventId}`).get()).data() as
           | PodiumEmailEvent
           | undefined;
+        // ONLY ONCE THE READ HAS ACTUALLY SUCCEEDED (Codex P2, final round).
+        // Setting this before awaiting meant a transient rejection here — caught
+        // by the per-recipient handler, which counts a failure and moves on —
+        // left the guard marked done, so every remaining recipient skipped it and
+        // could be mailed after an archive or disable that happened during
+        // preparation. A throw now leaves the flag clear and the next recipient
+        // performs the guard; the failure it records already withholds
+        // completion, so nobody is lost by retrying it.
+        guardedBeforeFirstSend = true;
         if (eventClosedToPlay(atFirst)) {
           console.log(`sendPodiumEmailForEvent ${eventId}: archived during recipient preparation`);
           result.reason = 'archived';
@@ -851,6 +850,24 @@ export async function sendPodiumEmailForEvent(
           stoppedEarly = true;
           break;
         }
+      }
+      // THE DEADLINE IS RECORDED ONLY ONCE A SEND IS ACTUALLY IMMINENT (Codex
+      // P2, current head). It used to be written BEFORE the freeze, so an outbox
+      // that could not be created started the 24-hour clock on a recipient who
+      // was never mailed — and if that failure outlasted the window, the cutoff
+      // above blocked them permanently for an attempt that never happened.
+      // Permanent recipient loss caused by the guard meant to prevent a
+      // duplicate.
+      const firstAttemptAt = await markPodiumEmailAttempted(
+        db,
+        eventId,
+        player.uid,
+        recordedAttemptAt,
+        deps,
+      );
+      if (firstAttemptAt === null) {
+        result.blocked++;
+        continue;
       }
       const ok = await send({
         to: [outbound.to],
@@ -1184,7 +1201,14 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
 /** A ban roster as a stable, order-insensitive fingerprint, normalised exactly
  *  as `bansDiffer` normalises it so the two can never disagree about equality. */
 function banFingerprintOf(raw: unknown): string {
-  return [...normalizeBanSet(raw)].sort().join(',');
+  // JSON OVER THE SORTED ARRAY, NOT A JOIN (Codex P2, final round). A uid is an
+  // arbitrary string at this boundary, so `join(',')` is lossy: `['a,b']` and
+  // `['a','b']` both serialize to `a,b`. Two genuinely different ban sets then
+  // produce one fingerprint, and the replay guard accepts frozen bytes that name
+  // or address a Player banned since the freeze — the precise case this
+  // fingerprint exists to refuse. `JSON.stringify` escapes the separator, so
+  // distinct sets cannot collide.
+  return JSON.stringify([...normalizeBanSet(raw)].sort());
 }
 
 /** The rendered award as a stable fingerprint: each winner's proof id and
@@ -1214,13 +1238,18 @@ function awardRecordFingerprintOf(raw: unknown): string {
             promptText?: unknown;
             dayIndex?: unknown;
           };
-          return [x.proofId, x.proofCreatedAt, x.uid, x.displayName, x.promptText, x.dayIndex]
-            .map((v) => String(v))
-            .join(':');
+          return [x.proofId, x.proofCreatedAt, x.uid, x.displayName, x.promptText, x.dayIndex].map(
+            (v) => String(v),
+          );
         })
-        .join(',')
-    : '';
-  return `${winners}|${String(a.winnerCount)}|${String(a.heartCount)}|${String(a.frozenAt)}`;
+    : [];
+  // CANONICAL JSON RATHER THAN DELIMITER JOINS (Codex P2 + CodeRabbit P1, final
+  // round). `displayName` and `promptText` are participant-controlled, so a name
+  // containing the separator could forge another winner's tuple and two different
+  // awards would fingerprint alike — a stale replay then passes a guard whose one
+  // job is to catch exactly that. Nesting the arrays keeps every boundary
+  // unambiguous without changing which fields are covered.
+  return JSON.stringify([winners, String(a.winnerCount), String(a.heartCount), String(a.frozenAt)]);
 }
 
 function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): string {
@@ -1230,13 +1259,16 @@ function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): st
   // changes a printed value produces identical identity pairs, so an
   // identity-only fingerprint would let a retry replay bytes naming a superseded
   // winner or prompt.
-  return award.winners
-    .map((w) =>
-      [w.proofId, w.proofCreatedAt, w.uid, w.displayName, w.promptText, w.dayIndex]
-        .map((v) => String(v))
-        .join(':'),
-    )
-    .join(',');
+  // Canonical JSON for the same reason the record fingerprint uses it (Codex P2 +
+  // CodeRabbit P1, final round): these tuples carry participant-controlled text,
+  // and a delimiter join lets a crafted name collide with a different award.
+  return JSON.stringify(
+    award.winners.map((w) =>
+      [w.proofId, w.proofCreatedAt, w.uid, w.displayName, w.promptText, w.dayIndex].map((v) =>
+        String(v),
+      ),
+    ),
+  );
 }
 
 /**
@@ -1349,7 +1381,32 @@ function dayLabels(
   // the frozen outbox document over Firestore's 1 MiB limit, which blocks every
   // recipient. The Event name got this treatment a round ago; these labels are
   // the same kind of value and were missed.
-  const place = (day: EmailDay | undefined): string => (day ? singleLine(placeLabel(day)) : '');
+  // COERCED BEFORE `placeLabel`, NOT JUST NORMALISED AFTER IT (Codex P2, final
+  // round). `placeLabel` trims its inputs directly, and `firestore.rules`
+  // validates only a Day's `scoring` — `dayScoringValid` is the whole of it — so a
+  // stored `place`, `port`, `placeEmoji` or `portEmoji` that is not a string
+  // reaches `.trim()` and THROWS. The throw lands in input assembly, ahead of the
+  // per-recipient loop and its catch, and this helper walks every Day: one
+  // malformed field therefore fails the whole sweep before a single recipient is
+  // mailed, every quarter hour, permanently. `singleLine` could not help because
+  // it only ever saw `placeLabel`'s output. Same doctrine as the stored award —
+  // validated, not cast — and the same one `EmailDay` states for `scoring`: this
+  // boundary reads raw Firestore maps, so a bad value must resolve rather than
+  // fail. Narrowed to this call site deliberately: `placeLabel` is shared with the
+  // daily card, whose own exposure belongs to that ticket rather than this one.
+  const asText = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  const place = (day: EmailDay | undefined): string =>
+    day
+      ? singleLine(
+          placeLabel({
+            ...day,
+            place: asText(day.place),
+            port: asText(day.port),
+            placeEmoji: asText(day.placeEmoji),
+            portEmoji: asText(day.portEmoji),
+          }),
+        )
+      : '';
   const honorDayLabels: Record<number, string> = {};
   for (const index of honorDayIndexes) {
     const day = days.find((d) => d.index === index);
