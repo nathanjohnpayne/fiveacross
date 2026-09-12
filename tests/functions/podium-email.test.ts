@@ -1435,18 +1435,31 @@ describe('round-6 findings (Codex P2)', () => {
     const db = makeDb(seedDue());
     const got = await podiumEmailInputFor(db, 'med-2026');
     if (!got.due) throw new Error('expected due');
-    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+    // The mutation must land DURING the function's own preparation, not while
+    // this deps object is being built (CodeRabbit, round 7): an IIFE here runs
+    // before `sendPodiumEmailForEvent` is even called, so the FIRST guard would
+    // satisfy the assertion and the test would pass with the second guard
+    // deleted. Hooking the hostnames read — which `resolveEventOrigin` performs
+    // between the two guards — puts it in the real window.
+    let firstGuardSawOpenEvent = false;
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        if (path === 'hostnames') {
+          // Reaching here at all proves the first guard passed on an open Event.
+          firstGuardSawOpenEvent = true;
+          db.docs['events/med-2026'].archiving = true;
+        }
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
       ...baseDeps(),
-      from: undefined,
-      // Archive the Event from inside the sender resolution — the exact gap.
-      fromOverrides: (() => {
-        db.docs['events/med-2026'].archiving = true;
-        return { gcb: 'Gay Cruise Bingo <bingo@example.com>' };
-      })(),
       send: async () => {
         throw new Error('an Event archived during preparation must not be mailed');
       },
     });
+    expect(firstGuardSawOpenEvent).toBe(true);
     expect(result.reason).toBe('archived');
   });
 
@@ -1593,6 +1606,50 @@ describe('round-7 finding (Codex P2)', () => {
       send: async () => true,
     });
     expect(result.sent).toBe(3);
+    expect(result.drained).toBe(true);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
+describe('the completion transaction is the last word (CodeRabbit P1 r7)', () => {
+  // `freshEventGuard` can pass and the Event can change before the marker
+  // commits — and that write is irreversible in effect, since re-enabling or
+  // unbanning afterwards cannot reopen a closed fan-out. So every mutable
+  // condition is re-applied on the transactional snapshot.
+  const mutateInsideTx = (db: ReturnType<typeof makeDb>, mutation: Record<string, unknown>) =>
+    ({
+      ...db,
+      runTransaction: async <T,>(fn: (tx: never) => Promise<T>): Promise<T> => {
+        Object.assign(db.docs['events/med-2026'], mutation);
+        return db.runTransaction(fn);
+      },
+    }) as unknown as typeof db;
+
+  it.each([
+    ['archived', { status: 'archived' }],
+    ['closing', { archiving: true }],
+    ['disabled', { settings: { dailyEmailEnabled: false } }],
+    ['re-banned', { bannedUids: ['logan'] }],
+  ])('does not stamp when the Event became %s before the commit', async (_name, mutation) => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(mutateInsideTx(db, mutation), 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('still stamps when nothing changed', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => true,
+    });
     expect(result.drained).toBe(true);
     expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
   });

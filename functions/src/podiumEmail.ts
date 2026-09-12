@@ -281,6 +281,18 @@ async function verifyAndStampCompletion(
       // existence inside the transaction makes the deletion win.
       const event = await tx.get(eventRef);
       if (!event.exists) return false;
+      // AND RE-APPLY EVERY MUTABLE CONDITION HERE, on the transactional snapshot
+      // (CodeRabbit P1, round 7 on PR #1207). `freshEventGuard` can pass and the
+      // Event can then be disabled, archived or re-banned before this commits —
+      // and this is the write that is IRREVERSIBLE in effect: re-enabling or
+      // unbanning afterwards cannot reopen a fan-out the marker has closed. The
+      // transaction already reads the document to prove it exists, so checking
+      // its contents costs nothing and makes this the last word rather than a
+      // second opinion.
+      const atCommit = event.data() as PodiumEmailEvent | undefined;
+      if (eventClosedToPlay(atCommit)) return false;
+      if (!dailyEmailEnabled(atCommit as Parameters<typeof dailyEmailEnabled>[0])) return false;
+      if (bansDiffer(bannedUids, atCommit?.bannedUids)) return false;
       const snap = await tx.get(bounded);
       // OVERFLOW REFUSES COMPLETION, and it must be checked BEFORE the ban
       // filter (Codex P2, round 7 on PR #1207). The page is `cap + 1` precisely
