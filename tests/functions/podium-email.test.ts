@@ -121,6 +121,7 @@ const input = (over: Partial<PodiumEmailInput> = {}): PodiumEmailInput => ({
     frozenAt: 2_000,
     computedAt: 2_050,
   },
+  boardWasEmpty: false,
   closingDay: {
     themeId: 'so-long-farewell',
     dayNumber: 10,
@@ -561,6 +562,247 @@ describe('runPodiumEmailSweep (#1192)', () => {
   });
 });
 
+// --- ③c Round-2 review fixes ----------------------------------------------------
+
+describe('row 1 is the Moment’s champion, never the live roster’s head (Codex P2 r2)', () => {
+  it('pins the champion first even when a Player edits themselves above them', async () => {
+    // The exact failure the round-1 test had merely DEMONSTRATED: subject says
+    // Zac, row 1 said Nathan. The subject and the first row must name one person.
+    const docs = seedDue();
+    docs['events/med-2026/players/nathan'] = {
+      displayName: 'Nathan Payne',
+      bingoCount: 99,
+      squaresMarked: 999,
+      firstBingoAt: 1,
+    };
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const model = buildPodiumEmailModel({
+      eventName: 'E',
+      podium: got.input.podium,
+      mostLoved: got.input.mostLoved,
+      ranked: got.input.ranked,
+      boardWasEmpty: got.input.boardWasEmpty,
+      closingDay: got.input.closingDay,
+      honorDayLabels: got.input.honorDayLabels,
+      recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
+      edition: 'gcb',
+      feedUrl: 'https://x.test/feed',
+      unsubscribeUrl: 'https://x.test/u',
+      preferencesUrl: 'https://x.test/p',
+    });
+    expect(model.subject).toBe('Final standings 🏆—Zacaria Arab takes the cruise');
+    expect(model.standingsRows[0]).toMatchObject({ uid: 'zac', rank: 1 });
+    // The edited Player still appears — below the pinned champion, and exactly
+    // once.
+    expect(model.standingsRows.filter((r) => r.uid === 'zac')).toHaveLength(1);
+    expect(model.standingsRows[1].uid).toBe('nathan');
+    // And the reader's own placing indexes the SAME ordering.
+    expect(model.youLine).toContain('#2');
+  });
+});
+
+describe('a withheld champion is not an empty board (Codex + CodeRabbit P2 r2)', () => {
+  it('still prints standings when the frozen champion is banned', async () => {
+    const got = await podiumEmailInputFor(makeDb(seedDue({ bannedUids: ['zac'] })), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.podium.champion).toBeNull();
+    // The board was NOT empty — the Moment had a champion before filtering.
+    expect(got.input.boardWasEmpty).toBe(false);
+    const model = buildPodiumEmailModel({
+      eventName: 'E',
+      podium: got.input.podium,
+      mostLoved: got.input.mostLoved,
+      ranked: got.input.ranked,
+      boardWasEmpty: got.input.boardWasEmpty,
+      closingDay: got.input.closingDay,
+      honorDayLabels: got.input.honorDayLabels,
+      recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
+      edition: 'gcb',
+      feedUrl: 'https://x.test/feed',
+      unsubscribeUrl: 'https://x.test/u',
+      preferencesUrl: 'https://x.test/p',
+    });
+    expect(model.standingsEmptyLine).toBeNull();
+    expect(model.standingsRows.length).toBeGreaterThan(0);
+    // The contradiction this prevents: "nobody marked a square" beside a
+    // non-zero personal result.
+    expect(model.youLine).toContain('bingos');
+  });
+});
+
+describe('the Most-Loved award is validated and ban-filtered (Codex + CodeRabbit r2)', () => {
+  const award = (over: Record<string, unknown> = {}) => ({
+    winners: [
+      { proofId: 'p1', uid: 'ido', displayName: 'Ido Marcus', promptText: 'Mirror-hall selfie', dayIndex: 6, proofCreatedAt: 500 },
+      { proofId: 'p2', uid: 'sam', displayName: 'Sam', promptText: 'Deck sunrise', dayIndex: 5, proofCreatedAt: 600 },
+    ],
+    winnerCount: 2,
+    heartCount: 31,
+    frozenAt: 1,
+    computedAt: 2,
+    ...over,
+  });
+
+  it('drops a banned winner and promotes the next visible co-winner', async () => {
+    const docs = seedDue({ mostLovedPhoto: award(), bannedUids: ['ido'] });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners.map((w) => w.uid)).toEqual(['sam']);
+    // The tie tail counts only Players the reader could see.
+    expect(got.input.mostLoved?.winnerCount).toBe(1);
+  });
+
+  it('omits the award entirely when every winner is banned', async () => {
+    const docs = seedDue({ mostLovedPhoto: award(), bannedUids: ['ido', 'sam'] });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+  });
+
+  it.each([
+    ['no winners array', { winners: undefined }],
+    ['a non-numeric heartCount', { heartCount: 'lots' }],
+    ['a winner missing promptText', { winners: [{ proofId: 'p', uid: 'x', displayName: 'X' }] }],
+  ])('normalises a malformed award to null rather than throwing: %s', async (_name, over) => {
+    const docs = seedDue({ mostLovedPhoto: award(over) });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+  });
+
+  it('does not throw for the whole send when the stored award is garbage', async () => {
+    const docs = seedDue({ mostLovedPhoto: { nonsense: true } });
+    const db = makeDb(docs);
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    // Before the fix this threw inside the per-recipient catch for EVERY
+    // recipient, so the Event never drained and the crash repeated every sweep.
+    expect(sent).toHaveLength(3);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
+describe('delivery-time and roster safety (Codex P2 r2)', () => {
+  it('does not begin delivery for an Event archived during preparation', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // The archive lands between the due check and the send.
+    db.docs['events/med-2026'].archiving = true;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('an archived Event must not be mailed');
+      },
+    });
+    expect(result.reason).toBe('archived');
+    expect(result.sent).toBe(0);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('withholds the marker when a Player joins mid-send, so the next sweep mails them', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        // A late joiner appears while the fan-out is still running.
+        if (++n === 1) {
+          db.docs['events/med-2026/players/late'] = {
+            displayName: 'Late Joiner',
+            bingoCount: 0,
+            squaresMarked: 3,
+            firstBingoAt: null,
+          };
+        }
+        return true;
+      },
+    });
+    expect(result.sent).toBe(3);
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+
+    // The next sweep mails only the new member — everyone else is skipped by
+    // their own marker.
+    const sent: Captured[] = [];
+    await runPodiumEmailSweep(db, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent.map((s) => s.to[0])).toEqual(['late@example.com']);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+
+  it('records an undeliverable recipient durably, so the lookup is not repeated', async () => {
+    const db = makeDb(seed());
+    let lookups = 0;
+    const deps = {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => {
+        lookups++;
+        return uid === 'zac' ? null : `${uid}@example.com`;
+      },
+      send: async () => true,
+    };
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), deps);
+    expect(db.docs['events/med-2026/emailPrefs/zac'].podiumEmailSkippedAt).toBe(3_000);
+    const first = lookups;
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), deps);
+    // The second run costs no further Auth lookups at all: everyone is now
+    // resolved, by a sent marker or a skipped one.
+    expect(lookups).toBe(first);
+  });
+
+  it('keeps the run open when the sent-marker write fails', async () => {
+    const db = makeDb(seed());
+    const broken = {
+      ...db,
+      doc: (path: string) =>
+        path.includes('/emailPrefs/')
+          ? { ...db.doc(path), set: async () => { throw new Error('UNAVAILABLE'); } }
+          : db.doc(path),
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    // Mail went out, but nothing recorded it — so the Event must NOT drain, or a
+    // retry beyond Resend's 24h dedup window would deliver a second copy.
+    expect(result.sent).toBe(3);
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+});
+
+describe('the sweep selects only active Events (Codex + CodeRabbit r2)', () => {
+  it('never reads an archived Event’s Moment or roster', async () => {
+    const docs = { ...seedDue(), 'events/old-2024': { status: 'archived', name: 'Old' } };
+    const db = makeDb(docs);
+    const read: string[] = [];
+    const traced = {
+      ...db,
+      doc: (path: string) => {
+        read.push(path);
+        return db.doc(path);
+      },
+    } as unknown as typeof db;
+    await runPodiumEmailSweep(traced, { ...baseDeps(), send: async () => true });
+    expect(read.some((p) => p.startsWith('events/old-2024'))).toBe(false);
+  });
+});
+
 // --- ④ Both registers render ----------------------------------------------------
 
 /** The model as a real send would build it, for one Edition. */
@@ -573,6 +815,7 @@ const modelFor = (edition: string, over: Record<string, unknown> = {}) => {
     ranked: beat.ranked,
     closingDay: beat.closingDay,
     honorDayLabels: beat.honorDayLabels,
+    boardWasEmpty: false,
     recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
     edition,
     feedUrl: 'https://gaycruisebingo.com/feed',

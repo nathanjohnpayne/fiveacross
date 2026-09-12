@@ -151,10 +151,13 @@ export function renderPodiumEmailText(model: PodiumEmailModel): string {
   ];
   if (model.standingsRows.length > 0) {
     for (const r of model.standingsRows) {
-      lines.push(
-        `${r.rank}. ${r.displayName}—${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'}, ` +
-          `${r.squaresMarked} square${r.squaresMarked === 1 ? '' : 's'}`,
-      );
+      // THE SHARED stat line, not a second spelling of it (CodeRabbit, round 2 on
+      // PR #1207). `finaleStatLine` is documented as belonging to both parts, and
+      // this renderer was quietly printing "16 bingos, 124 squares" where the
+      // HTML printed "16 bingos · 124 sq" — two alternatives of one message
+      // disagreeing about the same numbers' presentation is exactly what a
+      // shared helper exists to prevent.
+      lines.push(`${r.rank}. ${r.displayName}—${finaleStatLine(r)}`);
     }
   } else {
     lines.push(model.standingsEmptyLine ?? '');

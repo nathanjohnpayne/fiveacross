@@ -1132,7 +1132,16 @@ export const dailyEngagementEmail = onSchedule(
  */
 export const podiumAnnouncementEmail = onSchedule(
   {
-    schedule: '*/15 * * * *',
+    // OFFSET FROM THE DAILY CARD'S SWEEP BY DESIGN (Codex P2, round 2 on PR
+    // #1207). The two families pace their own sends through their own in-memory
+    // queue, so two invocations overlapping in time can each send at the paced
+    // rate and together exceed what either intends. A shared durable limiter is
+    // the real answer and is out of this ticket's scope; staggering the two
+    // schedules by seven minutes makes the common case — a short podium burst
+    // against a daily sweep — not overlap at all. The residual is stated in the
+    // spec rather than papered over: a long-running sweep can still span into
+    // the other's slot.
+    schedule: '7-59/15 * * * *',
     timeZone: 'Etc/UTC',
     serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
     secrets: [RESEND_API_KEY],

@@ -99,8 +99,21 @@ export interface BuildPodiumEmailArgs {
    *  return value, passed through rather than recomputed. */
   podium: PodiumPayload;
   /** The frozen Most-Loved award, or `null`/`undefined` for an Event whose
-   *  award was never computed. */
+   *  award was never computed. Already ban-filtered and shape-validated by the
+   *  caller — this module renders it, it does not vet it. */
   mostLoved?: MostLovedPhotoAward | null;
+  /**
+   * Whether the Event's board was EMPTY at the freeze — nobody marked anything.
+   *
+   * ITS OWN INPUT, not `podium.champion === null` (Codex + CodeRabbit, round 2
+   * on PR #1207). Those two conditions were the same thing until the caller
+   * began withholding a currently-banned champion, at which point `null` gained
+   * a second meaning — and an Event whose frozen champion is banned would have
+   * told every recipient that nobody marked a square, directly above a `youLine`
+   * reporting their own non-zero result. The caller knows which it is, because
+   * it reads the Moment's payload BEFORE filtering it.
+   */
+  boardWasEmpty: boolean;
   /**
    * The full standings, already ranked by `compareFinalePlayers` and
    * ban-filtered, from which the top rows and the reader's placing are read.
@@ -274,7 +287,22 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     register,
   );
 
-  const rows: FinaleStandingsRow[] = args.ranked
+  // ROW 1 IS THE MOMENT'S CHAMPION, NOT THE LIVE ROSTER'S HEAD (Codex P2, round
+  // 2 on PR #1207). The ranking below is rebuilt from Player documents, which
+  // are client-authoritative and validate no field (ADR 0001) — and the freeze
+  // cutoff bounds timestamps, not counts — so a post-freeze self-write can put
+  // somebody else at the head of it. The subject names the Moment's champion, so
+  // an unpinned row 1 would have produced an email whose headline and whose
+  // first row named two different people. That is strictly worse than the
+  // documented residual, which is that ranks 2 and 3 may drift.
+  //
+  // So the champion is placed first by identity, and the live ranking fills the
+  // rows BELOW it with that uid removed.
+  const below = args.ranked.filter((p) => !champion || p.uid !== champion.uid);
+  const ordered: FinaleRankedPlayer[] = champion
+    ? [{ uid: champion.uid, displayName: champion.displayName, bingoCount: champion.bingoCount, squaresMarked: champion.squaresMarked }, ...below]
+    : [...args.ranked];
+  const rows: FinaleStandingsRow[] = ordered
     .slice(0, FINALE_STANDINGS_ROWS)
     .map((p, i) => ({
       uid: p.uid,
@@ -284,10 +312,7 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
       squaresMarked: p.squaresMarked,
     }));
 
-  // An empty board is the one state with no rows: `champion` is `null` exactly
-  // when nobody marked anything, which is the same condition
-  // `buildPodiumPayload` applies.
-  const emptyBoard = champion === null;
+  const emptyBoard = args.boardWasEmpty;
   const contextPlace = args.closingDay.placeLabel.trim();
 
   return {
@@ -312,7 +337,9 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     starLine,
     mostLovedHeading: 'Most-loved photo',
     mostLovedLine,
-    youLine: youLineFor(args.ranked, args.recipient.uid),
+    // Indexed into the SAME ordering the rows above are cut from, so a reader
+    // cannot be told they finished #2 while row 2 names somebody else.
+    youLine: youLineFor(ordered, args.recipient.uid),
     signOffLine: register.finaleSignOff,
     ctaLabel: 'Open the Feed',
     ctaUrl: args.feedUrl,

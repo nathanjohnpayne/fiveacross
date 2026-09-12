@@ -44,6 +44,7 @@ import { podiumStandings, type FinaleDay } from './finaleContent';
 import {
   ensureEmailPrefs,
   markPodiumEmailSent,
+  markPodiumEmailUndeliverable,
   preferencesLink,
   shouldSendPodiumTo,
   unsubscribeLink,
@@ -52,7 +53,7 @@ import {
 import type { FinalePlayer, PodiumPayload } from './finaleContent';
 import { buildPodiumEmailModel } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
-import type { MostLovedPhotoAward } from '../../src/domainTypes';
+import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
 
 /** Everything the beat hands over. Every field is already computed — this
  *  module reads no finale state of its own. */
@@ -69,8 +70,11 @@ export interface PodiumEmailInput {
    *  IS `podium.champion`. Doubles as the recipient list: every row carries the
    *  uid and display name the send needs, so the fan-out costs no extra read. */
   ranked: readonly FinalePlayer[];
-  /** The frozen award, or `null` for an Event that never computed one. */
+  /** The frozen award, already validated and ban-filtered, or `null`. */
   mostLoved?: MostLovedPhotoAward | null;
+  /** Whether the Event's board was empty at the freeze, read off the Moment
+   *  before its honours were ban-filtered. */
+  boardWasEmpty: boolean;
   /** The closing Day, already formatted in the Event's timezone by the beat —
    *  this module holds no clock and no timezone logic. */
   closingDay: {
@@ -117,7 +121,7 @@ export interface PodiumSendResult {
    */
   drained: boolean;
   /** Why nothing was sent, when nothing was. */
-  reason?: 'disabled' | 'no-roster';
+  reason?: 'disabled' | 'no-roster' | 'archived';
 }
 
 /** The per-run recipient ceiling — a runaway guard on a corrupted roster, not a
@@ -177,6 +181,30 @@ async function resolveAddress(
 }
 
 /**
+ * Whether the Event's roster has more members than this run examined.
+ *
+ * Compares the VISIBLE count, because that is what the send walked: a ban
+ * landing mid-send shrinks the roster and must not read as growth. A read
+ * failure answers `true` — withholding the marker costs one more sweep, while
+ * wrongly stamping it costs a participant their only copy of this email.
+ */
+async function rosterGrewSince(
+  db: DailyEmailFirestore & FinaleReadSource,
+  eventId: string,
+  examinedCount: number,
+  deps: DailyEmailDeps,
+): Promise<boolean> {
+  try {
+    const cap = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
+    const roster = await readFinaleRoster(db, eventId, cap + 1);
+    return roster.length > examinedCount;
+  } catch (err) {
+    console.error('rosterGrewSince failed', eventId, err);
+    return true;
+  }
+}
+
+/**
  * Record that this Event's fan-out is finished, so the sweep stops asking.
  *
  * A MERGE, EMPHATICALLY (Codex P1 on PR #1207). The first implementation stamped
@@ -221,7 +249,7 @@ async function stampFanOutComplete(
  * wrapped by the beat as well.
  */
 export async function sendPodiumEmailForEvent(
-  db: DailyEmailFirestore,
+  db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
   input: PodiumEmailInput,
   deps: DailyEmailDeps = {},
@@ -262,6 +290,25 @@ export async function sendPodiumEmailForEvent(
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
   const eventName = typeof input.event.name === 'string' ? input.event.name : '';
 
+  // THE FRESH READ, immediately before the first send (Codex P2, round 2 on PR
+  // #1207). Everything above this line is preparation — the due check's Moment
+  // and roster reads, the hostname resolution, the sender identity — and that is
+  // exactly the elapsed time an archive landing mid-sweep gets to slip through:
+  // the closed-Event guard ran against the snapshot the due check opened with,
+  // and the spec says archival is TERMINAL for this send. Re-reading the one
+  // document that carries it is what turns "this Event was open when the sweep
+  // started" into "it is still open now". Mirrors `sendDailyEmailForEvent`'s own
+  // pre-delivery re-read, for the same reason.
+  const atDelivery = (await db.doc(`events/${eventId}`).get()).data() as
+    | { status?: string; archiving?: boolean }
+    | undefined;
+  if (eventClosedToPlay(atDelivery)) {
+    // Not drained: the fan-out is genuinely unfinished. It will not be retried
+    // either, because an archived Event is never due again — that residual is
+    // the spec's, not this guard's, and stopping here is what it promises.
+    return { ...result, reason: 'archived' };
+  }
+
   let capHit = false;
   let examined = 0;
   for (const player of input.ranked) {
@@ -297,6 +344,10 @@ export async function sendPodiumEmailForEvent(
         continue;
       }
       if (address.status === 'none') {
+        // Recorded durably, so the next sweep does not pay this Auth lookup
+        // again — a long leading prefix of address-less Players could otherwise
+        // consume a whole invocation and starve the deliverable tail behind it.
+        await markPodiumEmailUndeliverable(db, eventId, player.uid, deps);
         result.skipped++;
         continue;
       }
@@ -308,6 +359,7 @@ export async function sendPodiumEmailForEvent(
         podium: input.podium,
         mostLoved: input.mostLoved ?? null,
         ranked: input.ranked,
+        boardWasEmpty: input.boardWasEmpty,
         closingDay: input.closingDay,
         honorDayLabels: input.honorDayLabels,
         recipient: { uid: player.uid, displayName: player.displayName },
@@ -331,7 +383,15 @@ export async function sendPodiumEmailForEvent(
       });
       if (ok) {
         result.sent++;
-        await markPodiumEmailSent(db, eventId, player.uid, deps);
+        // A SWALLOWED marker failure is how a duplicate escapes (CodeRabbit,
+        // round 2 on PR #1207): the send succeeded, so the recipient is mailed,
+        // but without the marker a later sweep would mail them again — and
+        // Resend's idempotency key only dedupes for 24 hours, so a retry after
+        // that window would genuinely deliver twice. Counting it as blocked
+        // keeps the Event undrained, which brings the retry forward to the next
+        // quarter hour, well inside the window, where the key still collapses it.
+        const marked = await markPodiumEmailSent(db, eventId, player.uid, deps);
+        if (!marked) result.blocked++;
       } else {
         result.failed++;
       }
@@ -354,7 +414,24 @@ export async function sendPodiumEmailForEvent(
   // dependency leaves the question open, so the marker is withheld and the next
   // sweep resumes (Codex P1 on PR #1207).
   result.drained = !capHit && result.failed === 0 && result.blocked === 0;
-  if (result.drained) await stampFanOutComplete(db, eventId, deps);
+  if (result.drained) {
+    // THE ROSTER MAY HAVE GROWN WHILE THIS RAN (Codex P2, round 2 on PR #1207).
+    // `firestore.rules` permits `players/{uid}` creation until archival and a
+    // paced fan-out runs for minutes, so somebody joining after the due check's
+    // roster read is absent from `input.ranked` — and stamping the marker on
+    // that stale list would mean every later sweep skips the Event and they are
+    // never mailed. Re-counting is one bounded read against a roster this run
+    // has already paid to walk; a mismatch simply withholds the marker, and the
+    // next sweep examines the new member while everybody else is skipped by
+    // their own `podiumEmailSentAt`.
+    const grew = await rosterGrewSince(db, eventId, input.ranked.length, deps);
+    if (grew) {
+      console.log(`sendPodiumEmailForEvent ${eventId}: roster changed mid-send, deferring the marker`);
+      result.drained = false;
+    } else {
+      await stampFanOutComplete(db, eventId, deps);
+    }
+  }
   console.log(
     `sendPodiumEmailForEvent ${eventId}: sent=${result.sent} skipped=${result.skipped} ` +
       `failed=${result.failed} blocked=${result.blocked} drained=${result.drained}`,
@@ -398,6 +475,60 @@ export type PodiumDueReason =
   | 'already-sent'
   | 'no-podium'
   | 'no-payload';
+
+/**
+ * The frozen Most-Loved award, VALIDATED and ban-filtered, or `null`.
+ *
+ * VALIDATED because `EventDoc.mostLovedPhoto` arrives here as a raw Firestore
+ * map and the content module indexes into it (CodeRabbit, round 2 on PR #1207):
+ * an award missing `winners`, or carrying a winner without a string
+ * `promptText`, threw inside `mostLovedLineFor` — and because the throw landed
+ * in the per-recipient catch, it counted as a failure for EVERY recipient, so
+ * the Event never drained and the sweep retried the same crash every quarter
+ * hour. Nothing about this module may assume the document's shape.
+ *
+ * BAN-FILTERED for the same reason the podium honours are (Codex + CodeRabbit,
+ * round 2): the stored award is the record and keeps the unfiltered truth, while
+ * this email is a rendered view. A currently-banned winner is dropped, the next
+ * visible co-winner becomes the hero, and an award with no visible winner left
+ * renders no module at all. `heartCount` is the frozen count they tied at and is
+ * preserved; `winnerCount` is reduced to what remains visible, so the "shared
+ * with N others" tail counts only Players the reader could actually see.
+ */
+export function visibleMostLovedAward(
+  raw: unknown,
+  bannedUids: ReadonlySet<string>,
+): MostLovedPhotoAward | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const award = raw as Partial<MostLovedPhotoAward>;
+  if (!Array.isArray(award.winners)) return null;
+  if (typeof award.heartCount !== 'number' || !Number.isFinite(award.heartCount)) return null;
+  const winners = award.winners.filter(
+    (w): w is MostLovedPhotoWinner =>
+      !!w &&
+      typeof w === 'object' &&
+      typeof (w as MostLovedPhotoWinner).uid === 'string' &&
+      typeof (w as MostLovedPhotoWinner).displayName === 'string' &&
+      typeof (w as MostLovedPhotoWinner).promptText === 'string' &&
+      !bannedUids.has((w as MostLovedPhotoWinner).uid),
+  );
+  if (winners.length === 0) return null;
+  // The retained prefix's length is the right fallback when `winnerCount` is
+  // absent (records written before the bounded format), and the filtered count
+  // must never exceed what survived the filter.
+  const declared =
+    typeof award.winnerCount === 'number' && Number.isFinite(award.winnerCount)
+      ? award.winnerCount
+      : award.winners.length;
+  const removed = award.winners.length - winners.length;
+  return {
+    winners,
+    winnerCount: Math.max(winners.length, declared - removed),
+    heartCount: award.heartCount,
+    frozenAt: typeof award.frozenAt === 'number' ? award.frozenAt : 0,
+    computedAt: typeof award.computedAt === 'number' ? award.computedAt : 0,
+  };
+}
 
 /** `events/{eventId}/moments/podium` — the one place this path is spelled. */
 export function podiumMomentPath(eventId: string): string {
@@ -463,8 +594,12 @@ function dayLabels(
 export async function podiumEmailInputFor(
   db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
+  /** The Event document the sweep already read, to save a second fetch of it. A
+   *  caller with none (a test, a manual replay) omits it and this reads. */
+  known?: PodiumEmailEvent,
 ): Promise<{ due: true; input: PodiumEmailInput } | { due: false; reason: PodiumDueReason }> {
-  const event = (await db.doc(`events/${eventId}`).get()).data() as PodiumEmailEvent | undefined;
+  const event =
+    known ?? ((await db.doc(`events/${eventId}`).get()).data() as PodiumEmailEvent | undefined);
   if (!event) return { due: false, reason: 'no-event' };
   // Checked ahead of the toggle, because it is the stronger statement: the
   // occasion is over, whatever the settings say. This is also where an archived
@@ -492,7 +627,17 @@ export async function podiumEmailInputFor(
 
   const days = (Array.isArray(event.days) ? event.days : []) as EmailDay[];
   const banned = (Array.isArray(event.bannedUids) ? event.bannedUids : []) as string[];
-  const roster = await readFinaleRoster(db, eventId);
+  // BOUNDED AT THE QUERY, ceiling plus one so overflow is detectable from the
+  // raw page rather than from the ban-filtered roster — a banned row inside the
+  // page must not hide the fact that valid participants beyond it were cut off.
+  const cap = DEFAULT_MAX_RECIPIENTS;
+  const roster = await readFinaleRoster(db, eventId, cap + 1);
+  if (roster.length > cap) {
+    console.error(
+      `podiumEmailInputFor: roster exceeds the ${cap} ceiling; the remainder will not be mailed`,
+      eventId,
+    );
+  }
   const visible = visibleFinaleRoster(roster, banned);
   const freezeAt = typeof event.standingsFreezeAt === 'number' ? event.standingsFreezeAt : null;
   const ranked = podiumStandings(visible, days as unknown as FinaleDay[], freezeAt);
@@ -516,7 +661,10 @@ export async function podiumEmailInputFor(
         dailyHonors: payload.dailyHonors.filter((h) => !bannedSet.has(h.uid)),
       },
       ranked,
-      mostLoved: (event.mostLovedPhoto ?? null) as MostLovedPhotoAward | null,
+      mostLoved: visibleMostLovedAward(event.mostLovedPhoto, bannedSet),
+      // Read from the Moment BEFORE the honour filtering above, so a withheld
+      // banned champion is never mistaken for a board nobody played.
+      boardWasEmpty: payload.champion == null,
       closingDay,
       honorDayLabels,
     },
@@ -526,18 +674,34 @@ export async function podiumEmailInputFor(
 /**
  * One sweep across every active Event, mirroring `runDailyEmailSweep`: Event
  * work starts concurrently so a large or slow first Event cannot consume the
- * whole invocation, while every transport call still passes through ONE shared
- * pacing queue — concurrency is for fairness across Events, never a multiplier
- * on Resend's account-wide request rate.
+ * whole invocation, while every transport call still passes through ONE pacing
+ * queue — concurrency is for fairness across Events, never a multiplier on the
+ * send rate.
+ *
+ * THAT QUEUE IS PER-INVOCATION, NOT ACCOUNT-WIDE, and the earlier wording here
+ * claimed otherwise (Codex P2, round 2 on PR #1207). `runDailyEmailSweep` owns a
+ * separate in-memory queue, so a daily sweep and a podium sweep running at once
+ * can each pace independently and together exceed Resend's account-wide rate;
+ * so can two overlapping instances of either. The schedules are staggered seven
+ * minutes apart to make the common case not overlap at all, and the residual is
+ * written down in the spec. A shared durable limiter is the real fix and belongs
+ * to both families rather than to this ticket.
  */
 export async function runPodiumEmailSweep(
   db: DailyEmailFirestore & FinaleReadSource,
   deps: DailyEmailDeps = {},
 ): Promise<void> {
-  // Not the freeze check, and not the marker check: this selection only excludes
-  // an ARCHIVED Event, and it runs once before any Event is processed.
-  // `podiumEmailInputFor` reads both off the document itself.
-  const events = await db.collection('events').get();
+  // ACTUALLY FILTERED (Codex + CodeRabbit, round 2 on PR #1207). This comment
+  // used to claim the selection excluded archived Events while the query applied
+  // no filter at all, so every Event ever created was fetched 96 times a day and
+  // then re-read inside the due check merely to be rejected — a cost that grows
+  // with the lifetime Event count and never falls back.
+  //
+  // The filter is NOT the freeze check and not the marker check: the archive's
+  // closing phase deliberately leaves `status` alone, and this query runs once
+  // before any Event is processed, so `podiumEmailInputFor` still reads both off
+  // the document itself. It just no longer reads the ones that can never qualify.
+  const events = await db.collection('events').where('status', '==', 'active').get();
   const transport = deps.send ?? (await import('./email')).sendEmail;
   const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
   const sleep = deps.sleep ?? defaultSleep;
@@ -563,7 +727,10 @@ export async function runPodiumEmailSweep(
   await Promise.all(
     events.docs.map(async (ev) => {
       try {
-        const due = await podiumEmailInputFor(db, ev.id);
+        // The snapshot this sweep already holds, passed through rather than
+        // re-fetched: the due check needed a second read of the same document
+        // on every Event on every sweep.
+        const due = await podiumEmailInputFor(db, ev.id, ev.data() as PodiumEmailEvent | undefined);
         if (!due.due) return;
         await sendPodiumEmailForEvent(db, ev.id, due.input, {
           ...deps,

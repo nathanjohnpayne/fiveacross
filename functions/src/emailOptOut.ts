@@ -89,6 +89,11 @@ export interface EmailPrefs {
    * support question about the finale is always "when did this go out".
    */
   podiumEmailSentAt?: number;
+  /** When this participant was found to have no deliverable address at the
+   *  Event's finale (#1192). Its own field rather than a `podiumEmailSentAt`
+   *  value, because "we decided not to mail you" and "we mailed you" must stay
+   *  distinguishable to anyone reading this doc in support. */
+  podiumEmailSkippedAt?: number;
 }
 
 export interface OptOutDeps {
@@ -147,6 +152,11 @@ export async function readEmailPrefsOutcome(
         podiumEmailSentAt:
           typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
             ? data.podiumEmailSentAt
+            : undefined,
+        podiumEmailSkippedAt:
+          typeof data.podiumEmailSkippedAt === 'number' &&
+          Number.isFinite(data.podiumEmailSkippedAt)
+            ? data.podiumEmailSkippedAt
             : undefined,
       },
     };
@@ -292,14 +302,50 @@ export async function markPodiumEmailSent(
   eventId: string,
   uid: string,
   deps: OptOutDeps = {},
-): Promise<void> {
+): Promise<boolean> {
   const at = (deps.now ?? Date.now)();
   try {
     await db
       .doc(emailPrefsPath(eventId, uid))
       .set({ podiumEmailSentAt: at, updatedAt: at }, { merge: true });
+    return true;
   } catch (err) {
     console.error('markPodiumEmailSent failed', eventId, uid, err);
+    return false;
+  }
+}
+
+/**
+ * Record that this participant will NOT be sent the winner email, for a reason
+ * no retry would change — they have no deliverable address at the Event's
+ * finale.
+ *
+ * DURABLE, because the alternative starves the tail of a large roster (Codex P2,
+ * round 2 on PR #1207). Each sweep walks the roster in ranked order and every
+ * address-less Player costs a Firebase Auth lookup; a long leading prefix of
+ * them could consume the whole invocation before any deliverable recipient was
+ * reached, and the next sweep would start again from the same first Player. A
+ * successful send is already durable through `podiumEmailSentAt`; this is its
+ * counterpart for the one outcome that is equally final.
+ *
+ * NOT written for an opt-out — that answer is already in the doc and costs a
+ * single read — and not for a transient failure, which must stay retryable.
+ */
+export async function markPodiumEmailUndeliverable(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+  deps: OptOutDeps = {},
+): Promise<void> {
+  const at = (deps.now ?? Date.now)();
+  try {
+    await db
+      .doc(emailPrefsPath(eventId, uid))
+      .set({ podiumEmailSkippedAt: at, updatedAt: at }, { merge: true });
+  } catch (err) {
+    // Best-effort: the only cost of a failure is repeating the lookup next
+    // sweep, which is the behaviour this exists to improve, not to guarantee.
+    console.error('markPodiumEmailUndeliverable failed', eventId, uid, err);
   }
 }
 
@@ -312,10 +358,11 @@ export async function markPodiumEmailSent(
  *  unsubscribe means no email, and that holds for the last mail of the Event
  *  exactly as it does for every other one. */
 export function shouldSendPodiumTo(
-  prefs: { optedOut: boolean; podiumEmailSentAt?: number } | null,
+  prefs: { optedOut: boolean; podiumEmailSentAt?: number; podiumEmailSkippedAt?: number } | null,
 ): boolean {
   if (!prefs) return false;
   if (prefs.optedOut) return false;
+  if (typeof prefs.podiumEmailSkippedAt === 'number') return false;
   return typeof prefs.podiumEmailSentAt !== 'number';
 }
 

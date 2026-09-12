@@ -674,7 +674,13 @@ interface Transaction {
  */
 export interface FinaleReadSource {
   doc(path: string): { get(): Promise<DocSnapshot> };
-  collection(path: string): { get(): Promise<{ docs: DocSnapshot[] }> };
+  collection(path: string): {
+    get(): Promise<{ docs: DocSnapshot[] }>;
+    /** Optional, because `AdminFirestore`'s own `CollectionRef` does not declare
+     *  it: a caller that HAS it can bound the roster read (#1192), and one that
+     *  does not reads unbounded exactly as every finale beat always has. */
+    limit?(count: number): { get(): Promise<{ docs: DocSnapshot[] }> };
+  };
 }
 
 export interface AdminFirestore {
@@ -811,8 +817,14 @@ function finiteNumber(value: unknown, fallback: number): number {
 export async function readFinaleRoster(
   db: FinaleReadSource,
   eventId: string,
+  /** Bound the QUERY, not just the loop that consumes it (#1192, Codex P2 on PR
+   *  #1207). A corrupted `players` collection would otherwise be materialised and
+   *  sorted in full before any ceiling applied. Omitted by the finale beats,
+   *  which read the whole roster by design — the podium payload ranks everyone. */
+  cap?: number,
 ): Promise<FinalePlayer[]> {
-  const snap = await db.collection(`events/${eventId}/players`).get();
+  const ref = db.collection(`events/${eventId}/players`);
+  const snap = await (cap != null && ref.limit ? ref.limit(cap).get() : ref.get());
   return snap.docs
     .map((d) => {
       const data = (d.data() ?? {}) as Partial<FinalePlayer>;
