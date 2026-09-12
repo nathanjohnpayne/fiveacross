@@ -384,12 +384,19 @@ async function freshEventGuard(
   // Re-verifies only the HERO, which is the single winner the email renders: one
   // document read, and if it has gone the whole snapshot is stale because the
   // tie count behind it was derived from a join that no longer holds.
-  if (revalidateAward && input.mostLoved) {
-    const hero = input.mostLoved.winners[0];
+  // GUARDED ON A HERO EXISTING, not merely on the award being present
+  // (CodeRabbit, round 9 on PR #1207). The sweep converts an award with no
+  // visible winner to `null`, so this only bites a DIRECT caller — a test, or a
+  // manual replay — passing `winners: []`. But there it was permanent: an empty
+  // list has nothing to verify, `surviving.length === 0` read as "the photo went
+  // away", and the send aborted with `award-changed` on every attempt. An award
+  // with no winner is simply an email with no award module.
+  const heroToRecheck = revalidateAward ? input.mostLoved?.winners[0] : undefined;
+  if (heroToRecheck) {
     const still = await visibleWinners(
       db,
       eventId,
-      hero ? [hero] : [],
+      [heroToRecheck],
       normalizeBanSet(input.bannedUids),
       typeof (atDelivery?.settings as { reportHideThreshold?: unknown } | undefined)
         ?.reportHideThreshold === 'number'

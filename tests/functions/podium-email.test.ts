@@ -1791,6 +1791,26 @@ describe('round-8 findings (Codex P2)', () => {
   });
 });
 
+describe('an award with no winners is not a changed award (CodeRabbit r9)', () => {
+  it('sends normally when a direct caller passes an empty winner list', async () => {
+    // The sweep converts this to `null`, so only a direct caller — a test, or a
+    // manual replay — can produce it. It used to abort with `award-changed` on
+    // every attempt, permanently.
+    const db = makeDb(seed());
+    const result = await sendPodiumEmailForEvent(
+      db,
+      'med-2026',
+      input({
+        mostLoved: { winners: [], winnerCount: 0, heartCount: 0, frozenAt: 1, computedAt: 2 },
+      }),
+      { ...baseDeps(), send: async () => true },
+    );
+    expect(result.reason).toBeUndefined();
+    expect(result.sent).toBe(3);
+    expect(result.drained).toBe(true);
+  });
+});
+
 describe('round-9 findings (Codex P2)', () => {
   const bigRoster = () => {
     const docs = seedDue();
