@@ -1226,9 +1226,12 @@ describe('round-4 findings (Codex P2, CodeRabbit P1)', () => {
     expect(got.input.mostLoved?.winnerCountExact).toBe(false);
   });
 
-  it('still counts a truncated tie exactly when NO ban roster is in play', async () => {
-    // With no bans there is no filtering, so the stored cardinality stands even
-    // though the prefix is truncated.
+  it('will not count a truncated tie even when NO ban roster is in play', async () => {
+    // Round 4's rule excused this case, because bans were then the only filter.
+    // The live-visibility join added in round 5 applies to every winner
+    // regardless, and the winners beyond the persisted prefix cannot be joined
+    // because they were never stored — so a hidden photo out there is as
+    // invisible to us as a banned owner was.
     const many = Array.from({ length: 100 }, (_, i) => ({
       proofId: `p${i}`,
       uid: `u${i}`,
@@ -1242,8 +1245,9 @@ describe('round-4 findings (Codex P2, CodeRabbit P1)', () => {
     });
     const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
     if (!got.due) throw new Error('expected due');
-    expect(got.input.mostLoved?.winnerCountExact).toBe(true);
-    expect(got.input.mostLoved?.winnerCount).toBe(150);
+    expect(got.input.mostLoved?.winnerCountExact).toBe(false);
+    // The count reflects what was actually verified, not the stored cardinality.
+    expect(got.input.mostLoved?.winnerCount).toBe(100);
   });
 });
 
@@ -1315,7 +1319,29 @@ describe('round-5 findings (Codex P2, CodeRabbit)', () => {
     expect(model.mostLovedLine).toBeNull();
   });
 
-  it('costs ONE proof read when the hero survives', async () => {
+  it('reads one proof per persisted winner, and exactly one when there is no tie', async () => {
+    const solo = {
+      winners: [
+        { proofId: 'only', uid: 'ido', displayName: 'Ido Marcus', promptText: 'Solo', dayIndex: 6, proofCreatedAt: 500 },
+      ],
+      winnerCount: 1,
+      heartCount: 31,
+      frozenAt: 1,
+      computedAt: 2,
+    };
+    const soloDb = makeDb(seedDue({ mostLovedPhoto: solo }));
+    const soloReads: string[] = [];
+    const tracedSolo = {
+      ...soloDb,
+      doc: (path: string) => {
+        if (path.includes('/proofs/')) soloReads.push(path);
+        return soloDb.doc(path);
+      },
+    } as unknown as typeof soloDb;
+    await podiumEmailInputFor(tracedSolo, 'med-2026');
+    // The overwhelmingly common case — no tie — still costs a single read.
+    expect(soloReads).toEqual(['events/med-2026/proofs/only']);
+
     const docs = seedDue({ mostLovedPhoto: award() });
     const db = makeDb(docs);
     const read: string[] = [];
@@ -1327,7 +1353,10 @@ describe('round-5 findings (Codex P2, CodeRabbit)', () => {
       },
     } as unknown as typeof db;
     await podiumEmailInputFor(traced, 'med-2026');
-    expect(read).toEqual(['events/med-2026/proofs/p1']);
+    // A real tie costs one read per persisted winner — bounded by the tie, paid
+    // once per Event lifetime, and the price of not claiming a co-winner whose
+    // photo has been taken down.
+    expect(read).toEqual(['events/med-2026/proofs/p1', 'events/med-2026/proofs/p2']);
   });
 });
 
@@ -1359,28 +1388,32 @@ describe('completion is verified and stamped atomically (Codex P2 r5)', () => {
     const db = makeDb(seedDue());
     const got = await podiumEmailInputFor(db, 'med-2026');
     if (!got.due) throw new Error('expected due');
-    let insideTx = false;
-    let readInside = false;
+    // Building the query ref is not a read — `tx.get` is. So the assertion is
+    // that the players query is GOT inside the transaction, not that
+    // `db.collection` is called there.
+    let rosterGotInsideTx = false;
     const traced = {
       ...db,
-      runTransaction: async <T,>(fn: (tx: never) => Promise<T>): Promise<T> => {
-        insideTx = true;
-        try {
-          return await db.runTransaction(fn);
-        } finally {
-          insideTx = false;
-        }
-      },
-      collection: (path: string) => {
-        if (path.endsWith('/players') && insideTx) readInside = true;
-        return db.collection(path);
-      },
+      runTransaction: async <T,>(fn: (tx: never) => Promise<T>): Promise<T> =>
+        db.runTransaction((async (tx: {
+          get: (ref: unknown) => Promise<unknown>;
+          set: (...args: unknown[]) => void;
+        }) => {
+          const wrapped = {
+            ...tx,
+            get: async (ref: { path?: string }) => {
+              if (typeof ref.path !== 'string') rosterGotInsideTx = true;
+              return tx.get(ref);
+            },
+          };
+          return fn(wrapped as never);
+        }) as never),
     } as unknown as typeof db;
     await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
       ...baseDeps(),
       send: async () => true,
     });
-    expect(readInside).toBe(true);
+    expect(rosterGotInsideTx).toBe(true);
   });
 
   it('writes the marker with a MERGE inside the transaction', async () => {
@@ -1392,6 +1425,129 @@ describe('completion is verified and stamped atomically (Codex P2 r5)', () => {
     expect(event.status).toBe('active');
     expect(event.frozenAt).toBe(5_000);
     expect(Array.isArray(event.days)).toBe(true);
+  });
+});
+
+describe('round-6 findings (Codex P2)', () => {
+  it('aborts when the Event is archived while the sender is being resolved', async () => {
+    // `resolveEventOrigin` and `resolveEmailFrom` are remote, so guards placed
+    // ahead of them left the very window they closed reopened.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      from: undefined,
+      // Archive the Event from inside the sender resolution — the exact gap.
+      fromOverrides: (() => {
+        db.docs['events/med-2026'].archiving = true;
+        return { gcb: 'Gay Cruise Bingo <bingo@example.com>' };
+      })(),
+      send: async () => {
+        throw new Error('an Event archived during preparation must not be mailed');
+      },
+    });
+    expect(result.reason).toBe('archived');
+  });
+
+  it('refuses to resurrect an Event deleted during the fan-out', async () => {
+    // A merge-style `set` CREATES a missing document, so this would have left a
+    // zombie Event containing only `podiumEmailAt` — its subcollections survive
+    // deletion, so it would look half-real.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        if (++n === 3) delete db.docs['events/med-2026'];
+        return true;
+      },
+    });
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026']).toBeUndefined();
+  });
+
+  it('bounds the transactional roster read at the ceiling', async () => {
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let limited: number | null = null;
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        const q = db.collection(path);
+        return path.endsWith('/players')
+          ? { ...q, limit: (n: number) => { limited = n; return q.limit(n); } }
+          : q;
+      },
+    } as unknown as typeof db;
+    await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      maxRecipients: 5,
+      send: async () => true,
+    });
+    // Ceiling plus one, so an overflowing roster still reads as "someone I did
+    // not examine" rather than silently fitting.
+    expect(limited).toBe(6);
+  });
+
+  it('states no tie size when a co-winner’s photo was taken down', async () => {
+    // Round 5 validated only the hero and kept counting the tail, so the email
+    // could claim a co-winner whose photo had been removed.
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+          { proofId: 'p2', uid: 'sam', displayName: 'Sam', promptText: 'Two', dayIndex: 1, proofCreatedAt: 2 },
+          { proofId: 'p3', uid: 'kai', displayName: 'Kai', promptText: 'Three', dayIndex: 1, proofCreatedAt: 3 },
+        ],
+        winnerCount: 3,
+        heartCount: 9,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    delete docs['events/med-2026/proofs/p3'];
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // The hero survives, and the count reflects only what was verified.
+    expect(got.input.mostLoved?.winners.map((w) => w.uid)).toEqual(['ido', 'sam']);
+    expect(got.input.mostLoved?.winnerCount).toBe(2);
+    const model = modelFor('gcb', { mostLoved: got.input.mostLoved });
+    expect(model.mostLovedLine).toContain('Shared with 1 other photo on the same count.');
+  });
+
+  it('renders no placing line when the frozen board was empty', () => {
+    // `boardWasEmpty` comes from the Moment while the placing line is read off
+    // the live roster, so a post-freeze self-edit would otherwise produce "nobody
+    // marked a square" above "you finished #2 with 14 squares".
+    const model = modelFor('gcb', { boardWasEmpty: true });
+    expect(model.standingsRows).toEqual([]);
+    expect(model.youLine).toBeNull();
+  });
+
+  it.each([
+    ['an unchanged but malformed roster', [123], [123]],
+    ['a duplicate replacing a real unban', ['x', 'y'], ['x', 'x']],
+  ])('compares ban rosters symmetrically: %s', (_name, before, after) => {
+    const db = makeDb(seedDue({ bannedUids: after }));
+    return (async () => {
+      const got = await podiumEmailInputFor(db, 'med-2026');
+      if (!got.due) throw new Error('expected due');
+      const result = await sendPodiumEmailForEvent(
+        db,
+        'med-2026',
+        { ...got.input, bannedUids: before as unknown as string[] },
+        { ...baseDeps(), send: async () => true },
+      );
+      // `[123]` vs `[123]`: identical, so the send proceeds rather than
+      // returning `bans-changed` on every sweep forever.
+      // `['x','y']` vs `['x','x']`: a real unban, so it must be caught.
+      const expected = JSON.stringify(before) === JSON.stringify(after) ? undefined : 'bans-changed';
+      expect(result.reason).toBe(expected);
+    })();
   });
 });
 

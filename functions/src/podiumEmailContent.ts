@@ -401,7 +401,14 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     mostLovedLine,
     // Indexed into the SAME ordering the rows above are cut from, so a reader
     // cannot be told they finished #2 while row 2 names somebody else.
-    youLine: youLineFor(ordered, args.recipient.uid),
+    //
+    // AND SUPPRESSED ENTIRELY ON A FROZEN EMPTY BOARD (Codex P2, round 6 on PR
+    // #1207). `boardWasEmpty` comes from the Moment while this line is read off
+    // the live roster, so a Player editing their own client-authoritative stats
+    // after the freeze would produce an email that says nobody marked a square
+    // and then tells the reader how many squares they marked. The frozen record
+    // wins: if the board was empty, nobody has a placing.
+    youLine: emptyBoard ? null : youLineFor(ordered, args.recipient.uid),
     signOffLine: register.finaleSignOff,
     ctaLabel: 'Open the Feed',
     ctaUrl: args.feedUrl,
