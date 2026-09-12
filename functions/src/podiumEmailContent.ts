@@ -195,6 +195,13 @@ export function subjectSafeName(raw: string, maxLength = 48): string {
   return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1).trimEnd()}…` : flattened;
 }
 
+/** The ceiling on any single participant-authored value in the rendered body.
+ *  Generous against real names and prompts — both live Events' longest are well
+ *  under it — and small enough that a full standings module plus an award line
+ *  cannot approach Firestore's 1 MiB document limit when both alternatives are
+ *  frozen together. */
+export const BODY_TEXT_MAX = 120;
+
 /**
  * Flatten participant-authored text to a single line.
  *
@@ -210,7 +217,7 @@ export function subjectSafeName(raw: string, maxLength = 48): string {
  * the same characters and cannot present a different message structure — which
  * is the property a `multipart/alternative` pair has to hold.
  */
-export function singleLine(raw: string): string {
+export function singleLine(raw: string, maxLength = BODY_TEXT_MAX): string {
   // C0 **AND C1**, plus DEL (Codex P2, round 11 on PR #1207). The first version
   // covered `\u0000-\u001f\u007f` and leaned on `\s+` for the rest — but
   // JavaScript's `\s` does NOT match U+0085 NEXT LINE, and some clients render
@@ -218,7 +225,21 @@ export function singleLine(raw: string): string {
   // bodies and could still fabricate structure, which is the whole thing this
   // function exists to prevent. U+0080–U+009F is the range that was missing.
   // eslint-disable-next-line no-control-regex -- flattening control characters IS the point.
-  return raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // AND BOUNDED (Codex P1, final round on PR #1207). Flattening alone left the
+  // LENGTH unbounded, and `players/{uid}` validates no field (ADR 0001): a
+  // Player can edit their own `displayName` while the Event is active, place
+  // themselves in the live top three after the podium posts, and store a name
+  // hundreds of kilobytes long. That value is copied into BOTH alternatives for
+  // every recipient and both halves are then stored in ONE outbox document, so
+  // past Firestore's 1 MiB limit every `create` fails, every recipient counts as
+  // blocked, and the Event's winner announcement can never drain — one
+  // participant denying the whole roster its last email.
+  //
+  // The subject has been bounded since round 8 (`subjectSafeName`); this is the
+  // same oversight one layer in, the body left unbounded while the header was
+  // protected.
+  return flat.length > maxLength ? `${flat.slice(0, maxLength - 1).trimEnd()}…` : flat;
 }
 
 /** "16 bingos · 124 sq" — the stat cell, pluralised. Shared by both parts so

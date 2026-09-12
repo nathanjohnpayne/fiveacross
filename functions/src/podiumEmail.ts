@@ -696,6 +696,7 @@ export async function sendPodiumEmailForEvent(
           from,
           unsubscribeUrl: unsubUrl,
           banFingerprint: banFingerprintOf(input.bannedUids),
+          awardFingerprint: awardFingerprintOf(input.mostLoved),
         },
         deps,
       );
@@ -985,6 +986,18 @@ interface FrozenPodiumRequest {
    *  A replay whose current roster differs is STALE: the stored message may name
    *  somebody since banned (Codex P2, round 13 on PR #1207). */
   banFingerprint: string;
+  /**
+   * The AWARD these bytes rendered, as a stable fingerprint (Codex P2, final
+   * round).
+   *
+   * The ban fingerprint does not cover this: a winning Proof deleted, hidden or
+   * report-hidden after the freeze leaves the roster untouched, so the next
+   * sweep rebuilds a correctly award-free snapshot, validates it, and then the
+   * replay serves the OLD bytes naming the suppressed winner. That is the
+   * hidden-after-freeze contract broken by the retry path specifically, and the
+   * one thing it must not do — the whole reason the live-visibility join exists.
+   */
+  awardFingerprint: string;
 }
 
 function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodiumRequest | null {
@@ -997,6 +1010,7 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
   // because requiring it non-empty rejected every unbanned Event's frozen
   // request and blocked its whole retry path.
   if (typeof raw.banFingerprint !== 'string') return null;
+  if (typeof raw.awardFingerprint !== 'string') return null;
   return {
     to: raw.to as string,
     subject: raw.subject as string,
@@ -1005,6 +1019,7 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
     from: raw.from as string,
     unsubscribeUrl: raw.unsubscribeUrl as string,
     banFingerprint: raw.banFingerprint as string,
+    awardFingerprint: raw.awardFingerprint as string,
   };
 }
 
@@ -1012,6 +1027,15 @@ function toFrozenRequest(raw: Record<string, unknown> | undefined): FrozenPodium
  *  as `bansDiffer` normalises it so the two can never disagree about equality. */
 function banFingerprintOf(raw: unknown): string {
   return [...normalizeBanSet(raw)].sort().join(',');
+}
+
+/** The rendered award as a stable fingerprint: each winner's proof id and
+ *  incarnation, in render order. `''` means "no award module", which is itself a
+ *  state a replay must not contradict — bytes naming a winner cannot be served
+ *  once the current snapshot has none. */
+function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): string {
+  if (!award) return '';
+  return award.winners.map((w) => `${w.proofId}:${w.proofCreatedAt}`).join(',');
 }
 
 /**
@@ -1066,13 +1090,17 @@ async function freezeOrReplay(
       // transport `false` does not prove nothing was delivered. Refusing is the
       // only branch that cannot make it worse, and it is loud so an operator can
       // resolve the one recipient by hand.
-      if (stored && stored.banFingerprint !== request.banFingerprint) {
-        console.error(
-          'freezeOrReplay: frozen request predates a ban change; refusing to replay it',
-          eventId,
-          uid,
-        );
-        return null;
+      if (stored) {
+        const staleBans = stored.banFingerprint !== request.banFingerprint;
+        const staleAward = stored.awardFingerprint !== request.awardFingerprint;
+        if (staleBans || staleAward) {
+          console.error(
+            `freezeOrReplay: frozen request predates a ${staleBans ? 'ban' : 'award visibility'} change; refusing to replay it`,
+            eventId,
+            uid,
+          );
+          return null;
+        }
       }
       if (stored) return stored;
     } catch (err) {

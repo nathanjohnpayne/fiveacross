@@ -12,6 +12,7 @@ import {
 import type { DailyEmailFirestore } from '../../functions/src/dailyEmail';
 import { shouldSendPodiumTo } from '../../functions/src/emailOptOut';
 import {
+  BODY_TEXT_MAX,
   buildPodiumEmailModel,
   singleLine,
   subjectSafeName,
@@ -2203,6 +2204,105 @@ describe('round-13 findings (Codex P2)', () => {
     expect(withNewline.footerWhyLine).toContain('Atlantis Med Unsubscribe: https://evil.test');
     expect(renderPodiumEmailText(withNewline).split('\n').filter((l) => l.startsWith('Unsubscribe: https://evil'))).toEqual([]);
     expect(model.footerWhyLine).toContain('Atlantis Med—Trieste to Barcelona');
+  });
+});
+
+describe('final round (Codex P1 + P2)', () => {
+  it('bounds a hostile display name so the frozen outbox cannot exceed Firestore', async () => {
+    // `players/{uid}` validates no field (ADR 0001), so a Player can edit their
+    // own name while the Event is active, place themselves in the live top three
+    // after the podium posts, and store hundreds of kilobytes. Both alternatives
+    // carry it and BOTH are frozen in one document — past 1 MiB every create
+    // fails, every recipient is blocked, and the Event can never drain.
+    const huge = 'Z'.repeat(400_000);
+    const docs = seedDue();
+    docs['events/med-2026/players/nathan'] = {
+      displayName: huge,
+      bingoCount: 99,
+      squaresMarked: 999,
+      firstBingoAt: 1,
+    };
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(result.sent).toBe(3);
+    expect(result.blocked).toBe(0);
+    expect(result.drained).toBe(true);
+    // One participant cannot inflate the message for everybody else.
+    for (const s of sent) {
+      expect(s.html.length).toBeLessThan(60_000);
+      expect(s.text.length).toBeLessThan(20_000);
+    }
+    const frozen = db.docs[podiumOutboxPath('med-2026', 'zac')];
+    expect(JSON.stringify(frozen).length).toBeLessThan(200_000);
+  });
+
+  it('truncates with an ellipsis rather than dropping the name', () => {
+    expect(singleLine('Z'.repeat(500))).toHaveLength(BODY_TEXT_MAX);
+    expect(singleLine('Z'.repeat(500)).endsWith('…')).toBe(true);
+    expect(singleLine('Zacaria Arab')).toBe('Zacaria Arab');
+  });
+
+  it('refuses to replay frozen bytes after the award photo is suppressed', async () => {
+    // The ban fingerprint cannot cover this: hiding a Proof leaves the roster
+    // untouched, so the next sweep rebuilds a correctly award-free snapshot,
+    // validates it, and the replay would then serve OLD bytes naming the
+    // suppressed winner — the hidden-after-freeze contract broken by the retry
+    // path specifically.
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName: 'Ido', promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+        ],
+        winnerCount: 1,
+        heartCount: 9,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    const db = makeDb(docs);
+    const first = await podiumEmailInputFor(db, 'med-2026');
+    if (!first.due) throw new Error('expected due');
+    expect(first.input.mostLoved?.winners[0].uid).toBe('ido');
+    // The transport refuses, so the request stays frozen with the award in it.
+    await sendPodiumEmailForEvent(db, 'med-2026', first.input, {
+      ...baseDeps(),
+      send: async () => false,
+    });
+    expect(db.docs[podiumOutboxPath('med-2026', 'zac')]).toBeDefined();
+
+    // The photo is then suppressed, and the next sweep's snapshot has no award.
+    db.docs['events/med-2026/proofs/p1'].status = 'hidden';
+    const second = await podiumEmailInputFor(db, 'med-2026');
+    if (!second.due) throw new Error('expected due');
+    expect(second.input.mostLoved).toBeNull();
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', second.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('bytes naming a suppressed winner must not be replayed');
+      },
+    });
+    expect(result.sent).toBe(0);
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+
+  it('still replays when the award is unchanged', async () => {
+    const db = makeDb(seed());
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), { ...baseDeps(), send: async () => false });
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(result.sent).toBe(3);
   });
 });
 
