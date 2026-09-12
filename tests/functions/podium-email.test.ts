@@ -968,12 +968,22 @@ describe('the token back-fill preserves every send marker (CodeRabbit r2, review
     // `ensureEmailPrefs` takes the back-fill transaction rather than returning
     // the stored prefs directly.
     docs['events/med-2026/emailPrefs/zac'] = { optedOut: false, token: '', podiumEmailSentAt: 111 };
-    const { result, sent } = await run(docs);
+    const { result, sent, db } = await run(docs);
     expect(sent.some((s) => s.to[0] === 'zac@example.com')).toBe(false);
     expect(result.sent).toBe(2);
     expect(result.skipped).toBe(1);
-    // …and the back-fill still did its job: the token is minted and persisted.
-    expect(docs['events/med-2026/emailPrefs/zac']).toBeDefined();
+    // …and the back-fill still did its job. Asserting the DOCUMENT exists would
+    // prove nothing — the test seeds it — so assert the values the back-fill is
+    // responsible for: a token was minted and persisted, and the marker it had
+    // to carry through survived the write untouched.
+    //
+    // Read from `db.docs`, NOT the seed object: `makeDb` copies its input, so
+    // the outer `docs` is a snapshot of the fixture and never sees a write. That
+    // is what let the original `toBeDefined()` assertion look meaningful.
+    const backfilled = db.docs['events/med-2026/emailPrefs/zac'];
+    expect(typeof backfilled.token).toBe('string');
+    expect(backfilled.token).not.toBe('');
+    expect(backfilled.podiumEmailSentAt).toBe(111);
   });
 
   it('preserves a token-less participant’s undeliverable marker too', async () => {
