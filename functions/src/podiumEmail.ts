@@ -40,7 +40,7 @@ import {
   type FinaleReadSource,
 } from './unlockDay';
 import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
-import { podiumStandings, type FinaleDay } from './finaleContent';
+import { podiumStandings, standingsFreezeAtFor } from './finaleContent';
 import {
   ensureEmailPrefs,
   markPodiumEmailSent,
@@ -709,8 +709,21 @@ export async function podiumEmailInputFor(
     );
   }
   const visible = visibleFinaleRoster(roster, banned);
-  const freezeAt = typeof event.standingsFreezeAt === 'number' ? event.standingsFreezeAt : null;
-  const ranked = podiumStandings(visible, days as unknown as FinaleDay[], freezeAt);
+  // THE RESOLVED FREEZE, not the configured field. `standingsFreezeAtFor` falls
+  // back to the first ceremonial Day's `unlockAt` when `EventDoc.standingsFreezeAt`
+  // is absent — which is every Event written before that field existed, including
+  // both live ones — and the beat builds the Moment's payload with exactly that
+  // resolved value. Reading the raw field here left the cutoff NULL for those
+  // Events, so `podiumStandings` applied none: ranks 2 and 3 would have counted
+  // post-freeze marks the Moment's own champion excludes, and the tie-break
+  // instant would differ too, which reorders rows. That is a systematic
+  // disagreement with the frozen record, not the documented per-Player-edit
+  // residual.
+  const freezeAt = standingsFreezeAtFor({
+    standingsFreezeAt: typeof event.standingsFreezeAt === 'number' ? event.standingsFreezeAt : undefined,
+    days,
+  });
+  const ranked = podiumStandings(visible, days, freezeAt);
   const bannedSet = new Set(banned);
   const { closingDay, honorDayLabels } = dayLabels(
     days,

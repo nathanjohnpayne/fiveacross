@@ -812,6 +812,38 @@ describe('the fan-out marker lands on an Event that has banned players', () => {
   });
 });
 
+describe('the ranking uses the RESOLVED freeze, like the Moment does', () => {
+  it('applies the ceremonial-Day fallback when no freeze is configured', async () => {
+    // `standingsFreezeAtFor` resolves the configured field FIRST and falls back
+    // to the first ceremonial Day's unlock — which is every Event written before
+    // that field existed, including both live ones. Reading the raw field left
+    // the cutoff null for them, so post-freeze marks counted toward ranks 2-3
+    // while the Moment's champion excluded them.
+    const docs = seedDue();
+    // No `standingsFreezeAt` on the Event; Day index 2 is the ceremonial close,
+    // unlocking at 5_000. A bingo recorded AFTER it must not rank.
+    (docs['events/med-2026'].days as Array<Record<string, unknown>>)[2].unlockAt = 5_000;
+    docs['events/med-2026/players/nathan'] = {
+      displayName: 'Nathan Payne',
+      bingoCount: 13,
+      squaresMarked: 110,
+      // Post-freeze instant: excluded from the ranking tie-break by the cutoff.
+      firstBingoAt: 9_000,
+    };
+    docs['events/med-2026/players/logan'] = {
+      displayName: 'Logan Murdock',
+      bingoCount: 13,
+      squaresMarked: 110,
+      // Pre-freeze, so Logan wins the tie on the earliest qualifying bingo.
+      firstBingoAt: 200,
+    };
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const order = got.input.ranked.map((p) => p.uid);
+    expect(order.indexOf('logan')).toBeLessThan(order.indexOf('nathan'));
+  });
+});
+
 describe('round-3 findings (Codex P2)', () => {
   it('does not complete an EMPTY fan-out that gained a member mid-flight', async () => {
     // `firestore.rules` permits `players/{uid}` creation until archival, so the
