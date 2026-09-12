@@ -190,9 +190,29 @@ export interface BuildPodiumEmailArgs {
  */
 export function subjectSafeName(raw: string, maxLength = 48): string {
   // eslint-disable-next-line no-control-regex -- stripping control characters IS the point.
-  const flattened = raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const flattened = singleLine(raw);
   if (flattened === '') return 'The winner';
   return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1).trimEnd()}…` : flattened;
+}
+
+/**
+ * Flatten participant-authored text to a single line.
+ *
+ * The PLAIN-TEXT alternative has no escaping layer (Codex P2, round 8 on PR
+ * #1207). The HTML part confines every field through `esc`, and the subject
+ * through `subjectSafeName` — but the text renderer interpolated display names
+ * and prompt text verbatim, so a stored newline could fabricate what looks like
+ * an extra standings row, a second CTA, or a footer line in a text-only client.
+ * `players/{uid}` and Proof `itemText` validate no field (ADR 0001), so this is
+ * participant-controlled structure in a message the recipient reads as ours.
+ *
+ * Applied by the MODEL rather than by the renderer, so both alternatives carry
+ * the same characters and cannot present a different message structure — which
+ * is the property a `multipart/alternative` pair has to hold.
+ */
+export function singleLine(raw: string): string {
+  // eslint-disable-next-line no-control-regex -- flattening control characters IS the point.
+  return raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /** "16 bingos · 124 sq" — the stat cell, pluralised. Shared by both parts so
@@ -228,7 +248,7 @@ function starLineFor(
   const own = podium.dailyHonors.find((h) => h.uid === star.uid && h.at === star.at);
   const label = own && honorDayLabels ? honorDayLabels[own.dayIndex] : undefined;
   const where = label ? `—${label}` : '';
-  return `${star.displayName} took the ${register.occasionWide} First to BINGO${where}.`;
+  return `${singleLine(star.displayName)} took the ${register.occasionWide} First to BINGO${where}.`;
 }
 
 /**
@@ -251,7 +271,7 @@ function mostLovedLineFor(
   // missing computation (see `buildMostLovedPhotoAward`), so it is rendered as
   // no module rather than as a zero.
   if (!hero || award.heartCount < 1) return null;
-  const prompt = hero.promptText.trim();
+  const prompt = singleLine(hero.promptText);
   const hearts = `❤ ${award.heartCount}`;
   // `winnerCount` is ABSENT on records written before the bounded format, where
   // `winners` WAS the complete tie — so the retained prefix's length is the
@@ -262,11 +282,17 @@ function mostLovedLineFor(
   // the hidden remainder beyond the persisted prefix may hold more banned
   // Players, so any number here could overstate the visible tie. The tail still
   // says a tie happened — dropping it entirely would be its own distortion.
+  // UNCERTAINTY IS CHECKED FIRST (Codex P2, round 8 on PR #1207). The count-first
+  // shortcut discarded the flag entirely in the one case it mattered most: a
+  // stored tie whose Proof reads all failed but one arrives here as
+  // `winnerCount: 1, winnerCountExact: false`, and `others <= 0` then emitted NO
+  // tail — presenting a survivor of an unverifiable tie as the sole winner,
+  // which is a stronger claim than the numeric tail it was avoiding.
   const shared =
-    others <= 0
-      ? ''
-      : award.winnerCountExact === false
-        ? ' Shared with others on the same count.'
+    award.winnerCountExact === false
+      ? ' Shared with others on the same count.'
+      : others <= 0
+        ? ''
         : ` Shared with ${others} other photo${others === 1 ? '' : 's'} on the same count.`;
   // THE FRAME'S SENTENCE, not a paraphrase of it (`#fx-email-finale-gcb`). The
   // module heading already says "Most-loved photo", so the line does not repeat
@@ -276,7 +302,7 @@ function mostLovedLineFor(
   // earlier draft of this line paraphrased instead — dropping the Day entirely.
   const quoted = prompt ? `"${prompt},"` : '';
   const where = photoDayLabel ? ` ${photoDayLabel}.` : '';
-  const head = [hero.displayName, quoted].filter(Boolean).join('—');
+  const head = [singleLine(hero.displayName), quoted].filter(Boolean).join('—');
   return `${head}${where} ${hearts}, frozen at the Standings Freeze.${shared}`;
 }
 
@@ -369,7 +395,9 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     .map((p, i) => ({
       uid: p.uid,
       rank: i + 1,
-      displayName: p.displayName,
+      // Flattened HERE, in the model, so the HTML and text alternatives carry
+      // the same characters and cannot present a different structure.
+      displayName: singleLine(p.displayName),
       bingoCount: p.bingoCount,
       squaresMarked: p.squaresMarked,
     }));

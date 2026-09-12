@@ -126,7 +126,7 @@ export interface PodiumSendResult {
    */
   drained: boolean;
   /** Why nothing was sent, when nothing was. */
-  reason?: 'disabled' | 'no-roster' | 'archived' | 'bans-changed';
+  reason?: 'disabled' | 'no-roster' | 'archived' | 'bans-changed' | 'award-changed';
 }
 
 /** The per-run recipient ceiling — a runaway guard on a corrupted roster, not a
@@ -134,6 +134,12 @@ export interface PodiumSendResult {
  *  or under it is examined in full every run, so continuation is unaffected. */
 const DEFAULT_MAX_RECIPIENTS = 2000;
 const DEFAULT_PACING_MS = 550;
+
+/** How many recipients the paced loop mails between archival re-checks. One
+ *  document read per batch against a loop whose own step is a network send —
+ *  enough to bound the overrun to a handful of recipients without making the
+ *  fan-out read-bound. */
+const LIFECYCLE_RECHECK_EVERY = 25;
 
 /**
  * The verified-address lookup, matching `notify.ts`'s verified-only policy.
@@ -339,10 +345,13 @@ async function verifyAndStampCompletion(
  * different commitment and the remote preparation sits between them.
  */
 async function freshEventGuard(
-  db: DailyEmailFirestore,
+  db: DailyEmailFirestore & FinaleReadSource,
   eventId: string,
   input: PodiumEmailInput,
   result: PodiumSendResult,
+  /** Also re-verify the award's hero Proof. Only the pre-send call needs it: the
+   *  empty-roster call mails nobody, so no award is rendered. */
+  revalidateAward = false,
 ): Promise<PodiumSendResult | null> {
   const atDelivery = (await db.doc(`events/${eventId}`).get()).data() as
     | PodiumEmailEvent
@@ -364,6 +373,33 @@ async function freshEventGuard(
   if (bansDiffer(input.bannedUids, atDelivery?.bannedUids)) {
     console.log(`sendPodiumEmailForEvent ${eventId}: ban roster changed during preparation`);
     return { ...result, reason: 'bans-changed' };
+  }
+  // THE AWARD IS PART OF THE SNAPSHOT TOO (Codex P2, round 8 on PR #1207). The
+  // visibility join runs during due-input assembly, and the remote setup awaits
+  // after it — so a moderator hiding or deleting the winning Proof in that window
+  // was not seen, and the fan-out broadcast a removed winner's name and prompt.
+  // Closing that window for the Event's own fields while leaving it open for the
+  // award was simply inconsistent.
+  //
+  // Re-verifies only the HERO, which is the single winner the email renders: one
+  // document read, and if it has gone the whole snapshot is stale because the
+  // tie count behind it was derived from a join that no longer holds.
+  if (revalidateAward && input.mostLoved) {
+    const hero = input.mostLoved.winners[0];
+    const still = await visibleWinners(
+      db,
+      eventId,
+      hero ? [hero] : [],
+      normalizeBanSet(input.bannedUids),
+      typeof (atDelivery?.settings as { reportHideThreshold?: unknown } | undefined)
+        ?.reportHideThreshold === 'number'
+        ? ((atDelivery?.settings as { reportHideThreshold?: number }).reportHideThreshold as number)
+        : undefined,
+    );
+    if (still.surviving.length === 0 || !still.allChecked) {
+      console.log(`sendPodiumEmailForEvent ${eventId}: award photo changed during preparation`);
+      return { ...result, reason: 'award-changed' };
+    }
   }
   return null;
 }
@@ -454,7 +490,7 @@ export async function sendPodiumEmailForEvent(
   // would otherwise be waved through — which is the window round 2's placement
   // left open by sitting ahead of them. Nothing awaits between this check and
   // the first message.
-  const beforeSending = await freshEventGuard(db, eventId, input, result);
+  const beforeSending = await freshEventGuard(db, eventId, input, result, true);
   if (beforeSending) return beforeSending;
 
   let capHit = false;
@@ -467,6 +503,29 @@ export async function sendPodiumEmailForEvent(
       );
       capHit = true;
       break;
+    }
+    // ARCHIVAL IS RE-CHECKED DURING THE LOOP, not only before it (Codex P2,
+    // round 8 on PR #1207). A paced fan-out runs for minutes, and the spec calls
+    // archival TERMINAL while documenting only ban changes as an accepted
+    // post-start residual — so mailing for several more minutes after the Event
+    // crossed that boundary contradicted the contract rather than falling under
+    // its stated exception.
+    //
+    // Every `LIFECYCLE_RECHECK_EVERY` recipients rather than every one: the
+    // check is a document read against a loop whose own step is a network send,
+    // so once per batch bounds the overrun to a few recipients while adding
+    // roughly a 4% read overhead. Archival is the only condition re-checked
+    // here — it is the irreversible one, and the others are recoverable by a
+    // later sweep.
+    if (examined > 0 && examined % LIFECYCLE_RECHECK_EVERY === 0) {
+      const mid = (await db.doc(`events/${eventId}`).get()).data() as
+        | PodiumEmailEvent
+        | undefined;
+      if (eventClosedToPlay(mid)) {
+        console.log(`sendPodiumEmailForEvent ${eventId}: archived mid-delivery, stopping`);
+        result.reason = 'archived';
+        break;
+      }
     }
     examined++;
     try {

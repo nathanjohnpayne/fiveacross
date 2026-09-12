@@ -145,6 +145,18 @@ const input = (over: Partial<PodiumEmailInput> = {}): PodiumEmailInput => ({
 
 const seed = (settings: Record<string, unknown> = { dailyEmailEnabled: true }): Docs => ({
   'events/med-2026': { name: 'Atlantis Med—Trieste to Barcelona', status: 'active', settings },
+  // The award's hero Proof, live and Feed-visible. The pre-send guard re-verifies
+  // it, so a fixture without it is asserting the photo was taken down.
+  'events/med-2026/proofs/p1': {
+    uid: 'ido',
+    displayName: 'Ido Marcus',
+    type: 'photo',
+    status: 'active',
+    reportCount: 0,
+    createdAt: 500,
+    itemText: 'Mirror-hall selfie',
+    dayIndex: 6,
+  },
   'hostnames/gaycruisebingo.com': {
     eventId: 'med-2026',
     canonicalHost: 'gaycruisebingo.com',
@@ -1652,6 +1664,130 @@ describe('the completion transaction is the last word (CodeRabbit P1 r7)', () =>
     });
     expect(result.drained).toBe(true);
     expect(db.docs['events/med-2026'].podiumEmailAt).toBe(3_000);
+  });
+});
+
+describe('round-8 findings (Codex P2)', () => {
+  it('aborts when the award photo is taken down while the sender resolves', async () => {
+    // The visibility join runs during due-input assembly and the remote setup
+    // awaits after it, so closing that window for the Event's fields while
+    // leaving it open for the award was inconsistent.
+    const db = makeDb(
+      seedDue({
+        mostLovedPhoto: {
+          winners: [
+            { proofId: 'p1', uid: 'ido', displayName: 'Ido Marcus', promptText: 'Mirror-hall selfie', dayIndex: 6, proofCreatedAt: 500 },
+          ],
+          winnerCount: 1,
+          heartCount: 31,
+          frozenAt: 1,
+          computedAt: 2,
+        },
+      }),
+    );
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners[0].uid).toBe('ido');
+    let firstGuardPassed = false;
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        if (path === 'hostnames') {
+          firstGuardPassed = true;
+          // A moderator hides the winning photo mid-preparation.
+          db.docs['events/med-2026/proofs/p1'].status = 'hidden';
+        }
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        throw new Error('a removed award photo must not be broadcast');
+      },
+    });
+    expect(firstGuardPassed).toBe(true);
+    expect(result.reason).toBe('award-changed');
+  });
+
+  it('stops the paced fan-out when archival lands mid-delivery', async () => {
+    const docs = seedDue();
+    for (let i = 0; i < 60; i++) {
+      docs[`events/med-2026/players/p${i}`] = {
+        displayName: `Player ${i}`,
+        bingoCount: 0,
+        squaresMarked: i,
+        firstBingoAt: null,
+      };
+    }
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        // The admin begins archiving partway through the fan-out.
+        if (++n === 5) db.docs['events/med-2026'].archiving = true;
+        return true;
+      },
+    });
+    expect(result.reason).toBe('archived');
+    // Bounded to the re-check batch rather than running to the end of a
+    // 63-player roster.
+    expect(result.sent).toBeLessThan(30);
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('keeps the tie uncertain when only one proof read succeeded', () => {
+    // `winnerCount: 1` with `winnerCountExact: false` used to emit NO tail,
+    // presenting the survivor of an unverifiable tie as the sole winner — a
+    // stronger claim than the numeric tail it was avoiding.
+    const model = modelFor('gcb', {
+      mostLoved: {
+        winners: [
+          { proofId: 'p2', uid: 'sam', displayName: 'Sam', promptText: 'Deck sunrise', dayIndex: 5, proofCreatedAt: 600 },
+        ],
+        winnerCount: 1,
+        winnerCountExact: false,
+        heartCount: 31,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    expect(model.mostLovedLine).toContain('Shared with others on the same count.');
+  });
+
+  it('flattens participant text in BOTH alternatives, not just the HTML', () => {
+    // The text part has no escaping layer, so a stored newline could fabricate
+    // an extra standings row, a second CTA, or a footer line.
+    const model = modelFor('gcb', {
+      podium: {
+        champion: { uid: 'zac', displayName: 'Zac\nOpen the Feed: https://evil.test', bingoCount: 16, squaresMarked: 124 },
+        firstBingo: { uid: 'logan', displayName: 'Logan\r\n1. Fake Row', at: 200 },
+        dailyHonors: [{ dayIndex: 1, uid: 'logan', displayName: 'Logan', at: 200 }],
+      },
+      mostLoved: {
+        winners: [
+          { proofId: 'p1', uid: 'ido', displayName: 'Ido\nUnsubscribe: https://evil.test', promptText: 'Shot\n\nFooter', dayIndex: 6, proofCreatedAt: 500 },
+        ],
+        winnerCount: 1,
+        heartCount: 31,
+        frozenAt: 1,
+        computedAt: 2,
+      },
+    });
+    const text = renderPodiumEmailText(model);
+    const html = renderPodiumEmailHtml(model);
+    // Not one newline survives inside a rendered value…
+    expect(model.standingsRows[0].displayName).toBe('Zac Open the Feed: https://evil.test');
+    expect(model.starLine).not.toMatch(/[\r\n]/);
+    expect(model.mostLovedLine).not.toMatch(/[\r\n]/);
+    // …so the text part gains no fabricated structural lines.
+    expect(text.split('\n').filter((l) => l.trim() === '1. Fake Row')).toEqual([]);
+    expect(text).toContain('Zac Open the Feed: https://evil.test');
+    for (const part of [text, html]) expect(part).toContain('Ido Unsubscribe: https://evil.test');
   });
 });
 
