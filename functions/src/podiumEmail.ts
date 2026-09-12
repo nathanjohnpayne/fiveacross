@@ -610,6 +610,8 @@ export async function sendPodiumEmailForEvent(
   /** Set when the loop broke before walking the roster — an early stop can never
    *  be a completed fan-out, whatever the counters say. */
   let stoppedEarly = false;
+  /** Whether the one-shot pre-first-message guard has run. */
+  let guardedBeforeFirstSend = false;
   for (const player of input.ranked) {
     if (examined >= maxRecipients) {
       console.error(
@@ -759,22 +761,16 @@ export async function sendPodiumEmailForEvent(
       // FROZEN BEFORE THE SEND, replayed on a retry. Everything below reads
       // `outbound`, never the freshly rendered model, so the bytes under this
       // idempotency key are the same on every attempt.
-      // THE DURABLE DEADLINE, recorded before the first send and outliving the
-      // outbox's TTL. Past the provider's dedup window with no sent marker, the
-      // first attempt's outcome cannot be established, so automation stops
-      // rather than risking a duplicate.
-      const firstAttemptAt = await markPodiumEmailAttempted(
-        db,
-        eventId,
-        player.uid,
-        prefs.podiumEmailFirstAttemptAt,
-        deps,
-      );
-      if (firstAttemptAt === null) {
-        result.blocked++;
-        continue;
-      }
-      if ((deps.now ?? Date.now)() - firstAttemptAt >= DEDUP_WINDOW_MS) {
+      // THE DEADLINE IS READ BEFORE IT IS WRITTEN (Codex P2, current head). An
+      // ALREADY-RECORDED first attempt past the provider's dedup window means
+      // the outcome of that attempt cannot be established — accepted-then-
+      // unrecorded is indistinguishable from never-accepted — so automation
+      // stops here, before doing any further work for this recipient.
+      const recordedAttemptAt = prefs.podiumEmailFirstAttemptAt;
+      if (
+        typeof recordedAttemptAt === 'number' &&
+        (deps.now ?? Date.now)() - recordedAttemptAt >= DEDUP_WINDOW_MS
+      ) {
         console.error(
           'sendPodiumEmailForEvent: first attempt is older than the dedup window and no send is recorded; operator resolution required',
           eventId,
@@ -805,6 +801,54 @@ export async function sendPodiumEmailForEvent(
         // with no record of what was accepted. An open question, not a skip.
         result.blocked++;
         continue;
+      }
+      // THE DEADLINE IS RECORDED ONLY ONCE A SEND IS ACTUALLY IMMINENT (Codex
+      // P2, current head). It used to be written BEFORE the freeze, so an outbox
+      // that could not be created started the 24-hour clock on a recipient who
+      // was never mailed — and if that failure outlasted the window, the cutoff
+      // above blocked them permanently for an attempt that never happened.
+      // Permanent recipient loss caused by the guard meant to prevent a
+      // duplicate. It still precedes the transport, which is the property that
+      // matters: an accepted send always has a durable start.
+      const firstAttemptAt = await markPodiumEmailAttempted(
+        db,
+        eventId,
+        player.uid,
+        recordedAttemptAt,
+        deps,
+      );
+      if (firstAttemptAt === null) {
+        result.blocked++;
+        continue;
+      }
+      // THE LAST THING BEFORE THE FIRST MESSAGE (Codex P2, current head). The
+      // pre-loop guard's comment claimed nothing awaits before delivery, and the
+      // spec claimed the Event is re-read "immediately before the first send" —
+      // but four remote operations run per recipient after that guard: the prefs
+      // read, the address lookup, the freeze and the attempt stamp. An Event
+      // archived or disabled during the FIRST recipient's preparation was
+      // therefore still mailed, against a boundary the spec calls terminal.
+      //
+      // Once per Event, not per recipient: the batch checkpoint below already
+      // covers the rest of the roster, and this only has to close the gap the
+      // checkpoint cannot see — the stretch before any message has gone out.
+      if (!guardedBeforeFirstSend) {
+        guardedBeforeFirstSend = true;
+        const atFirst = (await db.doc(`events/${eventId}`).get()).data() as
+          | PodiumEmailEvent
+          | undefined;
+        if (eventClosedToPlay(atFirst)) {
+          console.log(`sendPodiumEmailForEvent ${eventId}: archived during recipient preparation`);
+          result.reason = 'archived';
+          stoppedEarly = true;
+          break;
+        }
+        if (!dailyEmailEnabled(atFirst as Parameters<typeof dailyEmailEnabled>[0])) {
+          console.log(`sendPodiumEmailForEvent ${eventId}: disabled during recipient preparation`);
+          result.reason = 'disabled';
+          stoppedEarly = true;
+          break;
+        }
       }
       const ok = await send({
         to: [outbound.to],
@@ -1151,11 +1195,26 @@ function awardRecordFingerprintOf(raw: unknown): string {
   // re-freeze — reads as different. Stable ordering is the document's own.
   if (!raw || typeof raw !== 'object') return '';
   const a = raw as { winners?: unknown; winnerCount?: unknown; heartCount?: unknown; frozenAt?: unknown };
+  // EVERY RENDERED FIELD, not just the identity pair (Codex P2, current head).
+  // Fingerprinting `proofId` and `proofCreatedAt` alone missed a replacement
+  // that kept the same proofs and counts but changed a field the email actually
+  // prints — `displayName`, `promptText` or `dayIndex` — which a recompute after
+  // a display-name edit produces. The guard then passed and broadcast the stale
+  // award, and the outbox fingerprint let a retry replay the stale bytes.
   const winners = Array.isArray(a.winners)
     ? a.winners
         .map((w) => {
-          const x = (w ?? {}) as { proofId?: unknown; proofCreatedAt?: unknown };
-          return `${String(x.proofId)}:${String(x.proofCreatedAt)}`;
+          const x = (w ?? {}) as {
+            proofId?: unknown;
+            proofCreatedAt?: unknown;
+            uid?: unknown;
+            displayName?: unknown;
+            promptText?: unknown;
+            dayIndex?: unknown;
+          };
+          return [x.proofId, x.proofCreatedAt, x.uid, x.displayName, x.promptText, x.dayIndex]
+            .map((v) => String(v))
+            .join(':');
         })
         .join(',')
     : '';
@@ -1164,7 +1223,18 @@ function awardRecordFingerprintOf(raw: unknown): string {
 
 function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): string {
   if (!award) return '';
-  return award.winners.map((w) => `${w.proofId}:${w.proofCreatedAt}`).join(',');
+  // Every RENDERED field, for the same reason the record fingerprint covers them
+  // (Codex P2, current head): a replacement that keeps the proofs and counts but
+  // changes a printed value produces identical identity pairs, so an
+  // identity-only fingerprint would let a retry replay bytes naming a superseded
+  // winner or prompt.
+  return award.winners
+    .map((w) =>
+      [w.proofId, w.proofCreatedAt, w.uid, w.displayName, w.promptText, w.dayIndex]
+        .map((v) => String(v))
+        .join(':'),
+    )
+    .join(',');
 }
 
 /**

@@ -2446,6 +2446,95 @@ describe('post-resume round (Codex P2, CodeRabbit P1)', () => {
   });
 });
 
+describe('current-head convergence round (Codex P2)', () => {
+  it('does not start the retry deadline when the outbox cannot be written', async () => {
+    // The deadline used to be stamped BEFORE the freeze, so an outbox failure
+    // started the 24-hour clock on a recipient who was never mailed — and if the
+    // failure outlasted the window, the cutoff blocked them permanently for an
+    // attempt that never happened.
+    const db = makeDb(seed());
+    const broken = {
+      ...db,
+      doc: (path: string) =>
+        path.includes('/podiumEmailOutbox/')
+          ? {
+              get: async () => { throw new Error('UNAVAILABLE'); },
+              set: async () => undefined,
+              create: async () => { throw new Error('UNAVAILABLE'); },
+            }
+          : db.doc(path),
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(broken, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => { throw new Error('must not send without a frozen request'); },
+    });
+    expect(result.blocked).toBe(3);
+    // No deadline recorded, so a later sweep with a working outbox can still mail.
+    expect(db.docs['events/med-2026/emailPrefs/zac']?.podiumEmailFirstAttemptAt).toBeUndefined();
+    const sent: Captured[] = [];
+    await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      now: () => 3_000 + 48 * 60 * 60 * 1000,
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+    expect(sent).toHaveLength(3);
+  });
+
+  it('detects an award record replaced with the same ids but a different rendered field', async () => {
+    // Identity-only fingerprinting missed this: same proofIds, incarnations,
+    // count and freeze stamp, but a display name the email actually prints.
+    const award = (displayName: string) => ({
+      winners: [
+        { proofId: 'p1', uid: 'ido', displayName, promptText: 'One', dayIndex: 1, proofCreatedAt: 1 },
+      ],
+      winnerCount: 1,
+      heartCount: 9,
+      frozenAt: 1,
+      computedAt: 2,
+    });
+    const db = makeDb(seedDue({ mostLovedPhoto: award('Ido Marcus') }));
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const traced = {
+      ...db,
+      collection: (path: string) => {
+        if (path === 'hostnames') db.docs['events/med-2026'].mostLovedPhoto = award('Renamed Person');
+        return db.collection(path);
+      },
+    } as unknown as typeof db;
+    const result = await sendPodiumEmailForEvent(traced, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => { throw new Error('a stale rendered award must not be broadcast'); },
+    });
+    expect(result.reason).toBe('award-changed');
+  });
+
+  it('does not mail when the Event is archived during the FIRST recipient’s preparation', async () => {
+    // Four remote operations run per recipient after the pre-loop guard — prefs
+    // read, address lookup, freeze, attempt stamp — so an archive landing in
+    // that stretch used to reach the transport anyway.
+    const db = makeDb(seedDue());
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      // The address lookup is one of those awaits; archive from inside it.
+      getEmailForUid: async (uid: string) => {
+        db.docs['events/med-2026'].archiving = true;
+        return `${uid}@example.com`;
+      },
+      send: async () => { throw new Error('an archived Event must not be mailed'); },
+    });
+    expect(result.reason).toBe('archived');
+    expect(result.sent).toBe(0);
+    expect(result.drained).toBe(false);
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+});
+
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a
