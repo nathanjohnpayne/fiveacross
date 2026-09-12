@@ -265,9 +265,20 @@ function normalizeBanSet(raw: unknown): Set<string> {
  * so the window was reachable rather than theoretical — narrow, but the loss is
  * silent and permanent, which is the combination worth paying a transaction for.
  *
- * The read is the players COLLECTION, so Firestore serializes this write against
- * any creation in it: a row added during the transaction aborts and retries, and
- * the retry sees it.
+ * WHAT IT DOES NOT DO, stated here because an earlier version of this comment
+ * claimed the opposite and the file then argued both sides against its own spec
+ * (peer review, 2026-09-12). It does NOT serialize this write against a
+ * creation: a transaction's query read is understood to lock the documents it
+ * RETURNED, so a row created after the read need not contend, and the marker can
+ * still land with that Player unexamined. `specs/daily-engagement-email.md`
+ * retracts the stronger claim; this comment used to keep making it, which is
+ * worse than silence because a reader who trusts it concludes the window is
+ * closed.
+ *
+ * What the transaction DOES buy is real: the window shrinks from the whole paced
+ * fan-out to one commit, and every other interleaving — deletion, archival, a
+ * disabled toggle, a ban change — is genuinely checked against the same snapshot
+ * this write commits on.
  *
  * WHAT IT COMPARES, and why each half matters:
  *
