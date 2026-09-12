@@ -284,6 +284,77 @@ describe('the final guard runs BEFORE the stamp, and owns its own flag (#1192, f
   });
 });
 
+describe('the dedup window is re-checked against the effective start (#1192, final round)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;
+
+  it('refuses to send when the window closes during the recipient\'s own preparation', async () => {
+    const docs = seedDue();
+    // A first attempt just INSIDE the window when the early cutoff reads it.
+    const firstAttempt = 1_000_000;
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      docs[prefsPath(uid)] = {
+        optedOut: false,
+        token: 'tok-fixed',
+        podiumEmailFirstAttemptAt: firstAttempt,
+      };
+    }
+
+    // The clock has to cross the deadline in the narrow stretch BETWEEN the early
+    // cutoff and the transport. The outbox write is the first thing in that
+    // stretch, so freezing the request is what advances it — call-counting cannot
+    // express this, because the early cutoff is not the first reader of the clock.
+    let expired = false;
+    const db = makeDb(docs);
+    const realDoc = db.doc;
+    db.doc = ((path: string) => {
+      const ref = realDoc(path);
+      if (!path.includes('/podiumEmailOutbox/')) return ref;
+      return {
+        ...ref,
+        create: async (data: Record<string, unknown>) => {
+          const out = await ref.create(data);
+          expired = true;
+          return out;
+        },
+      };
+    }) as typeof db.doc;
+
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      now: () => (expired ? firstAttempt + DAY + 1_000 : firstAttempt + DAY - 1_000),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // The early cutoff let them through; this check is the only thing standing
+    // between an expired key and a second copy.
+    expect(sent).toHaveLength(0);
+    expect(result.sent).toBe(0);
+    expect(result.blocked).toBeGreaterThan(0);
+  });
+
+  it('still sends when the effective start is comfortably inside the window', async () => {
+    const docs = seedDue();
+    const firstAttempt = 1_000_000;
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      docs[prefsPath(uid)] = {
+        optedOut: false,
+        token: 'tok-fixed',
+        podiumEmailFirstAttemptAt: firstAttempt,
+      };
+    }
+    const { result, sent } = await run(docs, { now: () => firstAttempt + 60_000 });
+
+    expect(sent).toHaveLength(3);
+    expect(result.sent).toBe(3);
+    expect(result.blocked).toBe(0);
+  });
+});
+
 describe('a malformed Day label cannot fail the whole sweep (#1192, final round)', () => {
   // `firestore.rules` validates only a Day's `scoring` (`dayScoringValid` is the
   // whole of it), so these fields arrive as raw Firestore values. `placeLabel`

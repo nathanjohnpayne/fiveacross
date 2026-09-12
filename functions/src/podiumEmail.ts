@@ -869,6 +869,28 @@ export async function sendPodiumEmailForEvent(
         result.blocked++;
         continue;
       }
+      // AND RE-CHECKED ONCE MORE, AGAINST THE EFFECTIVE START (CodeRabbit P1,
+      // final round). The cutoff above runs before this recipient's remote work —
+      // the freeze, the pre-delivery guard, the stamp — so a first attempt sitting
+      // just inside the window when it was read can be just outside it by the time
+      // the transport is actually called. The spec's promise is that automatic
+      // retrying STOPS at the provider's window, not merely that it is consulted
+      // early, and sending past it is how a duplicate escapes: if the original
+      // attempt was accepted but its marker write failed, the key no longer
+      // collapses this one and the recipient is mailed twice. Measured against
+      // `firstAttemptAt` — the EFFECTIVE start, which is the stored value when one
+      // already existed — rather than against this run's clock. A recipient stopped
+      // here lands on the same operator-resolution path the early cutoff would
+      // give them on the next sweep, so this costs no delivery that was owed.
+      if ((deps.now ?? Date.now)() - firstAttemptAt >= DEDUP_WINDOW_MS) {
+        console.error(
+          'sendPodiumEmailForEvent: dedup window closed during recipient preparation; operator resolution required',
+          eventId,
+          player.uid,
+        );
+        result.blocked++;
+        continue;
+      }
       const ok = await send({
         to: [outbound.to],
         subject: outbound.subject,
