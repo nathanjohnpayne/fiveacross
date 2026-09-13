@@ -1249,10 +1249,12 @@ describe('buildDailyEmailModel', () => {
   // A Day's Place fields are COERCED before they are trimmed (#1192, found while
   // narrowing the winner announcement's own copy of this on PR #1207). The Place
   // pair is the part `firestore.rules` types NOTHING about — `dayScoringValid`
-  // covers `scoring`, `dayTonightShapeOk` covers `tonight`, and `place`, `port`,
-  // `placeEmoji` and `portEmoji` have no check of any kind — so a stored
-  // non-string reaches the email as-is, and both Place readers trimmed it
-  // directly. Asserted on BOTH of them, because the context line's label and the
+  // covers `scoring`, while `place`, `port`, `placeEmoji` and `portEmoji` have no
+  // check of any kind — so a stored non-string reaches the email as-is, and both
+  // Place readers trimmed it directly. (`dayTonightShapeOk` is NOT the fourth
+  // name in that list: it is reached only on a CHANGED Day, which is why
+  // `tonight`'s container needed a guard of its own — see the `tonight` cases
+  // below.) Asserted on BOTH of them, because the context line's label and the
   // morning line's arrival clause read the identical pair and a fix applied to
   // one reader alone would leave the same malformed value throwing in the other.
   it('resolves a malformed `place` to its legacy `port` sibling rather than throwing on it', () => {
