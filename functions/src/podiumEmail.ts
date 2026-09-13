@@ -1198,11 +1198,23 @@ export function visibleMostLovedAward(
   const award = raw as Partial<MostLovedPhotoAward>;
   if (!Array.isArray(award.winners)) return null;
   if (typeof award.heartCount !== 'number' || !Number.isFinite(award.heartCount)) return null;
+  // THE JOIN KEY IS VALIDATED, NOT JUST THE RENDERED STRINGS (Codex P2, final
+  // round). `proofId` is fed to `db.doc` by the live-visibility re-join, and an
+  // admin replacement is rules-permitted with nothing typing this field — so an
+  // empty id, one containing a slash, or a bare `.`/`..` builds an INVALID
+  // document path and throws. The throw lands in the re-join's catch, which sets
+  // `allChecked` false, which makes the pre-send guard report `award-changed` on
+  // every sweep: the whole roster's announcement blocked permanently by one
+  // malformed field. The spec promises a malformed award normalises to no module,
+  // and it can only keep that promise if the key it joins on is checked here.
+  const joinable = (id: unknown): boolean =>
+    typeof id === 'string' && id.length > 0 && !id.includes('/') && id !== '.' && id !== '..';
   const winners = award.winners.filter(
     (w): w is MostLovedPhotoWinner =>
       !!w &&
       typeof w === 'object' &&
       typeof (w as MostLovedPhotoWinner).uid === 'string' &&
+      joinable((w as MostLovedPhotoWinner).proofId) &&
       typeof (w as MostLovedPhotoWinner).displayName === 'string' &&
       typeof (w as MostLovedPhotoWinner).promptText === 'string' &&
       !bannedUids.has((w as MostLovedPhotoWinner).uid),

@@ -575,6 +575,45 @@ describe('the guards the final round closed (#1192, final round)', () => {
     expect(db.docs[podiumOutboxPath('med-2026', 'zac')]?.to).toBe('old@example.com');
   });
 
+  it.each([
+    ['an empty proofId', ''],
+    ['a proofId containing a slash', 'a/b'],
+    ['a bare dot', '.'],
+    ['a non-string proofId', 42 as unknown as string],
+  ])('normalises an award with %s to no module rather than blocking the Event', async (_label, proofId) => {
+    // `proofId` is fed to `db.doc` by the live-visibility re-join, so an invalid
+    // document path throws — and the throw sets `allChecked` false, which makes the
+    // pre-send guard report `award-changed` on EVERY sweep. One malformed field
+    // would block the whole roster permanently.
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          {
+            proofId,
+            uid: 'ido',
+            displayName: 'Ido Marcus',
+            promptText: 'Mirror-hall selfie',
+            dayIndex: 6,
+            proofCreatedAt: 500,
+          },
+        ],
+        winnerCount: 1,
+        heartCount: 31,
+        frozenAt: 2_000,
+      },
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    expect(got.due).toBe(true);
+    if (!got.due) throw new Error('expected due');
+    // Normalised away, exactly as the spec promises for a malformed award.
+    expect(got.input.mostLoved).toBeNull();
+
+    // And the Event still mails, which is the property that was at risk.
+    const { result, sent } = await run(docs);
+    expect(result.reason).toBeUndefined();
+    expect(sent.length).toBeGreaterThan(0);
+  });
+
   it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
     // The hero check at the checkpoint only asks whether that Proof is still
     // visible, so a replacement keeping the old hero's Proof alive walked past it.
