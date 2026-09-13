@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPodium, finaleDayIndex, finalePinIndex } from './finale';
+import { PODIUM_STANDING_ROWS, buildPodium, finaleDayIndex, finalePinIndex } from './finale';
 import { MAX_ARCHIVE_NUMBER } from './eventLimits';
 import { sortPlayers } from '../game/logic';
 import { withReadableDayStats } from './eventArchive';
@@ -488,6 +488,26 @@ describe('buildPodium — a ban withholds an honour and closes a position', () =
     // bingo on the same Day is an hour later.
     const podium = buildPodium(ROSTER, DAYS, new Map(), true, undefined, ['champ']);
     expect(podium.dailyHonors).toEqual([]);
+  });
+
+  it('prints at most PODIUM_STANDING_ROWS positions, and stops there', () => {
+    // The cap is the share composition's, not an accident of this fixture: the
+    // photo-hero card's compressed rows have room for three. Pinned against the
+    // exported constant so the card and the builder cannot drift apart, and with
+    // a roster LONGER than the cap so the slice is actually exercised.
+    const extras = ['fourth', 'fifth'].map((uid, i) =>
+      player({
+        uid,
+        bingoCount: 1,
+        squaresMarked: 10 - i,
+        firstBingoAt: NOW + (3 + i) * HOUR,
+        dayStats: { 1: { bingoCount: 1, squaresMarked: 10 - i, firstBingoAt: NOW + (3 + i) * HOUR } },
+      }),
+    );
+    const podium = buildPodium([...ROSTER, ...extras], DAYS);
+    expect(PODIUM_STANDING_ROWS).toBe(3);
+    expect(podium.standings).toHaveLength(PODIUM_STANDING_ROWS);
+    expect(podium.standings.map((r) => r.rank)).toEqual([1, 2, 3]);
   });
 
   it('leaves an unbanned Event byte-identical to what it built before', () => {

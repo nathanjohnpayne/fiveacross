@@ -152,7 +152,14 @@ function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): 
  *  Event's champion differently (`src/data/finale.ts`). */
 function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: readonly string[]): PodiumMomentPayload | undefined {
   if (!podium) return undefined;
-  return withholdBannedHonours(podium, bannedUids);
+  // Spread the payload UNDER the rule's output rather than returning that output
+  // alone: the helper is generic over the three honour fields and constructs an
+  // object of exactly those, so a field added to `PodiumMomentPayload` later
+  // would pass straight through here today and be silently dropped the moment it
+  // is OPTIONAL — a required one fails the build, an optional one does not. The
+  // Moment is the immutable record this surface renders, so losing a field of it
+  // to a filter is the one failure worth spending a spread on.
+  return { ...podium, ...withholdBannedHonours(podium, bannedUids) };
 }
 
 /**
