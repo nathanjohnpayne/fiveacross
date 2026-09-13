@@ -1246,6 +1246,50 @@ describe('buildDailyEmailModel', () => {
     expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 👋 Valletta');
   });
 
+  // A Day's Place fields are COERCED before they are trimmed (#1192, found while
+  // narrowing the winner announcement's own copy of this on PR #1207). The Place
+  // pair is the part `firestore.rules` types NOTHING about — `dayScoringValid`
+  // covers `scoring`, `dayTonightShapeOk` covers `tonight`, and `place`, `port`,
+  // `placeEmoji` and `portEmoji` have no check of any kind — so a stored
+  // non-string reaches the email as-is, and both Place readers trimmed it
+  // directly. Asserted on BOTH of them, because the context line's label and the
+  // morning line's arrival clause read the identical pair and a fix applied to
+  // one reader alone would leave the same malformed value throwing in the other.
+  it('resolves a malformed `place` to its legacy `port` sibling rather than throwing on it', () => {
+    // A localized map is the shape an import or an admin tool actually writes
+    // here; `.trim()` is not a function on it.
+    const malformed = { ...gcbDay4, place: { en: 'Valletta' }, port: 'Valletta' } as unknown as EmailDay;
+    const model = build({ day: malformed });
+    expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 🇲🇹 Valletta');
+    expect(model.nudgeLine).toContain('The boat docks in Valletta today');
+  });
+
+  it('falls back to a readable `placeEmoji` when the legacy `portEmoji` that outranks it is malformed', () => {
+    // `portEmoji` wins the pair while both are dual-written, so a malformed one
+    // SHADOWS a perfectly good `placeEmoji` — the emoji half throws on a Day
+    // whose label half is flawless.
+    const malformedEmoji = { ...gcbDay4, portEmoji: 0 } as unknown as EmailDay;
+    expect(build({ day: malformedEmoji }).contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 🇲🇹 Valletta');
+  });
+
+  it('drops the Place when every Place field is malformed, exactly as a Day naming none does', () => {
+    const allMalformed = { ...gcbDay4, place: [], port: 0, placeEmoji: {}, portEmoji: true } as unknown as EmailDay;
+    const model = build({ day: allMalformed });
+    expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18');
+    expect(model.nudgeLine).toContain('A day at sea today');
+  });
+
+  it('lets an EMPTY `place` keep suppressing a legacy `port`, which the coercion does not change', () => {
+    // The other half of the coercion's decision: a non-string resolves to
+    // `undefined` so the `??` chain falls THROUGH to the legacy field (the
+    // pre-#566 case above), while an empty string is still a string, still wins
+    // its `??`, and still means this Day names no Place. Coercing both to `''`
+    // would have collapsed the first case into this one and silently dropped a
+    // Place the app still shows.
+    const cleared = { ...gcbDay4, place: '', placeEmoji: '', port: 'Valletta', portEmoji: '🇲🇹' };
+    expect(build({ day: cleared }).contextLine).toBe('Day 4 of 4 · Saturday, Jul 18');
+  });
+
   it('formats the unlock time in the EVENT timezone, and survives a bogus one', () => {
     expect(formatUnlockTime(DAY4_UNLOCK, 'Europe/Rome')).toBe('8:00 a.m.');
     expect(formatUnlockTime(DAY4_UNLOCK, 'Not/AZone')).toBe('6:00 a.m.'); // falls back to UTC
@@ -2304,6 +2348,30 @@ describe('sendDailyEmailForEvent', () => {
     });
     expect(result).toMatchObject({ sent: 0, failed: 2 });
     expect(db.docs['events/med-2026/emailPrefs/theo']).not.toHaveProperty('lastSentDayIndex');
+  });
+
+  // Where the daily card's Place-field exposure actually lands (#1192, narrowed
+  // on PR #1207 to the winner announcement's own call site). `placeLabel` runs
+  // inside `buildDailyEmailModel`, which this loop calls PER RECIPIENT — so the
+  // throw is caught by the per-recipient catch rather than failing input
+  // assembly. That is the worse shape, not the milder one: every recipient is
+  // counted `failed`, no `lastSentDayIndex` is ever written, so the Event never
+  // drains and each following sweep replays the identical crash for the whole
+  // roster. Reverting the coercion turns this case into `{ sent: 0, failed: 2 }`
+  // with both markers absent — the shape the test directly above pins for a
+  // transport failure, reached here by a single malformed field on the Day.
+  it('sends the whole roster on a Day whose Place field is malformed, rather than failing every recipient every sweep', async () => {
+    const docs = seedEvent();
+    const scheduled = gcbEvent.days ?? [];
+    docs['events/med-2026'] = {
+      ...docs['events/med-2026'],
+      days: [...scheduled.slice(0, -1), { ...gcbDay4, place: { en: 'Valletta' }, port: 'Valletta' }],
+    };
+    const { result, sent, db } = await run(docs);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent[0].text).toContain('🇲🇹 Valletta');
+    expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
+    expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
   });
 
   // #633: fail-closed regression. Exercises the REAL `sendEmail` (not a boolean
