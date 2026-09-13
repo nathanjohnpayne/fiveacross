@@ -1045,8 +1045,9 @@
 </ol>
 </li>
 <li><a href="#sec-email">Daily engagement email—the Day's Theme in the inbox (issue #616)</a>
-<span class="vars"><a href="#fx-email-anatomy">▤ fx-email-anatomy</a><a href="#fx-email-vacay">🧳 fx-email-vacay</a><a href="#fx-email-gcb">🚢 fx-email-gcb</a></span>
+<span class="vars"><a href="#fx-email-anatomy">▤ fx-email-anatomy</a><a href="#fx-email-vacay">🧳 fx-email-vacay</a><a href="#fx-email-gcb">🚢 fx-email-gcb</a><a href="#fx-email-finale-gcb">🚢 fx-email-finale-gcb</a><a href="#fx-email-finale-fa">✳ fx-email-finale-fa</a></span>
 <ol>
+<li><a href="#fx-email-finale">The winner announcement—the last mail of the Event (issue #1192)</a></li>
 <li><a href="#fx-email-registers-tri">Per-brand register strip—the fa variant as annotations</a></li>
 </ol>
 </li>
@@ -4101,6 +4102,96 @@
       <div class="efoot"><b>Gay Cruise Bingo · by Five Across</b>—You're getting this because you're sailing Atlantis Med—Trieste to Barcelona. <u>Unsubscribe</u> · <u>Email preferences</u></div>
     </div>
     <p class="cap"><b>Mid-cruise Day 4—the cruise-Edition example</b>Cruise register at full camp: <code>sporty-splash</code> tokens skin the band, the port flag rides the context line, the ⭐ cruise-wide First-BINGO pin travels with Jess's row, and the photos module gets to be funny ("BINGO without a photo is a rumor")—the same module Vacay says gently and Five Across says plainly. The standings snapshot is the full state: top three through yesterday plus the personalized "You're #N" line, which is the only per-recipient variance in the send. The brand line <b>Gay Cruise Bingo · by Five Across</b> (#698) rides both the header band and the footer sign-off: the cruise Edition carries the platform endorsement exactly as it does under its in-app wordmark (#688), on one inline line rather than the lockup's stacked micro-line, because this is a sign-off and not display type.</p>
+  </div>
+
+</div>
+
+<h3 class="subhead" id="fx-email-finale">The winner announcement—the last mail of the Event (issue #1192)</h3>
+<p class="sub">One email per participant at the finale's podium beat, and the <i>only</i> mail an Event sends at or after its Standings Freeze. #1121 stops the daily card at the freeze because nothing it says is still true; this is what speaks in its place, so the last thing in the inbox is the final standings rather than a card nobody can play. It is due off the in-app <code>podium</code> Moment and reads that Moment's own stored payload (<code>buildPodiumPayload</code>, <code>functions/src/finaleContent.ts</code>), so the email cannot name a champion the Feed and the Leaderboard do not. <b>Its own quarter-hourly sweep</b> (<code>podiumAnnouncementEmail</code>), shaped like the daily card's rather than run inside the finale beat: a paced per-recipient fan-out in that serial, secret-less, 60-second scheduler would have starved every later Event's Day snapshot and rebuilt the podium from live Player documents on each retry. Reading the Moment is what makes the email quote the frozen record by construction. <b>The honours are ban-filtered for the email even though the Moment's payload is not</b>—the Moment is the record and a ban is reversible, so it keeps the unfiltered truth; this is a rendered view and hides the row. <b>The subject names the champion</b>—it is the strongest true thing the mail has to say, and the register supplies the verb (<code>takes the cruise</code> / <code>takes the trip</code> / <code>takes it</code>); an Event whose board is empty falls back to the occasion close (<code>the cruise is done</code>), because there is no name to print. Exactly one send per Event per recipient, on its own marker rather than the daily card's <code>lastSentDayIndex</code>; a failed send never blocks the freeze or the Moment.</p>
+<div class="frames">
+
+  <div class="unit" id="fx-email-finale-gcb">
+    <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
+    <div class="eml" data-theme="so-long-farewell">
+      <div class="epre"><span class="mnum">1</span> The podium is in—see who took the ⭐ and the Most-Loved Photo.</div>
+      <div class="ehead">
+        <div class="ebrand">Gay Cruise Bingo · by Five Across</div>
+        <div class="etheme">👋 So Long, Farewell</div>
+        <div class="ectx"><span class="mnum">2</span> Final standings · Day 10 of 10 · Friday, Jul 24 · 🇪🇸 Barcelona</div>
+        <div class="epal"><i style="background:#ff8b6a"></i><i style="background:#feb47b"></i><i style="background:#ffd23f"></i><i style="background:#1e1019"></i><i style="background:#140b12"></i></div>
+      </div>
+      <div class="emod">
+        <div class="mh"><span class="mnum">3</span> Final standings · frozen</div>
+        <div class="erow"><span class="r">1</span><b>Zacaria Arab</b><span class="s">16 bingos · 124 sq</span></div>
+        <div class="erow"><span class="r">2</span><b>Logan Murdock</b> ⭐<span class="s">14 bingos · 117 sq</span></div>
+        <div class="erow"><span class="r">3</span><b>Nathan Payne</b><span class="s">13 bingos · 110 sq</span></div>
+      </div>
+      <div class="emod">
+        <div class="mh"><span class="mnum">4</span> The ⭐</div>
+        <b>Logan Murdock</b> took the cruise-wide First to BINGO—Day 2 in 🇭🇷 Split.
+      </div>
+      <div class="emod">
+        <div class="mh"><span class="mnum">5</span> Most-loved photo</div>
+        📷 <b>Ido Marcus</b>—"Mirror-hall selfie," Day 7 · 🇮🇹 Rome (Civitavecchia). <b>❤ 31</b>, frozen at the Standings Freeze.
+      </div>
+      <div class="emod">
+        <div class="mh"><span class="mnum">6</span> Where you finished</div>
+        <div class="eyou">You finished <b>#6</b>—1 bingo and 24 squares.</div>
+      </div>
+      <div class="emod">
+        <div class="mh"><span class="mnum">7</span> Sign-off + CTA</div>
+        That's the cruise. Every photo is still in the Feed—go back through the whole thing.<br>
+        <span class="ecta">Open the Feed</span>
+      </div>
+      <div class="efoot"><span class="mnum">8</span> <b>Gay Cruise Bingo · by Five Across</b>—You're getting this because you're sailing Atlantis Med—Trieste to Barcelona. <u>Unsubscribe</u> · <u>Email preferences</u></div>
+    </div>
+    <ol class="legend">
+      <li><b>Preheader.</b> Names the two honors without naming their holders—the subject already spent the champion, and two unspoiled reveals are what the open is for. Same ~85-char budget and the same no-decorative-lead-ins rule as the daily card.</li>
+      <li><b>Theme header.</b> The farewell Day's own Theme (<code>so-long-farewell</code>), unchanged machinery: the band is the Day's palette and the context line is the Day context with <b>Final standings</b> in the slot the daily card gives "Day N". The email wears the day it was sent on, which is the day the Event ended.</li>
+      <li><b>Final standings.</b> Top three with bingos and squares, ranked by <code>compareFinalePlayers</code>. <b>Row 1 is the podium's <code>champion</code> field byte for byte</b>—the parity test pins it, because that is the one row the in-app Moment actually carries. Rows 2 and 3 come from the same roster through the same sort; the Moment has no second or third place to disagree with (#1192 decision). Ceremonial Days are excluded from the totals exactly as the podium excludes them, so the farewell Day's own marks never move these numbers.</li>
+      <li><b>The ⭐.</b> Its own module rather than a pin, because the Event-wide First to BINGO frequently is <i>not</i> in the top three—Tutorial Days are excluded from the honor, so it belongs to the earliest qualifying bingo on a main Day, whoever that was. Equal to the podium's <code>firstBingo</code> field byte for byte, tie-break included. It rides row 2 here only because Logan happens to hold both.</li>
+      <li><b>Most-loved photo.</b> The Most-Loved Photo award (#534/#560) as the podium froze it: <code>winners[0]</code>—the share hero—with its prompt text, Day and eligible-Heart count. The count is the frozen total, never a live re-read. A tie prints the hero and says how many shared it; a no-award Event omits the module rather than printing a zero.</li>
+      <li><b>Where you finished.</b> The only per-recipient variance in the send, exactly as "You're #N" is in the daily card—past tense, because nothing moves after this. <b>Omitted entirely for an address that is not on the roster</b>, which is the daily card's rule unchanged.</li>
+      <li><b>Sign-off + CTA.</b> One closing line in the Edition's register, then the same "Open the Feed" button the daily card uses, deep-linking the Event's canonical host (#599). The Feed is still the destination: the Event is over, and the archive of it is the thing worth opening.</li>
+      <li><b>Footer.</b> Identical to the daily card's—brand line, why-you-got-this, visible unsubscribe + preferences, <code>List-Unsubscribe</code> headers. This is a <i>daily-email</i> send under the existing opt-in (<code>settings.dailyEmailEnabled</code>), not a new category, so the same unsubscribe governs it.</li>
+    </ol>
+    <p class="cap"><b>The farewell mail—cruise register at full camp</b>Subject <i>"Final standings 🏆—Zacaria Arab takes the cruise"</i>; the empty-board fallback is <i>"Final standings 🏆—the cruise is done"</i>. The example is the same Event, roster and honors as the final-standings share card (<code>#fx-share-final-gcb</code>) on purpose—these two surfaces state one frozen result, and a frame that quietly disagreed with the other would hide exactly the drift the parity test exists to catch. <b>The ⭐ holder is Logan Murdock, and the rule is why:</b> Day 1 (Trieste) is <code>tutorial: true</code> in the Med seed and the Event-wide honor excludes Tutorial Days, so it belongs to the earliest <i>main</i>-Day bingo—Day 2 · Split, whose own daily honor this Event's honors list already gives to Logan. Turntilla's earliest honor is Day 4, which cannot precede it. The final-standings share card (<code>#fx-share-final-gcb</code>) named Turntilla when this frame was written; #1208 corrected it, so the two surfaces now agree.</p>
+  </div>
+
+  <div class="unit" id="fx-email-finale-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="eml" data-theme="fiveacross-slate">
+      <div class="epre">The podium is in—see who took the ⭐ and the Most-Loved Photo.</div>
+      <div class="ehead">
+        <div class="ebrand">Five Across</div>
+        <div class="etheme">✳ Final standings</div>
+        <div class="ectx">Final standings · Day 3 of 3 · Sunday, Aug 23 · 💍 The Barn at Green Valley</div>
+        <div class="epal"><i style="background:#3f66f0"></i><i style="background:#2c4bd8"></i><i style="background:#f5b840"></i><i style="background:#161a22"></i><i style="background:#0f1116"></i></div>
+      </div>
+      <div class="emod">
+        <div class="mh">Final standings · frozen</div>
+        <div class="erow"><span class="r">1</span><b>Sam</b> ⭐<span class="s">6 bingos · 68 sq</span></div>
+        <div class="erow"><span class="r">2</span><b>Rosa</b><span class="s">5 bingos · 64 sq</span></div>
+        <div class="erow"><span class="r">3</span><b>Dev</b><span class="s">5 bingos · 61 sq</span></div>
+      </div>
+      <div class="emod">
+        <div class="mh">The ⭐</div>
+        <b>Sam</b> took the event-wide First to BINGO—Day 1 in 💍 The Barn at Green Valley.
+      </div>
+      <div class="emod">
+        <div class="mh">Most-loved photo</div>
+        📷 <b>Amara</b>—"First dance, from the balcony," Day 2 · 💍 The Barn at Green Valley. <b>❤ 14</b>, frozen at the Standings Freeze.
+      </div>
+      <div class="emod">
+        <div class="eyou">You finished <b>#7</b>—3 bingos and 52 squares.</div>
+      </div>
+      <div class="emod">
+        That's the event. Every photo is still in the Feed.<br>
+        <span class="ecta">Open the Feed</span>
+      </div>
+      <div class="efoot"><b>Five Across</b>—You're getting this because you're part of Kim &amp; Jo's Wedding. <u>Unsubscribe</u> · <u>Email preferences</u></div>
+    </div>
+    <p class="cap"><b>The platform register—plain, and the occasion word gone</b>Subject <i>"Final standings 🏆—Sam takes it"</i>; empty-board fallback <i>"Final standings 🏆—the event is done"</i>. Five Across gets a full render here rather than the register strip's annotations (the rule for the daily card) because this email's register carries three <i>new</i> fields—the subject verb, the honor qualifier in module 4, and the sign-off—and a table row cannot show how a three-Day wedding reads when the same skeleton loses the camp. <code>fiveacross-slate</code> tokens, and the header wears <b>✳ Final standings</b> where a themed Edition wears the Day's Theme: a wedding's closing Day carries no vignette Theme, so the platform band states the occasion instead of inventing one. <b>⭐ rides row 1 here</b>—the small-Event common case, where the first BINGO and the eventual champion are the same person—which is exactly why module 4 still exists as its own line: the honor is a different question from the ranking, and the answer only coincides sometimes.</p>
   </div>
 
 </div>

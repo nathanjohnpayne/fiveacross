@@ -26,7 +26,7 @@ The gate has to be honored at **deploy trigger discovery**—the step where Fire
 
 To enable Vision later (the region pin is already in place, #132): (1) enable the Cloud Vision API on the project, (2) set `ENABLE_VISION_MODERATION=true` in `functions/.env.<projectId>`, and (3) redeploy `--only functions`.
 
-**The sending functions—`adminAlertDigest`, `settleAdminAlertsOnArchive`, and `dailyEngagementEmail`—need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** Since #638 the queue producers (`notifyProofModeration`, `notifyItemModeration`, and `notifyAbuseBugReport`) are NOT among them: they enqueue only, bind no secret, and are unaffected by a missing key. See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`npm run deploy:<target> -- --only functions`).
+**The sending functions—`adminAlertDigest`, `settleAdminAlertsOnArchive`, `dailyEngagementEmail`, and `podiumAnnouncementEmail`—need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** Since #638 the queue producers (`notifyProofModeration`, `notifyItemModeration`, and `notifyAbuseBugReport`) are NOT among them: they enqueue only, bind no secret, and are unaffected by a missing key. See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`npm run deploy:<target> -- --only functions`).
 
 **If a previously deployed project still carries `recomputeStats` and/or `share`:** this deploy is what deletes them—Firebase discovers exports removed from the source and prompts to confirm deleting each live function. Two exports have been removed since the scaffold: `recomputeStats` (#40, ADR 0001—self-writable player stats need no server recompute) and `share` (#39, ADR 0005—the crawler OG page is replaced by on-device Share Cards). A project deployed before either removal will prompt to delete whichever it still carries. The wrapper always runs `firebase deploy --non-interactive`, which stalls on that prompt, so the one-time cleanup deploy must pass the force flag through: `npm run deploy:<target> -- --only functions --force` (extra args pass straight through to `firebase deploy`). Both deletions are expected and required; do not recreate the function in either case. Deleting `share` from Functions does **not** remove the separate Cloud Run OG renderer—that retirement is step 3 below.
 
@@ -65,7 +65,7 @@ Three things to check after the deploy:
 2. **A recipient resolves.** Recipients are the Event's `admins` roster (verified Firebase Auth emails only) unioned with `ADMIN_NOTIFY_EMAIL`. If neither resolves, alerts queue and nothing sends—which is logged, not lost, but it is silent from the outside. Populate `ADMIN_NOTIFY_EMAIL` per project unless the roster is known to resolve.
 3. **Smoke-test the DIGEST, not the triggers.** Report a Prompt in the app (or submit one as a non-admin, which lands `pending`), then wait for the next five-minute sweep. A queue row appearing under `events/{eventId}/adminAlerts` with no email inside two sweeps means the scheduler job or the recipient list is the problem, in that order.
 
-**THREE one-time Firestore TTL policies, and since #670/#859 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the others:
+**FOUR one-time Firestore TTL policies, and since #670/#859 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the others:
 
 ```bash
 gcloud firestore fields ttls update expiresAt \
@@ -74,9 +74,11 @@ gcloud firestore fields ttls update expiresAt \
   --collection-group=adminAlertBatches --enable-ttl --project <projectId>
 gcloud firestore fields ttls update expiresAt \
   --collection-group=bugReportEscalations --enable-ttl --project <projectId>
+gcloud firestore fields ttls update expiresAt \
+  --collection-group=podiumEmailOutbox --enable-ttl --project <projectId>
 ```
 
-Run all three commands once with `<projectId>` set to `gaycruisebingo` and once with it set to `fiveacross`. The `bugReportEscalations` policy MUST reach `ACTIVE` before deploying the #859 Functions release, because its pending row temporarily contains a raw reporter uid and the policy is the privacy backstop if the scheduler cannot terminalize it. Verify that policy in each project before release:
+Run all four commands once with `<projectId>` set to `gaycruisebingo` and once with it set to `fiveacross`. The `podiumEmailOutbox` policy is the winner-announcement email's frozen outbound request (#1192): each document holds a participant's email address, their unsubscribe capability URL and the fully rendered message, retained only so a retry inside Resend's 24-hour idempotency window replays the same bytes rather than a rebuilt request. Nothing reads it after that, so without the policy those documents accumulate addresses and capability URLs for the life of the project. The `bugReportEscalations` policy MUST reach `ACTIVE` before deploying the #859 Functions release, because its pending row temporarily contains a raw reporter uid and the policy is the privacy backstop if the scheduler cannot terminalize it. Verify that policy in each project before release:
 
 ```bash
 gcloud firestore fields ttls list \
@@ -106,7 +108,7 @@ node scripts/backfill-alert-ttl.mjs --project <projectId>
 
 Two things to check after the deploy:
 
-1. **The Cloud Scheduler job exists**—per #318 the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function with no job behind it and no error: `gcloud scheduler jobs list --project <projectId>` must show a job for `dailyEngagementEmail` alongside `unlockDay`.
+1. **The Cloud Scheduler job exists**—per #318 the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function with no job behind it and no error: `gcloud scheduler jobs list --project <projectId>` must show jobs for `dailyEngagementEmail` and `podiumAnnouncementEmail` alongside `unlockDay`. `podiumAnnouncementEmail` (#1192, the winner announcement) runs on its own offset schedule — `7-59/15 * * * *`, staggered seven minutes off the daily card so the two senders' paced fan-outs do not normally overlap — and it is the LAST mail an Event sends, so a missing job is silent in exactly the way that matters: nothing is late, the announcement simply never arrives and no error is raised anywhere. Verify it on the same deploy that first ships the function.
 2. **The unsubscribe endpoint answers**—`curl -sI "$EMAIL_UNSUBSCRIBE_URL?e=x&u=y&t=z"` should return `200` with an HTML confirmation page (a GET never changes state; only a POST does). A `403` means the Cloud Run invoker reconciliation below hasn't run yet, is scoped to a different project, or failed—that invoker check is the only thing gating this endpoint once the `/unsubscribe` rewrite and `EMAIL_UNSUBSCRIBE_URL` are in place (the structural test in `src/recon-share-og.test.ts` covers those two; `tests/synthetic/unsubscribe-invoker.spec.ts` covers this one on every deploy, see below).
 
 #### Cloud Run invoker reconciliation (#158, #768)

@@ -128,6 +128,16 @@ export interface EditionRegister {
   photosRest: string;
   /** Footer: why this person is receiving the email, given the Event's name. */
   whyYouGotThis: (eventName: string) => string;
+  /** Winner-announcement subject tail, given the champion's display name
+   *  (#1192): "Zacaria Arab takes the cruise". The subject names the champion
+   *  because it is the strongest true thing that mail has to say. */
+  finaleSubjectTail: (championName: string) => string;
+  /** Winner-announcement subject tail for an Event that ends with an EMPTY
+   *  board — nobody marked anything, so `PodiumPayload.champion` is `null` and
+   *  there is no name to print: "the cruise is done". */
+  finaleSubjectTailNoChampion: string;
+  /** Winner-announcement sign-off, the one closing line before the Feed CTA. */
+  finaleSignOff: string;
 }
 
 const REGISTERS: Record<string, EditionRegister> = {
@@ -143,6 +153,10 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'BINGO without a photo is a rumor.',
     photosRest: 'Post a pic with every claim—the boat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're sailing ${eventName}.`,
+    finaleSubjectTail: (championName) => `${championName} takes the cruise`,
+    finaleSubjectTailNoChampion: 'the cruise is done',
+    finaleSignOff:
+      "That's the cruise. Every photo is still in the Feed—go back through the whole thing.",
   },
   // 🧳 Vacay Bingo — trip register at moderate camp.
   vacay: {
@@ -156,6 +170,9 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'Got BINGO? Post a photo with it.',
     photosRest: 'Every claim is a photo op, and the group chat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're on the ${eventName} trip.`,
+    finaleSubjectTail: (championName) => `${championName} takes the trip`,
+    finaleSubjectTailNoChampion: 'the trip is done',
+    finaleSignOff: "That's the trip. Every photo is still in the Feed—go back through it.",
   },
   // ✳ Five Across — the platform register: plain, occasion-neutral.
   fiveacross: {
@@ -169,6 +186,9 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosLead: 'Post a photo with every BINGO.',
     photosRest: "That's what the Feed is for.",
     whyYouGotThis: (eventName) => `You're getting this because you're part of ${eventName}.`,
+    finaleSubjectTail: (championName) => `${championName} takes it`,
+    finaleSubjectTailNoChampion: 'the event is done',
+    finaleSignOff: "That's the event. Every photo is still in the Feed.",
   },
 };
 
@@ -602,13 +622,53 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string | n
   return out.replace(/\s*AM$/, ' a.m.').replace(/\s*PM$/, ' p.m.');
 }
 
+/** A raw Firestore field read as text, or `undefined` when it is not a string.
+ *  A Day's Place pair is the part `firestore.rules` types NOTHING about —
+ *  `dayScoringValid` covers `scoring`, `dayTonightShapeOk` covers `tonight`, and
+ *  `place`, `port`, `placeEmoji` and `portEmoji` have no check of any kind — so
+ *  they arrive as whatever was stored, and every reader below trims them
+ *  directly: a stored non-string reached `.trim()` and THREW. Same doctrine
+ *  `EmailDay` already states for `scoring`: this boundary reads RAW Firestore
+ *  maps, so a bad value must RESOLVE rather than fail to typecheck.
+ *
+ *  `undefined` rather than `''` is the load-bearing half, because it is what
+ *  keeps the legacy fall-through intact: a malformed `place` beside a readable
+ *  `port` has to resolve to the `port`, which is exactly how `migrateDayFields`
+ *  (`src/data/converters.ts`) resolves the same pair for the app. Coercing to
+ *  `''` would instead stop the `??` chain on the malformed field and silently
+ *  drop a Place the app still shows. An empty-string field is a string, still
+ *  wins its `??`, and still means "this Day names no Place" — unchanged.
+ *
+ *  It lives HERE, inside the shared helper, rather than at either sender's call
+ *  site: both the daily card and the winner announcement read this pair, and a
+ *  coercion applied per-caller is one a third caller silently opts out of. */
+function asText(v: unknown): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+/** The Day's Place name alone: the neutral `place` wins, the pre-#566 `port` is
+ *  the legacy fallback, `''` when the Day names none. ONE reader for both of
+ *  this module's call sites — the context line's label and the morning line's
+ *  arrival clause read the identical pair, and holding that in one place is what
+ *  keeps the two from drifting apart or from being coerced one at a time. */
+function placeName(day: EmailDay): string {
+  return (asText(day.place) ?? asText(day.port) ?? '').trim();
+}
+
 /** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. The
  *  neutral place label wins; legacy `portEmoji` takes precedence while both
- *  fields are dual-written, preserving a live operator correction. */
-function placeLabel(day: EmailDay): string {
-  const place = (day.place ?? day.port ?? '').trim();
+ *  fields are dual-written, preserving a live operator correction. Every Place
+ *  field is COERCED before it is trimmed (see `asText`), so a raw Firestore map
+ *  carrying a non-string resolves here rather than throwing in its caller.
+ *
+ *  Exported because the finale beat labels the closing Day and each honour's
+ *  Day for the winner-announcement email (#1192). One spelling of the
+ *  place label, including its legacy-field precedence AND its coercion, is
+ *  the point. */
+export function placeLabel(day: EmailDay): string {
+  const place = placeName(day);
   if (!place) return '';
-  const emoji = (day.portEmoji ?? day.placeEmoji ?? '').trim();
+  const emoji = (asText(day.portEmoji) ?? asText(day.placeEmoji) ?? '').trim();
   return emoji ? `${emoji} ${place}` : place;
 }
 
@@ -801,7 +861,7 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const greeting = firstName ? `Morning, ${firstName}. ` : 'Morning. ';
   // The arrival line names the Place WITHOUT its flag emoji: the flag rides the
   // context line, and a flag mid-sentence reads as decoration rather than data.
-  const arrivalPlace = (day.place ?? day.port ?? '').trim();
+  const arrivalPlace = placeName(day);
   const arrival = arrivalPlace ? register.arrivalLine(arrivalPlace) : register.arrivalLineNoPlace;
   // The opening Day of an Event that uses the open sentinel has no unlock hour
   // to promise — it is already live — so the copy says so rather than quoting
