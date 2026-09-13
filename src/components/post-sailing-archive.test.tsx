@@ -1511,32 +1511,41 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
 });
 
 // #1192, routed here from Codex's P1 on PR #1207. `podiumAnnouncementEmail` is
-// its own quarter-hour sweep rather than a finale beat, so an Event carries
-// `finaleCompletedAt` — and reads as finale-complete on this surface — while its
-// last email is still owed. Archival is terminal for that send, so the flip
-// cancels it for the whole roster and, until this warning, said nothing.
+// its own quarter-hour sweep rather than a finale beat, so an Event can be owed
+// its last email on either side of the finale gate. Archival is terminal for
+// that send, so the flip cancels what is left of it for the roster and, until
+// this warning, said nothing.
 describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () => {
   const owed = (over: Partial<EventDoc> = {}) =>
     mkEvent({
       settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
       ...over,
     } as Partial<EventDoc>);
-  const COPY = /The winner announcement has not been sent yet/;
+  /** The window `markFinaleComplete` failed in: the freeze and the podium both
+   *  landed, the completion marker never did, and the email is owed beside a
+   *  finale gate that is still unsatisfied. */
+  const preFinaleOwed = () =>
+    ({
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+      frozenAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    }) as EventDoc;
+  const COPY = /The winner announcement has not finished going out/;
+  const FINALE_COPY = /the podium, the Most-Loved award and the freeze stamp will never arrive/;
+  const COMBINED = /The winner announcement will not finish going out either/;
 
   it('will not archive with the announcement still owed without an explicit acknowledgement', async () => {
     H.event = owed();
     renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
-    const confirm = screen.getByRole('button', { name: 'Archive the Event now' });
-    expect(confirm).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
     expect(screen.getByText(COPY)).toBeInTheDocument();
-    // …and it is the ONLY question on screen: the marker that puts this box here
-    // is the marker that takes the pre-finale one away. The mutual exclusion
-    // asked from this side; the pre-finale case below asks it from the other.
+    // …and it is the ONLY question on screen: the finale gate is satisfied here,
+    // so its box stands down and this one is asked on its own.
     expect(screen.getAllByRole('checkbox')).toHaveLength(1);
-    expect(
-      screen.queryByText(/the podium, the Most-Loved award and the freeze stamp will never arrive/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(FINALE_COPY)).not.toBeInTheDocument();
     expect(H.archiveEvent).not.toHaveBeenCalled();
   });
 
@@ -1570,6 +1579,43 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
   });
 
+  it('asks ONE question when the marker failed over a landed freeze, not two', async () => {
+    // Codex P1 on PR #1215. `markFinaleComplete` can fail over a freeze and a
+    // podium that both landed, which leaves the finale gate unsatisfied WITH the
+    // email genuinely owed beside it — the two predicates overlap here. Two boxes
+    // over one irreversible write is two chances to read only the first, so the
+    // finale box carries the announcement clause and the standalone one stands
+    // down. One tick, and it is the one the writer's own gate needs.
+    H.event = preFinaleOwed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: true,
+    });
+  });
+
+  it('says nothing about the announcement in the finale box when none is owed', async () => {
+    // The control for the clause above: an ordinary pre-finale Event that mails
+    // nobody is asked exactly what it was asked before this shipped.
+    H.event = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+    } as EventDoc;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(COMBINED)).not.toBeInTheDocument();
+  });
+
   it('asks nothing once the fan-out has stamped its marker — the control', async () => {
     H.event = owed({ podiumEmailAt: 8_200 });
     renderConsole();
@@ -1590,26 +1636,6 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
   });
 
-  it('asks ONE question, never both — a pre-finale Event is asked only about the finale', async () => {
-    // Structural rather than arranged: this acknowledgement requires the marker
-    // that is the first thing `finaleHasRun` accepts, so the two can never be on
-    // screen together. The Admin is told the one thing true of the Event in
-    // front of them rather than a pair of warnings to reconcile.
-    H.event = {
-      name: 'Test Event',
-      status: 'active',
-      standingsFreezeAt: 8_000,
-      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
-    } as EventDoc;
-    renderConsole();
-    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
-    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
-    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/the podium, the Most-Loved award and the freeze stamp will never arrive/),
-    ).toBeInTheDocument();
-  });
-
   it('forgets the acknowledgement when the confirm row is cancelled', async () => {
     // The tick describes the Event on screen at the tap, exactly as the finale
     // box does — an Admin who backs out and arms again is asked again.
@@ -1622,6 +1648,35 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
     expect(screen.getByRole('checkbox')).not.toBeChecked();
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('RETRACTS the tick when play is reopened, for both acknowledgements', async () => {
+    // Codex P2 on PR #1215. Both boxes live on the closing surface as well as the
+    // confirm row, and only the confirm row had a way to clear them — this
+    // component stays mounted across the phase move, so an Admin who ticked one
+    // and then pressed **Reopen play** left the tick behind. Closing the Event
+    // again later put the box back ALREADY CHECKED with **Freeze the record** live
+    // beside it: an irreversible write one click away over a consequence nobody
+    // acknowledged in this flow.
+    for (const seed of [owed, preFinaleOwed]) {
+      H.writes = [];
+      H.event = { ...seed(), archiving: true, archiveToken: 1 } as EventDoc;
+      const view = renderConsole();
+      await userEvent.click(screen.getByRole('checkbox'));
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
+      // The reopen the Admin chooses instead of freezing, and the listener
+      // swapping the surface under them.
+      await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
+      await waitFor(() => expect(H.writes).toContain('abandon'));
+      view.rerender(<ArchiveEvent {...props(seed())} />);
+      // …and the Event shut again later, by this Admin or another.
+      view.rerender(
+        <ArchiveEvent {...props({ ...seed(), archiving: true, archiveToken: 2 } as EventDoc)} />,
+      );
+      expect(screen.getByRole('checkbox')).not.toBeChecked();
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+      view.unmount();
+    }
   });
 });
 

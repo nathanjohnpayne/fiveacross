@@ -2155,19 +2155,37 @@ describe('finaleHasRun — the finale gate’s own predicate', () => {
 });
 
 // #1192, routed here from Codex's P1 on PR #1207. The winner announcement is its
-// own quarter-hour sweep rather than a finale beat, so `finaleHasRun` answers
-// true for up to one interval while the Event's last email is still owed — and
-// the flip that follows cancels that send for the whole roster.
-describe('podiumEmailPending — the announcement the finale marker does not cover', () => {
+// own quarter-hour sweep rather than a finale beat, so an Event can be owed its
+// last email on either side of `finaleHasRun` — and the flip that follows cancels
+// that send for whatever is left of the roster.
+describe('podiumEmailPending — the announcement no finale gate covers', () => {
   const owed = (over: Partial<EventDoc> = {}) =>
     ({
-      finaleCompletedAt: 8_100,
+      frozenAt: 8_000,
       settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
       ...over,
     }) as Partial<EventDoc>;
 
-  it('is true for a finale-complete Event whose announcement has not gone out', () => {
+  it('is true from the freeze onwards, with or without the completion marker', () => {
+    // THE MARKER IS NOT THE CONDITION (Codex P1 on PR #1215). `markFinaleComplete`
+    // stamps it only inside a transaction that has observed the freeze and the
+    // podium Moment, so the marker entails `frozenAt` — but not the reverse. A run
+    // whose freeze and Moment both landed while the stamp did not leaves the email
+    // genuinely due with no marker to see it by, and keying on the marker answered
+    // false for the whole of that window: the same silent loss, one beat earlier.
     expect(podiumEmailPending(owed())).toBe(true);
+    expect(podiumEmailPending(owed({ finaleCompletedAt: 8_100 }))).toBe(true);
+  });
+
+  it('is false before the freeze, when there is no send to lose yet', () => {
+    expect(podiumEmailPending(owed({ frozenAt: undefined }))).toBe(false);
+    expect(
+      podiumEmailPending({
+        standingsFreezeAt: 8_000,
+        days: DAYS,
+        settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      } as Partial<EventDoc>),
+    ).toBe(false);
   });
 
   it('is false once the fan-out has stamped its marker', () => {
@@ -2186,37 +2204,30 @@ describe('podiumEmailPending — the announcement the finale marker does not cov
       podiumEmailPending(owed({ settings: { reportHideThreshold: 3 } } as Partial<EventDoc>)),
     ).toBe(false);
     expect(
-      podiumEmailPending(
-        owed({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } }),
-      ),
+      podiumEmailPending(owed({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } })),
     ).toBe(false);
     // The loose read this deliberately is not: a stored non-boolean is OFF.
     expect(
       podiumEmailPending(
-        owed({ settings: { dailyEmailEnabled: 'yes', reportHideThreshold: 3 } } as unknown as Partial<EventDoc>),
+        owed({
+          settings: { dailyEmailEnabled: 'yes', reportHideThreshold: 3 },
+        } as unknown as Partial<EventDoc>),
       ),
     ).toBe(false);
   });
 
-  it('is false before the finale marker is stamped, so it never doubles the other warning', () => {
-    // THE MUTUAL EXCLUSION, and it is structural rather than arranged: this
-    // predicate REQUIRES the marker that is the first thing `finaleHasRun`
-    // accepts, so at most one of the two acknowledgements can ever be on screen.
-    const midEvent = {
-      standingsFreezeAt: 8_000,
-      days: DAYS,
-      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
-    } as Partial<EventDoc>;
-    expect(finaleHasRun(midEvent)).toBe(false);
-    expect(podiumEmailPending(midEvent)).toBe(false);
-    // …and a freeze stamp with no completion marker beside it is the same
-    // window from the other side (#1151, Codex P1 on PR #1162): the podium beat
-    // has not landed, so there is no announcement owed yet either.
-    const frozenNoPodium = { ...midEvent, frozenAt: 8_000 } as Partial<EventDoc>;
-    expect(finaleHasRun(frozenNoPodium)).toBe(false);
-    expect(podiumEmailPending(frozenNoPodium)).toBe(false);
-    // The legacy no-freeze shape satisfies `finaleHasRun` without a marker, and
-    // for the same reason owes no announcement.
+  it('OVERLAPS the finale gate in the window the marker failed in', () => {
+    // The two are deliberately NOT disjoint, which is the property the console
+    // composes its copy around: here the freeze has landed, the email is owed,
+    // and the finale gate is still unsatisfied because the marker never stamped.
+    const markerFailed = owed({ days: DAYS, standingsFreezeAt: 8_000 });
+    expect(finaleHasRun(markerFailed)).toBe(false);
+    expect(podiumEmailPending(markerFailed)).toBe(true);
+    // …and the ordinary post-finale Event, where only this one is true.
+    const complete = owed({ days: DAYS, standingsFreezeAt: 8_000, finaleCompletedAt: 8_100 });
+    expect(finaleHasRun(complete)).toBe(true);
+    expect(podiumEmailPending(complete)).toBe(true);
+    // …and the legacy no-freeze shape, where only the finale gate is.
     const legacy = {
       days: [],
       settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
