@@ -1214,6 +1214,28 @@ export interface PodiumMomentPayload {
   champion: { uid: string; displayName: string; bingoCount: number; squaresMarked: number } | null;
   firstBingo: { uid: string; displayName: string; at: number } | null;
   dailyHonors: { dayIndex: number; uid: string; displayName: string; at: number }[];
+  /**
+   * Whether ANY Marks were recorded across the Event as of the freeze — Marks on
+   * ceremonial and Tutorial Days included, because this is the "did anybody
+   * play" fact rather than a scoring one (#1192).
+   *
+   * Its own field because it is NOT derivable from `champion`. The three fields
+   * above answer three questions under three different exclusions, and an Event
+   * whose only play sits on ceremonial, `tutorial: false` Days — the shape ADR
+   * 0011 exists to permit — has no champion and a real `firstBingo` at the same
+   * time. The winner-announcement email read `champion == null` as an empty
+   * board and so told every recipient nobody marked a square, printed directly
+   * beside the ⭐ naming the person who bingoed.
+   *
+   * OPTIONAL, because a podium Moment is written once and never amended: every
+   * Moment posted before this field existed lacks it, and absence means
+   * "unknown", not `false`. Consumers must state their own fallback for a legacy
+   * Moment rather than reading absence as an empty board — see
+   * `podiumEmailInputFor` (`functions/src/podiumEmail.ts`), which will not claim
+   * an empty board on a legacy payload naming any honour at all — a champion, the
+   * Event-wide ⭐, or one Day's pinned honour.
+   */
+  playRecorded?: boolean;
 }
 
 // A Notice (specs/admin-messages.md): an admin-authored broadcast — title + body,

@@ -32,7 +32,9 @@ export interface PodiumFirstBingo {
   at: number;
 }
 export interface Podium {
-  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` when no
+   *  ranking-eligible play was recorded — which is NOT the same as an empty
+   *  board, see `playRecorded`. */
   champion: PodiumChampion | null;
   /** Cruise-wide First to BINGO across main-game Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
@@ -46,6 +48,22 @@ export interface Podium {
    * and the podium Moment are NOT touched, so nothing served changes.
    */
   runnersUp: PodiumChampion[];
+  /**
+   * Whether ANY Marks were recorded across the Event — the "did anybody play"
+   * fact, stated rather than inferred from `champion` (#1192). Mirror of
+   * `PodiumPayload.playRecorded` (`functions/src/finaleContent.ts`), pinned
+   * against it by `tests/functions/finale-parity.test.ts`.
+   *
+   * NO CLIENT SURFACE READS IT YET, and it is carried anyway. The consumer that
+   * needs it is the winner-announcement email, which reads the functions-side
+   * payload off the Moment — but the two builders are a mirror, and the reason
+   * this mirror has a parity test at all is that they once drifted invisibly.
+   * A fact present on one side and absent on the other is the shape that drift
+   * takes, so it moves with its twin. The farewell view needs no empty-board
+   * copy today for the same reason it never had the bug: it OMITS the champion
+   * block rather than asserting anything about who played.
+   */
+  playRecorded: boolean;
 }
 
 /**
@@ -114,6 +132,42 @@ function podiumStandingRow(
     squaresMarked: clampReaggregatedTotal(squaresMarked),
     firstBingoAt,
   };
+}
+
+/**
+ * Did this Player record ANY Marks — a marked Square or a bingo — on ANY Day?
+ *
+ * THE MARKS QUESTION, NOT THE SCORING ONE (#1192). Every other predicate on the
+ * podium path asks what COUNTS: `podiumStandingRow` above drops each ceremonial
+ * Day's contribution and `effectiveCruiseFirstBingoAt` drops each Tutorial Day's
+ * instant, because ADR 0011 makes pool identity, Tutorial framing and Scoring
+ * Policy three independent facts. This asks whether anything HAPPENED, which no
+ * exclusion can change: a Player who marked forty Squares on a ceremonial Day
+ * marked forty Squares. The Scoring Policy removed their score, not their Marks.
+ *
+ * ROOTS OR BUCKETS, either one positive — the root aggregates and the per-Day
+ * breakdown can disagree on a legacy or hybrid row (the state `playerRowRootLag`
+ * exists to detect), and the only claim this answer gates is "nobody marked a
+ * square", so it is refused unless every signal the row has agrees that nothing
+ * was marked. Malformed counts are already coerced by `withReadableDayStats` at
+ * the read boundary, and a non-finite or negative count is not positive anyway.
+ *
+ * The bucket guard is not decoration: this reads the map UNCONDITIONALLY, where
+ * `podiumStandingRow` reads it only on a schedule that has a ceremonial Day to
+ * exclude. `dayStats` is Player-written and validated by no rules arm (ADR 0001),
+ * so a roster that reaches here without passing `withReadableDayStats` hands this
+ * a `null` bucket the row builder would never have touched — and a throw inside
+ * `buildPodium` takes the farewell view down with it.
+ *
+ * Mirror of `anyMarksRecorded` in `functions/src/finaleContent.ts`, pinned
+ * against it by `tests/functions/finale-parity.test.ts`.
+ */
+function anyMarksRecorded(player: PlayerDoc): boolean {
+  if (player.bingoCount > 0 || player.squaresMarked > 0) return true;
+  for (const stat of Object.values(player.dayStats ?? {})) {
+    if (stat && (stat.bingoCount > 0 || stat.squaresMarked > 0)) return true;
+  }
+  return false;
 }
 
 /**
@@ -325,6 +379,12 @@ export function buildPodium(
     firstBingo,
     dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
     runnersUp,
+    // OVER THE RAW ROSTER, not over `standings` (#1192): the re-aggregated rows
+    // are where a ceremonial Day's Marks have already been dropped, so asking
+    // them whether anything was marked would answer the scoring question again
+    // under a different name. Unbounded by `withinFreeze` because counts carry
+    // no instant — the same reason the champion's own totals are not.
+    playRecorded: players.some(anyMarksRecorded),
   };
 }
 

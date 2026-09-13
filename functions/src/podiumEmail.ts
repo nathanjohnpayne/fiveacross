@@ -1091,7 +1091,13 @@ interface PodiumEmailEvent {
 interface PodiumMomentDoc {
   kind?: unknown;
   dayIndex?: unknown;
-  podium?: PodiumPayload;
+  /** The payload as STORED, which is not quite what this process would build:
+   *  `playRecorded` postdates the contract (#1192) and a podium Moment is written
+   *  once and never amended, so every Moment posted before it exists lacks the
+   *  field. Spelled optional and `unknown` here so the compiler cannot let a
+   *  legacy `undefined` be read as `false` — absence means "unknown", and
+   *  `podiumEmailInputFor` states the fallback explicitly. */
+  podium?: Omit<PodiumPayload, 'playRecorded'> & { playRecorded?: unknown };
 }
 
 export type PodiumDueReason =
@@ -1791,6 +1797,30 @@ export async function podiumEmailInputFor(
     payload.dailyHonors.map((h) => h.dayIndex),
   );
 
+  // WHETHER ANYBODY PLAYED IS CARRIED, NOT INFERRED (#1192, Codex P2 on PR
+  // #1207). `champion == null` is not that fact: the champion is the head of the
+  // standings with every ceremonial Day's contribution removed, so an Event whose
+  // only play sits on ceremonial, `tutorial: false` Days — the shape ADR 0011
+  // exists to permit — legitimately has no champion while `firstBingo`, whose
+  // exclusion is tutorial-only by design, names a real winner. Reading the first
+  // as proof of an empty board produced an email that suppressed every standings
+  // row and the reader's own placing and stated "Nobody marked a square" directly
+  // beside the ⭐ naming the person who bingoed.
+  //
+  // A LEGACY MOMENT HAS NO SUCH FIELD, and absence is unknown rather than
+  // `false`: the Moment is written once and never amended, so an Event that froze
+  // before this contract can still be mailed by the first sweep after deploy. The
+  // fallback is read off the frozen record alone — never off the live roster,
+  // which a post-freeze self-write can move (ADR 0001) — and it refuses the empty
+  // claim whenever the record names ANY honour: a champion, the Event-wide ⭐, or
+  // one Day's pinned honour. The residual it cannot recover is a legacy Event
+  // whose only play was ceremonial Squares with no bingo anywhere; that one reads
+  // as empty, and every Event frozen from here on carries the real answer.
+  const playRecorded =
+    typeof payload.playRecorded === 'boolean'
+      ? payload.playRecorded
+      : payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0;
+
   return {
     due: true,
     input: {
@@ -1802,6 +1832,10 @@ export async function podiumEmailInputFor(
         firstBingo:
           payload.firstBingo && !bannedSet.has(payload.firstBingo.uid) ? payload.firstBingo : null,
         dailyHonors: payload.dailyHonors.filter((h) => !bannedSet.has(h.uid)),
+        // Unfiltered on purpose: a ban withholds an honour, it never un-plays the
+        // Event. Filtering this would recreate the second meaning `champion: null`
+        // gained and the round-2 fix removed.
+        playRecorded,
       },
       ranked,
       mostLoved: award,
@@ -1811,9 +1845,11 @@ export async function podiumEmailInputFor(
         award?.winners[0]?.dayIndex != null
           ? photoDayLabels[award.winners[0].dayIndex as number]
           : undefined,
-      // Read from the Moment BEFORE the honour filtering above, so a withheld
-      // banned champion is never mistaken for a board nobody played.
-      boardWasEmpty: payload.champion == null,
+      // The Moment's own answer, negated — never the absence of a champion, and
+      // never anything read off the live roster. Resolved from the payload BEFORE
+      // the honour filtering above, so a withheld banned champion is still never
+      // mistaken for a board nobody played. See `playRecorded` above.
+      boardWasEmpty: !playRecorded,
       bannedUids: banned,
       closingDay,
       honorDayLabels,
