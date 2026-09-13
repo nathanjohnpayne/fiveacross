@@ -40,7 +40,11 @@ import {
   type FinaleReadSource,
 } from './unlockDay';
 import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
-import { podiumStandings, standingsFreezeAtFor } from './finaleContent';
+import {
+  MAX_PERSISTED_MOST_LOVED_WINNERS,
+  podiumStandings,
+  standingsFreezeAtFor,
+} from './finaleContent';
 import {
   ensureEmailPrefs,
   emailPrefsPath,
@@ -1197,7 +1201,33 @@ export function visibleMostLovedAward(
   if (!raw || typeof raw !== 'object') return null;
   const award = raw as Partial<MostLovedPhotoAward>;
   if (!Array.isArray(award.winners)) return null;
-  if (typeof award.heartCount !== 'number' || !Number.isFinite(award.heartCount)) return null;
+  // EVERY NUMERIC IS A COUNT OR AN INDEX, so "finite" is the wrong test (Codex P2,
+  // final round — raised for `heartCount`, fixed for all of them together). This
+  // record is admin-writable with nothing typing it, and the reader is the last
+  // place a bad value can be stopped: `1.5` hearts rendered `❤ 1.5` to every
+  // recipient, and the spec promises a malformed stored award normalises to no
+  // module. Doing the whole inventory in one pass rather than one field per review
+  // round, because the enumeration is the thing that keeps being incomplete.
+  const count = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  if (!count(award.heartCount)) return null;
+  if (award.winnerCount !== undefined && !count(award.winnerCount)) return null;
+  if (award.frozenAt !== undefined && (typeof award.frozenAt !== 'number' || !Number.isFinite(award.frozenAt))) {
+    return null;
+  }
+  // THE PERSISTENCE BOUND IS ENFORCED BY THE READER TOO (Codex P2, final round).
+  // `buildPodiumPayload` slices to `MAX_PERSISTED_MOST_LOVED_WINNERS`, but an admin
+  // write or a migration is not obliged to, and the re-join reads one Proof per
+  // entry — twice, at input assembly and again at the pre-send guard. An Event
+  // document near Firestore's 1 MiB limit could therefore spend thousands of
+  // sequential reads and exhaust the scheduled function's timeout before mailing
+  // anybody, on every sweep. Capped rather than rejected: the first 100 are the
+  // prefix the contract describes, so the award still renders, and the tie count
+  // is forced inexact below because a truncated list cannot be counted.
+  const overBound = award.winners.length > MAX_PERSISTED_MOST_LOVED_WINNERS;
+  const bounded = overBound
+    ? award.winners.slice(0, MAX_PERSISTED_MOST_LOVED_WINNERS)
+    : award.winners;
   // THE JOIN KEY IS VALIDATED, NOT JUST THE RENDERED STRINGS (Codex P2, final
   // round). `proofId` is fed to `db.doc` by the live-visibility re-join, and an
   // admin replacement is rules-permitted with nothing typing this field — so an
@@ -1226,7 +1256,7 @@ export function visibleMostLovedAward(
     id !== '.' &&
     id !== '..' &&
     !/^__.*__$/.test(id);
-  const winners = award.winners.filter(
+  const winners = bounded.filter(
     (w): w is MostLovedPhotoWinner =>
       !!w &&
       typeof w === 'object' &&
@@ -1234,6 +1264,12 @@ export function visibleMostLovedAward(
       joinable((w as MostLovedPhotoWinner).proofId) &&
       typeof (w as MostLovedPhotoWinner).displayName === 'string' &&
       typeof (w as MostLovedPhotoWinner).promptText === 'string' &&
+      // `dayIndex` indexes the Day-label maps and `proofCreatedAt` is compared
+      // against the live Proof's own stamp, so neither may be a fraction or a
+      // non-number reaching those uses.
+      count((w as MostLovedPhotoWinner).dayIndex) &&
+      typeof (w as MostLovedPhotoWinner).proofCreatedAt === 'number' &&
+      Number.isFinite((w as MostLovedPhotoWinner).proofCreatedAt) &&
       !bannedUids.has((w as MostLovedPhotoWinner).uid),
   );
   if (winners.length === 0) return null;
@@ -1243,8 +1279,8 @@ export function visibleMostLovedAward(
   const declared =
     typeof award.winnerCount === 'number' && Number.isFinite(award.winnerCount)
       ? award.winnerCount
-      : award.winners.length;
-  const removed = award.winners.length - winners.length;
+      : bounded.length;
+  const removed = bounded.length - winners.length;
   // A TRUNCATED TIE CANNOT BE COUNTED EXACTLY (Codex P2, rounds 3 and 4 on PR
   // #1207). `winners` is a bounded prefix — `MAX_PERSISTED_MOST_LOVED_WINNERS` —
   // while `winnerCount` deliberately preserves the FULL cardinality beyond it, so
@@ -1259,7 +1295,10 @@ export function visibleMostLovedAward(
   // its hidden remainder is ban-free, so the only honest test is whether any ban
   // roster is in play at all — with none, no filtering happened and the declared
   // count stands.
-  const truncated = declared > award.winners.length;
+  // An over-bound list is truncated by construction, so it can never report an
+  // exact tie count either — the entries we dropped may contain banned owners or
+  // hidden photos we cannot see.
+  const truncated = overBound || declared > bounded.length;
   return {
     winners,
     winnerCount: Math.max(winners.length, declared - removed),

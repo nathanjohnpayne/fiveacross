@@ -620,6 +620,73 @@ describe('the guards the final round closed (#1192, final round)', () => {
     expect(sent.length).toBeGreaterThan(0);
   });
 
+  const awardWith = (over: Record<string, unknown>) => ({
+    mostLovedPhoto: {
+      winners: [
+        {
+          proofId: 'p1',
+          uid: 'ido',
+          displayName: 'Ido Marcus',
+          promptText: 'Mirror-hall selfie',
+          dayIndex: 6,
+          proofCreatedAt: 500,
+        },
+      ],
+      winnerCount: 1,
+      heartCount: 31,
+      frozenAt: 2_000,
+      ...over,
+    },
+  });
+
+  it.each([
+    ['a fractional heartCount', { heartCount: 1.5 }],
+    ['a negative heartCount', { heartCount: -1 }],
+    ['a fractional winnerCount', { winnerCount: 2.5 }],
+    ['a non-finite frozenAt', { frozenAt: Number.NaN }],
+  ])('normalises an award with %s to no module', async (_label, over) => {
+    const got = await podiumEmailInputFor(makeDb(seedDue(awardWith(over))), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).toBeNull();
+  });
+
+  it.each([
+    ['a fractional dayIndex', { dayIndex: 6.5 }],
+    ['a non-numeric proofCreatedAt', { proofCreatedAt: 'soon' }],
+  ])('drops a winner with %s', async (_label, over) => {
+    const award = awardWith({});
+    award.mostLovedPhoto.winners = [{ ...award.mostLovedPhoto.winners[0], ...over } as never];
+    const got = await podiumEmailInputFor(makeDb(seedDue(award)), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // The only winner is malformed, so no visible winner remains and no module renders.
+    expect(got.input.mostLoved).toBeNull();
+  });
+
+  it('caps an over-bound winner list and forces the tie count inexact', async () => {
+    // The writer slices to MAX_PERSISTED_MOST_LOVED_WINNERS; an admin write or a
+    // migration need not. The re-join reads one Proof PER ENTRY, twice — at input
+    // assembly and again at the pre-send guard — so an unbounded list can exhaust
+    // the scheduled function's timeout before anybody is mailed, on every sweep.
+    const winners = Array.from({ length: 250 }, (_, i) => ({
+      proofId: i === 0 ? 'p1' : `p${i + 100}`,
+      uid: i === 0 ? 'ido' : `u${i}`,
+      displayName: `Winner ${i}`,
+      promptText: 'Mirror-hall selfie',
+      dayIndex: 6,
+      proofCreatedAt: 500,
+    }));
+    const docs = seedDue({
+      mostLovedPhoto: { winners, winnerCount: 250, heartCount: 31, frozenAt: 2_000 },
+    });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    // Only the hero's Proof is seeded, so one winner survives the visibility join.
+    // The property under test is the BOUND plus its consequence: a list truncated
+    // by the reader can never report an exact tie count.
+    expect(got.input.mostLoved).not.toBeNull();
+    expect(got.input.mostLoved?.winnerCountExact).toBe(false);
+  });
+
   it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
     // The hero check at the checkpoint only asks whether that Proof is still
     // visible, so a replacement keeping the old hero's Proof alive walked past it.
