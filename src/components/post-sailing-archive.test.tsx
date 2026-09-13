@@ -1510,6 +1510,121 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
   });
 });
 
+// #1192, routed here from Codex's P1 on PR #1207. `podiumAnnouncementEmail` is
+// its own quarter-hour sweep rather than a finale beat, so an Event carries
+// `finaleCompletedAt` — and reads as finale-complete on this surface — while its
+// last email is still owed. Archival is terminal for that send, so the flip
+// cancels it for the whole roster and, until this warning, said nothing.
+describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () => {
+  const owed = (over: Partial<EventDoc> = {}) =>
+    mkEvent({
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      ...over,
+    } as Partial<EventDoc>);
+  const COPY = /The winner announcement has not been sent yet/;
+
+  it('will not archive with the announcement still owed without an explicit acknowledgement', async () => {
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    const confirm = screen.getByRole('button', { name: 'Archive the Event now' });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    // …and it is the ONLY question on screen: the marker that puts this box here
+    // is the marker that takes the pre-finale one away. The mutual exclusion
+    // asked from this side; the pre-finale case below asks it from the other.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(
+      screen.queryByText(/the podium, the Most-Loved award and the freeze stamp will never arrive/),
+    ).not.toBeInTheDocument();
+    expect(H.archiveEvent).not.toHaveBeenCalled();
+  });
+
+  it('archives once the Admin ticks it — and tells the writer NOTHING about it', async () => {
+    // The archive gate is deliberately unchanged (specs/daily-engagement-email.md
+    // § "Archival is terminal for this send"): `finaleCompletedAt` must not wait
+    // on this email, so a permanently failing transport cannot block the flip.
+    // The acknowledgement therefore holds this surface's door and reaches no
+    // further — `beforeFinale` stays false, because the finale itself HAS run.
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: false,
+    });
+  });
+
+  it('offers the same acknowledgement on the CLOSING surface, and archives once it is given', async () => {
+    // The surface an Admin who has already used Close play cannot leave — the
+    // #1162 failure mode the finale box was fixed for. Same control, same copy.
+    H.event = owed({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+  });
+
+  it('asks nothing once the fan-out has stamped its marker — the control', async () => {
+    H.event = owed({ podiumEmailAt: 8_200 });
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('asks nothing on an Event that mails nobody', async () => {
+    // The toggle is the only thing that decides whether anyone is emailed at
+    // all, and it ships off. An Event with it off has no announcement to lose,
+    // so warning about one would be a box to tick on every ordinary archive.
+    H.event = mkEvent();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('asks ONE question, never both — a pre-finale Event is asked only about the finale', async () => {
+    // Structural rather than arranged: this acknowledgement requires the marker
+    // that is the first thing `finaleHasRun` accepts, so the two can never be on
+    // screen together. The Admin is told the one thing true of the Event in
+    // front of them rather than a pair of warnings to reconcile.
+    H.event = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as EventDoc;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/the podium, the Most-Loved award and the freeze stamp will never arrive/),
+    ).toBeInTheDocument();
+  });
+
+  it('forgets the acknowledgement when the confirm row is cancelled', async () => {
+    // The tick describes the Event on screen at the tap, exactly as the finale
+    // box does — an Admin who backs out and arms again is asked again.
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+});
+
 // CodeRabbit Major on PR #1162. The writer's server reads are taken after the
 // quiesce, so one that does not answer used to throw straight out of
 // `archiveEvent`: `runArchive` never saw a result, the automatic reopen never

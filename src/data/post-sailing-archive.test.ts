@@ -6,6 +6,7 @@ import {
   draftEventArchive,
   finaleHasRun,
   isEventArchived,
+  podiumEmailPending,
   isEventArchiving,
   withReadableDayStats,
   MAX_ARCHIVE_NUMBER,
@@ -2150,6 +2151,84 @@ describe('finaleHasRun — the finale gate’s own predicate', () => {
     expect(finaleHasRun({})).toBe(true);
     expect(finaleHasRun(null)).toBe(true);
     expect(finaleHasRun(undefined)).toBe(true);
+  });
+});
+
+// #1192, routed here from Codex's P1 on PR #1207. The winner announcement is its
+// own quarter-hour sweep rather than a finale beat, so `finaleHasRun` answers
+// true for up to one interval while the Event's last email is still owed — and
+// the flip that follows cancels that send for the whole roster.
+describe('podiumEmailPending — the announcement the finale marker does not cover', () => {
+  const owed = (over: Partial<EventDoc> = {}) =>
+    ({
+      finaleCompletedAt: 8_100,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      ...over,
+    }) as Partial<EventDoc>;
+
+  it('is true for a finale-complete Event whose announcement has not gone out', () => {
+    expect(podiumEmailPending(owed())).toBe(true);
+  });
+
+  it('is false once the fan-out has stamped its marker', () => {
+    expect(podiumEmailPending(owed({ podiumEmailAt: 8_200 }))).toBe(false);
+    // The stamp is the whole answer, not a truthiness test: a fan-out that
+    // finished at epoch zero still finished.
+    expect(podiumEmailPending(owed({ podiumEmailAt: 0 }))).toBe(false);
+  });
+
+  it('is false while the Event mails nobody at all', () => {
+    // Read the server's way — EXPLICITLY `true`, never merely present
+    // (`dailyEmailEnabled`, functions/src/dailyEmail.ts). Every one of these
+    // Events sends no announcement, so there is none to warn about losing.
+    expect(podiumEmailPending(owed({ settings: undefined }))).toBe(false);
+    expect(
+      podiumEmailPending(owed({ settings: { reportHideThreshold: 3 } } as Partial<EventDoc>)),
+    ).toBe(false);
+    expect(
+      podiumEmailPending(
+        owed({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } }),
+      ),
+    ).toBe(false);
+    // The loose read this deliberately is not: a stored non-boolean is OFF.
+    expect(
+      podiumEmailPending(
+        owed({ settings: { dailyEmailEnabled: 'yes', reportHideThreshold: 3 } } as unknown as Partial<EventDoc>),
+      ),
+    ).toBe(false);
+  });
+
+  it('is false before the finale marker is stamped, so it never doubles the other warning', () => {
+    // THE MUTUAL EXCLUSION, and it is structural rather than arranged: this
+    // predicate REQUIRES the marker that is the first thing `finaleHasRun`
+    // accepts, so at most one of the two acknowledgements can ever be on screen.
+    const midEvent = {
+      standingsFreezeAt: 8_000,
+      days: DAYS,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as Partial<EventDoc>;
+    expect(finaleHasRun(midEvent)).toBe(false);
+    expect(podiumEmailPending(midEvent)).toBe(false);
+    // …and a freeze stamp with no completion marker beside it is the same
+    // window from the other side (#1151, Codex P1 on PR #1162): the podium beat
+    // has not landed, so there is no announcement owed yet either.
+    const frozenNoPodium = { ...midEvent, frozenAt: 8_000 } as Partial<EventDoc>;
+    expect(finaleHasRun(frozenNoPodium)).toBe(false);
+    expect(podiumEmailPending(frozenNoPodium)).toBe(false);
+    // The legacy no-freeze shape satisfies `finaleHasRun` without a marker, and
+    // for the same reason owes no announcement.
+    const legacy = {
+      days: [],
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as Partial<EventDoc>;
+    expect(finaleHasRun(legacy)).toBe(true);
+    expect(podiumEmailPending(legacy)).toBe(false);
+  });
+
+  it('answers false for an absent Event rather than throwing', () => {
+    expect(podiumEmailPending(null)).toBe(false);
+    expect(podiumEmailPending(undefined)).toBe(false);
+    expect(podiumEmailPending({})).toBe(false);
   });
 });
 
