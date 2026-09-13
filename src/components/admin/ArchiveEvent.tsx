@@ -33,6 +33,16 @@ type ArchiveOutcome = AbandonArchiveResult | BeginArchiveResult | ArchiveEventRe
 type Phase = 'open' | 'closing' | 'archived';
 
 /**
+ * WHICH consequence the flip's acknowledgement is about (#1151, #1192; Codex P1
+ * on PR #1215). It is the acknowledgement's KEY, not a rendering hint: the tick
+ * is stored as the value of the question it answered and spent the moment the
+ * Event re-keys it, so a warning that changes under a ticked box cannot be
+ * archived over. `'finale+email'` is its own value rather than a pair of flags
+ * because the two consequences are asked as ONE question — see `ask`.
+ */
+type ArchiveAsk = 'finale' | 'email' | 'finale+email';
+
+/**
  * Stated identically wherever the oversized record is refused — before the
  * quiesce (the blocked control) and after it (the flip's own report) — so an
  * Admin who meets it twice is told the same thing about the same cause.
@@ -427,11 +437,11 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
  *     4 satisfied and no warning on screen. Archival is terminal for that send,
  *     so the flip strands whatever is left of it for the roster and nothing else
  *     here would say so. A warning for the same reason 4 is, and rendered in the
- *     same two places. It OVERLAPS 4 rather than excluding it — the predicate
- *     keys on `frozenAt`, which is owed from the freeze while 4 waits on a
- *     completion marker that can fail behind it — so where both apply, 4's box
- *     carries the announcement clause and this one stands down: one irreversible
- *     write, one question. Unlike 4 it reaches no further than this surface: the
+ *     same control. It OVERLAPS 4 rather than excluding it — the predicate keys
+ *     on `frozenAt`, which is owed from the freeze while 4 waits on a completion
+ *     marker that can fail behind it — so where both apply the one control names
+ *     both consequences: one irreversible write, one question, keyed to what it
+ *     asked (`ArchiveAsk`). Unlike 4 it reaches no further than this surface: the
  *     writer has no `podiumEmailAt` gate and `specs/daily-engagement-email.md`
  *     rejects giving it one, so a failing transport can never block the flip.
  */
@@ -513,12 +523,23 @@ export default function ArchiveEvent({
     scheduleUnusable,
   } = useDayMetasStatus(event?.days?.map((d) => d.index) ?? []);
   const [arming, setArming] = useState(false);
-  const [beforeFinale, setBeforeFinale] = useState(false);
-  // The SECOND acknowledgement, and it is the console's alone (#1192). Unlike
-  // `beforeFinale` it is never handed to `archiveEvent`: the writer has no
-  // `podiumEmailAt` gate and deliberately must not grow one, so this state
-  // exists only to hold the door of this surface. See `podiumEmailPending`.
-  const [beforePodiumEmail, setBeforePodiumEmail] = useState(false);
+  // WHAT THE ADMIN ACKNOWLEDGED, not merely THAT they did (Codex P1 on PR #1215).
+  // Two booleans were the obvious shape and they were the wrong one: a tick
+  // survives a change to the very question it answered. An Admin who ticked the
+  // pre-finale box before the freeze kept `ready` open when `frozenAt` landed
+  // under them — the label silently gained the announcement consequence while
+  // their tick still described the label without it — and a `dailyEmailEnabled`
+  // switched off and back on resurrected a tick for a warning that had been off
+  // screen in between. Both archive over a consequence nobody accepted.
+  //
+  // So the state holds the SIGNATURE of the question that was ticked, and the
+  // tick counts only while that signature is still the question on screen. Any
+  // move in the underlying Event that changes what is being asked re-keys the
+  // ask, and the box unchecks itself — which is the explicit-acknowledgement
+  // contract stated as a data shape rather than as a list of transitions to
+  // remember. One value rather than two, because exactly one question is ever
+  // asked (`ask` below).
+  const [acknowledged, setAcknowledged] = useState<ArchiveAsk | null>(null);
   // `from` is the state the action was taken in; once the outcome's target state
   // is observed it is rebased there, so any LATER move — someone else's — clears
   // the message rather than contradicting the controls. `describes` is that
@@ -634,8 +655,7 @@ export default function ArchiveEvent({
     const was = ackPhaseRef.current;
     ackPhaseRef.current = phase;
     if (was === phase || phase !== 'open') return;
-    setBeforeFinale(false);
-    setBeforePodiumEmail(false);
+    setAcknowledged(null);
   }, [phase]);
   // WHICH invocation is speaking (the post-4b barrier round on PR #1157). The
   // controls are swapped by the listener, not by the action: while a Close is
@@ -712,7 +732,42 @@ export default function ArchiveEvent({
   // Two boxes over one irreversible write is two chances to read only the first,
   // so where both apply the finale box carries the announcement clause and this
   // one stands down — the Admin is asked once, and told both consequences.
-  const podiumEmailAsked = podiumEmailOwed && finaleDone;
+  //
+  // THE ONE QUESTION THIS SURFACE ASKS about the flip, or `null` when it has
+  // none. Exactly one by construction rather than by arrangement: the two
+  // consequences are not mutually exclusive — keying `podiumEmailPending` on
+  // `frozenAt` rather than the completion marker is what closes the window where
+  // the freeze and the podium landed but `markFinaleComplete` did not, and there
+  // both apply at once — so the combined ask states both rather than putting two
+  // boxes over one irreversible write, which is two chances to read only the
+  // first.
+  const ask: ArchiveAsk | null = !finaleDone
+    ? podiumEmailOwed
+      ? 'finale+email'
+      : 'finale'
+    : podiumEmailOwed
+      ? 'email'
+      : null;
+  // The tick is spent only against the question it was given for; see
+  // `acknowledged`.
+  const acked = ask !== null && acknowledged === ask;
+  // …AND A QUESTION THAT GOES AWAY SPENDS THE TICK TOO (Codex P1 on PR #1215).
+  // Re-keying alone does not cover this: `ask` returning to the SAME value is not
+  // the same asking. `settings.dailyEmailEnabled` is an ordinary admin toggle, so
+  // the announcement question can disappear and come back while this console
+  // watches — and an acknowledgement that survived the gap brought the box back
+  // ALREADY CHECKED, with **Archive now** live beside it, for a warning that was
+  // not on screen when it was given. Clearing on the way out is what makes the
+  // return a fresh ask. A no-op in the ordinary case, where an Event with nothing
+  // to acknowledge has no tick to clear.
+  useLayoutEffect(() => {
+    if (ask === null) setAcknowledged(null);
+  }, [ask]);
+  // …and only the FINALE half reaches the writer, because that is the only half
+  // with a server-side refusal to override (`finale-pending`). There is no
+  // `podiumEmailAt` refusal and `specs/daily-engagement-email.md` rejects adding
+  // one, so the announcement half gates this surface and nothing else.
+  const beforeFinale = acked && !finaleDone;
 
   // What WOULD be frozen, so the confirm row can state the record's size before
   // the Admin commits to it — and whether it can be frozen at all. Derived from
@@ -750,8 +805,7 @@ export default function ArchiveEvent({
     drained &&
     fits &&
     scheduleUsable &&
-    (finaleDone || beforeFinale) &&
-    (!podiumEmailAsked || beforePodiumEmail);
+    (ask === null || acked);
   // Why the door is shut, in the order the Admin can act on it: nothing to do
   // about a loading roster but wait, whereas a pending claim names its own fix.
   //
@@ -814,7 +868,7 @@ export default function ArchiveEvent({
   const frozen = event?.archive;
 
   /**
-   * The pre-finale acknowledgement (#1151), rendered wherever `ready` gates the
+   * THE acknowledgement (#1151 and #1192), rendered wherever `ready` gates the
    * flip — the open surface's confirm row AND the closing surface's **Freeze the
    * record** (Codex P2 on PR #1162).
    *
@@ -825,53 +879,32 @@ export default function ArchiveEvent({
    * — reopening gameplay on an Event the Admin had deliberately shut, purely to
    * satisfy a checkbox. Same control, same copy, same state, so an Admin who ends
    * up in either place is asked the same question and answers it once.
-   */
-  const finaleAcknowledgement = !finaleDone && (
-    <label className="sub archive-before-finale">
-      <input
-        type="checkbox"
-        checked={beforeFinale}
-        onChange={(e) => setBeforeFinale(e.target.checked)}
-      />{' '}
-      The scheduled standings freeze has not run yet. Archive anyway—the podium, the Most-Loved
-      award and the freeze stamp will never arrive.
-      {/* …and the announcement, when it is owed in the same breath (Codex P1 on
-          PR #1215). The freeze and the podium can both have landed while
-          `markFinaleComplete` did not, which leaves this box on screen over an
-          Event whose last email is genuinely due. Stated here rather than in a
-          second box, so one irreversible write asks one question. */}
-      {podiumEmailOwed && ' The winner announcement will not finish going out either.'}
-    </label>
-  );
-
-  /**
-   * The unsent-announcement acknowledgement (#1192, routed from Codex's P1 on PR
-   * #1207). Rendered in the same two places and behind the same `ready`, because
-   * it answers the same shape of question about the same irreversible write.
    *
-   * IT IS NEVER ON SCREEN BESIDE THE ONE ABOVE, and `podiumEmailAsked` is what
-   * holds that (Codex P1 on PR #1215). The two predicates are NOT disjoint: the
-   * email is owed from the freeze onwards, while the finale gate stays unsatisfied
-   * until the completion marker lands, so the window where `markFinaleComplete`
-   * failed over a landed freeze and podium has both true at once. Asking twice
-   * over one irreversible write is two chances to read only the first box, so
-   * there the finale box carries the announcement clause and this one stands
-   * down. One question per flip, and it names every consequence of taking it.
+   * ONE CONTROL FOR BOTH CONSEQUENCES, and `ask` is what makes that safe (Codex
+   * P1 on PR #1215). They are NOT mutually exclusive: the announcement is owed
+   * from the freeze onwards while the finale gate waits on a completion marker
+   * that can fail behind it, so the window `markFinaleComplete` failed in has
+   * both true. Two boxes over one irreversible write is two chances to read only
+   * the first, so the combined ask names both consequences in one sentence and
+   * takes one tick — and that tick is `beforeFinale`, which is the half the
+   * writer's own gate needs.
    *
-   * THE COPY DESCRIBES A FAN-OUT, NOT A SEND (Codex P2 on PR #1215). `podiumEmailAt`
-   * is stamped only by a run that examined every participant with nothing failing,
-   * while per-recipient duplication is prevented separately by `podiumEmailSentAt`
-   * on each `emailPrefs` doc — so a fan-out that failed or timed out partway leaves
-   * the field absent with part of the roster ALREADY MAILED. "Has not been sent"
-   * and "no one will receive it" were both false in exactly that state, and the
-   * Admin would have been told the opposite of what archiving costs. What archiving
-   * actually strands is the remainder, which is what this now says.
+   * THE COPY DESCRIBES A FAN-OUT, NOT A SEND (Codex P2 on PR #1215).
+   * `podiumEmailAt` is stamped only by a run that examined every participant with
+   * nothing failing, while per-recipient duplication is prevented separately by
+   * `podiumEmailSentAt` on each `emailPrefs` doc — so a fan-out that failed or
+   * timed out partway leaves the field absent with part of the roster ALREADY
+   * MAILED. "Has not been sent" and "no one will receive it" were both false in
+   * exactly that state, and the Admin would have been told the opposite of what
+   * archiving costs. What archiving strands is the remainder, which is what this
+   * says.
    *
-   * AND IT IS NOT SENT TO THE WRITER. `beforeFinale` travels to `archiveEvent`
-   * because the writer has a `finale-pending` refusal to override; there is no
-   * `podiumEmailAt` refusal to override and the spec rejects adding one, so this
-   * box gates this surface and nothing else. An Admin who ticks it is
-   * acknowledging a consequence, not lifting a server-side bar.
+   * AND THE ANNOUNCEMENT HALF IS NOT SENT TO THE WRITER. `beforeFinale` travels
+   * to `archiveEvent` because the writer has a `finale-pending` refusal to
+   * override; there is no `podiumEmailAt` refusal to override and
+   * `specs/daily-engagement-email.md` rejects adding one, so that half gates this
+   * surface and nothing else. An Admin who ticks it is acknowledging a
+   * consequence, not lifting a server-side bar.
    *
    * THE COPY NAMES THE FREEZE RATHER THAN THE QUIESCE, which is what makes it
    * true on the closing surface too. `eventClosedToPlay` counts `archiving`, so
@@ -880,15 +913,22 @@ export default function ArchiveEvent({
    * reopening play resumes it on the next quarter hour. It is the flip that
    * makes the loss permanent, and that is the word the Admin is asked about.
    */
-  const podiumEmailAcknowledgement = podiumEmailAsked && (
-    <label className="sub archive-before-podium-email">
+  const acknowledgement = ask !== null && (
+    <label
+      className={`sub ${ask === 'email' ? 'archive-before-podium-email' : 'archive-before-finale'}`}
+    >
       <input
         type="checkbox"
-        checked={beforePodiumEmail}
-        onChange={(e) => setBeforePodiumEmail(e.target.checked)}
+        checked={acked}
+        // The tick is STORED AS THE QUESTION it answers, so a later Event move
+        // that re-keys `ask` spends it (Codex P1 on PR #1215).
+        onChange={(e) => setAcknowledged(e.target.checked ? ask : null)}
       />{' '}
-      The winner announcement has not finished going out. Archive anyway—freezing the record
-      cancels the rest of it permanently, and anyone still unsent will never receive it.
+      {ask === 'email'
+        ? 'The winner announcement has not finished going out. Archive anyway—freezing the record cancels the rest of it permanently, and anyone still unsent will never receive it.'
+        : ask === 'finale+email'
+          ? 'The scheduled standings freeze has not run yet, and the winner announcement has not finished going out. Archive anyway—the podium, the Most-Loved award and the freeze stamp will never arrive, and the rest of the announcement is cancelled permanently.'
+          : 'The scheduled standings freeze has not run yet. Archive anyway—the podium, the Most-Loved award and the freeze stamp will never arrive.'}
     </label>
   );
 
@@ -990,8 +1030,7 @@ export default function ArchiveEvent({
               No one can Mark, claim, post a Proof or heart while this holds. Freeze the record to
               finish, or reopen play to put the {editionLexicon().occasion} back the way it was.
             </div>
-            {finaleAcknowledgement}
-            {podiumEmailAcknowledgement}
+            {acknowledgement}
           </div>
           <AsyncButton
             ariaLabel="Reopen play"
@@ -1094,28 +1133,20 @@ export default function ArchiveEvent({
                   {draft.skippedHonors > 0 &&
                     ` ${draft.skippedHonors} unreadable daily honor${draft.skippedHonors === 1 ? '' : 's'} will not be included.`}
                 </div>
-                {/* The finale acknowledgement (#1151). The quiesce only DELAYS
-                    the finale beats; the flip forgoes them for good, so the
-                    Admin says so explicitly rather than discovering it after an
-                    irreversible write. Shared with the closing surface, which
-                    reaches the same flip behind the same `ready`. */}
-                {finaleAcknowledgement}
-                {/* …and the announcement the finale marker does not cover
-                    (#1192). `finaleCompletedAt` is stamped by the finale beat
-                    while the email is a separate quarter-hour sweep, so an Event
-                    can read as finale-complete with its last email still owed —
-                    and this flip cancels that send for the whole roster. Never
-                    rendered beside the box above: one requires the marker, the
-                    other is satisfied by it. */}
-                {podiumEmailAcknowledgement}
+                {/* The acknowledgement (#1151, #1192). The quiesce only DELAYS
+                    the finale beats and only SUSPENDS the announcement; the flip
+                    forgoes both for good, so the Admin says so explicitly rather
+                    than discovering it after an irreversible write. Shared with
+                    the closing surface, which reaches the same flip behind the
+                    same `ready`. */}
+                {acknowledgement}
               </div>
               <button
                 type="button"
                 className="btn"
                 onClick={() => {
                   setArming(false);
-                  setBeforeFinale(false);
-                  setBeforePodiumEmail(false);
+                  setAcknowledged(null);
                 }}
               >
                 Cancel

@@ -1532,9 +1532,13 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
       frozenAt: 8_000,
       settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
     }) as EventDoc;
-  const COPY = /The winner announcement has not finished going out/;
-  const FINALE_COPY = /the podium, the Most-Loved award and the freeze stamp will never arrive/;
-  const COMBINED = /The winner announcement will not finish going out either/;
+  /** The announcement asked ALONE (the finale gate is satisfied). */
+  const COPY = /The winner announcement has not finished going out\. Archive anyway/;
+  /** The finale asked alone (no announcement owed). */
+  const FINALE_COPY = /The scheduled standings freeze has not run yet\. Archive anyway/;
+  /** Both consequences in ONE question, for the window the marker failed in. */
+  const COMBINED =
+    /The scheduled standings freeze has not run yet, and the winner announcement has not finished going out/;
 
   it('will not archive with the announcement still owed without an explicit acknowledgement', async () => {
     H.event = owed();
@@ -1590,8 +1594,8 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
     expect(screen.getAllByRole('checkbox')).toHaveLength(1);
-    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
     expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.queryByText(FINALE_COPY)).not.toBeInTheDocument();
     expect(screen.queryByText(COPY)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('checkbox'));
     await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
@@ -1648,6 +1652,70 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
     expect(screen.getByRole('checkbox')).not.toBeChecked();
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('SPENDS the tick when the freeze lands under it and the question changes', async () => {
+    // Codex P1 on PR #1215. The tick has to describe the Event on screen at the
+    // tap, and a boolean cannot: an Admin who ticked the pre-finale box before
+    // the freeze kept **Archive now** enabled when `frozenAt` landed under them,
+    // while the label silently gained the announcement consequence their tick had
+    // never mentioned. The acknowledgement is stored as the QUESTION it answered,
+    // so the re-key spends it.
+    const preFinale = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as EventDoc;
+    H.event = preFinale;
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    // The freeze commits while the confirm row is armed, with the completion
+    // marker still to come — the question becomes the combined one.
+    view.rerender(<ArchiveEvent {...props({ ...preFinale, frozenAt: 8_000 } as EventDoc)} />);
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('SPENDS the tick when the warning goes off screen and comes back', async () => {
+    // Codex P1 on PR #1215, the reversible half. `dailyEmailEnabled` is an
+    // ordinary admin toggle, so the announcement question can disappear and
+    // return — and a surviving boolean brought the box back ALREADY CHECKED for a
+    // warning that had not been on screen when it was ticked.
+    H.event = owed();
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    // Another Admin switches the daily email off: nothing is owed, nothing asked.
+    view.rerender(
+      <ArchiveEvent
+        {...props(mkEvent({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } } as Partial<EventDoc>))}
+      />,
+    );
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    // …and back on again.
+    view.rerender(<ArchiveEvent {...props(owed())} />);
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('KEEPS the tick while the question is unchanged, so an unrelated edit is not a re-ask', async () => {
+    // The control for the two above: re-keying must spend a tick when the
+    // question moves, not whenever the Event document does. An Event renamed or
+    // re-banned under an armed confirm row asks the same thing it already asked.
+    H.event = owed();
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    view.rerender(<ArchiveEvent {...props(owed({ name: 'Renamed Event' }))} />);
+    expect(screen.getByRole('checkbox')).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
   });
 
   it('RETRACTS the tick when play is reopened, for both acknowledgements', async () => {
