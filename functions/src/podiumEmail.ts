@@ -43,6 +43,7 @@ import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
 import { podiumStandings, standingsFreezeAtFor } from './finaleContent';
 import {
   ensureEmailPrefs,
+  emailPrefsPath,
   markPodiumEmailAttempted,
   markPodiumEmailSent,
   markPodiumEmailUndeliverable,
@@ -1511,18 +1512,47 @@ async function freezeOrReplay(
           // is no key to protect, and it makes the abandoned freeze self-healing
           // instead of a document somebody has to delete by hand.
           if (!attemptRecorded) {
+            // RE-READ THE MARKER INSIDE THE WRITE, because `attemptRecorded` is a
+            // stale read (CodeRabbit, final round). It comes from the prefs read at
+            // the top of this recipient's pass, and the stamp is written by its own
+            // transaction — so an overlapping sweep can stamp and send under this
+            // key between that read and this replacement. An unconditional `set`
+            // would then change the bytes AFTER a send had started under them,
+            // which is precisely the 409-then-duplicate sequence the frozen request
+            // exists to prevent. Replacing inside a transaction that re-reads the
+            // marker makes "nothing was ever sent under this key" true at COMMIT
+            // time rather than merely when we looked.
             const replacedAt = (deps.now ?? Date.now)();
-            console.log(
-              `freezeOrReplay: replacing a never-attempted frozen request that predates a ${why} change`,
+            const replaced = await db.runTransaction(async (tx) => {
+              const prefsRef = db.doc(emailPrefsPath(eventId, uid));
+              const prefsSnap = await tx.get(prefsRef);
+              const stamped = prefsSnap.exists
+                ? (prefsSnap.data() ?? {}).podiumEmailFirstAttemptAt
+                : undefined;
+              if (typeof stamped === 'number' && Number.isFinite(stamped)) return false;
+              tx.set(ref, {
+                ...request,
+                createdAt: replacedAt,
+                expiresAt: new Date(replacedAt + OUTBOX_TTL_MS),
+              });
+              return true;
+            });
+            if (replaced) {
+              console.log(
+                `freezeOrReplay: replaced a never-attempted frozen request that predates a ${why} change`,
+                eventId,
+                uid,
+              );
+              return request;
+            }
+            // An attempt appeared under us, so this is the ordinary stale case after
+            // all and falls through to the refusal below.
+            console.error(
+              `freezeOrReplay: an attempt was recorded while replacing a stale frozen request; refusing to replay it`,
               eventId,
               uid,
             );
-            await ref.set({
-              ...request,
-              createdAt: replacedAt,
-              expiresAt: new Date(replacedAt + OUTBOX_TTL_MS),
-            });
-            return request;
+            return null;
           }
           console.error(
             `freezeOrReplay: frozen request predates a ${why} change; refusing to replay it`,

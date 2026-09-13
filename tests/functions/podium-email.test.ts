@@ -524,6 +524,57 @@ describe('the guards the final round closed (#1192, final round)', () => {
     expect(db.docs[podiumOutboxPath('med-2026', 'zac')]?.to).toBe('moved@example.com');
   });
 
+  it('refuses to replace an orphan freeze once an attempt appears under it', async () => {
+    // The concurrency the `attemptRecorded` flag cannot see on its own: it comes
+    // from the prefs read at the top of this recipient's pass, so an overlapping
+    // sweep can stamp and send under this key before the replacement commits.
+    // Reproduced by stamping the marker from inside the transaction's own read.
+    const docs = seedDue();
+    // An orphan freeze for an address that has since moved, with NO attempt yet.
+    docs[podiumOutboxPath('med-2026', 'zac')] = {
+      to: 'old@example.com',
+      subject: 's',
+      html: 'h',
+      text: 't',
+      from: 'Gay Cruise Bingo <bingo@example.com>',
+      replyTo: '',
+      unsubscribeUrl: 'https://fn.example.com/emailUnsubscribe?e=med-2026&u=zac&t=tok-fixed',
+      banFingerprint: JSON.stringify([]),
+      awardFingerprint: '',
+      createdAt: 1_000,
+    };
+    docs['events/med-2026/emailPrefs/zac'] = { optedOut: false, token: 'tok-fixed' };
+
+    const db = makeDb(docs);
+    const realRunTransaction = db.runTransaction;
+    let armed = true;
+    db.runTransaction = (async <T,>(fn: (tx: never) => Promise<T>): Promise<T> => {
+      // A competing sweep records the attempt between our read and our commit.
+      if (armed) {
+        armed = false;
+        (db.docs['events/med-2026/emailPrefs/zac'] as Record<string, unknown>)
+          .podiumEmailFirstAttemptAt = 2_000;
+      }
+      return realRunTransaction(fn);
+    }) as typeof db.runTransaction;
+
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Zac is refused rather than having his frozen bytes rewritten under a key a
+    // concurrent sweep may already have sent on.
+    expect(result.blocked).toBeGreaterThan(0);
+    expect(sent.flatMap((m) => m.to)).not.toContain('old@example.com');
+    // The stored request is untouched — the whole point of the transaction.
+    expect(db.docs[podiumOutboxPath('med-2026', 'zac')]?.to).toBe('old@example.com');
+  });
+
   it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
     // The hero check at the checkpoint only asks whether that Proof is still
     // visible, so a replacement keeping the old hero's Proof alive walked past it.
