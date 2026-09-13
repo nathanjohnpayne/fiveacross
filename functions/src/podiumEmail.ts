@@ -1406,12 +1406,25 @@ async function freezeOrReplay(
         // there: re-freezing different bytes under the same key risks a 409, a new
         // key risks a second delivery, and only refusing cannot make it worse.
         const staleAddress = stored.to !== request.to;
-        if (staleBans || staleAward || staleAddress) {
+        // AND THE UNSUBSCRIBE CAPABILITY (CodeRabbit, final round). Replaying a
+        // frozen URL that no longer resolves hands the recipient an email they
+        // cannot opt out of — the visible link and the RFC 8058 one-click header
+        // both point somewhere the endpoint refuses — which is the one control this
+        // mail is obliged to carry. Reachable without any token-rotation feature,
+        // which is what the same suggestion was rebutted on earlier: the base URL
+        // comes from the `EMAIL_UNSUBSCRIBE_URL` deploy param, so a config or domain
+        // change between a failed attempt and its retry moves it, and this repo has
+        // migrated domains before. A recreated prefs document, which mints a fresh
+        // token, does the same.
+        const staleUnsubscribe = stored.unsubscribeUrl !== request.unsubscribeUrl;
+        if (staleBans || staleAward || staleAddress || staleUnsubscribe) {
           const why = staleBans
             ? 'ban'
             : staleAward
               ? 'award visibility'
-              : 'verified address';
+              : staleAddress
+                ? 'verified address'
+                : 'unsubscribe capability';
           console.error(
             `freezeOrReplay: frozen request predates a ${why} change; refusing to replay it`,
             eventId,
@@ -1464,31 +1477,20 @@ function dayLabels(
   // recipient. The Event name got this treatment a round ago; these labels are
   // the same kind of value and were missed.
   // COERCED BEFORE `placeLabel`, NOT JUST NORMALISED AFTER IT (Codex P2, final
-  // round). `placeLabel` trims its inputs directly, and `firestore.rules`
-  // validates only a Day's `scoring` — `dayScoringValid` is the whole of it — so a
-  // stored `place`, `port`, `placeEmoji` or `portEmoji` that is not a string
-  // reaches `.trim()` and THROWS. The throw lands in input assembly, ahead of the
-  // per-recipient loop and its catch, and this helper walks every Day: one
-  // malformed field therefore fails the whole sweep before a single recipient is
-  // mailed, every quarter hour, permanently. `singleLine` could not help because
-  // it only ever saw `placeLabel`'s output. Same doctrine as the stored award —
-  // validated, not cast — and the same one `EmailDay` states for `scoring`: this
-  // boundary reads raw Firestore maps, so a bad value must resolve rather than
-  // fail. Narrowed to this call site deliberately: `placeLabel` is shared with the
-  // daily card, whose own exposure belongs to that ticket rather than this one.
-  const asText = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
-  const place = (day: EmailDay | undefined): string =>
-    day
-      ? singleLine(
-          placeLabel({
-            ...day,
-            place: asText(day.place),
-            port: asText(day.port),
-            placeEmoji: asText(day.placeEmoji),
-            portEmoji: asText(day.portEmoji),
-          }),
-        )
-      : '';
+  // round) — and the coercion now lives INSIDE `placeLabel` rather than here.
+  // The Place pair is the part `firestore.rules` types nothing about, so a stored
+  // `place`, `port`, `placeEmoji` or `portEmoji` that is not a string reached
+  // `.trim()` and THREW; `singleLine` could not help, because it only ever saw
+  // `placeLabel`'s output. This sender's exposure was the worse-looking one — the
+  // throw landed in input assembly, ahead of the per-recipient loop and its
+  // catch, and this helper walks every Day, so one malformed field failed the
+  // whole sweep before a single recipient was mailed, every quarter hour,
+  // permanently. The daily card's identical exposure landed INSIDE its
+  // per-recipient catch instead, which is not milder: every recipient was counted
+  // failed, no sent marker was written, and its Event never drained either. Two
+  // callers reading one pair is why the guard belongs in the shared helper: a
+  // coercion applied per-call-site is one the next caller silently opts out of.
+  const place = (day: EmailDay | undefined): string => (day ? singleLine(placeLabel(day)) : '');
   const honorDayLabels: Record<number, string> = {};
   for (const index of honorDayIndexes) {
     const day = days.find((d) => d.index === index);

@@ -309,6 +309,33 @@ describe('the guards the final round closed (#1192, final round)', () => {
     }
   });
 
+  it('refuses to replay a frozen request after the unsubscribe capability moves', async () => {
+    // Frozen for real, then retried with a DIFFERENT unsubscribe base URL — which
+    // is a deploy param, so an ordinary config or domain change moves it between a
+    // failed attempt and its retry. No token-rotation feature required.
+    const docs = seedDue();
+    const first = await run(docs, { send: async () => false });
+    expect(first.result.failed).toBe(3);
+    const frozen = first.db.docs[podiumOutboxPath('med-2026', 'zac')] as Record<string, unknown>;
+    expect(String(frozen?.unsubscribeUrl)).toContain('fn.example.com');
+
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(first.db, 'med-2026', input(), {
+      ...baseDeps(),
+      unsubscribeBaseUrl: 'https://unsubscribe.fiveacross.app/emailUnsubscribe',
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Every recipient is refused, because the capability moved for all of them —
+    // an email nobody can opt out of is worse than one that arrives a sweep later.
+    expect(sent).toHaveLength(0);
+    expect(result.blocked).toBe(3);
+    expect(result.drained).toBe(false);
+  });
+
   it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
     // The hero check at the checkpoint only asks whether that Proof is still
     // visible, so a replacement keeping the old hero's Proof alive walked past it.
