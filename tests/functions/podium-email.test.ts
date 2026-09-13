@@ -1550,10 +1550,37 @@ describe('a withheld champion is not an empty board (Codex + CodeRabbit P2 r2)',
       preferencesUrl: 'https://x.test/p',
     });
     expect(model.standingsEmptyLine).toBeNull();
-    expect(model.standingsRows.length).toBeGreaterThan(0);
+    // THE RANKS THEMSELVES, not merely that rows survived (#1216). Asserting
+    // only that the module is non-empty left the actual question open: what is
+    // the top remaining Player NUMBERED, and does the email call them the
+    // winner? Those are two different facts, and this email answers them
+    // differently on purpose.
+    //
+    // A POSITION closes the gap. A standings rank is a row's place among the
+    // rows THIS READER CAN SEE, so the withheld champion's row is simply not
+    // there and the rest read 1, 2 — `specs/w2-leaderboard.md` § Design
+    // decisions, which every standings surface in this product already applies:
+    // the live Leaderboard, both Share Cards, and `ArchivedLeaderboard`, whose
+    // own comment gives the reason (a hole at #1 advertises that a row was
+    // removed, the opposite of what hiding is for). The frozen record even
+    // DEFINES `ArchivedFirstBingoRow.rank` over the ban-filtered standings.
+    expect(model.standingsRows.map((r) => [r.rank, r.uid])).toEqual([
+      [1, 'logan'],
+      [2, 'nathan'],
+    ]);
+    // An HONOUR vacates. What must NOT happen is the email calling that top row
+    // the champion: the subject takes the no-champion tail, no 🏆 row is
+    // prepended, and the banned name appears nowhere — while the Moment itself
+    // keeps the unfiltered record.
+    expect(model.subject).toBe('Final standings 🏆—the cruise is done');
+    expect(model.subject).not.toContain('Zacaria');
+    expect(model.standingsRows.map((r) => r.uid)).not.toContain('zac');
     // The contradiction this prevents: "nobody marked a square" beside a
-    // non-zero personal result.
+    // non-zero personal result. And the reader's own placing indexes the SAME
+    // ordering the rows are cut from, so they cannot be told they finished #2
+    // while row 2 names somebody else.
     expect(model.youLine).toContain('bingos');
+    expect(model.youLine).toContain('#2');
   });
 });
 
