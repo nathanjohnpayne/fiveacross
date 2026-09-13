@@ -682,20 +682,44 @@ export async function sendPodiumEmailForEvent(
               : undefined,
           )
         ).surviving.length === 0;
-      if (!snap.exists || eventClosedToPlay(mid) || disabledMidFlight || heroGone) {
+      // THE AWARD RECORD IS COMPARED HERE TOO, NOT JUST ITS HERO (Codex P2, final
+      // round). The hero check above asks whether that Proof is still visible, so
+      // an admin REPLACING `mostLovedPhoto` while the old hero's Proof stays
+      // visible walked straight past it, and every remaining recipient was mailed
+      // a superseded winner, prompt or count. `firestore.rules` permits that
+      // replacement. This costs nothing: the Event document is already in hand
+      // from the read above, so it is one fingerprint of a value already fetched
+      // — which is why it does not carry the read-bound objection that keeps full
+      // award revalidation out of this loop.
+      // Guarded on the fingerprint being PRESENT, exactly as the pre-delivery
+      // comparison at the top of this file is: the field is optional, so an input
+      // assembled without one would otherwise compare `''` against `undefined`,
+      // come out "changed" for every Event with no award, and stop a fan-out that
+      // nothing was wrong with.
+      const awardRecordChanged =
+        snap.exists &&
+        input.awardRecordFingerprint !== undefined &&
+        awardRecordFingerprintOf(mid?.mostLovedPhoto) !== input.awardRecordFingerprint;
+      if (!snap.exists || eventClosedToPlay(mid) || disabledMidFlight || heroGone || awardRecordChanged) {
         const why = !snap.exists
           ? 'deleted'
           : eventClosedToPlay(mid)
             ? 'archived'
             : disabledMidFlight
               ? 'disabled'
-              : 'award photo removed';
+              : heroGone
+                ? 'award photo removed'
+                : 'award record replaced';
         console.log(`sendPodiumEmailForEvent ${eventId}: ${why} mid-delivery, stopping`);
-        result.reason = heroGone && snap.exists && !eventClosedToPlay(mid) && !disabledMidFlight
-          ? 'award-changed'
-          : disabledMidFlight
-            ? 'disabled'
-            : 'archived';
+        result.reason =
+          (heroGone || awardRecordChanged) &&
+          snap.exists &&
+          !eventClosedToPlay(mid) &&
+          !disabledMidFlight
+            ? 'award-changed'
+            : disabledMidFlight
+              ? 'disabled'
+              : 'archived';
         // EARLY STOP FEEDS THE DRAIN PREDICATE (Codex P2, round 9). Breaking out
         // left `capHit`, `failed` and `blocked` all clear, so `drained` computed
         // to TRUE and completion was then offered the whole of `input.ranked` as
@@ -1369,9 +1393,27 @@ async function freezeOrReplay(
       if (stored) {
         const staleBans = stored.banFingerprint !== request.banFingerprint;
         const staleAward = stored.awardFingerprint !== request.awardFingerprint;
-        if (staleBans || staleAward) {
+        // AND A CHANGED ADDRESS IS STALE TOO (CodeRabbit, security, final round).
+        // The replay returns the request's own frozen `to`, which is the point —
+        // the bytes under one idempotency key must not move. But the address is a
+        // recipient's verified Auth email, and it can change between a failed
+        // attempt and its retry: the caller has just resolved the CURRENT one, so
+        // replaying the frozen one would deliver somebody's final standings to an
+        // address they no longer hold. That is personal data to the wrong mailbox,
+        // which is worse than not sending — and it is the same judgement the two
+        // fingerprints already encode, so it belongs in the same refusal rather
+        // than in a new mechanism. Refusing is safe here for the reason it is safe
+        // there: re-freezing different bytes under the same key risks a 409, a new
+        // key risks a second delivery, and only refusing cannot make it worse.
+        const staleAddress = stored.to !== request.to;
+        if (staleBans || staleAward || staleAddress) {
+          const why = staleBans
+            ? 'ban'
+            : staleAward
+              ? 'award visibility'
+              : 'verified address';
           console.error(
-            `freezeOrReplay: frozen request predates a ${staleBans ? 'ban' : 'award visibility'} change; refusing to replay it`,
+            `freezeOrReplay: frozen request predates a ${why} change; refusing to replay it`,
             eventId,
             uid,
           );

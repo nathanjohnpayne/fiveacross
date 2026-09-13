@@ -284,6 +284,130 @@ describe('the final guard runs BEFORE the stamp, and owns its own flag (#1192, f
   });
 });
 
+describe('the guards the final round closed (#1192, final round)', () => {
+  const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('carries the first-attempt stamp through the token back-fill, so the early cutoff can see it', async () => {
+    const docs = seedDue();
+    const firstAttempt = 1_000;
+    // Token-less documents force the back-fill transaction — the return path that
+    // rebuilds the prefs object field by field and used to drop this marker.
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      docs[prefsPath(uid)] = { optedOut: false, podiumEmailFirstAttemptAt: firstAttempt };
+    }
+    const { result, sent, db } = await run(docs, { now: () => firstAttempt + DAY + 1 });
+
+    expect(sent).toHaveLength(0);
+    expect(result.blocked).toBe(3);
+    // THE POINT: the early cutoff fired, so nothing was frozen. When the marker was
+    // dropped it read as `undefined`, the cutoff never ran, and each sweep rebuilt
+    // the outbox — address, unsubscribe capability and rendered body — before a
+    // later check blocked the send.
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      expect(db.docs[podiumOutboxPath('med-2026', uid)]).toBeUndefined();
+    }
+  });
+
+  it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
+    // The hero check at the checkpoint only asks whether that Proof is still
+    // visible, so a replacement keeping the old hero's Proof alive walked past it.
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          {
+            proofId: 'p1',
+            uid: 'ido',
+            displayName: 'Ido Marcus',
+            promptText: 'Mirror-hall selfie',
+            dayIndex: 6,
+            proofCreatedAt: 500,
+          },
+        ],
+        winnerCount: 1,
+        heartCount: 31,
+        frozenAt: 2_000,
+      },
+    });
+    for (let i = 0; i < 60; i++) {
+      docs[`events/med-2026/players/p${i}`] = {
+        displayName: `Player ${i}`,
+        bingoCount: 0,
+        squaresMarked: i,
+        firstBingoAt: null,
+      };
+    }
+    const db = makeDb(docs);
+    const got = await podiumEmailInputFor(db, 'med-2026');
+    if (!got.due) throw new Error('expected due');
+
+    let n = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', got.input, {
+      ...baseDeps(),
+      send: async () => {
+        // An admin replaces the award record partway through — SAME hero Proof, so
+        // `p1` stays visible and the hero recheck is satisfied. Only the record's
+        // own fields move.
+        if (++n === 5) {
+          (db.docs['events/med-2026'] as Record<string, unknown>).mostLovedPhoto = {
+            winners: [
+              {
+                proofId: 'p1',
+                uid: 'ido',
+                displayName: 'Ido Marcus',
+                promptText: 'Mirror-hall selfie',
+                dayIndex: 6,
+                proofCreatedAt: 500,
+              },
+            ],
+            winnerCount: 1,
+            heartCount: 99,
+            frozenAt: 2_000,
+          };
+        }
+        return true;
+      },
+    });
+
+    expect(result.reason).toBe('award-changed');
+    expect(result.sent).toBeLessThan(30);
+    expect(result.drained).toBe(false);
+    // And no completion marker: the remaining roster is still owed the mail.
+    expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+
+  it('refuses to replay a frozen request after the verified address changes', async () => {
+    // Built by actually freezing rather than by hand, so every OTHER fingerprint
+    // genuinely matches — a hand-written fixture made this pass on a mismatched
+    // award fingerprint instead of on the address, and proved nothing.
+    const docs = seedDue();
+    const first = await run(docs, { send: async () => false });
+    expect(first.result.failed).toBe(3);
+    const frozen = first.db.docs[podiumOutboxPath('med-2026', 'zac')] as Record<string, unknown>;
+    expect(frozen?.to).toBe('zac@example.com');
+
+    // The retry sweep resolves a DIFFERENT verified address for that recipient.
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(first.db, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) =>
+        uid === 'zac' ? 'moved@example.com' : `${uid}@example.com`,
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Zac is refused; the others still go out, so this is a per-recipient refusal
+    // rather than a stalled fan-out.
+    expect(result.blocked).toBe(1);
+    const addressed = sent.flatMap((m) => m.to);
+    expect(addressed).not.toContain('zac@example.com');
+    expect(addressed).not.toContain('moved@example.com');
+    expect(addressed).toContain('logan@example.com');
+  });
+});
+
 describe('consent and the freeze both respect a late change (#1192, final round)', () => {
   const prefsPath = (uid: string) => `events/med-2026/emailPrefs/${uid}`;
 
@@ -526,12 +650,27 @@ describe('the first-attempt stamp is write-once (#1192, CodeRabbit P1)', () => {
     expect(db.docs[prefsPath]?.token).toBe('t');
   });
 
-  it('still short-circuits without a read when the caller already has the stamp', async () => {
+  it('keeps the caller\'s stamp without writing a fresh one', async () => {
     const db = makeDb({ [prefsPath]: { optedOut: false, token: 't' } });
     const at = await markPodiumEmailAttempted(db, 'med-2026', 'zac', 42, { now: () => 1_000 });
     expect(at).toBe(42);
-    // Nothing was written: the caller's own read already proved the stamp exists.
+    // Nothing was written: the caller's own read already proved the stamp exists,
+    // and the window must start at the FIRST attempt rather than at this one.
     expect(db.docs[prefsPath]?.podiumEmailFirstAttemptAt).toBeUndefined();
+  });
+
+  it('rechecks consent on a RETRY, not only on a first attempt', async () => {
+    // `existing` numeric is the retry path — a transport or marker failure being
+    // resent — and it used to return before the transaction that reads consent.
+    // That is the widest window of all: the recipient has had since the failed
+    // attempt to unsubscribe.
+    const db = makeDb({
+      [prefsPath]: { optedOut: true, token: 't', podiumEmailFirstAttemptAt: 500 },
+    });
+    const at = await markPodiumEmailAttempted(db, 'med-2026', 'zac', 500, { now: () => 9_000 });
+    expect(at).toBe('opted-out');
+    // And the stored stamp is untouched by the refusal.
+    expect(db.docs[prefsPath]?.podiumEmailFirstAttemptAt).toBe(500);
   });
 });
 

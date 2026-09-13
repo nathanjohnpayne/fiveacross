@@ -289,6 +289,24 @@ export async function ensureEmailPrefs(
         // that HAS been mailed is a duplicate winner email. The daily card's
         // marker was carried from the start; these two were added later and the
         // list did not grow with them.
+        //
+        // AND IT DID NOT GROW AGAIN (Codex P2, final round). This warning was
+        // already here when `podiumEmailFirstAttemptAt` was added, and the list
+        // still missed it — the third instance of one bug class on this PR, so the
+        // comment plainly does not prevent the next one. Dropping THIS field does
+        // not risk a duplicate; it silently disables the early dedup-window cutoff,
+        // which then always reads `undefined` and never stops anybody. The stop
+        // itself survives, because the pre-transport re-check measures against the
+        // value the attempt transaction reads straight from the document — but the
+        // whole per-recipient preparation runs first, so an expired attempt
+        // re-created the frozen outbox, carrying the address, the unsubscribe
+        // capability and the rendered body, once per sweep forever as each TTL
+        // deletion cleared the way for the next.
+        const podiumEmailFirstAttemptAt =
+          typeof data.podiumEmailFirstAttemptAt === 'number' &&
+          Number.isFinite(data.podiumEmailFirstAttemptAt)
+            ? data.podiumEmailFirstAttemptAt
+            : undefined;
         const podiumEmailSentAt =
           typeof data.podiumEmailSentAt === 'number' && Number.isFinite(data.podiumEmailSentAt)
             ? data.podiumEmailSentAt
@@ -299,7 +317,14 @@ export async function ensureEmailPrefs(
             ? data.podiumEmailSkippedAt
             : undefined;
         if (stored !== '') {
-          return { optedOut, token: stored, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
+          return {
+            optedOut,
+            token: stored,
+            lastSentDayIndex,
+            podiumEmailSentAt,
+            podiumEmailSkippedAt,
+            podiumEmailFirstAttemptAt,
+          };
         }
         const token = mint();
         // Name `optedOut` ONLY when the document has vanished under us (it must
@@ -310,7 +335,14 @@ export async function ensureEmailPrefs(
           snap.exists ? { token, updatedAt: now } : { optedOut: false, token, createdAt: now, updatedAt: now },
           { merge: true },
         );
-        return { optedOut, token, lastSentDayIndex, podiumEmailSentAt, podiumEmailSkippedAt };
+        return {
+          optedOut,
+          token,
+          lastSentDayIndex,
+          podiumEmailSentAt,
+          podiumEmailSkippedAt,
+          podiumEmailFirstAttemptAt,
+        };
       });
     } catch (err) {
       console.error('ensureEmailPrefs: token back-fill failed', eventId, uid, err);
@@ -450,7 +482,13 @@ export async function markPodiumEmailAttempted(
   existing: number | undefined,
   deps: OptOutDeps = {},
 ): Promise<number | 'opted-out' | null> {
-  if (typeof existing === 'number') return existing;
+  // NO FAST PATH PAST THE CONSENT READ (Codex P1, final round). `existing` being
+  // a number means a RETRY — a transport or marker failure is being resent — and
+  // returning here skipped the transaction below, so the consent re-read only ever
+  // covered first attempts. A retry is exactly when the window is widest, because
+  // the recipient has had since the failed attempt to unsubscribe. The stamp is
+  // still never moved: the transaction prefers the stored value, then the caller's,
+  // and only writes when neither exists.
   const at = (deps.now ?? Date.now)();
   try {
     // CLAIMED-ABSENT IS NOT ABSENT, so the check and the write share a
@@ -485,6 +523,10 @@ export async function markPodiumEmailAttempted(
       if (stored.optedOut === true) return 'opted-out';
       const already = stored.podiumEmailFirstAttemptAt;
       if (typeof already === 'number' && Number.isFinite(already)) return already;
+      // The caller's own read, when the document no longer carries one. Preferred
+      // over stamping a fresh value for the same reason the stored one is: the
+      // window must start at the FIRST attempt, never at this one.
+      if (typeof existing === 'number') return existing;
       tx.set(ref, { podiumEmailFirstAttemptAt: at, updatedAt: at }, { merge: true });
       return at;
     });
