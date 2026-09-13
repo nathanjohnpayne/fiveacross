@@ -1267,7 +1267,17 @@ export function visibleMostLovedAward(
       // `dayIndex` indexes the Day-label maps and `proofCreatedAt` is compared
       // against the live Proof's own stamp, so neither may be a fraction or a
       // non-number reaching those uses.
-      count((w as MostLovedPhotoWinner).dayIndex) &&
+      //
+      // NULL IS VALID AND MUST SURVIVE (Codex P2, final round — a regression I
+      // introduced in the previous commit). The type declares `number | null`, the
+      // canonical producer persists `p.dayIndex ?? null` for a Proof with no Day
+      // association, and the label lookup already guards `!= null` before indexing.
+      // So requiring an integer dropped a legitimately Day-less winner — and if it
+      // was the only winner, removed the whole Most-Loved module rather than just
+      // its optional Day label. Tightening a validator is exactly where a valid
+      // shape gets mistaken for a malformed one.
+      ((w as MostLovedPhotoWinner).dayIndex === null ||
+        count((w as MostLovedPhotoWinner).dayIndex)) &&
       typeof (w as MostLovedPhotoWinner).proofCreatedAt === 'number' &&
       Number.isFinite((w as MostLovedPhotoWinner).proofCreatedAt) &&
       !bannedUids.has((w as MostLovedPhotoWinner).uid),

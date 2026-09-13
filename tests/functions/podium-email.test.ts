@@ -650,6 +650,23 @@ describe('the guards the final round closed (#1192, final round)', () => {
     expect(got.input.mostLoved).toBeNull();
   });
 
+  it('KEEPS a winner whose dayIndex is null, which is a valid stored shape', async () => {
+    // `MostLovedPhotoWinner.dayIndex` is `number | null`, the producer persists
+    // `p.dayIndex ?? null` for a Proof with no Day association, and the label
+    // lookup already guards `!= null`. Rejecting null dropped the winner — and
+    // with a single winner, the whole module — instead of just its Day label.
+    const award = awardWith({});
+    award.mostLovedPhoto.winners = [
+      { ...award.mostLovedPhoto.winners[0], dayIndex: null } as never,
+    ];
+    const got = await podiumEmailInputFor(makeDb(seedDue(award)), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved).not.toBeNull();
+    expect(got.input.mostLoved?.winners[0]?.dayIndex).toBeNull();
+    // And no Day label is claimed for it.
+    expect(got.input.photoDayLabel).toBeUndefined();
+  });
+
   it.each([
     ['a fractional dayIndex', { dayIndex: 6.5 }],
     ['a non-numeric proofCreatedAt', { proofCreatedAt: 'soon' }],
