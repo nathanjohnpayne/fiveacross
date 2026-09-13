@@ -458,8 +458,10 @@ export function finaleHasRun(
  * (`7-59/15 * * * *`), staggered off the finale run. Archival is terminal for
  * that send by contract (`specs/daily-engagement-email.md` § "Archival is
  * terminal for this send"), so an Admin who flips while it is owed drops the
- * Event's last email for its whole roster, permanently — and nothing on the
- * console said so.
+ * Event's last email — permanently, and for everyone past the fan-out's next
+ * lifecycle checkpoint rather than for the whole roster, since
+ * `sendPodiumEmailForEvent` re-reads the Event once a batch rather than before
+ * each send — and nothing on the console said so.
  *
  * IT KEYS ON `frozenAt`, NOT ON `finaleCompletedAt` (Codex P1 on PR #1215). The
  * marker looked like the natural condition, because `markFinaleComplete`

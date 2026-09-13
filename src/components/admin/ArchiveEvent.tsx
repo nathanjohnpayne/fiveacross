@@ -486,7 +486,8 @@ const REOPEN_AFTER: ReadonlySet<ArchiveOutcome> = new Set<ArchiveOutcome>([
  *     `podiumAnnouncementEmail` is its own quarter-hour sweep rather than a
  *     finale beat, so the Event's last email can still be owed with precondition
  *     4 satisfied and no warning on screen. Archival is terminal for that send,
- *     so the flip strands whatever is left of it for the roster and nothing else
+ *     so the flip strands what is left of it — everyone past the fan-out's next
+ *     lifecycle checkpoint rather than the whole remainder — and nothing else
  *     here would say so. A warning for the same reason 4 is, and rendered in the
  *     same control. It OVERLAPS 4 rather than excluding it — the predicate keys
  *     on `frozenAt`, which is owed from the freeze while 4 waits on a completion
@@ -972,8 +973,8 @@ export default function ArchiveEvent({
    * timed out partway leaves the field absent with part of the roster ALREADY
    * MAILED. "Has not been sent" and "no one will receive it" were both false in
    * exactly that state, and the Admin would have been told the opposite of what
-   * archiving costs. What archiving strands is the remainder, which is what this
-   * says.
+   * archiving costs. What archiving strands is the remainder less the bounded
+   * overrun described below, which is what this says.
    *
    * AND THE ANNOUNCEMENT HALF IS NOT SENT TO THE WRITER. `beforeFinale` travels
    * to `archiveEvent` because the writer has a `finale-pending` refusal to
