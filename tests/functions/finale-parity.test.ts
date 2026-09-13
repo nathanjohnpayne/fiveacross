@@ -1219,8 +1219,12 @@ describe('client/functions parity — the bound a RE-AGGREGATED total keeps (#11
       `root-max:${MAX_ARCHIVE_NUMBER}/30`,
       `two-buckets:${MAX_ARCHIVE_NUMBER}/20`,
     ]);
-    expect(clientPodium.runnersUp[0]?.uid).toBe('two-buckets');
-    expect(clientPodium.runnersUp[0]?.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
+    // The POSITIONS the client podium prints, which on an unbanned Event are the
+    // champion's own ranking followed by the rest — so row 2 is the clamped
+    // `two-buckets`, and row 1 agrees with the champion above.
+    expect(clientPodium.standings[0]?.uid).toBe('root-max');
+    expect(clientPodium.standings[1]?.uid).toBe('two-buckets');
+    expect(clientPodium.standings[1]?.bingoCount).toBe(MAX_ARCHIVE_NUMBER);
 
     // The UNCLAMPED answer, pinned beside it: the raw sum of the two maxed
     // buckets is twice the bound, so re-aggregating without the clamp put
@@ -1471,9 +1475,16 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
     );
     expect(fns.champion).toEqual(client.champion);
 
-    const podiumTop = [client.champion, ...client.runnersUp].map(
+    // The client podium's own top rows. `standings` already LEADS with the
+    // champion on an unbanned Event — it is the same ranking, numbered — so this
+    // no longer prepends `champion` to a runners-up list. The two come apart only
+    // under moderation, which is a different test's subject
+    // (`src/data/d15-finale.test.ts` § "a ban withholds an honour and closes a
+    // position"), and the assertion below pins that row 1 is still the champion.
+    const podiumTop = client.standings.map(
       (r) => `${r?.uid}:${r?.bingoCount}/${r?.squaresMarked}`,
     );
+    expect(client.standings[0]?.uid).toBe(client.champion?.uid);
     const emailTop = ranked
       .slice(0, 3)
       .map((r) => `${r.uid}:${r.bingoCount}/${r.squaresMarked}`);

@@ -62,7 +62,7 @@ const FIXTURE: Podium = {
     displayName: `Winner ${i}`,
     firstBingoAt: 1_700_000_000_000 + i,
   })),
-  runnersUp: [],
+  standings: [],
 };
 
 describe('FarewellPodiumView', () => {
@@ -87,7 +87,7 @@ describe('FarewellPodiumView', () => {
   it('singularizes a one-bingo champion stat line', () => {
     render(
       <FarewellPodiumView
-        podium={{ champion: { uid: 'x', displayName: 'Solo', bingoCount: 1, squaresMarked: 5 }, firstBingo: null, dailyHonors: [], runnersUp: [] }}
+        podium={{ champion: { uid: 'x', displayName: 'Solo', bingoCount: 1, squaresMarked: 5 }, firstBingo: null, dailyHonors: [], standings: [] }}
       />,
     );
     expect(screen.getByText('1 bingo · 5 squares')).toBeTruthy();
@@ -115,7 +115,7 @@ describe('FarewellPodiumView', () => {
 
   it('renders nothing for an entirely empty podium', () => {
     const { container } = render(
-      <FarewellPodiumView podium={{ champion: null, firstBingo: null, dailyHonors: [], runnersUp: [] }} />,
+      <FarewellPodiumView podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [] }} />,
     );
     expect(container.querySelector('.farewell-podium')).toBeNull();
   });
@@ -248,7 +248,7 @@ describe('FarewellPodiumView — Most-Loved Photo section (#561)', () => {
   it('an award section keeps an otherwise-empty podium alive (no null short-circuit)', () => {
     const { container } = render(
       <FarewellPodiumView
-        podium={{ champion: null, firstBingo: null, dailyHonors: [], runnersUp: [] }}
+        podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [] }}
         mostLoved={AWARD_SECTION}
       />,
     );
@@ -548,5 +548,107 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
       proofId: null,
       dayIndex: null,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Board → buildPodium seam: a ban HIDES, it never promotes
+// ---------------------------------------------------------------------------
+
+/**
+ * The wrapper runs the REAL `buildPodium` over the roster it is handed, so this
+ * is the seam `Board` sits on: it used to pass a ban-FILTERED roster, which is
+ * indistinguishable from a roster that never had the champion on it, and the
+ * banner then crowned whoever was next. The Feed's own podium Moment for the
+ * same Event showed no champion at all, so the closing Day answered its own
+ * headline question two ways depending which surface you looked at.
+ *
+ * `Board` now passes the raw roster and lets `EventDoc.bannedUids` do the
+ * hiding. These assertions fail if that is ever reverted.
+ */
+describe('FarewellPodium wrapper — a banned honoree is withheld, not handed down', () => {
+  // Two honours, two holders, so banning one leaves the section rendering and
+  // the OTHER honour observable: `champ` tops the standings, `early` bingoed
+  // first. A fixture where one Player held both would simply empty the podium
+  // and prove nothing about promotion.
+  const mkPlayer = (
+    uid: string,
+    displayName: string,
+    bingoCount: number,
+    squaresMarked: number,
+    firstBingoAt: number,
+  ) => ({
+    uid,
+    displayName,
+    photoURL: null,
+    joinedAt: 1,
+    bingoCount,
+    squaresMarked,
+    firstBingoAt,
+    reshufflesUsed: 0,
+  });
+  const roster = [
+    mkPlayer('champ', 'Champ Carrow', 4, 40, 200),
+    mkPlayer('early', 'Early Esher', 3, 30, 100),
+  ];
+  const eventWith = (bannedUids: string[]) =>
+    ({ name: 'Bodega Bay 2026', bannedUids }) as EventDoc;
+
+  // Scoped to the podium SECTION throughout: the real ShareCard rasterizes
+  // through an off-screen host appended to document.body, so a `screen` query
+  // here can match the card's own honoree block — this suite is asserting what
+  // the banner renders.
+  const podiumSection = (container: HTMLElement) =>
+    container.querySelector('.farewell-podium') as HTMLElement;
+
+  beforeEach(() => {
+    M.proofs = [];
+    M.proofsLoading = false;
+    M.proofFeedCalls = [];
+  });
+
+  it('baseline: unbanned, each honour names its own holder', () => {
+    const { container } = render(
+      <FarewellPodium players={roster} days={undefined} event={eventWith([])} />,
+    );
+    const section = podiumSection(container);
+    expect(
+      section.querySelector('.farewell-podium-champion .farewell-podium-name')?.textContent,
+    ).toBe('Champ Carrow');
+    expect(section.querySelector('.farewell-podium-first .farewell-podium-name')?.textContent).toBe(
+      'Early Esher',
+    );
+  });
+
+  it('WITHHOLDS a banned champion rather than crowning the runner-up', () => {
+    const { container } = render(
+      <FarewellPodium players={roster} days={undefined} event={eventWith(['champ'])} />,
+    );
+    const section = podiumSection(container);
+    // The honour vacates: no block at all, rather than a block naming somebody
+    // else. This is the assertion that fails if `Board` goes back to handing
+    // this a ban-FILTERED roster, which is indistinguishable from a roster the
+    // champion was never on.
+    expect(section.querySelector('.farewell-podium-champion')).toBeNull();
+    expect(section.textContent).not.toContain('Champ Carrow');
+    // …and `early` is still only the ⭐ holder, not the new champion.
+    expect(section.querySelector('.farewell-podium-first .farewell-podium-name')?.textContent).toBe(
+      'Early Esher',
+    );
+  });
+
+  it('WITHHOLDS a banned ⭐ holder rather than handing it to the next-earliest bingo', () => {
+    const { container } = render(
+      <FarewellPodium players={roster} days={undefined} event={eventWith(['early'])} />,
+    );
+    const section = podiumSection(container);
+    // Who crossed the line first already happened, so a ban can only hide it
+    // (specs/w2-ban-console.md § Leaderboard). `champ` bingoed second and does
+    // not inherit it.
+    expect(section.querySelector('.farewell-podium-first')).toBeNull();
+    expect(section.textContent).not.toContain('Early Esher');
+    expect(
+      section.querySelector('.farewell-podium-champion .farewell-podium-name')?.textContent,
+    ).toBe('Champ Carrow');
   });
 });

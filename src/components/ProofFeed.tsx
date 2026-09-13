@@ -19,6 +19,7 @@ import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
+import { withholdBannedHonours } from '../data/finale';
 import type {
   BoardDoc,
   DayDef,
@@ -144,13 +145,21 @@ function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): 
   return bannedUids.length > 0 ? undefined : moment.line;
 }
 
+/** The posted Moment as this reader may see it. The Moment itself is written
+ *  UNFILTERED and never amended, so the ban rule is applied here, at render —
+ *  and it is `withholdBannedHonours`' rule rather than a second copy of it, so
+ *  this surface and the closing Day's own podium banner cannot answer one
+ *  Event's champion differently (`src/data/finale.ts`). */
 function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: readonly string[]): PodiumMomentPayload | undefined {
   if (!podium) return undefined;
-  return {
-    champion: isBannedUid(podium.champion?.uid, bannedUids) ? null : podium.champion,
-    firstBingo: isBannedUid(podium.firstBingo?.uid, bannedUids) ? null : podium.firstBingo,
-    dailyHonors: podium.dailyHonors.filter((h) => !isBannedUid(h.uid, bannedUids)),
-  };
+  // Spread the payload UNDER the rule's output rather than returning that output
+  // alone: the helper is generic over the three honour fields and constructs an
+  // object of exactly those, so a field added to `PodiumMomentPayload` later
+  // would pass straight through here today and be silently dropped the moment it
+  // is OPTIONAL — a required one fails the build, an optional one does not. The
+  // Moment is the immutable record this surface renders, so losing a field of it
+  // to a filter is the one failure worth spending a spread on.
+  return { ...podium, ...withholdBannedHonours(podium, bannedUids) };
 }
 
 /**
