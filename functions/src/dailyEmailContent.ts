@@ -624,12 +624,12 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string | n
 
 /** A raw Firestore field read as text, or `undefined` when it is not a string.
  *  A Day's Place pair is the part `firestore.rules` types NOTHING about —
- *  `dayScoringValid` covers `scoring`, `dayTonightShapeOk` covers `tonight`, and
- *  `place`, `port`, `placeEmoji` and `portEmoji` have no check of any kind — so
- *  they arrive as whatever was stored, and every reader below trims them
- *  directly: a stored non-string reached `.trim()` and THREW. Same doctrine
- *  `EmailDay` already states for `scoring`: this boundary reads RAW Firestore
- *  maps, so a bad value must RESOLVE rather than fail to typecheck.
+ *  `dayScoringValid` covers `scoring`, while `place`, `port`, `placeEmoji` and
+ *  `portEmoji` have no check of any kind — so they arrive as whatever was
+ *  stored, and every reader below trims them directly: a stored non-string
+ *  reached `.trim()` and THREW. Same doctrine `EmailDay` already states for
+ *  `scoring`: this boundary reads RAW Firestore maps, so a bad value must
+ *  RESOLVE rather than fail to typecheck.
  *
  *  `undefined` rather than `''` is the load-bearing half, because it is what
  *  keeps the legacy fall-through intact: a malformed `place` beside a readable
@@ -641,7 +641,17 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string | n
  *
  *  It lives HERE, inside the shared helper, rather than at either sender's call
  *  site: both the daily card and the winner announcement read this pair, and a
- *  coercion applied per-caller is one a third caller silently opts out of. */
+ *  coercion applied per-caller is one a third caller silently opts out of.
+ *
+ *  THE EVENT'S `name` IS THE SAME UNTYPED CLASS and reads through this helper
+ *  too (#1192). No arm of `firestore.rules` types it — the one place Rules type
+ *  an Event's name at all is `completeArchiveRecord`'s frozen `eventName` copy,
+ *  a different field on a different document, deliberately NOT tied to the live
+ *  one — so an Admin config write stores whatever it sends and the footer's
+ *  `.trim()` threw on it. The `undefined`-not-`''` decision above is neutral
+ *  there rather than load-bearing: `name` has no legacy sibling to fall through
+ *  to, so both resolve to the reader's own `|| 'this event'` fallback, and a
+ *  malformed name renders exactly as an absent one does. */
 function asText(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
@@ -767,7 +777,18 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const days = Array.isArray(event.days) ? event.days : [];
   const dayNumber = day.index + 1;
   const dayCount = days.length || dayNumber;
-  const eventName = (event.name ?? '').trim() || 'this event';
+  // COERCED AT THE READ, exactly like every Place field above (#1192). It is
+  // coerced HERE rather than at `sendDailyEmailForEvent`'s Firestore boundary
+  // because this function is the exported, injectable content surface: the
+  // orchestrator's `as EmailEvent` is a bare cast with no per-field mapping step
+  // to hang a coercion on (unlike `readEmailRosterPage`, which builds each
+  // `EmailPlayer` field by field and so coerces `displayName` there), it casts
+  // the SAME document twice — the opening read and the delivery-time re-read,
+  // and this model is handed the first while the freeze comes from the second —
+  // and a guard there would protect that one caller while leaving every other
+  // caller of this exported function throwing. Same argument that put the Place
+  // coercion inside `placeLabel` rather than at either sender's call site.
+  const eventName = (asText(event.name) ?? '').trim() || 'this event';
 
   // --- ② Theme header -----------------------------------------------------------
   const themeHeadline = `${theme.emoji} ${theme.label}`;
@@ -869,7 +890,16 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const unlockClock = formatUnlockTime(day.unlockAt, timeZone);
   const liveWhen = unlockClock ? `live at ${unlockClock}` : 'live now';
   const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is ${liveWhen}: 24 fresh squares.`;
-  const tonight = (day.tonight ?? []).filter((t) => typeof t === 'string' && t.trim() !== '');
+  // THE CONTAINER IS GUARDED, not only its elements (#1192). Each entry was
+  // already `typeof`-checked, which is what made the remaining hole easy to
+  // miss: `firestore.rules`'s `dayTonightShapeOk` is reached only when a Day
+  // actually CHANGES, because `dayThemeChangeOk` short-circuits on
+  // `newDay == oldDay` before it — so an untouched Day, or one written before
+  // the rule existed, can still carry a non-array, non-nullish `tonight`, which
+  // `??` passes straight through to `.filter`.
+  const tonight = (Array.isArray(day.tonight) ? day.tonight : []).filter(
+    (t) => typeof t === 'string' && t.trim() !== '',
+  );
   const tonightLine = tonight.length > 0 ? tonight.join(' · ') : null;
 
   // --- ⑤ Photos + the Most-Loved Photo award (#534) -----------------------------

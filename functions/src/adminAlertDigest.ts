@@ -234,7 +234,16 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
   const days = Array.isArray(event.days) ? event.days : [];
   const day = currentThemeDay(days, now);
   const theme = emailThemeTokens(day?.theme, args.edition);
-  const eventName = (event.name ?? '').trim() || 'this event';
+  // COERCED AT THE READ (#1192): `adminAlerts.ts` casts the Event document with
+  // a bare `as DigestEvent` and no arm of `firestore.rules` types `name`, so a
+  // stored non-string arrives here and `.trim()` is not a function on it. The
+  // digest's exposure is its own shape, and it is not the milder one: this runs
+  // AFTER `claimDrain` has claimed the page, so the throw unwinds to
+  // `runAdminAlertSweep`'s per-Event catch leaving the rows claimed with no
+  // frozen request — which the next sweep retires rather than risk a duplicate.
+  // Every queued alert for that Event is then discarded without ever being
+  // mailed, on every sweep, for as long as the field stays malformed.
+  const eventName = (typeof event.name === 'string' ? event.name : '').trim() || 'this event';
   const threshold =
     typeof event.settings?.reportHideThreshold === 'number' ? event.settings.reportHideThreshold : null;
 
