@@ -351,9 +351,17 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
       bingoCount: MAX_ARCHIVE_NUMBER,
       squaresMarked: 30,
     });
-    expect(podium.runnersUp).toEqual([
+    expect(podium.standings).toEqual([
+      {
+        uid: 'root-max',
+        rank: 1,
+        displayName: 'root-max',
+        bingoCount: MAX_ARCHIVE_NUMBER,
+        squaresMarked: 30,
+      },
       {
         uid: 'two-buckets',
+        rank: 2,
         displayName: 'two-buckets',
         bingoCount: MAX_ARCHIVE_NUMBER,
         squaresMarked: 20,
@@ -374,5 +382,119 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     );
     expect(rawTotal).toBe(2 * MAX_ARCHIVE_NUMBER);
     expect(rawTotal).toBeGreaterThan(podium.champion?.bingoCount ?? 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A ban withholds an HONOUR and closes a POSITION
+// ---------------------------------------------------------------------------
+
+/**
+ * The two rules this repo draws through every ban-aware surface, applied to the
+ * one builder that renders both kinds of fact at once.
+ *
+ *   - AN HONOUR IS WITHHELD, NEVER REASSIGNED (`specs/w2-ban-console.md`
+ *     § Leaderboard): the champion, the Event-wide ⭐ and a Day's own First to
+ *     BINGO each name who WON something, and hiding the winner cannot make the
+ *     next Player the winner.
+ *   - A POSITION CLOSES THE GAP (`specs/w2-leaderboard.md` § Design decisions):
+ *     a standings rank is a row's place among the rows being shown, so the
+ *     visible rows read 1-2-3 with no hole where the hidden one was.
+ *
+ * These were one rule applied twice until this suite: `Board` handed
+ * `buildPodium` a ban-filtered roster, which is indistinguishable from a roster
+ * that never had that Player — so the runner-up became champion, the
+ * next-earliest bingo took the ⭐, and a Day's derived honour moved down, on the
+ * closing Day's banner and on its share card, while the Feed's own podium
+ * Moment for the same Event showed none of the three.
+ */
+describe('buildPodium — a ban withholds an honour and closes a position', () => {
+  const champ = player({
+    uid: 'champ',
+    displayName: 'Champ Carrow',
+    bingoCount: 4,
+    squaresMarked: 40,
+    firstBingoAt: NOW,
+    dayStats: { 1: { bingoCount: 4, squaresMarked: 40, firstBingoAt: NOW } },
+  });
+  const second = player({
+    uid: 'second',
+    displayName: 'Second Sennen',
+    bingoCount: 3,
+    squaresMarked: 30,
+    firstBingoAt: NOW + HOUR,
+    dayStats: { 1: { bingoCount: 3, squaresMarked: 30, firstBingoAt: NOW + HOUR } },
+  });
+  const third = player({
+    uid: 'third',
+    displayName: 'Third Thorne',
+    bingoCount: 2,
+    squaresMarked: 20,
+    firstBingoAt: NOW + 2 * HOUR,
+    dayStats: { 1: { bingoCount: 2, squaresMarked: 20, firstBingoAt: NOW + 2 * HOUR } },
+  });
+  const ROSTER = [champ, second, third];
+
+  it('baseline: unbanned, the champion IS the top position', () => {
+    const podium = buildPodium(ROSTER, DAYS);
+    expect(podium.champion?.uid).toBe('champ');
+    expect(podium.standings.map((r) => [r.rank, r.uid])).toEqual([
+      [1, 'champ'],
+      [2, 'second'],
+      [3, 'third'],
+    ]);
+    // The ⭐ and the Day's honour are the champion's here too, so the banned
+    // case below moves all three at once or none of them.
+    expect(podium.firstBingo?.uid).toBe('champ');
+    expect(podium.dailyHonors.map((h) => h.uid)).toEqual(['champ']);
+  });
+
+  it('WITHHOLDS a banned champion rather than crowning the runner-up', () => {
+    const podium = buildPodium(ROSTER, DAYS, undefined, true, undefined, ['champ']);
+    // The honour vacates. This is the assertion that fails if the roster is
+    // ban-filtered on the way in instead of hidden on the way out.
+    expect(podium.champion).toBeNull();
+    // And nobody else is named it — not by a different field, not by the rows.
+    expect(podium.standings.map((r) => r.uid)).not.toContain('champ');
+  });
+
+  it('CLOSES the gap the withheld champion leaves: the visible rows read 1-2-3', () => {
+    const podium = buildPodium(ROSTER, DAYS, undefined, true, undefined, ['champ']);
+    // The positions are over who is SHOWN — a hole at #1 would advertise that a
+    // row was removed, which is the opposite of what hiding is for
+    // (`ArchivedLeaderboard`'s own rule, and the live Leaderboard's).
+    expect(podium.standings.map((r) => [r.rank, r.uid])).toEqual([
+      [1, 'second'],
+      [2, 'third'],
+    ]);
+    // The two facts are now DIFFERENT people's: the top visible position is
+    // Second's, and the champion honour is nobody's. That is the whole
+    // distinction, and it is why the share card marks its champion row by uid
+    // rather than by "row 1".
+    expect(podium.standings[0].uid).not.toBe(podium.champion?.uid);
+  });
+
+  it('WITHHOLDS a banned ⭐ holder rather than handing it to the next-earliest', () => {
+    // Ban only the earliest bingo. The honour is a factual historical event —
+    // who crossed the line first already happened — so it vacates rather than
+    // moving to `second` (specs/w2-ban-console.md § Leaderboard).
+    const podium = buildPodium(ROSTER, DAYS, undefined, true, undefined, ['champ']);
+    expect(podium.firstBingo).toBeNull();
+  });
+
+  it('WITHHOLDS a banned DERIVED daily honour rather than moving it down a Day', () => {
+    // No day-meta pins, so Day 1's honour is DERIVED from the roster. Banning
+    // its holder empties that Day; it does not promote `second`, whose own
+    // bingo on the same Day is an hour later.
+    const podium = buildPodium(ROSTER, DAYS, new Map(), true, undefined, ['champ']);
+    expect(podium.dailyHonors).toEqual([]);
+  });
+
+  it('leaves an unbanned Event byte-identical to what it built before', () => {
+    // The parity guard's own condition: with no ban roster the withholding step
+    // is the identity, so this builder still agrees with `buildPodiumPayload`,
+    // which is written unfiltered by contract.
+    const withEmptyList = buildPodium(ROSTER, DAYS, undefined, true, undefined, []);
+    expect(withEmptyList).toEqual(buildPodium(ROSTER, DAYS));
   });
 });

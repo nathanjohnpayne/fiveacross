@@ -245,11 +245,20 @@ function toFarewellCardData(
     contextLine: copy.contextLine,
     statLine: dayCount > 0 ? `Final standings · ${dayCount} days` : 'Final standings',
     // Rendered only by the photo-hero composition; the photo-less card ignores
-    // it, so its node stays byte-identical to the pre-#534 card.
-    runnersUp: podium.runnersUp.map((r) => ({
+    // it and reads `champion` above, so its node stays byte-identical to the
+    // pre-#534 card.
+    //
+    // POSITIONS, not honours: each row carries the place it holds among the rows
+    // a reader can see, and the 🏆 role rides on the row whose uid the champion
+    // honour names. When that honour is withheld the rows still read 1-2-3 and
+    // simply carry no role line — the card never crowns whoever is standing at
+    // the top of a moderated list.
+    standings: podium.standings.map((r) => ({
+      rank: r.rank,
       displayName: r.displayName,
       bingoCount: r.bingoCount,
       squaresMarked: r.squaresMarked,
+      champion: r.uid === podium.champion?.uid,
     })),
   };
 }
@@ -463,11 +472,12 @@ function FarewellPodiumInner({
   // could mint a First to BINGO the scheduler's immutable podium Moment does
   // not have — the card and the Feed naming different winners.
   const freezeAt = resolvedStandingsFreezeAt(event ?? null);
-  // `players` arrives ban-filtered from `Board`, which is what keeps the
-  // champion, the runners-up, the headline honour and the DERIVED daily honours
-  // clean. The ban roster is passed separately for the day-meta PIN branch
-  // (#1146): a pin carries its own name and instant and needs no Player row, so
-  // roster absence is not a ban and only the list can say who is banned.
+  // `players` arrives RAW from `Board` and the ban roster does the hiding, which
+  // is what keeps the champion and the headline honour WITHHELD rather than
+  // handed to whoever is next (`buildPodium`). Roster absence is not a ban and
+  // only the list can say who is banned — which is also why a day-meta PIN, which
+  // carries its own name and instant and needs no Player row, is checked against
+  // the same list (#1146).
   const podium = buildPodium(
     players,
     days,

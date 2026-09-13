@@ -850,9 +850,10 @@ describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#56
     champion: { displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124 },
     firstBingo: { displayName: 'Turntilla' },
     honors: [{ dayLabel: 'Day 1 · Trieste 🇮🇹', displayName: 'Andrew Levad' }],
-    runnersUp: [
-      { displayName: 'Logan Murdock', bingoCount: 14, squaresMarked: 117 },
-      { displayName: 'Nathan Payne', bingoCount: 13, squaresMarked: 110 },
+    standings: [
+      { rank: 1, displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124, champion: true },
+      { rank: 2, displayName: 'Logan Murdock', bingoCount: 14, squaresMarked: 117, champion: false },
+      { rank: 3, displayName: 'Nathan Payne', bingoCount: 13, squaresMarked: 110, champion: false },
     ],
     mostLoved: {
       photoUrl: 'blob:mock-hero',
@@ -926,6 +927,46 @@ describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#56
     expect(node.querySelector('.share-card-footer')?.textContent).toContain(shareCardAppName());
   });
 
+  // A WITHHELD CHAMPION LEAVES A NUMBERED TOP THREE AND CROWNS NOBODY.
+  // `buildPodium` hands this composition two different kinds of fact: the
+  // champion HONOUR, which vacates when its holder is banned, and the standings
+  // POSITIONS, which close the gap over the hidden row. The renderer used to
+  // conflate them — it printed `data.champion` as rank 1 and numbered the rest
+  // from 2 — so a card built from a moderated podium either dropped its #1 or
+  // (once the caller renumbered) handed the crown to whoever was standing at the
+  // top of the visible list. Rows carry their own rank and their own champion
+  // flag for exactly this case.
+  it('prints a numbered top three and NO crown when the champion honour is withheld', async () => {
+    stubImageDecode(() => Promise.resolve());
+    await renderFarewellShareCard({
+      ...heroData,
+      // The honour vacates…
+      champion: null,
+      // …while the positions close over the banned row: the former runner-up
+      // holds the top POSITION without holding the title.
+      standings: [
+        { rank: 1, displayName: 'Logan Murdock', bingoCount: 14, squaresMarked: 117, champion: false },
+        { rank: 2, displayName: 'Nathan Payne', bingoCount: 13, squaresMarked: 110, champion: false },
+      ],
+    });
+    const node = toBlobNode();
+
+    const rows = node.querySelectorAll('.share-card-ml-row');
+    // Two standings rows plus the 👑 First to BINGO row — no hole, and no fourth.
+    expect(rows).toHaveLength(3);
+    expect(rows[0].querySelector('.share-card-ml-rank')?.textContent).toBe('1');
+    expect(rows[0].querySelector('.share-card-ml-name')?.textContent).toBe('Logan Murdock');
+    // The row at the top of the list is NOT crowned: no champ treatment, no
+    // role line, and the fuller two-stat line every non-champion row carries.
+    expect(rows[0].className).not.toContain('champ');
+    expect(rows[0].querySelector('.share-card-ml-role')).toBeNull();
+    expect(rows[0].querySelector('.share-card-ml-stat')?.textContent).toBe('14 bingos · 117 sq');
+    expect(rows[1].querySelector('.share-card-ml-rank')?.textContent).toBe('2');
+    // Nowhere on the card does the withheld title appear.
+    expect(node.textContent).not.toContain('Cruise champion');
+    expect(node.textContent).not.toContain('Zacaria Arab');
+  });
+
   it('isolates emoji runs on the hero surfaces — credit line flag, badge camera (#603)', async () => {
     stubImageDecode(() => Promise.resolve());
     await renderFarewellShareCard(heroData);
@@ -938,7 +979,7 @@ describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#56
   });
 
   it('mostLoved absent and mostLoved: null render the SAME photo-less node — byte-identical to the pre-#534 card', async () => {
-    // The pre-#534 call shape: no mostLoved key, no runnersUp key at all.
+    // The pre-#534 call shape: no mostLoved key, no standings key at all.
     const legacy: FarewellShareCardData = {
       eventName: heroData.eventName,
       contextLine: heroData.contextLine,
@@ -948,12 +989,12 @@ describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#56
       honors: heroData.honors,
     };
     await renderFarewellShareCard(legacy);
-    await renderFarewellShareCard({ ...legacy, mostLoved: null, runnersUp: heroData.runnersUp });
+    await renderFarewellShareCard({ ...legacy, mostLoved: null, standings: heroData.standings });
     expect(toBlobMock).toHaveBeenCalledTimes(2);
     const absent = toBlobMock.mock.calls[0][0] as HTMLElement;
     const nulled = toBlobMock.mock.calls[1][0] as HTMLElement;
-    // The photo-less composition ignores runnersUp entirely; both renders are
-    // the exact honoree-blocks card, markup-identical.
+    // The photo-less composition ignores the standings rows entirely; both
+    // renders are the exact honoree-blocks card, markup-identical.
     expect(nulled.outerHTML).toBe(absent.outerHTML);
     expect(absent.querySelector('.share-card-ml-hero')).toBeNull();
     expect(absent.querySelectorAll('.share-card-honoree')).toHaveLength(2);
@@ -2872,7 +2913,7 @@ describe('FarewellPodium — share affordance', () => {
           champion: { uid: 'c', displayName: 'C', bingoCount: 2, squaresMarked: 20 },
           firstBingo: null,
           dailyHonors: [],
-          runnersUp: [],
+          standings: [],
         }}
       />,
     );

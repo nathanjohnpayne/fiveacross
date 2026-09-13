@@ -302,6 +302,26 @@ describe('Leaderboard — presentational ban filter + first-bingo split (specs/w
     expect(screen.queryByText(/First BINGO/)).toBeNull();
   });
 
+  // THE OTHER HALF OF THE SAME BAN, and the half the test above never looked at.
+  // An HONOUR vacates (the assertion above); a POSITION closes the gap. The rank
+  // badge is a row's place among the rows being SHOWN — `specs/w2-leaderboard.md`
+  // § Design decisions states it for the presentational filters and it reads the
+  // same way for a ban, because both are reasons a row is not on screen. Leaving
+  // a hole at #1 would advertise that a row was removed, which is the opposite of
+  // what hiding is for (`ArchivedLeaderboard` says so in as many words, and the
+  // frozen record's own `ArchivedFirstBingoRow.rank` is defined over the
+  // ban-filtered standings).
+  it('RENUMBERS the visible rows from 1 when a ban hides the row above them', () => {
+    H.players = [player('first-banned', 'First Banned', 100), player('later-ok', 'Later OK', 200)];
+    H.event = { ...H.event, bannedUids: ['first-banned'] } as EventDoc;
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+
+    const rows = Array.from(document.querySelectorAll('.list .row'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].querySelector('.rank')?.textContent).toBe('1');
+    expect(within(rows[0] as HTMLElement).getByText('Later OK')).toBeInTheDocument();
+  });
+
   it('baseline: without the ban, the first-to-BINGO Player shows WITH the 1st BINGO badge', () => {
     // Proves the ban filter is what removed the badge above, not a broken fixture.
     H.players = [player('first-banned', 'First Banned', 100), player('later-ok', 'Later OK', 200)];

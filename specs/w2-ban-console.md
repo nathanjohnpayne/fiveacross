@@ -54,6 +54,14 @@ So `useLeaderboard()` stays **RAW**—it never reads `bannedUids`—and the pres
 
 The regression that pins this: banning the original first-bingo Player must NOT hand the badge to a later Player (the VIEW) while `useLeaderboard` still returns the banned Player (the raw source Board reads). A test that applied the filter to the shared source instead would fail both halves.
 
+### Hidden, never reassigned—but a rank is not an honour
+
+The rule above is about an HONOUR: the ⭐, a Day's own First to BINGO, the Event champion, the Most-Loved Photo. Each names who WON something, so hiding the winner cannot make the next Player the winner, and the honour goes unheld rather than passing down.
+
+A standings RANK is a different kind of fact—a row's place among the rows being shown—so a ban is simply another reason a row is not on screen and the rest renumber from 1, exactly as under a presentational filter. `specs/w2-leaderboard.md` § Design decisions is the canonical statement of both halves and the reasoning behind them; this spec's own surfaces already implement it (the Leaderboard view and its Share Card number the ban-filtered roster), and the frozen record defines `ArchivedFirstBingoRow.rank` over the ban-filtered standings for the same reason.
+
+**The mechanism matters as much as the rule.** Hiding is applied to the OUTPUT, never by filtering the roster on the way IN: a ban-filtered input is indistinguishable from a roster the banned Player was never on, so every selector reading it silently promotes. That is how the closing Day's podium came to crown a runner-up, hand out a ⭐ and move a Day's derived honour down, all from one pre-filtered roster, while the Feed's own podium Moment for the same Event withheld all three (`specs/d15-finale.md` § Contract).
+
 ## Admin reachability—admin views stay UNfiltered
 
 Only PUBLIC/player reads filter. The Admin console (`useAllItems`, `useReportedProofs`, `usePendingClaims`, and the queue rows derived from them) applies **no** ban filter, so a banned Player's Prompts and Proofs stay reachable there for review, moderation, and unban—the same reachability invariant `specs/w2-admin-console.md` establishes for the threshold auto-hide. The Banned players section additionally lists every banned uid so an Admin can unban even a Player whose content has all been deleted.
@@ -117,6 +125,7 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/components/w2-ban-console.test.ts
 - A row authored by a **fellow admin** renders **NO** Ban control, while a normal-player row DOES—the admin-overlap exclusion (a ban that overlaps `admins` is rejected by the rules).
 - The **Banned players** section lists banned uids and **Unban** calls `unbanUser(uid)`—reachable even with no queued content; empty when no one is banned.
 - Leaderboard hides a banned Player from the view and does NOT promote a later Player to **1st BINGO** (the raw-source pin, VIEW half); a baseline without the ban shows the first-to-BINGO Player with the badge.
+- Leaderboard RENUMBERS the visible rows from 1 when a ban hides the row above them—the other half of the same ban (§ "Hidden, never reassigned—but a rank is not an honour"): the honour vacates, the position closes the gap.
 
 ### Rules—consumed, not changed
 
@@ -128,6 +137,7 @@ Runner: `npm run test:rules` (Firestore emulator). Test: `tests/rules/w2-banned-
 - A banned uid's content is filtered off every PUBLIC read—pool/deal, Proof Feed, per-item Proof lookup, Tally, Moments, Doubts—by its owner uid; an empty/absent roster filters nothing (fail-open)—`src/hooks/w2-ban-console.test.tsx`.
 - The viewer's own content is not filtered for themselves—`useMyProofs` is unfiltered, and `useDoubts` keeps a Doubt against the viewer when the viewer is a banned target (own-content exception), while still hiding a banned accuser's Doubts everywhere and a banned target's Doubts from other viewers—`src/hooks/w2-ban-console.test.tsx`.
 - Board's First-to-BINGO reads the RAW roster (a ban never promotes a later Player), while the Leaderboard VIEW hides the banned Player—`src/hooks/w2-ban-console.test.tsx` (raw hook) + `src/components/w2-ban-console.test.tsx` (view + no-promotion).
+- An HONOUR vacates and a POSITION closes the gap: the ⭐ goes unheld while the visible rows renumber from 1—`src/components/w2-ban-console.test.tsx` (both halves of the same ban, side by side). The podium's own surfaces carry the same pair—`src/data/d15-finale.test.ts` and `src/components/FarewellPodium.test.tsx` (`specs/d15-finale.md`).
 - The Admin console bans/unbans from the report queue and a Banned players section, and admin views stay UNfiltered so banned content is reachable for review/unban—`src/components/w2-ban-console.test.tsx`.
 - A system/sentinel author (`'seed'`) is never bannable—no UI Ban control and `banUser` refuses to add it—so the default pool cannot be nuked by a mis-click; `unbanUser` still removes a sentinel for recovery (the ban/unban asymmetry)—`src/data/w2-ban-console.test.ts` (guard + asymmetry) + `src/components/w2-ban-console.test.tsx` (no control on a seeded Prompt).
 - A fellow admin is never bannable—`BanControl` renders no Ban control for an author in `admins` (a ban that overlaps `admins` is rejected by the #113 rules, so it is a doomed action)—`src/components/w2-ban-console.test.tsx` (no control on an admin-authored row).

@@ -19,6 +19,7 @@ import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
+import { withholdBannedHonours } from '../data/finale';
 import type {
   BoardDoc,
   DayDef,
@@ -144,13 +145,14 @@ function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): 
   return bannedUids.length > 0 ? undefined : moment.line;
 }
 
+/** The posted Moment as this reader may see it. The Moment itself is written
+ *  UNFILTERED and never amended, so the ban rule is applied here, at render —
+ *  and it is `withholdBannedHonours`' rule rather than a second copy of it, so
+ *  this surface and the closing Day's own podium banner cannot answer one
+ *  Event's champion differently (`src/data/finale.ts`). */
 function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: readonly string[]): PodiumMomentPayload | undefined {
   if (!podium) return undefined;
-  return {
-    champion: isBannedUid(podium.champion?.uid, bannedUids) ? null : podium.champion,
-    firstBingo: isBannedUid(podium.firstBingo?.uid, bannedUids) ? null : podium.firstBingo,
-    dailyHonors: podium.dailyHonors.filter((h) => !isBannedUid(h.uid, bannedUids)),
-  };
+  return withholdBannedHonours(podium, bannedUids);
 }
 
 /**

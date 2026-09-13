@@ -2578,13 +2578,17 @@ export default function Board() {
             any Event whose ceremonial Day is on another pool, or which has
             none at all: the pin sent a returning Player to a Day that then
             rendered no podium and no share action (Codex P1, PR #841).
-            The roster is ban-filtered first (Leaderboard.tsx parity): the
-            podium is a public leaderboard-like surface, so a banned Player
-            must never surface as champion, First to BINGO, or a daily
-            honor (Codex #244). */}
+            The roster goes in RAW; the ban roster reaches `buildPodium`
+            through the `event` below, so it can HIDE a banned Player rather
+            than rank without them. Filtering here was the older shape (#244)
+            and it promoted: with the champion's row removed, the next
+            Player became champion, the next-earliest bingo took the ⭐, and
+            a Day's derived honour moved down — all three reassignments the
+            ban policy forbids, and none of them visible in the Feed's own
+            podium Moment for the same Event, which withholds. */}
         {hasDays && viewedIndex === finaleDayIndex(days, scheduledFreezeAt) && event?.frozenAt != null && (
           <FarewellPodium
-            players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
+            players={players}
             days={days}
             dayMetas={dayMetas}
             dayMetasLoaded={dayMetasLoaded}
