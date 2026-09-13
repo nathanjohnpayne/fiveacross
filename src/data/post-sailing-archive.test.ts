@@ -6,6 +6,7 @@ import {
   draftEventArchive,
   finaleHasRun,
   isEventArchived,
+  podiumEmailPending,
   isEventArchiving,
   withReadableDayStats,
   MAX_ARCHIVE_NUMBER,
@@ -2150,6 +2151,95 @@ describe('finaleHasRun — the finale gate’s own predicate', () => {
     expect(finaleHasRun({})).toBe(true);
     expect(finaleHasRun(null)).toBe(true);
     expect(finaleHasRun(undefined)).toBe(true);
+  });
+});
+
+// #1192, routed here from Codex's P1 on PR #1207. The winner announcement is its
+// own quarter-hour sweep rather than a finale beat, so an Event can be owed its
+// last email on either side of `finaleHasRun` — and the flip that follows cancels
+// that send for whatever is left of the roster.
+describe('podiumEmailPending — the announcement no finale gate covers', () => {
+  const owed = (over: Partial<EventDoc> = {}) =>
+    ({
+      frozenAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      ...over,
+    }) as Partial<EventDoc>;
+
+  it('is true from the freeze onwards, with or without the completion marker', () => {
+    // THE MARKER IS NOT THE CONDITION (Codex P1 on PR #1215). `markFinaleComplete`
+    // stamps it only inside a transaction that has observed the freeze and the
+    // podium Moment, so the marker entails `frozenAt` — but not the reverse. A run
+    // whose freeze and Moment both landed while the stamp did not leaves the email
+    // genuinely due with no marker to see it by, and keying on the marker answered
+    // false for the whole of that window: the same silent loss, one beat earlier.
+    expect(podiumEmailPending(owed())).toBe(true);
+    expect(podiumEmailPending(owed({ finaleCompletedAt: 8_100 }))).toBe(true);
+  });
+
+  it('is false before the freeze, when there is no send to lose yet', () => {
+    expect(podiumEmailPending(owed({ frozenAt: undefined }))).toBe(false);
+    expect(
+      podiumEmailPending({
+        standingsFreezeAt: 8_000,
+        days: DAYS,
+        settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      } as Partial<EventDoc>),
+    ).toBe(false);
+  });
+
+  it('is false once the fan-out has stamped its marker', () => {
+    expect(podiumEmailPending(owed({ podiumEmailAt: 8_200 }))).toBe(false);
+    // The stamp is the whole answer, not a truthiness test: a fan-out that
+    // finished at epoch zero still finished.
+    expect(podiumEmailPending(owed({ podiumEmailAt: 0 }))).toBe(false);
+  });
+
+  it('is false while the Event mails nobody at all', () => {
+    // Read the server's way — EXPLICITLY `true`, never merely present
+    // (`dailyEmailEnabled`, functions/src/dailyEmail.ts). Every one of these
+    // Events sends no announcement, so there is none to warn about losing.
+    expect(podiumEmailPending(owed({ settings: undefined }))).toBe(false);
+    expect(
+      podiumEmailPending(owed({ settings: { reportHideThreshold: 3 } } as Partial<EventDoc>)),
+    ).toBe(false);
+    expect(
+      podiumEmailPending(owed({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } })),
+    ).toBe(false);
+    // The loose read this deliberately is not: a stored non-boolean is OFF.
+    expect(
+      podiumEmailPending(
+        owed({
+          settings: { dailyEmailEnabled: 'yes', reportHideThreshold: 3 },
+        } as unknown as Partial<EventDoc>),
+      ),
+    ).toBe(false);
+  });
+
+  it('OVERLAPS the finale gate in the window the marker failed in', () => {
+    // The two are deliberately NOT disjoint, which is the property the console
+    // composes its copy around: here the freeze has landed, the email is owed,
+    // and the finale gate is still unsatisfied because the marker never stamped.
+    const markerFailed = owed({ days: DAYS, standingsFreezeAt: 8_000 });
+    expect(finaleHasRun(markerFailed)).toBe(false);
+    expect(podiumEmailPending(markerFailed)).toBe(true);
+    // …and the ordinary post-finale Event, where only this one is true.
+    const complete = owed({ days: DAYS, standingsFreezeAt: 8_000, finaleCompletedAt: 8_100 });
+    expect(finaleHasRun(complete)).toBe(true);
+    expect(podiumEmailPending(complete)).toBe(true);
+    // …and the legacy no-freeze shape, where only the finale gate is.
+    const legacy = {
+      days: [],
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as Partial<EventDoc>;
+    expect(finaleHasRun(legacy)).toBe(true);
+    expect(podiumEmailPending(legacy)).toBe(false);
+  });
+
+  it('answers false for an absent Event rather than throwing', () => {
+    expect(podiumEmailPending(null)).toBe(false);
+    expect(podiumEmailPending(undefined)).toBe(false);
+    expect(podiumEmailPending({})).toBe(false);
   });
 });
 
