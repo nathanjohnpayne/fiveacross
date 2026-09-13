@@ -579,7 +579,13 @@ describe('the guards the final round closed (#1192, final round)', () => {
     ['an empty proofId', ''],
     ['a proofId containing a slash', 'a/b'],
     ['a bare dot', '.'],
+    ['a bare double dot', '..'],
     ['a non-string proofId', 42 as unknown as string],
+    // These two pass the Admin SDK's LOCAL path validation and fail on the server
+    // read instead, which is the same permanent block by a longer route.
+    ['a reserved __id__ form', '__name__'],
+    ['an id over 1500 UTF-8 bytes', 'a'.repeat(1501)],
+    ['an id under 1500 chars but over 1500 BYTES', 'é'.repeat(800)],
   ])('normalises an award with %s to no module rather than blocking the Event', async (_label, proofId) => {
     // `proofId` is fed to `db.doc` by the live-visibility re-join, so an invalid
     // document path throws — and the throw sets `allChecked` false, which makes the

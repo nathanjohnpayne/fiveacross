@@ -1207,8 +1207,25 @@ export function visibleMostLovedAward(
   // every sweep: the whole roster's announcement blocked permanently by one
   // malformed field. The spec promises a malformed award normalises to no module,
   // and it can only keep that promise if the key it joins on is checked here.
+  // THE COMPLETE CONSTRAINT SET, not the three I thought of first (CodeRabbit,
+  // final round). Firestore rejects a document id that is empty, over 1500 UTF-8
+  // BYTES, contains `/`, is a bare `.` or `..`, or matches `__.*__` — and the last
+  // two of those pass the Admin SDK's LOCAL path validation, so they reach the
+  // server and fail on the read instead. Same permanent block either way: the
+  // re-join's catch sets `allChecked` false and the pre-send guard then reports
+  // `award-changed` on every sweep. My first version of this predicate covered
+  // three of the five, which is the failure this whole check exists to prevent
+  // arriving one level up — a correct rule with a partial inventory reads exactly
+  // like coverage. Byte length rather than string length, because the limit is
+  // bytes and a multi-byte name reaches it sooner than its `.length` suggests.
   const joinable = (id: unknown): boolean =>
-    typeof id === 'string' && id.length > 0 && !id.includes('/') && id !== '.' && id !== '..';
+    typeof id === 'string' &&
+    id.length > 0 &&
+    Buffer.byteLength(id, 'utf8') <= 1500 &&
+    !id.includes('/') &&
+    id !== '.' &&
+    id !== '..' &&
+    !/^__.*__$/.test(id);
   const winners = award.winners.filter(
     (w): w is MostLovedPhotoWinner =>
       !!w &&
