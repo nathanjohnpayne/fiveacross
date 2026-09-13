@@ -1358,6 +1358,29 @@ describe('buildAdminDigestModel', () => {
     expect(model.brandLine).toBe('Gay Cruise Bingo · by Five Across · Admin');
     expect(model.footerBrandLine).toBe('Gay Cruise Bingo · by Five Across');
   });
+
+  // The Event's `name` arrives from a bare `as DigestEvent` cast in
+  // `adminAlerts.ts` and no arm of `firestore.rules` types it (#1192, found
+  // sweeping the same untyped read out of the daily engagement email's footer),
+  // so a stored non-string reaches this model and `.trim()` is not a function on
+  // it. Asserted on all FOUR modules that quote the name, because they read it
+  // from one binding and a fix to any single line would leave the rest throwing.
+  //
+  // The digest's blast radius is its own, and it is not the milder one: this
+  // model is built AFTER `claimDrain` has claimed the page, so the throw unwinds
+  // to `runAdminAlertSweep`'s per-Event catch leaving the rows claimed with no
+  // frozen request — which a later sweep RETIRES rather than risk a duplicate.
+  // Every queued alert for that Event is discarded unmailed while the field
+  // stays malformed.
+  it('falls back to the unnamed-Event wording when `name` is not a string, rather than throwing on it', () => {
+    const malformed = build([ALERT({ kind: 'item-created', status: 'pending', label: 'Spot a speedo' })], {
+      event: { ...EVENT, name: { en: 'Trieste → Barcelona' } } as unknown as typeof EVENT,
+    });
+    expect(malformed.subject).toBe('Admin · this event—1 to approve');
+    expect(malformed.preheader).toBe('1 item waiting for this event.');
+    expect(malformed.contextLine).toBe('this event · Day 2 of 3 · 💦 Sporty Splash');
+    expect(malformed.footerWhyLine).toBe("You're getting this because you're an admin of this event.");
+  });
 });
 
 // --- Rendering -------------------------------------------------------------------
