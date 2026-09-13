@@ -430,6 +430,100 @@ describe('the guards the final round closed (#1192, final round)', () => {
     expect(result.drained).toBe(false);
   });
 
+  it('re-guards for the next recipient when the first one exits before sending', async () => {
+    // The first recipient passes both guards and then opts out inside the attempt
+    // transaction, so nothing is sent. The latches must still be open, or recipient
+    // two skips both guards and is mailed after a disable.
+    const docs = seedDue();
+    for (const uid of ['zac', 'logan', 'nathan']) {
+      docs[`events/med-2026/emailPrefs/${uid}`] = { optedOut: false, token: 'tok-fixed' };
+    }
+    const db = makeDb(docs);
+    const sent: Captured[] = [];
+    let recipient = 0;
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => {
+        recipient += 1;
+        if (recipient === 1) {
+          // Unsubscribes during their own preparation: guards already passed.
+          (db.docs[`events/med-2026/emailPrefs/${uid}`] as Record<string, unknown>).optedOut = true;
+        } else {
+          // And the Event goes off before the second recipient.
+          (db.docs['events/med-2026'] as Record<string, unknown>).settings = {
+            dailyEmailEnabled: false,
+          };
+        }
+        return `${uid}@example.com`;
+      },
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    expect(sent).toHaveLength(0);
+    expect(result.reason).toBe('disabled');
+  });
+
+  it('replaces a never-attempted frozen request instead of blocking forever', async () => {
+    // A freeze abandoned by the post-freeze guard: created, then the fan-out
+    // cancelled before any attempt was stamped.
+    const docs = seedDue();
+    const db = makeDb(docs);
+    const realDoc = db.doc;
+    let disabled = false;
+    db.doc = ((path: string) => {
+      const ref = realDoc(path);
+      if (!path.includes('/podiumEmailOutbox/')) return ref;
+      return {
+        ...ref,
+        create: async (data: Record<string, unknown>) => {
+          const out = await ref.create(data);
+          if (!disabled) {
+            disabled = true;
+            (db.docs['events/med-2026'] as Record<string, unknown>).settings = {
+              dailyEmailEnabled: false,
+            };
+          }
+          return out;
+        },
+      };
+    }) as typeof db.doc;
+
+    const firstRun = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async () => true,
+    });
+    expect(firstRun.reason).toBe('disabled');
+    const orphan = db.docs[podiumOutboxPath('med-2026', 'zac')] as Record<string, unknown>;
+    expect(orphan).toBeDefined();
+    expect(db.docs['events/med-2026/emailPrefs/zac']?.podiumEmailFirstAttemptAt).toBeUndefined();
+
+    // Re-enabled later, and by then that participant's verified address has moved —
+    // which makes the orphan STALE by the address check.
+    (db.docs['events/med-2026'] as Record<string, unknown>).settings = {
+      dailyEmailEnabled: true,
+    };
+    db.doc = realDoc;
+    const sent: Captured[] = [];
+    const second = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) =>
+        uid === 'zac' ? 'moved@example.com' : `${uid}@example.com`,
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Zac is MAILED at the new address, not blocked: no attempt was ever recorded
+    // under that key, so there is nothing for the refusal to protect.
+    expect(second.blocked).toBe(0);
+    expect(sent.flatMap((m) => m.to)).toContain('moved@example.com');
+    expect(db.docs[podiumOutboxPath('med-2026', 'zac')]?.to).toBe('moved@example.com');
+  });
+
   it('stops the fan-out when the award RECORD is replaced mid-delivery, hero intact', async () => {
     // The hero check at the checkpoint only asks whether that Proof is still
     // visible, so a replacement keeping the old hero's Proof alive walked past it.

@@ -611,8 +611,10 @@ export async function sendPodiumEmailForEvent(
    *  be a completed fan-out, whatever the counters say. */
   let stoppedEarly = false;
   /** Whether the one-shot pre-first-message guard has run. */
+  // Per-EVENT latches, closed only once a transport call has actually been made,
+  // so a recipient who bails before sending does not disarm the guards for
+  // everybody behind them.
   let guardedBeforeFirstSend = false;
-  // Paired with the flag above: the post-freeze re-check is also once per Event.
   let reguardedAfterFreeze = false;
   for (const player of input.ranked) {
     if (examined >= maxRecipients) {
@@ -850,7 +852,6 @@ export async function sendPodiumEmailForEvent(
         // preparation. A throw now leaves the flag clear and the next recipient
         // performs the guard; the failure it records already withholds
         // completion, so nobody is lost by retrying it.
-        guardedBeforeFirstSend = true;
         if (eventClosedToPlay(atFirst)) {
           console.log(`sendPodiumEmailForEvent ${eventId}: archived during recipient preparation`);
           result.reason = 'archived';
@@ -880,6 +881,7 @@ export async function sendPodiumEmailForEvent(
           awardFingerprint: awardFingerprintOf(input.mostLoved),
         },
         deps,
+        typeof recordedAttemptAt === 'number',
       );
       if (!outbound) {
         // Neither frozen nor readable: sending now could 409 on a later retry
@@ -904,11 +906,10 @@ export async function sendPodiumEmailForEvent(
       //
       // Cheap because it is per EVENT, not per recipient: this whole branch runs
       // only for the first deliverable recipient.
-      if (guardedBeforeFirstSend && !reguardedAfterFreeze) {
+      if (!reguardedAfterFreeze) {
         const afterFreeze = (await db.doc(`events/${eventId}`).get()).data() as
           | PodiumEmailEvent
           | undefined;
-        reguardedAfterFreeze = true;
         if (eventClosedToPlay(afterFreeze)) {
           console.log(`sendPodiumEmailForEvent ${eventId}: archived while the request was frozen`);
           result.reason = 'archived';
@@ -970,6 +971,18 @@ export async function sendPodiumEmailForEvent(
         result.blocked++;
         continue;
       }
+      // THE ONE-SHOT LATCHES CLOSE ONLY WHEN A SEND ACTUALLY HAPPENS (Codex P2,
+      // final round). They used to close inside the guard blocks, so a recipient
+      // who passed both guards and then exited before the transport — a late
+      // opt-out seen by the attempt transaction, a failed stamp write, an expired
+      // deadline — left them closed with nothing sent. The NEXT recipient then
+      // skipped both guards and could be mailed after an archive or disable that
+      // landed during that exit, well before the 25-recipient checkpoint. A latch
+      // meaning "we have guarded" has to mean "and then we sent", or it records an
+      // intention rather than an event. Each guard block appears once in the loop
+      // body, so it still cannot run twice for one recipient.
+      guardedBeforeFirstSend = true;
+      reguardedAfterFreeze = true;
       const ok = await send({
         to: [outbound.to],
         subject: outbound.subject,
@@ -1418,6 +1431,11 @@ async function freezeOrReplay(
   uid: string,
   request: FrozenPodiumRequest,
   deps: DailyEmailDeps,
+  /** Whether a first attempt is already RECORDED for this recipient. A frozen
+   *  request with no recorded attempt cannot be protecting an idempotency key,
+   *  because nothing was ever sent under it — so a stale one is replaced rather
+   *  than refused. See the staleness branch below. */
+  attemptRecorded = true,
 ): Promise<FrozenPodiumRequest | null> {
   const ref = db.doc(podiumOutboxPath(eventId, uid));
   try {
@@ -1479,6 +1497,33 @@ async function freezeOrReplay(
               : staleAddress
                 ? 'verified address'
                 : 'unsubscribe capability';
+          // A STALE FREEZE WITH NO RECORDED ATTEMPT IS REPLACED, NOT REFUSED
+          // (Codex P2, final round). Refusing exists because re-freezing different
+          // bytes under a key the provider may already hold risks a 409, while a
+          // fresh key risks a second delivery — but both presuppose that something
+          // was once sent under this key. When no first attempt is recorded, nothing
+          // was: the request was frozen and then abandoned by a guard that cancelled
+          // the fan-out before the stamp. Refusing those turned the post-freeze
+          // guard into permanent recipient loss — the orphan outlives the run by a
+          // week, and if the Event is re-enabled after that participant's address or
+          // unsubscribe base has moved, the staleness check blocks them indefinitely
+          // for a send never attempted. Overwriting is safe precisely because there
+          // is no key to protect, and it makes the abandoned freeze self-healing
+          // instead of a document somebody has to delete by hand.
+          if (!attemptRecorded) {
+            const replacedAt = (deps.now ?? Date.now)();
+            console.log(
+              `freezeOrReplay: replacing a never-attempted frozen request that predates a ${why} change`,
+              eventId,
+              uid,
+            );
+            await ref.set({
+              ...request,
+              createdAt: replacedAt,
+              expiresAt: new Date(replacedAt + OUTBOX_TTL_MS),
+            });
+            return request;
+          }
           console.error(
             `freezeOrReplay: frozen request predates a ${why} change; refusing to replay it`,
             eventId,
