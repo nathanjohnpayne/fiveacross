@@ -369,11 +369,24 @@ export interface FarewellShareCardData {
    */
   mostLoved?: { photoUrl: string; heartCount: number; creditLine: string } | null;
   /**
-   * Standings rows 2-3 for the hero composition's compressed rows
-   * (`buildPodium().runnersUp`). Ignored by the photo-less composition, which
-   * keeps its honoree-blocks layout untouched.
+   * The hero composition's compressed standings rows (`buildPodium().standings`).
+   * Ignored by the photo-less composition, which keeps its honoree-blocks layout
+   * untouched.
+   *
+   * Each row carries its OWN `rank` — its place among the rows a reader can see,
+   * which the caller has already closed over any hidden row — rather than being
+   * numbered from its position in this array plus an assumption that row 1 is
+   * the champion. `champion` marks which row, if any, holds that honour: a
+   * withheld champion (banned holder) leaves every row unmarked, so the card
+   * prints a numbered top three and crowns nobody.
    */
-  runnersUp?: Array<{ displayName: string; bingoCount: number; squaresMarked: number }>;
+  standings?: Array<{
+    rank: number;
+    displayName: string;
+    bingoCount: number;
+    squaresMarked: number;
+    champion: boolean;
+  }>;
 }
 
 /** A labeled honoree block: medal-tagged role line, then the name (and optional stat). */
@@ -436,23 +449,22 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
     card.append(el('div', 'share-card-ml-by', mostLoved.creditLine));
 
     const rows = el('div', 'share-card-ml-rows');
-    if (data.champion) {
+    // The champion's row is decorated where it FALLS, not assumed to be the
+    // first one. The two are the same row on an unmoderated Event; they come
+    // apart when the champion is withheld, and numbering from this array would
+    // then have relabelled the visible top row as #1 and crowned it — precisely
+    // the promotion `withholdBannedHonours` exists to refuse.
+    (data.standings ?? []).forEach((r) => {
+      const bingos = `${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'}`;
       rows.append(
         buildMostLovedRow({
-          champ: true,
-          rank: '1',
-          name: data.champion.displayName,
-          role: `🏆 ${editionBrand().championRole}`,
-          stat: `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'}`,
-        }),
-      );
-    }
-    (data.runnersUp ?? []).forEach((r, i) => {
-      rows.append(
-        buildMostLovedRow({
-          rank: String(i + 2),
+          champ: r.champion,
+          rank: String(r.rank),
           name: r.displayName,
-          stat: `${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'} · ${r.squaresMarked} sq`,
+          role: r.champion ? `🏆 ${editionBrand().championRole}` : undefined,
+          // The champion's row states bingos alone — its role line already
+          // carries the weight; every other row pays its way with both stats.
+          stat: r.champion ? bingos : `${bingos} · ${r.squaresMarked} sq`,
         }),
       );
     });

@@ -31,21 +31,94 @@ export interface PodiumFirstBingo {
   displayName: string;
   at: number;
 }
+
+/**
+ * One standings row as a POSITION: its 1-based place among the rows a reader can
+ * actually see. NOT an honour — see `withholdBannedHonours` for the distinction
+ * and `specs/w2-leaderboard.md` § Design decisions for the rule.
+ */
+export interface PodiumStandingRow extends PodiumChampion {
+  rank: number;
+}
+
+/** How many standings positions the podium's share composition prints — the
+ *  three the photo-hero card's compressed rows have room for (#534/#561). */
+export const PODIUM_STANDING_ROWS = 3;
+
 export interface Podium {
-  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty
+   *  board, and `null` when its holder is currently banned — the HONOUR is
+   *  withheld rather than handed down (`withholdBannedHonours`). */
   champion: PodiumChampion | null;
-  /** Cruise-wide First to BINGO across main-game Days; `null` when none qualifies. */
+  /** Cruise-wide First to BINGO across main-game Days; `null` when none
+   *  qualifies, and `null` when its holder is currently banned. */
   firstBingo: PodiumFirstBingo | null;
-  /** Each Day's pinned First to BINGO, sorted by Day index (present honors only). */
+  /** Each Day's pinned First to BINGO, sorted by Day index (present honors
+   *  only), with a currently-banned holder's Day withheld. */
   dailyHonors: DayHonor[];
   /**
-   * Standings rows 2-3 (#534/#561): the photo-hero share composition compresses
-   * the podium to ranked rows, so it needs the two runners-up the champion-only
-   * payload never carried. Same zero-activity guard as the champion (a row with
-   * no marks is not a rank). CLIENT-ONLY — the functions-side `PodiumPayload`
-   * and the podium Moment are NOT touched, so nothing served changes.
+   * The top `PODIUM_STANDING_ROWS` POSITIONS, numbered 1..n over the rows a
+   * reader can see (#534/#561): the photo-hero share composition compresses the
+   * podium to ranked rows, so it needs more than the champion-only payload ever
+   * carried. Same zero-activity guard as the champion (a row with no marks is
+   * not a rank), and a banned row is absent, so the numbering closes over it.
+   *
+   * CLIENT-ONLY — the functions-side `PodiumPayload` and the podium Moment are
+   * NOT touched, so nothing served changes.
    */
-  runnersUp: PodiumChampion[];
+  standings: PodiumStandingRow[];
+}
+
+/**
+ * Withhold every honour whose holder is currently banned.
+ *
+ * THE RULE, STATED ONCE for both surfaces that render a podium (`buildPodium`
+ * here, and `ProofFeed`'s podium Moment, which reads the immutable payload the
+ * scheduler posted). A ban is presentational (`specs/w2-ban-console.md`), and
+ * this repo draws one line through every ban-aware surface:
+ *
+ *   - AN HONOUR IS WITHHELD, NEVER REASSIGNED. The champion, the Event-wide
+ *     First to BINGO and a Day's pinned First to BINGO each name who WON
+ *     something; hiding the winner does not make the runner-up the winner, so
+ *     the module simply does not render. That is `specs/w2-ban-console.md`
+ *     § Leaderboard, `specs/daily-engagement-email.md` § "A ban hides the
+ *     holder", and `ArchivedLeaderboard`'s vacating hall-of-fame headline.
+ *   - A POSITION CLOSES THE GAP. A standings rank is the row's place among the
+ *     rows being shown, so a hidden row is simply not there and the rest are
+ *     numbered 1..n — `specs/w2-leaderboard.md` § Design decisions, the live
+ *     Leaderboard, both Share Cards, and `ArchivedLeaderboard`, whose own
+ *     comment gives the reason: a hole at #1 advertises that a row was removed,
+ *     which is the opposite of what hiding is for.
+ *
+ * So this function takes ONLY the honours. The positions beside them
+ * (`Podium.standings`) are built from the ban-filtered rows instead, and the two
+ * rules are applied in one place each rather than inferred per surface — which
+ * is how the closing Day's banner came to crown the runner-up while the Feed's
+ * Moment for the same Event showed no champion at all.
+ *
+ * Generic over the three honour shapes because the Moment's payload spells a
+ * daily honour's instant `at` and this module's spells it `firstBingoAt`: only
+ * the uid is read here, so one rule covers both rather than two copies that can
+ * drift.
+ */
+export function withholdBannedHonours<
+  C extends { uid: string },
+  F extends { uid: string },
+  H extends { uid: string },
+>(
+  honours: {
+    champion: C | null | undefined;
+    firstBingo: F | null | undefined;
+    dailyHonors: readonly H[];
+  },
+  bannedUids: readonly string[],
+): { champion: C | null; firstBingo: F | null; dailyHonors: H[] } {
+  const { champion, firstBingo, dailyHonors } = honours;
+  return {
+    champion: champion && !isBanned(champion.uid, bannedUids) ? champion : null,
+    firstBingo: firstBingo && !isBanned(firstBingo.uid, bannedUids) ? firstBingo : null,
+    dailyHonors: dailyHonors.filter((h) => !isBanned(h.uid, bannedUids)),
+  };
 }
 
 /**
@@ -200,7 +273,17 @@ export function pinnedOrDerivedDailyHonors(
   dayMetasLoaded: boolean,
   bannedUids: readonly string[] = [],
 ): DayHonor[] {
-  const derivedHonors = perDayHonors(players).filter((h) => supportedDayIndex(h.dayIndex));
+  // A DERIVED honour is dropped for a banned holder AFTER the selection, never
+  // before it. A caller that hands this a RAW roster (`buildPodium`) therefore
+  // gets that Day withheld — "hidden, never reassigned", the same rule the pin
+  // branch below already applied — rather than the next-earliest Player handed a
+  // chip they did not earn. A caller that ban-filters its roster first
+  // (`Leaderboard`, `draftEventArchive`) selects from rows this can no longer
+  // see, so for those this line is a no-op and their promotion residual is
+  // unchanged by it.
+  const derivedHonors = perDayHonors(players).filter(
+    (h) => supportedDayIndex(h.dayIndex) && !isBanned(h.uid, bannedUids),
+  );
   if (!days?.length || !dayMetas) return derivedHonors;
   return days
     .flatMap((day) => {
@@ -248,6 +331,31 @@ export function dayHonorChipLabel(
   return `${emoji ? `${emoji} ` : ''}D${dayIndex + 1}`;
 }
 
+/**
+ * The client's podium, honours and positions each under their own ban rule.
+ *
+ * `players` IS THE RAW ROSTER, and `bannedUids` is what hides anybody. The
+ * earlier contract was the other way round — every caller ban-filtered its
+ * roster first and `bannedUids` existed only for the day-meta PIN branch (#1146)
+ * — and filtering the INPUT is precisely what promoted the runner-up: with the
+ * champion's row removed, `standings[0]` is the next Player, `eventFirstBingoWinner`
+ * picks the next-earliest bingo, and `perDayHonors` derives a Day's honour for
+ * whoever is left. The closing Day's banner therefore crowned a champion the
+ * Feed's own podium Moment for the same Event showed none of, and handed out a
+ * ⭐ the spec says can never be reassigned (`specs/w2-ban-console.md`
+ * § Leaderboard). Hiding is applied to the OUTPUT instead, which is how the
+ * Feed's Moment has always done it and how the mirror on the Functions side is
+ * shaped: `buildPodiumPayload` ranks the unfiltered roster and its consumers
+ * withhold (`ProofFeed`, `podiumEmail`).
+ *
+ * So: the honours come off the raw ranking and go through
+ * `withholdBannedHonours`; `standings` is numbered over the ban-filtered rows.
+ * With an empty ban roster the two paths are the same array and this stays
+ * byte-identical to `buildPodiumPayload`, which is what `tests/functions/finale-parity.test.ts`
+ * compares — that guard covers the unbanned case because the Moment is written
+ * unfiltered by contract, so a ban is exactly the input the two builders are
+ * never handed together.
+ */
 export function buildPodium(
   players: readonly PlayerDoc[],
   days: readonly DayDef[] | undefined,
@@ -255,12 +363,10 @@ export function buildPodium(
   dayMetasLoaded = true,
   freezeAt?: number | null,
   /**
-   * The Event's ban roster, for the day-meta PIN branch of the honours strip
-   * (#1146). `players` is already ban-filtered by every caller, which is what
-   * keeps the champion, the headline honour and the DERIVED honours clean — but
-   * a pin carries its own name and instant and needs no Player row, so hiding
-   * one required its own check. Passing `[]` renders every pin, which is right
-   * only for a caller with no ban roster in hand.
+   * The Event's ban roster — the ONLY thing that hides a Player here. Passing
+   * `[]` renders everybody, which is right for a caller with no ban roster in
+   * hand and wrong for one that has simply filtered its roster instead: that
+   * caller gets the promotion this parameter exists to prevent.
    */
   bannedUids: readonly string[] = [],
 ): Podium {
@@ -284,10 +390,10 @@ export function buildPodium(
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexSet(days);
 
-  const standings = players
+  const ranked = players
     .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
     .sort(comparePlayers);
-  const top = standings[0];
+  const top = ranked[0];
   const champion: PodiumChampion | null =
     top && (top.bingoCount > 0 || top.squaresMarked > 0)
       ? {
@@ -298,33 +404,50 @@ export function buildPodium(
         }
       : null;
 
-  // Ranks 2-3 from the SAME sorted standings the champion came from — never a
-  // re-sort — with the champion's own zero-activity guard applied per row (the
-  // sort puts zero-activity rows last, so a filtered row can only ever be
-  // trailing; ranks never skip).
-  const runnersUp: PodiumChampion[] = standings
-    .slice(1, 3)
-    .filter((r) => r.bingoCount > 0 || r.squaresMarked > 0)
-    .map((r) => ({
-      uid: r.uid,
-      displayName: r.displayName,
-      bingoCount: r.bingoCount,
-      squaresMarked: r.squaresMarked,
-    }));
-
   // ONE selector, shared with the Leaderboard's pin (Phase 4b P1): the honour
   // must read the same on the card and in the standings, and the cutoff applies
   // to the SELECTION rather than only the reported instant — picking the winner
   // from uncut data and then blanking their timestamp would report no First to
   // BINGO at all while an eligible pre-freeze one existed.
+  //
+  // Over the RAW roster, like the Leaderboard's own pin and for the same reason
+  // that spec gives: who crossed the line first already happened, so a ban can
+  // only hide it.
   const firstBingo: PodiumFirstBingo | null =
     eventFirstBingoWinner(players, isTutorialDay, freezeAt) ?? null;
 
+  // THE POSITIONS, numbered over the rows a reader can see — the other half of
+  // the rule `withholdBannedHonours` states. Cut from the SAME sorted array the
+  // champion came from, never a re-sort, with the champion's own zero-activity
+  // guard applied per row (the sort puts zero-activity rows last, so a dropped
+  // row can only ever be trailing; ranks never skip).
+  const standings: PodiumStandingRow[] = ranked
+    .filter((r) => !isBanned(r.uid, bannedUids) && (r.bingoCount > 0 || r.squaresMarked > 0))
+    .slice(0, PODIUM_STANDING_ROWS)
+    .map((r, i) => ({
+      uid: r.uid,
+      rank: i + 1,
+      displayName: r.displayName,
+      bingoCount: r.bingoCount,
+      squaresMarked: r.squaresMarked,
+    }));
+
   return {
-    champion,
-    firstBingo,
-    dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
-    runnersUp,
+    // The honours strip is ban-aware on BOTH sides of this call, and deliberately
+    // so: `pinnedOrDerivedDailyHonors` has to make the check itself because a PIN
+    // renders with no roster row behind it, and routing the finished list through
+    // the shared rule as well is what keeps "an honour is withheld" a single
+    // statement rather than one per surface. Applying one predicate twice to one
+    // list costs an array and cannot disagree with itself.
+    ...withholdBannedHonours(
+      {
+        champion,
+        firstBingo,
+        dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
+      },
+      bannedUids,
+    ),
+    standings,
   };
 }
 
