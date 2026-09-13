@@ -37,10 +37,49 @@ type Phase = 'open' | 'closing' | 'archived';
  * on PR #1215). It is the acknowledgement's KEY, not a rendering hint: the tick
  * is stored as the value of the question it answered and spent the moment the
  * Event re-keys it, so a warning that changes under a ticked box cannot be
- * archived over. `'finale+email'` is its own value rather than a pair of flags
- * because the two consequences are asked as ONE question — see `ask`.
+ * archived over. A combined value is its own value rather than a pair of flags
+ * because the consequences are asked as ONE question — see `ask`, which
+ * documents what each value means.
+ *
+ * They are the four TRUE things this surface can ask about rather than a cross
+ * product of predicates (Codex P2 on PR #1215): `frozenAt` and the Most-Loved
+ * award are written by one transaction, so what is still at risk after the
+ * freeze commits is a different list from what is at risk before it, and the
+ * copy has to say so.
  */
-type ArchiveAsk = 'finale' | 'email' | 'finale+email';
+type ArchiveAsk = 'pre-freeze' | 'podium' | 'podium+email' | 'email';
+
+/**
+ * What each ask SAYS, and every clause of it has to be true in that state
+ * (Codex P2 on PR #1215). The combined warning used to carry the pre-freeze
+ * sentence wholesale — "the scheduled standings freeze has not run yet", "the
+ * podium, the Most-Loved award and the freeze stamp will never arrive" — into a
+ * branch that only renders once `podiumEmailPending` has required `frozenAt`.
+ * The freeze HAD run there, and the Most-Loved award with it (one transaction
+ * writes both), so the Admin was given two false statements while being asked to
+ * authorise an irreversible write. The only honest way to keep that from
+ * recurring is for the copy to be a function of the ask and for the ask to name
+ * the state, which is why `freezeDone` is part of the key rather than a flag
+ * read at render time.
+ *
+ * THE PODIUM IS HEDGED and the freeze is not, because the console can tell one
+ * and not the other. `frozenAt` is on the document in front of it; whether the
+ * podium Moment has landed is a subcollection query this surface does not make,
+ * and a missing `finaleCompletedAt` means either the Moment is still owed or
+ * only `markFinaleComplete` failed behind it. So "if it has not been posted yet"
+ * is the true form, and a closed Event's finale is never retried — which is what
+ * makes the conditional loss permanent.
+ */
+const ASK_COPY: Record<ArchiveAsk, string> = {
+  'pre-freeze':
+    'The scheduled standings freeze has not run yet. Archive anyway—the podium, the Most-Loved award and the freeze stamp will never arrive.',
+  podium:
+    'The standings freeze has run, but the finale is not recorded as finished. Archive anyway—if the podium has not been posted yet, it never will be.',
+  'podium+email':
+    'The standings freeze has run, but the finale is not recorded as finished and the winner announcement has not finished going out. Archive anyway—if the podium has not been posted yet it never will be, and the rest of the announcement is cancelled permanently.',
+  email:
+    'The winner announcement has not finished going out. Archive anyway—freezing the record cancels the rest of it permanently, and anyone still unsent will never receive it.',
+};
 
 /**
  * Stated identically wherever the oversized record is refused — before the
@@ -724,44 +763,69 @@ export default function ArchiveEvent({
   // owed on either side of `finaleDone` — and the flip cancels it for the whole
   // roster with nothing else on this surface saying so.
   const podiumEmailOwed = podiumEmailPending(event);
-  // WHETHER IT IS ASKED AS ITS OWN QUESTION (Codex P1 on PR #1215). The two
-  // acknowledgements are not mutually exclusive: keying the predicate on
-  // `frozenAt` rather than the completion marker is what closes the window where
-  // the freeze and the podium landed but `markFinaleComplete` did not, and in
-  // that window the pre-finale box is on screen WITH the email owed beside it.
-  // Two boxes over one irreversible write is two chances to read only the first,
-  // so where both apply the finale box carries the announcement clause and this
-  // one stands down — the Admin is asked once, and told both consequences.
+  // Whether the FREEZE TRANSACTION has committed, which is a different fact from
+  // either predicate above and decides what the copy may truthfully claim (Codex
+  // P2 on PR #1215). `frozenAt` and the Most-Loved award are written by ONE
+  // transaction, so a stamped `frozenAt` means both are durable — and a warning
+  // that says the freeze and the award "will never arrive" is false the moment it
+  // is set. It is part of the ASK rather than a separate rendering flag because
+  // the ask is the acknowledgement's key: a fact that changes the copy has to
+  // change the key, or a tick survives a change to what it agreed to.
+  const freezeDone = event?.frozenAt != null;
   //
   // THE ONE QUESTION THIS SURFACE ASKS about the flip, or `null` when it has
-  // none. Exactly one by construction rather than by arrangement: the two
-  // consequences are not mutually exclusive — keying `podiumEmailPending` on
-  // `frozenAt` rather than the completion marker is what closes the window where
-  // the freeze and the podium landed but `markFinaleComplete` did not, and there
-  // both apply at once — so the combined ask states both rather than putting two
-  // boxes over one irreversible write, which is two chances to read only the
-  // first.
+  // none. One rather than several by construction: the consequences are not
+  // mutually exclusive — keying `podiumEmailPending` on `frozenAt` rather than
+  // the completion marker is what closes the window where the freeze and the
+  // podium landed but `markFinaleComplete` did not, and there two of them apply
+  // at once — so a combined ask states both rather than putting two boxes over
+  // one irreversible write, which is two chances to read only the first.
+  //
+  // The four values are the four true things this surface can be asking about:
+  //
+  //   `pre-freeze`     the freeze has not run, so the podium, the Most-Loved
+  //                    award and the freeze stamp are all still to come and the
+  //                    flip forgoes every one of them.
+  //   `podium`         the freeze committed (award included) but the finale is
+  //                    not recorded finished, so only the podium is at risk.
+  //   `podium+email`   that, with the announcement owed beside it.
+  //   `email`          the finale is recorded finished; only the announcement is
+  //                    at risk.
   const ask: ArchiveAsk | null = !finaleDone
-    ? podiumEmailOwed
-      ? 'finale+email'
-      : 'finale'
+    ? freezeDone
+      ? podiumEmailOwed
+        ? 'podium+email'
+        : 'podium'
+      : 'pre-freeze'
     : podiumEmailOwed
       ? 'email'
       : null;
   // The tick is spent only against the question it was given for; see
   // `acknowledged`.
   const acked = ask !== null && acknowledged === ask;
-  // …AND A QUESTION THAT GOES AWAY SPENDS THE TICK TOO (Codex P1 on PR #1215).
-  // Re-keying alone does not cover this: `ask` returning to the SAME value is not
-  // the same asking. `settings.dailyEmailEnabled` is an ordinary admin toggle, so
-  // the announcement question can disappear and come back while this console
-  // watches — and an acknowledgement that survived the gap brought the box back
-  // ALREADY CHECKED, with **Archive now** live beside it, for a warning that was
-  // not on screen when it was given. Clearing on the way out is what makes the
-  // return a fresh ask. A no-op in the ordinary case, where an Event with nothing
-  // to acknowledge has no tick to clear.
+  // …AND EVERY MOVE OF THE ASK SPENDS THE TICK, not only one that ends in `null`
+  // (Codex P1 on PR #1215, round 3). `ask` returning to a value it already had is
+  // not the same asking, and the cycle that proves it never passes through
+  // `null`: on a frozen Event whose finale is not recorded finished, switching
+  // `settings.dailyEmailEnabled` off moves the ask from `podium+email` to
+  // `podium`, and switching it back moves it home — where a stored `podium+email`
+  // matched again, re-checked the box, and re-enabled an irreversible write
+  // nobody had agreed to in this state. Clearing on the way OUT of every ask is
+  // what makes each arrival a fresh question.
+  //
+  // The equality test above is not made redundant by this. That one is what makes
+  // the CURRENT render correct, so the control is never briefly live on a stale
+  // tick in the commit before this effect runs; this one keeps the STORED value
+  // honest, so a later return cannot resurrect it.
+  //
+  // A quiesce is not an ask move — nothing in `ask` reads `status` or `archiving`
+  // — so an armed confirm row is not emptied under a write already in flight, and
+  // the reopen retraction above is not subsumed by this.
+  const askRef = useRef(ask);
   useLayoutEffect(() => {
-    if (ask === null) setAcknowledged(null);
+    if (askRef.current === ask) return;
+    askRef.current = ask;
+    setAcknowledged(null);
   }, [ask]);
   // …and only the FINALE half reaches the writer, because that is the only half
   // with a server-side refusal to override (`finale-pending`). There is no
@@ -924,11 +988,7 @@ export default function ArchiveEvent({
         // that re-keys `ask` spends it (Codex P1 on PR #1215).
         onChange={(e) => setAcknowledged(e.target.checked ? ask : null)}
       />{' '}
-      {ask === 'email'
-        ? 'The winner announcement has not finished going out. Archive anyway—freezing the record cancels the rest of it permanently, and anyone still unsent will never receive it.'
-        : ask === 'finale+email'
-          ? 'The scheduled standings freeze has not run yet, and the winner announcement has not finished going out. Archive anyway—the podium, the Most-Loved award and the freeze stamp will never arrive, and the rest of the announcement is cancelled permanently.'
-          : 'The scheduled standings freeze has not run yet. Archive anyway—the podium, the Most-Loved award and the freeze stamp will never arrive.'}
+      {ASK_COPY[ask]}
     </label>
   );
 
