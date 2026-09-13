@@ -1290,6 +1290,55 @@ describe('buildDailyEmailModel', () => {
     expect(build({ day: cleared }).contextLine).toBe('Day 4 of 4 · Saturday, Jul 18');
   });
 
+  // THE EVENT'S `name` IS THE SAME UNTYPED CLASS as the Place pair above
+  // (#1192). `firestore.rules` carries no `request.resource.data.name is string`
+  // check on any Event arm — the only place Rules type an Event's name is
+  // `completeArchiveRecord`'s frozen `eventName`, a different field on a
+  // different document — so an Admin config write stores whatever it sends and
+  // the footer read it with a bare `.trim()`.
+  it('falls back to the unnamed-Event wording when `name` is not a string, rather than throwing on it', () => {
+    // A map is the shape a localized-name import actually writes; `.trim()` is
+    // not a function on it. Asserted on the footer line, the one module that
+    // quotes the Event's name.
+    const named = { ...gcbEvent, name: { en: 'Trieste → Barcelona' } } as unknown as EmailEvent;
+    const model = build({ event: named });
+    expect(model.footerWhyLine).toBe("You're getting this because you're sailing this event.");
+  });
+
+  it('gives a malformed `name` the SAME wording an absent one gets, which is what makes the fallback silent', () => {
+    // The pair that proves the coercion resolves rather than invents: an Event
+    // that simply has no name, and one whose name is unreadable, are the same
+    // email. A recipient can never be shown a rendered `[object Object]`.
+    const unnamed = build({ event: { ...gcbEvent, name: undefined } });
+    const blank = build({ event: { ...gcbEvent, name: '   ' } });
+    const malformed = build({ event: { ...gcbEvent, name: 42 } as unknown as EmailEvent });
+    expect(malformed.footerWhyLine).toBe(unnamed.footerWhyLine);
+    expect(blank.footerWhyLine).toBe(unnamed.footerWhyLine);
+  });
+
+  // `tonight`'s CONTAINER, not its elements (#1192). The elements were already
+  // `typeof`-checked, and `firestore.rules` looks like it covers the rest —
+  // `dayTonightShapeOk` requires exactly two non-empty strings — but that arm is
+  // reached only when a Day CHANGES, because `dayThemeChangeOk` short-circuits on
+  // `newDay == oldDay` first. An untouched Day, or one written before the rule
+  // existed, still arrives as whatever was stored.
+  it('publishes no Tonight line when `tonight` is not an array, rather than throwing on `.filter`', () => {
+    const mapShaped = { ...gcbDay4, tonight: { a: '💦 Splash T-Dance' } } as unknown as EmailDay;
+    expect(build({ day: mapShaped }).tonightLine).toBeNull();
+    // A bare string is the likelier hand-edit of a two-entry list, and it is the
+    // one that would NOT have thrown: `.filter` is not a string method either.
+    const stringShaped = { ...gcbDay4, tonight: '💦 Splash T-Dance' } as unknown as EmailDay;
+    expect(build({ day: stringShaped }).tonightLine).toBeNull();
+  });
+
+  it('keeps the readable half of a partly malformed `tonight` array, which the container guard does not change', () => {
+    // The element guard is the pre-existing behaviour, and the container guard
+    // must not swallow it: a real list with one bad entry still publishes the
+    // good one rather than dropping the whole line.
+    const mixed = { ...gcbDay4, tonight: ['💦 Splash T-Dance', 0] } as unknown as EmailDay;
+    expect(build({ day: mixed }).tonightLine).toBe('💦 Splash T-Dance');
+  });
+
   it('formats the unlock time in the EVENT timezone, and survives a bogus one', () => {
     expect(formatUnlockTime(DAY4_UNLOCK, 'Europe/Rome')).toBe('8:00 a.m.');
     expect(formatUnlockTime(DAY4_UNLOCK, 'Not/AZone')).toBe('6:00 a.m.'); // falls back to UTC
@@ -2370,6 +2419,42 @@ describe('sendDailyEmailForEvent', () => {
     const { result, sent, db } = await run(docs);
     expect(result).toMatchObject({ sent: 2, failed: 0 });
     expect(sent[0].text).toContain('🇲🇹 Valletta');
+    expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
+    expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
+  });
+
+  // The Event's `name` reaches the same place by the same route (#1192), and the
+  // sweep-level assertion is the load-bearing one for the identical reason: the
+  // footer is built inside `buildDailyEmailModel`, which this loop calls PER
+  // RECIPIENT, so one malformed field on the Event document counted every
+  // recipient `failed`, wrote no `lastSentDayIndex`, and left the Event to replay
+  // the same crash for the whole roster on every following sweep. Reverting the
+  // coercion turns this case into `{ sent: 0, failed: 2 }` with both markers
+  // absent.
+  it('sends the whole roster on an Event whose `name` is malformed, rather than failing every recipient every sweep', async () => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], name: { en: 'Trieste → Barcelona' } };
+    const { result, sent, db } = await run(docs);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent[0].text).toContain("you're sailing this event");
+    expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
+    expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
+  });
+
+  // And so does the Day's `tonight` container, whose Rules arm only ever sees a
+  // CHANGED Day (`dayThemeChangeOk` short-circuits on `newDay == oldDay`), so the
+  // Days most likely to carry a bad one are exactly the untouched ones this sweep
+  // mails every morning.
+  it('sends the whole roster on a Day whose `tonight` is not an array, rather than failing every recipient every sweep', async () => {
+    const docs = seedEvent();
+    const scheduled = gcbEvent.days ?? [];
+    docs['events/med-2026'] = {
+      ...docs['events/med-2026'],
+      days: [...scheduled.slice(0, -1), { ...gcbDay4, tonight: '💦 Splash T-Dance' }],
+    };
+    const { result, sent, db } = await run(docs);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent[0].text).not.toContain('Tonight:');
     expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
     expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
   });
