@@ -1711,6 +1711,31 @@ describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () 
     expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
   });
 
+  it('does NOT promise that nobody still unsent will be mailed', async () => {
+    // Codex P2 on PR #1215 round 4. "Anyone still unsent will never receive it"
+    // is an absolute this surface cannot keep: `sendPodiumEmailForEvent` re-reads
+    // the Event every `LIFECYCLE_RECHECK_EVERY` (25) recipients rather than before
+    // each send, so an archive landing mid-fan-out is honoured at the next
+    // checkpoint and up to a batch of people who were unsent at the flip are
+    // mailed anyway. The email spec documents that overrun deliberately, so the
+    // promise is what had to change.
+    for (const [event, copy] of [
+      [owed(), COPY],
+      [preFinaleOwed(), COMBINED],
+    ] as const) {
+      H.event = event;
+      const view = renderConsole();
+      if (screen.queryByRole('button', { name: 'Archive…' })) {
+        await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+      }
+      expect(screen.getByText(copy)).toBeInTheDocument();
+      expect(screen.getByText(/stops only at its next checkpoint/)).toBeInTheDocument();
+      expect(screen.getByText(/a few more may still be delivered/)).toBeInTheDocument();
+      expect(screen.queryByText(/will never receive it/)).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
   it('SPENDS the tick on a cycle that never passes through "nothing to ask"', async () => {
     // Codex P1 on PR #1215 round 3. Clearing only when the ask became `null` left
     // the reachable cycle open: on a frozen Event whose finale is not recorded

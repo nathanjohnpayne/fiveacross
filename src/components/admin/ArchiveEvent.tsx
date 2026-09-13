@@ -62,6 +62,18 @@ type ArchiveAsk = 'pre-freeze' | 'podium' | 'podium+email' | 'email';
  * the state, which is why `freezeDone` is part of the key rather than a flag
  * read at render time.
  *
+ * THE CANCELLATION IS BOUNDED, NOT IMMEDIATE (Codex P2 on PR #1215, round 4).
+ * "Anyone still unsent will never receive it" was an absolute this surface cannot
+ * keep: `sendPodiumEmailForEvent` re-reads the Event every
+ * `LIFECYCLE_RECHECK_EVERY` recipients (25) rather than before each send, so an
+ * archive landing mid-fan-out is honoured at the next checkpoint and up to a
+ * batch of people who were unsent at the flip are mailed anyway. The email spec
+ * documents that overrun deliberately — the check is a document read against a
+ * loop whose own step is a network send — so the fix belongs in the promise, not
+ * in the sweep. The copy says what is true: the rest is stopped permanently, and
+ * a run already under way stops at its next checkpoint. The bound is described
+ * rather than numbered, so the sentence stays true if that constant moves.
+ *
  * THE PODIUM IS HEDGED and the freeze is not, because the console can tell one
  * and not the other. `frozenAt` is on the document in front of it; whether the
  * podium Moment has landed is a subcollection query this surface does not make,
@@ -76,9 +88,9 @@ const ASK_COPY: Record<ArchiveAsk, string> = {
   podium:
     'The standings freeze has run, but the finale is not recorded as finished. Archive anyway—if the podium has not been posted yet, it never will be.',
   'podium+email':
-    'The standings freeze has run, but the finale is not recorded as finished and the winner announcement has not finished going out. Archive anyway—if the podium has not been posted yet it never will be, and the rest of the announcement is cancelled permanently.',
+    'The standings freeze has run, but the finale is not recorded as finished and the winner announcement has not finished going out. Archive anyway—if the podium has not been posted yet it never will be, and the rest of the announcement is stopped permanently, though a fan-out already under way stops only at its next checkpoint, so a few more may still be delivered.',
   email:
-    'The winner announcement has not finished going out. Archive anyway—freezing the record cancels the rest of it permanently, and anyone still unsent will never receive it.',
+    'The winner announcement has not finished going out. Archive anyway—freezing the record stops the rest of it permanently, though a fan-out already under way stops only at its next checkpoint, so a few more may still be delivered.',
 };
 
 /**
