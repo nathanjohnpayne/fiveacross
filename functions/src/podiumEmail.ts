@@ -612,6 +612,8 @@ export async function sendPodiumEmailForEvent(
   let stoppedEarly = false;
   /** Whether the one-shot pre-first-message guard has run. */
   let guardedBeforeFirstSend = false;
+  // Paired with the flag above: the post-freeze re-check is also once per Event.
+  let reguardedAfterFreeze = false;
   for (const player of input.ranked) {
     if (examined >= maxRecipients) {
       console.error(
@@ -884,6 +886,41 @@ export async function sendPodiumEmailForEvent(
         // with no record of what was accepted. An open question, not a skip.
         result.blocked++;
         continue;
+      }
+      // AND CHECKED ONCE MORE AFTER THE FREEZE (Codex P2, final round). Moving
+      // `freezeOrReplay` behind the guard — so a cancelled send leaves no frozen
+      // request — traded one window for another: the guard now has two remote
+      // operations after it, and an archive or disable landing while the freeze
+      // awaits was still crossed. This closes the freeze's half of that.
+      //
+      // It sits BEFORE the attempt stamp, not after, for the reason the first
+      // guard does: a check that can cancel must not follow the write that starts
+      // a 24-hour clock, or a cancelled recipient is charged for an attempt that
+      // never happened. So the residual is exactly the stamp transaction's own
+      // duration — one transaction rather than a create plus a transaction — and
+      // it is stated rather than claimed away. Closing it completely would mean
+      // reading the Event inside the attempt transaction, which couples the
+      // opt-out store to Event lifecycle semantics for a window of milliseconds.
+      //
+      // Cheap because it is per EVENT, not per recipient: this whole branch runs
+      // only for the first deliverable recipient.
+      if (guardedBeforeFirstSend && !reguardedAfterFreeze) {
+        const afterFreeze = (await db.doc(`events/${eventId}`).get()).data() as
+          | PodiumEmailEvent
+          | undefined;
+        reguardedAfterFreeze = true;
+        if (eventClosedToPlay(afterFreeze)) {
+          console.log(`sendPodiumEmailForEvent ${eventId}: archived while the request was frozen`);
+          result.reason = 'archived';
+          stoppedEarly = true;
+          break;
+        }
+        if (!dailyEmailEnabled(afterFreeze as Parameters<typeof dailyEmailEnabled>[0])) {
+          console.log(`sendPodiumEmailForEvent ${eventId}: disabled while the request was frozen`);
+          result.reason = 'disabled';
+          stoppedEarly = true;
+          break;
+        }
       }
       // THE DEADLINE IS RECORDED ONLY ONCE A SEND IS ACTUALLY IMMINENT (Codex
       // P2, current head). It used to be written BEFORE the freeze, so an outbox
@@ -1326,13 +1363,30 @@ function awardFingerprintOf(award: VisibleMostLovedAward | null | undefined): st
   // Canonical JSON for the same reason the record fingerprint uses it (Codex P2 +
   // CodeRabbit P1, final round): these tuples carry participant-controlled text,
   // and a delimiter join lets a crafted name collide with a different award.
-  return JSON.stringify(
+  //
+  // THE AWARD-LEVEL VALUES BELONG HERE TOO (Codex P2, third raise). I rebutted
+  // this twice, on the grounds that the Event-level record fingerprint already
+  // covers the counts and that refusing a replay over a recount would cost a
+  // recipient. The first half was wrong: that guard compares two reads taken
+  // inside ONE sweep, so it cannot see a change that landed between a failed
+  // attempt and its retry — and THIS fingerprint is the only thing that spans
+  // sweeps. The second half was inconsistent, because the Event-level guard
+  // already aborts the entire sweep over the same field, so the same change
+  // stopped everybody or nobody depending purely on its timing. `mostLovedLineFor`
+  // renders the heart count and the tie sentence, so they are rendered fields by
+  // the same test the winner tuples pass. Covering them puts a count change on the
+  // documented footing every other stale input has: block that recipient loudly
+  // for an operator rather than mail a number the record no longer says.
+  return JSON.stringify([
     award.winners.map((w) =>
       [w.proofId, w.proofCreatedAt, w.uid, w.displayName, w.promptText, w.dayIndex].map((v) =>
         String(v),
       ),
     ),
-  );
+    String(award.heartCount),
+    String(award.winnerCount),
+    String(award.winnerCountExact),
+  ]);
 }
 
 /**

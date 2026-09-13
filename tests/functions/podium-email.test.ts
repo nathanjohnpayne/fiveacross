@@ -309,6 +309,100 @@ describe('the guards the final round closed (#1192, final round)', () => {
     }
   });
 
+  it('stops when the Event is disabled while the request is being frozen', async () => {
+    // The window the freeze reorder opened: the first guard has already passed, and
+    // the disable lands while `freezeOrReplay` awaits. Driven from the outbox write
+    // itself, which is the operation inside that window.
+    const docs = seedDue();
+    const db = makeDb(docs);
+    const realDoc = db.doc;
+    db.doc = ((path: string) => {
+      const ref = realDoc(path);
+      if (!path.includes('/podiumEmailOutbox/')) return ref;
+      return {
+        ...ref,
+        create: async (data: Record<string, unknown>) => {
+          const out = await ref.create(data);
+          (db.docs['events/med-2026'] as Record<string, unknown>).settings = {
+            dailyEmailEnabled: false,
+          };
+          return out;
+        },
+      };
+    }) as typeof db.doc;
+
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(db, 'med-2026', input(), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    expect(sent).toHaveLength(0);
+    expect(result.reason).toBe('disabled');
+    expect(result.drained).toBe(false);
+    // No attempt stamp either: the re-check sits ahead of the stamp for the same
+    // reason the first guard does.
+    expect(db.docs['events/med-2026/emailPrefs/zac']?.podiumEmailFirstAttemptAt).toBeUndefined();
+  });
+
+  it('refuses to replay a frozen request whose heart count has moved', async () => {
+    const docs = seedDue({
+      mostLovedPhoto: {
+        winners: [
+          {
+            proofId: 'p1',
+            uid: 'ido',
+            displayName: 'Ido Marcus',
+            promptText: 'Mirror-hall selfie',
+            dayIndex: 6,
+            proofCreatedAt: 500,
+          },
+        ],
+        winnerCount: 1,
+        heartCount: 31,
+        frozenAt: 2_000,
+      },
+    });
+    // Freeze for real with heartCount 31, transport failing.
+    const first = await run(docs, { send: async () => false });
+    expect(first.result.failed).toBe(3);
+
+    // A later sweep whose award carries a DIFFERENT count, same winner tuples.
+    const sent: Captured[] = [];
+    const result = await sendPodiumEmailForEvent(first.db, 'med-2026', input({
+      mostLoved: {
+        winners: [
+          {
+            proofId: 'p1',
+            uid: 'ido',
+            displayName: 'Ido Marcus',
+            promptText: 'Mirror-hall selfie',
+            dayIndex: 6,
+            proofCreatedAt: 500,
+          },
+        ],
+        winnerCount: 1,
+        heartCount: 99,
+        frozenAt: 2_000,
+        computedAt: 2_050,
+      },
+    }), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push({ ...args, from: args.from ?? '', idempotencyKey: args.idempotencyKey ?? '' });
+        return true;
+      },
+    });
+
+    // Blocked rather than mailing a heart count the record no longer states. The
+    // Event-level guard cannot see this: it compares two reads from ONE sweep.
+    expect(sent).toHaveLength(0);
+    expect(result.blocked).toBe(3);
+  });
+
   it('refuses to replay a frozen request after the unsubscribe capability moves', async () => {
     // Frozen for real, then retried with a DIFFERENT unsubscribe base URL — which
     // is a deploy param, so an ordinary config or domain change moves it between a
