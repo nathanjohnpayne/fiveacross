@@ -1510,6 +1510,343 @@ describe('ArchiveEvent — the pre-finale acknowledgement (#1151)', () => {
   });
 });
 
+// #1192, routed here from Codex's P1 on PR #1207. `podiumAnnouncementEmail` is
+// its own quarter-hour sweep rather than a finale beat, so an Event can be owed
+// its last email on either side of the finale gate. Archival is terminal for
+// that send, so the flip cancels what is left of it for the roster and, until
+// this warning, said nothing.
+describe('ArchiveEvent — the unsent-announcement acknowledgement (#1192)', () => {
+  const owed = (over: Partial<EventDoc> = {}) =>
+    mkEvent({
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+      ...over,
+    } as Partial<EventDoc>);
+  /** The window `markFinaleComplete` failed in: the freeze and the podium both
+   *  landed, the completion marker never did, and the email is owed beside a
+   *  finale gate that is still unsatisfied. */
+  const preFinaleOwed = () =>
+    ({
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+      frozenAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    }) as EventDoc;
+  /** The announcement asked ALONE (the finale gate is satisfied). */
+  const COPY = /The winner announcement has not finished going out\. Archive anyway/;
+  /** The finale asked alone (no announcement owed). */
+  const FINALE_COPY = /The scheduled standings freeze has not run yet\. Archive anyway/;
+  /** Both consequences in ONE question, for the window the marker failed in —
+   *  and it says the freeze HAS run, because by then it has. */
+  const COMBINED =
+    /The standings freeze has run, but the finale is not recorded as finished and the winner announcement has not finished going out/;
+  /** The freeze committed with the finale unrecorded and no announcement owed:
+   *  the podium is the only thing still at risk, and the copy says so rather
+   *  than claiming the freeze and the award are still to come. */
+  const PODIUM_ONLY =
+    /The standings freeze has run, but the finale is not recorded as finished\. Archive anyway/;
+
+  it('will not archive with the announcement still owed without an explicit acknowledgement', async () => {
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    // …and it is the ONLY question on screen: the finale gate is satisfied here,
+    // so its box stands down and this one is asked on its own.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.queryByText(FINALE_COPY)).not.toBeInTheDocument();
+    expect(H.archiveEvent).not.toHaveBeenCalled();
+  });
+
+  it('archives once the Admin ticks it — and tells the writer NOTHING about it', async () => {
+    // The archive gate is deliberately unchanged (specs/daily-engagement-email.md
+    // § "Archival is terminal for this send"): `finaleCompletedAt` must not wait
+    // on this email, so a permanently failing transport cannot block the flip.
+    // The acknowledgement therefore holds this surface's door and reaches no
+    // further — `beforeFinale` stays false, because the finale itself HAS run.
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: false,
+    });
+  });
+
+  it('offers the same acknowledgement on the CLOSING surface, and archives once it is given', async () => {
+    // The surface an Admin who has already used Close play cannot leave — the
+    // #1162 failure mode the finale box was fixed for. Same control, same copy.
+    H.event = owed({ archiving: true, archiveToken: 1 });
+    renderConsole();
+    expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Freeze the record now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+  });
+
+  it('asks ONE question when the marker failed over a landed freeze, not two', async () => {
+    // Codex P1 on PR #1215. `markFinaleComplete` can fail over a freeze and a
+    // podium that both landed, which leaves the finale gate unsatisfied WITH the
+    // email genuinely owed beside it — the two predicates overlap here. Two boxes
+    // over one irreversible write is two chances to read only the first, so the
+    // finale box carries the announcement clause and the standalone one stands
+    // down. One tick, and it is the one the writer's own gate needs.
+    H.event = preFinaleOwed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.queryByText(FINALE_COPY)).not.toBeInTheDocument();
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: true,
+    });
+  });
+
+  it('says nothing about the announcement in the finale box when none is owed', async () => {
+    // The control for the clause above: an ordinary pre-finale Event that mails
+    // nobody is asked exactly what it was asked before this shipped.
+    H.event = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+    } as EventDoc;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(COMBINED)).not.toBeInTheDocument();
+  });
+
+  it('asks nothing once the fan-out has stamped its marker — the control', async () => {
+    H.event = owed({ podiumEmailAt: 8_200 });
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('asks nothing on an Event that mails nobody', async () => {
+    // The toggle is the only thing that decides whether anyone is emailed at
+    // all, and it ships off. An Event with it off has no announcement to lose,
+    // so warning about one would be a box to tick on every ordinary archive.
+    H.event = mkEvent();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.queryByText(COPY)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('forgets the acknowledgement when the confirm row is cancelled', async () => {
+    // The tick describes the Event on screen at the tap, exactly as the finale
+    // box does — an Admin who backs out and arms again is asked again.
+    H.event = owed();
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('SPENDS the tick when the freeze lands under it and the question changes', async () => {
+    // Codex P1 on PR #1215. The tick has to describe the Event on screen at the
+    // tap, and a boolean cannot: an Admin who ticked the pre-finale box before
+    // the freeze kept **Archive now** enabled when `frozenAt` landed under them,
+    // while the label silently gained the announcement consequence their tick had
+    // never mentioned. The acknowledgement is stored as the QUESTION it answered,
+    // so the re-key spends it.
+    const preFinale = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+      settings: { dailyEmailEnabled: true, reportHideThreshold: 3 },
+    } as EventDoc;
+    H.event = preFinale;
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    // The freeze commits while the confirm row is armed, with the completion
+    // marker still to come — the question becomes the combined one.
+    view.rerender(<ArchiveEvent {...props({ ...preFinale, frozenAt: 8_000 } as EventDoc)} />);
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('SPENDS the tick when the warning goes off screen and comes back', async () => {
+    // Codex P1 on PR #1215, the reversible half. `dailyEmailEnabled` is an
+    // ordinary admin toggle, so the announcement question can disappear and
+    // return — and a surviving boolean brought the box back ALREADY CHECKED for a
+    // warning that had not been on screen when it was ticked.
+    H.event = owed();
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    // Another Admin switches the daily email off: nothing is owed, nothing asked.
+    view.rerender(
+      <ArchiveEvent
+        {...props(mkEvent({ settings: { dailyEmailEnabled: false, reportHideThreshold: 3 } } as Partial<EventDoc>))}
+      />,
+    );
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    // …and back on again.
+    view.rerender(<ArchiveEvent {...props(owed())} />);
+    expect(screen.getByText(COPY)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('does NOT promise that nobody still unsent will be mailed', async () => {
+    // Codex P2 on PR #1215 round 4. "Anyone still unsent will never receive it"
+    // is an absolute this surface cannot keep: `sendPodiumEmailForEvent` re-reads
+    // the Event every `LIFECYCLE_RECHECK_EVERY` (25) recipients rather than before
+    // each send, so an archive landing mid-fan-out is honoured at the next
+    // checkpoint and up to a batch of people who were unsent at the flip are
+    // mailed anyway. The email spec documents that overrun deliberately, so the
+    // promise is what had to change.
+    for (const [event, copy] of [
+      [owed(), COPY],
+      [preFinaleOwed(), COMBINED],
+    ] as const) {
+      H.event = event;
+      const view = renderConsole();
+      if (screen.queryByRole('button', { name: 'Archive…' })) {
+        await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+      }
+      expect(screen.getByText(copy)).toBeInTheDocument();
+      expect(screen.getByText(/stops only at its next checkpoint/)).toBeInTheDocument();
+      expect(screen.getByText(/a few more may still be delivered/)).toBeInTheDocument();
+      expect(screen.queryByText(/will never receive it/)).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it('SPENDS the tick on a cycle that never passes through "nothing to ask"', async () => {
+    // Codex P1 on PR #1215 round 3. Clearing only when the ask became `null` left
+    // the reachable cycle open: on a frozen Event whose finale is not recorded
+    // finished, switching the daily email off moves the ask from `podium+email` to
+    // `podium` — never to `null` — and switching it back matched the stored value
+    // again, re-checking the box and re-enabling an irreversible write nobody had
+    // agreed to in this state. Every move of the ask spends the tick.
+    const owedPodium = preFinaleOwed();
+    H.event = owedPodium;
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox'));
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+    // The toggle off: still a question, a DIFFERENT one, and never `null`.
+    const emailOff = {
+      ...owedPodium,
+      settings: { dailyEmailEnabled: false, reportHideThreshold: 3 },
+    } as EventDoc;
+    view.rerender(<ArchiveEvent {...props(emailOff)} />);
+    expect(screen.getByText(PODIUM_ONLY)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    // …and back on, to the ask the tick was originally given for.
+    view.rerender(<ArchiveEvent {...props(owedPodium)} />);
+    expect(screen.getByText(COMBINED)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeDisabled();
+  });
+
+  it('does NOT claim the freeze and the award are still to come once they are durable', async () => {
+    // Codex P2 on PR #1215. `frozenAt` and the Most-Loved award are written by ONE
+    // transaction, so after the freeze commits both are durable — and the
+    // pre-freeze sentence ("the podium, the Most-Loved award and the freeze stamp
+    // will never arrive") is two false statements put to an Admin who is being
+    // asked to authorise an irreversible write. The podium stays HEDGED, because
+    // whether the Moment landed is a subcollection this surface does not read.
+    H.event = {
+      ...preFinaleOwed(),
+      settings: { dailyEmailEnabled: false, reportHideThreshold: 3 },
+    } as EventDoc;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(PODIUM_ONLY)).toBeInTheDocument();
+    expect(screen.queryByText(FINALE_COPY)).not.toBeInTheDocument();
+    expect(screen.queryByText(/the Most-Loved award/)).not.toBeInTheDocument();
+    expect(screen.getByText(/if the podium has not been posted yet/)).toBeInTheDocument();
+    // …and it is still the finale half the writer is told about.
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledTimes(1));
+    expect(H.archiveEvent).toHaveBeenCalledWith(1, {
+      eventId: 'test-event',
+      beforeFinale: true,
+    });
+  });
+
+  it('KEEPS the pre-freeze copy while the freeze really has not run — the control', async () => {
+    H.event = {
+      name: 'Test Event',
+      status: 'active',
+      standingsFreezeAt: 8_000,
+    } as EventDoc;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    expect(screen.getByText(FINALE_COPY)).toBeInTheDocument();
+    expect(screen.getByText(/the Most-Loved award/)).toBeInTheDocument();
+  });
+
+  it('KEEPS the tick while the question is unchanged, so an unrelated edit is not a re-ask', async () => {
+    // The control for the two above: re-keying must spend a tick when the
+    // question moves, not whenever the Event document does. An Event renamed or
+    // re-banned under an armed confirm row asks the same thing it already asked.
+    H.event = owed();
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('checkbox'));
+    view.rerender(<ArchiveEvent {...props(owed({ name: 'Renamed Event' }))} />);
+    expect(screen.getByRole('checkbox')).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Archive the Event now' })).toBeEnabled();
+  });
+
+  it('RETRACTS the tick when play is reopened, for both acknowledgements', async () => {
+    // Codex P2 on PR #1215. Both boxes live on the closing surface as well as the
+    // confirm row, and only the confirm row had a way to clear them — this
+    // component stays mounted across the phase move, so an Admin who ticked one
+    // and then pressed **Reopen play** left the tick behind. Closing the Event
+    // again later put the box back ALREADY CHECKED with **Freeze the record** live
+    // beside it: an irreversible write one click away over a consequence nobody
+    // acknowledged in this flow.
+    for (const seed of [owed, preFinaleOwed]) {
+      H.writes = [];
+      H.event = { ...seed(), archiving: true, archiveToken: 1 } as EventDoc;
+      const view = renderConsole();
+      await userEvent.click(screen.getByRole('checkbox'));
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
+      // The reopen the Admin chooses instead of freezing, and the listener
+      // swapping the surface under them.
+      await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
+      await waitFor(() => expect(H.writes).toContain('abandon'));
+      view.rerender(<ArchiveEvent {...props(seed())} />);
+      // …and the Event shut again later, by this Admin or another.
+      view.rerender(
+        <ArchiveEvent {...props({ ...seed(), archiving: true, archiveToken: 2 } as EventDoc)} />,
+      );
+      expect(screen.getByRole('checkbox')).not.toBeChecked();
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeDisabled();
+      view.unmount();
+    }
+  });
+});
+
 // CodeRabbit Major on PR #1162. The writer's server reads are taken after the
 // quiesce, so one that does not answer used to throw straight out of
 // `archiveEvent`: `runArchive` never saw a result, the automatic reopen never

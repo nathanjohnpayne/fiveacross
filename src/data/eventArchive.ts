@@ -449,6 +449,70 @@ export function finaleHasRun(
 }
 
 /**
+ * Is the winner-announcement email still OWED on this Event? (#1192, routed
+ * here from Codex's P1 on PR #1207.)
+ *
+ * `finaleHasRun` and this ask different questions about the same stretch of an
+ * Event's ending, and the gap between them is the hazard. The announcement is
+ * not a finale beat: `podiumAnnouncementEmail` is its own scheduled sweep
+ * (`7-59/15 * * * *`), staggered off the finale run. Archival is terminal for
+ * that send by contract (`specs/daily-engagement-email.md` § "Archival is
+ * terminal for this send"), so an Admin who flips while it is owed drops the
+ * Event's last email — permanently, and for everyone past the fan-out's next
+ * lifecycle checkpoint rather than for the whole roster, since
+ * `sendPodiumEmailForEvent` re-reads the Event once a batch rather than before
+ * each send — and nothing on the console said so.
+ *
+ * IT KEYS ON `frozenAt`, NOT ON `finaleCompletedAt` (Codex P1 on PR #1215). The
+ * marker looked like the natural condition, because `markFinaleComplete`
+ * (`functions/src/unlockDay.ts`) stamps it only inside a transaction that has
+ * already observed the posted podium Moment and the freeze — the two conditions
+ * of `podiumEmailInputFor`'s due check this predicate cannot read for itself. But
+ * the entailment only runs one way. `markFinaleComplete` is a transaction that
+ * can fail, and a run whose freeze and Moment both landed while the stamp did
+ * not leaves the email DUE with no marker to see it by. Keying on the marker
+ * answered false for the whole of that window, which is the same silent loss one
+ * beat earlier. `frozenAt` is the condition the marker entails, so this is
+ * strictly broader and still covers every state the marker covers.
+ *
+ * IT IS A WARNING, NOT A GATE, and the distinction is the whole design.
+ * `finaleCompletedAt` deliberately does not wait on this email so that a
+ * permanently failing transport cannot block an irreversible flip — the same
+ * paragraph that names the hazard rejects gating archival on `podiumEmailAt` for
+ * exactly that reason. So this is a predicate the console warns on and
+ * `archiveEvent` knows nothing about: `finaleHasRun` keeps its own contract
+ * unchanged, and no refusal is added to the writer.
+ *
+ * The toggle is read the server's way — explicitly `true`, never merely present
+ * — because `dailyEmailEnabled` (`functions/src/dailyEmail.ts`) is what actually
+ * decides whether anyone is mailed, and a console that read it more loosely
+ * would warn about a send that was never going to happen.
+ *
+ * TWO RESIDUALS, and both over-warn rather than under-warn. A podium Moment that
+ * never landed leaves the send `no-podium` and one that landed with no payload
+ * leaves it `no-payload`; the Moment is a subcollection this surface does not
+ * read, so either Event keeps the acknowledgement on screen for a send that may
+ * never go out. That is the safe direction for a warning the Admin can tick
+ * through in one click, and the opposite direction is the defect this closes.
+ *
+ * The archived case is deliberately the call site's rather than a further fact
+ * here: the fields read the same on a frozen Event as on a live one — the send
+ * was owed and is now lost — so folding the lifecycle in would make the name say
+ * less than the predicate does. `ArchiveEvent` renders no lifecycle
+ * acknowledgement in its archived branch at all, which is where that belongs.
+ */
+export function podiumEmailPending(
+  event:
+    | Partial<Pick<EventDoc, 'frozenAt' | 'podiumEmailAt' | 'settings'>>
+    | null
+    | undefined,
+): boolean {
+  if (event?.frozenAt == null) return false;
+  if (event.podiumEmailAt != null) return false;
+  return event.settings?.dailyEmailEnabled === true;
+}
+
+/**
  * How long a `uid` the frozen record keeps, per row (#1151, Codex P1 on PR
  * #1162).
  *
