@@ -658,8 +658,12 @@ codex:
   # truth moves to this HEAD-pinned required check, which re-evaluates on
   # every push and cannot be satisfied by a stale earlier-HEAD clearance.
   #
-  # Default everywhere except mergepath: false. Same narrow-start posture
-  # as p1_gate above — enabled here first, then propagated.
+  # Enabled here: at a zero approval count, this required check carries
+  # Codex-only Phase 4 clearance only when the existing same-agent and
+  # current-head substitute conditions pass. Phase 4b still applies when
+  # required by fallback or complex-change policy; all other gates remain.
+  # Approval-count alignment requires canary evidence before a live change:
+  # https://github.com/nathanjohnpayne/mergepath/issues/1059#issuecomment-5658411944
   external_review_gate:
     enabled: true
 
