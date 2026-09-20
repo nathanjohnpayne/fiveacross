@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   lastCallStandingsCopy,
   buildPodiumPayload,
+  anyMarksRecorded,
   freezePhraseForUnlock,
   normalizeTimezone,
   DEFAULT_FREEZE_PHRASE,
@@ -243,5 +244,71 @@ describe('buildPodiumPayload', () => {
 
   it('returns a null champion for an empty board', () => {
     expect(buildPodiumPayload([player({ uid: 'ghost' })], DAYS, []).champion).toBeNull();
+  });
+});
+
+// #1192, Codex P2 on PR #1207. `champion == null` was being read as proof that
+// nobody played, and the two are different questions: the champion is the head of
+// the standings with every ceremonial Day's contribution removed, so an Event
+// whose only play sits on a ceremonial Day has no champion and was plainly
+// played. The payload states the second fact rather than leaving it to be
+// inferred from the first.
+describe('anyMarksRecorded — the Marks question, not the scoring one', () => {
+  it('reads a legacy row with no buckets by its roots, either count', () => {
+    expect(anyMarksRecorded(player({ uid: 'a', bingoCount: 1 }))).toBe(true);
+    expect(anyMarksRecorded(player({ uid: 'b', squaresMarked: 1 }))).toBe(true);
+    expect(anyMarksRecorded(player({ uid: 'c' }))).toBe(false);
+  });
+
+  it('reads a bucket a lagging root denies, and an empty map as no Marks', () => {
+    expect(
+      anyMarksRecorded(player({ uid: 'a', dayStats: { 2: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } } })),
+    ).toBe(true);
+    expect(anyMarksRecorded(player({ uid: 'b', dayStats: {} }))).toBe(false);
+  });
+
+  it('counts a CEREMONIAL Day s Marks, which no scoring total can see', () => {
+    // Day 2 is the ceremonial one in `DAYS`. `podiumStandingRow` drops its
+    // bucket; this must not.
+    const ceremonialOnly = player({
+      uid: 'logan',
+      bingoCount: 1,
+      squaresMarked: 7,
+      firstBingoAt: NOW,
+      dayStats: { 2: { bingoCount: 1, squaresMarked: 7, firstBingoAt: NOW } },
+    });
+    expect(anyMarksRecorded(ceremonialOnly)).toBe(true);
+    const payload = buildPodiumPayload([ceremonialOnly], DAYS, []);
+    // The two facts that used to be conflated, from one call.
+    expect(payload.champion).toBeNull();
+    expect(payload.playRecorded).toBe(true);
+  });
+
+  it('reads a malformed or negative count as no Marks rather than from noise', () => {
+    const noisy = { uid: 'x', displayName: 'X', firstBingoAt: null } as unknown as FinalePlayer;
+    expect(anyMarksRecorded({ ...noisy, bingoCount: Number.NaN, squaresMarked: Number.NaN })).toBe(false);
+    expect(anyMarksRecorded({ ...noisy, bingoCount: -5, squaresMarked: -5 })).toBe(false);
+  });
+
+  it('does not throw on a bucket the read boundary would have dropped', () => {
+    // This reads `dayStats` UNCONDITIONALLY, where `podiumStandingRow` reads it
+    // only on a schedule with a ceremonial Day — so a roster that skipped
+    // `sanitizeFinaleDayStats` reaches a bucket the row builder never touches, and
+    // `players/{uid}` validates no field (ADR 0001). One row must not take the
+    // whole finale beat down.
+    const malformed = (dayStats: unknown): FinalePlayer =>
+      ({ uid: 'x', displayName: 'X', bingoCount: 0, squaresMarked: 0, firstBingoAt: null, dayStats }) as unknown as FinalePlayer;
+    for (const shape of [null, undefined, {}, 'nope', 7, [], { 0: null }, { 0: 'nope' }, { 0: [] }]) {
+      expect(anyMarksRecorded(malformed(shape))).toBe(false);
+    }
+    // …and a readable bucket beside a malformed one is still found.
+    expect(
+      anyMarksRecorded(malformed({ 0: null, 1: { bingoCount: 0, squaresMarked: 2, firstBingoAt: null } })),
+    ).toBe(true);
+  });
+
+  it('is false for an empty roster and for a roster nobody played', () => {
+    expect(buildPodiumPayload([], DAYS, []).playRecorded).toBe(false);
+    expect(buildPodiumPayload([player({ uid: 'ghost' })], DAYS, []).playRecorded).toBe(false);
   });
 });

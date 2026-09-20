@@ -126,6 +126,19 @@ export interface BuildPodiumEmailArgs {
    * told every recipient that nobody marked a square, directly above a `youLine`
    * reporting their own non-zero result. The caller knows which it is, because
    * it reads the Moment's payload BEFORE filtering it.
+   *
+   * AND THE CALLER READS A CARRIED FACT, not a third inference (#1192). The
+   * payload states `playRecorded`; this is its negation. `champion` could never
+   * have answered this, ban filter or no: it is the head of the standings with
+   * every ceremonial Day removed, so an Event whose only play sits on ceremonial,
+   * `tutorial: false` Days has no champion and a real ⭐ at once — and the
+   * suppressions below then printed "Nobody marked a square" beside that ⭐.
+   *
+   * WHAT IT SUPPRESSES IS THE CLAIM, NOT THE ZEROS. A board that is all zeros
+   * because every Mark was ceremonial is NOT an empty board: it renders its
+   * honest zero rows and keeps its ⭐, exactly as the daily card's snapshot does
+   * for the same Event (specs/daily-engagement-email.md § "a held ⭐ is never
+   * gated on the score"). Only a board nobody marked at all takes the sentence.
    */
   boardWasEmpty: boolean;
   /**

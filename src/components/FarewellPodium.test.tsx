@@ -63,6 +63,7 @@ const FIXTURE: Podium = {
     firstBingoAt: 1_700_000_000_000 + i,
   })),
   standings: [],
+  playRecorded: true,
 };
 
 describe('FarewellPodiumView', () => {
@@ -87,7 +88,7 @@ describe('FarewellPodiumView', () => {
   it('singularizes a one-bingo champion stat line', () => {
     render(
       <FarewellPodiumView
-        podium={{ champion: { uid: 'x', displayName: 'Solo', bingoCount: 1, squaresMarked: 5 }, firstBingo: null, dailyHonors: [], standings: [] }}
+        podium={{ champion: { uid: 'x', displayName: 'Solo', bingoCount: 1, squaresMarked: 5 }, firstBingo: null, dailyHonors: [], standings: [], playRecorded: true }}
       />,
     );
     expect(screen.getByText('1 bingo · 5 squares')).toBeTruthy();
@@ -115,7 +116,7 @@ describe('FarewellPodiumView', () => {
 
   it('renders nothing for an entirely empty podium', () => {
     const { container } = render(
-      <FarewellPodiumView podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [] }} />,
+      <FarewellPodiumView podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [], playRecorded: false }} />,
     );
     expect(container.querySelector('.farewell-podium')).toBeNull();
   });
@@ -248,7 +249,7 @@ describe('FarewellPodiumView — Most-Loved Photo section (#561)', () => {
   it('an award section keeps an otherwise-empty podium alive (no null short-circuit)', () => {
     const { container } = render(
       <FarewellPodiumView
-        podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [] }}
+        podium={{ champion: null, firstBingo: null, dailyHonors: [], standings: [], playRecorded: false }}
         mostLoved={AWARD_SECTION}
       />,
     );

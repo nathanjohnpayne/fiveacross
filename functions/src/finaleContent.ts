@@ -653,24 +653,66 @@ export interface PodiumHonor {
   at: number;
 }
 export interface PodiumPayload {
-  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` when no
+   *  ranking-eligible play was recorded — which is NOT the same as an empty
+   *  board, see `playRecorded`. */
   champion: PodiumChampion | null;
   /** Event-wide First to BINGO across non-Tutorial Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
   /** Each Day's pinned First to BINGO, sorted by Day index (present honors only). */
   dailyHonors: PodiumHonor[];
+  /** Whether ANY Marks were recorded across the Event as of the freeze — the
+   *  frozen answer to "did anybody play", carried rather than inferred. See
+   *  `anyMarksRecorded`. */
+  playRecorded: boolean;
 }
 
 /**
- * Build the podium payload posted at the 08:00 Day 10 freeze:
+ * Did this Player record ANY Marks — a marked Square or a bingo — on ANY Day?
  *
- *   - champion: the top of the standings re-aggregated to EXCLUDE every ceremonial Day
- *     (its marks are all post-freeze and ceremonial), `null` when nobody has played;
- *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
- *     identity alone never decides the headline honor;
- *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
- *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted).
+ * THE MARKS QUESTION, NOT THE SCORING ONE, and the two are deliberately
+ * different (#1192, Codex P2 on PR #1207). Every other predicate in this file
+ * asks what COUNTS: `podiumStandingRow` drops each ceremonial Day's contribution
+ * and `effectiveFirstBingoAt` drops each Tutorial Day's instant, because ADR 0011
+ * makes pool identity, Tutorial framing and Scoring Policy three independent
+ * facts and the standings answer only to the third. This asks whether anything
+ * HAPPENED, which no exclusion can change: a Player who marked forty Squares on
+ * a ceremonial Day marked forty Squares. The Scoring Policy removed their score,
+ * not their Marks.
+ *
+ * It exists because `champion == null` was being read as proof of an empty board.
+ * On an Event whose only play sits on ceremonial, `tutorial: false` Days — a
+ * shape ADR 0011 explicitly permits — the re-aggregated standings are all zeros
+ * and there is legitimately no champion, while the First to BINGO honour (whose
+ * exclusion is tutorial-only, by design) still names a winner. The two facts are
+ * not in conflict; a surface that treats one as the other is.
+ *
+ * ROOTS OR BUCKETS, either one positive. The root aggregates and the per-Day
+ * breakdown can disagree on a legacy or hybrid row — the state
+ * `playerRowRootLag` exists to detect — and the only claim this answer gates is
+ * "nobody marked a square", so it is refused unless every signal the row has
+ * agrees that nothing was marked. An unreadable count reads `0` at the read
+ * boundary (`withReadableFinaleRanking`) and a negative one is not positive
+ * either way, so a malformed row reads as no Marks on either path rather than
+ * deciding the question from noise.
+ *
+ * The bucket guard is not decoration: this reads the map UNCONDITIONALLY, where
+ * `podiumStandingRow` reads it only on a schedule that has a ceremonial Day to
+ * exclude. So a roster reaching a podium builder WITHOUT passing the read
+ * boundary — a fixture, a future caller, a schedule with nothing to exclude —
+ * hands this a `null` bucket that `podiumStandingRow` would never have touched,
+ * and a throw here would take the whole finale beat or send down for one row.
  */
+export function anyMarksRecorded(
+  player: Pick<FinalePlayer, 'bingoCount' | 'squaresMarked' | 'dayStats'>,
+): boolean {
+  if (player.bingoCount > 0 || player.squaresMarked > 0) return true;
+  for (const stat of Object.values(player.dayStats ?? {})) {
+    if (stat && (stat.bingoCount > 0 || stat.squaresMarked > 0)) return true;
+  }
+  return false;
+}
+
 /**
  * The podium's FULL frozen standings, ranked — every Player's re-aggregated row
  * (ceremonial Days excluded) sorted by `compareFinalePlayers`.
@@ -705,6 +747,32 @@ export function podiumStandings(
     .sort(compareFinalePlayers);
 }
 
+/**
+ * Build the podium payload posted at the 08:00 Day 10 freeze:
+ *
+ *   - champion: the top of the standings re-aggregated to EXCLUDE every ceremonial Day
+ *     (its marks are all post-freeze and ceremonial), `null` when no ranking-eligible
+ *     play was recorded;
+ *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
+ *     identity alone never decides the headline honor;
+ *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
+ *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted);
+ *   - playRecorded: whether ANY Marks were recorded, ceremonial and Tutorial Days
+ *     included — the "did anybody play" fact, stated rather than left to be
+ *     inferred from the three fields above.
+ *
+ * THE LAST OF THOSE IS NOT DERIVABLE FROM THE OTHERS (#1192, Codex P2 on PR
+ * #1207). `champion == null` looks like "nobody played" and is not: the three
+ * fields answer three different questions under three different exclusions, and
+ * on an Event whose only play sits on ceremonial, `tutorial: false` Days — which
+ * ADR 0011 exists to permit — the standings are legitimately empty of scoring
+ * play while `firstBingo` names a real winner. A consumer reading the absence of
+ * a champion as an empty board therefore produced a self-contradictory
+ * winner-announcement email: "Nobody marked a square" printed directly beside
+ * the ⭐ naming the person who bingoed. `playRecorded` is the fact that consumer
+ * actually needs, carried out of the frozen record rather than reconstructed
+ * from its neighbours.
+ */
 export function buildPodiumPayload(
   players: readonly FinalePlayer[],
   days: readonly FinaleDay[] | undefined,
@@ -766,7 +834,15 @@ export function buildPodiumPayload(
     }))
     .sort((a, b) => a.dayIndex - b.dayIndex);
 
-  return { champion, firstBingo, dailyHonors };
+  // OVER THE RAW ROSTER, not over `standings` (#1192). The re-aggregated rows
+  // are exactly where a ceremonial Day's Marks have already been dropped, so
+  // asking them whether anything was marked would reproduce the very inference
+  // this field replaces. The freeze needs no cutoff here for the reason it is a
+  // no-op above: counts carry no instant, the scheduler builds this AT the
+  // freeze, and its input is already frozen.
+  const playRecorded = players.some(anyMarksRecorded);
+
+  return { champion, firstBingo, dailyHonors, playRecorded };
 }
 
 // --- Most-Loved Photo award (#534/#560, specs/most-loved-photo.md) --------------

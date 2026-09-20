@@ -943,6 +943,44 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     });
   });
 
+  // #1192, Codex P2 on PR #1207 — the same seam for the payload's "did anybody
+  // play" fact. A podium Moment is written once and never amended, so if the beat
+  // does not record it, no consumer can recover it: the winner-announcement email
+  // read `champion == null` as an empty board and told every recipient nobody
+  // marked a square, beside the ⭐ naming the person who bingoed.
+  it('posts a Moment recording that the Event was played, even with no champion', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+          // Ceremonial by its stated Policy and NOT a Tutorial Day — the shape
+          // ADR 0011 exists to permit, and the one that splits the two facts.
+          { index: 9, pool: 'main', tutorial: false, scoring: 'ceremonial', unlockAt: D10_UNLOCK },
+        ] as DayLike[],
+      },
+      // Every Mark in the Event sits on that Day, so the re-aggregated standings
+      // are all zeros and there is legitimately no champion.
+      players: [
+        {
+          uid: 'logan',
+          displayName: 'Logan',
+          bingoCount: 1,
+          squaresMarked: 7,
+          firstBingoAt: D10_UNLOCK - 1_000,
+          dayStats: { 9: { bingoCount: 1, squaresMarked: 7, firstBingoAt: D10_UNLOCK - 1_000 } },
+        },
+      ],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
+      podium?: { champion?: unknown; firstBingo?: unknown; playRecorded?: unknown };
+    };
+    expect(podium.podium?.champion).toBeNull();
+    expect(podium.podium?.firstBingo).toMatchObject({ uid: 'logan' });
+    expect(podium.podium?.playRecorded).toBe(true);
+  });
+
   it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {
     const db = makeDb({
       eventId: 'e',

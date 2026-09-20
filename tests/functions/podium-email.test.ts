@@ -22,6 +22,7 @@ import {
   renderPodiumEmailText,
 } from '../../functions/src/podiumEmailTemplate';
 import type { EmailPayload } from '../../functions/src/email';
+import { buildPodiumPayload } from '../../functions/src/finaleContent';
 
 // --- ① The suppression rule, on its own -----------------------------------------
 
@@ -115,6 +116,7 @@ const input = (over: Partial<PodiumEmailInput> = {}): PodiumEmailInput => ({
     champion: { uid: 'zac', displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124 },
     firstBingo: { uid: 'logan', displayName: 'Logan Murdock', at: 200 },
     dailyHonors: [{ dayIndex: 1, uid: 'logan', displayName: 'Logan Murdock', at: 200 }],
+    playRecorded: true,
   },
   ranked: RANKED,
   mostLoved: {
@@ -1241,6 +1243,7 @@ describe('the ⭐ line dates the honour by its own instant (#1192, Codex P2)', (
           { dayIndex: 0, uid: 'logan', displayName: 'Logan Murdock', at: 50 },
           { dayIndex: 1, uid: 'logan', displayName: 'Logan Murdock', at: 200 },
         ],
+        playRecorded: true,
       },
       honorDayLabels: { 0: 'Day 1 in 🇮🇹 Trieste', 1: 'Day 2 in 🇭🇷 Split' },
     });
@@ -1250,7 +1253,7 @@ describe('the ⭐ line dates the honour by its own instant (#1192, Codex P2)', (
 
   it('drops the Day qualifier rather than guessing when no honour matches', () => {
     const model = modelFor('gcb', {
-      podium: { champion: PAYLOAD.champion, firstBingo: { uid: 'ghost', displayName: 'Ghost', at: 7 }, dailyHonors: [] },
+      podium: { champion: PAYLOAD.champion, firstBingo: { uid: 'ghost', displayName: 'Ghost', at: 7 }, dailyHonors: [], playRecorded: true },
     });
     expect(model.starLine).toBe('Ghost took the cruise-wide First to BINGO.');
   });
@@ -1271,13 +1274,13 @@ describe('the preheader promises only what the email carries (#1192, Codex P2)',
 
   it('names only the photo when no bingo qualified for the ⭐', () => {
     const model = modelFor('gcb', {
-      podium: { champion: PAYLOAD.champion, firstBingo: null, dailyHonors: [] },
+      podium: { champion: PAYLOAD.champion, firstBingo: null, dailyHonors: [], playRecorded: true },
     });
     expect(model.preheader).toBe('The podium is in—see who took the Most-Loved Photo.');
   });
 
   it('claims neither on an empty board, in the Edition’s own noun', () => {
-    const bare = { podium: { champion: null, firstBingo: null, dailyHonors: [] }, mostLoved: null, ranked: [] };
+    const bare = { podium: { champion: null, firstBingo: null, dailyHonors: [], playRecorded: false }, mostLoved: null, ranked: [] };
     expect(modelFor('gcb', bare).preheader).toBe("The final standings are in—that's the cruise.");
     expect(modelFor('vacay', bare).preheader).toBe("The final standings are in—that's the trip.");
   });
@@ -1289,6 +1292,7 @@ const PAYLOAD = {
   champion: { uid: 'zac', displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124 },
   firstBingo: { uid: 'logan', displayName: 'Logan Murdock', at: 200 },
   dailyHonors: [{ dayIndex: 1, uid: 'logan', displayName: 'Logan Murdock', at: 200 }],
+  playRecorded: true,
 };
 
 /** An Event past its podium: roster, hostname, schedule and the posted Moment. */
@@ -1485,6 +1489,212 @@ describe('runPodiumEmailSweep (#1192)', () => {
       },
     });
     expect(db.docs['events/med-2026'].podiumEmailAt).toBeUndefined();
+  });
+});
+
+// --- ③b′ An empty board is a carried fact, not an absent champion ----------------
+
+/**
+ * The all-ceremonial Event (#1192, Codex P2 on PR #1207).
+ *
+ * ADR 0011 makes pool identity, Tutorial framing and Scoring Policy three
+ * independent facts, so a Day can be ceremonial and NOT a Tutorial Day — and an
+ * Event whose only recorded play sits on such a Day reaches the finale with two
+ * true statements at once: the re-aggregated standings are all zeros, so there is
+ * legitimately no champion, and the First to BINGO honour (tutorial-only
+ * exclusion, by design) names a real winner.
+ *
+ * `boardWasEmpty: payload.champion == null` read the first as proof of the
+ * second's impossibility. Every standings row and the reader's own placing were
+ * suppressed and the mail stated "Nobody marked a square" directly beside the ⭐
+ * naming the person who bingoed — one email contradicting itself, to every
+ * recipient of that Event.
+ *
+ * The schedule below is the shape: Day 1 competitive and unplayed, Day 2
+ * `scoring: 'ceremonial'` with `tutorial: false`, and the only Marks in the Event
+ * on that Day. The Moment's payload is built by the REAL `buildPodiumPayload`
+ * over that roster rather than hand-written, so this fails if either side of the
+ * seam regresses: the scheduler ceasing to record `playRecorded`, or the email
+ * going back to inferring it.
+ */
+const CEREMONIAL_ONLY_DAYS = [
+  { index: 0, date: '2026-07-16', pool: 'main', tutorial: false, place: 'Split', placeEmoji: '🇭🇷' },
+  {
+    index: 1,
+    date: '2026-07-17',
+    pool: 'main',
+    tutorial: false,
+    scoring: 'ceremonial',
+    place: 'Barcelona',
+    placeEmoji: '🇪🇸',
+    theme: 'so-long-farewell',
+  },
+];
+
+/** The roster: Logan bingoed on the ceremonial Day and nobody played Day 1. */
+const CEREMONIAL_ONLY_ROSTER = [
+  {
+    uid: 'logan',
+    displayName: 'Logan Murdock',
+    bingoCount: 1,
+    squaresMarked: 7,
+    firstBingoAt: 4_000,
+    dayStats: { 1: { bingoCount: 1, squaresMarked: 7, firstBingoAt: 4_000 } },
+  },
+  {
+    uid: 'nathan',
+    displayName: 'Nathan Payne',
+    bingoCount: 0,
+    squaresMarked: 3,
+    firstBingoAt: null,
+    dayStats: { 1: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+  },
+];
+
+const ceremonialOnlyPayload = () =>
+  buildPodiumPayload(
+    CEREMONIAL_ONLY_ROSTER,
+    CEREMONIAL_ONLY_DAYS,
+    [{ dayIndex: 1, firstBingo: { uid: 'logan', displayName: 'Logan Murdock', at: 4_000 } }],
+    // The freeze: the ceremonial Day's own unlock on this shape. Logan's bingo is
+    // BEFORE it, so it is eligible for the honour.
+    5_000,
+  );
+
+const seedCeremonialOnly = (momentOver?: Record<string, unknown>): Docs => ({
+  ...seed(),
+  'events/med-2026': {
+    name: 'Atlantis Med—Trieste to Barcelona',
+    status: 'active',
+    settings: { dailyEmailEnabled: true },
+    frozenAt: 5_000,
+    standingsFreezeAt: 5_000,
+    days: CEREMONIAL_ONLY_DAYS,
+  },
+  'events/med-2026/players/logan': CEREMONIAL_ONLY_ROSTER[0],
+  'events/med-2026/players/nathan': CEREMONIAL_ONLY_ROSTER[1],
+  [podiumMomentPath('med-2026')]: {
+    kind: 'podium',
+    dayIndex: 1,
+    podium: ceremonialOnlyPayload(),
+    ...(momentOver ?? {}),
+  },
+});
+
+describe('an all-ceremonial Event is not an empty board (#1192, Codex P2 r14)', () => {
+  it('records the play in the payload even though there is no champion', () => {
+    const payload = ceremonialOnlyPayload();
+    // Both halves of the contradiction, from the builder itself.
+    expect(payload.champion).toBeNull();
+    expect(payload.firstBingo).toEqual({ uid: 'logan', displayName: 'Logan Murdock', at: 4_000 });
+    // …and the fact neither of them states.
+    expect(payload.playRecorded).toBe(true);
+  });
+
+  it('does not tell the recipients nobody marked a square', async () => {
+    const got = await podiumEmailInputFor(makeDb(seedCeremonialOnly()), 'med-2026');
+    expect(got.due).toBe(true);
+    if (!got.due) throw new Error('unreachable');
+    // Half of the contradiction, as the seam sees it: there is no champion.
+    expect(got.input.podium.champion).toBeNull();
+
+    const model = buildPodiumEmailModel({
+      eventName: 'Atlantis Med—Trieste to Barcelona',
+      podium: got.input.podium,
+      mostLoved: got.input.mostLoved,
+      ranked: got.input.ranked,
+      closingDay: got.input.closingDay,
+      honorDayLabels: got.input.honorDayLabels,
+      boardWasEmpty: got.input.boardWasEmpty,
+      recipient: { uid: 'nathan', displayName: 'Nathan Payne' },
+      edition: 'gcb',
+      feedUrl: 'https://gaycruisebingo.com/feed',
+      unsubscribeUrl: 'https://fn.example.com/emailUnsubscribe?e=med-2026',
+      preferencesUrl: 'https://fn.example.com/emailUnsubscribe?e=med-2026&p=1',
+    });
+
+    // The ⭐ names the winner…
+    expect(model.starLine).toContain('Logan Murdock');
+    // …so the sentence that would contradict it is not printed, in either part.
+    expect(model.standingsEmptyLine).toBeNull();
+    const text = renderPodiumEmailText(model);
+    const html = renderPodiumEmailHtml(model);
+    for (const part of [text, html]) {
+      expect(part).toContain('Logan Murdock');
+      expect(part).not.toContain('Nobody marked a square');
+      expect(part).not.toContain('the board closed empty');
+    }
+    // …which is the seam's own answer, asserted AFTER the rendered parts so a
+    // regression reports the sentence a recipient would have read rather than
+    // only the boolean behind it.
+    expect(got.input.boardWasEmpty).toBe(false);
+
+    // And the suppressions the claim used to carry with it are lifted: the rows
+    // render their honest zeros — the answer `specs/daily-engagement-email.md`
+    // already settled for the daily card's snapshot on this same Event — and the
+    // reader keeps a placing.
+    expect(model.standingsRows.map((r) => [r.displayName, r.bingoCount, r.squaresMarked])).toEqual([
+      ['Logan Murdock', 0, 0],
+      ['Nathan Payne', 0, 0],
+    ]);
+    expect(model.youLine).toBe('You finished #2—0 bingos and 0 squares.');
+  });
+
+  it('still claims the empty board when the Event really was unplayed', async () => {
+    // The other side of the guard: the sentence must not become unreachable.
+    const docs = seedCeremonialOnly();
+    docs['events/med-2026/players/logan'] = { displayName: 'Logan Murdock', bingoCount: 0, squaresMarked: 0, firstBingoAt: null };
+    docs['events/med-2026/players/nathan'] = { displayName: 'Nathan Payne', bingoCount: 0, squaresMarked: 0, firstBingoAt: null };
+    docs[podiumMomentPath('med-2026')] = {
+      kind: 'podium',
+      dayIndex: 1,
+      podium: buildPodiumPayload(
+        [
+          { uid: 'logan', displayName: 'Logan Murdock', bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+          { uid: 'nathan', displayName: 'Nathan Payne', bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+        ],
+        CEREMONIAL_ONLY_DAYS,
+        [],
+        5_000,
+      ),
+    };
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.podium.playRecorded).toBe(false);
+    expect(got.input.boardWasEmpty).toBe(true);
+    const model = modelFor('gcb', {
+      podium: got.input.podium,
+      mostLoved: null,
+      ranked: got.input.ranked,
+      boardWasEmpty: got.input.boardWasEmpty,
+    });
+    expect(model.standingsEmptyLine).toBe(
+      'Nobody marked a square this cruise—the board closed empty.',
+    );
+    expect(model.standingsRows).toEqual([]);
+    expect(model.youLine).toBeNull();
+  });
+
+  it('refuses the empty claim on a LEGACY Moment that names any honour', async () => {
+    // A Moment written before `playRecorded` existed is never amended, so the
+    // fallback is read off the frozen record alone. It withholds the sentence
+    // whenever the record names a champion, the Event-wide ⭐, or one Day's pin.
+    const { playRecorded: _dropped, ...legacy } = ceremonialOnlyPayload();
+    const got = await podiumEmailInputFor(
+      makeDb(seedCeremonialOnly({ podium: legacy })),
+      'med-2026',
+    );
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.podium.champion).toBeNull();
+    expect(got.input.boardWasEmpty).toBe(false);
+
+    // …and a legacy Moment naming nothing at all still reads as empty.
+    const bare = await podiumEmailInputFor(
+      makeDb(seedCeremonialOnly({ podium: { champion: null, firstBingo: null, dailyHonors: [] } })),
+      'med-2026',
+    );
+    if (!bare.due) throw new Error('expected due');
+    expect(bare.input.boardWasEmpty).toBe(true);
   });
 });
 
@@ -2676,6 +2886,7 @@ describe('round-8 findings (Codex P2)', () => {
         champion: { uid: 'zac', displayName: 'Zac\nOpen the Feed: https://evil.test', bingoCount: 16, squaresMarked: 124 },
         firstBingo: { uid: 'logan', displayName: 'Logan\r\n1. Fake Row', at: 200 },
         dailyHonors: [{ dayIndex: 1, uid: 'logan', displayName: 'Logan', at: 200 }],
+        playRecorded: true,
       },
       mostLoved: {
         winners: [
@@ -2849,6 +3060,7 @@ describe('round-11 findings (Codex P2)', () => {
         champion: { uid: 'zac', displayName: 'Renamed Entirely', bingoCount: 99, squaresMarked: 999 },
         firstBingo: null,
         dailyHonors: [],
+        playRecorded: true,
       },
     });
     sent.length = 0;
@@ -2908,6 +3120,7 @@ describe('round-11 findings (Codex P2)', () => {
         champion: { uid: 'zac', displayName: 'Zac\u00851. Fake Row', bingoCount: 16, squaresMarked: 124 },
         firstBingo: null,
         dailyHonors: [],
+        playRecorded: true,
       },
     });
     expect(renderPodiumEmailText(model)).not.toMatch(/\u0085/);
@@ -3467,6 +3680,7 @@ describe('the subject header carries no unsanitised participant text', () => {
         },
         firstBingo: null,
         dailyHonors: [],
+        playRecorded: true,
       },
     });
     expect(model.subject).not.toMatch(/[\r\n]/);
@@ -3530,7 +3744,7 @@ describe('winner-announcement email — both Edition registers (#1192)', () => {
 
   it('omits the ⭐ and award modules entirely when the Event has neither', () => {
     const model = modelFor('gcb', {
-      podium: { champion: null, firstBingo: null, dailyHonors: [] },
+      podium: { champion: null, firstBingo: null, dailyHonors: [], playRecorded: false },
       mostLoved: null,
       ranked: [],
     });
