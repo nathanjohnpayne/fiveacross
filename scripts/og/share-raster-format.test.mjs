@@ -65,17 +65,23 @@ describe('assertCapturedCardFormat (#887)', () => {
     );
   });
 
-  it('is called by the renderer before it replaces the committed picture', () => {
-    // The guard only helps if it runs while the capture is still staged: a
-    // check after `renameSync` is a report on a file that has already been
-    // overwritten.
+  it('is called by the renderer while the capture is still staged', () => {
+    // The guard only helps if it runs before the publish step: a check after
+    // the rename is a report on a file that has already been overwritten. The
+    // renderer no longer renames inline — every target is validated into a
+    // scratch file and the whole batch is published by one `commit(staged)`
+    // call afterwards (#887 round 3) — so what this pins is that the guard
+    // sits on the staging side of that call.
     const code = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), 'render-share-rasters.mjs'),
       'utf8',
     );
     const guard = code.indexOf('assertCapturedCardFormat(id, header');
-    const replace = code.indexOf('renameSync(scratch, dest)');
+    const publish = code.indexOf('commit(staged)');
     expect(guard).toBeGreaterThan(-1);
-    expect(replace).toBeGreaterThan(guard);
+    expect(publish).toBeGreaterThan(guard);
+    // And nothing in the renderer replaces a committed picture on its own any
+    // more; `commitStaged` (og-stage-commit.mjs) owns every rename.
+    expect(code).not.toContain('renameSync(');
   });
 });

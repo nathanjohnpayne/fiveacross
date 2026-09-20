@@ -50,75 +50,59 @@
 // change. `--out` writes to a scratch directory instead of the repo, which is
 // what you want for a first look.
 //
+// `--all` IS ATOMIC. Every target is captured and fully validated into its own
+// scratch file first, and only once the LAST one has passed does a single
+// commit phase move them all into place (`commitStaged`, og-stage-commit.mjs,
+// the same primitive `render-og-editions.mjs` publishes the unfurl set
+// through). The per-Edition rename used to happen the moment that Edition
+// validated, so a batch whose third card failed its overlay check left the
+// first two updated and the third stale — one command, a mixed render set, and
+// no way to tell from the tree which cards are from which run. On any failure
+// now, every scratch file in the run is deleted and every committed picture is
+// exactly the file it was before the command started; the error names the
+// Edition that failed.
+//
 // The output is truecolor and NOT quantised, matching the committed captures
 // (colour type 2) and `render-og-editions.mjs`'s posture: a palette pass
 // perturbs pixels everywhere, which is exactly what makes "prove the only
 // thing that moved is the thing you meant to move" impossible.
 //
 // Requirements: playwright + esbuild (dev deps), `npx playwright install
-// chromium`, and macOS — the artboards resolve to Helvetica Neue and Arial
-// Narrow and their marks rasterise as Apple Color Emoji, which is what the
-// committed assets use. Do not suppress the output: this fails closed on a bad
-// frame, and on a capture that is the wrong size or in the wrong PNG format,
-// and `>/dev/null 2>&1` turns that into a silent no-op that reads downstream as
-// "the change had no effect".
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+// chromium`, macOS, AND the **Arial Narrow** display face. The artboards'
+// `.shc` rules ask for `'Bebas Neue','Arial Narrow',sans-serif`; Bebas Neue is
+// not a macOS face and the committed pictures are captures with Arial Narrow,
+// which macOS ships as a SUPPLEMENTAL font (`/System/Library/Fonts/
+// Supplemental/Arial Narrow.ttf`) and a host can therefore be without. This
+// script refuses to capture unless that face is the one the artboards resolve
+// to — see `assertDisplayFace` below for why `document.fonts.ready` cannot be
+// asked the question. Do not suppress the output: this fails closed on a bad
+// frame, on a missing display face, and on a capture that is the wrong size or
+// in the wrong PNG format, and `>/dev/null 2>&1` turns that into a silent
+// no-op that reads downstream as "the change had no effect".
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { chromium } from 'playwright';
-import { loadEditions } from './load-editions.mjs';
+import { withDestinationLocks } from './og-commit-lock.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
+import { commitStaged, discardStaged } from './og-stage-commit.mjs';
 import { lightPixelShare, readPngHeader, readPngPixels } from './png-pixels.mjs';
 import { assertCapturedCardFormat } from './share-raster-format.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
-const args = process.argv.slice(2);
-const argOf = (f) => {
-  const i = args.indexOf(f);
-  return i === -1 ? null : args[i + 1];
-};
-const only = argOf('--edition');
-const all = args.includes('--all');
-const checkOnly = args.includes('--check');
-const outDir = argOf('--out');
-
-if (!only && !all) {
-  console.error(
-    'render-share-rasters.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
-  );
-  process.exit(1);
-}
-// A value-less `--out` would otherwise fall back to the committed directory,
-// which is the one place someone reaching for `--out` is trying not to write.
-if (args.includes('--out') && !outDir) {
-  console.error('render-share-rasters.mjs: --out needs a directory.');
-  process.exit(1);
-}
-if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform')) {
-  console.error('render-share-rasters.mjs: refusing to render off macOS (Apple Color Emoji / Helvetica Neue / Arial Narrow).');
-  process.exit(1);
-}
-
-// The brand table comes from the shared bundling loader in
-// `load-editions.mjs`. This script introduced that loader inline; it moved to
-// its own module once the two renderers next door adopted it, because the
-// transpile-and-stub loader they had each copied rotted the moment
-// `src/editions.ts` grew a real import — one defect in three places.
-const { editionBrand } = loadEditions();
 
 /** The artboard each committed picture is a render of. Edition ids match the
  *  brand table (`src/edition-brands.ts`), so `editionBrand(id)` resolves. */
-const CARDS = {
+export const CARDS = {
   gcb: { frame: 'fx-share-final-photo-gcb', file: 'share-final-photo-gcb.png' },
   vacay: { frame: 'fx-share-final-photo-vacay', file: 'share-final-photo-vacay.png' },
   fiveacross: { frame: 'fx-share-final-photo-fa', file: 'share-final-photo-fa.png' },
 };
-const CARD_W = 600;
-const CARD_H = 750;
+export const CARD_W = 600;
+export const CARD_H = 750;
 /** The artboards are drawn at half scale, so the capture runs at 2× to land on
  *  the committed 600×750. */
-const SCALE = 2;
+export const SCALE = 2;
 /**
  * Upper-right quadrant near-white share above which the capture is rejected.
  *
@@ -128,14 +112,239 @@ const SCALE = 2;
  * antialiased ink. Vacay's own card is cream end to end and is exempted below
  * rather than scored against a threshold that means nothing for it.
  */
-const MAX_DARK_CARD_LIGHT_SHARE = 0.12;
+export const MAX_DARK_CARD_LIGHT_SHARE = 0.12;
 
-const ids = only ? [only] : Object.keys(CARDS);
-for (const id of ids) {
-  if (!CARDS[id]) {
-    console.error(`Unknown edition "${id}". Known: ${Object.keys(CARDS).join(', ')}`);
-    process.exit(1);
+/** The display stack the artboards' `.shc` rules request, in the order CSS
+ *  resolves it (`plans/daily-cards-wireframes.html`, `.shc .big` / `.who` /
+ *  `.hname`). */
+export const DISPLAY_FACE_STACK = ['Bebas Neue', 'Arial Narrow'];
+/** The generic the stack ends in, and therefore what a host with neither face
+ *  silently renders the card's display type in. */
+export const DISPLAY_FACE_GENERIC = 'sans-serif';
+/** The face the committed pictures were captured with, and so the only one a
+ *  re-render may use if it is to be a re-render rather than a restyle. */
+export const REQUIRED_DISPLAY_FACE = 'Arial Narrow';
+/** The probe the face check measures with: the largest size the `.shc` rules
+ *  use (`.big`), and a sample long enough that two different faces cannot
+ *  plausibly measure the same. */
+export const DISPLAY_FACE_PROBE = { size: 62, sample: 'FINAL STANDINGS · 0123456789 · WMWMiiil' };
+
+/**
+ * The face the artboards will actually draw their display type in, from one
+ * probe per family in `DISPLAY_FACE_STACK`, or `null` if the stack falls all
+ * the way through to the generic.
+ *
+ * Each probe is `{ family, checked, width, genericWidth }`: `checked` is
+ * `document.fonts.check` for that family at the rules' own size, and the two
+ * widths are the same sample measured with the family in front of the generic
+ * and with the generic alone. BOTH have to agree before a family counts as
+ * resolved, because each is unreliable in the opposite direction —
+ * `document.fonts.check` answers about availability rather than about what the
+ * cascade picked, and a width comparison alone would call a face missing if it
+ * happened to be metrically identical to the host's sans-serif.
+ */
+export function resolvedDisplayFace(probes) {
+  for (const probe of probes) {
+    if (probe.checked && probe.width !== probe.genericWidth) return probe.family;
   }
+  return null;
+}
+
+/**
+ * Throw unless the artboards resolve their display type to `expected`.
+ *
+ * The hole this closes: `document.fonts.ready` resolves happily on a host with
+ * neither Bebas Neue nor Arial Narrow installed — it promises that pending
+ * font LOADS have settled, not that the families a stylesheet asked for exist
+ * — so Chromium falls through to the generic sans-serif, the capture is still
+ * 600×750 truecolor with a dark upper-right quadrant, and every check below
+ * passes while the committed picture is replaced with one in visibly different
+ * typography. That is the exact failure mode this generator exists to end, in
+ * a new costume: an asset nobody can reproduce, because reproducing it depends
+ * on which fonts the last person to run it happened to have.
+ *
+ * The check is an equality, not a presence test, and it refuses in both
+ * directions on purpose. A host MISSING Arial Narrow restyles the cards; so
+ * does a host that has installed Bebas Neue, because the stack puts Bebas Neue
+ * first and the committed pictures are not captures of it. One comparison
+ * covers both, and the message says which host it is looking at.
+ */
+export function assertDisplayFace(probes, expected = REQUIRED_DISPLAY_FACE) {
+  const resolved = resolvedDisplayFace(probes);
+  if (resolved === expected) return resolved;
+  // Every probe's raw numbers, so an unexpected refusal is diagnosable from
+  // the error alone rather than by re-running the browser by hand.
+  const evidence = probes
+    .map(
+      (p) =>
+        `  - ${p.family}: document.fonts.check ${p.checked ? 'yes' : 'no'}, ` +
+        `sample ${p.width}px vs ${DISPLAY_FACE_GENERIC} ${p.genericWidth}px` +
+        `${p.width === p.genericWidth ? ' (fell back)' : ''}`,
+    )
+    .join('\n');
+  const found =
+    resolved === null
+      ? `nothing in the stack resolves, so the artboards draw their display type in ${DISPLAY_FACE_GENERIC}`
+      : `the stack resolves to ${resolved}`;
+  throw new Error(
+    [
+      `render-share-rasters.mjs: refusing to capture — ${found}, but the committed pictures ` +
+        `are captures with ${expected}.`,
+      evidence,
+      `  The .shc rules request '${DISPLAY_FACE_STACK.join("','")}',${DISPLAY_FACE_GENERIC}. ` +
+        `macOS ships ${expected} as a supplemental face (/System/Library/Fonts/Supplemental/` +
+        `${expected}.ttf); install it, or uninstall the face ahead of it, before re-rendering. ` +
+        'document.fonts.ready resolves either way, so without this check the capture would pass ' +
+        'its size, format and overlay checks and replace the committed picture with different type.',
+    ].join('\n'),
+  );
+}
+
+/**
+ * Read a staged capture and decide whether it may replace a committed picture.
+ *
+ * Throws on anything wrong; returns the numbers the run reports on success.
+ * Every call happens while the capture is still a scratch file — see the
+ * staging contract on `renderCardSet`.
+ */
+export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
+  const bytes = read(scratch);
+  const header = readPngHeader(bytes);
+  // Size AND format. Size alone was not enough: `readPngPixels` decodes colour
+  // type 6 as readily as 2 and Vacay skips it entirely, so a correctly sized
+  // capture in the wrong PNG format would replace the committed file and only
+  // red `src/recon-share-og.test.ts` afterwards. See share-raster-format.mjs.
+  assertCapturedCardFormat(id, header, { width: CARD_W, height: CARD_H });
+  let lightShare = null;
+  if (id !== 'vacay') {
+    lightShare = lightPixelShare(readPngPixels(bytes), {
+      x: CARD_W / 2,
+      y: 0,
+      width: CARD_W / 2,
+      height: CARD_H / 2,
+    });
+    if (lightShare > MAX_DARK_CARD_LIGHT_SHARE) {
+      throw new Error(
+        `render-share-rasters.mjs: ${id}'s upper-right quadrant is ${(lightShare * 100).toFixed(1)}% ` +
+          `near-white (cap ${(MAX_DARK_CARD_LIGHT_SHARE * 100).toFixed(0)}%) — something is composited over the card (#887).`,
+      );
+    }
+  }
+  return { width: header.width, height: header.height, colorType: header.colorType, bytes: bytes.length, lightShare };
+}
+
+/**
+ * Stage every target, validate every target, and only then publish them all.
+ *
+ * The seams (`preflight`, `capture`, `inspect`, `beforeCommit`, and the
+ * commit/discard/lock trio) are parameters so the staging contract itself is
+ * testable with plain files and no browser — the arrangement og-stage-commit.mjs
+ * and og-scratch-path.mjs already make for the unfurl renders, and the reason
+ * render-share-rasters.test.mjs can pin "a batch whose second target fails
+ * changes nothing" without launching Chromium.
+ *
+ * Order is the contract:
+ *
+ *  1. `preflight` runs ONCE, before the first capture. It is where the
+ *     display-face check lives: a host that cannot draw the cards should cost
+ *     a message, not three screenshots and a refusal.
+ *  2. Each target is captured to its own scratch path and inspected there.
+ *  3. Only after the LAST target has passed does the commit phase run. A
+ *     failure anywhere above (or in the commit phase itself, which rolls its
+ *     own renames back) falls into one `catch` that discards every scratch
+ *     file in the run, so the committed set is either wholly updated or wholly
+ *     untouched.
+ *
+ * The commit phase holds `withDestinationLocks` for its whole duration, as
+ * `commitStaged`'s concurrency contract requires of every caller publishing to
+ * a shared destination — `plans/og-images/` is shared with a second run of
+ * this same command. Staging needs no lock: `scratchPathFor` mints a
+ * per-invocation path that no other run can be writing.
+ */
+export async function renderCardSet({
+  ids,
+  destDir,
+  capture,
+  preflight = async () => {},
+  beforeCommit = async () => {},
+  inspect = inspectCapture,
+  stagePathFor = scratchPathFor,
+  commit = commitStaged,
+  discard = discardStaged,
+  lock = withDestinationLocks,
+}) {
+  await preflight();
+  const staged = [];
+  try {
+    for (const id of ids) {
+      const dest = join(destDir, CARDS[id].file);
+      // Recorded BEFORE the capture runs, so a screenshot that fails halfway
+      // through writing its file still has that file swept up below.
+      const entry = { id, dest, scratch: stagePathFor(dest) };
+      staged.push(entry);
+      try {
+        await capture(id, entry.scratch);
+        entry.report = inspect(id, entry.scratch);
+      } catch (error) {
+        throw new Error(
+          `render-share-rasters.mjs: ${id} failed, so nothing was written — every target in this ` +
+            `run is staged together and discarded together. ${error.message}`,
+          { cause: error },
+        );
+      }
+    }
+    // All browser work is complete before the commit phase, matching
+    // render-og-editions.mjs: a Chromium shutdown that fails AFTER the commit
+    // would report a run that actually published as a failed one.
+    await beforeCommit();
+    const release = lock(staged);
+    try {
+      commit(staged);
+    } finally {
+      release();
+    }
+  } catch (error) {
+    // Either a target failed its own checks — every earlier target in this run
+    // passed but is still only a scratch file — or the commit phase failed
+    // partway and has already rolled every destination it touched back. Either
+    // way sweep the scratch files (this tolerates the ones a commit consumed)
+    // and rethrow, so the process exits nonzero and `plans/og-images/` is
+    // exactly as it was before the run started.
+    discard(staged);
+    throw error;
+  }
+  return staged;
+}
+
+/** Ask the page which display face the artboards actually resolve to. Split
+ *  from `assertDisplayFace` so the decision is testable without a browser and
+ *  this half stays a thin `page.evaluate`. */
+async function probeDisplayFaces(page) {
+  return page.evaluate(
+    ({ families, generic, size, sample }) => {
+      // Canvas measurement rather than a DOM span: `measureText` applies the
+      // same font resolution the page uses, with no layout, no reflow of the
+      // artboards, and nothing left behind in the document being captured.
+      const context = document.createElement('canvas').getContext('2d');
+      const widthOf = (font) => {
+        context.font = font;
+        return context.measureText(sample).width;
+      };
+      const genericWidth = widthOf(`${size}px ${generic}`);
+      return families.map((family) => ({
+        family,
+        checked: document.fonts.check(`${size}px "${family}"`),
+        width: widthOf(`${size}px "${family}", ${generic}`),
+        genericWidth,
+      }));
+    },
+    {
+      families: DISPLAY_FACE_STACK,
+      generic: DISPLAY_FACE_GENERIC,
+      size: DISPLAY_FACE_PROBE.size,
+      sample: DISPLAY_FACE_PROBE.sample,
+    },
+  );
 }
 
 /** Fix `frame` at the viewport origin and return the undo. */
@@ -162,113 +371,179 @@ async function pinToOrigin(frame) {
     }, before);
 }
 
-const destDir = outDir ?? join(repo, 'plans', 'og-images');
-if (outDir) mkdirSync(outDir, { recursive: true });
-const wireframes = pathToFileURL(join(repo, 'plans', 'daily-cards-wireframes.html')).href;
+/** Locate an Edition's artboard, and refuse anything but exactly one match. */
+function artboardFor(page, id) {
+  return page.locator(`#${CARDS[id].frame} .shc`);
+}
 
-const browser = await chromium.launch();
-try {
-  const page = await browser.newPage({
-    viewport: { width: 1400, height: 1200 },
-    deviceScaleFactor: SCALE,
-  });
-  await page.goto(wireframes, { waitUntil: 'load' });
-  await page.evaluate(() => document.fonts.ready);
+/** Overwrite the artboard's footer with the brand table's line, and warn when
+ *  the two disagreed. Runs in `--check` too, because "what would this write?"
+ *  includes that warning. */
+async function applyFooter(frame, id, footer) {
+  const replaced = await frame.evaluate((node, line) => {
+    const foot = node.querySelector('.foot');
+    if (!foot) throw new Error('artboard has no .foot line');
+    const before = foot.textContent;
+    foot.textContent = line;
+    return before;
+  }, footer);
+  if (replaced.trim() !== footer) {
+    console.warn(`${id.padEnd(11)} artboard footer "${replaced.trim()}" replaced with brand-table "${footer}"`);
+  }
+}
 
+async function main() {
+  const args = process.argv.slice(2);
+  const argOf = (f) => {
+    const i = args.indexOf(f);
+    return i === -1 ? null : args[i + 1];
+  };
+  const only = argOf('--edition');
+  const all = args.includes('--all');
+  const checkOnly = args.includes('--check');
+  const outDir = argOf('--out');
+
+  if (!only && !all) {
+    console.error(
+      'render-share-rasters.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
+    );
+    process.exit(1);
+  }
+  // A value-less `--out` would otherwise fall back to the committed directory,
+  // which is the one place someone reaching for `--out` is trying not to write.
+  if (args.includes('--out') && !outDir) {
+    console.error('render-share-rasters.mjs: --out needs a directory.');
+    process.exit(1);
+  }
+  if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform')) {
+    console.error('render-share-rasters.mjs: refusing to render off macOS (Apple Color Emoji / Helvetica Neue / Arial Narrow).');
+    process.exit(1);
+  }
+
+  const ids = only ? [only] : Object.keys(CARDS);
   for (const id of ids) {
-    const card = CARDS[id];
-    const brand = editionBrand(id);
-    const footer = `${brand.appName} ${brand.lexicon.shareMark}`;
-    const frame = page.locator(`#${card.frame} .shc`);
-    if ((await frame.count()) !== 1) {
-      throw new Error(`render-share-rasters.mjs: #${card.frame} .shc did not match exactly one artboard.`);
-    }
-
-    // Brand-table copy wins over whatever the artboard has typed into it.
-    const replaced = await frame.evaluate((node, line) => {
-      const foot = node.querySelector('.foot');
-      if (!foot) throw new Error('artboard has no .foot line');
-      const before = foot.textContent;
-      foot.textContent = line;
-      return before;
-    }, footer);
-    if (replaced.trim() !== footer) {
-      console.warn(`${id.padEnd(11)} artboard footer "${replaced.trim()}" replaced with brand-table "${footer}"`);
-    }
-
-    const dest = join(destDir, card.file);
-    if (checkOnly) {
-      console.log(`${id.padEnd(11)} would write ${dest} — footer "${footer}"`);
-      continue;
-    }
-
-    // Pin the artboard to the viewport origin for the capture, and un-pin it
-    // straight afterwards.
-    //
-    // Pinning, because in the document flow the artboard lands on a fractional
-    // y and Playwright rounds the clip outwards from there — a 600×752 capture
-    // of a 600×750 card, off by one device row at each end. A fixed origin
-    // makes the box integral, and it also brings the artboard on screen
-    // however far down the document it sits. Nothing about the card's own
-    // rendering changes: it carries explicit width, height and
-    // `box-sizing: border-box`, and the ground behind its rounded corners is
-    // the same page background either way.
-    //
-    // Un-pinning, because `--all` reuses one page: leaving the previous card
-    // stacked at the same origin would put it behind the next one, and the
-    // antialiased pixels along the rounded corner arc would composite over
-    // Vacay's cream card instead of over the page. That is a one-pixel version
-    // of exactly the defect this script exists to stop shipping.
-    const restore = await pinToOrigin(frame);
-    const scratch = scratchPathFor(dest);
-    try {
-      await frame.screenshot(screenshotOptionsFor(scratch));
-    } finally {
-      await restore();
-    }
-    try {
-      const bytes = readFileSync(scratch);
-      const header = readPngHeader(bytes);
-      // Size AND format, before the capture is allowed anywhere near the
-      // committed picture. Size alone was not enough: `readPngPixels` below
-      // decodes colour type 6 as readily as 2 and Vacay skips it entirely, so
-      // a correctly sized capture in the wrong PNG format would replace the
-      // committed file here and only red `src/recon-share-og.test.ts`
-      // afterwards. See share-raster-format.mjs.
-      assertCapturedCardFormat(id, header, { width: CARD_W, height: CARD_H });
-      const { width, height, colorType } = header;
-      let lightShare = null;
-      if (id !== 'vacay') {
-        lightShare = lightPixelShare(readPngPixels(bytes), {
-          x: CARD_W / 2,
-          y: 0,
-          width: CARD_W / 2,
-          height: CARD_H / 2,
-        });
-        if (lightShare > MAX_DARK_CARD_LIGHT_SHARE) {
-          throw new Error(
-            `render-share-rasters.mjs: ${id}'s upper-right quadrant is ${(lightShare * 100).toFixed(1)}% ` +
-              `near-white (cap ${(MAX_DARK_CARD_LIGHT_SHARE * 100).toFixed(0)}%) — something is composited over the card (#887).`,
-          );
-        }
-      }
-      renameSync(scratch, dest);
-      const kb = (statSync(dest).size / 1024).toFixed(0);
-      const light = lightShare === null ? 'n/a (cream ground)' : `${(lightShare * 100).toFixed(1)}%`;
-      console.log(
-        `${id.padEnd(11)} wrote ${dest} — ${width}×${height}, colour type ${colorType}, ${kb} KB, ` +
-          `upper-right near-white ${light}, footer "${footer}"`,
-      );
-    } catch (error) {
-      try {
-        unlinkSync(scratch);
-      } catch {
-        /* the staged file may already be gone; the original render error is what matters */
-      }
-      throw error;
+    if (!CARDS[id]) {
+      console.error(`Unknown edition "${id}". Known: ${Object.keys(CARDS).join(', ')}`);
+      process.exit(1);
     }
   }
-} finally {
-  await browser.close();
+
+  // The brand table comes from the shared bundling loader in
+  // `load-editions.mjs`. This script introduced that loader inline; it moved to
+  // its own module once the two renderers next door adopted it, because the
+  // transpile-and-stub loader they had each copied rotted the moment
+  // `src/editions.ts` grew a real import — one defect in three places.
+  //
+  // Loaded here rather than at module scope (it shells out to esbuild) so
+  // importing this file for its staging logic costs nothing.
+  const { loadEditions } = await import('./load-editions.mjs');
+  const { editionBrand } = loadEditions();
+  const footerFor = (id) => {
+    const brand = editionBrand(id);
+    return `${brand.appName} ${brand.lexicon.shareMark}`;
+  };
+
+  const destDir = outDir ?? join(repo, 'plans', 'og-images');
+  if (outDir) mkdirSync(outDir, { recursive: true });
+  const wireframes = pathToFileURL(join(repo, 'plans', 'daily-cards-wireframes.html')).href;
+
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch();
+  let browserClosed = false;
+  const closeBrowser = async () => {
+    if (browserClosed) return;
+    browserClosed = true;
+    await browser.close();
+  };
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1400, height: 1200 },
+      deviceScaleFactor: SCALE,
+    });
+    await page.goto(wireframes, { waitUntil: 'load' });
+    await page.evaluate(() => document.fonts.ready);
+
+    const preflight = async () => {
+      const face = assertDisplayFace(await probeDisplayFaces(page));
+      console.log(`${'display face'.padEnd(11)} ${face}`);
+    };
+
+    if (checkOnly) {
+      await preflight();
+      for (const id of ids) {
+        const footer = footerFor(id);
+        const frame = artboardFor(page, id);
+        if ((await frame.count()) !== 1) {
+          throw new Error(`render-share-rasters.mjs: #${CARDS[id].frame} .shc did not match exactly one artboard.`);
+        }
+        await applyFooter(frame, id, footer);
+        console.log(`${id.padEnd(11)} would write ${join(destDir, CARDS[id].file)} — footer "${footer}"`);
+      }
+      console.log('\n--check: nothing written.');
+      return;
+    }
+
+    const staged = await renderCardSet({
+      ids,
+      destDir,
+      preflight,
+      beforeCommit: closeBrowser,
+      capture: async (id, scratch) => {
+        const footer = footerFor(id);
+        const frame = artboardFor(page, id);
+        if ((await frame.count()) !== 1) {
+          throw new Error(`#${CARDS[id].frame} .shc did not match exactly one artboard.`);
+        }
+        // Brand-table copy wins over whatever the artboard has typed into it.
+        await applyFooter(frame, id, footer);
+
+        // Pin the artboard to the viewport origin for the capture, and un-pin
+        // it straight afterwards.
+        //
+        // Pinning, because in the document flow the artboard lands on a
+        // fractional y and Playwright rounds the clip outwards from there — a
+        // 600×752 capture of a 600×750 card, off by one device row at each
+        // end. A fixed origin makes the box integral, and it also brings the
+        // artboard on screen however far down the document it sits. Nothing
+        // about the card's own rendering changes: it carries explicit width,
+        // height and `box-sizing: border-box`, and the ground behind its
+        // rounded corners is the same page background either way.
+        //
+        // Un-pinning, because `--all` reuses one page: leaving the previous
+        // card stacked at the same origin would put it behind the next one,
+        // and the antialiased pixels along the rounded corner arc would
+        // composite over Vacay's cream card instead of over the page. That is
+        // a one-pixel version of exactly the defect this script exists to stop
+        // shipping.
+        const restore = await pinToOrigin(frame);
+        try {
+          await frame.screenshot(screenshotOptionsFor(scratch));
+        } finally {
+          await restore();
+        }
+      },
+    });
+
+    for (const { id, dest, report } of staged) {
+      const light = report.lightShare === null ? 'n/a (cream ground)' : `${(report.lightShare * 100).toFixed(1)}%`;
+      console.log(
+        `${id.padEnd(11)} wrote ${dest} — ${report.width}×${report.height}, colour type ${report.colorType}, ` +
+          `${(report.bytes / 1024).toFixed(0)} KB, upper-right near-white ${light}, footer "${footerFor(id)}"`,
+      );
+    }
+  } finally {
+    try {
+      await closeBrowser();
+    } catch {
+      // Preserve whatever brought us here; a browser that was already failing
+      // to close cannot make a successful publish look like a failed run,
+      // because the success path closes it before the commit phase.
+    }
+  }
 }
-if (checkOnly) console.log('\n--check: nothing written.');
+
+// Importable for its staging logic, runnable as the generator. Nothing above
+// this line touches the filesystem, the brand table or a browser.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

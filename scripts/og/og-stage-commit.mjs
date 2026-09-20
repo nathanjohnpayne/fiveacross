@@ -26,6 +26,17 @@
 // — is directly testable with plain filesystem operations, no browser
 // required.
 //
+// `mirror` is OPTIONAL on a staged entry (#887). The unfurl renders publish a
+// PNG to `public/` and a copy of it into the wireframes mirror, and every
+// guarantee above is written for that pair; `render-share-rasters.mjs`
+// publishes one file per Edition into `plans/og-images/` with no second copy,
+// and needs exactly the same all-or-nothing publication. An entry without a
+// `mirror` simply skips the mirror half of each step — backup, rename-and-
+// copy, rollback, cleanup — so the two callers share one tested primitive
+// instead of keeping two rollback implementations honest by review.
+// `withDestinationLocks` (og-commit-lock.mjs) already tolerated the same
+// omission.
+//
 // Round 6 (#713, id 3762521202 re-raised): the backup path used to be a
 // pure function of the target (`${p}.rollback-tmp`) — deterministic, and
 // therefore IDENTICAL across two invocations racing to commit the same
@@ -79,14 +90,14 @@ function rollback(backups) {
     // rename a partial backup over them. We still remove every temp path below.
     if (!b.ready) {
       tryUnlink(b.destBackup);
-      tryUnlink(b.mirrorBackup);
+      if (b.mirrorBackup) tryUnlink(b.mirrorBackup);
       continue;
     }
     let restored = true;
-    for (const [target, backup, existed] of [
-      [b.dest, b.destBackup, b.destExisted],
-      [b.mirror, b.mirrorBackup, b.mirrorExisted],
-    ]) {
+    const targets = [[b.dest, b.destBackup, b.destExisted]];
+    // A mirror-less entry (see the header note) has nothing to restore here.
+    if (b.mirror) targets.push([b.mirror, b.mirrorBackup, b.mirrorExisted]);
+    for (const [target, backup, existed] of targets) {
       try {
         if (existed) {
           renameSync(backup, target);
@@ -103,7 +114,7 @@ function rollback(backups) {
     }
     if (restored) {
       tryUnlink(b.destBackup);
-      tryUnlink(b.mirrorBackup);
+      if (b.mirrorBackup) tryUnlink(b.mirrorBackup);
     } else {
       console.error(
         `og-stage-commit: preserving rollback backups for incomplete recovery of ${b.dest}; ` +
@@ -193,12 +204,12 @@ export function commitStaged(staged) {
   const written = [];
   try {
     for (const s of staged) {
-      mkdirSync(dirname(s.mirror), { recursive: true });
+      if (s.mirror) mkdirSync(dirname(s.mirror), { recursive: true });
 
       const destBackup = rollbackBackupPath(s.dest, token);
-      const mirrorBackup = rollbackBackupPath(s.mirror, token);
+      const mirrorBackup = s.mirror ? rollbackBackupPath(s.mirror, token) : null;
       const destExisted = existsSync(s.dest);
-      const mirrorExisted = existsSync(s.mirror);
+      const mirrorExisted = s.mirror ? existsSync(s.mirror) : false;
       // Register BEFORE copying so a disk-full or permission failure that
       // leaves a partial backup still reaches cleanup. `ready` stays false
       // until both copies have completed, which tells rollback that no
@@ -212,8 +223,8 @@ export function commitStaged(staged) {
       backup.ready = true;
 
       renameSync(s.scratch, s.dest);
-      copyFileSync(s.dest, s.mirror);
-      written.push({ id: s.id, dest: s.dest, mirror: s.mirror });
+      if (s.mirror) copyFileSync(s.dest, s.mirror);
+      written.push({ id: s.id, dest: s.dest, mirror: s.mirror ?? null });
     }
   } catch (err) {
     rollback(backups);
@@ -222,7 +233,7 @@ export function commitStaged(staged) {
   // Every entry committed cleanly — the backups are no longer needed.
   for (const b of backups) {
     tryUnlink(b.destBackup);
-    tryUnlink(b.mirrorBackup);
+    if (b.mirrorBackup) tryUnlink(b.mirrorBackup);
   }
   return written;
 }
