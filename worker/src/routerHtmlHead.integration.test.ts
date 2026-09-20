@@ -229,10 +229,10 @@ function miniflare(): Miniflare {
  * A request to the router, defaulting to a browser document NAVIGATION.
  *
  * The default carries headers because the origin stub honours
- * `accept-encoding` the way the real one does, and the router negotiates
- * `identity` only for a request that says it accepts HTML. A bare
- * `dispatchFetch` is therefore not "a page load with nothing interesting set"
- * — it is the wildcard-`Accept` residue, which has a case of its own below.
+ * `accept-encoding` the way the real one does, so what the client asks for
+ * decides whether the transform sees markup or compressed bytes. Spelling the
+ * navigation out keeps each case saying which client it speaks for: a browser
+ * here, a link-preview crawler and an asset fetch in the cases below.
  */
 async function request(
   instance: Miniflare,
@@ -263,6 +263,18 @@ const BROWSER_NAVIGATION: RequestInit = {
   headers: {
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
     'accept-encoding': 'gzip, br',
+  },
+};
+
+/** What a link-preview crawler sends: no content-negotiation opinion at all.
+ *  `facebookexternalhit`, `Twitterbot`, `Slackbot`, `LinkedInBot`,
+ *  `Discordbot` and the iMessage fetcher all ask for the document this way,
+ *  which makes this the client the whole rewrite exists for. */
+const CRAWLER_FETCH: RequestInit = {
+  headers: {
+    accept: '*/*',
+    'accept-encoding': 'gzip, deflate, br',
+    'user-agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
   },
 };
 
@@ -408,10 +420,11 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
   it('leaves an asset subrequest to negotiate its own encoding', async () => {
     // Identity is bought for the documents the rewrite can act on and for
     // nothing else. An asset is relayed, so making it travel uncompressed
-    // would be a bandwidth bill with no defect behind it.
-    const response = await request(miniflare(), VACAY_ALTERNATE, '/asset.js', {
-      headers: { accept: '*/*', 'accept-encoding': 'gzip, br' },
-    });
+    // would be a bandwidth bill with no defect behind it — and a wildcard
+    // `Accept` on a path with a file extension is exactly the shape a browser
+    // uses to fetch a script, which is why the path test and not the `Accept`
+    // is what separates it from the crawler above.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/asset.js', CRAWLER_FETCH);
     expect(response.status).toBe(200);
     // Whatever the runtime negotiated on its own behalf — never the `identity`
     // the router buys for a document.
@@ -420,17 +433,41 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     expect(negotiated.toLowerCase()).toContain('gzip');
   });
 
-  it('relays a wildcard-Accept document rather than parsing its compressed bytes', async () => {
-    // The residue of the request-side predicate, pinned rather than left to be
-    // discovered. A client that does not say it accepts HTML is not a document
-    // candidate, so the runtime's own `accept-encoding` travels and the origin
-    // may answer `gzip`. The rewrite refuses an encoded body: what comes back
-    // is the origin's own response, correctly framed by its `content-encoding`
-    // and carrying the bundle's baked Edition — exactly what such a client
-    // received before this rewrite existed, rather than markup a parser
-    // silently failed to touch.
+  it.each(['/', '/board', '/board/', '/index.html'])(
+    'brands %s for a crawler that sends no Accept opinion at all',
+    async (path) => {
+      // The client this rewrite exists for. A crawler names no media type, so
+      // the narrow validator predicate does not describe it; if the encoding
+      // rule were narrow too, every link-preview fetch would be answered in
+      // gzip, skip the transform in silence and file the link under the
+      // Edition the bundle was built with. The path shape is what qualifies
+      // it instead.
+      const response = await request(miniflare(), VACAY_ALTERNATE, path, CRAWLER_FETCH);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-origin-accept-encoding'), path).toBe('identity');
+      const html = await response.text();
+      expect(metaContent(html, 'property', 'og:url'), path).toBe(`https://${VACAY_ALTERNATE}/`);
+      expect(metaContent(html, 'name', 'theme-color'), path).toBe(
+        webManifestForEdition('vacay').theme_color,
+      );
+      expect(metaContent(html, 'property', 'og:site_name'), path).toBe(
+        brandFor('vacay').documentTitle,
+      );
+      expect(response.headers.get('content-encoding')).toBeNull();
+    },
+  );
+
+  it('relays a document asked for as JSON rather than parsing its compressed bytes', async () => {
+    // What is left outside the encoding rule, pinned rather than left to be
+    // discovered: a client that named a media type, and named one that is not
+    // HTML. It is not a crawler and not a browser navigation, so its
+    // negotiated encoding travels and the origin may answer `gzip`. The
+    // rewrite refuses an encoded body: what comes back is the origin's own
+    // response, correctly framed and carrying the bundle's baked Edition,
+    // rather than markup a parser silently failed to touch.
     const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
-      headers: { accept: '*/*' },
+      headers: { accept: 'application/json' },
     });
     expect(response.status).toBe(200);
     // The relay arm, not the rewrite arm: both headers the rewrite drops are

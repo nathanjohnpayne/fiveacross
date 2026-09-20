@@ -5,6 +5,8 @@ import {
   dropOriginEncoding,
   dropOriginValidators,
   headEditsFor,
+  isDocumentEncodingCandidate,
+  isDocumentShapedPath,
   isHeadRewritable,
   isHtmlDocumentRequest,
   negotiateIdentityEncoding,
@@ -288,5 +290,94 @@ describe('which requests must not carry a cache validator to the origin', () => 
     expect(headers.get('etag')).toBeNull();
     expect(headers.get('last-modified')).toBeNull();
     expect([...headers.keys()].sort()).toEqual(['cache-control', 'content-type']);
+  });
+});
+
+describe('which requests must ask the origin for an unencoded body', () => {
+  const asked = (
+    path: string,
+    headers: Record<string, string> = {},
+    method = 'GET',
+  ): boolean => {
+    const url = new URL(`https://bodega-bay.fiveacross.app${path}`);
+    return isDocumentEncodingCandidate(new Request(url, { method, headers }), url);
+  };
+
+  it.each([
+    'text/html',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
+    'application/xhtml+xml',
+  ])('takes a browser navigation accepting %s, whatever its path', (accept) => {
+    expect(asked('/board', { accept })).toBe(true);
+    // An explicit HTML Accept is a statement about the representation, so the
+    // path is never consulted for it.
+    expect(asked('/weird.name', { accept })).toBe(true);
+  });
+
+  it.each([
+    ['*/*', '/'],
+    ['*/*', '/board'],
+    ['*/*', '/board/'],
+    ['*/*', '/index.html'],
+    ['*/*', '/admin/prompts'],
+    ['*/*;q=0.8', '/'],
+    ['', '/'],
+  ])('takes a no-preference Accept of %s at the document-shaped %s', (accept, path) => {
+    // The link-preview crawlers this rewrite exists for — facebookexternalhit,
+    // Twitterbot, Slackbot, LinkedInBot, Discordbot, the iMessage fetcher —
+    // name no media type at all. A rule keyed on an explicit HTML Accept would
+    // negotiate identity for browsers and leave every one of them reading
+    // compressed bytes, which is the whole defect for the one client class the
+    // rewrite is for.
+    expect(asked(path, accept === '' ? {} : { accept })).toBe(true);
+  });
+
+  it.each([
+    '/assets/app-3f2a.js',
+    '/pwa-192.png',
+    '/manifest.webmanifest',
+    '/assets/app.css',
+    '/assets/app.css.map',
+    '/fonts/inter.woff2',
+    '/data.json',
+  ])('leaves %s alone for a no-preference Accept, so no asset loses compression', (path) => {
+    expect(asked(path, { accept: '*/*' })).toBe(false);
+  });
+
+  it.each(['application/json', 'image/png', 'application/javascript', 'text/css,*/*;q=0.1'])(
+    'leaves a document-shaped path asked for as %s alone',
+    (accept) => {
+      // A client that named a media type, and named one that is not HTML. Its
+      // path is never second-guessed: the shape test exists only to read a
+      // client that stated no preference.
+      expect(asked('/board', { accept })).toBe(false);
+    },
+  );
+
+  it('takes a HEAD as well as a GET, and no other method', () => {
+    // A HEAD carries no body to rewrite, but a crawler that probes with one
+    // first should be told about the representation the GET will return.
+    expect(asked('/', { accept: '*/*' }, 'HEAD')).toBe(true);
+    for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+      expect(asked('/', { accept: 'text/html' }, method), method).toBe(false);
+    }
+  });
+
+  it.each([
+    ['/', true],
+    ['/board', true],
+    ['/board/', true],
+    ['/index.html', true],
+    ['/admin/prompts', true],
+    ['/v1.2/board', true],
+    ['/nested/path/index.html', true],
+    ['/assets/app-3f2a.js', false],
+    ['/manifest.webmanifest', false],
+    ['/apple-touch-icon.png', false],
+  ])('reads %s as document-shaped: %s', (pathname, expected) => {
+    // Structural rather than a guess at the origin's routing: every asset the
+    // bundle emits is a file with an extension, and every route the app serves
+    // as a document is extensionless or ends in a slash or index.html.
+    expect(isDocumentShapedPath(pathname)).toBe(expected);
   });
 });

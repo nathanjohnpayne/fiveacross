@@ -14,6 +14,7 @@ import { RESERVED_LABELS } from '../../src/slug';
 // `vite/client`, which is why #546 split the table out in the first place.
 import { brandFor } from '../../src/edition-brands';
 import { headIdentityEdits } from '../../src/html-head-identity';
+import { webManifestForEdition } from '../../src/web-manifest';
 
 const CONFIG: RouterConfig = {
   originHost: 'fiveacross.web.app',
@@ -969,6 +970,71 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       expect(rewrites).toHaveLength(1);
     });
 
+    const CRAWLER = {
+      accept: '*/*',
+      'accept-encoding': 'gzip, deflate, br',
+      'user-agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    };
+
+    it.each(['/', '/board', '/board/', '/index.html'])(
+      'asks for identity at %s for a crawler that names no media type',
+      async (path) => {
+        // The client the rewrite exists for. `facebookexternalhit`,
+        // `Twitterbot`, `Slackbot`, `LinkedInBot`, `Discordbot` and the
+        // iMessage fetcher all ask with `*/*` or with no `Accept` at all, so a
+        // rule keyed on an explicit HTML `Accept` would negotiate identity for
+        // browsers and leave every link preview reading compressed bytes.
+        const { deps, requests, rewrites } = harness({
+          seed: vacaySeed,
+          originFor: () => htmlOrigin(),
+        });
+        await handleRequest(
+          get(`https://bodega-bay.fiveacross.app${path}`, { headers: CRAWLER }),
+          CONFIG,
+          deps,
+        );
+        expect(requests.at(-1)!.headers.get('accept-encoding'), path).toBe('identity');
+        expect(rewrites, path).toHaveLength(1);
+        expect(contentFor(rewrites[0]!.edits, 'meta[property="og:url"]')).toBe(
+          'https://bodega-bay.fiveacross.app/',
+        );
+        expect(contentFor(rewrites[0]!.edits, 'meta[name="theme-color"]')).toBe(
+          webManifestForEdition('vacay').theme_color,
+        );
+      },
+    );
+
+    it('still leaves that crawler’s validators alone, because only the encoding rule widened', async () => {
+      // The two predicates are not the same, and this is the difference made
+      // visible: widening the validator rule to a wildcard `Accept` would cost
+      // every asset on the host its `304`, so it stayed narrow.
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', {
+          headers: { ...CRAWLER, 'if-none-match': '"origin-index"' },
+        }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('identity');
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"origin-index"');
+    });
+
+    it('leaves a document path asked for as JSON to negotiate its own encoding', async () => {
+      // A client that named a media type, and named one that is not HTML. The
+      // path shape is only ever consulted for a client that stated no
+      // preference, so this one is never second-guessed.
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/board', {
+          headers: { accept: 'application/json', 'accept-encoding': 'gzip, br' },
+        }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, br');
+    });
+
     it('leaves an asset request’s accept-encoding exactly as it arrived', async () => {
       // An asset is relayed rather than parsed, so making the bundle travel
       // uncompressed would be a bandwidth bill with no defect behind it.
@@ -986,6 +1052,29 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, br');
       expect(rewrites).toHaveLength(0);
     });
+
+    it.each(['/assets/app.js', '/pwa-192.png', '/assets/inter.woff2', '/assets/app.css.map'])(
+      'leaves %s alone even with the crawler’s own wildcard Accept',
+      async (path) => {
+        // The file extension is what separates an asset from a document when
+        // the client states no preference, which is the shape a browser uses
+        // to fetch a script. Without it the whole bundle would travel
+        // uncompressed on the origin hop. (`/manifest.webmanifest` is absent
+        // because the router answers it itself and never proxies it;
+        // `htmlHead.test.ts` covers that extension on the pure predicate.)
+        const { deps, requests } = harness({
+          seed: vacaySeed,
+          originFor: () =>
+            new Response('x', { headers: { 'content-type': 'application/javascript' } }),
+        });
+        await handleRequest(
+          get(`https://bodega-bay.fiveacross.app${path}`, { headers: CRAWLER }),
+          CONFIG,
+          deps,
+        );
+        expect(requests.at(-1)!.headers.get('accept-encoding'), path).toBe('gzip, deflate, br');
+      },
+    );
 
     it('leaves the /__/auth/* exemption’s accept-encoding alone too', async () => {
       const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });

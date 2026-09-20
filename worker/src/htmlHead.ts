@@ -99,45 +99,131 @@ function isIdentityEncoded(headers: Headers): boolean {
 /** The two media ranges a client uses to say it is asking for a document. */
 const HTML_MEDIA_RANGES = ['text/html', 'application/xhtml+xml'];
 
+/** Every media range a request offered, lowercased and stripped of its
+ *  parameters, so `text/html; charset=utf-8` and `*\/*;q=0.8` compare as the
+ *  ranges they are. */
+function acceptedMediaRanges(headers: Headers): string[] {
+  return (headers.get('accept') ?? '')
+    .split(',')
+    .map((range) => range.split(';')[0]!.trim().toLowerCase())
+    .filter((range) => range !== '');
+}
+
+/** Whether the request named an HTML media range explicitly. */
+function acceptNamesHtml(headers: Headers): boolean {
+  return acceptedMediaRanges(headers).some((range) => HTML_MEDIA_RANGES.includes(range));
+}
+
 /**
- * Whether this REQUEST could be answered with a document the rewrite would
- * touch — the request-side approximation of {@link isHeadRewritable}.
+ * Whether the request stated no preference at all: no `Accept`, or nothing in
+ * it but `*\/*`.
  *
- * It has to be an approximation, because both questions it decides are asked
- * before the origin has answered. May this request carry a cache validator to
- * the origin? The origin serves one baked `index.html` to every hostname, so
- * its `etag` and `last-modified` say nothing about which Edition the registry
- * now resolves this hostname to; a forwarded `if-none-match` can therefore
- * come back as a `304` that is true of the origin and false of what this host
- * should serve, leaving the router no body to rewrite and the client on the
- * previous Edition's Crawler identity. And may the origin compress its answer?
- * A `gzip` or `br` body reaches the transform as bytes no HTML parser can
- * read, which is {@link negotiateIdentityEncoding}'s reason for existing.
- * Both are the same question one step earlier — is a rewritable document what
- * comes back? — so both are answered by this one predicate.
+ * This is the shape a link-preview crawler sends. `facebookexternalhit`,
+ * `Twitterbot`, `Slackbot`, `LinkedInBot`, `Discordbot` and the iMessage
+ * fetcher ask for the document with `Accept: *\/*` or with no `Accept`
+ * header — they are not browsers and have no content-negotiation opinion —
+ * which is precisely the client class this whole rewrite exists for. A range
+ * list carrying anything MORE specific does not qualify, so a request that
+ * asked for `application/json` and would also take anything is still a
+ * request that asked for JSON.
+ */
+function acceptStatesNoPreference(headers: Headers): boolean {
+  return acceptedMediaRanges(headers).every((range) => range === '*/*');
+}
+
+/**
+ * Whether this path is the shape an SPA document lives at rather than an
+ * asset.
  *
- * Conservative in the safe direction, deliberately. Only a `GET` qualifies —
- * a validator on any other method is a PRECONDITION rather than a cache
- * revalidation, and dropping it would change what the origin is being asked to
- * do — and only an `Accept` that names an HTML media range explicitly. A
- * request that does not say it accepts HTML keeps its validators and can still
- * be answered `304`, which is what every asset revalidation on the host is; a
- * bare wildcard range deliberately does not qualify, because that is what a
- * browser sends for a script. The residue — a client that asks for the
- * document with a wildcard — degrades to today's behaviour rather than to a
- * corrupt response on BOTH halves: its validators travel and may be answered
- * `304`, and its answer may arrive compressed, in which case
- * {@link isHeadRewritable} relays it whole instead of parsing it. Either way
- * what it receives is the bundle's baked Edition, intact, which is what it
- * received before this rewrite existed. The validator half also closes for
- * good the first time such a client receives a rewritten document, because
- * {@link dropOriginValidators} leaves it nothing to revalidate with.
+ * A structural test, not a guess at the origin's routing: the bundle's assets
+ * are hashed files with extensions (`/assets/app-3f2a.js`, `/pwa-192.png`,
+ * `/manifest.webmanifest`), and every route the app serves as a document is
+ * extensionless (`/`, `/board`, `/admin/prompts`) or ends in a slash or
+ * `index.html`. Being wrong in the asset direction costs one asset its
+ * compression on one hop; being wrong in the document direction costs that
+ * document its Edition, which is the defect. It is only ever consulted for a
+ * client that stated no preference, so a request that names its media type
+ * never has its path second-guessed.
+ */
+export function isDocumentShapedPath(pathname: string): boolean {
+  if (pathname.endsWith('/')) return true;
+  const lastSegment = pathname.slice(pathname.lastIndexOf('/') + 1);
+  if (lastSegment === 'index.html') return true;
+  return !lastSegment.includes('.');
+}
+
+/**
+ * Whether this REQUEST must reach the origin without its cache validators —
+ * the request-side approximation of {@link isHeadRewritable}.
+ *
+ * It has to be an approximation, because the question is asked before the
+ * origin has answered. The origin serves one baked `index.html` to every
+ * hostname, so its `etag` and `last-modified` say nothing about which Edition
+ * the registry now resolves this hostname to; a forwarded `if-none-match` can
+ * therefore come back as a `304` that is true of the origin and false of what
+ * this host should serve, leaving the router no body to rewrite and the client
+ * on the previous Edition's Crawler identity.
+ *
+ * Conservative in the safe direction, deliberately, because the cost of being
+ * wrong here is asymmetric with the cost of being wrong about the ENCODING
+ * (see {@link isDocumentEncodingCandidate}, which is wider for exactly that
+ * reason). Only a `GET` qualifies — a validator on any other method is a
+ * PRECONDITION rather than a cache revalidation, and dropping it would change
+ * what the origin is being asked to do — and only an `Accept` that names an
+ * HTML media range explicitly. A request that does not say it accepts HTML
+ * keeps its validators and can still be answered `304`, which is what every
+ * asset revalidation on the host is; a bare wildcard range deliberately does
+ * not qualify here, because that is also what a browser sends for a script and
+ * widening this rule would cost every asset on the host its `304`. The residue
+ * — a crawler that both caches HTML and asks with a wildcard — degrades to
+ * today's behaviour rather than to a corrupt response: its validators travel
+ * and may be answered `304`, carrying the baked Edition it already had. It
+ * closes for good the first time such a client receives a rewritten document,
+ * because {@link dropOriginValidators} leaves it nothing to revalidate with —
+ * and since the encoding rule DOES cover that client, its first unconditional
+ * fetch is now a rewritten one.
  */
 export function isHtmlDocumentRequest(request: Request): boolean {
   if (request.method !== 'GET') return false;
-  return (request.headers.get('accept') ?? '')
-    .split(',')
-    .some((range) => HTML_MEDIA_RANGES.includes(range.split(';')[0]!.trim().toLowerCase()));
+  return acceptNamesHtml(request.headers);
+}
+
+/**
+ * Whether this request should ask the origin for `identity` — a WIDER
+ * question than {@link isHtmlDocumentRequest}, and deliberately so.
+ *
+ * The two decisions that predicate used to make are not symmetric, because
+ * being wrong costs different things. Dropping a validator from a request
+ * that turns out to be an asset costs that asset its cheap `304` on every
+ * revalidation, so the validator rule stays conservative: an explicit HTML
+ * `Accept`, and nothing else. Failing to negotiate `identity` for a request
+ * that turns out to be a document costs that document its Edition entirely —
+ * the rewrite is skipped and a crawler files the link under the Edition the
+ * bundle was built with — while being wrong the other way costs one asset its
+ * compression on the origin-to-edge hop alone. So this rule is wider by the
+ * exact class the narrow one was losing: a client that stated no preference,
+ * asking for a path shaped like a document.
+ *
+ * That class is not a residue. `facebookexternalhit`, `Twitterbot`,
+ * `Slackbot`, `LinkedInBot`, `Discordbot` and the iMessage fetcher all ask
+ * with `Accept: *\/*` or with no `Accept` at all, so under the narrow rule the
+ * consumers this rewrite exists for were the ones it did not reach.
+ *
+ * `HEAD` qualifies as well as `GET`, although a `HEAD` response carries no
+ * body to rewrite: a crawler that probes with `HEAD` first should be told
+ * about the same representation the `GET` will return.
+ *
+ * What is left outside: a request that names a non-HTML media type, and a
+ * path with a file extension asked for with a wildcard — a script, a
+ * stylesheet, an image, the manifest. Those keep whatever encoding the
+ * runtime negotiated, which is what stops this costing the bundle its
+ * compression.
+ */
+export function isDocumentEncodingCandidate(request: Request, url: URL): boolean {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false;
+  if (acceptNamesHtml(request.headers)) return true;
+  if (!acceptStatesNoPreference(request.headers)) return false;
+  return isDocumentShapedPath(url.pathname);
 }
 
 /**
@@ -174,11 +260,12 @@ export function dropConditionalValidators(headers: Headers): void {
  * the rewritten response to the client on the way out, so nothing on the wire
  * a visitor pays for grows.
  *
- * Applied on the same predicate as {@link dropConditionalValidators} and for
- * the same reason: only a request that could be answered with a rewritable
- * document. An asset keeps whatever the runtime negotiated for it, because an
- * asset is relayed rather than parsed and making the bundle travel
- * uncompressed would be a bandwidth bill with no defect behind it.
+ * Applied on {@link isDocumentEncodingCandidate}, which is wider than the
+ * validator rule for the reason recorded there: a crawler asks for the
+ * document with `Accept: *\/*` and would otherwise be the one client this
+ * rewrite never reached. An asset keeps whatever the runtime negotiated for
+ * it, because an asset is relayed rather than parsed and making the bundle
+ * travel uncompressed would be a bandwidth bill with no defect behind it.
  */
 export function negotiateIdentityEncoding(headers: Headers): void {
   headers.set('accept-encoding', 'identity');
