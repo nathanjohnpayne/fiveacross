@@ -36,6 +36,9 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: Install dependencies
+        run: npm ci
+
       # The deploy-scope classifier (scripts/validate-firebase-deploy-filters.mjs)
       # rehearses predeploy hooks inside a platform write containment and
       # refuses the single-endpoint exemption fail-closed when it can prove
@@ -45,7 +48,19 @@ jobs:
       # that needs a predeploy hook to have RUN was therefore skipped here — in
       # the vitest suite under `npm test` and in `npm run test:deploy` alike —
       # which left the Linux `bwrap` nesting path exercised by no machine at
-      # all (#1164). This step must stay AHEAD of both of them.
+      # all (#1164).
+      #
+      # WHERE IT HAS TO SIT, pinned from both sides in
+      # scripts/app-ci-write-containment.test.mjs. AFTER `Install dependencies`:
+      # the probe imports the classifier, and that module's body resolves
+      # `commander`, `typescript`, seven `firebase-tools/lib/*` entry points and
+      # `portfinder` through `createRequire` before it exports anything, so on a
+      # runner that has not run `npm ci` yet the probe and its retry both die
+      # with MODULE_NOT_FOUND and the job ends before the first suite. AHEAD of
+      # `npm test` and `npm run test:deploy`: those are the consumers whose
+      # skips this step exists to lift. The root `npm ci` is the only install it
+      # needs — the `--prefix` installs below belong to the Worker and the
+      # registry publisher, neither of which the classifier loads.
       #
       # Two stages, because only the runner can settle which is needed: install
       # `bubblewrap`, then drop the AppArmor user-namespace restriction only if
@@ -94,9 +109,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
             probe
           fi
-
-      - name: Install dependencies
-        run: npm ci
 
       # The registry publisher is deliberately a separate Functions Framework
       # codebase so its runtime dependency graph cannot inherit firebase-admin.

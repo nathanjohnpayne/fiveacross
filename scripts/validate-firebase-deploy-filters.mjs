@@ -712,19 +712,27 @@ export const WRITE_CONTAINMENT_REFUSAL = Object.freeze({
  * The test-only switch that makes this machine answer as one with no usable
  * mechanism, WITHOUT running a candidate.
  *
- * WHY IT EXISTS. `ubuntu-latest` is such a machine — no `bwrap`, and an
- * unprivileged user namespace the kernel refuses — so the fail-closed arm is
- * what CI actually exercises, while the development Mac only ever exercises the
- * proved arm. A suite that could not reach the other arm locally would be
- * written blind against the one machine that runs it.
+ * WHY IT EXISTS. No machine this repository runs on reaches the fail-closed
+ * arm on its own any more. The development Mac proves `sandbox-exec`, and
+ * `app-ci` proves `bwrap` since #1164 — its workflow installs `bubblewrap`
+ * ahead of both suites and fails the job unless `probeWriteContainment` names
+ * it — so each of them exercises the PROVED arm and neither would ever reach
+ * the other. `ubuntu-latest` used to: it shipped no `bwrap`, and the kernel
+ * refused the unprivileged user namespace, so CI took the fail-closed arm by
+ * accident of the image. A machine that has candidates and can prove none of
+ * them is still real — a developer box with neither mechanism, or a runner
+ * image that drops `bwrap` again — and this is how the suites reach its answer
+ * from the machines they actually run on, rather than being written blind
+ * against whichever arm their own machine happens to take.
  *
  * WHY IT IS SAFE. It can only make this classifier answer MORE conservatively:
  * the sole thing it does is refuse the exemption before any hook, probe or
- * canary runs, which is the same answer `ubuntu-latest` reaches on its own. It
- * is read from the environment rather than taken as an argument because the
- * harness cases drive `deploy.sh`, which passes no options through — and unlike
- * `writeContainment: "unavailable"`, it reports the UNPROVED arm CI reaches
- * rather than the DISABLED one, naming the candidates it did not try.
+ * canary runs, which is the same answer a machine with no provable mechanism
+ * reaches on its own. It is read from the environment rather than taken as an
+ * argument because the harness cases drive `deploy.sh`, which passes no options
+ * through — and unlike `writeContainment: "unavailable"`, it reports the
+ * UNPROVED arm such a machine reaches rather than the DISABLED one, naming the
+ * candidates it did not try.
  */
 const FORCE_NO_CONTAINMENT_VAR = "FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT";
 
@@ -816,12 +824,16 @@ function macosSandboxProfile(writable, nestedReadOnly) {
  * how the caller is mapped into the namespace, which older util-linux releases
  * and stricter kernels each refuse in their own way.
  *
- * NOT VERIFIED HERE. The Linux forms were written against the documented
+ * NOT VERIFIED BY HAND. The Linux forms were written against the documented
  * behaviour of `bwrap` and `unshare`; this repository's development machine is
- * a Mac, so only the `sandbox-exec` form has been exercised by hand. That is
- * precisely why nothing is trusted without the canary: on a Linux machine where
- * none of the three works, the canary fails, the exemption is refused, and every
- * deploy classifies conservatively rather than silently running hooks loose.
+ * a Mac, so `sandbox-exec` is the only one anyone has exercised at a keyboard.
+ * The `bwrap` form is exercised by machine instead: `app-ci` installs
+ * `bubblewrap` and fails the job unless `probeWriteContainment` names it, so
+ * both suites take this path on every PR (#1164). The two `unshare` spellings
+ * are still exercised nowhere, which is precisely why nothing is trusted
+ * without the canary: on a Linux machine where none of the three works, the
+ * canary fails, the exemption is refused, and every deploy classifies
+ * conservatively rather than silently running hooks loose.
  */
 function writeContainmentCandidates({ writable, readOnlyRoots, nestedReadOnly, profilePath }) {
   if (process.platform === "darwin") {
@@ -1023,10 +1035,12 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
     return { ok: false, reason: `${process.platform} ${WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM}` };
   }
   // The forced arm, taken BEFORE the first canary so nothing runs: this is the
-  // machine that has candidates and can prove none of them, which is what
-  // `ubuntu-latest` is and what the development Mac otherwise never is. The
-  // reason is composed exactly as a real failure sweep composes it, candidate
-  // labels and all, so a caller cannot tell the simulation from the machine.
+  // machine that has candidates and can prove none of them, which since #1164
+  // is neither of the machines this repository runs on — `app-ci` proves
+  // `bwrap` and the development Mac proves `sandbox-exec` — and is still what a
+  // box with neither mechanism is. The reason is composed exactly as a real
+  // failure sweep composes it, candidate labels and all, so a caller cannot
+  // tell the simulation from the machine.
   if (forcedNoWriteContainment()) {
     const forced = candidates.map(
       (candidate) => `${candidate.label}: not attempted, ${FORCE_NO_CONTAINMENT_VAR} is set`,
@@ -1069,11 +1083,15 @@ let writeContainmentProbe = null;
  * WHO ASKS. The suites. Every case that expects an EXEMPT classification, and
  * every case whose drift is injected by a hook, needs a hook to have RUN — and
  * on a machine that can prove no containment none ever does, because
- * `establishWriteContainment` refuses before the first one. `ubuntu-latest` is
- * such a machine: no `bwrap`, and a kernel that refuses to write
- * `/proc/self/uid_map` for an unprivileged user namespace. Those cases are then
- * asserting the exemption path against a machine that has no exemption path,
- * which is not a finding about this classifier.
+ * `establishWriteContainment` refuses before the first one. Those cases are
+ * then asserting the exemption path against a machine that has no exemption
+ * path, which is not a finding about this classifier. `ubuntu-latest` used to
+ * be exactly such a machine — no `bwrap`, and a kernel that refuses to write
+ * `/proc/self/uid_map` for an unprivileged user namespace — until `app-ci`
+ * began installing `bubblewrap` and failing the job unless this probe names it
+ * (#1164); what the skip is left for is a box with neither mechanism, plus the
+ * suites that ask for that answer deliberately through
+ * `FORCE_NO_CONTAINMENT_VAR`.
  *
  * WHY A PROBE RATHER THAN A PLATFORM TEST. `process.platform === "linux"` is
  * the wrong question twice over: a Linux box WITH `bwrap` runs every case
