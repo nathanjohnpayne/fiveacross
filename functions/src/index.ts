@@ -784,9 +784,31 @@ export const repairLegacyMarkerEventIdentityOnWrite = onDocumentWritten(
  * `notifyItemModeration`/`notifyProofModeration` REACTS to the `status → hidden`
  * transition and emails the admins. moderateProof and the notifiers are
  * untouched; no secrets are needed here. Firestore triggers stay on us-central1.
+ *
+ * ALL THREE THRESHOLD TRIGGERS PIN `ADMIN_SDK_SERVICE_ACCOUNT` (#1137), and it
+ * is a fix rather than boilerplate. Every path here is a Firestore data-plane
+ * call — the `events/{eventId}` threshold read, the transactional re-read, the
+ * `status → 'hidden'` update — and the project's default Gen2 compute identity
+ * has none of that access (ADR 0008), which is the same reasoning the notifiers
+ * and the Vision hide on these very paths already rely on. Unpinned, every
+ * invocation would have failed its first read, and because `applyThresholdHide`
+ * / `applyThresholdBackfill` are best-effort (ADR 0001) the failure is swallowed
+ * into a `console.error`, so the shipped #43 auto-hide would have been failing
+ * silently rather than loudly.
+ *
+ * NO `retry: true`, unlike `hideProofOnVisionFlag` on the same document path and
+ * unlike the adult-content pair below. Retry only does anything for a handler
+ * that REJECTS, and neither `applyThresholdHide` nor `applyThresholdBackfill`
+ * ever does: both wrap everything in a try/catch that logs and returns (ADR
+ * 0001), so the flag would be unreachable configuration advertising a durability
+ * this module deliberately does not offer. The module's actual answer to a
+ * swallowed attempt is the "rose to at/over" gate in `shouldHideAtThreshold`,
+ * which re-attempts the hide on the next report bump instead of requiring a
+ * strict below→over crossing. This matches the #101 notifiers, which pin the
+ * identity and likewise take no retry.
  */
 export const hideProofAtThreshold = onDocumentWritten(
-  'events/{eventId}/proofs/{proofId}',
+  { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdHide(
       'proofs',
@@ -855,7 +877,7 @@ export const hideProofOnVisionFlag = onDocumentWritten(
 );
 
 export const hideItemAtThreshold = onDocumentWritten(
-  'events/{eventId}/items/{itemId}',
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdHide(
       'items',
@@ -876,9 +898,16 @@ export const hideItemAtThreshold = onDocumentWritten(
  * proofs and hides the ones that now meet the lower bar (active-only, update-based
  * writes; best-effort). It never writes the Event doc, so it never re-fires
  * itself; its status->hidden writes re-fire the per-write hides, which no-op.
+ *
+ * Pinned to `ADMIN_SDK_SERVICE_ACCOUNT` and left without `retry` for exactly the
+ * reasons spelled out on `hideProofAtThreshold` above: the sweep query and every
+ * hide are Firestore data-plane calls the default Gen2 compute identity cannot
+ * make, and `applyThresholdBackfill` never rejects, so a retry flag could never
+ * fire. Its own re-attempt story is the next threshold decrease, plus the
+ * operator-invokable `runRolloutSweep`.
  */
 export const backfillHideOnThresholdDecrease = onDocumentWritten(
-  'events/{eventId}',
+  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdBackfill(
       event.params.eventId,
