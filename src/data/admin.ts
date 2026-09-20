@@ -648,13 +648,23 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * about this Proof — of which exactly one is legitimate, and every additional one
  * the owner minted against their own Proof says the same thing as the first.
  *
- * So the truncation this cap performs is OUTCOME-NEUTRAL: every document it can
- * drop is one of the owner's pending claims, and reading one of those is enough
- * to send the Proof back to `'pending'`, which is where any of them would have
- * sent it. Shrinking the cap therefore cannot change a restore's destination —
- * it only bounds the transactional read fan-out, from twenty-six documents in
- * the worst case to six. Five leaves headroom over the one claim a well-behaved
- * Proof has while keeping the bound small enough to be worth calling a bound.
+ * So the truncation this cap performs is OUTCOME-NEUTRAL FOR THE STATE THE
+ * LOOKUP SAW: every document the page can drop was one of the owner's pending
+ * claims when the query ran, and reading one of those is enough to send the
+ * Proof back to `'pending'`, which is where any of them would have sent it.
+ *
+ * The qualification matters, because the destination is decided on the LIVE
+ * re-read below and not on the page. A candidate the page KEPT can resolve
+ * between the lookup and the transaction while one it DROPPED is still pending,
+ * and then every fetched candidate re-reads as resolved and the Proof publishes
+ * with an undecided claim outstanding. That is the gap the headroom above one
+ * covers: were the cap one, a single resolution inside that window would do it.
+ * At five, all five fetched candidates have to resolve inside the same
+ * sub-second window before a dropped sixth is missed — a narrower margin than
+ * twenty-five gave, which is the honest cost of the smaller bound, and the
+ * reason the cap is five rather than one. Five keeps that margin while bounding
+ * the transactional read fan-out at six documents in the worst case instead of
+ * twenty-six.
  *
  * Exported so the boundary is pinned by a test rather than by the number's
  * reappearance in one.

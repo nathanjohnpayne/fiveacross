@@ -663,8 +663,12 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
   it('caps the owner-scoped lookup at a small, defensible page', async () => {
     // The number itself is the decision: it bounds the transaction's read
-    // fan-out, and it has to stay comfortably above the one claim a well-behaved
-    // Proof carries. Pinned so shrinking it further is a deliberate edit.
+    // fan-out, and it has to stay above one. The destination is decided on the
+    // live re-read, not on the page, so a cap of one would publish the Proof
+    // whenever its single fetched candidate resolved between the lookup and the
+    // transaction while another of the owner's claims stayed pending. The
+    // headroom over the one claim a well-behaved Proof carries is what covers
+    // that gap. Pinned so shrinking it further is a deliberate edit.
     expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBe(5);
     expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBeGreaterThan(1);
   });
@@ -689,10 +693,14 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
   it("truncates the owner's OWN surplus pending claims without changing the destination", async () => {
     // The boundary from above, and the reason a small cap is safe at all: every
-    // document this page can drop is one of the owner's pending claims, and any
-    // ONE of those sends the Proof back to `'pending'` — which is where all of
-    // them would have sent it. So the truncation is outcome-neutral, unlike the
-    // `proofId`-only page a stranger could fill with claims that steer nothing.
+    // document this page can drop was one of the owner's pending claims when the
+    // query ran, and any ONE of those that is still pending at the re-read sends
+    // the Proof back to `'pending'` — which is where all of them would have sent
+    // it. So the truncation is outcome-neutral for the state the lookup saw,
+    // unlike the `proofId`-only page a stranger could fill with claims that steer
+    // nothing. What it is not neutral about is the gap: the cases above pin the
+    // headroom that keeps a dropped candidate from being the only pending one
+    // left by the time the transaction runs.
     claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
       id: `own-${i}`,
       live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
