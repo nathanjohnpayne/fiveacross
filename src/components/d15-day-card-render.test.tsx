@@ -375,6 +375,59 @@ describe('Board daily-cards wiring (#246)', () => {
     expect(H.dealDayCard).toHaveBeenCalledTimes(2);
   });
 
+  it('retries for a PRE-EXISTING identity-less row that races the join repair (#1158)', async () => {
+    // The row is already there on the FIRST render — the leftover a pre-#1158
+    // Day deal wrote (`{dayStats}` and nothing else), or the `{theme}` row a
+    // Theme pick from More creates — so there is no null-to-row transition to
+    // notice. `playerConverter` pins `uid` to the doc id, so a guard reading
+    // the converted `uid` was true from that first render while `dealDayCard`,
+    // which checks the RAW stored `uid`, failed closed: the two sides
+    // disagreed for exactly the row the guard exists for, nothing in the
+    // effect's inputs moved when the join merged the identity, and the Card
+    // sat on "Dealing…" until an unrelated render. `joinedAt` is stored rather
+    // than synthesised, so the transition it names is the join COMMITTING.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    // The malformed leftover, and the fail-closed no-op it earns.
+    H.player = { uid: 'u1', dayStats: {} } as unknown as PlayerDoc;
+    H.dealDayCard.mockResolvedValue(false);
+
+    const { rerender } = render(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Dealing your card/i)).toBeInTheDocument();
+
+    // No board was written, so the Card stays dealing — and re-rendering over
+    // the same identity-less row is not a new attempt.
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Dealing your card/i)).toBeInTheDocument();
+
+    // `joinAndDeal` commits the identity onto that same row. THAT is the
+    // moment to re-attempt, and it deals once.
+    H.dealDayCard.mockResolvedValue(true);
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+  });
+
   it('renders the two-event "Tonight:" line on the dealt day card (schedule correction)', () => {
     const now = Date.now();
     H.event = {

@@ -217,7 +217,7 @@ describe('isEventArchiving', () => {
   });
 });
 
-describe('the observed play phase — the slot the deal gate resumes on (#1158)', () => {
+describe('the observed play phase — the store the deal gate resumes on (#1158)', () => {
   const COMMITTED = { fromCache: false, hasPendingWrites: false };
   beforeEach(() => resetEventPlayPhaseForTests());
 
@@ -247,7 +247,7 @@ describe('the observed play phase — the slot the deal gate resumes on (#1158)'
     expect(observedEventPlayPhase('event-b')).toBe('open');
   });
 
-  it('notifies subscribers only when the slot actually moves', () => {
+  it('notifies subscribers only when that Event\'s record actually moves', () => {
     const listener = vi.fn();
     const unsubscribe = subscribeEventPlayPhase(listener);
     recordEventPlayPhase('event-a', true, COMMITTED);
@@ -259,6 +259,38 @@ describe('the observed play phase — the slot the deal gate resumes on (#1158)'
     unsubscribe();
     recordEventPlayPhase('event-a', true, COMMITTED);
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a LATE snapshot for a retired Event out of the live Event\'s record', () => {
+    // The window `useDocSub`'s observer documents: the Event id is captured
+    // where the listener was OPENED, so between an `EVENT_ID` switch and the
+    // old listener's cleanup a snapshot for Event A can still land while the
+    // visit is on Event B. Held in ONE slot, that snapshot evicted B's
+    // recorded `'closed'` and B fell back to `'open'` — a phase nothing ever
+    // observed for it (#1158 review round 2, finding 1).
+    recordEventPlayPhase('event-b', true, COMMITTED);
+    recordEventPlayPhase('event-a', false, COMMITTED); // the late one, for the OLD Event
+    expect(observedEventPlayPhase('event-b')).toBe('closed');
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('still MOVES the live Event across the reopen notification after that late snapshot', () => {
+    // The half that strands the join: `useSyncExternalStore` re-renders only
+    // when the snapshot it reads back differs. If the late Event-A snapshot
+    // had already flipped B's read to `'open'`, B's genuine reopen would
+    // notify with the same value on both sides, React would be free to bail
+    // out, and the deferred join would never be resumed.
+    const seen: string[] = [];
+    const unsubscribe = subscribeEventPlayPhase(() => seen.push(observedEventPlayPhase('event-b')));
+    recordEventPlayPhase('event-b', true, COMMITTED);
+    recordEventPlayPhase('event-a', false, COMMITTED); // the late one, for the OLD Event
+    expect(observedEventPlayPhase('event-b')).toBe('closed');
+    recordEventPlayPhase('event-b', false, COMMITTED); // an Admin reopens play on B
+    expect(observedEventPlayPhase('event-b')).toBe('open');
+    // Closed on its own notification, closed still when A's landed, open on
+    // the reopen — so the value B reads back changed across it.
+    expect(seen).toEqual(['closed', 'closed', 'open']);
+    unsubscribe();
   });
 });
 

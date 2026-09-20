@@ -1,8 +1,9 @@
 // The Event's gameplay lifecycle as this DEVICE last observed it, in memory
-// (#1158, specs/post-sailing-archive.md § "The surfaces"). One slot, one owner:
-// the shared Event subscription WRITES it (`useEventDoc`, through the same
-// observer seam that records a confirmed archive), and `AuthContext`'s deal gate
-// READS it — so the join can be resumed when an Admin reopens play.
+// (#1158, specs/post-sailing-archive.md § "The surfaces"). One record PER
+// EVENT, one owner: the shared Event subscription WRITES it (`useEventDoc`,
+// through the same observer seam that records a confirmed archive), and
+// `AuthContext`'s deal gate READS it — so the join can be resumed when an Admin
+// reopens play.
 //
 // It exists because the deal gate has no Event subscription of its own and must
 // not grow one. `AuthProvider` sits above every route, so opening a second
@@ -29,11 +30,29 @@ import type { SnapshotOrigin } from './archiveConfirmation';
 export type EventPlayPhase = 'open' | 'closed';
 
 /**
- * The last fully server-committed phase observed, and the Event it was observed
- * for. `null` until a snapshot lands; an Event nobody has observed reads `'open'`
- * (see `observedEventPlayPhase`).
+ * The last fully server-committed phase observed, PER EVENT. Empty until a
+ * snapshot lands; an Event with no entry reads `'open'` (see
+ * `observedEventPlayPhase`).
+ *
+ * A map rather than one slot tagged with an Event id, because the two are not
+ * the same under the window this module's own writer documents (#1158 review
+ * round 2, finding 1). `useDocSub` hands the observer the Event id captured
+ * where the listener was OPENED, so between an `EVENT_ID` switch and the old
+ * listener's cleanup a LATE snapshot for the previous Event can still land. A
+ * single slot would let that snapshot evict the record it is not about: the
+ * current Event's recorded `'closed'` would be replaced, `observedEventPlayPhase`
+ * would fall back to `'open'`, the deal gate would re-attempt a join the rules
+ * still deny, and — because the read is then already `'open'` — the genuine
+ * reopen would move nothing across the notification, so `useSyncExternalStore`
+ * need not re-render and the deferred join would stay stranded for the session.
+ * Keyed per Event, a snapshot is only ever evidence about its own Event.
+ *
+ * Unbounded in principle, bounded in fact: the entries are one per Event this
+ * device's subscription has observed since load (one, plus one per Event switch
+ * an Admin makes mid-session), each a short id and a two-value string, and the
+ * whole map dies with the page.
  */
-let observed: { eventId: string; phase: EventPlayPhase } | null = null;
+const observed = new Map<string, EventPlayPhase>();
 
 const listeners = new Set<() => void>();
 
@@ -56,10 +75,12 @@ export function subscribeEventPlayPhase(listener: () => void): () => void {
  * take for a missing field, and for the same reason: every Event is open until
  * something says otherwise, and a cold visit that has not yet received a
  * snapshot must behave exactly as it does today. A phase observed for a
- * DIFFERENT Event is not evidence about this one, so it reads as open too.
+ * DIFFERENT Event is not evidence about this one, so it reads as open too —
+ * and, because the records are per Event, observing that other Event never
+ * disturbs what THIS one last said.
  */
 export function observedEventPlayPhase(eventId: string): EventPlayPhase {
-  return observed?.eventId === eventId ? observed.phase : 'open';
+  return observed.get(eventId) ?? 'open';
 }
 
 /**
@@ -74,9 +95,15 @@ export function observedEventPlayPhase(eventId: string): EventPlayPhase {
  * phase change would either strand a join or fire a resume for a close that
  * rolled back.
  *
- * `closed` is passed in rather than derived here so this module stays a slot
+ * `closed` is passed in rather than derived here so this module stays a store
  * with no opinions: the caller spells the predicate pair the rest of the client
  * spells (`isEventArchived(event) || isEventArchiving(event)`).
+ *
+ * The snapshot updates ITS OWN Event's record and no other's, so a late
+ * snapshot for a retired Event cannot move what the live one reads. The
+ * notification is still global — `subscribeEventPlayPhase` takes no Event —
+ * which costs a reader of another Event one bailed-out `getSnapshot`, since
+ * its own value is unchanged.
  */
 export function recordEventPlayPhase(
   eventId: string,
@@ -85,16 +112,16 @@ export function recordEventPlayPhase(
 ): void {
   if (origin.fromCache || origin.hasPendingWrites) return;
   const phase: EventPlayPhase = closed ? 'closed' : 'open';
-  if (observed?.eventId === eventId && observed.phase === phase) return;
-  observed = { eventId, phase };
+  if (observed.get(eventId) === phase) return;
+  observed.set(eventId, phase);
   for (const listener of listeners) listener();
 }
 
 /**
- * Forget every observation. For tests only — the slot is module state, and a
- * suite that leaves a closed Event behind would hand the next test a phase it
- * never set up.
+ * Forget every observation, for every Event. For tests only — the records are
+ * module state, and a suite that leaves a closed Event behind would hand the
+ * next test a phase it never set up.
  */
 export function resetEventPlayPhaseForTests(): void {
-  observed = null;
+  observed.clear();
 }
