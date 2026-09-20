@@ -979,6 +979,125 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     expect(podium.podium?.champion).toBeNull();
     expect(podium.podium?.firstBingo).toMatchObject({ uid: 'logan' });
     expect(podium.podium?.playRecorded).toBe(true);
+    // …and the OTHER half of that seam (#1218): the fact the Moment carries was
+    // captured by the freeze transaction in this same run, not derived by the
+    // beat. The describe below is where that separation is pinned.
+    expect(db.readEvent().frozenPlayRecorded).toBe(true);
+  });
+
+  // #1218, Codex P2 + CodeRabbit on PR #1242. WHERE the fact is decided, which
+  // the test above does not settle because its freeze and its podium land in one
+  // run. The podium beat is retried until its Moment actually lands, and a
+  // ceremonial Day keeps recording Marks after the freeze by design (ADR 0011) —
+  // so a delayed sweep, or a retry after a failed podium write, re-reads a LIVE
+  // roster. Every other podium field carries an instant and is resolved through
+  // the freeze cutoff; a count carries none, so the cutoff had nothing to bite on
+  // and post-freeze activity could move a value the payload's contract calls
+  // frozen: a newly marked ceremonial square turning it true, a cleared count
+  // turning it false, on a record written once and never amended.
+  //
+  // Each case below is the beat running on an ALREADY-frozen Event — the retry
+  // shape — with a roster that disagrees with the frozen fact. Revert the fix and
+  // every one of them takes the roster's answer.
+  describe('playRecorded is captured at the freeze, not re-derived by the beat (#1218)', () => {
+    /** The two-Day finale shape the ceremonial split needs: a competitive Day 9
+     *  and a Day 10 that is ceremonial by stated Policy and NOT a Tutorial Day. */
+    const ceremonialFinale = (): DayLike[] => [
+      { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+      { index: 9, pool: 'main', tutorial: false, scoring: 'ceremonial', unlockAt: D10_UNLOCK },
+    ];
+
+    /** A Player whose every Mark sits on that ceremonial Day — invisible to the
+     *  re-aggregated standings, which is what makes `playRecorded` its own fact. */
+    const ceremonialPlayer = (at: number) => ({
+      uid: 'logan',
+      displayName: 'Logan',
+      bingoCount: 1,
+      squaresMarked: 7,
+      firstBingoAt: at,
+      dayStats: { 9: { bingoCount: 1, squaresMarked: 7, firstBingoAt: at } },
+    });
+
+    const postedPodium = (db: { moments(): StoredMoment[] }) =>
+      db.moments().find((m) => m.kind === 'podium') as
+        | (Record<string, unknown> & { podium?: { playRecorded?: unknown } })
+        | undefined;
+
+    it('keeps the frozen answer when a ceremonial Mark lands AFTER the freeze', async () => {
+      const db = makeDb({
+        eventId: 'e',
+        event: {
+          days: ceremonialFinale(),
+          // An earlier sweep froze an unplayed board and recorded that; its
+          // podium write did not land, so only the beat is still owed.
+          frozenAt: D10_UNLOCK,
+          frozenPlayRecorded: false,
+        },
+        // The goodbye Mark, landing after the freeze. The live roster now says
+        // somebody played; the freeze said nobody had.
+        players: [ceremonialPlayer(D10_UNLOCK + 60_000)],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+    });
+
+    it('keeps the frozen answer when the counts behind it are CLEARED after the freeze', async () => {
+      // The other direction, and the one a live derivation gets wrong in the
+      // costlier way: the frozen Event WAS played, and a roster that has since
+      // been emptied would have the email tell every recipient nobody marked a
+      // square. `players/{uid}` validates no field (ADR 0001), so a self-write
+      // clearing a row is reachable; so is a moderation deletion.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: true },
+        players: [],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
+
+    it('says NOTHING rather than false when the freeze predates the field', async () => {
+      // An Event frozen before this contract carries no fact, and the honest
+      // answer is unknown. The Moment omits the field, which is exactly the
+      // absence `PodiumMomentPayload.playRecorded` is optional for and
+      // `podiumEmailInputFor` states a frozen-record-only fallback for.
+      // Substituting this run's live derivation would be the defect with a
+      // default's name on it.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK },
+        players: [ceremonialPlayer(D10_UNLOCK - 1_000)],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      const podium = postedPodium(db);
+      // The rest of the payload is unaffected — only the one unknowable fact is
+      // withheld.
+      expect(podium?.podium).toMatchObject({ firstBingo: { uid: 'logan' } });
+      expect(podium?.podium).not.toHaveProperty('playRecorded');
+    });
+
+    it('answers a RETRIED beat exactly as the first attempt did', async () => {
+      // End to end, with no pre-frozen seed: run one freezes and posts, the
+      // Moment is lost, the roster moves, run two re-posts. The two Moments must
+      // agree, because they describe one instant.
+      const logan = { uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null };
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [logan],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+      expect(db.readEvent().frozenPlayRecorded).toBe(false);
+
+      // The podium write is lost (the transient failure the beat's retry guard
+      // exists for), and the Event is played on in the meantime.
+      db.moments().length = 0;
+      Object.assign(logan, ceremonialPlayer(D10_UNLOCK + 60_000));
+
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_800_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+    });
   });
 
   it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {

@@ -450,6 +450,33 @@ export interface EventDoc {
   // finale finished; see `finaleCompletedAt` below (#1151).
   frozenAt?: number;
   /**
+   * Whether ANY Mark had been recorded anywhere in the Event when the standings
+   * froze (#1218) — the podium payload's `playRecorded`, captured at the freeze
+   * instead of re-derived at the beat that quotes it. Written by
+   * `runFinaleBeats` in the same transaction as `frozenAt`, so the fact and the
+   * stamp land together or not at all.
+   *
+   * It is here rather than left to the podium beat because the beat cannot
+   * answer it as of the freeze. Every other podium field carries an instant and
+   * is resolved through the freeze cutoff; a COUNT carries none, and a
+   * ceremonial Day keeps recording Marks after the freeze by design (ADR 0011).
+   * The beat is retried until its Moment lands, so a delayed sweep or a retry
+   * after a failed write read live totals and could answer differently from the
+   * first attempt — a post-freeze Mark turning it true, a cleared count turning
+   * it false — on the one record that is written once and never amended.
+   *
+   * ABSENT MEANS UNKNOWN, not `false`: an Event frozen before this field
+   * existed carries no value, and the podium beat then omits `playRecorded`
+   * from the Moment rather than substituting a live derivation, which is the
+   * absence `podiumEmailInputFor` already states a frozen-record-only fallback
+   * for. Unlike `finaleCompletedAt` beside it this is NOT in the rules'
+   * no-client-writes set — the Event arm sits at Firestore's expression cap
+   * (#1142) — so an Event admin can still write it, exactly as they can
+   * `frozenAt`. The exposure is one sentence of email copy rather than a gate on
+   * an irreversible write, which is why it rides the existing admin gate.
+   */
+  frozenPlayRecorded?: boolean;
+  /**
    * The composite FINALE-COMPLETE marker (ms epoch, #1151, Codex P1 on PR
    * #1162): when every required finale beat had landed — the freeze stamp AND
    * the podium Moment together. Written by `runFinaleBeats` once it can observe

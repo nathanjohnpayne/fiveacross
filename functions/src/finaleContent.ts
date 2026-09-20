@@ -663,7 +663,13 @@ export interface PodiumPayload {
   dailyHonors: PodiumHonor[];
   /** Whether ANY Marks were recorded across the Event as of the freeze — the
    *  frozen answer to "did anybody play", carried rather than inferred. See
-   *  `anyMarksRecorded`. */
+   *  `anyMarksRecorded`.
+   *
+   *  THIS BUILDER ANSWERS FOR THE ROSTER IT IS HANDED, which is as-of-the-freeze
+   *  only when its caller's input is (#1218). The scheduler's is not on a retry,
+   *  so `runFinaleBeats` posts `EventDoc.frozenPlayRecorded` — captured in the
+   *  freeze transaction — in place of this value, and omits the field entirely
+   *  when the Event carries none. See `specs/d15-finale.md`. */
   playRecorded: boolean;
 }
 
@@ -772,6 +778,16 @@ export function podiumStandings(
  * the ⭐ naming the person who bingoed. `playRecorded` is the fact that consumer
  * actually needs, carried out of the frozen record rather than reconstructed
  * from its neighbours.
+ *
+ * AND THAT LAST FIELD IS ONLY AS FROZEN AS THIS FUNCTION'S INPUT (#1218). The
+ * `freezeAt` cutoff below covers `champion` and `firstBingo`, because both are
+ * decided by INSTANTS a post-freeze write can be recognised by; `playRecorded`
+ * is a count, which carries none. So the scheduler — whose podium beat is
+ * retried over a roster a ceremonial Day keeps writing to — does not post this
+ * value at all: `runFinaleBeats` substitutes `EventDoc.frozenPlayRecorded`,
+ * stamped in the freeze transaction, or omits the field when the Event carries
+ * none. This builder stays pure and stays the client mirror's twin, which is
+ * what `tests/functions/finale-parity.test.ts` compares.
  */
 export function buildPodiumPayload(
   players: readonly FinalePlayer[],

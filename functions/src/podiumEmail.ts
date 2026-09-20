@@ -1104,9 +1104,11 @@ interface PodiumMomentDoc {
   /** The payload as STORED, which is not quite what this process would build:
    *  `playRecorded` postdates the contract (#1192) and a podium Moment is written
    *  once and never amended, so every Moment posted before it exists lacks the
-   *  field. Spelled optional and `unknown` here so the compiler cannot let a
-   *  legacy `undefined` be read as `false` — absence means "unknown", and
-   *  `podiumEmailInputFor` states the fallback explicitly. */
+   *  field — as does one the beat DELIBERATELY withheld it from, because the
+   *  freeze recorded no answer to carry (#1218). Spelled optional and `unknown`
+   *  here so the compiler cannot let either `undefined` be read as `false` —
+   *  absence means "unknown", and `podiumEmailInputFor` states the fallback
+   *  explicitly. */
   podium?: Omit<PodiumPayload, 'playRecorded'> & { playRecorded?: unknown };
 }
 
@@ -1895,9 +1897,12 @@ export async function podiumEmailInputFor(
   // row and the reader's own placing and stated "Nobody marked a square" directly
   // beside the ⭐ naming the person who bingoed.
   //
-  // A LEGACY MOMENT HAS NO SUCH FIELD, and absence is unknown rather than
-  // `false`: the Moment is written once and never amended, so an Event that froze
-  // before this contract can still be mailed by the first sweep after deploy. The
+  // A MOMENT WITHOUT THE FIELD says unknown rather than `false`: the Moment is
+  // written once and never amended, so an Event that froze before this contract
+  // can still be mailed by the first sweep after deploy — and the freeze capture
+  // (#1218) leaves it unstated two further ways, a roster read that failed at the
+  // freeze and an Event stamped `frozenAt` by some path other than the finale
+  // beat. All three arrive here identically, as a payload with no field. The
   // fallback is read off the frozen record alone — never off the live roster,
   // which a post-freeze self-write can move (ADR 0001) — and it refuses the empty
   // claim whenever the record names ANY honour: a champion, the Event-wide ⭐, or

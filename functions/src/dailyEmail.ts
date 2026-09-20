@@ -656,6 +656,15 @@ export interface DailySendResult {
  * check, from the variable the check itself used — otherwise an extended freeze
  * would permit an email whose honour the superseded freeze had decided, which is
  * exactly the divergence the spec forbids.
+ *
+ * AND THE FRESH READ IS ASKED FOR DUE-NESS, NOT ONLY FOR THE FREEZE (#1218,
+ * Codex P2). Re-reading the document and then mailing the opening read's Day
+ * regardless left the rest of the re-read advisory: the container coercion
+ * resolves an unreadable fresh `days` to an empty list, which is right at the
+ * opening read and a licence here, and for a legacy Event with no configured
+ * `standingsFreezeAt` it takes the DERIVED cutoff down with it. So the due Day
+ * is resolved again from the fresh schedule and the fresh freeze, and the send
+ * is refused unless it is still the Day this call prepared.
  */
 export async function sendDailyEmailForEvent(
   db: DailyEmailFirestore,
@@ -809,11 +818,45 @@ export async function sendDailyEmailForEvent(
   // that became malformed in between is exactly the mid-sweep edit this re-read
   // exists to notice. Reusing the opening read's `schedule` would read the old
   // document to answer a question asked of the new one.
+  const scheduleAtDelivery = readableDayList(atDelivery.days);
+  // ONE reading of the clock for both questions below, for the reason the
+  // freeze is read once for both of its readers: two readings could answer them
+  // against two different instants.
+  const nowAtDelivery = clock();
   const freezeAtDelivery = standingsFreezeAtFor({
     standingsFreezeAt: atDelivery.standingsFreezeAt,
-    days: readableDayList(atDelivery.days),
+    days: scheduleAtDelivery,
   });
-  if (freezeHasPassed(freezeAtDelivery, clock())) {
+  if (freezeHasPassed(freezeAtDelivery, nowAtDelivery)) {
+    return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
+  }
+  // AND THE DAY IS STILL THE DUE ONE ON THAT SAME FRESH SCHEDULE (#1218, Codex
+  // P2). The coercion above is right for the OPENING read — an Event whose
+  // stored schedule is unreadable has nothing due and goes quiet — and it is a
+  // licence here, because everything this send is about to mail was built from
+  // the opening read's valid schedule: `day`, the standings snapshot, the ⭐.
+  // Coerce and continue and the sender ships that stale card on the authority of
+  // a document that no longer says it is due.
+  //
+  // THE FREEZE IS THE HALF THAT BITES. `standingsFreezeAtFor` derives the cutoff
+  // from the first ceremonial Day when no `standingsFreezeAt` is configured —
+  // which is both live Events — so a malformed fresh `days` does not merely lose
+  // the schedule, it resolves the freeze to `null` and the check above waves the
+  // whole roster through AFTER the real derived freeze. Before the container
+  // coercion landed that value threw and nothing was mailed; this is that same
+  // answer, stated rather than thrown.
+  //
+  // Asking due-ness again is what closes both: a malformed container coerces to
+  // `[]` and an empty schedule has nothing due, a Day removed or re-dated
+  // mid-sweep is no longer due, and a schedule that is simply unchanged answers
+  // exactly as it did at the top. The comparison is on the Day's INDEX because
+  // that is its identity in the schedule — a Day object re-read from a new
+  // document is a different object either way. Answered `not-due`, like every
+  // other refusal here: this Event has nothing to send this morning.
+  const dayAtDelivery = dueDayForDailyEmail(scheduleAtDelivery, nowAtDelivery, atDelivery.timezone, {
+    freezeAt: freezeAtDelivery,
+  });
+  if (dayAtDelivery?.index !== day.index) {
     return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
   }
 

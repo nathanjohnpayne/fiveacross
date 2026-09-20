@@ -2357,6 +2357,114 @@ describe('sendDailyEmailForEvent', () => {
       expect(unchanged.sent[0].text).not.toContain('Theo *');
       expect(unchanged.sent[0].text).not.toContain('Jess *');
     });
+
+    // #1218, Codex P2 on PR #1242. The container coercion (#1214) is right at the
+    // OPENING read — an Event whose stored schedule is unreadable has nothing due
+    // and goes quiet — and it is a licence at the delivery-time re-read, which is
+    // the one place this call has already built everything it is about to mail.
+    // Coerce and continue there and the sender ships the opening read's Day,
+    // standings and ⭐ on the authority of a document that no longer says they are
+    // due; and because `standingsFreezeAtFor` DERIVES the cutoff from the first
+    // ceremonial Day when no `standingsFreezeAt` is configured — which is both
+    // live Events — an empty schedule does not merely lose the Day, it resolves
+    // the freeze to `null` and waves the whole roster through after the real
+    // boundary. Before the coercion landed that value threw and nothing was
+    // mailed. These pin the refusal that replaces the throw.
+    /** The live-Event shape for that bypass: no configured freeze, and a
+     *  ceremonial Day whose own unlock IS the derived one. */
+    const seedDerivedFreeze = (freezeAt: number): Docs => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = {
+        ...docs['events/med-2026'],
+        days: [
+          ...(gcbEvent.days ?? []),
+          { index: 4, date: '2026-07-19', unlockAt: freezeAt, theme: 'fog-froth-farewells', scoring: 'ceremonial', pool: 'closing' },
+        ],
+      };
+      return docs;
+    };
+
+    it('refuses the send when the FRESH `days` container is malformed, rather than mailing past the freeze it erases', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      // Opens a minute short of the derived freeze — Day 4 is due, and the same
+      // Event mails in full on the last control below — then arrives a minute
+      // past it with `days` stored as a map. Coerced and continued, the fresh
+      // freeze is `null`, the cutoff never fires, and both recipients get a card
+      // after scoring closed.
+      const { result, sent } = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], days: { '3': gcbDay4 } };
+        },
+      );
+      expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+      // And still no second log line: the re-read refuses rather than announcing
+      // (§ Shared domain contract). The opening read was valid here, and the next
+      // sweep's opening read is what names a container that stays malformed.
+      expect(error).not.toHaveBeenCalled();
+      error.mockRestore();
+
+      // The answer the coercion was hiding: same timing, fresh read left intact.
+      // The freeze it derives has passed, so this is `not-due` on its own merits
+      // — which is what makes the case above a bypass rather than a difference of
+      // opinion about the Day.
+      const readable = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+      );
+      expect(readable.result).toMatchObject({ sent: 0, reason: 'not-due' });
+
+      // …and the control that keeps the guard from being a blanket refusal: a
+      // readable fresh schedule, arriving a millisecond before the same freeze,
+      // still mails the morning in full.
+      const inTime = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt - 1,
+      );
+      expect(inTime.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(inTime.sent).toHaveLength(2);
+    });
+
+    it('revalidates due-ness on the fresh schedule, so a Day withdrawn mid-sweep is never mailed', async () => {
+      // The other half, and the one no shape check reaches: the fresh container
+      // is a perfectly good array that simply no longer carries the Day this call
+      // prepared. Everything above the re-read — `day`, the standings snapshot,
+      // the ⭐ — was built from the schedule the call opened with, so continuing
+      // mails a card for a Day the Event has withdrawn.
+      const withdrawn = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            days: (gcbEvent.days ?? []).filter((d) => d.index !== gcbDay4.index),
+          };
+        },
+      );
+      expect(withdrawn.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(withdrawn.sent).toEqual([]);
+
+      // The control: the same re-read, the same mid-sweep rewrite, the same
+      // schedule. Asking the question again is not what refuses — the answer
+      // changing is.
+      const rewritten = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], days: [...(gcbEvent.days ?? [])] };
+        },
+      );
+      expect(rewritten.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(rewritten.sent).toHaveLength(2);
+    });
   });
 
   it('is idempotent — a second sweep inside the same window sends nothing', async () => {
