@@ -230,6 +230,19 @@ feedback_policy:
 # operator's 2026-09-11 decision, so `scripts/coderabbit-severity-gate.sh` is a
 # green no-op and a CodeRabbit finding cannot hold a merge by itself.
 #
+# "Advisory" is scoped to that gate, and one more finding-based block survives
+# outside it. When CodeRabbit publishes a blocking `Potential issue`/⚠️ marker
+# carried SOLELY by the PR-level summary comment, `coderabbit-wait.sh --probe`
+# returns rc 2, `p4b_barrier_class_coderabbit` maps that to `escalate`
+# (scripts/phase-4b/lib.sh, around line 211) and `p4b_same_head_barrier`
+# escalates it to the manual fallback unconditionally (same file, around line
+# 1465). Neither reads `severity_gate.enabled`, so turning the severity gate off
+# does not remove this one. That is deliberate: the severity gate reads only
+# `pulls/{pr}/comments`, the conversation gate covers threads, and the Phase 4b
+# adapter sees only the diff, so the barrier is the only reader a summary-only
+# finding has. An agent that meets this escalation has not found a policy bug —
+# a human has to read that summary comment before Phase 4b can proceed.
+#
 # That pairing is deliberate and worth keeping. The gate is live, not inert —
 # it was observed FAILING on PR #1209 while it was still true. Turning it back
 # on while auto-review is enabled would let an advisory bot block every PR, and
