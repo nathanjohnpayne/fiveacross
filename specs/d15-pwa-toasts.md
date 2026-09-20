@@ -21,6 +21,7 @@ Implements `plans/daily-cards-spec.md` § "Install nudge and update banner": pre
 
 - **Given** a claim sheet is open, **when** a new build is available (`needRefresh` true), **then** the update banner waits until the sheet closes.
 - **Given** the sheet closes with `needRefresh` still true, **when** the next render happens, **then** the update banner appears immediately.
+- **Given** a tab that is not under the service worker's control—the very first page load on a device, which registers the worker but is never claimed by it, `registerType: 'prompt'` claiming only on the #516 rescue path—**when** a new build is deployed, **then** the replacement worker activates straight away instead of parking in `waiting`, no `needRefresh` is raised, and no banner appears. The offer belongs to the returning tab, which is controlled; the e2e case reloads once after the first worker activates so it is testing that tab (#1122).
 
 ## Toast stacking: a shared coordinator, urgent outranks invitational
 

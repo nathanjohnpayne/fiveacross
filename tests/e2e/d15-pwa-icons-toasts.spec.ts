@@ -35,18 +35,34 @@ const SHOTS = process.env.E2E_SHOT_DIR || 'test-results/shots';
  *  `addInitScript`-on-`DOMContentLoaded` dispatch races that (DOMContentLoaded
  *  fires on the initial HTML parse, well before the SPA bundle has executed
  *  and React has mounted), so the event was landing before anyone was
- *  listening. Calling this AFTER the app has visibly rendered sidesteps the
- *  race entirely. */
+ *  listening.
+ *
+ *  "After the app has visibly rendered" turned out not to close that race on
+ *  its own (#1122): on a cold first run the dispatch still landed before
+ *  `useInstallPrompt`'s `useSyncExternalStore` subscription had run
+ *  `attachListenersOnce`, the capture was dropped, and the nudge simply never
+ *  appeared after the Mark — an intermittent red with no other symptom. The
+ *  dispatch is therefore RETRIED until the app acknowledges it: the event is
+ *  `cancelable`, the real listener's first act is `preventDefault()`, and
+ *  `dispatchEvent` returns false exactly when that happened. A capture nobody
+ *  received can no longer be mistaken for one that was. */
 async function fireFakeInstallPrompt(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const ev = new Event('beforeinstallprompt', { cancelable: true }) as Event & {
-      prompt?: () => Promise<void>;
-      userChoice?: Promise<{ outcome: string; platform: string }>;
-    };
-    ev.prompt = () => Promise.resolve();
-    ev.userChoice = Promise.resolve({ outcome: 'accepted', platform: 'web' });
-    window.dispatchEvent(ev);
-  });
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const ev = new Event('beforeinstallprompt', { cancelable: true }) as Event & {
+            prompt?: () => Promise<void>;
+            userChoice?: Promise<{ outcome: string; platform: string }>;
+          };
+          ev.prompt = () => Promise.resolve();
+          ev.userChoice = Promise.resolve({ outcome: 'accepted', platform: 'web' });
+          // false === some listener called preventDefault(), i.e. the app captured it.
+          return !window.dispatchEvent(ev);
+        }),
+      { timeout: 15_000, message: 'the app never captured the synthetic beforeinstallprompt' },
+    )
+    .toBe(true);
 }
 
 test.describe('iconography — Lucide chrome, emoji flavor', () => {
@@ -159,6 +175,30 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
     await joinViaSharedLink(page);
     await waitForBoardServerConfirmed(page);
     await dismissCoach(page);
+
+    // The tab has to be UNDER the service worker's control before a second
+    // build can surface as `needRefresh` at all (#1122). The page that performs
+    // the very FIRST registration is never controlled by the worker it
+    // registered — `registerType: 'prompt'` deliberately never claims outside
+    // the #516 rescue path — and a replacement worker only parks in `waiting`
+    // when the outgoing one still controls a client. With no controlled client
+    // the browser activates the replacement immediately, so workbox-window
+    // never fires `waiting`, `useRegisterSW` never flips `needRefresh`, and the
+    // banner cannot appear however long the case waits: before this reload the
+    // registration went `installing → activating → activated` with
+    // `navigator.serviceWorker.controller` still null throughout. One reload,
+    // once that first worker is active, puts this tab in the state EVERY
+    // returning Player's tab is already in — which is the only state the update
+    // banner was ever meant to fire in.
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.ready;
+    });
+    await page.reload();
+    await expect(page.getByRole('navigation', { name: 'Primary' })).toBeVisible({ timeout: 30_000 });
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller, undefined, { timeout: 30_000 });
+    await expect(page.locator('.grid')).toHaveAttribute('data-server-confirmed', 'true', { timeout: 30_000 });
+    await dismissCoach(page); // already flagged off above; a no-op unless the reload re-raised it
+
     await fireFakeInstallPrompt(page);
 
     // Trigger the install toast first (first Mark on a non-farewell/locked
@@ -170,9 +210,12 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
 
     // Open a real claim sheet (the ＋ "Add proof" affordance on the
     // now-marked Square) and leave it open — UpdatePrompt must defer while
-    // it's up.
+    // it's up. ASSERTED, not probed (#1122): `locator.isVisible()` never waits,
+    // so the old best-effort check could report the sheet closed purely because
+    // it ran in the same tick as the click, quietly dropping the defer leg this
+    // case exists to prove.
     await page.locator('.grid .cell').filter({ hasText: firstPrompt }).locator('button.proofbtn').click();
-    const sheetOpen = await page.locator('.sheet-title', { hasText: firstPrompt }).isVisible().catch(() => false);
+    await expect(page.locator('.sheet-title', { hasText: firstPrompt })).toBeVisible({ timeout: 10_000 });
 
     // Force a genuinely new deployed build: re-run the SAME `vite build` the
     // webServer used, with one inert env var bumped (GITHUB_SHA — vite.config.ts's
@@ -227,16 +270,22 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
         await reg?.update();
       });
 
-      if (sheetOpen) {
-        // Deferred: needRefresh is true internally, but the claim sheet being
-        // open must suppress the banner.
-        await page.waitForTimeout(3_000); // let the SW installed→waiting transition settle
-        await expect(page.locator('.update-prompt')).toHaveCount(0);
-        await page.screenshot({ path: `${SHOTS}/pwa-update-deferred-sheet-open.png`, fullPage: true });
-        await page.getByRole('button', { name: 'Cancel' }).click();
-      } else {
-        console.log('[pwa-update-defer] could not open a claim sheet on the already-marked Square — defer-while-open leg skipped, update-detection + stacking legs still run below.');
-      }
+      // Wait on the WORKER, not on a timer (#1122). `registration.waiting`
+      // becoming non-null IS the event `useRegisterSW` turns into
+      // `needRefresh`, so the suppression assertion below only means anything
+      // once it has happened; a fixed sleep either asserted too early (proving
+      // nothing) or padded every run for no reason.
+      await page.waitForFunction(
+        async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+        undefined,
+        { timeout: 30_000 },
+      );
+
+      // Deferred: needRefresh is true internally, but the claim sheet being
+      // open must suppress the banner.
+      await expect(page.locator('.update-prompt')).toHaveCount(0);
+      await page.screenshot({ path: `${SHOTS}/pwa-update-deferred-sheet-open.png`, fullPage: true });
+      await page.getByRole('button', { name: 'Cancel' }).click();
 
       // Now visible (sheet closed) — urgent priority banner, real copy/actions.
       const updateToast = page.locator('.update-prompt');
