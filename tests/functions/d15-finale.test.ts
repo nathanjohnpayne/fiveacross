@@ -267,7 +267,7 @@ describe('anyMarksRecorded — the Marks question, not the scoring one', () => {
     expect(anyMarksRecorded(player({ uid: 'b', dayStats: {} }))).toBe(false);
   });
 
-  it('counts a CEREMONIAL Day s Marks, which no scoring total can see', () => {
+  it("counts a CEREMONIAL Day's Marks, which no scoring total can see", () => {
     // Day 2 is the ceremonial one in `DAYS`. `podiumStandingRow` drops its
     // bucket; this must not.
     const ceremonialOnly = player({

@@ -564,6 +564,46 @@ async function defaultGetEmailForUid(uid: string): Promise<string | null> {
 const defaultSleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
+/**
+ * The signal a coerced container gets, because the coercion must end the THROW
+ * without also ending the DIAGNOSTIC (#1214).
+ *
+ * #1214 recorded the one redeeming property of this failure mode: a malformed
+ * `days` unwound to `runDailyEmailSweep`'s per-Event catch, so the Event was
+ * named in the logs every morning it failed. Coerced and left silent, the same
+ * Event resolves `not-due`, mails nobody for as long as the field stays
+ * malformed — permanently, because nothing in this system repairs a stored
+ * container — and says nothing anywhere about why. That is the quieter failure
+ * the spec already refuses to call the smaller one. A malformed `bannedUids`
+ * reads worse still: it fails OPEN, which is the right direction, but an
+ * unannounced ban roster of nobody returns moderated participants to the
+ * recipient list and to the standings.
+ *
+ * So the line is restored at the layer that can still answer the call. The
+ * coerced value is untouched — this only says what was read.
+ *
+ * `null` and an absent field are NOT malformed and never log: they are how an
+ * Event says "no schedule" and "nobody is hidden", the reading `?? []` already
+ * gave them, and logging them would bury the real case under every Event that
+ * simply carries neither field.
+ *
+ * The stored value is described by TYPE rather than printed. `bannedUids` is a
+ * list of uids and a Day carries authored copy; neither belongs in a log line
+ * whose whole content is that a shape is wrong.
+ */
+function reportMalformedContainer(
+  eventId: string,
+  field: 'days' | 'bannedUids',
+  value: unknown,
+): void {
+  if (value == null || Array.isArray(value)) return;
+  console.error(
+    `sendDailyEmailForEvent: malformed ${field} container; read as an empty list`,
+    eventId,
+    typeof value,
+  );
+}
+
 export interface DailySendResult {
   /** Emails actually accepted by the transport. */
   sent: number;
@@ -657,6 +697,20 @@ export async function sendDailyEmailForEvent(
   // container at their own read, through this same helper.
   const schedule = readableDayList(event.days);
   const bannedUids = readableUidList(event.bannedUids);
+  // AND THE COERCION SAYS SO. The throw was this Event's only announcement that
+  // one of these containers was unreadable; silencing it without replacing it
+  // would trade a loud recoverable failure for a permanently dark Event. See
+  // `reportMalformedContainer` for why the value itself is left exactly as
+  // coerced, and why `null` and an absent field do not log.
+  //
+  // HERE ONLY, not also at the delivery-time re-read below. A container
+  // malformed at THIS read is what makes an Event go dark: the schedule coerces
+  // to `[]`, no Day is due, and the same answer repeats every sweep. One
+  // malformed at the re-read instead means the document changed mid-call — this
+  // send still resolves, and the very next sweep's opening read names it on this
+  // same line. A second call site would only duplicate that morning's line.
+  reportMalformedContainer(eventId, 'days', event.days);
+  reportMalformedContainer(eventId, 'bannedUids', event.bannedUids);
 
   // The freeze as this call opens, for the due check alone. The two readers that
   // must agree — the cutoff that stops the mail (#1121) and the instant the
