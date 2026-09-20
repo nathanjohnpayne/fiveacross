@@ -119,6 +119,13 @@ describe('three-way reconciliation', () => {
       auditPage({ committed: null, lookup: { kind: 'unknown-host' } }),
     ],
     [
+      // Neither document exists: nothing to project and nothing projected, so
+      // backfill has no ledger to create here.
+      'no-documents',
+      { hostname: null, routerReplica: null },
+      auditPage({ committed: null, lookup: { kind: 'unknown-host' } }),
+    ],
+    [
       'drifted',
       {
         hostname: hostnameDocument(),
@@ -383,6 +390,25 @@ describe('the reconciler boundary', () => {
       'recoveryRecordCount',
       'sourceRevision',
       'state',
+    ]);
+    // Every classification plus the one applied outcome, always present at
+    // zero. `specs/event-router-registry.md` enumerates this exact set, so a
+    // state added without a spec sentence fails here.
+    expect(Object.keys(report.counts).sort()).toEqual([
+      'already-correct',
+      'backfilled',
+      'drifted',
+      'edge-behind',
+      'invalid-host',
+      'malformed-ledger',
+      'malformed-source',
+      'missing',
+      'missing-ledger',
+      'no-documents',
+      'poisoned',
+      'recovered',
+      'reserved-class',
+      'source-behind',
     ]);
   });
 

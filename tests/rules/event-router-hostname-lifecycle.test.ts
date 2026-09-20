@@ -47,6 +47,7 @@ const RULES = readFileSync(RULES_PATH, 'utf8');
 const HOST = 'bodega-bay.fiveacross.app';
 const ALIAS = 'bodega-bay.vacaybingo.com';
 const MIRROR = 'vacaybingo.vercel.app';
+const APEX = 'vacaybingo.com';
 const SYNTHETIC = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const EVENT_ID = 'bodega-bay-2026';
 const NOW = new Date('2026-09-20T12:00:00.000Z');
@@ -239,6 +240,12 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         status: 'active',
         slug: 'bodega-bay',
         pathNamespace: 'vacaybingo.com',
+        // Non-projected fields with their own reviewed writers. The mirror-root
+        // conversion replaces the whole document, so a real transaction is
+        // where "it carries them forward" has to hold.
+        adultContent: true,
+        canonicalHost: HOST,
+        isCanonical: false,
       });
       await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active', admins: ['nathan'] });
 
@@ -255,7 +262,14 @@ describe('the trusted hostname mutation helper against a real transaction', () =
 
       expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'archived', apexPath: true });
       expect(await read(db, `hostnames/${ALIAS}`)).toMatchObject({ status: 'archived' });
-      expect(await read(db, `hostnames/${MIRROR}`)).toEqual({ root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+      expect(await read(db, `hostnames/${MIRROR}`)).toEqual({
+        root: 'not-found',
+        edition: 'vacay',
+        pathNamespace: 'vacaybingo.com',
+        adultContent: true,
+        canonicalHost: HOST,
+        isCanonical: false,
+      });
       expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '2', desired: { kind: 'root', root: 'not-found' } });
       expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'archived' });
     });
@@ -296,6 +310,30 @@ describe('the trusted hostname mutation helper against a real transaction', () =
           ),
         ),
       ).toBe('tombstoned-address');
+    });
+  });
+
+  it('refuses to tombstone a serving doorway marker and leaves both documents standing', async () => {
+    await trusted(async (db) => {
+      // A root marker has no `status`, so "reject active delete" has to be
+      // about what the host serves: `root: 'doorway'` is the live doorway
+      // `specs/path-addressing-and-root.md` § D1 defines, and the tombstone
+      // would be permanent.
+      await seedConverged(db, APEX, { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+      expect(
+        await refusalCode(() =>
+          applyHostnameMutation(mutation({ intent: 'delete', host: APEX, convergedRevision: '1' }), dependencies(db)),
+        ),
+      ).toBe('delete-requires-inactive');
+      expect(await read(db, `hostnames/${APEX}`)).toMatchObject({ root: 'doorway' });
+      expect(await read(db, `routerReplicas/${APEX}`)).toMatchObject({ revision: '1' });
+
+      // Its non-serving sibling is deletable: retiring the host's remaining
+      // path capability is a real operation.
+      await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }), dependencies(db));
+      await applyHostnameMutation(mutation({ intent: 'delete', host: APEX, convergedRevision: '2' }), dependencies(db));
+      expect(await read(db, `hostnames/${APEX}`)).toBeNull();
+      expect(await read(db, `routerReplicas/${APEX}`)).toMatchObject({ revision: '3', desired: { kind: 'tombstone' } });
     });
   });
 

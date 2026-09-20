@@ -8,11 +8,21 @@
  * publisher converges to the edge. If any command could move one without the
  * other, "the edge is a projection of Firestore" would be a convention rather
  * than an invariant, and the reconciler's drift report would be reporting on
- * whichever writer last forgot. So every create, status, Edition, root,
- * path-capability, repoint and delete goes through `applyHostnameMutation`,
- * which reads both documents plus the permanent rehearsal reservation in ONE
- * Firestore transaction, derives the projection from the RESULTING hostname
- * document rather than from the caller's patch, and writes both sides together.
+ * whichever writer last forgot. So every create, status, Edition, root-marker,
+ * repoint and delete goes through `applyHostnameMutation`, which reads both
+ * documents plus the permanent rehearsal reservation in ONE Firestore
+ * transaction, derives the projection from the RESULTING hostname document
+ * rather than from the caller's patch, and writes both sides together.
+ *
+ * `pathNamespace` is deliberately absent from that list even though it is a
+ * projected field. Under the frozen `ROOT_HOSTS` table it is a pure function of
+ * the host — null for every Event subdomain, the table's value for every root
+ * host — and `deriveCanonicalProjection` refuses any other value, so no
+ * mutation of an existing host can turn the capability on or off. Publishing it
+ * is therefore a provisioning decision, and the deployment barrier sits on
+ * `provision` alone. Converting a host between a route and a root marker
+ * outside the archive interlock has no intent here either; `planUpdate` refuses
+ * it by name rather than letting the derivation report a malformed document.
  *
  * Deliberately NOT owned here: `adultContent` (#608) keeps updating its own
  * non-projected field with no revision, because the data contract does not copy
@@ -30,7 +40,6 @@
  */
 import {
   HostnameProjectionRefusal,
-  PATH_NAMESPACES,
   ROOT_HOSTS,
   STATUSES,
   buildLedgerDocument,
@@ -58,6 +67,14 @@ const DEPENDENCY_KEYS = ['now', 'runTransaction'];
 
 const PROJECTED_FIELDS = new Set(['eventId', 'status', 'slug', 'edition', 'root', 'pathNamespace']);
 const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanonical', 'preview']);
+
+/**
+ * The fields only a route document may carry, which the archive's mirror-root
+ * conversion therefore removes. `apexPath` belongs here rather than with the
+ * non-projected fields above because it is per-Event, and the converted
+ * document names no Event.
+ */
+const ROUTE_ONLY_FIELDS = ['eventId', 'status', 'slug', 'apexPath'];
 
 const INTENTS = new Set([
   'provision',
@@ -163,6 +180,10 @@ function validateDependencies(dependencies) {
  * and ONLY THEN may `pathNamespace` be published. None of that is observable
  * from inside a Firestore transaction, so the barrier is an explicit attested
  * record the operator supplies; absent, the mutation fails closed.
+ *
+ * Only `provision` consults it, for the reason the module header gives: the
+ * capability is a constant per host, so the one write that can first publish it
+ * for a host is the write that creates that host's document.
  */
 function validatePathCapabilityBarrier(barrier, observedAt) {
   exactKeys(
@@ -181,12 +202,6 @@ function validatePathCapabilityBarrier(barrier, observedAt) {
   }
   const armed = Date.parse(barrier.armedAt);
   if (!Number.isFinite(armed) || armed > Date.parse(observedAt)) refuse('path-capability-barrier');
-}
-
-function pathNamespaceOf(document) {
-  if (!isRecord(document)) return null;
-  const value = Object.hasOwn(document, 'pathNamespace') ? document.pathNamespace : null;
-  return value === null || PATH_NAMESPACES.has(value) ? value : undefined;
 }
 
 /**
@@ -288,7 +303,7 @@ async function planProvision(input, transaction, observedAt, buffer, revisions, 
 }
 
 async function planUpdate(input, transaction, observedAt, buffer, revisions, projections) {
-  boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['pathCapabilityBarrier'], 'invalid-input');
+  exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
@@ -304,6 +319,21 @@ async function planUpdate(input, transaction, observedAt, buffer, revisions, pro
     if (NON_PROJECTED_FIELDS.has(key)) continue;
     if (!PROJECTED_FIELDS.has(key)) refuse('unknown-field');
     projectedChange = true;
+  }
+  // A route and a root marker are distinguished by which of `eventId`/`root`
+  // the document carries, and `changes` can only ADD a field — Firestore's
+  // delete sentinel is deliberately not plumbed through this helper — so a
+  // conversion in either direction would merge into a document carrying both.
+  // Route → `root: 'doorway'` and `root: 'not-found'` → an active replacement
+  // flagship are the two moves `specs/path-addressing-and-root.md` § D1 names,
+  // and neither has an intent here: the archive interlock owns the only
+  // route → root conversion that exists. Refuse by name so the operator reads
+  // "this transition has no path" rather than "your document is malformed".
+  if (
+    (Object.hasOwn(changes, 'root') && !Object.hasOwn(state.hostname, 'root')) ||
+    (Object.hasOwn(changes, 'eventId') && !Object.hasOwn(state.hostname, 'eventId'))
+  ) {
+    refuse('root-route-transition-barrier');
   }
   const identityChange =
     (Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId) ||
@@ -329,11 +359,14 @@ async function planUpdate(input, transaction, observedAt, buffer, revisions, pro
     buffer.update(`hostnames/${host}`, changes);
     return { host, projectedChange: false, resultingHostname: document };
   }
+  // No path-capability barrier is consulted here, and the intent takes no
+  // barrier input: `deriveCanonicalProjection` pins `pathNamespace` to the
+  // host's `ROOT_HOSTS` entry (or to null off the table), and
+  // `requireConvergedPreState` has already forced the stored document through
+  // that same derivation, so the value cannot differ before and after. A
+  // barrier check on this path would be unreachable code that read as a
+  // guarantee.
   const desired = project(() => deriveCanonicalProjection(host, document));
-  const before = pathNamespaceOf(state.hostname);
-  if (before === null && desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
-    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, observedAt);
-  }
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
   buffer.update(`hostnames/${host}`, changes);
   ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
@@ -445,7 +478,22 @@ async function planArchive(input, transaction, observedAt, buffer, revisions, pr
     // The marker retains the host's path capability and its Edition and keeps
     // no Event field at all, so `/` is not-found while `/<slug>` can still
     // resolve other mirrored Events.
-    const document = { root, edition: rootHost.edition, pathNamespace: rootHost.pathNamespace };
+    //
+    // This is the one write in the helper that replaces a whole hostname
+    // document rather than patching it, because a root marker may not carry
+    // the route fields and `update` has no way to drop them. Replacement is
+    // therefore built by REMOVING exactly the route fields from the stored
+    // document, so `adultContent`, `preview`, `canonicalHost`, `isCanonical`
+    // and anything else the host carries survive the conversion — those fields
+    // have their own reviewed writers (`specs/hostnames-lookup.md` § Who
+    // writes a hostname document) and the archive transaction is not one of
+    // them. `apexPath` goes with the route fields: it is a per-Event apex-path
+    // opt-in and this document no longer names an Event.
+    const document = { ...state.hostname };
+    for (const field of ROUTE_ONLY_FIELDS) delete document[field];
+    document.root = root;
+    document.edition = rootHost.edition;
+    document.pathNamespace = rootHost.pathNamespace;
     const desired = project(() => deriveCanonicalProjection(host, document));
     buffer.set(`hostnames/${host}`, document);
     ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
@@ -466,7 +514,18 @@ async function planDelete(input, transaction, observedAt, buffer, revisions, pro
   guardClaimable(host, state.reservation);
   if (state.hostname === null) refuse('hostname-missing');
   const stored = requireConvergedPreState(host, state.hostname, state.ledger);
-  if (stored.desired.kind === 'route' && stored.desired.status === 'active') refuse('delete-requires-inactive');
+  // "Reject active delete" is about what the host SERVES, not about the
+  // `status` field, which only a route has. `specs/path-addressing-and-root.md`
+  // § D1 makes `root: 'doorway'` the live platform or Edition doorway, so a
+  // doorway marker is as serving as an active route and the permanent
+  // tombstone would strand it exactly the same way. Its sibling
+  // `root: 'not-found'` is the explicitly non-serving marker — deleting it
+  // retires the host's remaining path capability, which is a real and
+  // deliberate operation — so only the doorway is refused here.
+  const serving =
+    (stored.desired.kind === 'route' && stored.desired.status === 'active') ||
+    (stored.desired.kind === 'root' && stored.desired.root === 'doorway');
+  if (serving) refuse('delete-requires-inactive');
   // "After inactive convergence" — the operator proves convergence by naming the
   // revision the private audit read back from the Durable Object's committed
   // state. A mismatch means the edge has not accepted the inactive projection
@@ -534,9 +593,13 @@ async function planAdvanceLedger(input, transaction, observedAt, buffer, revisio
     isRecord(state.ledger) && isCanonicalRevision(state.ledger.revision) ? state.ledger.revision : '0';
   const desired = project(() => deriveCanonicalProjection(host, state.hostname));
   const highWater = BigInt(input.durableObjectHighWaterRevision);
+  // Monotonicity is CONSTRUCTED, not checked: flooring at the greater of the
+  // stored revision and the named high-water mark and adding one is what makes
+  // "it never lowers a revision" true, so there is no reachable state left for
+  // a guard to refuse. Any later edit to this floor has to preserve that
+  // property itself rather than expect a check below to catch it.
   const floor = BigInt(storedRevision) > highWater ? BigInt(storedRevision) : highWater;
   const revision = (floor + 1n).toString(10);
-  if (BigInt(revision) <= BigInt(storedRevision)) refuse('advance-not-monotonic');
   ledgerWrite(buffer, host, revision, desired, observedAt, revisions, projections, storedRevision === '0' ? null : storedRevision);
   return { host, projectedChange: true, resultingHostname: state.hostname };
 }

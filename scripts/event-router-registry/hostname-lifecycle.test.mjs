@@ -256,6 +256,44 @@ describe('ordinary update', () => {
     expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
   });
 
+  it('moves a root marker between its two values and spends one revision', async () => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const { docs, dependencies } = store(converged(APEX, '3', marker));
+    await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' } }), dependencies);
+    expect(docs.get(`routerReplicas/${APEX}`)).toMatchObject({
+      revision: '4',
+      desired: { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
+    });
+  });
+
+  it('refuses a root/route conversion by name in both directions and takes no barrier input', async () => {
+    // `specs/path-addressing-and-root.md` § D1's replacement-flagship repoint
+    // and the route → doorway move have no intent in this helper; the archive
+    // interlock owns the only route → root conversion that exists.
+    const route = store(converged(HOST, '4', hostnameDocument()));
+    expect(await refusal(mutation({ intent: 'update', host: HOST, changes: { root: 'doorway' } }), route.dependencies)).toBe(
+      'root-route-transition-barrier',
+    );
+    expect(route.docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+
+    const marker = store(converged(APEX, '3', { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' }));
+    expect(
+      await refusal(
+        mutation({ intent: 'update', host: APEX, changes: { eventId: 'replacement-2027', slug: 'replacement', status: 'active' } }),
+        marker.dependencies,
+      ),
+    ).toBe('root-route-transition-barrier');
+
+    // `pathNamespace` is a constant per host, so `update` has no barrier
+    // parameter at all and offering one is a malformed envelope.
+    expect(
+      await refusal(
+        mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' }, pathCapabilityBarrier: BARRIER }),
+        store(converged(HOST, '4', hostnameDocument())).dependencies,
+      ),
+    ).toBe('invalid-input');
+  });
+
   it('refuses un-archiving a routing document on its own', async () => {
     const { dependencies } = store(converged(HOST, '9', hostnameDocument({ status: 'archived' })));
     expect(await refusal(mutation({ intent: 'update', host: HOST, changes: { status: 'active' } }), dependencies)).toBe(
@@ -315,11 +353,23 @@ describe('archive', () => {
   const flagship = () => ({
     ...converged(HOST, '4', hostnameDocument()),
     ...converged(ALIAS, '2', hostnameDocument({ canonicalHost: HOST, isCanonical: false, slug: 'bodega-bay' })),
-    ...converged(
-      MIRROR,
-      '7',
-      { eventId: 'bodega-bay-2026', edition: 'vacay', status: 'active', slug: 'bodega-bay', pathNamespace: 'vacaybingo.com' },
-    ),
+    ...converged(MIRROR, '7', {
+      eventId: 'bodega-bay-2026',
+      edition: 'vacay',
+      status: 'active',
+      slug: 'bodega-bay',
+      pathNamespace: 'vacaybingo.com',
+      // Non-projected fields with their own reviewed writers. The conversion
+      // replaces this whole document, so they are exactly what it must not
+      // silently drop.
+      adultContent: true,
+      preview: { headline: 'Bodega Bay' },
+      canonicalHost: HOST,
+      isCanonical: false,
+      // A per-Event opt-in left behind by an earlier writer. The converted
+      // document names no Event, so this one MUST go.
+      apexPath: true,
+    }),
     'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
   });
 
@@ -344,7 +394,18 @@ describe('archive', () => {
     expect(docs.get(`hostnames/${HOST}`)).toMatchObject({ status: 'archived', apexPath: true });
     expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status: 'archived' });
     expect(docs.get(`hostnames/${ALIAS}`).apexPath).toBeUndefined();
-    expect(docs.get(`hostnames/${MIRROR}`)).toEqual({ root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+    // The conversion drops exactly the route fields and keeps every
+    // non-projected field: those have their own reviewed writers, and this
+    // transaction is not one of them.
+    expect(docs.get(`hostnames/${MIRROR}`)).toEqual({
+      root: 'not-found',
+      edition: 'vacay',
+      pathNamespace: 'vacaybingo.com',
+      adultContent: true,
+      preview: { headline: 'Bodega Bay' },
+      canonicalHost: HOST,
+      isCanonical: false,
+    });
     expect(docs.get(`routerReplicas/${MIRROR}`).desired).toEqual({
       kind: 'root',
       root: 'not-found',
@@ -413,6 +474,24 @@ describe('delete', () => {
         store(converged(HOST, '4', hostnameDocument({ status: 'disabled' }))).dependencies,
       ),
     ).toBe('delete-requires-convergence');
+  });
+
+  it('refuses a serving root marker and accepts the non-serving one', async () => {
+    // `root: 'doorway'` IS the live platform/Edition doorway, so it is as
+    // serving as an active route even though a root marker has no `status`.
+    const doorway = { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    expect(
+      await refusal(
+        mutation({ intent: 'delete', host: APEX, convergedRevision: '3' }),
+        store(converged(APEX, '3', doorway)).dependencies,
+      ),
+    ).toBe('delete-requires-inactive');
+
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const { docs, dependencies } = store(converged(MIRROR, '3', marker));
+    await applyHostnameMutation(mutation({ intent: 'delete', host: MIRROR, convergedRevision: '3' }), dependencies);
+    expect(docs.has(`hostnames/${MIRROR}`)).toBe(false);
+    expect(docs.get(`routerReplicas/${MIRROR}`)).toMatchObject({ revision: '4', desired: { kind: 'tombstone' } });
   });
 
   it('deletes the hostname and advances the ledger to a permanent tombstone', async () => {

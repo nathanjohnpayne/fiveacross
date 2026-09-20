@@ -66,7 +66,9 @@ Every mutation of a **projected** field — `eventId`, `status`, `slug`, `editio
 
 The **non-projected** fields are deliberately outside that helper, because the edge does not copy them and a change to one must not churn a revision. `adultContent` (#608) keeps its own derivation and trigger path in `functions/src/adultContent.ts`. `preview` (#647) keeps `scripts/provision-bodega-preview.mjs`. `canonicalHost` and `isCanonical` keep `scripts/migrate-bodega-canonical-host.mjs`. Each of those three writers touches only non-projected fields, which is exactly why they remain separate reviewed paths rather than becoming lifecycle intents.
 
-`apexPath` is the one field that is written by the lifecycle helper and still not projected: it is the archive transaction's per-Event apex-path opt-in, which the client resolver reads and the edge deliberately never sees. Only the archive intent writes it, and only onto the one target mapping named in that transaction.
+`apexPath` is the one field that is written by the lifecycle helper and still not projected: it is the archive transaction's per-Event apex-path opt-in, which the client resolver reads and the edge deliberately never sees. Only the archive intent writes it, and only onto the one target mapping named in that transaction; the same transaction's mirror-root conversion removes it, because the converted document names no Event.
+
+That conversion is also the one lifecycle write that replaces a hostname document rather than patching it. A root marker may not carry `eventId`, `status` or `slug`, and a Firestore `update` has no way to drop a field, so the marker is built by removing exactly those three and `apexPath` from the stored document. `adultContent`, `preview`, `canonicalHost` and `isCanonical` therefore survive the conversion unchanged, and the three writers named above stay the only things that decide their values.
 
 ## Bodega postcard provisioning
 

@@ -223,7 +223,12 @@ function classify(host, entry, audit) {
   }
 
   if (entry.routerReplica === null || entry.routerReplica === undefined) {
-    return { state: entry.hostname === null ? 'orphan-source' : 'missing-ledger', ...unknown };
+    // `no-documents` is the listing naming a host that has NEITHER document —
+    // nothing to project and nothing projected — which backfill must not treat
+    // as a ledger it can create. It was named `orphan-source` and read as the
+    // opposite of its neighbour `missing-ledger`, which is a source with no
+    // ledger.
+    return { state: entry.hostname === null ? 'no-documents' : 'missing-ledger', ...unknown };
   }
   let stored;
   try {
@@ -256,12 +261,21 @@ function classify(host, entry, audit) {
   return { state: 'already-correct', ...known };
 }
 
+/**
+ * Every classification `classify` can return, and the exact set `counts` is
+ * seeded from. `backfilled` is deliberately NOT here: it is not something a
+ * host can be classified as, it is what an applied backfill turns a
+ * `missing-ledger` row into, and it is seeded onto `counts` separately below
+ * so a report always carries it at zero rather than only after a repair.
+ * `specs/event-router-registry.md` § Provisioning, mutation, and deletion
+ * enumerates both halves and must stay equal to this list.
+ */
 const STATES = [
   'already-correct',
   'recovered',
   'missing',
   'missing-ledger',
-  'orphan-source',
+  'no-documents',
   'drifted',
   'poisoned',
   'source-behind',
