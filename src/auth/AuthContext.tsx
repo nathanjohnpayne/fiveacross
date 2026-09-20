@@ -1872,11 +1872,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //
     // `eventPlayPhase` is a gate input for the same reason `online` is (#1158):
     // the Event being shut to gameplay is a condition the join can do nothing
-    // under, and play reopening is the moment to try again. Carrying it in the
+    // under, and play REOPENING is the moment to try again. Carrying it in the
     // KEY rather than only in the deps is what makes the resume exactly ONE
     // rerun — while the Event stays closed the key does not move, so the
     // server-backed decline stays declined, and the flip back to `'open'`
     // changes the key once.
+    //
+    // The close edge MOVES the key but is NOT an attempt (CodeRabbit Major,
+    // #1158 review round 3). Observing the shut is a reason to stop asking,
+    // not a reason to ask again: the rules decline a join under the quiesce
+    // exactly as they declined the one a moment earlier, so dealing on
+    // `'closed'` would spend a forbidden attempt to learn what the phase just
+    // said — and a first deal the fallback `'open'` reading deferred would be
+    // re-attempted the instant the committed `'closed'` snapshot confirmed it
+    // could not succeed. So the branch below records the key and returns: the
+    // record is what lets the later flip to `'open'` move it exactly once and
+    // resume the join.
     //
     // The KEY is the WHOLE mechanism: a deferral deliberately does NOT clear
     // the recorded inputs from `runDeal`'s settle. Every gate evaluation that
@@ -1896,8 +1907,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}\u0000${eventPlayPhase}`;
     if (lastDealGateRef.current === gate) return;
     lastDealGateRef.current = gate;
+    if (eventPlayPhase === 'closed') {
+      // Settle `dealing` on the way out, the same way the admission branch
+      // above settles it for `retryable` and `blocked`, and for the same
+      // reason: `retryBootstrap` leaves the flag true for the deal it expects
+      // to follow, and this branch runs no deal, so nothing else would retire
+      // it — a cold visit whose Event is ALREADY observed closed would strand
+      // the shell on its spinner. It mirrors what a deferral itself settles:
+      // `runDeal`'s `finally` clears exactly this flag when `joinAndDeal`
+      // reports `'deferred'`. `dealError` is deliberately NOT cleared here —
+      // no attempt settled on this branch, and replacing the error before a
+      // settle is the one thing the P3 discipline forbids.
+      setDealingFor(eventId, false);
+      return;
+    }
     void runDeal(user, eventId);
-  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded, eventPlayPhase]);
+  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded, eventPlayPhase, setDealingFor]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
