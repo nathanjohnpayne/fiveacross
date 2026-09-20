@@ -11,7 +11,7 @@ import { webManifestForEdition } from '../../src/web-manifest';
 // The DECISION half only — which responses may be rewritten, and which tag
 // gets which value. `src/html-head-identity.test.ts` owns the shared table
 // itself, `router.test.ts` owns WHERE in the pipeline this sits, and
-// `registry/routerHtmlHead.integration.test.ts` owns the streaming transform,
+// `routerHtmlHead.integration.test.ts` owns the streaming transform,
 // which needs a workerd runtime this program does not have.
 
 const html = (init: ResponseInit = {}) =>

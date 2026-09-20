@@ -160,7 +160,6 @@ export async function handleRequest(
     return proxyToOrigin(request, url, config, deps, null);
   }
 
-
   // A refusal that was decided FROM a committed record carries that record's
   // revision, so `inactive` and a tombstone's `unknown-host` are publicly
   // observable as the `{reason, revision}` pair the registry's recovery

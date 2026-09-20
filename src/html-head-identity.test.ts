@@ -11,6 +11,7 @@ import {
   requestOriginUrl,
   RUNTIME_REPAIRED_TOKENS,
 } from './html-head-identity';
+import { defaultThemeForEdition } from './theme/themes';
 import { webManifestForEdition } from './web-manifest';
 
 const EDITIONS = Object.values(EDITION_IDS);
@@ -20,9 +21,37 @@ const EDITIONS = Object.values(EDITION_IDS);
 // token has somewhere to be corrected for a hostname-resolved bundle.
 // `src/editions.test.ts` owns the build-time substitution, `worker/src/
 // htmlHead.test.ts` the edge's edit list, and
-// `worker/src/registry/routerHtmlHead.integration.test.ts` the transform.
+// `worker/src/routerHtmlHead.integration.test.ts` the transform.
 
 const indexHtml = () => readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
+
+/**
+ * The `--bg` a Theme declares in the real stylesheet.
+ *
+ * Parsed rather than imported: `themes.css` is the only definition of a
+ * Theme's colours—`themes.ts` carries ids and which Edition defaults to
+ * which, not the values. The file is flat rule blocks with no at-rules, so
+ * splitting on `}` after stripping comments is exact here rather than an
+ * approximation of a CSS parser.
+ */
+function themeBackground(theme: string): string {
+  const css = readFileSync(resolve(process.cwd(), 'src/theme/themes.css'), 'utf8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  );
+  const backgrounds = css
+    .split('}')
+    .map((rule) => rule.split('{'))
+    .filter(([selector, body]) => body !== undefined && selector!.includes(`[data-theme='${theme}']`))
+    .map(([, body]) => /--bg:\s*(#[0-9a-f]{3,8})\s*;/i.exec(body!)?.[1])
+    .filter((bg): bg is string => bg !== undefined);
+  // Exactly one, so a second block that also set `--bg` for this Theme would
+  // fail here rather than let whichever came first stand in for both.
+  if (backgrounds.length !== 1) {
+    throw new Error(`expected one --bg for [data-theme='${theme}'], found ${backgrounds.length}`);
+  }
+  return backgrounds[0]!;
+}
 
 /** The attribute a selector like `meta[property="og:title"]` matches on. */
 function selectorAttribute(selector: string): { name: string; value: string } {
@@ -94,6 +123,21 @@ describe('the edits the edge writes', () => {
     // splash moves.
     expect(editionBrand(EDITION_IDS.GAY_CRUISE_BINGO).chromeColor).toBe('#07060d');
     for (const colour of colours) expect(colour).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it("takes each Edition's chrome colour from its default Theme's `--bg`", () => {
+    // `src/edition-brands.ts` states this as a rule on all three rows and
+    // `specs/w1-pwa.md` repeats it, but nothing else in the suite reads
+    // `themes.css`. Without this assertion, editing a Theme's `--bg` leaves
+    // the chrome a player's browser paints a different near-black from the
+    // app it opens into—and makes those four sentences false—with every gate
+    // still green.
+    for (const edition of EDITIONS) {
+      const theme = defaultThemeForEdition(edition);
+      expect(editionBrand(edition).chromeColor, `${edition} / ${theme}`).toBe(
+        themeBackground(theme),
+      );
+    }
   });
 
   it('hands the edge the plain brand string, unescaped', () => {
