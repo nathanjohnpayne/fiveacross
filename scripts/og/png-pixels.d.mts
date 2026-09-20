@@ -22,6 +22,13 @@ export type PngImage = {
 
 export type PngRect = { x: number; y: number; width: number; height: number };
 
+/**
+ * Both readers take the wide type on purpose, and the implementation honours
+ * it: a plain `Uint8Array` is adopted as a `Buffer` over the same memory
+ * before anything reads it, because the parsing uses Buffer-only accessors
+ * (`.equals`, `.toString('ascii', start, end)`, `.readUInt32BE`) that a plain
+ * view either lacks or, worse, answers with something plausible and wrong.
+ */
 export function readPngHeader(buffer: Uint8Array): PngHeader;
 export function readPngPixels(buffer: Uint8Array): PngImage;
 export function lightPixelShare(image: PngImage, rect: PngRect, floor?: number): number;

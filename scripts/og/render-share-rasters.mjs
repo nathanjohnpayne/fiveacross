@@ -58,9 +58,10 @@
 // Requirements: playwright + esbuild (dev deps), `npx playwright install
 // chromium`, and macOS — the artboards resolve to Helvetica Neue and Arial
 // Narrow and their marks rasterise as Apple Color Emoji, which is what the
-// committed assets use. Do not suppress the output: this fails closed on a
-// bad frame or a wrong-sized capture, and `>/dev/null 2>&1` turns that into a
-// silent no-op that reads downstream as "the change had no effect".
+// committed assets use. Do not suppress the output: this fails closed on a bad
+// frame, and on a capture that is the wrong size or in the wrong PNG format,
+// and `>/dev/null 2>&1` turns that into a silent no-op that reads downstream as
+// "the change had no effect".
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -68,6 +69,7 @@ import { chromium } from 'playwright';
 import { loadEditions } from './load-editions.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { lightPixelShare, readPngHeader, readPngPixels } from './png-pixels.mjs';
+import { assertCapturedCardFormat } from './share-raster-format.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -226,13 +228,15 @@ try {
     }
     try {
       const bytes = readFileSync(scratch);
-      const { width, height, colorType } = readPngHeader(bytes);
-      if (width !== CARD_W || height !== CARD_H) {
-        throw new Error(
-          `render-share-rasters.mjs: ${id} captured ${width}×${height}, expected ${CARD_W}×${CARD_H}. ` +
-            'The artboard is drawn at half scale, so the capture must run at 2×.',
-        );
-      }
+      const header = readPngHeader(bytes);
+      // Size AND format, before the capture is allowed anywhere near the
+      // committed picture. Size alone was not enough: `readPngPixels` below
+      // decodes colour type 6 as readily as 2 and Vacay skips it entirely, so
+      // a correctly sized capture in the wrong PNG format would replace the
+      // committed file here and only red `src/recon-share-og.test.ts`
+      // afterwards. See share-raster-format.mjs.
+      assertCapturedCardFormat(id, header, { width: CARD_W, height: CARD_H });
+      const { width, height, colorType } = header;
       let lightShare = null;
       if (id !== 'vacay') {
         lightShare = lightPixelShare(readPngPixels(bytes), {

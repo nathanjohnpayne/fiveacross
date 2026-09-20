@@ -18,8 +18,28 @@ import { inflateSync } from 'node:zlib';
 
 const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/**
+ * Adopt `bytes` as a `Buffer` over the same memory, copying nothing.
+ *
+ * Both readers below are written against Buffer's accessors — `.equals`,
+ * `.toString('ascii', start, end)`, `.readUInt32BE` — and a plain
+ * `Uint8Array` has none of them. Two of the three throw, and the third is
+ * worse: `Uint8Array.prototype.toString()` ignores its arguments and returns
+ * the whole array as a comma-joined list of numbers, so the IHDR check would
+ * fail for a reason that has nothing to do with the file. Every caller in the
+ * tree hands over `readFileSync` output, which is already a Buffer, but the
+ * declared parameter type is the wider `Uint8Array` and a caller that honours
+ * the declaration must not fail at runtime for honouring it. `Buffer.from` on
+ * the view's own `ArrayBuffer` is a window onto the same bytes, so the widened
+ * input costs one object and no copy.
+ */
+function asBuffer(bytes) {
+  return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
 /** IHDR only — width/height/bit depth/colour type, without decoding any pixels. */
-export function readPngHeader(buffer) {
+export function readPngHeader(bytes) {
+  const buffer = asBuffer(bytes);
   if (buffer.length < 33 || !buffer.subarray(0, 8).equals(SIGNATURE)) {
     throw new Error('not a PNG file');
   }
@@ -47,7 +67,8 @@ function paeth(a, b, c) {
  * channel in row-major order — the same shape `CanvasRenderingContext2D`'s
  * `getImageData().data` has, minus the forced alpha channel on an opaque PNG.
  */
-export function readPngPixels(buffer) {
+export function readPngPixels(bytes) {
+  const buffer = asBuffer(bytes);
   const header = readPngHeader(buffer);
   if (header.bitDepth !== 8) throw new Error(`PNG: unsupported bit depth ${header.bitDepth} (expected 8)`);
   if (header.colorType !== 2 && header.colorType !== 6) {
