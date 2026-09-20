@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Timestamp } from 'firebase/firestore';
 import { HostnameLifecycleRefusal, applyHostnameMutation } from './hostname-lifecycle.mjs';
-import { deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
+import { cloneDocumentValue, deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
 
 const HOST = 'bodega-bay.fiveacross.app';
 const MIRROR = 'vacaybingo.vercel.app';
@@ -9,6 +10,10 @@ const ALIAS = 'bodega-bay.vacaybingo.com';
 const SYNTHETIC = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const SYNTHETIC_ROOT = 'r2-root-abcdefghijklmnopqrst.fiveacross.app';
 const NOW = '2026-09-20T12:00:00.000Z';
+// The same class the emulator arm writes through, because the ledger's
+// `updatedAt` must reach Firestore as a timestamp field rather than as text:
+// the deployed publisher's Eventarc parser rejects a `stringValue` for it.
+const NOW_STAMP = Timestamp.fromDate(new Date(NOW));
 
 const BARRIER = {
   releaseTag: 'v2026.09.19-path-capability',
@@ -23,28 +28,47 @@ const BARRIER = {
  * refusal raised after some writes were buffered leaves the store untouched —
  * the same atomicity the emulator suite proves against a real transaction.
  */
-function store(seed = {}) {
-  const docs = new Map(Object.entries(structuredClone(seed)));
+function store(seed = {}, { listEventMappings = true } = {}) {
+  // `cloneDocumentValue`, not `structuredClone`, for the reason the module
+  // gives: `structuredClone` strips a `Timestamp` to a plain map, so a double
+  // built on it would hide exactly the field shape under test here.
+  const docs = new Map(Object.entries(cloneDocumentValue(seed)));
   const reads = [];
   const runTransaction = async (work) => {
     const staged = [];
     const result = await work({
       async get(path) {
         reads.push(path);
-        return docs.has(path) ? structuredClone(docs.get(path)) : null;
+        return docs.has(path) ? cloneDocumentValue(docs.get(path)) : null;
       },
+      // The Admin SDK can run this query inside the transaction, so the double
+      // answers from the same committed map every `get` above reads.
+      ...(listEventMappings
+        ? {
+            async listEventMappings(eventId) {
+              reads.push(`hostnames?eventId=${eventId}`);
+              return [...docs.entries()]
+                .filter(([path, value]) => path.startsWith('hostnames/') && value?.eventId === eventId)
+                .map(([path]) => path.slice('hostnames/'.length));
+            },
+          }
+        : {}),
       set: (path, value) => staged.push(['set', path, value]),
       update: (path, value) => staged.push(['update', path, value]),
       delete: (path) => staged.push(['delete', path]),
     });
     for (const [op, path, value] of staged) {
-      if (op === 'set') docs.set(path, structuredClone(value));
-      else if (op === 'update') docs.set(path, { ...(docs.get(path) ?? {}), ...structuredClone(value) });
+      if (op === 'set') docs.set(path, cloneDocumentValue(value));
+      else if (op === 'update') docs.set(path, { ...(docs.get(path) ?? {}), ...cloneDocumentValue(value) });
       else docs.delete(path);
     }
     return result;
   };
-  return { docs, reads, dependencies: { now: () => new Date(NOW), runTransaction } };
+  return {
+    docs,
+    reads,
+    dependencies: { now: () => new Date(NOW), timestamp: (date) => Timestamp.fromDate(date), runTransaction },
+  };
 }
 
 const hostnameDocument = (overrides = {}) => ({
@@ -107,7 +131,7 @@ describe('provision', () => {
       revision: '1',
       host: HOST,
       desired: { kind: 'route', eventId: 'bodega-bay-2026', status: 'disabled', slug: 'bodega-bay', edition: 'fiveacross', pathNamespace: null },
-      updatedAt: NOW,
+      updatedAt: NOW_STAMP,
     });
     expect(plan.projections[0].digest).toBe(projectionDigest('1', HOST, plan.projections[0].desired));
   });
@@ -451,12 +475,55 @@ describe('archive', () => {
   });
 
   it('refuses a root marker on a host that has no root class', async () => {
+    // Every mapping of the Event is still named, so the set is complete and
+    // the refusal is about ALIAS carrying no root class rather than about a
+    // host left out.
     expect(
       await refusal(
-        archiveInput({ mappings: [HOST], mirrorRootConversions: [{ host: ALIAS, root: 'not-found' }] }),
+        archiveInput({
+          mappings: [HOST],
+          mirrorRootConversions: [
+            { host: ALIAS, root: 'not-found' },
+            { host: MIRROR, root: 'not-found' },
+          ],
+        }),
         store(flagship()).dependencies,
       ),
     ).toBe('root-marker-ineligible');
+  });
+
+  it('refuses an archive that omits one of the Event mappings and leaves every document standing', async () => {
+    // The defect this closes: the named mappings and `events/{eventId}` would
+    // archive while `hostnames/{ALIAS}` stayed `active`, so the archived Event
+    // would keep serving at that address.
+    const { docs, dependencies } = store(flagship());
+    expect(await refusal(archiveInput({ mappings: [HOST] }), dependencies)).toBe('archive-mapping-incomplete');
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+    expect(docs.get(`hostnames/${ALIAS}`).status).toBe('active');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+    expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+
+    // Omitting the mirror conversion is the same defect: that host maps the
+    // Event too, so leaving it out would leave an active route behind.
+    const mirror = store(flagship());
+    expect(await refusal(archiveInput({ mirrorRootConversions: [] }), mirror.dependencies)).toBe(
+      'archive-mapping-incomplete',
+    );
+    expect(mirror.docs.get(`hostnames/${MIRROR}`).status).toBe('active');
+  });
+
+  it('proves the set against the collection rather than the caller, and refuses a runner that cannot', async () => {
+    // The complete set comes from `hostnames` itself: naming all three is
+    // accepted, and no extra attestation is asked of the operator.
+    const { docs, dependencies } = store(flagship());
+    await applyHostnameMutation(archiveInput(), dependencies);
+    expect(docs.get('events/bodega-bay-2026').status).toBe('archived');
+
+    // A transaction runner with no listing seam cannot make the interlock's
+    // claim at all, so the archive fails closed by name.
+    const blind = store(flagship(), { listEventMappings: false });
+    expect(await refusal(archiveInput(), blind.dependencies)).toBe('event-mapping-listing-unavailable');
+    expect(blind.docs.get('events/bodega-bay-2026').status).toBe('active');
   });
 });
 
@@ -504,7 +571,7 @@ describe('delete', () => {
       revision: '5',
       host: HOST,
       desired: { kind: 'tombstone' },
-      updatedAt: NOW,
+      updatedAt: NOW_STAMP,
     });
   });
 
@@ -594,15 +661,70 @@ describe('backfill and the explicit Admin ledger advance', () => {
     const { dependencies } = store();
     expect(await refusal(advance({ host }), dependencies)).toBe('reserved-class');
   });
+
+  it('refuses to advance a tombstoned address back into a live route or root', async () => {
+    // A partial Admin write recreates the source over a permanent tombstone.
+    // The advance reads the CURRENT source, so without this guard it would
+    // derive a live route from the recreated document and republish the
+    // retired address at a higher revision than the tombstone.
+    const tombstone = { schemaVersion: 1, revision: '5', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW };
+    const route = store({ [`hostnames/${HOST}`]: hostnameDocument(), [`routerReplicas/${HOST}`]: tombstone });
+    expect(await refusal(advance(), route.dependencies)).toBe('tombstoned-address');
+    expect(route.docs.get(`routerReplicas/${HOST}`)).toEqual(tombstone);
+
+    const marker = store({
+      [`hostnames/${APEX}`]: { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
+      [`routerReplicas/${APEX}`]: { ...tombstone, host: APEX },
+    });
+    expect(await refusal(advance({ host: APEX }), marker.dependencies)).toBe('tombstoned-address');
+
+    // A recreated document too malformed to derive is the same reuse, and is
+    // refused as reuse rather than as a malformed source.
+    const malformed = store({
+      [`hostnames/${HOST}`]: { eventId: 'e', edition: 'westminster', status: 'active', slug: 'bodega-bay' },
+      [`routerReplicas/${HOST}`]: tombstone,
+    });
+    expect(await refusal(advance(), malformed.dependencies)).toBe('tombstoned-address');
+  });
 });
 
 describe('the helper boundary', () => {
-  it('accepts exactly the transaction and clock seams, and no edge store', async () => {
+  it('accepts exactly the transaction, clock and timestamp seams, and no edge store', async () => {
     const { dependencies } = store();
     const input = mutation({ intent: 'backfill-ledger', host: HOST });
     for (const extra of ['kv', 'cache', 'acknowledge', 'readSourceFromEdge']) {
       expect(await refusal(input, { ...dependencies, [extra]: () => undefined }), extra).toBe('invalid-dependencies');
     }
+    const { timestamp, ...withoutTimestamp } = dependencies;
+    expect(await refusal(input, withoutTimestamp)).toBe('invalid-dependencies');
+  });
+
+  it('stores updatedAt as the SDK timestamp the seam built, never as text', async () => {
+    // The deployed publisher's Eventarc parser requires a `timestampValue` for
+    // this field and rejects a `stringValue`, so a ledger event written with
+    // RFC 3339 text can never be published and the edge never converges on it.
+    const { docs, dependencies } = store({ [`hostnames/${HOST}`]: hostnameDocument() });
+    await applyHostnameMutation(mutation({ intent: 'backfill-ledger', host: HOST }), dependencies);
+    const written = docs.get(`routerReplicas/${HOST}`).updatedAt;
+    expect(typeof written).not.toBe('string');
+    expect(written).toBeInstanceOf(Timestamp);
+    expect(written.toDate().toISOString()).toBe(NOW);
+  });
+
+  it('refuses a timestamp seam that does not answer the clock it was given', async () => {
+    const { docs, dependencies } = store({ [`hostnames/${HOST}`]: hostnameDocument() });
+    const input = mutation({ intent: 'backfill-ledger', host: HOST });
+    for (const broken of [
+      () => NOW,
+      () => Timestamp.fromDate(new Date('2020-01-01T00:00:00.000Z')),
+      () => ({ toDate: () => 'not a date' }),
+      () => {
+        throw new Error('no timestamp');
+      },
+    ]) {
+      expect(await refusal(input, { ...dependencies, timestamp: broken })).toBe('authoritative-clock-unavailable');
+    }
+    expect(docs.has(`routerReplicas/${HOST}`)).toBe(false);
   });
 
   it('reads the reservation, the hostname and the ledger inside the one transaction', async () => {

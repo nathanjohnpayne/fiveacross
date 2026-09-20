@@ -36,18 +36,24 @@
  * Plain `.mjs`, no build step, no Firestore import: the caller injects a
  * transaction runner (`createTransactionRunner` below adapts either Firestore
  * SDK), so the emulator suite drives real transactions and the unit suite
- * drives an in-memory store through the same code path.
+ * drives an in-memory store through the same code path. Two more things the
+ * module cannot import come through the same door — the SDK's `Timestamp`
+ * constructor, because the ledger's `updatedAt` must be stored as one, and the
+ * archive's `eventId` listing of `hostnames`, because an Event's complete
+ * mapping set is a query rather than a point read.
  */
 import {
   HostnameProjectionRefusal,
   ROOT_HOSTS,
   STATUSES,
   buildLedgerDocument,
+  cloneDocumentValue,
   deriveCanonicalProjection,
   isCanonicalRevision,
   isRecord,
   isReservedClassHost,
   nextRevision,
+  normalizeTimestamp,
   projectionDigest,
   sameValue,
   validateHostShape,
@@ -62,8 +68,15 @@ const POSITIVE_DECIMAL = /^[1-9]\d*$/;
  * publisher acknowledgement writer, or a "read the source from the edge"
  * fallback — the four stores `specs/event-router-registry.md` says never
  * participate in accepted state.
+ *
+ * `timestamp` turns the authoritative clock's `Date` into the caller SDK's own
+ * `Timestamp`, and it is a seam rather than an import for the reason the
+ * module header gives. It is REQUIRED, not optional: the spec types the
+ * ledger's `updatedAt` as a `Timestamp` and the deployed publisher's Eventarc
+ * parser rejects a `stringValue` for it, so a helper that silently fell back
+ * to RFC 3339 text would write documents the edge can never converge on.
  */
-const DEPENDENCY_KEYS = ['now', 'runTransaction'];
+const DEPENDENCY_KEYS = ['now', 'runTransaction', 'timestamp'];
 
 const PROJECTED_FIELDS = new Set(['eventId', 'status', 'slug', 'edition', 'root', 'pathNamespace']);
 const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanonical', 'preview']);
@@ -153,6 +166,14 @@ function guardClaimable(host, reservation) {
   if (reservation !== null) refuse('rehearsal-reservation');
 }
 
+/**
+ * The one instant a mutation is stamped with, in both encodings it is needed
+ * in: `iso` for the plan an operator reads and for the barrier comparison, and
+ * `stamp` for the `updatedAt` field the ledger document stores. The two are
+ * required to name the same instant, so a `timestamp` seam that quietly
+ * rounded, shifted or ignored its argument fails closed here rather than
+ * writing a ledger whose observability field disagrees with its own plan.
+ */
 function authoritativeNow(dependencies) {
   let value;
   try {
@@ -162,13 +183,26 @@ function authoritativeNow(dependencies) {
   }
   const time = value instanceof Date ? value.getTime() : Number.NaN;
   if (!Number.isFinite(time)) refuse('authoritative-clock-unavailable');
-  return new Date(time).toISOString();
+  const at = new Date(time);
+  const iso = at.toISOString();
+  let stamp;
+  try {
+    stamp = dependencies.timestamp(at);
+  } catch {
+    refuse('authoritative-clock-unavailable');
+  }
+  // A plain string would be admissible to `buildLedgerDocument` — the receipt
+  // callers use one — so it is refused HERE, where the write is Firestore's.
+  if (typeof stamp === 'string' || normalizeTimestamp(stamp) !== iso) {
+    refuse('authoritative-clock-unavailable');
+  }
+  return { iso, stamp };
 }
 
 function validateDependencies(dependencies) {
   exactKeys(dependencies, DEPENDENCY_KEYS, 'invalid-dependencies');
-  if (typeof dependencies.now !== 'function' || typeof dependencies.runTransaction !== 'function') {
-    refuse('invalid-dependencies');
+  for (const key of DEPENDENCY_KEYS) {
+    if (typeof dependencies[key] !== 'function') refuse('invalid-dependencies');
   }
 }
 
@@ -227,11 +261,14 @@ function createWriteBuffer() {
   const writes = [];
   return {
     writes,
+    // `cloneDocumentValue` rather than `structuredClone`, which would strip a
+    // Firestore `Timestamp` to a plain two-number map on its way through the
+    // buffer and store the ledger's `updatedAt` as one.
     set(path, value) {
-      writes.push({ op: 'set', path, value: structuredClone(value) });
+      writes.push({ op: 'set', path, value: cloneDocumentValue(value) });
     },
     update(path, value) {
-      writes.push({ op: 'update', path, value: structuredClone(value) });
+      writes.push({ op: 'update', path, value: cloneDocumentValue(value) });
     },
     delete(path) {
       writes.push({ op: 'delete', path });
@@ -246,10 +283,10 @@ async function readHostState(transaction, host) {
   return { reservation, hostname, ledger };
 }
 
-function ledgerWrite(buffer, host, revision, desired, observedAt, revisions, projections, from) {
+function ledgerWrite(buffer, host, revision, desired, updatedAt, revisions, projections, from) {
   buffer.set(
     `routerReplicas/${host}`,
-    project(() => buildLedgerDocument(host, revision, desired, observedAt)),
+    project(() => buildLedgerDocument(host, revision, desired, updatedAt)),
   );
   revisions.push({ host, from, to: revision });
   projections.push({
@@ -269,7 +306,7 @@ function validateChanges(changes) {
 // Intents
 // ---------------------------------------------------------------------------
 
-async function planProvision(input, transaction, observedAt, buffer, revisions, projections) {
+async function planProvision(input, transaction, clock, buffer, revisions, projections) {
   boundedKeys(input, [...MUTATION_KEYS, 'hostname'], ['pathCapabilityBarrier'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
@@ -295,14 +332,14 @@ async function planProvision(input, transaction, observedAt, buffer, revisions, 
     : { ...input.hostname, status: 'disabled' };
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
-    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, observedAt);
+    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso);
   }
   buffer.set(`hostnames/${host}`, document);
-  ledgerWrite(buffer, host, '1', desired, observedAt, revisions, projections, null);
+  ledgerWrite(buffer, host, '1', desired, clock.stamp, revisions, projections, null);
   return { host, projectedChange: true, resultingHostname: document };
 }
 
-async function planUpdate(input, transaction, observedAt, buffer, revisions, projections) {
+async function planUpdate(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
@@ -369,11 +406,11 @@ async function planUpdate(input, transaction, observedAt, buffer, revisions, pro
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
   buffer.update(`hostnames/${host}`, changes);
-  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   return { host, projectedChange: true, resultingHostname: document };
 }
 
-async function planRepoint(input, transaction, observedAt, buffer, revisions, projections) {
+async function planRepoint(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
@@ -399,8 +436,53 @@ async function planRepoint(input, transaction, observedAt, buffer, revisions, pr
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
   buffer.update(`hostnames/${host}`, changes);
-  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   return { host, projectedChange: true, resultingHostname: document };
+}
+
+/**
+ * Every host the `hostnames` collection currently maps to `eventId`, read
+ * through the transaction's own listing seam.
+ *
+ * It fails closed when the seam is absent, and that is the point: the archive
+ * interlock is a statement about ALL of an Event's mappings, and a caller that
+ * cannot enumerate them cannot make it. An operator's `mappings` array is an
+ * assertion about the collection, not a definition of it.
+ */
+async function listEventMappings(transaction, eventId) {
+  if (typeof transaction.listEventMappings !== 'function') refuse('event-mapping-listing-unavailable');
+  let mapped;
+  try {
+    mapped = await transaction.listEventMappings(eventId);
+  } catch (error) {
+    if (error instanceof HostnameLifecycleRefusal) throw error;
+    refuse('event-mapping-listing-unavailable');
+  }
+  if (!Array.isArray(mapped) || mapped.some((host) => !isNonempty(host))) {
+    refuse('event-mapping-listing-malformed');
+  }
+  if (new Set(mapped).size !== mapped.length) refuse('event-mapping-listing-malformed');
+  return mapped;
+}
+
+/**
+ * The archive is refused unless it names every host the collection currently
+ * maps to the Event.
+ *
+ * An omitted alias is the defect this exists for: the named mappings and
+ * `events/{eventId}` would archive while that document stayed `active`, so the
+ * archived Event would keep serving at that URL and the § D8 interlock would
+ * be false.
+ *
+ * Only that direction is checked here. The converse — a named host the Event
+ * does not map — is already refused per host by `archive-mapping-mismatch`
+ * below, from the host's own document rather than from a listing, and that
+ * refusal names the defect more precisely than a set comparison would. The two
+ * together are set equality.
+ */
+function requireCompleteMappingSet(mapped, hosts) {
+  const named = new Set(hosts);
+  for (const host of mapped) if (!named.has(host)) refuse('archive-mapping-incomplete');
 }
 
 /**
@@ -410,7 +492,7 @@ async function planRepoint(input, transaction, observedAt, buffer, revisions, pr
  * marker, and `EventDoc.status` all move in ONE transaction. Nothing observes a
  * half-archived Event, and no active Event becomes reachable at an apex path.
  */
-async function planArchive(input, transaction, observedAt, buffer, revisions, projections) {
+async function planArchive(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(
     input,
     [
@@ -436,6 +518,7 @@ async function planArchive(input, transaction, observedAt, buffer, revisions, pr
 
   const event = (await transaction.get(`events/${eventId}`)) ?? null;
   if (event === null) refuse('event-missing');
+  requireCompleteMappingSet(await listEventMappings(transaction, eventId), hosts);
   const states = new Map();
   for (const host of hosts) {
     states.set(host, await readHostState(transaction, host));
@@ -460,7 +543,7 @@ async function planArchive(input, transaction, observedAt, buffer, revisions, pr
     const document = { ...state.hostname, ...changes };
     const desired = project(() => deriveCanonicalProjection(host, document));
     buffer.update(`hostnames/${host}`, changes);
-    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   }
 
   for (const entry of mirrorRootConversions) {
@@ -496,14 +579,14 @@ async function planArchive(input, transaction, observedAt, buffer, revisions, pr
     document.pathNamespace = rootHost.pathNamespace;
     const desired = project(() => deriveCanonicalProjection(host, document));
     buffer.set(`hostnames/${host}`, document);
-    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   }
 
   buffer.update(`events/${eventId}`, { status: 'archived' });
   return { hosts, eventId, projectedChange: true };
 }
 
-async function planDelete(input, transaction, observedAt, buffer, revisions, projections) {
+async function planDelete(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(
     input,
     ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host', 'convergedRevision'],
@@ -536,11 +619,11 @@ async function planDelete(input, transaction, observedAt, buffer, revisions, pro
   buffer.delete(`hostnames/${host}`);
   // The ledger and the DO state are never deleted and the address is never
   // reused: the tombstone is the permanent record of both facts.
-  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   return { host, projectedChange: true, resultingHostname: null };
 }
 
-async function planBackfill(input, transaction, observedAt, buffer, revisions, projections) {
+async function planBackfill(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(input, ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
@@ -551,8 +634,23 @@ async function planBackfill(input, transaction, observedAt, buffer, revisions, p
   // backfill one.
   if (state.ledger !== null) refuse('ledger-exists');
   const desired = project(() => deriveCanonicalProjection(host, state.hostname));
-  ledgerWrite(buffer, host, '1', desired, observedAt, revisions, projections, null);
+  ledgerWrite(buffer, host, '1', desired, clock.stamp, revisions, projections, null);
   return { host, projectedChange: true, resultingHostname: state.hostname };
+}
+
+/**
+ * Whether the stored ledger is a WELL-FORMED tombstone. A malformed ledger
+ * answers false rather than refusing, because repairing exactly that is what
+ * the advance below is for; only a ledger that validates can be relied on to
+ * say the address was permanently retired.
+ */
+function validTombstone(host, ledger) {
+  try {
+    return validateLedgerDocument(host, ledger).desired.kind === 'tombstone';
+  } catch (error) {
+    if (error instanceof HostnameProjectionRefusal) return false;
+    throw error;
+  }
 }
 
 /**
@@ -566,7 +664,7 @@ async function planBackfill(input, transaction, observedAt, buffer, revisions, p
  * revision and never touches the public document. A new read transaction and a
  * fresh signed audit follow; this call blesses nothing by itself.
  */
-async function planAdvanceLedger(input, transaction, observedAt, buffer, revisions, projections) {
+async function planAdvanceLedger(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(
     input,
     [
@@ -591,6 +689,21 @@ async function planAdvanceLedger(input, transaction, observedAt, buffer, revisio
   // document. Absence floors the high-water at 0.
   const storedRevision =
     isRecord(state.ledger) && isCanonicalRevision(state.ledger.revision) ? state.ledger.revision : '0';
+  // A tombstone is permanent and the address is never reused, so it bounds
+  // this repair the way it bounds every other intent. Reading the CURRENT
+  // source is what makes the advance a repair rather than an invention — and
+  // it is also how a tombstoned address could be reclaimed, because a partial
+  // Admin write that recreates `hostnames/{host}` would derive a live route
+  // from it and republish the retired address at a higher revision. So a
+  // well-formed tombstone in the ledger is detected BEFORE the source is
+  // derived, and any source at all is refused against it: no document a
+  // hostname can hold derives a tombstone, so nothing is lost by refusing
+  // before the derivation, and a recreated document that would not even parse
+  // is refused as the reuse it is rather than as a malformed source. The
+  // remaining case — the tombstone with no hostname document, which is the
+  // converged one — still advances, because that is how a tombstone the edge
+  // is ahead of gets republished.
+  if (validTombstone(host, state.ledger) && state.hostname !== null) refuse('tombstoned-address');
   const desired = project(() => deriveCanonicalProjection(host, state.hostname));
   const highWater = BigInt(input.durableObjectHighWaterRevision);
   // Monotonicity is CONSTRUCTED, not checked: flooring at the greater of the
@@ -600,7 +713,7 @@ async function planAdvanceLedger(input, transaction, observedAt, buffer, revisio
   // property itself rather than expect a check below to catch it.
   const floor = BigInt(storedRevision) > highWater ? BigInt(storedRevision) : highWater;
   const revision = (floor + 1n).toString(10);
-  ledgerWrite(buffer, host, revision, desired, observedAt, revisions, projections, storedRevision === '0' ? null : storedRevision);
+  ledgerWrite(buffer, host, revision, desired, clock.stamp, revisions, projections, storedRevision === '0' ? null : storedRevision);
   return { host, projectedChange: true, resultingHostname: state.hostname };
 }
 
@@ -634,14 +747,14 @@ function validateCommonInput(input) {
 export async function applyHostnameMutation(input, dependencies) {
   validateCommonInput(input);
   validateDependencies(dependencies);
-  const observedAt = authoritativeNow(dependencies);
+  const clock = authoritativeNow(dependencies);
   const planner = PLANNERS[input.intent];
 
   return dependencies.runTransaction(async (transaction) => {
     const buffer = createWriteBuffer();
     const revisions = [];
     const projections = [];
-    const outcome = await planner(input, transaction, observedAt, buffer, revisions, projections);
+    const outcome = await planner(input, transaction, clock, buffer, revisions, projections);
     if (input.apply) {
       for (const write of buffer.writes) {
         if (write.op === 'set') transaction.set(write.path, write.value);
@@ -652,7 +765,7 @@ export async function applyHostnameMutation(input, dependencies) {
     return {
       dryRun: !input.apply,
       intent: input.intent,
-      observedAt,
+      observedAt: clock.iso,
       actor: input.actor,
       reason: input.reason,
       writes: buffer.writes,
@@ -665,18 +778,35 @@ export async function applyHostnameMutation(input, dependencies) {
 
 /**
  * Adapts either Firestore SDK to the `{ get, set, update, delete }` facade the
- * planners use. `runTransaction` is the SDK's own — `db.runTransaction(fn)` on
+ * planners use, plus the optional `listEventMappings` the archive interlock
+ * requires. `runTransaction` is the SDK's own — `db.runTransaction(fn)` on
  * the Admin SDK, `(fn) => runTransaction(db, fn)` on the client SDK — and
  * `documentReference(path)` turns a `collection/id` path into that SDK's
  * reference. Nothing else about Firestore leaks into this module.
+ *
+ * `listEventMappings(eventId, transaction)` answers every host id in
+ * `hostnames` whose `eventId` equals the argument. It takes the SDK's own
+ * transaction because the Admin SDK can run that query INSIDE the transaction
+ * (`transaction.get(query)`) and should, while the client SDK has no
+ * transactional query at all and its adapter reads the collection beside the
+ * transaction instead. That difference is the adapter's to own, not this
+ * module's. It is optional here and required by the archive planner, so every
+ * other intent stays callable with a runner that cannot list, and an archive
+ * through one refuses by name.
  */
-export function createTransactionRunner({ runTransaction, documentReference }) {
+export function createTransactionRunner({ runTransaction, documentReference, listEventMappings }) {
   if (typeof runTransaction !== 'function' || typeof documentReference !== 'function') {
+    refuse('invalid-dependencies');
+  }
+  if (listEventMappings !== undefined && typeof listEventMappings !== 'function') {
     refuse('invalid-dependencies');
   }
   return async (work) =>
     runTransaction(async (transaction) => {
       const facade = {
+        ...(listEventMappings === undefined
+          ? {}
+          : { listEventMappings: (eventId) => listEventMappings(eventId, transaction) }),
         async get(path) {
           const snapshot = await transaction.get(documentReference(path));
           const exists = typeof snapshot.exists === 'function' ? snapshot.exists() : snapshot.exists === true;

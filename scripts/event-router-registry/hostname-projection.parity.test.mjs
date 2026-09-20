@@ -16,13 +16,24 @@
  * unless its own derivation reproduces the same bytes. The returned digest is
  * compared against `projectionDigest` for the same reason — one canonicalizer
  * is a contract, not a coincidence.
+ *
+ * The last suite here pins a third program against the same round trip: the
+ * DEPLOYED publisher. `router-publisher/src/runtime.ts` is what actually reads
+ * a `routerReplicas/{host}` write off Eventarc and sends it to the edge, so a
+ * ledger document this repository can write but that parser refuses is a
+ * document the edge can never converge on — and nothing else in the suite
+ * would notice, because every other reader here is one of ours.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { Timestamp } from 'firebase/firestore';
 import { RecoveryControllerRefusal, buildRecoveryArtifacts } from './recovery-controller.mjs';
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
+import { applyHostnameMutation } from './hostname-lifecycle.mjs';
+import { replicaPayloadFromFirestoreEvent } from '../../router-publisher/src/runtime.ts';
 import {
   HostnameProjectionRefusal,
   buildLedgerDocument,
+  cloneDocumentValue,
   deriveCanonicalProjection,
   projectionDigest,
 } from './hostname-projection.mjs';
@@ -203,5 +214,107 @@ describe('projection parity with the #970 recovery controller', () => {
     await expect(buildRecoveryArtifacts(recoveryInput(host), dependencies(host, hostname, ledger))).rejects.toBeInstanceOf(
       RecoveryControllerRefusal,
     );
+  });
+});
+
+describe('parity with the deployed publisher that reads what the helper writes', () => {
+  const LIVE_HOST = 'bodega-bay.fiveacross.app';
+  const WRITTEN_AT = '2026-09-20T12:00:00.000Z';
+  const HOSTNAME = {
+    eventId: 'bodega-bay-2026',
+    canonicalHost: LIVE_HOST,
+    edition: 'fiveacross',
+    status: 'active',
+    slug: 'bodega-bay',
+    isCanonical: true,
+  };
+
+  /** The one write the helper makes, taken from a real run of it. */
+  async function writtenLedger() {
+    const docs = new Map([[`hostnames/${LIVE_HOST}`, HOSTNAME]]);
+    await applyHostnameMutation(
+      {
+        schemaVersion: 1,
+        intent: 'backfill-ledger',
+        apply: true,
+        actor: 'nathanjohnpayne',
+        reason: 'publisher parity',
+        host: LIVE_HOST,
+      },
+      {
+        now: () => new Date(WRITTEN_AT),
+        timestamp: (date) => Timestamp.fromDate(date),
+        runTransaction: async (work) => {
+          const staged = [];
+          const result = await work({
+            async get(path) {
+              return docs.has(path) ? cloneDocumentValue(docs.get(path)) : null;
+            },
+            set: (path, value) => staged.push([path, value]),
+            update: (path, value) => staged.push([path, value]),
+            delete: (path) => docs.delete(path),
+          });
+          for (const [path, value] of staged) docs.set(path, cloneDocumentValue(value));
+          return result;
+        },
+      },
+    );
+    return docs.get(`routerReplicas/${LIVE_HOST}`);
+  }
+
+  /**
+   * How Firestore encodes a stored value into the `Document` payload Eventarc
+   * delivers. Only the types a ledger document can hold are covered, and the
+   * `Timestamp`-versus-string branch is the whole point: it is what turns the
+   * stored field into a `timestampValue` or a `stringValue`, which is the exact
+   * distinction the publisher's parser accepts or refuses on.
+   */
+  function firestoreValue(value) {
+    if (value === null) return { nullValue: null };
+    if (typeof value === 'string') return { stringValue: value };
+    if (typeof value === 'boolean') return { booleanValue: value };
+    if (typeof value === 'number') return { integerValue: String(value) };
+    if (Array.isArray(value)) return { arrayValue: { values: value.map((entry) => firestoreValue(entry)) } };
+    if (typeof value.toDate === 'function') return { timestampValue: value.toDate().toISOString() };
+    return { mapValue: { fields: encodeFields(value) } };
+  }
+
+  function encodeFields(document) {
+    return Object.fromEntries(Object.entries(document).map(([key, value]) => [key, firestoreValue(value)]));
+  }
+
+  const writtenEvent = (document) => ({
+    specversion: '1.0',
+    type: 'google.cloud.firestore.document.v1.written',
+    source: '//firestore.googleapis.com/projects/fiveacross/databases/(default)',
+    id: 'a5c0f0ec-0000-4000-8000-000000000001',
+    time: WRITTEN_AT,
+    subject: `documents/routerReplicas/${LIVE_HOST}`,
+    data: {
+      value: {
+        name: `projects/fiveacross/databases/(default)/documents/routerReplicas/${LIVE_HOST}`,
+        fields: encodeFields(document),
+      },
+    },
+  });
+
+  it('publishes a freshly written ledger document through the publisher own parser', async () => {
+    const document = await writtenLedger();
+    expect(replicaPayloadFromFirestoreEvent(writtenEvent(document))).toEqual({
+      schemaVersion: 1,
+      revision: '1',
+      host: LIVE_HOST,
+      desired: deriveCanonicalProjection(LIVE_HOST, HOSTNAME),
+      updatedAt: WRITTEN_AT,
+    });
+  });
+
+  it('refuses the same document with updatedAt stored as text, which is what made this a parity test', async () => {
+    // The negative arm is the load-bearing one: it proves the encoder above
+    // really does distinguish the two stored shapes, so the passing arm is
+    // evidence about the field and not about the fixture. A helper that wrote
+    // RFC 3339 text would produce exactly this event.
+    const document = { ...(await writtenLedger()), updatedAt: WRITTEN_AT };
+    expect(() => replicaPayloadFromFirestoreEvent(writtenEvent(document))).toThrow('invalid router replica event');
   });
 });

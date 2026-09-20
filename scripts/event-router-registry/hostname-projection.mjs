@@ -81,6 +81,56 @@ function isNonempty(value) {
 }
 
 /**
+ * The ONE reader of a ledger `updatedAt`, answering its RFC 3339 text or null.
+ *
+ * Two shapes reach it, and both are contract, not tolerance. The stored field
+ * is a Firestore `Timestamp`, because `specs/event-router-registry.md` § Data
+ * and mutation contract types it as one and the deployed publisher's Eventarc
+ * parser (`replicaPayloadFromFirestoreEvent` in `router-publisher/src/
+ * runtime.ts`) accepts only a `timestampValue`: a document whose `updatedAt`
+ * arrived as a Firestore string is rejected before it can be published, so the
+ * edge would never converge on it. The plain RFC 3339 string is the shape the
+ * same publisher's `replicaPayloadFromEvent` also takes and the shape the
+ * source-attestor receipt in `recovery-controller.mjs` carries, because a
+ * receipt is normalized JSON rather than a Firestore snapshot.
+ *
+ * Reads therefore normalize rather than choose, which is also what keeps
+ * `documentDigest` below equal across the two: `updatedAt` is observability
+ * only and never orders a write, so which of the two encodings a reader
+ * received must not change the digest it computes.
+ */
+export function normalizeTimestamp(value) {
+  if (typeof value === 'string') {
+    return value.length > 0 && Number.isFinite(Date.parse(value)) ? value : null;
+  }
+  if (!isRecord(value) || typeof value.toDate !== 'function') return null;
+  let date;
+  try {
+    date = value.toDate();
+  } catch {
+    return null;
+  }
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
+  return date.toISOString();
+}
+
+/**
+ * A deep copy that returns anything which is not a plain object or array BY
+ * REFERENCE, which `structuredClone` cannot do: it strips a class instance to
+ * its own enumerable fields, so a Firestore `Timestamp` would reach the SDK as
+ * a two-number map and be stored as one. Timestamps are immutable value
+ * objects, so sharing the reference is safe, and every other value a hostname
+ * or ledger document carries is plain JSON and is copied.
+ */
+export function cloneDocumentValue(value) {
+  if (Array.isArray(value)) return value.map((entry) => cloneDocumentValue(entry));
+  if (isRecord(value) && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneDocumentValue(entry)]));
+  }
+  return value;
+}
+
+/**
  * Key-sorted JSON, so a digest over a document does not depend on the order in
  * which Firestore happened to hand back its fields.
  */
@@ -248,12 +298,12 @@ export function validateLedgerDocument(host, ledger) {
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     refuseProjection('malformed-ledger');
   }
+  const updatedAt = normalizeTimestamp(ledger.updatedAt);
   if (
     ledger.schemaVersion !== 1 ||
     !isCanonicalRevision(ledger.revision) ||
     ledger.host !== host ||
-    !isNonempty(ledger.updatedAt) ||
-    !Number.isFinite(Date.parse(ledger.updatedAt))
+    updatedAt === null
   ) {
     refuseProjection('malformed-ledger');
   }
@@ -262,7 +312,11 @@ export function validateLedgerDocument(host, ledger) {
     revision: ledger.revision,
     desired,
     digest: projectionDigest(ledger.revision, host, desired),
-    documentDigest: sha256Hex(canonicalJson(ledger)),
+    // Digested over the NORMALIZED timestamp, so a stored Firestore
+    // `Timestamp` and the same instant as RFC 3339 text produce one digest
+    // rather than two; `canonicalJson` of a `Timestamp` would otherwise
+    // serialize its internal second/nanosecond fields.
+    documentDigest: sha256Hex(canonicalJson({ ...ledger, updatedAt })),
   };
 }
 
@@ -311,12 +365,16 @@ export function normalizeDesired(host, desired) {
  * The exact `RouterReplicaDesired` document the lifecycle helper writes.
  * `updatedAt` is observability only and never orders a write, which is why it
  * is outside the digest above.
+ *
+ * `updatedAt` is stored EXACTLY as handed in, and the lifecycle helper hands
+ * in the Firestore `Timestamp` its `timestamp` seam builds, because the
+ * deployed Eventarc publisher rejects a `stringValue` for this field. The
+ * plain RFC 3339 string stays admissible for the receipt-shaped callers
+ * `normalizeTimestamp` documents.
  */
 export function buildLedgerDocument(host, revision, desired, updatedAt) {
   if (!isCanonicalRevision(revision)) refuseProjection('malformed-revision');
-  if (!isNonempty(updatedAt) || !Number.isFinite(Date.parse(updatedAt))) {
-    refuseProjection('malformed-timestamp');
-  }
+  if (normalizeTimestamp(updatedAt) === null) refuseProjection('malformed-timestamp');
   return {
     schemaVersion: 1,
     revision,

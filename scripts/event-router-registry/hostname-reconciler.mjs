@@ -8,9 +8,10 @@
  * document, the private `routerReplicas/{host}` ledger, and the per-host
  * Durable Object's committed/lock/history state read through the authenticated
  * audit endpoint — and says which of them disagree. It writes nothing itself:
- * the one ledger mutation it can make, creating a MISSING ledger, is delegated
- * to `hostname-lifecycle.mjs`, because that helper is what makes "one
- * transaction owns every projected mutation" true rather than customary.
+ * the one ledger mutation it can make, recreating a ledger that is missing
+ * from an edge object that has committed nothing, is delegated to
+ * `hostname-lifecycle.mjs`, because that helper is what makes "one transaction
+ * owns every projected mutation" true rather than customary.
  *
  * What deliberately does not participate: KV, the Cache API, a Firestore
  * acknowledgement write recording that the publisher delivered, and any runtime
@@ -72,9 +73,47 @@ function exactKeys(value, expected, code, host) {
   }
 }
 
-function sameCommittedRef(left, right) {
-  if (left === null || right === null) return left === right;
-  return left.revision === right.revision && left.digest === right.digest;
+/**
+ * Validates one `CommittedRef` and answers it normalized, or null for an
+ * uninitialized object. Every comparison below and `classify`'s revision
+ * arithmetic read these fields, so a malformed one is a malformed audit page
+ * rather than a `BigInt` throw from the middle of a chain check.
+ */
+function committedRef(value, host) {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value) || !POSITIVE_DECIMAL.test(String(value.revision ?? '')) || !isNonempty(value.digest)) {
+    refuse('malformed-audit-page', host);
+  }
+  return { revision: String(value.revision), digest: value.digest };
+}
+
+/**
+ * Whether the object could have moved from `earlier` to `later` at all: an
+ * uninitialized object precedes every committed state, committed state is
+ * never withdrawn once it exists, and no path lowers the accepted revision
+ * (`specs/event-router-registry.md` § Invariants and threat model, 5).
+ */
+function notLowered(earlier, later) {
+  if (earlier === null) return true;
+  if (later === null) return false;
+  return BigInt(later.revision) >= BigInt(earlier.revision);
+}
+
+/**
+ * Whether ORDINARY PUBLISHER SYNCS alone could have carried the object from
+ * `earlier` to `later` — the relation that holds across a span the recovery
+ * history does not record.
+ *
+ * It is `notLowered` plus one thing sync cannot do: change the payload at an
+ * unchanged revision. The sync table in § The per-host Durable Object answers
+ * an equal revision with `200 replay` when the payload is byte-equivalent and
+ * `409 revision-conflict` when it is not, and neither commits, so an equal
+ * revision across the span forces an equal digest.
+ */
+function publisherReachable(earlier, later) {
+  if (!notLowered(earlier, later)) return false;
+  if (earlier === null || later === null) return true;
+  return BigInt(later.revision) > BigInt(earlier.revision) || earlier.digest === later.digest;
 }
 
 function validateDependencies(dependencies) {
@@ -131,15 +170,31 @@ async function collectSource(dependencies, pageSize) {
 
 /**
  * Reads one host's complete Durable Object audit, following `nextAfter` to
- * null, and proves the recovery history is a single chain while doing so.
+ * null, and proves the recovery history is consistent while doing so.
  *
  * "Refuses conflicting histories" is enforced here rather than reported,
- * because a history whose records do not chain means the audit's own inputs
- * disagree about what the object did; every comparison downstream would be
- * derived from a state nothing in the system actually reached.
+ * because a history whose records contradict each other means the audit's own
+ * inputs disagree about what the object did; every comparison downstream would
+ * be derived from a state nothing in the system actually reached.
+ *
+ * What the records are NOT is a complete log of the object's committed
+ * transitions. A record is appended by a transaction that changes committed or
+ * lock state THROUGH RECOVERY; an ordinary publisher `sync` commits a new
+ * revision with no record at all (`applyPublisherSync` in
+ * `worker/src/registry/state.ts` returns a new `committed` and an untouched
+ * `recoverySequence`). So a recovered host that is later updated normally has
+ * a gap between its last record's `after` and the state the object reports,
+ * and two recovery episodes separated by one ordinary revision have a gap
+ * between them. Requiring equality across those gaps refused a whole
+ * reconciliation run over entirely valid history. The chain is therefore
+ * checked as what the spec actually guarantees: contiguous sequences from 1,
+ * a record that does not lower its own revision, and a span between records —
+ * or between the last record and the reported state — that ordinary publisher
+ * syncs could have produced.
  */
 async function collectAudit(dependencies, host) {
   const records = [];
+  let previousAfter = null;
   let cursor = '0';
   let pages = 0;
   let head = null;
@@ -174,10 +229,17 @@ async function collectAudit(dependencies, host) {
       if (BigInt(record.sequence) !== BigInt(records.length + 1)) {
         refuse('conflicting-recovery-history', host);
       }
-      const previous = records.at(-1);
-      if (previous !== undefined && !sameCommittedRef(previous.after ?? null, record.before ?? null)) {
+      const before = committedRef(record.before ?? null, host);
+      const after = committedRef(record.after ?? null, host);
+      // Internal consistency only: an `apply` may repair a DIFFERENT payload
+      // at the equal revision or jump to a higher one (§ Audit and recovery,
+      // step 2), so a record's own digests may differ where its revisions do
+      // not. All it may never do is lower the revision.
+      if (!notLowered(before, after)) refuse('conflicting-recovery-history', host);
+      if (records.length > 0 && !publisherReachable(previousAfter, before)) {
         refuse('conflicting-recovery-history', host);
       }
+      previousAfter = after;
       records.push(record);
     }
     const next = page.nextAfter;
@@ -187,9 +249,10 @@ async function collectAudit(dependencies, host) {
     }
     cursor = String(next);
   } while (true);
-  const terminal = records.at(-1);
-  if (terminal !== undefined && !sameCommittedRef(terminal.after ?? null, head.committed ?? null)) {
-    // The last thing the object recorded doing is not the state it reports.
+  const committed = committedRef(head.committed ?? null, host);
+  if (records.length > 0 && !publisherReachable(previousAfter, committed)) {
+    // The state the object reports is not one it could have reached from the
+    // last thing it recorded doing, even allowing for unrecorded syncs.
     refuse('conflicting-recovery-history', host);
   }
   for (const field of [
@@ -199,7 +262,7 @@ async function collectAudit(dependencies, host) {
   ]) {
     if (!NON_NEGATIVE_DECIMAL.test(String(head[field] ?? ''))) refuse('malformed-audit-page', host);
   }
-  return { ...head, records, pages };
+  return { ...head, committed, records, pages };
 }
 
 /**
@@ -229,9 +292,17 @@ function classify(host, entry, audit) {
   // prevent. `unknown` closes over this same array, so every early return
   // below carries whatever is pushed here.
   if (audit.recoveryLock !== null) flags.push('locked');
-  // A quarantined publisher epoch is only fenced once the floor sits strictly
-  // above it; equal means the quarantined key can still authenticate.
-  if (BigInt(audit.minimumPublisherEpoch) <= BigInt(audit.highestQuarantinedPublisherEpoch)) {
+  // Zero is the registry's no-quarantine sentinel, not an epoch: `RegistryState`
+  // initializes `highestQuarantinedPublisherEpoch` to it and only a
+  // `publisherReplacement` raises it, so there is no quarantined key for a
+  // floor to fence until it is above zero. `recovery.ts` reads it the same way
+  // before deciding a replacement is required. Only once a quarantine has
+  // happened is the fence tested, and then it is strict: an equal floor still
+  // lets the quarantined key authenticate.
+  if (
+    BigInt(audit.highestQuarantinedPublisherEpoch) > 0n &&
+    BigInt(audit.minimumPublisherEpoch) <= BigInt(audit.highestQuarantinedPublisherEpoch)
+  ) {
     flags.push('epoch-unfenced');
   }
 
@@ -251,7 +322,23 @@ function classify(host, entry, audit) {
     // as a ledger it can create. It was named `orphan-source` and read as the
     // opposite of its neighbour `missing-ledger`, which is a source with no
     // ledger.
-    return { state: entry.hostname === null ? 'no-documents' : 'missing-ledger', ...unknown };
+    if (entry.hostname === null) return { state: 'no-documents', ...unknown };
+    // Backfill recreates the ledger at revision 1, and an UNINITIALIZED object
+    // is the only edge that accepts revision 1 (§ The per-host Durable Object:
+    // "An uninitialized object accepts revision 1 only"). A ledger that went
+    // missing under an object that has already committed something is the
+    // source-behind condition by another name, and backfilling it would write
+    // a revision the edge answers `409 revision-gap` or `ignored-stale` while
+    // the report said `backfilled`. Its repair is the explicit Admin
+    // `advance-ledger` above the DO high-water mark, which this command
+    // deliberately does not perform: that intent requires an incident URL and
+    // a human reason the reconciler has neither of and cannot invent, and
+    // § Provisioning, mutation, and deletion makes it the explicit human
+    // transaction. So the state is reported, and an operator runs it.
+    return {
+      state: (audit.committed ?? null) === null ? 'missing-ledger' : 'missing-ledger-source-behind',
+      ...unknown,
+    };
   }
   let stored;
   try {
@@ -294,6 +381,7 @@ const STATES = [
   'recovered',
   'missing',
   'missing-ledger',
+  'missing-ledger-source-behind',
   'no-documents',
   'drifted',
   'poisoned',
@@ -318,8 +406,13 @@ function validateInput(input) {
 }
 
 /**
- * Audits — and, in `backfill` mode with `apply: true`, repairs only MISSING
- * ledgers for — every host the source listing returns.
+ * Audits — and, in `backfill` mode with `apply: true`, repairs only the
+ * `missing-ledger` hosts among — every host the source listing returns.
+ *
+ * `missing-ledger` is deliberately narrower than "has no ledger": it is a
+ * source document with no ledger AND an edge object that has committed
+ * nothing, which is the only edge a revision-1 backfill can converge on. Its
+ * sibling `missing-ledger-source-behind` is reported and never repaired here.
  *
  * Idempotent in both modes: a second apply run finds the ledgers it created and
  * classifies them, rather than writing again.

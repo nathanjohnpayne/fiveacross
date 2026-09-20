@@ -31,9 +31,12 @@ import {
   doc,
   getDoc,
   getDocs,
+  query,
   runTransaction,
   setDoc,
+  Timestamp,
   updateDoc,
+  where,
   type Firestore,
 } from 'firebase/firestore';
 // The operator module is plain `.mjs` with no build step and no type
@@ -92,9 +95,24 @@ async function trusted<T>(work: (db: Firestore) => Promise<T>): Promise<T> {
 function dependencies(db: Firestore) {
   return {
     now: () => NOW,
+    // The ledger's `updatedAt` is a Firestore timestamp field, not text: the
+    // deployed publisher's Eventarc parser rejects a `stringValue` for it, so
+    // a string here would write events that can never reach the edge.
+    timestamp: (date: Date) => Timestamp.fromDate(date),
     runTransaction: createTransactionRunner({
       runTransaction: (work: unknown) => runTransaction(db, work as never),
       documentReference: (path: string) => doc(db, path),
+      // The archive interlock's completeness check. The client SDK has no
+      // transactional query — `Transaction.get` takes a DocumentReference
+      // only — so this arm reads the collection beside the transaction, and
+      // the operator command's Admin adapter runs the same query inside it
+      // with `transaction.get(query)`. Each named host is still point-read
+      // inside the transaction, which is what the archive decides on; this
+      // listing only has to name a host the operator left out.
+      listEventMappings: async (eventId: string) => {
+        const snapshot = await getDocs(query(collection(db, 'hostnames'), where('eventId', '==', eventId)));
+        return snapshot.docs.map((entry) => entry.id);
+      },
     }),
   };
 }
@@ -144,7 +162,8 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         revision: '1',
         host: HOST,
         desired: { kind: 'route', eventId: EVENT_ID, status: 'disabled', slug: 'bodega-bay', edition: 'fiveacross', pathNamespace: null },
-        updatedAt: NOW.toISOString(),
+        // Stored as a Firestore timestamp and read back as one.
+        updatedAt: Timestamp.fromDate(NOW),
       });
     });
   });
@@ -272,6 +291,40 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       });
       expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '2', desired: { kind: 'root', root: 'not-found' } });
       expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'archived' });
+    });
+  });
+
+  it('refuses an archive that omits a mapping the hostnames collection still names', async () => {
+    // The completeness check is the one read that has to come from the
+    // collection rather than from the caller, so a real query against real
+    // Firestore is the only place it is actually proved: an in-memory double
+    // would be agreeing with itself about what `where('eventId', '==', ...)`
+    // returns.
+    await trusted(async (db) => {
+      await seedConverged(db, HOST, hostnameDocument());
+      await seedConverged(db, ALIAS, hostnameDocument({ canonicalHost: HOST, isCanonical: false }));
+      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+
+      expect(
+        await refusalCode(() =>
+          applyHostnameMutation(
+            mutation({ intent: 'archive', eventId: EVENT_ID, mappings: [HOST], apexPathHost: HOST, mirrorRootConversions: [] }),
+            dependencies(db),
+          ),
+        ),
+      ).toBe('archive-mapping-incomplete');
+      // The omitted alias would otherwise have kept serving the archived Event.
+      expect(await read(db, `hostnames/${ALIAS}`)).toMatchObject({ status: 'active' });
+      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'active' });
+      expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'active' });
+
+      // Naming both is accepted, so the refusal is about the omission rather
+      // than about the listing failing to see either host.
+      await applyHostnameMutation(
+        mutation({ intent: 'archive', eventId: EVENT_ID, mappings: [HOST, ALIAS], apexPathHost: HOST, mirrorRootConversions: [] }),
+        dependencies(db),
+      );
+      expect(await read(db, `hostnames/${ALIAS}`)).toMatchObject({ status: 'archived' });
     });
   });
 

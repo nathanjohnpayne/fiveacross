@@ -213,6 +213,28 @@ describe('three-way reconciliation', () => {
     expect(report.flagCounts).toEqual({ tombstoned: 1, locked: 1, 'epoch-unfenced': 1 });
   });
 
+  it('does not report epoch-unfenced for an object that has never been quarantined', async () => {
+    // Zero is the registry's no-quarantine sentinel rather than an epoch, so
+    // there is nothing for the floor to fence and a `<=` test against it is a
+    // false operational alarm on every never-quarantined host. The floor is
+    // varied across its own initial and post-rotation values to show the flag
+    // is off because of the sentinel and not because of the comparison.
+    for (const minimumPublisherEpoch of ['0', '1', '9']) {
+      const deps = dependencies({
+        audits: { [HOST]: [auditPage({ minimumPublisherEpoch, highestQuarantinedPublisherEpoch: '0' })] },
+      });
+      const report = await reconcileHostnameReplicas(input(), deps);
+      expect(report.hosts[0].flags, minimumPublisherEpoch).toEqual([]);
+      expect(report.flagCounts['epoch-unfenced'], minimumPublisherEpoch).toBe(0);
+    }
+
+    // One real quarantine later, an unraised floor is flagged again.
+    const quarantined = dependencies({
+      audits: { [HOST]: [auditPage({ minimumPublisherEpoch: '7', highestQuarantinedPublisherEpoch: '7' })] },
+    });
+    expect((await reconcileHostnameReplicas(input(), quarantined)).hosts[0].flags).toEqual(['epoch-unfenced']);
+  });
+
   // The two edge flags describe the audited Durable Object rather than the
   // three-way comparison, so an early classification has to carry them. A
   // `missing-ledger` host is precisely the row an apply run hands to the
@@ -315,6 +337,29 @@ describe('backfill', () => {
     }
   });
 
+  it('never backfills a missing ledger the edge has already committed past', async () => {
+    // Backfill recreates the ledger at revision 1, and only an uninitialized
+    // object accepts revision 1. Under an object that has committed revision
+    // 4, the publication is refused at the edge while the report would have
+    // said `backfilled`, so the row is classified for the explicit Admin
+    // `advance-ledger` instead of repaired here.
+    const deps = dependencies({
+      pages: [{ entries: [{ host: HOST, hostname: hostnameDocument(), routerReplica: null }], nextPageToken: null }],
+      audits: { [HOST]: [auditPage()] },
+    });
+    const report = await reconcileHostnameReplicas(input({ mode: 'backfill', apply: true }), deps);
+    expect(report.hosts[0]).toMatchObject({
+      state: 'missing-ledger-source-behind',
+      sourceRevision: null,
+      committedRevision: '4',
+      digestMatches: null,
+    });
+    expect(report.counts['missing-ledger-source-behind']).toBe(1);
+    expect(report.counts.backfilled).toBe(0);
+    expect(report.applied).toEqual([]);
+    expect(deps.applyMutation).not.toHaveBeenCalled();
+  });
+
   it('refuses a backfill result that does not name exactly one revision', async () => {
     const deps = dependencies({ ...missingLedger, applyMutation: vi.fn(async () => ({ revisions: [] })) });
     expect(await refusal(input({ mode: 'backfill', apply: true }), deps)).toBe('backfill-result-malformed');
@@ -408,11 +453,50 @@ describe('conflicting recovery histories', () => {
     expect(await refusal(input(), deps)).toBe('conflicting-recovery-history');
   });
 
-  it('refuses a terminal record that does not equal the state the object reports', async () => {
-    const deps = dependencies({
-      audits: { [HOST]: [auditPage({ committed, records: [record('1', null, { revision: '3', digest: 'b'.repeat(64) })] })] },
+  it('refuses a terminal record the object could not have advanced FROM to the state it reports', async () => {
+    // Lowered: nothing in the system reduces the accepted revision, so a
+    // terminal record above the reported state is a contradiction.
+    const lowered = dependencies({
+      audits: { [HOST]: [auditPage({ committed, records: [record('1', null, { revision: '9', digest: 'b'.repeat(64) })] })] },
     });
-    expect(await refusal(input(), deps)).toBe('conflicting-recovery-history');
+    expect(await refusal(input(), lowered)).toBe('conflicting-recovery-history');
+
+    // Equal revision, different digest: an ordinary sync answers that `409
+    // revision-conflict` and commits nothing, so no unrecorded transition can
+    // explain the gap.
+    const repainted = dependencies({
+      audits: { [HOST]: [auditPage({ committed, records: [record('1', null, { revision: '4', digest: 'b'.repeat(64) })] })] },
+    });
+    expect(await refusal(input(), repainted)).toBe('conflicting-recovery-history');
+  });
+
+  it('accepts a recovered host that ordinary publisher syncs have since moved on', async () => {
+    // The defect this closes: `applyPublisherSync` commits a new revision
+    // WITHOUT appending a recovery record, so recovery records are not a
+    // complete log of committed transitions. Requiring the terminal record to
+    // equal the reported state, or each record's `before` to equal the
+    // previous record's `after`, made one routine revision after a recovery
+    // refuse the whole reconciliation run.
+    const recoveredAt = { revision: '2', digest: 'a'.repeat(64) };
+    const secondEpisode = { revision: '3', digest: 'c'.repeat(64) };
+    const deps = dependencies({
+      audits: {
+        [HOST]: [
+          auditPage({
+            committed,
+            records: [
+              // Recovered at 2, then an unrecorded sync carried it to 3...
+              record('1', null, recoveredAt),
+              // ...where a second episode repaired the payload in place, and a
+              // further unrecorded sync carried it to the reported 4.
+              record('2', secondEpisode, { revision: '3', digest: 'd'.repeat(64) }),
+            ],
+          }),
+        ],
+      },
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts[0]).toMatchObject({ state: 'recovered', recoveryRecordCount: 2, digestMatches: true });
   });
 
   it('refuses in backfill mode too, before any repair is attempted', async () => {
@@ -464,6 +548,7 @@ describe('the reconciler boundary', () => {
       'malformed-source',
       'missing',
       'missing-ledger',
+      'missing-ledger-source-behind',
       'no-documents',
       'poisoned',
       'recovered',

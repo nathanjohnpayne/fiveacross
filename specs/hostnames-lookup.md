@@ -68,6 +68,8 @@ The **non-projected** fields are deliberately outside that helper, because the e
 
 `apexPath` is the one field that is written by the lifecycle helper and still not projected: it is the archive transaction's per-Event apex-path opt-in, which the client resolver reads and the edge deliberately never sees. Only the archive intent writes it, and only onto the one target mapping named in that transaction; the same transaction's mirror-root conversion removes it, because the converted document names no Event.
 
+That transaction is also the one lifecycle path that reads this collection by query rather than by key. It asks `hostnames` for every document whose `eventId` is the Event being archived and refuses unless the operator named all of them, because an omitted alias would be left `active` and would keep serving an archived Event at its own address. The query runs with the Admin credential inside the archive transaction and changes nothing about the client contract above: `list` stays denied to every client, and no new index or reverse mapping is exposed.
+
 That conversion is also the one lifecycle write that replaces a hostname document rather than patching it. A root marker may not carry `eventId`, `status` or `slug`, and a Firestore `update` has no way to drop a field, so the marker is built by removing exactly those three and `apexPath` from the stored document. `adultContent`, `preview`, `canonicalHost` and `isCanonical` therefore survive the conversion unchanged, and the three writers named above stay the only things that decide their values.
 
 ## Bodega postcard provisioning
