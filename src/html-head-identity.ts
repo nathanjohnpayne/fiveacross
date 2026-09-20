@@ -43,7 +43,10 @@ export const HTML_IDENTITY_TOKENS = {
   // The share block (#587). Crawlers fetch index.html without running JS, so
   // unlike the two tags above there is no runtime repair path for these — the
   // edge Worker rewrites them per hostname instead (#1118), from the rows in
-  // `HEAD_IDENTITY_TAGS` below. `%EDITION_SHARE_NAME%` appears twice
+  // `HEAD_IDENTITY_TAGS` below — with the chrome colour at the end of this
+  // table the one exception, repaired in both places because it is read by a
+  // crawler AND by an installed shell the edge never answers.
+  // `%EDITION_SHARE_NAME%` appears twice
   // (og:site_name and og:title — both carry the product name);
   // `%EDITION_OG_IMAGE%` twice (og:image and twitter:image). og:description is
   // NOT tokenised: "Sign in, get your card, mark it if you see it." is the
@@ -58,7 +61,10 @@ export const HTML_IDENTITY_TOKENS = {
   // `specs/w1-pwa.md` requires it to equal the manifest's `theme_color`
   // exactly, and that value became Edition-scoped in the same change — a
   // static `#07060d` here would manufacture the mismatch that spec forbids on
-  // every Edition but the default.
+  // every Edition but the default. The only token with TWO correctors: the
+  // edge for a crawler, `applyEditionDocumentIdentity` for an installed shell
+  // whose navigations the service worker answers from the precache, which the
+  // edge rewrite never touches.
   '%EDITION_THEME_COLOR%': 'chromeColor',
 } as const satisfies Record<string, EditionBrandTextField>;
 
@@ -93,15 +99,29 @@ export interface HeadIdentityTag {
 }
 
 /**
+ * The PWA chrome colour's tag, named because THREE writers reach for it: the
+ * build substitutes its placeholder, the edge rewrites it in the proxied
+ * document, and the app repairs it in the DOM after resolution. Spelling it
+ * once is what keeps them pointed at the same tag.
+ */
+export const THEME_COLOR_SELECTOR = 'meta[name="theme-color"]';
+
+/**
  * The crawler-facing tags the edge rewrites per hostname, and nothing else.
  *
- * Scoped to the tags with NO runtime repair path. `<title>` and
+ * Scoped to the tags a crawler reads. `<title>` and
  * `apple-mobile-web-app-title` are deliberately absent: `editions.ts`
  * `applyEditionDocumentIdentity` already corrects both in the DOM after
  * resolution, so rewriting them at the edge would add a second writer for a
  * surface that is already right, and the tokens are listed in
  * {@link RUNTIME_REPAIRED_TOKENS} instead so the coverage check still sees
  * them.
+ *
+ * `<meta name="theme-color">` is the one row that same DOM repair also writes,
+ * and the two are not redundant: a crawler runs no JavaScript, so only the
+ * edge corrects what IT reads, while an installed shell serves its navigations
+ * from the precached `index.html` and therefore never receives the edge's
+ * response at all. Both writers take the colour from {@link themeColorFor}.
  *
  * Every selector is written exactly as `index.html` writes the attribute it
  * matches on, and `src/editions.test.ts` asserts each one resolves against the
@@ -151,17 +171,28 @@ export const HEAD_IDENTITY_TAGS: readonly HeadIdentityTag[] = [
     edge: 'brand',
   },
   {
-    selector: 'meta[name="theme-color"]',
+    selector: THEME_COLOR_SELECTOR,
     attribute: 'content',
     token: '%EDITION_THEME_COLOR%',
     edge: 'manifest-theme-color',
   },
 ];
 
-/** The placeholders a hostname-resolved bundle repairs in the DOM after
- *  resolution (`applyEditionDocumentIdentity`), so the edge leaves them alone.
- *  Listed rather than inferred from absence: "not in the edge table" would
- *  read identically whether the omission was a decision or an oversight. */
+/**
+ * The placeholders the DOM repair (`applyEditionDocumentIdentity`) is the ONLY
+ * corrector for, so the edge leaves them alone. Listed rather than inferred
+ * from absence: "not in the edge table" would read identically whether the
+ * omission was a decision or an oversight.
+ *
+ * `%EDITION_THEME_COLOR%` is deliberately not here even though that tag is
+ * repaired at runtime too, because this list is what the edge must skip and
+ * that tag is one the edge must write. It is the one token with two writers,
+ * and it needs both: a crawler runs no JavaScript, so only the edge can reach
+ * it; and an installed shell serves its navigations from the precached
+ * `index.html` through the service worker, so the edge rewrite never runs for
+ * it and only the DOM repair can. Both read the colour from
+ * {@link themeColorFor}, so the two writers cannot disagree.
+ */
 export const RUNTIME_REPAIRED_TOKENS: readonly HtmlIdentityToken[] = [
   '%EDITION_DOCUMENT_TITLE%',
   '%EDITION_APP_NAME%',
@@ -273,19 +304,34 @@ export function requestOriginUrl(hostname: string): string {
 }
 
 /**
+ * One Edition's PWA chrome colour, read back out of the manifest builder.
+ *
+ * The single source both writers of `<meta name="theme-color">` call — the
+ * edge rewrite through {@link headIdentityEdits}, and the app's own DOM repair
+ * for an installed shell the edge never sees. `specs/w1-pwa.md` requires the
+ * meta tag to equal the manifest's `theme_color` exactly; reading the manifest
+ * makes that structural rather than a second read of a shared constant, and
+ * having one function do it makes the two writers equal by construction rather
+ * than by review.
+ */
+export function themeColorFor(brand: EditionBrand): string {
+  return buildWebManifest(brand).theme_color;
+}
+
+/**
  * What the edge writes into the proxied `<head>` for one Edition on one host.
  *
  * Pure, and returns data rather than performing the rewrite, so the decision
  * (which tag gets which value) is unit-testable in plain Node while only the
  * streaming application of it needs a workerd runtime.
  *
- * The theme colour is read back out of {@link buildWebManifest} rather than off
+ * The theme colour comes from {@link themeColorFor} rather than off
  * `brand.chromeColor`: `specs/w1-pwa.md` requires the meta tag to equal the
  * manifest's `theme_color` exactly, and reading the manifest is the only form
  * of that claim a later change to the builder cannot falsify.
  */
 export function headIdentityEdits(brand: EditionBrand, hostname: string): HeadIdentityEdit[] {
-  const themeColor = buildWebManifest(brand).theme_color;
+  const themeColor = themeColorFor(brand);
   return HEAD_IDENTITY_TAGS.map((tag) => ({
     selector: tag.selector,
     attribute: tag.attribute,

@@ -945,6 +945,97 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
     });
   });
 
+  describe('the encoding a document subrequest negotiates', () => {
+    const NAVIGATION = {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'accept-encoding': 'gzip, deflate, br',
+    };
+
+    it('asks the origin for identity, so what reaches the transform is markup', async () => {
+      // An origin that honours the forwarded encoding answers a document in
+      // `gzip` or `br`, and `HTMLRewriter` then parses bytes no HTML parser
+      // can read: it matches nothing, changes nothing, reports success, and
+      // the client receives the bundle's baked Edition.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => htmlOrigin(),
+      });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', { headers: NAVIGATION }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('identity');
+      expect(rewrites).toHaveLength(1);
+    });
+
+    it('leaves an asset request’s accept-encoding exactly as it arrived', async () => {
+      // An asset is relayed rather than parsed, so making the bundle travel
+      // uncompressed would be a bandwidth bill with no defect behind it.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => new Response('export const x = 1;', { headers: { 'content-type': 'application/javascript' } }),
+      });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/assets/app.js', {
+          headers: { accept: '*/*', 'accept-encoding': 'gzip, br' },
+        }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, br');
+      expect(rewrites).toHaveLength(0);
+    });
+
+    it('leaves the /__/auth/* exemption’s accept-encoding alone too', async () => {
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/__/auth/handler', { headers: NAVIGATION }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, deflate, br');
+    });
+
+    it('answers with no content-encoding and no Vary naming one', async () => {
+      const { deps, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () =>
+          htmlOrigin({ headers: { 'content-encoding': 'identity', vary: 'Accept-Encoding' } }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', { headers: NAVIGATION }),
+        CONFIG,
+        deps,
+      );
+      expect(rewrites).toHaveLength(1);
+      expect(response.headers.get('content-encoding')).toBeNull();
+      expect(response.headers.get('vary')).toBeNull();
+    });
+
+    it('relays an encoded document whole rather than parsing it', async () => {
+      // The residue of the request-side predicate: a client that does not say
+      // it accepts HTML keeps the runtime's negotiated encoding, so the origin
+      // may still answer compressed. That answer is relayed with its framing
+      // intact — the bundle's baked Edition, correctly encoded, which is what
+      // such a client received before this rewrite existed.
+      const { deps, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () =>
+          htmlOrigin({ headers: { 'content-encoding': 'gzip', vary: 'Accept-Encoding' } }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', { headers: { accept: '*/*' } }),
+        CONFIG,
+        deps,
+      );
+      expect(rewrites).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-encoding')).toBe('gzip');
+      expect(response.headers.get('vary')).toBe('Accept-Encoding');
+    });
+  });
+
   it.each([
     ['a 404 from the origin', () => htmlOrigin({ status: 404 })],
     ['a 500 from the origin', () => htmlOrigin({ status: 500 })],

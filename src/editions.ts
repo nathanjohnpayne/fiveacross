@@ -37,6 +37,10 @@ import { EDITION_IDS } from './edition-registry.ts';
 // this module's story (the build-time half of Edition chrome) even though the
 // table it iterates is now shared with the edge.
 export { brandHtmlIdentity } from './html-head-identity';
+// The chrome colour and the tag it lands in, for the runtime repair below.
+// Imported rather than restated so the DOM repair, the edge rewrite and the
+// manifest cannot drift apart.
+import { THEME_COLOR_SELECTOR, themeColorFor } from './html-head-identity';
 // The brand TABLE itself lives in a DOM-free, `import.meta`-free sibling so the
 // edge Worker can read the same rows (#546); everything below is the part that
 // needs a runtime. Re-exported here so no import site had to move.
@@ -213,8 +217,9 @@ export function alternateNamespaceApex(edition: string): string | null {
 }
 
 /**
- * Put the Edition's name on the browser chrome: the tab, and the label iOS
- * offers when someone adds the app to their home screen.
+ * Put the Edition on the browser chrome: the tab, the label iOS offers when
+ * someone adds the app to their home screen, and the colour the browser
+ * paints its chrome and splash with.
  *
  * Only a HOSTNAME-RESOLVED build needs this. A single-Event build already has
  * the right strings baked into `index.html` at build time, which is strictly
@@ -232,11 +237,23 @@ export function alternateNamespaceApex(edition: string): string | null {
  * (#546, `worker/src/manifest.ts`) — once its routes are attached, which is a
  * human cutover rather than something this build can arrange.
  *
- * These two tags are also the two the EDGE deliberately leaves alone (#1118,
+ * Those two tags are the two the EDGE deliberately leaves alone (#1118,
  * `RUNTIME_REPAIRED_TOKENS` in `html-head-identity.ts`). The edge rewrites the
  * crawler-facing block because a crawler runs no JavaScript and nothing here
  * can reach it; adding a second writer for a surface this function already
  * corrects would buy nothing and could disagree with it.
+ *
+ * `<meta name="theme-color">` is the one tag both surfaces write, and it needs
+ * both. A crawler reads it without running JavaScript, so only the edge can
+ * correct it there. But an INSTALLED shell serves its navigations from the
+ * precached `index.html` through the service worker's `NavigationRoute`, so
+ * the proxied response the edge rewrites never reaches it: after a hostname is
+ * repointed to another Edition, that shell would keep painting the previous
+ * Edition's chrome while the manifest it re-reads and the app it opens into
+ * both moved — the per-Edition equality `specs/w1-pwa.md` requires, broken on
+ * the one surface no deploy can fix. Both writers take the colour from
+ * `themeColorFor`, so the equality holds by construction rather than because
+ * two call sites were kept in step.
  */
 export function applyEditionDocumentIdentity(edition: string = activeEdition()): void {
   // Guarded because this module is imported by `vite.config.ts`, where there is
@@ -249,4 +266,5 @@ export function applyEditionDocumentIdentity(edition: string = activeEdition()):
   document
     .querySelector('meta[name="apple-mobile-web-app-title"]')
     ?.setAttribute('content', brand.appName);
+  document.querySelector(THEME_COLOR_SELECTOR)?.setAttribute('content', themeColorFor(brand));
 }

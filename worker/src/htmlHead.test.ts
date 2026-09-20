@@ -2,10 +2,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   dropConditionalValidators,
+  dropOriginEncoding,
   dropOriginValidators,
   headEditsFor,
   isHeadRewritable,
   isHtmlDocumentRequest,
+  negotiateIdentityEncoding,
 } from './htmlHead';
 import { EDITION_IDS } from '../../src/edition-registry';
 // `edition-brands`, NOT `editions`: this program has no DOM lib and no
@@ -78,6 +80,22 @@ describe('which origin responses may be rewritten', () => {
     expect(isHeadRewritable(new Response('x', { status: 200, headers: contentType ? { 'content-type': contentType } : {} }))).toBe(
       false,
     );
+  });
+
+  it.each(['gzip', 'br', 'deflate', 'GZIP', ' gzip '])(
+    'refuses a body still encoded as %s, which is not markup',
+    (encoding) => {
+      // `HTMLRewriter` would parse the compressed bytes, match nothing,
+      // change nothing and report success — and dropping the header off a
+      // body that is still encoded would hand the client compressed bytes
+      // labelled as text. The negotiation is what stops this arriving; the
+      // refusal is what makes the negotiation failing a relay.
+      expect(isHeadRewritable(html({ headers: { 'content-encoding': encoding } }))).toBe(false);
+    },
+  );
+
+  it.each(['identity', 'IDENTITY'])('accepts an explicit %s encoding', (encoding) => {
+    expect(isHeadRewritable(html({ headers: { 'content-encoding': encoding } }))).toBe(true);
   });
 
   it('matches the media type at a token boundary, not as a prefix', () => {
@@ -213,6 +231,50 @@ describe('which requests must not carry a cache validator to the origin', () => 
     // representation the client did not mean.
     expect(headers.get('if-range')).toBe('"origin-index"');
     expect(headers.get('accept')).toBe('text/html');
+  });
+
+  it('asks the origin for identity, whatever the runtime negotiated', () => {
+    // The runtime replaces this header with its own `br, gzip` on a
+    // subrequest, so the value being overwritten is the runtime's rather than
+    // the guest's — and either way an encoded document is not markup.
+    const headers = new Headers({ 'accept-encoding': 'br, gzip', accept: 'text/html' });
+    negotiateIdentityEncoding(headers);
+    expect(headers.get('accept-encoding')).toBe('identity');
+    expect(headers.get('accept')).toBe('text/html');
+  });
+
+  it('takes the encoding framing off a rewritten response', () => {
+    const headers = new Headers({
+      'content-encoding': 'identity',
+      vary: 'Accept-Encoding',
+      'content-type': 'text/html; charset=utf-8',
+    });
+    dropOriginEncoding(headers);
+    expect(headers.get('content-encoding')).toBeNull();
+    // Nothing left of a negotiation this hop did not perform.
+    expect(headers.get('vary')).toBeNull();
+    expect(headers.get('content-type')).toBe('text/html; charset=utf-8');
+  });
+
+  it.each([
+    ['Accept-Encoding, Origin', 'Origin'],
+    ['origin, accept-encoding', 'origin'],
+    ['Origin, Accept-Encoding, Cookie', 'Origin, Cookie'],
+    ['Origin', 'Origin'],
+    ['*', '*'],
+  ])('narrows a Vary of %s to %s', (vary, expected) => {
+    // Only the one field this hop stopped varying on is taken. A `Vary`
+    // naming anything else, or the blanket `*`, still describes the response
+    // and is the origin's to state.
+    const headers = new Headers({ vary });
+    dropOriginEncoding(headers);
+    expect(headers.get('vary')).toBe(expected);
+  });
+
+  it('leaves a response with no Vary without one', () => {
+    const headers = new Headers({ 'content-type': 'text/html' });
+    dropOriginEncoding(headers);
+    expect(headers.get('vary')).toBeNull();
   });
 
   it('removes the origin validators from a rewritten response and emits none in their place', () => {

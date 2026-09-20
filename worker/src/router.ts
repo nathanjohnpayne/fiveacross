@@ -38,10 +38,12 @@
 import { classifyHost, NAMESPACES } from './host';
 import {
   dropConditionalValidators,
+  dropOriginEncoding,
   dropOriginValidators,
   headEditsFor,
   isHeadRewritable,
   isHtmlDocumentRequest,
+  negotiateIdentityEncoding,
   type HtmlHeadRewriter,
 } from './htmlHead';
 import { isWebManifestRequest, webManifestResponse } from './manifest';
@@ -304,17 +306,30 @@ async function proxyToOrigin(
   headers.set('x-forwarded-host', url.hostname);
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
-  // A conditional revalidation of a document is sent on UNCONDITIONALLY
-  // (#1118). The origin's validators describe one baked `index.html` served to
-  // every hostname, so a forwarded `if-none-match` can be answered `304`
-  // truthfully by the origin and wrongly for this host — the registry may have
-  // repointed the hostname to another Edition since, and a `304` leaves no body
-  // to rewrite and the client on the previous Edition's Crawler identity. Only
-  // the serving path and only a document request: an asset keeps its validators
-  // and its cheap `304`, and the `/__/auth/*` exemption (`record === null`) is
-  // untouched like everything else about it.
+  // Two things a document subrequest must ask for differently from an asset's
+  // (#1118), both so that a body the rewrite can act on comes back.
+  //
+  // A conditional revalidation is sent on UNCONDITIONALLY. The origin's
+  // validators describe one baked `index.html` served to every hostname, so a
+  // forwarded `if-none-match` can be answered `304` truthfully by the origin
+  // and wrongly for this host — the registry may have repointed the hostname
+  // to another Edition since, and a `304` leaves no body to rewrite and the
+  // client on the previous Edition's Crawler identity.
+  //
+  // And the encoding is pinned to `identity`. The runtime negotiates
+  // compression on a subrequest whether or not this file asks it to, so an
+  // origin that honours `accept-encoding` answers a document in `gzip` or
+  // `br`, and `HTMLRewriter` then parses bytes that are not markup: it matches
+  // nothing, changes nothing, reports success, and the client receives the
+  // bundle's baked Edition.
+  //
+  // Only the serving path and only a document request: an asset keeps its
+  // validators, its cheap `304` and its negotiated encoding, and the
+  // `/__/auth/*` exemption (`record === null`) is untouched like everything
+  // else about it.
   if (record !== null && isHtmlDocumentRequest(request)) {
     dropConditionalValidators(headers);
+    negotiateIdentityEncoding(headers);
   }
 
   const init: RequestInit & { duplex?: 'half' } = {
@@ -359,10 +374,10 @@ async function proxyToOrigin(
   // The per-hostname `<head>` rewrite (#1118). Gated on a resolved record, so
   // it is unreachable from every fail-closed outcome and from the auth
   // exemption; gated on `isHeadRewritable`, so a failing origin, a partial
-  // representation, a bodyless response and every non-HTML asset are relayed
-  // byte-for-byte. A rewrite that cannot run is a relay, never an error — the
-  // transform must not be able to convert an origin failure into a Worker
-  // runtime error.
+  // representation, a bodyless response, a body still carrying a
+  // `content-encoding` and every non-HTML asset are relayed byte-for-byte. A
+  // rewrite that cannot run is a relay, never an error — the transform must
+  // not be able to convert an origin failure into a Worker runtime error.
   if (record !== null && isHeadRewritable(originResponse)) {
     // The rewrite changes the document's length, and the origin's
     // `content-length` describes the bytes BEFORE it. Relaying it would
@@ -375,6 +390,11 @@ async function proxyToOrigin(
     // way to this Edition's document after the registry had moved the hostname
     // to another one.
     dropOriginValidators(responseHeaders);
+    // And the encoding framing, for the third time the same reason: the body
+    // is `identity` by negotiation and rebuilt by the transform, so an
+    // explicit `content-encoding` claims nothing and the origin's
+    // `Vary: Accept-Encoding` records a negotiation this hop did not perform.
+    dropOriginEncoding(responseHeaders);
     return deps.htmlRewriter(
       new Response(originResponse.body, {
         status: originResponse.status,

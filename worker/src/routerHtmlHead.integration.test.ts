@@ -22,6 +22,7 @@
 // this.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { build } from 'esbuild';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Log, LogLevel, Miniflare } from 'miniflare';
@@ -83,11 +84,15 @@ export default { fetch: () => new Response('control plane', { status: 404 }) };
  * describes the bytes BEFORE the rewrite, so a router that relayed it would
  * truncate the document the moment a substituted string changed its length.
  *
- * It also behaves like the real origin in the two ways #1118's review turned
- * on: it answers a `Range` with a `206` framed by a `content-range`, and it
- * answers a matching `if-none-match` with a `304`. Both are the origin telling
- * the truth about its own baked document, which is exactly why neither may be
- * relayed to a client whose hostname resolves to a different Edition.
+ * It also behaves like the real origin in the three ways #1118's review turned
+ * on: it answers a `Range` with a `206` framed by a `content-range`, it
+ * answers a matching `if-none-match` with a `304`, and it HONOURS
+ * `accept-encoding` — a document requested with `gzip` comes back gzipped,
+ * under `content-encoding: gzip` and `vary: accept-encoding`. All three are
+ * the origin telling the truth about its own baked document, which is exactly
+ * why none of them may reach a client whose hostname resolves to a different
+ * Edition. Every response echoes the `accept-encoding` it was asked with, so a
+ * test can read what the router negotiated rather than infer it.
  */
 const INDEX_ETAG = '"origin-index"';
 const ASSET_ETAG = '"origin-asset"';
@@ -105,13 +110,18 @@ export default {
       const body = '<!doctype html><meta property="og:title" content="Gay Cruise Bingo"><p>nope';
       return new Response(body, { status: Number(fail[1]), headers: { 'content-type': 'text/html; charset=utf-8' } });
     }
+    const askedWith = request.headers.get('accept-encoding') ?? '';
     if (url.pathname === '/asset.js') {
       if (request.headers.get('if-none-match') === ASSET_ETAG) {
         return new Response(null, { status: 304, headers: { etag: ASSET_ETAG } });
       }
       return new Response('export const og = "Gay Cruise Bingo";', {
         status: 200,
-        headers: { 'content-type': 'application/javascript', etag: ASSET_ETAG },
+        headers: {
+          'content-type': 'application/javascript',
+          etag: ASSET_ETAG,
+          'x-origin-accept-encoding': askedWith,
+        },
       });
     }
     if (url.pathname === '/no-type') {
@@ -134,6 +144,23 @@ export default {
     if (request.headers.get('if-none-match') === INDEX_ETAG) {
       return new Response(null, { status: 304, headers: { etag: INDEX_ETAG } });
     }
+    if (askedWith.toLowerCase().includes('gzip')) {
+      return new Response(
+        new Response(bytes).body.pipeThrough(new CompressionStream('gzip')),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'content-encoding': 'gzip',
+            vary: 'Accept-Encoding',
+            etag: INDEX_ETAG,
+            'last-modified': '${LAST_MODIFIED}',
+            'x-origin-accept-encoding': askedWith,
+            'x-origin-forwarded-host': request.headers.get('x-forwarded-host') ?? '',
+          },
+        },
+      );
+    }
     return new Response(body, {
       status: 200,
       headers: {
@@ -141,6 +168,7 @@ export default {
         'content-length': String(bytes.byteLength),
         etag: INDEX_ETAG,
         'last-modified': '${LAST_MODIFIED}',
+        'x-origin-accept-encoding': askedWith,
         'x-origin-forwarded-host': request.headers.get('x-forwarded-host') ?? '',
       },
     });
@@ -197,11 +225,20 @@ function miniflare(): Miniflare {
   return instance;
 }
 
+/**
+ * A request to the router, defaulting to a browser document NAVIGATION.
+ *
+ * The default carries headers because the origin stub honours
+ * `accept-encoding` the way the real one does, and the router negotiates
+ * `identity` only for a request that says it accepts HTML. A bare
+ * `dispatchFetch` is therefore not "a page load with nothing interesting set"
+ * — it is the wildcard-`Accept` residue, which has a case of its own below.
+ */
 async function request(
   instance: Miniflare,
   host: string,
   path = '/',
-  init?: RequestInit,
+  init: RequestInit = BROWSER_NAVIGATION,
 ): Promise<Response> {
   return instance.dispatchFetch(
     `https://${host}${path}`,
@@ -216,6 +253,16 @@ const CONDITIONAL_NAVIGATION: RequestInit = {
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
     'if-none-match': INDEX_ETAG,
     'if-modified-since': LAST_MODIFIED,
+  },
+};
+
+/** The same navigation with no cached copy, and the compression a browser
+ *  always offers. The origin honours it, so this is the request that decides
+ *  whether the transform sees markup or gzip. */
+const BROWSER_NAVIGATION: RequestInit = {
+  headers: {
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
+    'accept-encoding': 'gzip, br',
   },
 };
 
@@ -278,10 +325,12 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     }
   });
 
-  it('leaves the two runtime-repaired tags to the app', async () => {
+  it('leaves the two edge-exempt tags to the app', async () => {
     // `applyEditionDocumentIdentity` owns `<title>` and the iOS label after
     // resolution. The edge deliberately does not add a second writer for them,
-    // so the proxied document still carries the build's copy.
+    // so the proxied document still carries the build's copy. (It does write
+    // `theme-color`, which the DOM repair also corrects — for the installed
+    // shell this response never reaches.)
     const html = await (await request(miniflare(), VACAY_ALTERNATE)).text();
     expect(html).toContain(`<title>${brandFor('gcb').documentTitle}</title>`);
     expect(metaContent(html, 'name', 'apple-mobile-web-app-title')).toBe(brandFor('gcb').appName);
@@ -329,6 +378,73 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     });
     expect(response.status).toBe(304);
     expect(response.headers.get('etag')).toBe(ASSET_ETAG);
+  });
+
+  it('brands a document the origin would have gzipped, because the subrequest asked for identity', async () => {
+    // The defect this case exists for: a browser navigation carries
+    // `accept-encoding: gzip, br`, and a router that forwards it unchanged
+    // hands `HTMLRewriter` compressed bytes. The parser finds no `<meta>` in
+    // them, changes nothing, reports success, and the crawler receives the
+    // Edition the bundle was baked for. Only a real workerd can show that —
+    // a seam records the call and says nothing about the bytes.
+    const instance = miniflare();
+    const response = await request(instance, VACAY_ALTERNATE, '/', BROWSER_NAVIGATION);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-origin-accept-encoding')).toBe('identity');
+    const html = await response.text();
+    expect(metaContent(html, 'property', 'og:url')).toBe(`https://${VACAY_ALTERNATE}/`);
+    expect(metaContent(html, 'name', 'theme-color')).toBe(
+      webManifestForEdition('vacay').theme_color,
+    );
+    expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('vacay').documentTitle);
+    // Nothing is left describing bytes the transform replaced: no
+    // `content-encoding` for a body that is no longer encoded, and no
+    // `vary: accept-encoding` for a response the edge no longer negotiates.
+    expect(response.headers.get('content-encoding')).toBeNull();
+    expect(response.headers.get('vary')).toBeNull();
+  });
+
+  it('leaves an asset subrequest to negotiate its own encoding', async () => {
+    // Identity is bought for the documents the rewrite can act on and for
+    // nothing else. An asset is relayed, so making it travel uncompressed
+    // would be a bandwidth bill with no defect behind it.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/asset.js', {
+      headers: { accept: '*/*', 'accept-encoding': 'gzip, br' },
+    });
+    expect(response.status).toBe(200);
+    // Whatever the runtime negotiated on its own behalf — never the `identity`
+    // the router buys for a document.
+    const negotiated = response.headers.get('x-origin-accept-encoding') ?? '';
+    expect(negotiated).not.toBe('identity');
+    expect(negotiated.toLowerCase()).toContain('gzip');
+  });
+
+  it('relays a wildcard-Accept document rather than parsing its compressed bytes', async () => {
+    // The residue of the request-side predicate, pinned rather than left to be
+    // discovered. A client that does not say it accepts HTML is not a document
+    // candidate, so the runtime's own `accept-encoding` travels and the origin
+    // may answer `gzip`. The rewrite refuses an encoded body: what comes back
+    // is the origin's own response, correctly framed by its `content-encoding`
+    // and carrying the bundle's baked Edition — exactly what such a client
+    // received before this rewrite existed, rather than markup a parser
+    // silently failed to touch.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
+      headers: { accept: '*/*' },
+    });
+    expect(response.status).toBe(200);
+    // The relay arm, not the rewrite arm: both headers the rewrite drops are
+    // still here, and the document names the Edition the bundle was built
+    // with rather than the one this hostname resolves to.
+    expect(response.headers.get('etag')).toBe(INDEX_ETAG);
+    expect(response.headers.get('vary')).toBe('Accept-Encoding');
+    // The origin's own compressed bytes, relayed. Read as gzip deliberately:
+    // the claim is that the body is still the encoded representation the
+    // origin produced, not markup a parser was handed and quietly failed on.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect([bytes[0], bytes[1]]).toEqual([0x1f, 0x8b]);
+    const html = Buffer.from(gunzipSync(bytes)).toString('utf8');
+    expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('gcb').documentTitle);
   });
 
   it('relays a 206 byte-for-byte with its content-range intact', async () => {

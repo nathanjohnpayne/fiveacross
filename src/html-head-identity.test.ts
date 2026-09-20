@@ -10,6 +10,8 @@ import {
   HTML_IDENTITY_TOKENS,
   requestOriginUrl,
   RUNTIME_REPAIRED_TOKENS,
+  THEME_COLOR_SELECTOR,
+  themeColorFor,
 } from './html-head-identity';
 import { defaultThemeForEdition } from './theme/themes';
 import { webManifestForEdition } from './web-manifest';
@@ -92,14 +94,28 @@ describe('the index.html head-identity table', () => {
     expect(() => assertHeadIdentityCoverage()).not.toThrow();
   });
 
-  it('leaves the two runtime-repaired tags to the DOM repair, and nothing else', () => {
-    // `applyEditionDocumentIdentity` rewrites the document title and the iOS
-    // home-screen label after resolution and stops. Anything else baked into
-    // the markup has no runtime repair at all, which is why it has to be an
-    // edge row.
+  it('leaves the two edge-exempt tags to the DOM repair, and nothing else', () => {
+    // This list is what the EDGE must skip: the document title and the iOS
+    // home-screen label, which `applyEditionDocumentIdentity` already corrects
+    // so a second writer would buy nothing.
     expect([...RUNTIME_REPAIRED_TOKENS]).toEqual(['%EDITION_DOCUMENT_TITLE%', '%EDITION_APP_NAME%']);
     expect(HEAD_IDENTITY_TAGS.map((tag) => tag.token)).not.toContain('%EDITION_DOCUMENT_TITLE%');
     expect(HEAD_IDENTITY_TAGS.map((tag) => tag.token)).not.toContain('%EDITION_APP_NAME%');
+  });
+
+  it('keeps the chrome colour an edge row even though the DOM repairs it too', () => {
+    // The one token with two correctors, and it needs both: a crawler runs no
+    // JavaScript so only the edge can reach it, and an installed shell serves
+    // its navigations from the precached `index.html` so only the DOM repair
+    // can. Putting it in RUNTIME_REPAIRED_TOKENS would tell the edge to skip
+    // the tag a crawler reads.
+    expect(HEAD_IDENTITY_TAGS.map((tag) => tag.token)).toContain('%EDITION_THEME_COLOR%');
+    expect([...RUNTIME_REPAIRED_TOKENS]).not.toContain('%EDITION_THEME_COLOR%');
+    expect(
+      HEAD_IDENTITY_TAGS.find((tag) => tag.token === '%EDITION_THEME_COLOR%')?.selector,
+    ).toBe(THEME_COLOR_SELECTOR);
+    // The selector both writers use resolves against the shipped markup.
+    expect(indexHtml()).toContain('<meta name="theme-color" content="%EDITION_THEME_COLOR%"');
   });
 });
 
@@ -113,6 +129,16 @@ describe('the edits the edge writes', () => {
     )?.content;
     expect(themeColor, edition).toBe(webManifestForEdition(edition).theme_color);
     expect(themeColor, edition).toBe(webManifestForEdition(edition).background_color);
+  });
+
+  it.each(EDITIONS)('reads %s’s chrome colour from one function both writers call', (edition) => {
+    // `themeColorFor` is the single source the edge rewrite and the app's own
+    // DOM repair share, which is what makes the per-Edition equality
+    // `specs/w1-pwa.md` requires hold by construction on BOTH surfaces rather
+    // than because two call sites were kept in step.
+    expect(themeColorFor(editionBrand(edition)), edition).toBe(
+      webManifestForEdition(edition).theme_color,
+    );
   });
 
   it('gives each Edition its own chrome colour, so the match is not vacuous', () => {
