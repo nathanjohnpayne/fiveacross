@@ -650,10 +650,12 @@ describe('joinAndDeal on a CLOSED Event (#134, specs/post-sailing-archive.md)', 
     data: () => ({ days: [{ index: 0 }], ...over }),
   });
 
-  it('writes nothing and reports no join on an ARCHIVED Event', async () => {
+  it('writes nothing and reports a DEFERRED join on an ARCHIVED Event', async () => {
     H.getDoc.mockResolvedValueOnce(closedEvent({ status: 'archived' }));
 
-    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false);
+    // 'deferred', never `false` (#1158): nothing was written, but the join is
+    // still owed — see the sibling assertion below for why the two must differ.
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe('deferred');
 
     expect(H.getDoc).toHaveBeenCalledTimes(1); // the mode read, and nothing after it
     expect(H.runTransaction).not.toHaveBeenCalled();
@@ -668,10 +670,43 @@ describe('joinAndDeal on a CLOSED Event (#134, specs/post-sailing-archive.md)', 
       metadata: { fromCache: false, hasPendingWrites: false },
     });
 
-    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false);
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe('deferred');
 
     expect(H.runTransaction).not.toHaveBeenCalled();
     expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it("a FIRST VISIT during the quiesce is DEFERRED, not the `false` a returning Player's no-op reports (#1158)", async () => {
+    // The whole point of the third outcome. Both of these write nothing, and
+    // before #1158 both reported `false` — so `AuthContext` recorded the
+    // first-time visitor's declined join as a completed deal and never ran it
+    // again. The two calls below are the same function on the same visit,
+    // separated only by the Event being shut, and they must not answer alike.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // no saved profile
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ archiving: true }),
+      metadata: { fromCache: false, hasPendingWrites: false },
+    });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe('deferred');
+    expect(H.txSet).not.toHaveBeenCalled(); // no identity, no dayStats, nothing
+
+    // The same visit once an Admin has reopened play: the join it was owed runs.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false });
+    H.getDoc.mockResolvedValueOnce({
+      ...closedEvent({ status: 'active' }),
+      metadata: { fromCache: false, hasPendingWrites: false },
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true); // a genuine first join
+    expect(H.txSet.mock.calls[0][1]).toMatchObject({
+      uid: 'sailor-1',
+      displayName: 'Sailor',
+      joinedAt: expect.any(Number),
+    });
   });
 
   it('ATTEMPTS the join when the closed state came from the CACHE — the rules decide', async () => {

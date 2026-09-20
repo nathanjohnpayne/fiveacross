@@ -7,7 +7,8 @@ import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
 import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
-import { usableDayIndexes, withReadableDayStats } from '../data/eventArchive';
+import { isEventArchived, isEventArchiving, usableDayIndexes, withReadableDayStats } from '../data/eventArchive';
+import { recordEventPlayPhase } from '../data/eventPlayPhase';
 import { supportedDayIndex } from '../data/eventLimits';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
@@ -282,7 +283,15 @@ const observeEventArchive = (
   event: EventDoc | null,
   origin: SnapshotOrigin,
   eventId: string,
-): void => recordArchiveConfirmation(eventId, event, origin);
+): void => {
+  recordArchiveConfirmation(eventId, event, origin);
+  // The gameplay lifecycle rides the SAME observation (#1158): the deal gate in
+  // `AuthContext` has no Event subscription of its own, and a join the quiesce
+  // deferred has to be resumed when an Admin reopens play. Both halves of the
+  // freeze read as closed — the rules deny the join on each — so the phase is
+  // the one predicate pair the rest of the client already spells.
+  recordEventPlayPhase(eventId, isEventArchived(event) || isEventArchiving(event), origin);
+};
 
 export function useEventDoc(enabled = true) {
   // `enabled` lets a pre-auth caller (main.tsx) skip the subscription: events

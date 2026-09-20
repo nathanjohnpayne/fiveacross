@@ -389,11 +389,28 @@ export async function hasCachedCard(uid: string, eventId: string = EVENT_ID): Pr
 }
 
 /**
+ * What a join attempt settled as (#1158).
+ *
+ * `true` — it dealt a NEW board (an actual join). `false` — the board or the
+ * identity already existed and it early-returned a no-op. `'deferred'` — the
+ * Event is shut to gameplay right now, so NOTHING was attempted and the join is
+ * still owed.
+ *
+ * The third case is the one this type exists for: a deferral and a no-op both
+ * write nothing, but only one of them is finished. Reporting the decline as
+ * `false` made `AuthContext` record a COMPLETED deal for a first-time visitor
+ * who has no Player row at all, and its deal gate then had no reason to ever run
+ * again — so reopening play left that visitor stranded.
+ */
+export type JoinOutcome = boolean | 'deferred';
+
+/**
  * Deal a frozen board + create the player row the first time a user joins.
  *
  * Returns `true` when it dealt a NEW board (an actual join), `false` when the
- * board already existed and it early-returned a no-op. The caller gates the
- * `join_event` analytic on this so a reconnect that re-runs the deal for an
+ * board already existed and it early-returned a no-op, and `'deferred'` when a
+ * closed Event declined the whole join (see `JoinOutcome`). The caller gates the
+ * `join_event` analytic on `true` so a reconnect that re-runs the deal for an
  * already-boarded Player records nothing (Codex #117 round 8, finding B) —
  * `runDeal` re-fires on every online/authority flip, and an existing-board no-op
  * is not a join.
@@ -414,7 +431,7 @@ export async function hasCachedCard(uid: string, eventId: string = EVENT_ID): Pr
  * online-only nature changes nothing for the offline story (it rejects fast
  * where the old plain write would hang until the #403 timeout).
  */
-export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<boolean> {
+export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<JoinOutcome> {
   // A join spans several reads and a transaction. Keep every Event-owned ref
   // pinned to the scope active when the operation began; changing the live
   // binding while an Event A read is in flight must never split the eventual
@@ -448,9 +465,10 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   //
   // So the client asks the question the rules already answer, through the ONE
   // predicate pair that spells it (`src/data/eventArchive.ts`), and declines the
-  // whole join: `false` is the same "no new Board was dealt" this function
-  // already returns for a returning Player, so no `join_event` is recorded, no
-  // error is raised, and `runDeal` clears any stale one.
+  // whole join. The decline is reported as `'deferred'`, NOT as the `false` a
+  // returning Player gets (#1158): nothing is written and no error is raised
+  // either way, but a first-time visitor's join is still OWED, and `runDeal`
+  // has to be able to tell the two apart or the reopen never resumes it.
   //
   // The read this decides on is the Event read the mode decision already takes,
   // so the skip costs nothing; `getDoc` goes to the server whenever it can reach
@@ -463,11 +481,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // the profile mirror decides it. `getDoc` can still resolve from the
   // persistent cache during a transient Firestore outage even while the browser
   // reports online, and a cached `archiving: true` can describe a quiesce
-  // another Admin has since lifted. Skipping on THAT is the worst outcome
-  // available here: the join reports a clean "no new Board was dealt", so
-  // `runDeal` records no retryable error and never reruns, and a first-time
-  // visitor sits without a Player row or a Board until the next connectivity
-  // transition or reload. A cached closed state therefore attempts the join and
+  // another Admin has since lifted. Skipping on THAT is still the worst outcome
+  // available here even now that a decline is reported as `'deferred'` (#1158):
+  // the resume that outcome arms watches for a server-committed REOPEN, and an
+  // Event that was never closed on the server has no reopen to observe, so a
+  // first-time visitor would sit without a Player row or a Board until the next
+  // connectivity transition or reload. A cached closed state therefore attempts the join and
   // lets the rules decide — if the freeze really does still hold, the write is
   // denied and `runDeal` surfaces it as the declined/retryable outcome it
   // already handles for every other closed-Event write.
@@ -476,7 +495,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // run 3): a pending local close is not authoritative, and a refused one rolls
   // back to open after this decision would have skipped the join for good.
   if (closed && !joinEventSnap.metadata?.fromCache && !joinEventSnap.metadata?.hasPendingWrites) {
-    return false;
+    return 'deferred';
   }
   const daily = Array.isArray(joinEventData?.days) && joinEventData.days.length > 0;
 
@@ -834,6 +853,28 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       ...otherBoardRefs.map((ref) => tx.get(ref)),
     ]);
     if (latestBoardSnap.exists()) return false;
+    // FAIL CLOSED TO THE JOIN (#1158). Every branch below writes a Day bucket
+    // into `players/{uid}`, and a merge onto a row that does not exist CREATES
+    // it — carrying `dayStats` and nothing else. That row is a nameless
+    // leaderboard entry with no `uid`, `displayName` or `joinedAt`, and it is
+    // exactly what a first visit produced while the join was still owed: the
+    // quiesce declined the join, the Card tab dealt anyway, and the Player
+    // existed only as a statistics bucket.
+    //
+    // `uid` is the marker because the join is its ONLY writer — `joinAndDeal`
+    // merges `{ uid, displayName, photoURL }` on every visit, in the same write
+    // that stamps `joinedAt` the first time — while every other writer of this
+    // row (this function, `setMark`, the profile mirror) only ever touches a row
+    // the join has already made. Requiring it to MATCH is free: the row is
+    // addressed by this uid, so anything else is a document from another Player.
+    //
+    // Returning `false` rather than throwing keeps the no-op family this
+    // function already has (locked Day, unstamped snapshot, existing card): the
+    // Card shows its dealing state instead of a retry surface for a wait that
+    // resolves itself. `Board` re-fires the lazy deal the moment the join
+    // commits, because the identity is part of the key its in-flight guard uses.
+    const latestPlayerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : null;
+    if (latestPlayerData?.uid !== u.uid) return false;
 
     const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
     const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
@@ -885,7 +926,9 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         standingsFreezeAt: latestEventData?.standingsFreezeAt,
         days: latestDays,
       });
-      const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
+      // The SAME read the identity guard above already decoded — the row is
+      // known to exist and to be this Player's by the time this branch runs.
+      const playerData = latestPlayerData;
       const statsAllowed = !frozen || ceremonialSet.has(dayIndex);
       // The Day-honor pin identity (Codex P2 on #447): the saved player-row
       // name, never the auth value — an unknown identity skips the pin (the

@@ -51,6 +51,7 @@ import { MAX_ARCHIVE_NUMBER, MAX_DAYS } from '../data/eventLimits';
 // the LIVE path's answer is compared against the frozen one rather than described
 // separately (#1152, Codex P2 on PR #1165 round 4).
 import { withReadableDayStats } from '../data/eventArchive';
+import { observedEventPlayPhase, resetEventPlayPhaseForTests } from '../data/eventPlayPhase';
 import { cruiseFirstBingoUid, withReadableRanking } from '../game/logic';
 import type { PlayerDoc } from '../types';
 
@@ -825,6 +826,42 @@ describe('useEventDoc records a server-committed archive for every route (#1152)
 
     expect(window.localStorage.getItem(confirmedKey)).toBe('4');
     expect(window.localStorage.getItem('gcb.archive.event-b.confirmedUnder')).toBeNull();
+  });
+
+  // #1158: the same observation also carries the Event's gameplay lifecycle to
+  // the deal gate, which has no Event subscription of its own. Both halves of
+  // the freeze read as closed, because the rules deny the join on each.
+  describe('and the gameplay lifecycle the deal gate resumes on (#1158)', () => {
+    beforeEach(() => resetEventPlayPhaseForTests());
+
+    it('records the quiesce, the flip and the reopen, under the subscribed Event', () => {
+      const sub = captureDocSub();
+      renderHook(() => useEventDoc());
+
+      sub.fire(
+        eventSnap({ status: 'active', archiving: true }, { fromCache: false, hasPendingWrites: false }),
+      );
+      expect(observedEventPlayPhase('event-a')).toBe('closed');
+
+      sub.fire(eventSnap({ status: 'active' }, { fromCache: false, hasPendingWrites: false }));
+      expect(observedEventPlayPhase('event-a')).toBe('open');
+
+      sub.fire(eventSnap(archived(), { fromCache: false, hasPendingWrites: false }));
+      expect(observedEventPlayPhase('event-a')).toBe('closed');
+    });
+
+    it('records nothing from a snapshot that is not fully server-committed', () => {
+      const sub = captureDocSub();
+      renderHook(() => useEventDoc());
+
+      sub.fire(
+        eventSnap({ status: 'active', archiving: true }, { fromCache: true, hasPendingWrites: false }),
+      );
+      sub.fire(
+        eventSnap({ status: 'active', archiving: true }, { fromCache: false, hasPendingWrites: true }),
+      );
+      expect(observedEventPlayPhase('event-a')).toBe('open');
+    });
   });
 });
 

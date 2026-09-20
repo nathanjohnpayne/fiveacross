@@ -18,6 +18,12 @@ import {
   MAX_ARCHIVED_UID,
   writableArchiveRecord,
 } from './eventArchive';
+import {
+  observedEventPlayPhase,
+  recordEventPlayPhase,
+  resetEventPlayPhaseForTests,
+  subscribeEventPlayPhase,
+} from './eventPlayPhase';
 import { buildPodium, dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import { MAX_DAYS, canonicalDayStatsKey } from './eventLimits';
 import { comparePlayers } from '../game/logic';
@@ -208,6 +214,51 @@ describe('isEventArchiving', () => {
     expect(isEventArchiving(closing)).toBe(true);
     expect(isEventArchived(archived)).toBe(true);
     expect(isEventArchiving(archived)).toBe(false);
+  });
+});
+
+describe('the observed play phase — the slot the deal gate resumes on (#1158)', () => {
+  const COMMITTED = { fromCache: false, hasPendingWrites: false };
+  beforeEach(() => resetEventPlayPhaseForTests());
+
+  it('reads OPEN for an Event nothing has observed', () => {
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('records both halves of the freeze as closed, and a reopen as open', () => {
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(observedEventPlayPhase('event-a')).toBe('closed');
+    recordEventPlayPhase('event-a', false, COMMITTED);
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('ignores a snapshot that is not fully server-committed', () => {
+    // A cached `archiving: true` can describe a quiesce another Admin has
+    // since lifted, and an Admin's own optimistic close is undecided until the
+    // rules answer — the same three-flag rule the Card tab's redirect and the
+    // join's own decline follow.
+    recordEventPlayPhase('event-a', true, { fromCache: true, hasPendingWrites: false });
+    recordEventPlayPhase('event-a', true, { fromCache: false, hasPendingWrites: true });
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('is scoped to the Event it observed — another Event reads open', () => {
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(observedEventPlayPhase('event-b')).toBe('open');
+  });
+
+  it('notifies subscribers only when the slot actually moves', () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeEventPlayPhase(listener);
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(1);
+    recordEventPlayPhase('event-a', true, COMMITTED); // the same snapshot again
+    expect(listener).toHaveBeenCalledTimes(1);
+    recordEventPlayPhase('event-a', false, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react';
 import {
@@ -27,6 +28,7 @@ import {
   readAdultAttestationFromCache,
   readAdultAttestationFromServer,
 } from '../data/api';
+import { observedEventPlayPhase, subscribeEventPlayPhase } from '../data/eventPlayPhase';
 import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
@@ -1681,6 +1683,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ) {
           track('join_event');
         }
+        // A DEFERRED join is not a completed deal (#1158). The Event was shut
+        // to gameplay when the join asked, so nothing was written and the join
+        // is still owed — for a first-time visitor, that means no Player row
+        // and no Board at all. Forgetting the gate inputs this attempt ran
+        // under is how that is recorded: the dedupe exists to stop TWO runs
+        // under one open gate, and a deferral means the gate's own work never
+        // happened, so the next evaluation must be allowed to try again rather
+        // than read the deferral as "already dealt for these inputs". The
+        // evaluation that matters is the Event reopening — `eventPlayPhase` is
+        // one of those inputs — but any other (a reconnect, an admission
+        // answer) resumes it just as well. Clearing a ref triggers no render,
+        // so this can never loop on its own.
+        if (dealt === 'deferred' && activeEventIdRef.current === ownedEventId) {
+          lastDealGateRef.current = null;
+        }
       },
       () => {},
     );
@@ -1818,6 +1835,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+  // The Event's gameplay lifecycle, as the shared Event subscription last
+  // observed it for THIS device (#1158, `src/data/eventPlayPhase.ts`). A join
+  // the quiesce declined is deferred, not done, and the thing that resumes it
+  // is play reopening — so the phase is one of the deal gate's inputs, on the
+  // same footing as connectivity and the admission answer.
+  //
+  // Read from the observer seam rather than from a subscription of this
+  // provider's own: `useEventDoc` already holds the document on every route,
+  // AuthProvider sits above all of them, and a second listener here would
+  // duplicate it while making the provider (and every suite that mounts it)
+  // depend on Firestore. An Event nobody has observed reads `'open'`, which is
+  // exactly today's behaviour for a cold visit.
+  const readEventPlayPhase = useCallback(() => observedEventPlayPhase(eventId), [eventId]);
+  const eventPlayPhase = useSyncExternalStore(
+    subscribeEventPlayPhase,
+    readEventPlayPhase,
+    readEventPlayPhase,
+  );
   useEffect(() => {
     if (!(user && mayDeal && online)) {
       // The gate closed (offline, authority retired, signed out). Forget the
@@ -1843,11 +1878,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // answers synchronously, so the run triggered by an Event or account
     // change already dealt from its answer; the run the admission mirror then
     // triggers is the same answer arriving through state, not a new one.
-    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}`;
+    //
+    // `eventPlayPhase` is a gate input for the same reason `online` is (#1158):
+    // the Event being shut to gameplay is a condition the join can do nothing
+    // under, and play reopening is the moment to try again. Carrying it in the
+    // KEY rather than only in the deps is what makes the resume exactly ONE
+    // rerun — while the Event stays closed the key does not move, so the
+    // server-backed decline stays declined, and the flip back to `'open'`
+    // changes the key once.
+    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}\u0000${eventPlayPhase}`;
     if (lastDealGateRef.current === gate) return;
     lastDealGateRef.current = gate;
     void runDeal(user, eventId);
-  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded]);
+  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded, eventPlayPhase]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same

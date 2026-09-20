@@ -320,6 +320,39 @@ describe('Board daily-cards wiring (#246)', () => {
     expect(H.setMark).not.toHaveBeenCalled();
   });
 
+  it('re-attempts the lazy deal once the JOIN lands on the Player row (#1158)', () => {
+    // `dealDayCard` fails CLOSED for a row with no identity — it will not
+    // create a Player who exists only as a `dayStats` bucket — so an attempt
+    // made before the join committed is a no-op. The identity is therefore
+    // part of what an attempt IS: without it in the in-flight key the Card
+    // would sit on "Dealing…" until some unrelated render happened along.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null; // the join has not landed yet
+
+    const { rerender } = render(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // A re-render that changes nothing else does NOT re-attempt.
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // The join commits and the Player row arrives with its identity.
+    H.player = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+
+    // …and exactly once: the identity landing is one change, not a loop.
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+  });
+
   it('renders the two-event "Tonight:" line on the dealt day card (schedule correction)', () => {
     const now = Date.now();
     H.event = {

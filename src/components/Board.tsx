@@ -726,6 +726,12 @@ export default function Board() {
   // string either way: its sheet only opens after a render with the row loaded in
   // practice, and #78 pins auth as its explicit pre-load fallback.
   const identityKnown = !playerLoading && (player !== null || playerConfirmed);
+  // Whether the join has actually landed on the subscribed row (#1158). `uid`
+  // is the marker because `joinAndDeal` is its only writer, in the same merge
+  // that carries `displayName` and stamps `joinedAt` — a row created by an
+  // earlier Day deal holds a `dayStats` bucket alone. Distinct from
+  // `identityKnown` above, which asks whether the SUBSCRIPTION has settled.
+  const playerJoined = uid !== undefined && player?.uid === uid;
   const { data: event } = useEventDoc();
   // The Day schedule (daily-cards-spec § "Data model"): `[]` on a not-yet-migrated
   // (legacy) Event or while the doc loads, which keeps the entire day-scoped path
@@ -918,7 +924,16 @@ export default function Board() {
       hasBoard: false,
     });
     if (state !== 'ready') return;
-    const key = `${eventId}:${user.uid}:${day.index}`;
+    // The JOIN is part of what a deal attempt is (#1158): `dealDayCard` fails
+    // CLOSED for a `players/{uid}` row that carries no identity yet, rather
+    // than creating one that holds a `dayStats` bucket and nothing else. An
+    // attempt made before the join committed is therefore NOT the same attempt
+    // as one made after it, so the identity belongs in the in-flight key (and
+    // in the deps) — otherwise the no-op would leave the Card on "Dealing…"
+    // until some unrelated render happened along. The two attempts are safe to
+    // overlap for the reason a Retry already is: the deal is a transaction that
+    // re-checks the card's existence and no-ops for the loser.
+    const key = `${eventId}:${user.uid}:${day.index}:${playerJoined ? 'joined' : 'unjoined'}`;
     if (dealingDaysRef.current.has(key)) return;
     dealingDaysRef.current.add(key);
     const dealIndex = day.index;
@@ -931,7 +946,7 @@ export default function Board() {
       })
       .finally(() => dealingDaysRef.current.delete(key));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days`/`day` derive from event?.days; deps track the fields the deal actually reads.
-  }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce]);
+  }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce, playerJoined]);
   // Open-time echo reconcile (specs/echo-marks.md, #446): once per board
   // identity per session, bring the opened Day Card up to date against the
   // Player's achieved set — the lazy backfill that self-heals pre-feature

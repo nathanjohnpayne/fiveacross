@@ -19,6 +19,11 @@ const H = vi.hoisted(() => ({
   event: null as { days?: DayDef[]; settings?: Partial<EventDoc['settings']> } | null,
   itemsById: new Map<string, Partial<ItemDoc>>(),
   dayBoards: new Map<number, { uid: string; cells: Cell[] } | null>(),
+  // The `players/{uid}` row. `dealDayCard` FAILS CLOSED to the join for a row
+  // that carries no identity (#1158), so the default fixture is a joined one —
+  // the state every deal in this suite is about — and the guard's own test
+  // clears it.
+  player: null as Record<string, unknown> | null,
   getDoc: vi.fn(),
   getDocs: vi.fn(),
   batchSet: vi.fn(),
@@ -112,6 +117,8 @@ function route(ref: { args?: unknown[] }) {
     const board = H.dayBoards.get(Number(a[3]));
     return board ? snap(true, a[5], board) : snap(false);
   }
+  // events/{EVENT_ID}/players/{uid}
+  if (a[2] === 'players') return H.player ? snap(true, a[3], H.player) : snap(false);
   return snap(false);
 }
 
@@ -172,6 +179,7 @@ beforeEach(() => {
   H.event = null;
   H.itemsById.clear();
   H.dayBoards.clear();
+  H.player = { uid: 'sailor-1', displayName: 'Sailor', joinedAt: PAST };
   H.getDoc.mockReset();
   H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => route(ref));
   H.getDocs.mockReset();
@@ -198,6 +206,61 @@ function writtenBoard(): { ref: { args?: unknown[] }; data: { cells: Cell[]; day
   }
   return null;
 }
+
+describe('dealDayCard — the join is a precondition (#1158)', () => {
+  // A merge onto a `players/{uid}` row that does not exist CREATES it, so
+  // before this guard a Day deal that beat the join left the Player as a
+  // `dayStats` bucket with no `uid`, `displayName` or `joinedAt` — a nameless
+  // leaderboard entry. It is what a first visit during the archive quiesce
+  // produced: the join was declined, and the Card tab dealt anyway.
+  const readyDay = () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })), settings: {} };
+  };
+
+  it('writes NOTHING for a Player row that has no identity yet — no Day bucket, no card', async () => {
+    readyDay();
+    H.player = null; // the join has not landed
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+
+    expect(writtenBoard()).toBeNull();
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('writes NOTHING for a row that holds only a dayStats bucket — the shape the old race left behind', async () => {
+    readyDay();
+    H.player = { dayStats: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } } };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('writes NOTHING for another Player\'s row — the uid has to MATCH, not merely be present', async () => {
+    readyDay();
+    H.player = { uid: 'someone-else', displayName: 'Interloper', joinedAt: PAST };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('deals as soon as the join HAS landed — the guard is a wait, not a refusal', async () => {
+    readyDay();
+    H.player = { uid: 'sailor-1', displayName: 'Sailor', joinedAt: PAST };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+
+    expect(writtenBoard()).not.toBeNull();
+    const playerWrite = H.txSet.mock.calls.find(
+      (call) => ((call[0] as { args?: unknown[] }).args ?? []).includes('players'),
+    );
+    expect(playerWrite![1]).toEqual({
+      dayStats: { 2: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    });
+  });
+});
 
 describe('dealDayCard — snapshot-gated lazy dealing', () => {
   it('does NOT deal a Day whose unlockAt is in the future (locked)', async () => {
