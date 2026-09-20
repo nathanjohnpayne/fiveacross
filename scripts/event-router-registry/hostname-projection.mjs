@@ -98,10 +98,34 @@ function isNonempty(value) {
  * `documentDigest` below equal across the two: `updatedAt` is observability
  * only and never orders a write, so which of the two encodings a reader
  * received must not change the digest it computes.
+ *
+ * Normalizing to ONE canonical form is what makes that true, and preserving an
+ * accepted string as written would not: `2026-09-20T12:00:00Z`,
+ * `2026-09-20T12:00:00+00:00` and a `Timestamp` all name one instant, so a
+ * reader that echoed the first two and `toISOString()`d the third would hand
+ * `documentDigest` three different documents for one ledger and an audit
+ * comparing a receipt against the stored row would report a mismatch that is
+ * an artifact of the encoding. The canonical form is therefore the
+ * `toISOString()` text the `Timestamp` branch already produces — UTC, `Z`
+ * offset, exactly three fractional digits — and a string is re-emitted through
+ * it rather than returned as written.
+ *
+ * A string must ROUND-TRIP to reach that form: it is required to be RFC 3339
+ * (the same shape `router-publisher/src/runtime.ts` and the worker's
+ * `parseSyncRequest` require) BEFORE it is parsed, because `Date.parse` also
+ * accepts texts RFC 3339 does not — and an offsetless `2026-09-20T12:00:00`
+ * would be read as LOCAL time, making the digest depend on the machine that
+ * computed it. Sub-millisecond digits are truncated rather than refused, since
+ * a Firestore `Timestamp` loses them at `toDate()` too, so millisecond
+ * resolution is the canonical resolution of the whole layer.
  */
+const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 export function normalizeTimestamp(value) {
   if (typeof value === 'string') {
-    return value.length > 0 && Number.isFinite(Date.parse(value)) ? value : null;
+    if (!RFC_3339.test(value)) return null;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
   }
   if (!isRecord(value) || typeof value.toDate !== 'function') return null;
   let date;
@@ -312,10 +336,11 @@ export function validateLedgerDocument(host, ledger) {
     revision: ledger.revision,
     desired,
     digest: projectionDigest(ledger.revision, host, desired),
-    // Digested over the NORMALIZED timestamp, so a stored Firestore
-    // `Timestamp` and the same instant as RFC 3339 text produce one digest
-    // rather than two; `canonicalJson` of a `Timestamp` would otherwise
-    // serialize its internal second/nanosecond fields.
+    // Digested over the CANONICALIZED timestamp, so a stored Firestore
+    // `Timestamp` and every RFC 3339 spelling of the same instant produce one
+    // digest rather than several; `canonicalJson` of a `Timestamp` would
+    // otherwise serialize its internal second/nanosecond fields, and an echoed
+    // string would make `Z` and `+00:00` two documents.
     documentDigest: sha256Hex(canonicalJson({ ...ledger, updatedAt })),
   };
 }

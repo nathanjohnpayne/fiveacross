@@ -14,6 +14,14 @@ const FIRESTORE_SOURCE =
 const FIRESTORE_DOCUMENT_PREFIX =
   'projects/fiveacross/databases/(default)/documents/routerReplicas/';
 const FIRESTORE_SUBJECT_PREFIX = 'documents/routerReplicas/';
+/**
+ * The `updatedAt` text shape, matching `RFC_3339` in the worker's
+ * `src/registry/contracts.ts` and `normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs`. It is applied to a
+ * RAW string before that string is parsed, because `Date.parse` also accepts
+ * texts RFC 3339 does not and an offsetless one is read as LOCAL time.
+ */
+const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
   ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
@@ -374,7 +382,17 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
   const timestamp = data.updatedAt;
   let updatedAt: string;
   if (typeof timestamp === 'string') {
-    updatedAt = timestamp;
+    // Canonicalized rather than echoed, so `2026-09-20T12:00:00Z`,
+    // `...+00:00` and a `Timestamp` for one instant publish ONE body. The
+    // source side applies the same rule before it digests a stored ledger
+    // (`normalizeTimestamp` in
+    // `scripts/event-router-registry/hostname-projection.mjs`), and a reader
+    // that echoed the text would make the two layers disagree about a
+    // document neither of them changed.
+    if (!RFC_3339.test(timestamp)) throw new Error('invalid router replica event');
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed)) throw new Error('invalid router replica event');
+    updatedAt = new Date(parsed).toISOString();
   } else if (
     isRecord(timestamp) &&
     typeof timestamp.toDate === 'function'
@@ -388,7 +406,7 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     throw new Error('invalid router replica event');
   }
   if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(updatedAt) ||
+    !RFC_3339.test(updatedAt) ||
     !Number.isFinite(Date.parse(updatedAt)) ||
     host !== host.toLowerCase() ||
     host.endsWith('.') ||

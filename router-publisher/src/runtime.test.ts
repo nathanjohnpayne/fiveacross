@@ -421,3 +421,56 @@ describe('rehearsal-class call sites in the registry publisher', () => {
     }
   });
 });
+
+/**
+ * The `updatedAt` half of the source/edge agreement (#971, CodeRabbit round).
+ *
+ * `replicaPayloadFromEvent` is the second reader of a stored ledger's
+ * `updatedAt`, after `normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs`, and the two are
+ * required to answer one text for one instant: the source digests its answer
+ * into `documentDigest`, so a publisher that echoed the stored spelling would
+ * put a body on the wire that an audit could not match against the row it was
+ * published from. Only the canonical `toISOString()` form is published.
+ */
+describe('the publisher timestamp canonicalizer', () => {
+  const HOST = 'bodega-bay.fiveacross.app';
+  const payloadFor = (updatedAt: unknown): Record<string, unknown> => ({
+    schemaVersion: 1,
+    revision: '1',
+    host: HOST,
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'fiveacross',
+      pathNamespace: null,
+    },
+    updatedAt,
+  });
+
+  it.each([
+    ['a Z spelling', '2026-09-20T12:00:00Z'],
+    ['a zero-offset spelling', '2026-09-20T12:00:00+00:00'],
+    ['a shifted-offset spelling', '2026-09-20T14:00:00+02:00'],
+    ['a sub-millisecond spelling', '2026-09-20T12:00:00.000123Z'],
+    ['a Firestore Timestamp', { toDate: () => new Date('2026-09-20T12:00:00.000Z') }],
+  ])('publishes %s as the one canonical instant', (_why, updatedAt) => {
+    expect(replicaPayloadFromEvent(HOST, payloadFor(updatedAt)).updatedAt).toBe(
+      '2026-09-20T12:00:00.000Z',
+    );
+  });
+
+  it.each([
+    ['an offsetless string a machine would read as local time', '2026-09-20T12:00:00'],
+    ['a text Date.parse accepts but RFC 3339 does not', 'Sep 20 2026 12:00:00 GMT+0000'],
+    ['a date with no time of day', '2026-09-20'],
+    ['an RFC 3339 shape that names no instant', '2026-13-40T25:00:00Z'],
+    ['an empty string', ''],
+  ])('refuses %s', (_why, updatedAt) => {
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
+      'invalid router replica event',
+    );
+  });
+});

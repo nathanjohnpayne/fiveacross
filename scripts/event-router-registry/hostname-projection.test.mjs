@@ -165,6 +165,48 @@ describe('stored ledger validation', () => {
   it('reports a missing ledger distinctly from a malformed one', () => {
     expect(code(() => validateLedgerDocument(EVENT_HOST, null))).toBe('missing-ledger');
   });
+
+  // A Firestore `Timestamp` as the SDK hands one back: `toDate()` is the only
+  // member the projection contracts for.
+  const storedTimestamp = (iso) => ({ toDate: () => new Date(iso) });
+
+  it('hashes every spelling of one instant to one documentDigest', () => {
+    const digests = new Set(
+      [
+        '2026-09-20T12:00:00Z',
+        '2026-09-20T12:00:00+00:00',
+        '2026-09-20T12:00:00.000Z',
+        '2026-09-20T14:00:00+02:00',
+        '2026-09-20T12:00:00.000123Z',
+        storedTimestamp('2026-09-20T12:00:00.000Z'),
+      ].map((updatedAt) => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })).documentDigest),
+    );
+    expect(digests.size).toBe(1);
+  });
+
+  it('still separates two instants a millisecond apart', () => {
+    expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.000Z' })).documentDigest).not.toBe(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.001Z' })).documentDigest,
+    );
+  });
+
+  it.each([
+    ['an offsetless string a machine would read as local time', '2026-09-20T12:00:00'],
+    ['a text Date.parse accepts but RFC 3339 does not', 'Sep 20 2026 12:00:00 GMT+0000'],
+    ['a date with no time of day', '2026-09-20'],
+    ['an RFC 3339 shape that names no instant', '2026-13-40T25:00:00Z'],
+    ['an empty string', ''],
+  ])('refuses a ledger whose updatedAt is %s', (_why, updatedAt) => {
+    expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
+  });
+
+  it('refuses to build a ledger around a timestamp that does not round-trip', () => {
+    expect(
+      code(() =>
+        buildLedgerDocument(EVENT_HOST, '4', deriveCanonicalProjection(EVENT_HOST, eventDocument()), '2026-09-20T12:00:00'),
+      ),
+    ).toBe('malformed-timestamp');
+  });
 });
 
 describe('the globally reserved rehearsal classes', () => {
