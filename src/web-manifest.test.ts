@@ -80,19 +80,13 @@ describe('the manifest document', () => {
   );
 
   it.each([EDITION_IDS.GAY_CRUISE_BINGO, EDITION_IDS.VACAY_BINGO, EDITION_IDS.FIVE_ACROSS])(
-    'keeps every non-identity member Edition-invariant for %s',
+    'keeps every member that is neither identity nor chrome Edition-invariant for %s',
     (edition) => {
       const manifest = webManifestForEdition(edition);
       // The plugin defaults, preserved verbatim...
       expect(manifest.start_url).toBe('/');
       expect(manifest.scope).toBe('/');
       expect(manifest.lang).toBe('en');
-      // ...and this ticket's scope line. The colours stay Edition-invariant
-      // because `index.html`'s `<meta name="theme-color">` is static markup that
-      // only the follow-up HTML rewrite (#1118) can move, and specs/w1-pwa.md
-      // requires the two to match exactly.
-      expect(manifest.theme_color).toBe('#07060d');
-      expect(manifest.background_color).toBe('#07060d');
       expect(manifest.display).toBe('standalone');
       expect(manifest.orientation).toBe('portrait');
       // One shared icon set: there is no per-Edition PWA icon art in the repo.
@@ -103,6 +97,30 @@ describe('the manifest document', () => {
       ]);
     },
   );
+
+  it.each([EDITION_IDS.GAY_CRUISE_BINGO, EDITION_IDS.VACAY_BINGO, EDITION_IDS.FIVE_ACROSS])(
+    'takes both chrome colours of %s from that Edition’s row, as one value',
+    (edition) => {
+      // They moved from an Edition-invariant constant to `brand.chromeColor` in
+      // #1118, and they are still ONE value rather than two because they always
+      // were. They could not move in #546: `index.html`'s
+      // `<meta name="theme-color">` was static markup inside a proxied HTML
+      // response, so per-Edition colours here alone would have broken the exact
+      // equality specs/w1-pwa.md requires. The edge rewrite moved the other
+      // half, and `src/html-head-identity.test.ts` pins the equality per
+      // Edition.
+      const manifest = webManifestForEdition(edition);
+      expect(manifest.theme_color).toBe(editionBrand(edition).chromeColor);
+      expect(manifest.background_color).toBe(manifest.theme_color);
+    },
+  );
+
+  it('leaves the default Edition’s chrome colour exactly where it was', () => {
+    // The one value that may not move: an installed Gay Cruise Bingo app's
+    // chrome and splash are rendered from what the manifest said, and this
+    // change reaches installed shells.
+    expect(webManifestForEdition(EDITION_IDS.GAY_CRUISE_BINGO).theme_color).toBe('#07060d');
+  });
 
   it('hands each caller its own icon array', () => {
     const first = buildWebManifest(editionBrand(EDITION_IDS.GAY_CRUISE_BINGO));

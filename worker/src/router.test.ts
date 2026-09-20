@@ -6,12 +6,14 @@ import {
   type RouterConfig,
   type RouterDeps,
 } from './router';
+import type { HeadIdentityEdit } from './htmlHead';
 import { WEB_MANIFEST_PATH } from './manifest';
 import type { RegistryLookup } from './registry/state';
 import { RESERVED_LABELS } from '../../src/slug';
 // `edition-brands`, not `editions`: this program has no DOM lib and no
 // `vite/client`, which is why #546 split the table out in the first place.
 import { brandFor } from '../../src/edition-brands';
+import { headIdentityEdits } from '../../src/html-head-identity';
 
 const CONFIG: RouterConfig = {
   originHost: 'fiveacross.web.app',
@@ -51,7 +53,12 @@ const APEX_ROOT: RegistryLookup = {
  * request" property is only checkable if every outbound call is observable.
  */
 function harness(
-  options: { seed?: Record<string, RegistryLookup>; origin?: Response; originError?: Error } = {},
+  options: {
+    seed?: Record<string, RegistryLookup>;
+    origin?: Response;
+    originFor?: () => Response;
+    originError?: Error;
+  } = {},
 ) {
   const seed = options.seed ?? {};
   const lookup = vi.fn(async (host: string): Promise<RegistryLookup> => seed[host] ?? { kind: 'unknown-host' });
@@ -61,14 +68,37 @@ function harness(
     const request = input instanceof Request ? input : new Request(String(input), init);
     requests.push(request);
     if (options.originError) throw options.originError;
+    if (options.originFor) return options.originFor();
     return options.origin ?? new Response('<!doctype html><title>app</title>', { status: 200 });
+  });
+
+  // The HTML transform is recorded rather than performed: `HTMLRewriter` is a
+  // workerd global this program does not have, and what belongs HERE is the
+  // decision — which responses reach the rewrite and with what edits — rather
+  // than the transform itself, which `routerHtmlHead.integration.test.ts`
+  // proves against the real runtime.
+  const rewrites: { response: Response; edits: readonly HeadIdentityEdit[] }[] = [];
+  const htmlRewriter = vi.fn((response: Response, edits: readonly HeadIdentityEdit[]) => {
+    rewrites.push({ response, edits });
+    return response;
   });
 
   const deps: RouterDeps = {
     fetch: fetchImpl as unknown as RouterDeps['fetch'],
     registry: { lookup },
+    htmlRewriter,
   };
-  return { deps, requests, lookup };
+  return { deps, requests, lookup, rewrites, htmlRewriter };
+}
+
+/** An origin response the `<head>` rewrite is allowed to touch: 2xx, HTML,
+ *  with a body. Built per call because a `Response` body is single-use. */
+function htmlOrigin(init: ResponseInit = {}): Response {
+  return new Response('<!doctype html><html><head><title>app</title></head><body></body></html>', {
+    status: 200,
+    ...init,
+    headers: { 'content-type': 'text/html; charset=utf-8', ...(init.headers ?? {}) },
+  });
 }
 
 const servingSeed = {
@@ -695,6 +725,246 @@ describe('the per-hostname PWA manifest (#546)', () => {
   });
 });
 
+describe('the per-hostname HTML head rewrite (#1118)', () => {
+  const VACAY: RegistryLookup = {
+    kind: 'committed',
+    schemaVersion: 1,
+    revision: '42',
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'vacay',
+      pathNamespace: null,
+    },
+  };
+  const vacaySeed = {
+    'bodega-bay.fiveacross.app': VACAY,
+    'bodega-bay.vacaybingo.com': VACAY,
+  };
+
+  /** What an edit list says for one selector, so an assertion can name the tag
+   *  rather than an array index. */
+  const contentFor = (edits: readonly HeadIdentityEdit[], selector: string) =>
+    edits.find((edit) => edit.selector === selector)?.content;
+
+  it.each(['bodega-bay.fiveacross.app', 'bodega-bay.vacaybingo.com'])(
+    'brands the share block for the Edition %s resolved to',
+    async (host) => {
+      const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      const response = await handleRequest(get(`https://${host}/`), CONFIG, deps);
+
+      expect(response.status).toBe(200);
+      expect(rewrites).toHaveLength(1);
+      const brand = brandFor('vacay');
+      const { edits } = rewrites[0]!;
+      // Every tag a crawler reads, from the Edition THIS hostname resolved to
+      // — not the one the single bundle happened to be built with.
+      expect(contentFor(edits, 'meta[name="description"]')).toBe(brand.metaDescription);
+      expect(contentFor(edits, 'meta[property="og:site_name"]')).toBe(brand.documentTitle);
+      expect(contentFor(edits, 'meta[property="og:title"]')).toBe(brand.documentTitle);
+      expect(contentFor(edits, 'meta[property="og:image"]')).toBe(brand.ogImage);
+      expect(contentFor(edits, 'meta[property="og:image:alt"]')).toBe(brand.ogImageAlt);
+      expect(contentFor(edits, 'meta[name="twitter:image"]')).toBe(brand.ogImage);
+      // ...and the whole list is exactly what the shared table produces, so a
+      // row added there cannot be silently dropped on the way to the edge.
+      expect(edits).toEqual(headIdentityEdits(brand, host));
+    },
+  );
+
+  it.each(['bodega-bay.fiveacross.app', 'bodega-bay.vacaybingo.com'])(
+    'emits %s’s own origin as og:url, not the brand row’s static value',
+    async (host) => {
+      // The one value whose truth is per-EVENT rather than per-Edition: the
+      // vacay row names a single Event's canonical host because a build has
+      // nowhere else to put it, and a guest who shares from the other
+      // registered host must not send a link filed under the first one.
+      const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(get(`https://${host}/board?day=3`), CONFIG, deps);
+
+      expect(contentFor(rewrites[0]!.edits, 'meta[property="og:url"]')).toBe(`https://${host}/`);
+    },
+  );
+
+  it('does not hand the alternate host the canonical host the brand row carries', async () => {
+    // The brand row can only carry ONE origin, and it carries the Event's
+    // canonical one. Before this, a guest who shared from
+    // bodega-bay.vacaybingo.com sent a link an unfurl filed under
+    // bodega-bay.fiveacross.app — a host they did not enter through.
+    const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+    await handleRequest(get('https://bodega-bay.vacaybingo.com/'), CONFIG, deps);
+    expect(contentFor(rewrites[0]!.edits, 'meta[property="og:url"]')).not.toBe(
+      brandFor('vacay').ogUrl,
+    );
+  });
+
+  it('keeps theme-color byte-identical to the manifest this same host serves', async () => {
+    // `specs/w1-pwa.md` requires the two to match exactly, and they are now
+    // per-Edition — so the assertion compares the rewritten tag against the
+    // manifest the SAME router answers on the SAME host, rather than against a
+    // restatement of either value.
+    const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+    await handleRequest(get('https://bodega-bay.vacaybingo.com/'), CONFIG, deps);
+    const manifest = await handleRequest(
+      get(`https://bodega-bay.vacaybingo.com${WEB_MANIFEST_PATH}`),
+      CONFIG,
+      deps,
+    );
+
+    const themeColor = contentFor(rewrites[0]!.edits, 'meta[name="theme-color"]');
+    expect(themeColor).toBe(((await manifest.json()) as { theme_color: string }).theme_color);
+    expect(themeColor).toBe(brandFor('vacay').chromeColor);
+  });
+
+  it('gives two Editions two different chrome colours, so the equality is not vacuous', async () => {
+    const { deps, rewrites } = harness({
+      seed: { 'bodega-bay.fiveacross.app': VACAY, 'fiveacross.app': APEX_ROOT },
+      originFor: () => htmlOrigin(),
+    });
+    await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    await handleRequest(get('https://fiveacross.app/'), CONFIG, deps);
+
+    const colours = rewrites.map((rewrite) => contentFor(rewrite.edits, 'meta[name="theme-color"]'));
+    expect(colours).toEqual([brandFor('vacay').chromeColor, brandFor('fiveacross').chromeColor]);
+    expect(new Set(colours).size).toBe(2);
+  });
+
+  it('drops the origin’s content-length, which describes the pre-rewrite bytes', async () => {
+    const { deps, rewrites } = harness({
+      seed: vacaySeed,
+      originFor: () => htmlOrigin({ headers: { 'content-length': '71' } }),
+    });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    expect(rewrites).toHaveLength(1);
+    expect(response.headers.get('content-length')).toBeNull();
+  });
+
+  it.each([
+    ['a 404 from the origin', () => htmlOrigin({ status: 404 })],
+    ['a 500 from the origin', () => htmlOrigin({ status: 500 })],
+    ['an origin redirect', () => htmlOrigin({ status: 302, headers: { location: '/elsewhere' } })],
+    [
+      'a non-HTML asset',
+      () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    ],
+    [
+      'a JavaScript bundle whose type merely starts alike',
+      () =>
+        new Response('export{}', {
+          status: 200,
+          headers: { 'content-type': 'text/htmlx' },
+        }),
+    ],
+    ['a response with no content-type at all', () => new Response('hi', { status: 200 })],
+  ])('relays %s untouched rather than rewriting it', async (_label, originFor) => {
+    // "Rewriting a streamed response cannot turn an origin failure into a
+    // Worker runtime error" is an acceptance criterion, and the way it is kept
+    // is that a response the rewrite cannot safely touch is never handed to
+    // the transform at all.
+    const { deps, rewrites } = harness({ seed: vacaySeed, originFor });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    expect(rewrites).toHaveLength(0);
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+    expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('relays a bodyless HEAD response untouched', async () => {
+    const { deps, rewrites } = harness({
+      seed: vacaySeed,
+      originFor: () =>
+        new Response(null, { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/', { method: 'HEAD' }),
+      CONFIG,
+      deps,
+    );
+    expect(rewrites).toHaveLength(0);
+    expect(response.status).toBe(200);
+  });
+
+  it('still answers a rejected origin fetch with the generic 502', async () => {
+    const { deps, rewrites } = harness({
+      seed: vacaySeed,
+      originError: new Error('tls handshake failed'),
+    });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe('Origin temporarily unavailable.');
+    expect(rewrites).toHaveLength(0);
+  });
+
+  it('never touches the /__/auth/* passthrough, which resolves no Edition', async () => {
+    // The exemption exists so a registry blip cannot break sign-in
+    // mid-transaction. It resolves no record, so there is no Edition to brand
+    // with — and the OAuth redirect leg is the last response to put a body
+    // transform in front of.
+    const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/__/auth/handler?state=abc'),
+      CONFIG,
+      deps,
+    );
+    expect(response.status).toBe(200);
+    expect(rewrites).toHaveLength(0);
+  });
+
+  it.each([
+    ['admin.fiveacross.app', 'reserved-label'],
+    ['unknown-event.fiveacross.app', 'unknown-host'],
+    ['bodega-bay.example.com', 'out-of-namespace'],
+    ['ab.fiveacross.app', 'invalid-slug:too-short'],
+  ] as const)('never runs for %s, which fails closed as %s', async (host, reason) => {
+    // Same ordering claim the manifest route makes: the rewrite sits after the
+    // namespace guard and after resolution, so an address that does not serve
+    // an app does not get an app's identity written into anything.
+    const { deps, requests, rewrites } = harness({
+      seed: { 'admin.fiveacross.app': VACAY },
+      originFor: () => htmlOrigin(),
+    });
+    const response = await handleRequest(get(`https://${host}/`), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe(reason);
+    expect(requests).toHaveLength(0);
+    expect(rewrites).toHaveLength(0);
+  });
+
+  it('never runs for an inactive Event', async () => {
+    const disabled: RegistryLookup = {
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '42',
+      desired: {
+        kind: 'route',
+        eventId: 'bodega-bay-2026',
+        status: 'disabled',
+        slug: 'bodega-bay',
+        edition: 'vacay',
+        pathNamespace: null,
+      },
+    };
+    const { deps, rewrites } = harness({
+      seed: { 'bodega-bay.fiveacross.app': disabled },
+      originFor: () => htmlOrigin(),
+    });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('inactive');
+    expect(rewrites).toHaveLength(0);
+  });
+
+  it('never runs for an unconfigured router', async () => {
+    const { deps, rewrites } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+    const response = await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, {
+      ...deps,
+      registry: null,
+    });
+    expect(response.status).toBe(404);
+    expect(rewrites).toHaveLength(0);
+  });
+});
+
 describe('/__/auth/* passthrough', () => {
   it.each(['/__/auth/handler', '/__/auth/iframe', '/__/auth'])(
     'proxies %s intact without a lookup, so a registry blip cannot break sign-in mid-transaction',
@@ -789,9 +1059,11 @@ describe('an unconfigured router', () => {
 describe('what the router no longer reaches for', () => {
   it('makes no request other than the origin proxy, on any outcome', async () => {
     // The Firebase read is gone, and so is the Cache API envelope in front of
-    // it. `RouterDeps` has exactly two members, so there is nowhere else for a
-    // lookup to come from — which is what "no Firestore, KV, negative, stale or
-    // other fallback" means in code rather than in prose.
+    // it. `RouterDeps` has exactly three members and only ONE of them can
+    // answer a question — `htmlRewriter` transforms a body the origin already
+    // sent — so there is nowhere else for a lookup to come from, which is what
+    // "no Firestore, KV, negative, stale or other fallback" means in code
+    // rather than in prose.
     const { deps, requests } = harness({ seed: { ...servingSeed, 'fiveacross.app': APEX_ROOT } });
     for (const url of [
       'https://bodega-bay.fiveacross.app/',
@@ -805,7 +1077,7 @@ describe('what the router no longer reaches for', () => {
       await handleRequest(get(url), CONFIG, deps);
     }
 
-    expect(Object.keys(deps).sort()).toEqual(['fetch', 'registry']);
+    expect(Object.keys(deps).sort()).toEqual(['fetch', 'htmlRewriter', 'registry']);
     for (const request of requests) {
       expect(new URL(request.url).hostname).toBe('fiveacross.web.app');
     }

@@ -25,9 +25,18 @@
 // cannot compile the two reads above at all. That is why the table itself now
 // lives in `edition-brands.ts` and this module re-exports it: one table, three
 // programs, and the split is enforced by the compilers rather than by a note.
+// The `index.html` placeholder table, and the build-time substitution over it,
+// left for `html-head-identity.ts` on the same terms in #1118, because the
+// edge Worker now rewrites those same tags per hostname and its program cannot
+// compile this module either.
 
 import type { EditionBrand, EditionLexicon } from './types';
 import { EDITION_IDS } from './edition-registry.ts';
+// Re-exported rather than moved-and-updated-everywhere: `vite.config.ts` and
+// `src/editions.test.ts` both reach for it here, and the function is still
+// this module's story (the build-time half of Edition chrome) even though the
+// table it iterates is now shared with the edge.
+export { brandHtmlIdentity } from './html-head-identity';
 // The brand TABLE itself lives in a DOM-free, `import.meta`-free sibling so the
 // edge Worker can read the same rows (#546); everything below is the part that
 // needs a runtime. Re-exported here so no import site had to move.
@@ -119,8 +128,10 @@ export function wordmarkSegments(brand: EditionBrand = editionBrand()): {
  * `hostnames/{host}.edition`, where an Edition-less mapping resets to the
  * default — which is exactly why `setActiveEdition('')` does the same. A named
  * target may separately preserve a trusted static fallback for the static HTML
- * identity the edge cannot yet rewrite per host (#1118) and for the manifest a
- * host serves before the Worker routes are attached (#546). A leftover
+ * identity and the manifest a host serves before the Worker's routes are
+ * attached — the edge rewrites the crawler-facing `<head>` per host (#1118)
+ * and answers the manifest per host (#546), but only once it is in the
+ * request path at all, which is a human cutover. A leftover
  * `VITE_EDITION` in a multi-Event `.env.local` must still not bake another
  * product's name into a bundle every Event shares.
  *
@@ -201,97 +212,6 @@ export function alternateNamespaceApex(edition: string): string | null {
   return typeof apex === 'string' ? apex : null;
 }
 
-/** The brand fields that are plain strings — i.e. the ones a static HTML
- *  placeholder could carry. `EditionBrand` gained a nested `lexicon` in #608, so
- *  a bare `keyof EditionBrand` would let a token be pointed at an OBJECT and
- *  stringify it into the tab title as `[object Object]`. Narrowing here makes
- *  that a compile error at the table below rather than a shipped defect. */
-type EditionBrandTextField = {
-  // `-?` keeps OPTIONAL fields (`wordmarkByline`) out of the union the same
-  // way objects are kept out: `string | undefined` fails `extends string`, so
-  // the field maps to `never` — and the modifier stops the optionality from
-  // smuggling `undefined` itself into the resulting key union.
-  [K in keyof EditionBrand]-?: EditionBrand[K] extends string ? K : never;
-}[keyof EditionBrand];
-
-/** The `index.html` placeholders, and the field each one carries. Adding a row
- *  here is the whole cost of branding a new static tag. */
-const HTML_IDENTITY_TOKENS: Record<string, EditionBrandTextField> = {
-  '%EDITION_DOCUMENT_TITLE%': 'documentTitle',
-  '%EDITION_APP_NAME%': 'appName',
-  // The share block (#587). Crawlers fetch index.html without running JS, so
-  // unlike the two tags above there is NO runtime repair path for these — a
-  // hostname-resolved bundle keeps the default Edition's share metadata until
-  // the edge Worker rewrites the block per hostname (#1118, the follow-up to
-  // #546: that ticket shipped the per-host PWA manifest, which the Worker
-  // constructs, and left this block to the change that mutates a proxied HTML
-  // response). `%EDITION_SHARE_NAME%`
-  // appears twice (og:site_name and og:title — both carry the product name);
-  // `%EDITION_OG_IMAGE%` twice (og:image and twitter:image). og:description is
-  // NOT tokenised: "Sign in, get your card, mark it if you see it." is the
-  // Edition-invariant tagline, and keeping it static keeps the gcb unfurl
-  // wording byte-identical to what shipped before #587.
-  '%EDITION_META_DESCRIPTION%': 'metaDescription',
-  '%EDITION_SHARE_NAME%': 'documentTitle',
-  '%EDITION_OG_URL%': 'ogUrl',
-  '%EDITION_OG_IMAGE%': 'ogImage',
-  '%EDITION_OG_IMAGE_ALT%': 'ogImageAlt',
-};
-
-/** Matches every placeholder of that SHAPE, including ones with no row above —
- *  which is the point: an unknown one must fail the build, not pass through. */
-const HTML_IDENTITY_PATTERN = /%EDITION_[A-Z_]+%/;
-
-/** Escape a brand string for BOTH contexts it lands in — `<title>` element text
- *  and a double-quoted attribute value. Every value is plain ASCII today; this
- *  exists so an Edition named with an `&` is a rendering detail rather than
- *  malformed markup. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/**
- * Brand `index.html`'s static chrome identity with one Edition's copy (#586).
- *
- * Called at BUILD time by the `edition-html-identity` plugin in
- * `vite.config.ts` — hence a pure string function here rather than logic inside
- * the config, so the substitution and its fail-closed check are unit-testable
- * without running a build. `<title>` and `apple-mobile-web-app-title` are static
- * markup, so on a single-Event build this is the only place the Edition can
- * reach a browser tab, a bookmark, a share-sheet title or iOS's "Add to Home
- * Screen" default before any JavaScript runs.
- *
- * Takes the resolved brand rather than an Edition id: the caller already holds
- * one (it brands the manifest from the same object), and a caller-supplied
- * brand is what lets a test drive copy this table does not happen to contain
- * today — the escaping below has no other way to be exercised.
- *
- * THROWS on a placeholder it does not recognise. A survivor is not a crash —
- * it renders as the literal text `%EDITION_…%` in the tab and in the installed
- * app's name, which is the kind of defect that builds, deploys, and is found by
- * a player rather than by CI.
- */
-export function brandHtmlIdentity(html: string, brand: EditionBrand): string {
-  let out = html;
-  for (const [token, field] of Object.entries(HTML_IDENTITY_TOKENS)) {
-    out = out.replaceAll(token, escapeHtml(brand[field]));
-  }
-  const orphan = out.match(HTML_IDENTITY_PATTERN);
-  if (orphan) {
-    throw new Error(
-      `index.html contains an unrecognised Edition placeholder ${orphan[0]}. Add it ` +
-        'to HTML_IDENTITY_TOKENS in src/editions.ts (with the EditionBrand field it ' +
-        'should read), or remove it from the markup — a placeholder that survives ' +
-        'this substitution is shipped as literal text to every visitor.',
-    );
-  }
-  return out;
-}
-
 /**
  * Put the Edition's name on the browser chrome: the tab, and the label iOS
  * offers when someone adds the app to their home screen.
@@ -311,6 +231,12 @@ export function brandHtmlIdentity(html: string, brand: EditionBrand): string {
  * hostname-resolved build gets its manifest from the edge Worker instead
  * (#546, `worker/src/manifest.ts`) — once its routes are attached, which is a
  * human cutover rather than something this build can arrange.
+ *
+ * These two tags are also the two the EDGE deliberately leaves alone (#1118,
+ * `RUNTIME_REPAIRED_TOKENS` in `html-head-identity.ts`). The edge rewrites the
+ * crawler-facing block because a crawler runs no JavaScript and nothing here
+ * can reach it; adding a second writer for a surface this function already
+ * corrects would buy nothing and could disagree with it.
  */
 export function applyEditionDocumentIdentity(edition: string = activeEdition()): void {
   // Guarded because this module is imported by `vite.config.ts`, where there is

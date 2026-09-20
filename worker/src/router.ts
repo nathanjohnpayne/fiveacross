@@ -15,7 +15,10 @@
 //      identity (`manifest.ts`, #546) — the one address whose correct answer
 //      depends on which hostname asked, taken from that same lookup too
 //   6. proxies what survives to the Firebase Hosting origin with a rewritten
-//      Host header, leaving the public hostname in the browser untouched
+//      Host header, leaving the public hostname in the browser untouched — and
+//      on that one path rewrites the proxied document's `<head>` per hostname
+//      (`htmlHead.ts`, #1118), because the share block and the theme colour a
+//      crawler reads are baked at build time and no JavaScript can repair them
 //
 // The seventh — the one it refuses — is REDIRECTING. This Worker is not a
 // canonicaliser. #599 as amended removed edge canonicalization outright: every
@@ -33,6 +36,7 @@
 // that knows it is running on Cloudflare.
 
 import { classifyHost, NAMESPACES } from './host';
+import { headEditsFor, isHeadRewritable, type HtmlHeadRewriter } from './htmlHead';
 import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
 import { resolveHost, type ResolveDeps, type ServedRecord, reportDiagnostic } from './resolve';
@@ -53,6 +57,18 @@ export interface RouterConfig {
 
 export interface RouterDeps extends ResolveDeps {
   fetch: typeof fetch;
+  /**
+   * The runtime's streaming HTML transform, used for the per-hostname `<head>`
+   * rewrite (#1118). Injected like `fetch` and the registry because
+   * `HTMLRewriter` exists only in workerd; `worker/src/htmlHead.ts` holds the
+   * workerd implementation and every decision about WHEN to use it.
+   *
+   * It is a body transform, not a second source of routing truth: it is
+   * reached only on the serving proxy path, only after the namespace guard and
+   * resolution have already let the request through, and it can neither
+   * consult a record nor change a status.
+   */
+  htmlRewriter: HtmlHeadRewriter;
 }
 
 /** Firebase Hosting's reserved namespace, which serves the Google sign-in
@@ -144,6 +160,7 @@ export async function handleRequest(
     return proxyToOrigin(request, url, config, deps, null);
   }
 
+
   // A refusal that was decided FROM a committed record carries that record's
   // revision, so `inactive` and a tombstone's `unknown-host` are publicly
   // observable as the `{reason, revision}` pair the registry's recovery
@@ -186,7 +203,14 @@ export async function handleRequest(
     return response;
   }
 
-  return proxyToOrigin(request, url, config, deps, resolution.record.revision);
+  // The serving proxy, and the ONE path that carries a resolved record into
+  // `proxyToOrigin`. That record is what lets the response's `<head>` be
+  // rewritten for the Edition this hostname resolved to (#1118) — which is why
+  // the record travels rather than just its revision: the rewrite sits after
+  // the namespace guard and after resolution exactly like the manifest route,
+  // so a reserved label, an out-of-namespace host and an unknown or inactive
+  // Event never reach it.
+  return proxyToOrigin(request, url, config, deps, resolution.record);
 }
 
 /**
@@ -245,14 +269,22 @@ function pathCapabilityResponse(record: ServedRecord, version: string): Response
  * with it, a 3xx from the origin is handed to the browser exactly as the origin
  * wrote it, and this Worker has no code path anywhere that constructs a
  * redirect of its own. There is no canonical host in this file to bounce to.
+ *
+ * `record` is the resolved projection on the serving path and `null` on the
+ * `/__/auth/*` exemption, which resolves nothing. It supplies both the
+ * revision stamp and the Edition the `<head>` rewrite brands with, so the auth
+ * helper's own HTML is relayed untouched — there is no Edition to brand it
+ * with, and a response the exemption exists to keep working is the last one to
+ * put a body transform in front of.
  */
 async function proxyToOrigin(
   request: Request,
   url: URL,
   config: RouterConfig,
   deps: RouterDeps,
-  revision: string | null,
+  record: ServedRecord | null,
 ): Promise<Response> {
+  const revision = record?.revision ?? null;
   const originUrl = new URL(url.toString());
   originUrl.protocol = 'https:';
   originUrl.hostname = config.originHost;
@@ -299,10 +331,38 @@ async function proxyToOrigin(
     });
   }
 
+  const responseHeaders = stampRouterHeaders(
+    new Headers(originResponse.headers),
+    config.version,
+    revision,
+  );
+
+  // The per-hostname `<head>` rewrite (#1118). Gated on a resolved record, so
+  // it is unreachable from every fail-closed outcome and from the auth
+  // exemption; gated on `isHeadRewritable`, so a failing origin, a bodyless
+  // response and every non-HTML asset are relayed byte-for-byte. A rewrite
+  // that cannot run is a relay, never an error — the transform must not be
+  // able to convert an origin failure into a Worker runtime error.
+  if (record !== null && isHeadRewritable(originResponse)) {
+    // The rewrite changes the document's length, and the origin's
+    // `content-length` describes the bytes BEFORE it. Relaying it would
+    // truncate or stall the response, so it is dropped and the runtime frames
+    // the transformed body itself.
+    responseHeaders.delete('content-length');
+    return deps.htmlRewriter(
+      new Response(originResponse.body, {
+        status: originResponse.status,
+        statusText: originResponse.statusText,
+        headers: responseHeaders,
+      }),
+      headEditsFor(record.edition, url.hostname),
+    );
+  }
+
   return new Response(originResponse.body, {
     status: originResponse.status,
     statusText: originResponse.statusText,
-    headers: stampRouterHeaders(new Headers(originResponse.headers), config.version, revision),
+    headers: responseHeaders,
   });
 }
 

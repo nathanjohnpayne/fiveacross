@@ -3,7 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
-    <meta name="theme-color" content="#07060d" />
+    <!-- Edition-scoped at BUILD time and rewritten per hostname at the edge
+         (#1118), because specs/w1-pwa.md requires this to equal the manifest's
+         theme_color exactly and that value is per-Edition. The inline boot
+         <style> below deliberately keeps one shared near-black: the edge
+         rewrites attributes, not stylesheet text, and the three Editions'
+         chrome colours differ by a few points of luminance. -->
+    <meta name="theme-color" content="%EDITION_THEME_COLOR%" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <!-- iOS home-screen label. Safari reads this, not the manifest's short_name
@@ -12,15 +18,17 @@
          back to <title>, which happens to match today; it is set explicitly so
          retitling the page cannot silently rename the installed icon.
 
-         The two Edition placeholders below are substituted at BUILD time from
-         `VITE_EDITION` against the brand table in src/editions.ts (#586) — see
-         `brandHtmlIdentity` there and the `edition-html-identity` plugin in
-         vite.config.ts, which fails the build if either one survives. They are
-         not Vite's own env-substitution syntax: these are derived brand copy,
-         not raw env values, and the plugin runs ahead of Vite's env
-         replacement. A hostname-resolved build has no single Edition to bake,
-         so it corrects both tags after resolution instead (editions.ts
-         `applyEditionDocumentIdentity`).
+         Every Edition placeholder in this file is substituted at BUILD time
+         from `VITE_EDITION` against the table in src/html-head-identity.ts
+         (#586) — see `brandHtmlIdentity` in src/editions.ts and the
+         `edition-html-identity` plugin in vite.config.ts, which fails the
+         build if any one survives. They are not Vite's own env-substitution
+         syntax: these are derived brand copy, not raw env values, and the
+         plugin runs ahead of Vite's env replacement. A hostname-resolved build
+         has no single Edition to bake, so the two chrome tags — this one and
+         <title> — are corrected after resolution instead (editions.ts
+         `applyEditionDocumentIdentity`), and every tag a crawler reads is
+         rewritten per hostname at the edge (#1118).
 
          Deliberately not spelling a placeholder out in this comment: the
          fail-closed scan reads the whole file, comments included, so an example
@@ -38,13 +46,18 @@
 
          Edition-scoped at BUILD time like the chrome tags above (#587, artwork
          #609): crawlers do not run JS, so unlike the document title there is no
-         runtime repair for these — a hostname-resolved bundle keeps the default
-         Edition's share block until the edge Worker rewrites it per hostname.
-         That rewrite is #1118, a FOLLOW-UP to #546: #546 shipped the per-host
-         PWA manifest, which the Worker CONSTRUCTS, and left this block to the
-         change that has to mutate a proxied HTML response instead.
-         og:description stays static: it is the Edition-invariant tagline,
-         shared verbatim by every brand row. -->
+         runtime repair for these. A hostname-resolved bundle would therefore
+         keep the default Edition's share block, which is why the edge Worker
+         rewrites this whole block per hostname instead (#1118, the follow-up
+         to #546: #546 shipped the per-host PWA manifest, which the Worker
+         CONSTRUCTS, and left this block to the change that mutates a proxied
+         HTML response). The rows the edge rewrites and the placeholders below
+         are one table — src/html-head-identity.ts — so the build and the edge
+         cannot brand different tags. og:url is the one value the edge does NOT
+         take from the brand row: it emits the requested hostname's own origin,
+         because the canonical URL of an unfurl is per-Event and a build can
+         only bake per-Edition data. og:description stays static: it is the
+         Edition-invariant tagline, shared verbatim by every brand row. -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="%EDITION_SHARE_NAME%" />
     <meta property="og:title" content="%EDITION_SHARE_NAME%" />
@@ -54,8 +67,10 @@
          web.app host, never a custom-domain apex: the gcb apex TLS-resets for
          link crawlers (#340), which is exactly the fetch iMessage/WhatsApp/
          Telegram make to build a preview, and it is SNI-blocked on the ship
-         network the app is used from (#164). og:url stays the canonical origin
-         on purpose. Both URLs live on the Edition's brand row (src/editions.ts). -->
+         network the app is used from (#164). og:url stays a serving origin on
+         purpose — the brand row's canonical one in a baked build, the
+         requested hostname's own at the edge. Both URLs live on the Edition's
+         brand row (src/edition-brands.ts). -->
     <meta property="og:image" content="%EDITION_OG_IMAGE%" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />

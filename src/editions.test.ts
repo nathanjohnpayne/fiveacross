@@ -219,8 +219,10 @@ describe('editions — the share block (#587, artwork #609)', () => {
   it('keeps every og:url on HTTPS with no other Edition’s hostname', () => {
     // og:url is the canonical identity a crawler files the link under. The
     // vacay row carries its Event canonical host (bodega-bay) rather than the
-    // legacy serving alias or dead vacaybingo.com apex — per-Event truth stays
-    // here until the edge HTML rewrite (#1118) emits it per hostname.
+    // legacy serving alias or dead vacaybingo.com apex — a build can bake only
+    // one, so this row is what a direct-Hosting response carries, while the
+    // edge HTML rewrite (#1118) replaces it with the requested hostname's own
+    // origin on every host the Worker fronts.
     expect(editionBrand('vacay').ogUrl).toBe('https://bodega-bay.fiveacross.app/');
     expect(editionBrand('fiveacross').ogUrl).toBe('https://fiveacross.app/');
     for (const edition of ['vacay', 'fiveacross']) {
@@ -323,6 +325,10 @@ describe('brandHtmlIdentity — baking the Edition into index.html', () => {
       expect(out, edition).toContain(`<meta property="og:image" content="${brand.ogImage}" />`);
       expect(out, edition).toContain(`<meta property="og:image:alt" content="${brand.ogImageAlt}" />`);
       expect(out, edition).toContain(`<meta name="twitter:image" content="${brand.ogImage}" />`);
+      // The PWA chrome colour (#1118): baked here so a single-Event build's
+      // meta tag equals the manifest it ships beside, now that both are
+      // Edition-scoped.
+      expect(out, edition).toContain(`<meta name="theme-color" content="${brand.chromeColor}" />`);
     }
   });
 });
