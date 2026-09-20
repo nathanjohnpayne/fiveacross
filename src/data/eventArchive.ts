@@ -490,9 +490,10 @@ export function finaleHasRun(
  *
  * THE UNDER-WARN RESIDUAL IS CONSOLE-ONLY, and stated rather than claimed away
  * (#1224). This predicate is evaluated against a subscription, so ANY state
- * change between the render that reads it and the archive transaction can
- * leave the warning stale — not only the one trigger this rule was first
- * written against. Two are known. Another Admin enabling
+ * change between the render that reads it and the archive transaction that
+ * re-keys the ask can leave the warning stale — not only the one trigger this
+ * rule was first written against; an edit that leaves the ask where it is (a
+ * rename, a ban) cannot. Two are known. Another Admin enabling
  * `settings.dailyEmailEnabled` between the render and the transaction archives
  * an Event the console never had cause to warn about. And the finale sweep
  * committing `frozenAt` and the podium Moment inside the quiesce round trip
