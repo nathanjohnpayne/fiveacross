@@ -49,11 +49,14 @@ jobs:
       #
       # Two stages, because only the runner can settle which is needed: install
       # `bubblewrap`, then drop the AppArmor user-namespace restriction only if
-      # the probe still cannot prove a mechanism. Ubuntu's own
-      # `bwrap-userns-restrict` profile would be the narrower grant, but neither
-      # `apparmor` nor `apparmor-profiles` ships it on noble, and hand-writing a
-      # policy that unconfines `bwrap` is no narrower than the sysctl on a
-      # single-use VM.
+      # the probe does not already name `bwrap`. Not "only if it proved
+      # nothing" — a probe that named an `unshare` spelling instead has not
+      # reached the path this step exists to reach, so it takes the second
+      # stage too, and if the drop does not move the answer to `bwrap` the job
+      # reds, which is the point. Ubuntu's own `bwrap-userns-restrict` profile
+      # would be the narrower grant, but neither `apparmor` nor
+      # `apparmor-profiles` ships it on noble, and hand-writing a policy that
+      # unconfines `bwrap` is no narrower than the sysctl on a single-use VM.
       #
       # The check is `probeWriteContainment` itself rather than a stand-in, so
       # this asserts the very answer the suites go on to read, and it FAILS the

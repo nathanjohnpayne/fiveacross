@@ -9,18 +9,24 @@
 // classifier could prove nothing (no `bwrap`, and Ubuntu 24.04 refuses the
 // unprivileged user namespace `unshare` needs), so those skips were the whole
 // of CI's Linux coverage and nobody's log said so out loud. The workflow now
-// installs `bubblewrap` and fails if the probe still names no mechanism — but
-// only if that step runs FIRST. A step reordered below either consumer, or
+// installs `bubblewrap` and fails unless the probe names `bwrap` — but only if
+// that step runs FIRST. A step reordered below either consumer, or
 // deleted, silently restores the skips and the suites stay green while proving
 // less, which is exactly the failure this repository keeps re-learning.
 //
 // WHY OFFSETS RATHER THAN A PARSED WORKFLOW. Steps run in document order, so a
 // position in the file IS the order, and this repository's dependency graph
 // carries no YAML parser of its own — adding one to assert three line positions
-// would cost more than it pins. This deliberately asserts ordering and nothing
-// about the step's contents beyond the two commands that identify it: whether
-// the runner can actually contain a write is the runner's answer to give, and
-// the step asks it with the classifier's own probe.
+// would cost more than it pins.
+//
+// WHAT IS ASSERTED ABOUT THE CONTENTS. Only the part that is the WORKFLOW's
+// answer to give rather than the runner's: that the step asks the classifier's
+// own probe, and that an answer which is not `bwrap` exits nonzero. Those two
+// are the whole difference between this step and a bare
+// `apt-get install bubblewrap`, which would install the binary and let every
+// case go on skipping if the kernel still refused the namespace. Whether the
+// runner can actually contain a write is the runner's answer, and nothing here
+// pins it.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -44,6 +50,16 @@ describe("app-ci provisions the deploy-scope classifier's write containment", ()
   const installOffset = () =>
     soleOffset(workflow, /^\s*sudo apt-get install .*\bbubblewrap\b.*$/gm, "the bubblewrap install");
 
+  /**
+   * That step's own body, so a match cannot be satisfied by some unrelated
+   * step: from the install line to wherever the next step's `- name:` begins.
+   */
+  const containmentStep = () => {
+    const rest = workflow.slice(installOffset());
+    const next = rest.search(/\n\s*- name:/);
+    return next === -1 ? rest : rest.slice(0, next);
+  };
+
   it("asks the classifier's own probe, so a runner that can contain nothing fails the job", () => {
     // Not a stand-in for the probe — a `bwrap --version` that succeeds says
     // nothing about whether the kernel will grant the namespace, which is the
@@ -56,5 +72,18 @@ describe("app-ci provisions the deploy-scope classifier's write containment", ()
     ["the deployment safety harness (npm run test:deploy)", /^\s*run: npm run test:deploy$/gm],
   ])("installs bubblewrap before %s", (label, pattern) => {
     expect(installOffset()).toBeLessThan(soleOffset(workflow, pattern, label));
+  });
+
+  it.each([
+    // Not `!answer.ok`: an `unshare` spelling winning instead is a proved
+    // mechanism and would satisfy that, while leaving the `bwrap` argv — the
+    // read-only checkout bound back over the writable set — exactly as
+    // untested as it was before #1164.
+    ["insists on `bwrap` by name rather than on some mechanism", /answer\.label !== "bwrap"/],
+    // Without this the probe is a `console.log`: the answer is printed, the
+    // step is green, and every case goes on skipping unread.
+    ["fails the job on any other answer", /process\.exit\(1\)/],
+  ])("%s", (_label, pattern) => {
+    expect(containmentStep()).toMatch(pattern);
   });
 });
