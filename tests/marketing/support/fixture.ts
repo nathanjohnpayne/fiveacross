@@ -158,15 +158,16 @@ export const HERO_EDITION: HeroEdition =
 /**
  * Prompts held OUT of the hero deal. Every one is a real, general-audience
  * Bodega prompt — they are excluded because a portfolio hero is read by
- * recruiters, not because the Event needed them cut. (The jammies line carries
- * a typo the live pool also carries; not something to enlarge to 393px.)
+ * recruiters, not because the Event needed them cut. (The jammies line's
+ * grammar was corrected in #1019; still kept out of the hero deal — not
+ * something to enlarge to 393px.)
  */
 const HERO_PROMPT_EXCLUSIONS = new Set([
   'Share a photo you’ve taken where you feel sexy',
   'Take a photo of somebody else looking sexy',
   'Take a shot',
   'Give a convincing speech on why men should not be included in this trip',
-  'Post of a picture of you and somebody else in your jammies',
+  'Post a picture of you and somebody else in your jammies',
   // GCB embark pool. Flagged `spicy: false` and genuinely fine on the ship;
   // not a line to enlarge to 393pt on a page a recruiter reads.
   'Locate the Dick Deck (reconnaissance only)',
