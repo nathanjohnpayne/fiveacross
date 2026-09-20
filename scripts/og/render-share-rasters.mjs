@@ -65,7 +65,7 @@ import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { buildSync } from 'esbuild';
+import { loadEditions } from './load-editions.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { lightPixelShare, readPngHeader, readPngPixels } from './png-pixels.mjs';
 
@@ -98,44 +98,11 @@ if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform'))
   process.exit(1);
 }
 
-/**
- * Load the brand table the way the app resolves it.
- *
- * `src/editions.ts` is BUNDLED here, not merely transpiled. Its neighbours
- * next door (`render-og-editions.mjs`, `render-share-footer.mjs`) transpile
- * the single file and hand it a `require` that returns `{}`, on a comment that
- * says "the only import is a type-only one" — which stopped being true once
- * the module started importing `EDITION_IDS` and `brandFor` for real values.
- * As of this writing both of those scripts die on load with `Cannot read
- * properties of undefined (reading 'VACAY_BINGO')`; that is their own defect,
- * not this one's, and it is what this loader is written not to repeat.
- * Bundling resolves the sibling modules instead of stubbing them, so the
- * loader cannot rot the next time the brand table grows an import.
- *
- * `import.meta.env.VITE_EDITION` is defined away because `seedEdition()` reads
- * it. Nothing here ever reaches that path — every lookup below passes an
- * explicit Edition id — but esbuild will not emit a CJS bundle containing
- * `import.meta` without being told what it is.
- */
-function loadEditions() {
-  const bundled = buildSync({
-    entryPoints: [join(repo, 'src', 'editions.ts')],
-    bundle: true,
-    write: false,
-    format: 'cjs',
-    platform: 'node',
-    target: 'node20',
-    define: { 'import.meta.env.VITE_EDITION': 'undefined' },
-    logLevel: 'silent',
-  });
-  const module = { exports: {} };
-  new Function('module', 'exports', 'require', bundled.outputFiles[0].text)(
-    module,
-    module.exports,
-    () => ({}),
-  );
-  return module.exports;
-}
+// The brand table comes from the shared bundling loader in
+// `load-editions.mjs`. This script introduced that loader inline; it moved to
+// its own module once the two renderers next door adopted it, because the
+// transpile-and-stub loader they had each copied rotted the moment
+// `src/editions.ts` grew a real import — one defect in three places.
 const { editionBrand } = loadEditions();
 
 /** The artboard each committed picture is a render of. Edition ids match the

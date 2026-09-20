@@ -4,12 +4,14 @@
 //   plans/og-images/share-final-photo-vacay.png
 //   plans/og-images/share-final-photo-fa.png
 //
-// Those PNGs are static pictures of a LIVE component. `ShareCard.tsx` draws
-// the real card's footer as `${appName} ${lexicon.shareMark}` (three call
-// sites), so the moment the brand table changes a share mark the shipped app
-// is already correct and only these reference pictures are stale. #681 is
-// exactly that case: #678 moved Vacay's mark from 🗺️ to 🧳 in the table, the
-// running app followed, and the wireframes' card kept showing a map.
+// Those PNGs are renders of the `.shc` artboards in
+// `plans/daily-cards-wireframes.html` (see render-share-rasters.mjs, #887).
+// `ShareCard.tsx` draws the real card's footer as
+// `${appName} ${lexicon.shareMark}` (three call sites), so the moment the
+// brand table changes a share mark the shipped app is already correct and only
+// these reference pictures are stale. #681 is exactly that case: #678 moved
+// Vacay's mark from 🗺️ to 🧳 in the table, the running app followed, and the
+// wireframes' card kept showing a map.
 //
 // So this script does not re-draw the card — it re-draws the one line the
 // brand table owns, in place, reading `appName` and `lexicon.shareMark` from
@@ -17,10 +19,11 @@
 // mark change is a table edit plus a re-run.
 //
 // SCOPE, stated plainly: everything else in these cards (the photo hero, the
-// standings rows, the honors chips) is a picture of sample data, has no design
-// source in this repo, and is deliberately left untouched. If the card's
-// LAYOUT ever changes, these references need re-screenshotting from the real
-// component, not patching here.
+// standings rows, the honors chips) comes from the artboard and is left
+// untouched here. If anything other than the footer line changes, this is the
+// wrong tool: edit the artboard and re-run
+// `render-share-rasters.mjs --edition <id>`. Repainting one 32-row band is
+// the cheaper answer only while the footer is all that moved.
 //
 // Usage:
 //   node scripts/og/render-share-footer.mjs --edition vacay
@@ -33,12 +36,11 @@
 // content change. Touch the Edition whose brand table row moved.
 //
 // Requirements: playwright + esbuild (dev deps), macOS for Apple Color Emoji.
-import { execFileSync } from 'node:child_process';
-import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { transformSync } from 'esbuild';
+import { loadEditions } from './load-editions.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -50,10 +52,6 @@ const argOf = (f) => {
 const only = argOf('--edition');
 const all = args.includes('--all');
 const checkOnly = args.includes('--check');
-// Skip the pngquant pass. Quantisation perturbs pixels everywhere, which makes
-// it impossible to prove the redraw stayed inside the footer band; verify with
-// this, then re-run without it to write the committed (crushed) file.
-const noCrush = args.includes('--no-crush');
 if (!only && !all) {
   console.error(
     'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
@@ -66,13 +64,10 @@ if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform'))
   process.exit(1);
 }
 
-function loadEditions() {
-  const src = readFileSync(join(repo, 'src', 'editions.ts'), 'utf8');
-  const js = transformSync(src, { loader: 'ts', format: 'cjs', target: 'node20' }).code;
-  const module = { exports: {} };
-  new Function('module', 'exports', 'require', js)(module, module.exports, () => ({}));
-  return module.exports;
-}
+// The brand table comes from the shared bundling loader in
+// `load-editions.mjs`. This script used to transpile `src/editions.ts` alone
+// and stub its `require`, which died on load once the module started importing
+// `EDITION_IDS` and `brandFor` for real values.
 const { editionBrand } = loadEditions();
 
 // Geometry measured off the committed cards. The band is the full-width strip
@@ -158,22 +153,17 @@ try {
 
     console.log(`${id.padEnd(11)} "${line}"  ink ${card.ink}  ground ${out.bg}  line width ${out.width}px`);
     if (!checkOnly) {
+      // Written as canvas hands it back: lossless TRUECOLOR (PNG colour type
+      // 2), matching the three committed cards, what render-share-rasters.mjs
+      // writes, and what `src/recon-share-og.test.ts` requires of all three.
+      // An earlier version ran pngquant here on the reasoning that these are
+      // soft-focus reference pictures rather than assets crawlers serve. That
+      // is no longer available: pngquant emits a palette PNG (colour type 3),
+      // which reds the recon guard — and a palette pass perturbs pixels
+      // everywhere, so it also destroys the one property this tool exists to
+      // have, that the only pixels that moved are the ones in the band.
       writeFileSync(path, Buffer.from(out.png.split(',')[1], 'base64'));
-      // The committed cards are pngquant-crushed. Canvas hands back a lossless
-      // PNG, so skipping this step grows a 150 KB reference asset to 240 KB for
-      // a one-emoji change — a bigger diff than the change itself.
-      try {
-        if (noCrush) throw new Error('skipped');
-        execFileSync(
-          'pngquant',
-          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${path}.quant`, path],
-          { stdio: 'inherit' },
-        );
-        renameSync(`${path}.quant`, path);
-      } catch {
-        console.warn(`${''.padEnd(11)} pngquant unavailable — keeping the lossless PNG (expect a larger file).`);
-      }
-      console.log(`${''.padEnd(11)} wrote ${path} (${(statSync(path).size / 1024).toFixed(0)} KB)`);
+      console.log(`${''.padEnd(11)} wrote ${path} (${(statSync(path).size / 1024).toFixed(0)} KB, truecolor)`);
     }
   }
 } finally {
