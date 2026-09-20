@@ -242,17 +242,25 @@ feedback_policy:
 #     ONE EXCEPTION, and it is worth knowing before escalating: a bare
 #     rate-limit refusal does not hold the barrier when Codex has already
 #     reported on the same head. `p4b_same_head_barrier` classifies that
-#     CodeRabbit result as `rate_limit` and, for a Codex class of `reported`,
-#     neither sets a `why` nor marks the run pending (scripts/phase-4b/lib.sh,
-#     the `rate_limit)` arm, around line 1437) — so the barrier opens with no
-#     CodeRabbit report at all, because the head has been read by the agent that
-#     actually gates the merge. The invariant that makes that safe is upstream:
+#     CodeRabbit result as `rate-limited` — the class name
+#     `p4b_barrier_class_coderabbit` prints when the probe's `observed` is
+#     `rate_limit` — and, for a Codex class of `reported`, neither sets a `why`
+#     nor marks the run pending (scripts/phase-4b/lib.sh, the `rate-limited)`
+#     arm of `p4b_same_head_barrier`, whose inner `case "$cls_cx"` is around
+#     line 1437) — so the barrier opens with no CodeRabbit report at all,
+#     because the head has been read by the agent that actually gates the merge.
+#     The invariant that makes that safe is upstream:
 #     `crw_rate_limit_masks_blocking_marker` in scripts/coderabbit-wait.sh emits
 #     rc 2 when a rate-limit stanza shares a body with a blocking marker, so a
 #     `rate_limit` that reaches the classifier is a refusal with nothing unread
-#     behind it. Every other Codex class in that arm still escalates. Do not
-#     read a rate-limited CodeRabbit on a Codex-reported head as a stall that
-#     needs a human.
+#     behind it. Every other Codex class escalates immediately, EXCEPT
+#     `not-yet`, which marks the run pending and waits the head-anchored budget.
+#     That wait is on Codex, not on CodeRabbit: the Codex arm is self-clearing,
+#     so the next probe can find it reported and open the barrier. Only once the
+#     budget is exhausted does the run route to the manual fallback, with the
+#     rate-limit reason appended to the reason string (same file, around line
+#     1491). Do not read a rate-limited CodeRabbit on a Codex-reported head as a
+#     stall that needs a human.
 #
 # A rate-limit stall does NOT automatically page the human, and an earlier
 # version of this note said it did. The failover is live: when
@@ -277,11 +285,17 @@ feedback_policy:
 # (scripts/phase-4b/lib.sh, around line 211) and `p4b_same_head_barrier`
 # escalates it to the manual fallback unconditionally (same file, around line
 # 1465). Neither reads `severity_gate.enabled`, so turning the severity gate off
-# does not remove this one. That is deliberate: the severity gate reads only
-# `pulls/{pr}/comments`, the conversation gate covers threads, and the Phase 4b
-# adapter sees only the diff, so the barrier is the only reader a summary-only
-# finding has. An agent that meets this escalation has not found a policy bug —
-# a human has to read that summary comment before Phase 4b can proceed.
+# does not remove this one. That is deliberate — but NOT because the severity
+# gate is blind to that surface. `scripts/coderabbit-severity-gate.sh` does read
+# it (`issues/{pr}/comments` and `pulls/{pr}/reviews`, #832) and would
+# disposition exactly this class; it simply exits 0 before reading anything
+# while `severity_gate.enabled` is false. The conversation gate covers only
+# threads, and a summary-only finding has none; the Phase 4b adapter sees only
+# the diff. So WHILE THE GATE IS OFF the barrier is the only reader a
+# summary-only finding has — flipping the gate back on would add a second reader
+# for precisely this class, not leave it unread. An agent that meets this
+# escalation has not found a policy bug — a human has to read that summary
+# comment before Phase 4b can proceed.
 #
 # That pairing is deliberate and worth keeping. The gate is live, not inert —
 # it was observed FAILING on PR #1209 while it was still true. Turning it back
