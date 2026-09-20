@@ -36,6 +36,62 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # The deploy-scope classifier (scripts/validate-firebase-deploy-filters.mjs)
+      # rehearses predeploy hooks inside a platform write containment and
+      # refuses the single-endpoint exemption fail-closed when it can prove
+      # none. This runner could prove none: the image ships no `bwrap`, and
+      # Ubuntu 24.04 keeps `kernel.apparmor_restrict_unprivileged_userns=1`, so
+      # both `unshare` spellings die writing `/proc/self/uid_map`. Every case
+      # that needs a predeploy hook to have RUN was therefore skipped here — in
+      # the vitest suite under `npm test` and in `npm run test:deploy` alike —
+      # which left the Linux `bwrap` nesting path exercised by no machine at
+      # all (#1164). This step must stay AHEAD of both of them.
+      #
+      # Two stages, because only the runner can settle which is needed: install
+      # `bubblewrap`, then drop the AppArmor user-namespace restriction only if
+      # the probe still cannot prove a mechanism. Ubuntu's own
+      # `bwrap-userns-restrict` profile would be the narrower grant, but neither
+      # `apparmor` nor `apparmor-profiles` ships it on noble, and hand-writing a
+      # policy that unconfines `bwrap` is no narrower than the sysctl on a
+      # single-use VM.
+      #
+      # The check is `probeWriteContainment` itself rather than a stand-in, so
+      # this asserts the very answer the suites go on to read, and it FAILS the
+      # job rather than letting the skips return unnoticed. It insists on
+      # `bwrap` by name and not merely on some mechanism: an `unshare` fallback
+      # that quietly won instead would run the cases while leaving the `bwrap`
+      # argv — the read-only checkout bound back over the writable set — as
+      # untested as it was before. A later regression is read off the three
+      # lines this prints: the `bwrap` version, the sysctl value, and the
+      # mechanism the probe named.
+      - name: Install bubblewrap (deploy-scope classifier write containment)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          echo "kernel.apparmor_restrict_unprivileged_userns = $(
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent
+          )"
+          probe() {
+            CLASSIFIER="$PWD/scripts/validate-firebase-deploy-filters.mjs" \
+              node --input-type=module -e '
+                const { pathToFileURL } = await import("node:url");
+                const { probeWriteContainment } = await import(
+                  pathToFileURL(process.env.CLASSIFIER).href
+                );
+                const answer = await probeWriteContainment();
+                console.log(
+                  "write-containment probe: " + (answer.ok ? answer.label : answer.reason),
+                );
+                if (answer.label !== "bwrap") process.exit(1);
+              '
+          }
+          if ! probe; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            probe
+          fi
+
       - name: Install dependencies
         run: npm ci
 
