@@ -206,11 +206,34 @@ async function collectAudit(dependencies, host) {
  * The three-way comparison for one host. Returns one primary `state` plus the
  * orthogonal flags an operator must act on separately (a held lock, a
  * quarantined epoch that is still admissible, a permanent tombstone).
+ *
+ * "Orthogonal" is load-bearing: the lock and the epoch fence come from the
+ * audit rather than from the comparison, so they are reported on EVERY audited
+ * host, including the ones classified before a ledger is ever read. Only
+ * `tombstoned` waits, because only it is a property of the ledger; and only
+ * `reserved-class` carries nothing, because that host is never audited at all.
  */
 function classify(host, entry, audit) {
   const flags = [];
   const unknown = { flags, sourceRevision: null, sourceDigest: null };
+  // The one classification reached with no audit at all: the caller returns a
+  // reserved-class row before it reads the Durable Object, so there is no lock
+  // or epoch state to report and the two flags below must stay behind this.
   if (isReservedClassHost(host)) return { state: 'reserved-class', ...unknown };
+
+  // The lock and the epoch fence are properties of the audited edge object
+  // alone, so they are read BEFORE anything that can classify the host early.
+  // A host whose source document will not parse, or that has no ledger for a
+  // backfill to compare against, is exactly the host an operator acts on, and
+  // acting on it while a recovery lock is held is what the flag exists to
+  // prevent. `unknown` closes over this same array, so every early return
+  // below carries whatever is pushed here.
+  if (audit.recoveryLock !== null) flags.push('locked');
+  // A quarantined publisher epoch is only fenced once the floor sits strictly
+  // above it; equal means the quarantined key can still authenticate.
+  if (BigInt(audit.minimumPublisherEpoch) <= BigInt(audit.highestQuarantinedPublisherEpoch)) {
+    flags.push('epoch-unfenced');
+  }
 
   let canonical = null;
   try {
@@ -237,13 +260,9 @@ function classify(host, entry, audit) {
     if (error instanceof HostnameProjectionRefusal) return { state: 'malformed-ledger', ...unknown };
     throw error;
   }
+  // `tombstoned` stays here, and only here: it is a property of the LEDGER,
+  // so it cannot be read until the ledger exists and validates.
   if (stored.desired.kind === 'tombstone') flags.push('tombstoned');
-  if (audit.recoveryLock !== null) flags.push('locked');
-  // A quarantined publisher epoch is only fenced once the floor sits strictly
-  // above it; equal means the quarantined key can still authenticate.
-  if (BigInt(audit.minimumPublisherEpoch) <= BigInt(audit.highestQuarantinedPublisherEpoch)) {
-    flags.push('epoch-unfenced');
-  }
   const known = { flags, sourceRevision: stored.revision, sourceDigest: stored.digest };
   if (!sameValue(canonical, stored.desired)) return { state: 'drifted', ...known };
 

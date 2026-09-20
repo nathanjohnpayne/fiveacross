@@ -5,7 +5,18 @@ import { deriveCanonicalProjection, projectionDigest } from './hostname-projecti
 const HOST = 'bodega-bay.fiveacross.app';
 const OTHER = 'sonoma.fiveacross.app';
 const SYNTHETIC = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
+// Uppercase, so `validateHostShape` refuses it as `invalid-host` — the listing
+// can name a host this projection may not describe.
+const UNPROJECTABLE = 'Bodega-Bay.fiveacross.app';
 const NOW = '2026-09-20T12:00:00.000Z';
+const HELD_LOCK = {
+  lockId: 'l',
+  acquiredAt: NOW,
+  expectedCommitted: null,
+  operatorSub: '1',
+  incidentUrl: 'https://x',
+  reason: 'r',
+};
 
 const hostnameDocument = (overrides = {}) => ({
   eventId: 'bodega-bay-2026',
@@ -186,7 +197,7 @@ describe('three-way reconciliation', () => {
         [HOST]: [
           auditPage({
             committed,
-            recoveryLock: { lockId: 'l', acquiredAt: NOW, expectedCommitted: null, operatorSub: '1', incidentUrl: 'https://x', reason: 'r' },
+            recoveryLock: HELD_LOCK,
             minimumPublisherEpoch: '3',
             highestQuarantinedPublisherEpoch: '3',
             lookup: { kind: 'unknown-host', revision: '9' },
@@ -196,8 +207,57 @@ describe('three-way reconciliation', () => {
     });
     const report = await reconcileHostnameReplicas(input(), deps);
     expect(report.hosts[0].state).toBe('already-correct');
-    expect(report.hosts[0].flags).toEqual(['tombstoned', 'locked', 'epoch-unfenced']);
+    // The lock and the epoch fence are read first because they are read for
+    // every audited host; `tombstoned` can only follow a readable ledger.
+    expect(report.hosts[0].flags).toEqual(['locked', 'epoch-unfenced', 'tombstoned']);
     expect(report.flagCounts).toEqual({ tombstoned: 1, locked: 1, 'epoch-unfenced': 1 });
+  });
+
+  // The two edge flags describe the audited Durable Object rather than the
+  // three-way comparison, so an early classification has to carry them. A
+  // `missing-ledger` host is precisely the row an apply run hands to the
+  // lifecycle helper, and a held recovery lock must be visible on the report
+  // before it does that rather than only on hosts that got as far as a
+  // ledger comparison.
+  it.each([
+    ['missing-ledger', HOST, { hostname: hostnameDocument(), routerReplica: null }],
+    ['no-documents', HOST, { hostname: null, routerReplica: null }],
+    [
+      'malformed-ledger',
+      HOST,
+      {
+        hostname: hostnameDocument(),
+        routerReplica: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: NOW },
+      },
+    ],
+    [
+      'malformed-source',
+      HOST,
+      {
+        hostname: { eventId: 'e', edition: 'westminster', status: 'active', slug: 'bodega-bay' },
+        routerReplica: ledgerFor(HOST, '4', hostnameDocument()),
+      },
+    ],
+    ['invalid-host', UNPROJECTABLE, { hostname: null, routerReplica: null }],
+  ])('reports a held lock and an unfenced epoch on the %s early return', async (state, host, entry) => {
+    const deps = dependencies({
+      pages: [{ entries: [{ host, ...entry }], nextPageToken: null }],
+      audits: {
+        [host]: [
+          auditPage({
+            committed: null,
+            lookup: { kind: 'unknown-host' },
+            recoveryLock: HELD_LOCK,
+            minimumPublisherEpoch: '3',
+            highestQuarantinedPublisherEpoch: '3',
+          }),
+        ],
+      },
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts[0].state).toBe(state);
+    expect(report.hosts[0].flags).toEqual(['locked', 'epoch-unfenced']);
+    expect(report.flagCounts).toEqual({ tombstoned: 0, locked: 1, 'epoch-unfenced': 1 });
   });
 
   it('never audits or repairs a globally reserved rehearsal host', async () => {
