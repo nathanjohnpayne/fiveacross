@@ -908,8 +908,11 @@ export default function Board() {
   // applies the stratified/tutorial deal). A Day that is `locked` (future),
   // `waking` (unlocked-by-clock but snapshot not yet stamped — scheduler lag), or
   // already `dealt` deals NOTHING here. `dealDayCard` re-checks all of this
-  // server-side and no-ops on an existing card, so the in-flight ref only avoids
-  // firing the same deal twice while one is in flight; gating on `dayBoardConfirmed`
+  // server-side and no-ops on an existing card — and on a Player row with no
+  // `joinedAt` stamp, the one precondition the schedule states do not cover
+  // (#1158), which `playerJoined` in the in-flight key below is what re-asks.
+  // So the in-flight ref only avoids firing the same deal twice while one is
+  // in flight; gating on `dayBoardConfirmed`
   // keeps a cache-miss (board unknown) from dealing a second card over an existing
   // one. Fire-and-forget: the day-scoped subscription renders the card once written.
   const dealingDaysRef = useRef<Set<string>>(new Set());

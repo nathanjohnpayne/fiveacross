@@ -718,11 +718,14 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
  *     unfrozen pool), or
  *   - a Day Card already exists for this Player+Day (mirrors `joinAndDeal`'s
  *     existing-board early return; re-opening never re-deals), or
- *   - the Player row does not yet carry a `uid` matching the dealing Player —
- *     the join has not committed, so this fails closed to it (#1158). Unlike
- *     the three above, this one RESOLVES ITSELF: `joinAndDeal` merges the
- *     identity a moment later and `Board` re-fires the lazy deal, which is why
- *     a caller sees `false` here rather than a retryable rejection.
+ *   - the Player row does not yet carry the persisted `joinedAt` stamp — the
+ *     join has not committed, so this fails closed to it (#1158). Unlike the
+ *     three above, this one RESOLVES ITSELF: `joinAndDeal` stamps the field a
+ *     moment later, `Board`'s `playerJoined` flips on that SAME field, and the
+ *     lazy deal is re-asked once — which is why a caller sees `false` here
+ *     rather than a retryable rejection. The marker is `joinedAt` and not a
+ *     matching stored `uid` (Codex P2, #1158 review round 4); the guard's own
+ *     comment inside the transaction has why the field is not the identity.
  */
 export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   const eventId = EVENT_ID;
