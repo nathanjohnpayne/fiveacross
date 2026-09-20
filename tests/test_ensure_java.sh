@@ -12,11 +12,17 @@
 # fails — find a working JDK via JAVA_HOME, macOS's own java_home locator,
 # or a Homebrew keg, in that order, and prepend it to PATH.
 #
-# Strategy: PATH-shim fake `java` binaries (one that runs, one that mimics
-# the failing stub) plus test-seam env overrides (ENSURE_JAVA_HOME_LOCATOR,
-# ENSURE_JAVA_KEG_GLOBS) so every branch is exercised against a synthetic
-# tree under a tmp dir — no real system state is touched, and the tests
-# pass identically whether or not this machine actually has a keg-only JDK.
+# The second contract (tests 6 and 7): running is not sufficient either.
+# firebase-tools rejects Java majors below 21, so a runnable java 17 is a
+# candidate ensure_java must step over rather than accept — every branch
+# checks the reported major, not just the exit status.
+#
+# Strategy: PATH-shim fake `java` binaries (one that runs and reports a
+# chosen major, one that mimics the failing stub) plus test-seam env
+# overrides (ENSURE_JAVA_HOME_LOCATOR, ENSURE_JAVA_KEG_GLOBS) so every
+# branch is exercised against a synthetic tree under a tmp dir — no real
+# system state is touched, and the tests pass identically whether or not
+# this machine actually has a keg-only JDK.
 #
 # Bash 3.2 portable.
 
@@ -35,16 +41,19 @@ FAIL=0
 pass() { echo "PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 
-# make_java DIR OK — writes DIR/java: exits 0 (a real JDK) if OK=1, or
-# mimics the macOS /usr/bin/java stub (exits 1, names the wrong problem)
-# if OK=0.
+# make_java DIR OK [MAJOR] — writes DIR/java: exits 0 and prints a real
+# JDK's version banner for major MAJOR (default 21) if OK=1, or mimics the
+# macOS /usr/bin/java stub (exits 1, names the wrong problem) if OK=0. The
+# banner shape matches a real `java -version` — the version on stderr, the
+# major inside the first quoted field — because that is what ensure_java
+# parses.
 make_java() {
-  dir="$1"; ok="$2"
+  dir="$1"; ok="$2"; major="${3:-21}"
   mkdir -p "$dir"
   if [ "$ok" = "1" ]; then
-    cat >"$dir/java" <<'STUB'
+    cat >"$dir/java" <<STUB
 #!/usr/bin/env bash
-echo "openjdk version \"21.0.12\" 2026-fake" >&2
+echo "openjdk version \"${major}.0.12\" 2026-fake" >&2
 exit 0
 STUB
   else
@@ -200,6 +209,79 @@ if [ "$RC" != 0 ] && [ "$MSG_OK" = 1 ]; then
   pass "fails closed (rc=$RC) and names the install fix"
 else
   fail "expected non-zero rc with an openjdk@21 install hint; got rc=$RC err=[$ERR]"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 6 (Codex P2, PR #1241): the ambient java RUNS but is a 17 — below the
+# major firebase-tools accepts — while a 21 keg is installed. Exit status
+# alone would accept the 17 and hand firebase a JDK it refuses to boot on,
+# so ensure_java has to read the reported major, reject it, and keep going
+# to the keg.
+# ---------------------------------------------------------------------------
+echo "--- Test 6: runnable but too-old ambient java is skipped for a 21 keg"
+OLD_AMBIENT="$WORKDIR/t6-ambient17"; make_java "$OLD_AMBIENT" 1 17
+KEG21="$WORKDIR/t6-opt-homebrew/opt/openjdk@21/bin"; make_java "$KEG21" 1 21
+DEAD_LOCATOR3="$WORKDIR/t6-dead-java_home"
+cat >"$DEAD_LOCATOR3" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$DEAD_LOCATOR3"
+set +e
+OUT=$(
+  PATH="$OLD_AMBIENT:$PATH"
+  unset JAVA_HOME
+  ENSURE_JAVA_HOME_LOCATOR="$DEAD_LOCATOR3"
+  ENSURE_JAVA_KEG_GLOBS="$WORKDIR/t6-opt-homebrew/opt/openjdk*/bin"
+  export ENSURE_JAVA_HOME_LOCATOR ENSURE_JAVA_KEG_GLOBS
+  . "$LIB"
+  ensure_java && echo "PATH_HEAD=${PATH%%:*}"
+)
+RC=$?
+set -e
+if [ "$RC" = 0 ] && [ "$OUT" = "PATH_HEAD=$KEG21" ]; then
+  pass "java 17 on PATH rejected on version; the 21 keg found and prepended"
+else
+  fail "expected rc=0 PATH_HEAD=$KEG21; got rc=$RC out=[$OUT]"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 7 (Codex P2, PR #1241): a 17-only machine. Nothing anywhere meets the
+# floor, so ensure_java must fail closed and say which floor — a message
+# that only said "no working Java" would send someone hunting a problem they
+# do not have, since their java runs fine.
+# ---------------------------------------------------------------------------
+echo "--- Test 7: 17 is the newest JDK anywhere → fails naming the 21 floor"
+OLD_ONLY="$WORKDIR/t7-ambient17"; make_java "$OLD_ONLY" 1 17
+OLD_KEG="$WORKDIR/t7-opt-homebrew/opt/openjdk@17/bin"; make_java "$OLD_KEG" 1 17
+DEAD_LOCATOR4="$WORKDIR/t7-dead-java_home"
+cat >"$DEAD_LOCATOR4" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$DEAD_LOCATOR4"
+set +e
+ERR=$(
+  PATH="$OLD_ONLY:$PATH"
+  unset JAVA_HOME
+  ENSURE_JAVA_HOME_LOCATOR="$DEAD_LOCATOR4"
+  ENSURE_JAVA_KEG_GLOBS="$WORKDIR/t7-opt-homebrew/opt/openjdk*/bin"
+  export ENSURE_JAVA_HOME_LOCATOR ENSURE_JAVA_KEG_GLOBS
+  . "$LIB"
+  ensure_java 2>&1
+)
+RC=$?
+set -e
+FLOOR_OK=0
+BREW_OK=0
+PORTABLE_OK=0
+case "$ERR" in *"JDK 21+"*) FLOOR_OK=1 ;; esac
+case "$ERR" in *"brew install openjdk@21"*) BREW_OK=1 ;; esac
+case "$ERR" in *"Temurin"*) PORTABLE_OK=1 ;; esac
+if [ "$RC" != 0 ] && [ "$FLOOR_OK" = 1 ] && [ "$BREW_OK" = 1 ] && [ "$PORTABLE_OK" = 1 ]; then
+  pass "fails closed (rc=$RC) naming the 21 floor, a non-Homebrew route, and the brew one-liner"
+else
+  fail "expected non-zero rc naming JDK 21+, Temurin and brew install openjdk@21; got rc=$RC err=[$ERR]"
 fi
 
 echo
