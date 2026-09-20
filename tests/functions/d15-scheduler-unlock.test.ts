@@ -1098,6 +1098,53 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_800_000 });
       expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
     });
+
+    it('holds the podium back when the freeze it must quote FAILS, and posts it on the next sweep', async () => {
+      // CodeRabbit on PR #1242, the other end of the capture. Freezing and
+      // posting are independent beats, so a run that owed the freeze and lost
+      // it to a transient Firestore failure still reached the podium arm with
+      // NOTHING captured — and posted a Moment that is written once and never
+      // amended. The next sweep freezes fine, learns the fact, and has nowhere
+      // to put it: for this Event, whose only play sits on the ceremonial Day
+      // and which therefore has no champion, that is the #1192 empty-board
+      // message restored permanently.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [ceremonialPlayer(D10_UNLOCK - 1_000)],
+      });
+      // Fail ONLY the freeze transaction. It is the first one this run opens:
+      // the last-call beat is past its window once the cutoff has passed, and
+      // both the podium Moment write and the completion marker come after it.
+      // Everything else still commits, so a missing podium Moment below can
+      // only be the beat standing down — not the fake refusing to write.
+      let transactions = 0;
+      const realRunTransaction = db.runTransaction;
+      const freezeFails: AdminFirestore = {
+        ...db,
+        runTransaction: async (fn) => {
+          if (++transactions === 1) throw new Error('freeze transaction failed');
+          return realRunTransaction(fn);
+        },
+      };
+      await runFinaleBeats(freezeFails, 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The freeze really did fail — without this the podium assertion under it
+      // would pass for the wrong reason.
+      expect(db.readEvent().frozenAt).toBeUndefined();
+      expect(db.readEvent().frozenPlayRecorded).toBeUndefined();
+      // …so this run posts no podium at all. Revert the fix and the Moment is
+      // here, permanently silent about `playRecorded`.
+      expect(postedPodium(db)).toBeUndefined();
+      // And the finale is honestly unfinished, so the archive still warns.
+      expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+
+      // The next sweep finds the freeze still owed, gets it, and posts the
+      // podium carrying the fact that freeze captured.
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
   });
 
   it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {

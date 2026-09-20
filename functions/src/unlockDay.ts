@@ -568,7 +568,11 @@ export interface FinaleDecision {
  *     yet. DECOUPLED from the freeze flip on purpose (Codex #228): if an earlier run
  *     froze but its podium write failed transiently, the freeze guard now blocks
  *     re-freezing, but the podium retry stays open until the Moment actually lands.
- *     Concurrent double-posts collapse onto the one deterministic-id doc.
+ *     Concurrent double-posts collapse onto the one deterministic-id doc. The
+ *     decoupling runs ONE WAY, and the other direction is `runFinaleBeats`'
+ *     to enforce, not this decision's (#1218, CodeRabbit on PR #1242): a run
+ *     that owes the freeze and fails to get it holds its podium back, because
+ *     the Moment is immutable and would fix an unknown `playRecorded` forever.
  *   - `computeMostLoved` (#560): `now` has reached the farewell unlock, the Event
  *     is not yet frozen, and no `mostLovedPhoto` award is persisted yet. It is
  *     deliberately coupled to the freeze transaction: that transaction reads the
@@ -972,14 +976,28 @@ export async function stampDaySnapshot(
  * the two freeze paths have always returned: only the run that flips `frozenAt`
  * from unset gets `true`, so a retry or a racing run no-ops.
  *
+ * `frozen` is the WIDER question the podium has to ask: did this transaction
+ * leave the Event carrying a freeze stamp at all — because this run wrote one,
+ * or because the document already had one? It is `true` on strictly more
+ * outcomes than `committed` (the lost race is the difference) and `false` only
+ * where no stamp exists to quote: a missing Event document, and an Event the
+ * archive closed before the stamp could land. A throw out of the transaction
+ * reaches the caller as no outcome at all, which is the third unfrozen shape.
+ *
  * `playRecorded` is the frozen Event's "did anybody play" fact — the value this
  * run wrote, or, when it lost the race, the one the already-frozen document
  * carries. `undefined` is UNKNOWN: an Event frozen before the field existed, one
  * whose roster read failed, or one this run could not freeze at all. The podium
  * beat treats that as unknown rather than `false`.
+ *
+ * The two are reported separately because they answer for different writes:
+ * `committed` gates nothing outside the freeze itself, while `frozen` is what
+ * lets the podium beat quote a frozen record. `committed: true` always implies
+ * `frozen: true`; the converse does not hold.
  */
 interface FreezeOutcome {
   committed: boolean;
+  frozen: boolean;
   playRecorded?: boolean;
 }
 
@@ -1017,17 +1035,17 @@ async function freezeStandings(
   const eventRef = db.doc(`events/${eventId}`);
   return db.runTransaction(async (tx) => {
     const ev = (await tx.get(eventRef)).data() as EventLike | undefined;
-    if (!ev) return { committed: false };
+    if (!ev) return { committed: false, frozen: false };
     // Already frozen: this run has nothing to write, and the fact that counts is
     // the one the winning run stored, not the one this run just computed.
-    if (ev.frozenAt != null) return { committed: false, playRecorded: frozenPlayRecordedOf(ev) };
+    if (ev.frozenAt != null) return { committed: false, frozen: true, playRecorded: frozenPlayRecordedOf(ev) };
     // #134: re-checked inside the transaction that writes. `frozenAt` is finale
     // state on an Event whose whole record has been frozen; stamping it
     // afterwards changes what the podium and the Scoring Policy resolve to,
     // underneath an archive that already said otherwise.
-    if (eventClosedToPlay(ev)) return { committed: false };
+    if (eventClosedToPlay(ev)) return { committed: false, frozen: false };
     tx.update(eventRef, { frozenAt, ...frozenPlayRecordedWrite(playRecorded) });
-    return { committed: true, playRecorded };
+    return { committed: true, frozen: true, playRecorded };
   });
 }
 
@@ -1149,16 +1167,20 @@ async function freezeStandingsAndPersistMostLovedAward(
   return db.runTransaction(async (tx) => {
     const eventSnap = await tx.get(eventRef);
     const event = eventSnap.data() as EventLike | undefined;
-    if (!event) return { committed: false };
+    if (!event) return { committed: false, frozen: false };
     if (event.frozenAt != null || event.mostLovedPhoto != null) {
-      return { committed: false, playRecorded: frozenPlayRecordedOf(event) };
+      // `frozen` is read off the STAMP, not off this arm being taken: the award
+      // half of the guard can fire on an Event that carries a persisted award
+      // and no `frozenAt` at all, and that Event has no frozen record for the
+      // podium to quote. (The compat path below is what actually stamps it.)
+      return { committed: false, frozen: event.frozenAt != null, playRecorded: frozenPlayRecordedOf(event) };
     }
     // #134, re-checked inside the writing transaction beside the idempotence
     // guards it sits with: this transaction reads every Proof and every Heart
     // before it writes, so its window is the widest in the finale — and on a
     // closed Event it would build an ostensibly frozen award out of moderation
     // state the archive has already moved past.
-    if (eventClosedToPlay(event)) return { committed: false };
+    if (eventClosedToPlay(event)) return { committed: false, frozen: false };
 
     // Firestore requires all transaction reads before its write. Reading every
     // award input through `tx` gives the Event update a single, retry-safe view.
@@ -1174,7 +1196,7 @@ async function freezeStandingsAndPersistMostLovedAward(
       mostLovedPhoto: award as unknown as Record<string, unknown>,
       ...frozenPlayRecordedWrite(playRecorded),
     });
-    return { committed: true, playRecorded };
+    return { committed: true, frozen: true, playRecorded };
   });
 }
 
@@ -1242,9 +1264,16 @@ async function markFinaleComplete(
 
 /**
  * Run the finale two-beat check for one event. Best-effort: each beat is
- * independently try/caught so one failing (e.g. a Moment write) never blocks the
- * other or crashes the run. Guards make it safe to call on any day and any number
- * of times — a non-finale day, or a re-run, simply posts nothing.
+ * independently try/caught so one failing (e.g. a Moment write) never crashes the
+ * run. Guards make it safe to call on any day and any number of times — a
+ * non-finale day, or a re-run, simply posts nothing.
+ *
+ * ONE ORDERING SURVIVES THAT INDEPENDENCE (#1218): the podium beat quotes a fact
+ * only the freeze can supply, and its Moment can never be amended, so a run that
+ * owes the freeze and does not get it defers its podium to the next sweep rather
+ * than posting a record it cannot complete. Every other pairing is genuinely
+ * independent, and a freeze that landed on an EARLIER run never holds the podium
+ * back (Codex #228).
  */
 export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: UnlockDeps = {}): Promise<void> {
   const now = (deps.now ?? Date.now)();
@@ -1320,6 +1349,14 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   // winning run stored is the only one that describes the Event at the freeze.
   // The freeze arm overwrites it only when it can learn something better.
   let frozenPlayRecorded = frozenPlayRecordedOf(event);
+  // …AND WHETHER THERE IS A FROZEN RECORD TO QUOTE AT ALL (#1218, CodeRabbit on
+  // PR #1242). Seeded from the same opening read, where it is already the whole
+  // answer for a run that does not owe the freeze: `postPodium` and `freeze` are
+  // both gated on the cutoff having passed, so a podium still owed by a run that
+  // is NOT freezing is a podium on an Event some earlier run already stamped.
+  // When this run does owe the freeze the seed is `false` by construction, and
+  // only the freeze outcome below can raise it.
+  let eventFrozen = event.frozenAt != null;
   // Freeze and podium are INDEPENDENT best-effort beats (Codex #228): the podium
   // retries on its own guard, while the freeze transaction atomically captures the
   // Most-Loved eligibility state when that award is still owed. Both are idempotent,
@@ -1356,11 +1393,30 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       // fact the FROZEN document now holds — which is what the podium must
       // quote. `undefined` leaves the opening read's value alone.
       if (outcome.playRecorded !== undefined) frozenPlayRecorded = outcome.playRecorded;
+      eventFrozen = outcome.frozen;
     } catch (err) {
       console.error('runFinaleBeats: freeze failed', eventId, err);
     }
   }
-  if (postPodium) {
+  // THE PODIUM MAY NOT OUTRUN THE FREEZE IT QUOTES (#1218, CodeRabbit on PR
+  // #1242). The two beats stay independent in the direction that matters — a
+  // freeze that already landed never blocks a podium retry, which is the whole
+  // point of Codex #228 — but a run that OWES the freeze and does not get it
+  // must not post anyway. `frozenPlayRecorded` would still be unknown, and the
+  // Moment that records that is written once and never amended: a later sweep
+  // freezes successfully, learns the fact, and has nowhere to put it. For an
+  // Event with ceremonial Squares and no honour that is the #1192 defect
+  // restored permanently — the email telling every recipient nobody marked a
+  // square beside the ⭐ naming the person who bingoed.
+  //
+  // Skipping costs nothing: `postPodium` is guarded on the Moment's absence, so
+  // the next sweep arrives at an Event the freeze arm now no-ops on, reads the
+  // stamped fact through the opening read, and posts the podium carrying it.
+  // The completion marker below is guarded on the same Moment, so the finale
+  // stays honestly unfinished until it lands.
+  if (postPodium && !eventFrozen) {
+    console.error('runFinaleBeats: podium deferred, freeze not recorded', eventId);
+  } else if (postPodium) {
     try {
       // #266: the podium payload — champion, cruise-wide First to BINGO, and
       // the pinned daily honors — computed AT the freeze from the roster +
