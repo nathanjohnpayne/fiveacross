@@ -166,6 +166,12 @@ describe('reserved-label mirrors in separately deployed programs', () => {
       parseSet('scripts/event-router-registry/recovery-controller.mjs', 'RESERVED_SLUGS').sort(),
     ).toEqual(expected);
   });
+
+  it('scripts/event-router-registry/hostname-projection.mjs mirrors RESERVED_LABELS exactly', () => {
+    expect(
+      parseSet('scripts/event-router-registry/hostname-projection.mjs', 'RESERVED_SLUGS').sort(),
+    ).toEqual(expected);
+  });
 });
 
 /**
@@ -351,6 +357,7 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
     ['router-publisher/src/runtime.ts', 3],
     ['scripts/event-router-registry/recovery-controller.mjs', 2],
     ['scripts/event-router-registry/rehearsal-controller.mjs', 2],
+    ['scripts/event-router-registry/hostname-projection.mjs', 2],
   ];
 
   const SITES: readonly MirrorSite[] = [
@@ -395,6 +402,18 @@ describe('rehearsal-class mirrors in separately deployed programs', () => {
       anchor: 'const SYNTHETIC_ROOT =',
       admits: 'root',
       purpose: 'recognises a root-test host in a rehearsal reservation',
+    },
+    {
+      path: 'scripts/event-router-registry/hostname-projection.mjs',
+      anchor: 'const SYNTHETIC_EVENT =',
+      admits: 'event',
+      purpose: 'exempts a synthetic Event host from the ordinary slug rules',
+    },
+    {
+      path: 'scripts/event-router-registry/hostname-projection.mjs',
+      anchor: 'const SYNTHETIC_ROOT =',
+      admits: 'root',
+      purpose: 'admits a root marker on a root-test host outside the root-host table',
     },
   ];
 

@@ -1,0 +1,634 @@
+/**
+ * The ONE transaction helper that owns every projected hostname mutation
+ * (#971), implementing `specs/event-router-registry.md` § Provisioning,
+ * mutation, and deletion.
+ *
+ * Why one helper rather than a mutation per command: `hostnames/{host}` is the
+ * public source and `routerReplicas/{host}` is the private desired state the
+ * publisher converges to the edge. If any command could move one without the
+ * other, "the edge is a projection of Firestore" would be a convention rather
+ * than an invariant, and the reconciler's drift report would be reporting on
+ * whichever writer last forgot. So every create, status, Edition, root,
+ * path-capability, repoint and delete goes through `applyHostnameMutation`,
+ * which reads both documents plus the permanent rehearsal reservation in ONE
+ * Firestore transaction, derives the projection from the RESULTING hostname
+ * document rather than from the caller's patch, and writes both sides together.
+ *
+ * Deliberately NOT owned here: `adultContent` (#608) keeps updating its own
+ * non-projected field with no revision, because the data contract does not copy
+ * it; and `apexPath` stays target/client resolution data that the archive
+ * transaction writes but the projection never reads.
+ *
+ * Dry run is the default. `apply: true` is the only way a write reaches
+ * Firestore, and the returned plan is identical either way, so an operator
+ * compares the two runs rather than trusting a description of one.
+ *
+ * Plain `.mjs`, no build step, no Firestore import: the caller injects a
+ * transaction runner (`createTransactionRunner` below adapts either Firestore
+ * SDK), so the emulator suite drives real transactions and the unit suite
+ * drives an in-memory store through the same code path.
+ */
+import {
+  HostnameProjectionRefusal,
+  PATH_NAMESPACES,
+  ROOT_HOSTS,
+  STATUSES,
+  buildLedgerDocument,
+  deriveCanonicalProjection,
+  isCanonicalRevision,
+  isRecord,
+  isReservedClassHost,
+  nextRevision,
+  projectionDigest,
+  sameValue,
+  validateHostShape,
+  validateLedgerDocument,
+} from './hostname-projection.mjs';
+
+const POSITIVE_DECIMAL = /^[1-9]\d*$/;
+
+/**
+ * The complete seam list. An exact set rather than a minimum, so a future
+ * caller cannot quietly hand this helper a KV namespace, a Cache API handle, a
+ * publisher acknowledgement writer, or a "read the source from the edge"
+ * fallback — the four stores `specs/event-router-registry.md` says never
+ * participate in accepted state.
+ */
+const DEPENDENCY_KEYS = ['now', 'runTransaction'];
+
+const PROJECTED_FIELDS = new Set(['eventId', 'status', 'slug', 'edition', 'root', 'pathNamespace']);
+const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanonical', 'preview']);
+
+const INTENTS = new Set([
+  'provision',
+  'update',
+  'repoint',
+  'archive',
+  'delete',
+  'backfill-ledger',
+  'advance-ledger',
+]);
+
+export class HostnameLifecycleRefusal extends Error {
+  constructor(code) {
+    super(`hostname mutation refused: ${code}`);
+    this.name = 'HostnameLifecycleRefusal';
+    this.code = code;
+  }
+}
+
+function refuse(code) {
+  throw new HostnameLifecycleRefusal(code);
+}
+
+function isNonempty(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function exactKeys(value, expected, code) {
+  if (!isRecord(value)) refuse(code);
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) {
+    refuse(code);
+  }
+}
+
+/** Every required key present, no key outside required ∪ optional. */
+function boundedKeys(value, required, optional, code) {
+  if (!isRecord(value)) refuse(code);
+  const actual = new Set(Object.keys(value));
+  for (const key of required) if (!actual.has(key)) refuse(code);
+  for (const key of actual) if (!required.includes(key) && !optional.includes(key)) refuse(code);
+}
+
+const MUTATION_KEYS = ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host'];
+
+/** Re-raises a projection refusal under this module's error type and code. */
+function project(work) {
+  try {
+    return work();
+  } catch (error) {
+    if (error instanceof HostnameProjectionRefusal) refuse(error.code);
+    throw error;
+  }
+}
+
+function requireHttpsUrl(value, code) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.toString() !== value) refuse(code);
+  } catch (error) {
+    if (error instanceof HostnameLifecycleRefusal) throw error;
+    refuse(code);
+  }
+}
+
+/**
+ * Every ordinary claim and mutation refuses the two globally reserved classes
+ * and every permanent rehearsal reservation, in the same transaction that would
+ * have written. #970's guarded controller is the only writer of a classed
+ * reservation or a synthetic state, and it does not come through here.
+ */
+function guardClaimable(host, reservation) {
+  project(() => validateHostShape(host));
+  if (isReservedClassHost(host)) refuse('reserved-class');
+  if (reservation !== null) refuse('rehearsal-reservation');
+}
+
+function authoritativeNow(dependencies) {
+  let value;
+  try {
+    value = dependencies.now();
+  } catch {
+    refuse('authoritative-clock-unavailable');
+  }
+  const time = value instanceof Date ? value.getTime() : Number.NaN;
+  if (!Number.isFinite(time)) refuse('authoritative-clock-unavailable');
+  return new Date(time).toISOString();
+}
+
+function validateDependencies(dependencies) {
+  exactKeys(dependencies, DEPENDENCY_KEYS, 'invalid-dependencies');
+  if (typeof dependencies.now !== 'function' || typeof dependencies.runTransaction !== 'function') {
+    refuse('invalid-dependencies');
+  }
+}
+
+/**
+ * The enablement barrier from `specs/path-addressing-and-root.md`: the endpoint
+ * and capability-aware worker ship, the release arms forced advancement and
+ * retires the root-scoped precaches, and the resolution cache's schema version
+ * is bumped so no client evaluates install UI against a pre-capability answer —
+ * and ONLY THEN may `pathNamespace` be published. None of that is observable
+ * from inside a Firestore transaction, so the barrier is an explicit attested
+ * record the operator supplies; absent, the mutation fails closed.
+ */
+function validatePathCapabilityBarrier(barrier, observedAt) {
+  exactKeys(
+    barrier,
+    ['releaseTag', 'workerVersionId', 'resolutionCacheSchemaVersion', 'armedAt'],
+    'path-capability-barrier',
+  );
+  if (
+    !isNonempty(barrier.releaseTag) ||
+    !isNonempty(barrier.workerVersionId) ||
+    !Number.isInteger(barrier.resolutionCacheSchemaVersion) ||
+    barrier.resolutionCacheSchemaVersion < 1 ||
+    !isNonempty(barrier.armedAt)
+  ) {
+    refuse('path-capability-barrier');
+  }
+  const armed = Date.parse(barrier.armedAt);
+  if (!Number.isFinite(armed) || armed > Date.parse(observedAt)) refuse('path-capability-barrier');
+}
+
+function pathNamespaceOf(document) {
+  if (!isRecord(document)) return null;
+  const value = Object.hasOwn(document, 'pathNamespace') ? document.pathNamespace : null;
+  return value === null || PATH_NAMESPACES.has(value) ? value : undefined;
+}
+
+/**
+ * A mutation may only be layered on a host whose ledger ALREADY projects its
+ * hostname document. Drift means one of the two was written outside this
+ * helper, and the spec is explicit that attestation never blesses drift: the
+ * repair is the explicit Admin ledger advance below, followed by a fresh read.
+ */
+function requireConvergedPreState(host, hostname, ledger) {
+  const canonical = project(() => deriveCanonicalProjection(host, hostname ?? null));
+  const stored = project(() => validateLedgerDocument(host, ledger));
+  if (!sameValue(canonical, stored.desired)) refuse('source-ledger-drift');
+  return stored;
+}
+
+/**
+ * Collects the writes a plan would make, so a dry run executes exactly the same
+ * read-and-derive path as an apply and differs only in whether the collected
+ * writes are flushed. Firestore requires every read before the first write, and
+ * buffering is what makes that ordering structural rather than remembered.
+ */
+function createWriteBuffer() {
+  const writes = [];
+  return {
+    writes,
+    set(path, value) {
+      writes.push({ op: 'set', path, value: structuredClone(value) });
+    },
+    update(path, value) {
+      writes.push({ op: 'update', path, value: structuredClone(value) });
+    },
+    delete(path) {
+      writes.push({ op: 'delete', path });
+    },
+  };
+}
+
+async function readHostState(transaction, host) {
+  const reservation = (await transaction.get(`routerRehearsals/${host}`)) ?? null;
+  const hostname = (await transaction.get(`hostnames/${host}`)) ?? null;
+  const ledger = (await transaction.get(`routerReplicas/${host}`)) ?? null;
+  return { reservation, hostname, ledger };
+}
+
+function ledgerWrite(buffer, host, revision, desired, observedAt, revisions, projections, from) {
+  buffer.set(
+    `routerReplicas/${host}`,
+    project(() => buildLedgerDocument(host, revision, desired, observedAt)),
+  );
+  revisions.push({ host, from, to: revision });
+  projections.push({
+    host,
+    desired: structuredClone(desired),
+    digest: project(() => projectionDigest(revision, host, desired)),
+  });
+}
+
+/** No `undefined` reaches a Firestore `update`, where it is not a deletion. */
+function validateChanges(changes) {
+  if (!isRecord(changes) || Object.keys(changes).length === 0) refuse('invalid-input');
+  for (const value of Object.values(changes)) if (value === undefined) refuse('invalid-input');
+}
+
+// ---------------------------------------------------------------------------
+// Intents
+// ---------------------------------------------------------------------------
+
+async function planProvision(input, transaction, observedAt, buffer, revisions, projections) {
+  boundedKeys(input, [...MUTATION_KEYS, 'hostname'], ['pathCapabilityBarrier'], 'invalid-input');
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname !== null) refuse('hostname-exists');
+  // A tombstone is permanent and an address is never reused, so the ledger's
+  // mere existence — tombstoned or not — refuses the claim.
+  if (state.ledger !== null) {
+    const stored = project(() => validateLedgerDocument(host, state.ledger));
+    refuse(stored.desired.kind === 'tombstone' ? 'tombstoned-address' : 'address-in-use');
+  }
+  if (!isRecord(input.hostname)) refuse('invalid-input');
+  for (const key of Object.keys(input.hostname)) {
+    if (!PROJECTED_FIELDS.has(key) && !NON_PROJECTED_FIELDS.has(key)) refuse('unknown-field');
+  }
+  if (Object.hasOwn(input.hostname, 'status') && input.hostname.status !== 'disabled') {
+    // "create `hostnames/{host}` initially `disabled`" — activation waits for
+    // publisher acceptance and edge inspection, which happen after this write.
+    refuse('provision-requires-disabled');
+  }
+  const document = Object.hasOwn(input.hostname, 'root')
+    ? { ...input.hostname }
+    : { ...input.hostname, status: 'disabled' };
+  const desired = project(() => deriveCanonicalProjection(host, document));
+  if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
+    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, observedAt);
+  }
+  buffer.set(`hostnames/${host}`, document);
+  ledgerWrite(buffer, host, '1', desired, observedAt, revisions, projections, null);
+  return { host, projectedChange: true, resultingHostname: document };
+}
+
+async function planUpdate(input, transaction, observedAt, buffer, revisions, projections) {
+  boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['pathCapabilityBarrier'], 'invalid-input');
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+  if (stored.desired.kind === 'tombstone') refuse('tombstoned-address');
+
+  const changes = input.changes;
+  validateChanges(changes);
+  let projectedChange = false;
+  for (const key of Object.keys(changes)) {
+    if (key === 'apexPath') refuse('apex-path-barrier');
+    if (NON_PROJECTED_FIELDS.has(key)) continue;
+    if (!PROJECTED_FIELDS.has(key)) refuse('unknown-field');
+    projectedChange = true;
+  }
+  const identityChange =
+    (Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId) ||
+    (Object.hasOwn(changes, 'slug') && changes.slug !== state.hostname.slug);
+  const statusChange = Object.hasOwn(changes, 'status') && changes.status !== state.hostname.status;
+  if (identityChange && statusChange) refuse('combined-barrier');
+  if (identityChange) {
+    // Repoint is its own barriered intent precisely so that an "update" cannot
+    // move an Event's address while the host is serving.
+    refuse(state.hostname.status === 'active' ? 'active-repoint-barrier' : 'repoint-requires-intent');
+  }
+  if (statusChange && changes.status === 'archived') refuse('archive-barrier');
+  if (statusChange && !STATUSES.has(changes.status)) refuse('malformed-hostname-source');
+  // Archival moved the routing documents, the `apexPath` field and
+  // `EventDoc.status` together; un-archiving one routing document alone would
+  // serve an "archive" whose Event document still refuses every gameplay write.
+  if (statusChange && state.hostname.status === 'archived') refuse('unarchive-barrier');
+
+  const document = { ...state.hostname, ...changes };
+  if (!projectedChange) {
+    // The `adultContent` derivation's path: a non-projected field does not
+    // churn the edge, so no revision is spent and the ledger is not touched.
+    buffer.update(`hostnames/${host}`, changes);
+    return { host, projectedChange: false, resultingHostname: document };
+  }
+  const desired = project(() => deriveCanonicalProjection(host, document));
+  const before = pathNamespaceOf(state.hostname);
+  if (before === null && desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
+    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, observedAt);
+  }
+  if (sameValue(desired, stored.desired)) refuse('no-projected-change');
+  buffer.update(`hostnames/${host}`, changes);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  return { host, projectedChange: true, resultingHostname: document };
+}
+
+async function planRepoint(input, transaction, observedAt, buffer, revisions, projections) {
+  exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+  if (stored.desired.kind !== 'route') refuse('repoint-requires-route');
+  // "active → disabled and converge; change `eventId`/`slug` while disabled and
+  // converge; active and converge. Skipping or combining barriers is
+  // prohibited." The disable and the re-activate are ordinary updates; this
+  // intent is only ever the middle step.
+  if (state.hostname.status !== 'disabled') refuse('repoint-requires-disabled');
+
+  const changes = input.changes;
+  validateChanges(changes);
+  for (const key of Object.keys(changes)) {
+    if (key === 'status') refuse('combined-barrier');
+    if (key === 'apexPath') refuse('apex-path-barrier');
+    if (!PROJECTED_FIELDS.has(key) && !NON_PROJECTED_FIELDS.has(key)) refuse('unknown-field');
+  }
+  if (!Object.hasOwn(changes, 'eventId') && !Object.hasOwn(changes, 'slug')) refuse('repoint-requires-identity');
+  const document = { ...state.hostname, ...changes };
+  const desired = project(() => deriveCanonicalProjection(host, document));
+  if (sameValue(desired, stored.desired)) refuse('no-projected-change');
+  buffer.update(`hostnames/${host}`, changes);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  return { host, projectedChange: true, resultingHostname: document };
+}
+
+/**
+ * The archive interlock from `specs/path-addressing-and-root.md` § D8: every
+ * Event mapping, the `apexPath` field on whichever mapping becomes the archive
+ * address, the mirror-root conversion to the non-serving `root: 'not-found'`
+ * marker, and `EventDoc.status` all move in ONE transaction. Nothing observes a
+ * half-archived Event, and no active Event becomes reachable at an apex path.
+ */
+async function planArchive(input, transaction, observedAt, buffer, revisions, projections) {
+  exactKeys(
+    input,
+    [
+      'schemaVersion',
+      'intent',
+      'apply',
+      'actor',
+      'reason',
+      'eventId',
+      'mappings',
+      'apexPathHost',
+      'mirrorRootConversions',
+    ],
+    'invalid-input',
+  );
+  const { eventId, mappings, apexPathHost, mirrorRootConversions } = input;
+  if (!isNonempty(eventId) || !Array.isArray(mappings) || !Array.isArray(mirrorRootConversions)) {
+    refuse('invalid-input');
+  }
+  const hosts = [...mappings, ...mirrorRootConversions.map((entry) => (isRecord(entry) ? entry.host : entry))];
+  if (hosts.length === 0 || new Set(hosts).size !== hosts.length) refuse('invalid-input');
+  if (apexPathHost !== null && !mappings.includes(apexPathHost)) refuse('apex-path-target-unknown');
+
+  const event = (await transaction.get(`events/${eventId}`)) ?? null;
+  if (event === null) refuse('event-missing');
+  const states = new Map();
+  for (const host of hosts) {
+    states.set(host, await readHostState(transaction, host));
+  }
+
+  for (const host of mappings) {
+    const state = states.get(host);
+    guardClaimable(host, state.reservation);
+    if (state.hostname === null) refuse('hostname-missing');
+    const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+    if (stored.desired.kind !== 'route' || stored.desired.eventId !== eventId) refuse('archive-mapping-mismatch');
+    if (state.hostname.status !== 'active') refuse('archive-requires-active');
+    const changes = { status: 'archived' };
+    if (host === apexPathHost) {
+      // `apexPath` gates apex-path eligibility for THIS Event and is deliberately
+      // a different field on a different document from the host-wide
+      // `pathNamespace`; it is target/client resolution data and is never
+      // projected to the edge.
+      if (ROOT_HOSTS.has(host)) refuse('apex-path-target-ineligible');
+      changes.apexPath = true;
+    }
+    const document = { ...state.hostname, ...changes };
+    const desired = project(() => deriveCanonicalProjection(host, document));
+    buffer.update(`hostnames/${host}`, changes);
+    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  }
+
+  for (const entry of mirrorRootConversions) {
+    exactKeys(entry, ['host', 'root'], 'invalid-input');
+    const { host, root } = entry;
+    const state = states.get(host);
+    guardClaimable(host, state.reservation);
+    if (state.hostname === null) refuse('hostname-missing');
+    const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+    if (stored.desired.kind !== 'route' || stored.desired.eventId !== eventId) refuse('archive-mapping-mismatch');
+    if (state.hostname.status !== 'active') refuse('archive-requires-active');
+    const rootHost = ROOT_HOSTS.get(host);
+    if (rootHost === undefined) refuse('root-marker-ineligible');
+    if (root !== 'not-found') refuse('root-marker-ineligible');
+    // The marker retains the host's path capability and its Edition and keeps
+    // no Event field at all, so `/` is not-found while `/<slug>` can still
+    // resolve other mirrored Events.
+    const document = { root, edition: rootHost.edition, pathNamespace: rootHost.pathNamespace };
+    const desired = project(() => deriveCanonicalProjection(host, document));
+    buffer.set(`hostnames/${host}`, document);
+    ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  }
+
+  buffer.update(`events/${eventId}`, { status: 'archived' });
+  return { hosts, eventId, projectedChange: true };
+}
+
+async function planDelete(input, transaction, observedAt, buffer, revisions, projections) {
+  exactKeys(
+    input,
+    ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host', 'convergedRevision'],
+    'invalid-input',
+  );
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+  if (stored.desired.kind === 'route' && stored.desired.status === 'active') refuse('delete-requires-inactive');
+  // "After inactive convergence" — the operator proves convergence by naming the
+  // revision the private audit read back from the Durable Object's committed
+  // state. A mismatch means the edge has not accepted the inactive projection
+  // yet, so deleting the source would strand a serving route with no source.
+  if (!isCanonicalRevision(input.convergedRevision)) refuse('invalid-input');
+  if (input.convergedRevision !== stored.revision) refuse('delete-requires-convergence');
+  const desired = { kind: 'tombstone' };
+  buffer.delete(`hostnames/${host}`);
+  // The ledger and the DO state are never deleted and the address is never
+  // reused: the tombstone is the permanent record of both facts.
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, observedAt, revisions, projections, stored.revision);
+  return { host, projectedChange: true, resultingHostname: null };
+}
+
+async function planBackfill(input, transaction, observedAt, buffer, revisions, projections) {
+  exactKeys(input, ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host'], 'invalid-input');
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  // Backfill creates a missing ledger and changes no public document. An
+  // existing ledger — however wrong — is a reconciliation question, not a
+  // backfill one.
+  if (state.ledger !== null) refuse('ledger-exists');
+  const desired = project(() => deriveCanonicalProjection(host, state.hostname));
+  ledgerWrite(buffer, host, '1', desired, observedAt, revisions, projections, null);
+  return { host, projectedChange: true, resultingHostname: state.hostname };
+}
+
+/**
+ * The explicit human Admin recovery transaction. It exists for exactly one
+ * situation the closed recovery state machine cannot resolve on its own: the
+ * Durable Object is AHEAD of Firestore, so `apply` fails `409 source-behind`
+ * and no attestation can be signed over a ledger that is behind the edge.
+ *
+ * It may advance the ledger above the DO high-water mark, using the CURRENT
+ * canonical hostname projection — never an invented one — and it never lowers a
+ * revision and never touches the public document. A new read transaction and a
+ * fresh signed audit follow; this call blesses nothing by itself.
+ */
+async function planAdvanceLedger(input, transaction, observedAt, buffer, revisions, projections) {
+  exactKeys(
+    input,
+    [
+      'schemaVersion',
+      'intent',
+      'apply',
+      'actor',
+      'reason',
+      'host',
+      'durableObjectHighWaterRevision',
+      'incidentUrl',
+    ],
+    'invalid-input',
+  );
+  const { host } = input;
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (!POSITIVE_DECIMAL.test(String(input.durableObjectHighWaterRevision ?? ''))) refuse('invalid-input');
+  requireHttpsUrl(input.incidentUrl, 'invalid-input');
+  // A missing or malformed ledger is exactly what this transaction repairs, so
+  // it reads the stored revision defensively rather than validating the whole
+  // document. Absence floors the high-water at 0.
+  const storedRevision =
+    isRecord(state.ledger) && isCanonicalRevision(state.ledger.revision) ? state.ledger.revision : '0';
+  const desired = project(() => deriveCanonicalProjection(host, state.hostname));
+  const highWater = BigInt(input.durableObjectHighWaterRevision);
+  const floor = BigInt(storedRevision) > highWater ? BigInt(storedRevision) : highWater;
+  const revision = (floor + 1n).toString(10);
+  if (BigInt(revision) <= BigInt(storedRevision)) refuse('advance-not-monotonic');
+  ledgerWrite(buffer, host, revision, desired, observedAt, revisions, projections, storedRevision === '0' ? null : storedRevision);
+  return { host, projectedChange: true, resultingHostname: state.hostname };
+}
+
+const PLANNERS = {
+  provision: planProvision,
+  update: planUpdate,
+  repoint: planRepoint,
+  archive: planArchive,
+  delete: planDelete,
+  'backfill-ledger': planBackfill,
+  'advance-ledger': planAdvanceLedger,
+};
+
+function validateCommonInput(input) {
+  if (!isRecord(input)) refuse('invalid-input');
+  if (input.schemaVersion !== 1) refuse('invalid-input');
+  if (!INTENTS.has(input.intent)) refuse('unknown-intent');
+  if (typeof input.apply !== 'boolean') refuse('invalid-input');
+  if (!isNonempty(input.actor)) refuse('invalid-input');
+  if (!isNonempty(input.reason) || input.reason.trim() !== input.reason) refuse('invalid-input');
+}
+
+/**
+ * Plans — and, with `apply: true`, performs — one hostname mutation in one
+ * Firestore transaction.
+ *
+ * Returns `{ dryRun, intent, writes, revisions, projections, projectedChange }`.
+ * The plan is computed identically in both modes; `writes` is the exact list of
+ * document operations the transaction did (or would have) perform.
+ */
+export async function applyHostnameMutation(input, dependencies) {
+  validateCommonInput(input);
+  validateDependencies(dependencies);
+  const observedAt = authoritativeNow(dependencies);
+  const planner = PLANNERS[input.intent];
+
+  return dependencies.runTransaction(async (transaction) => {
+    const buffer = createWriteBuffer();
+    const revisions = [];
+    const projections = [];
+    const outcome = await planner(input, transaction, observedAt, buffer, revisions, projections);
+    if (input.apply) {
+      for (const write of buffer.writes) {
+        if (write.op === 'set') transaction.set(write.path, write.value);
+        else if (write.op === 'update') transaction.update(write.path, write.value);
+        else transaction.delete(write.path);
+      }
+    }
+    return {
+      dryRun: !input.apply,
+      intent: input.intent,
+      observedAt,
+      actor: input.actor,
+      reason: input.reason,
+      writes: buffer.writes,
+      revisions,
+      projections,
+      ...outcome,
+    };
+  });
+}
+
+/**
+ * Adapts either Firestore SDK to the `{ get, set, update, delete }` facade the
+ * planners use. `runTransaction` is the SDK's own — `db.runTransaction(fn)` on
+ * the Admin SDK, `(fn) => runTransaction(db, fn)` on the client SDK — and
+ * `documentReference(path)` turns a `collection/id` path into that SDK's
+ * reference. Nothing else about Firestore leaks into this module.
+ */
+export function createTransactionRunner({ runTransaction, documentReference }) {
+  if (typeof runTransaction !== 'function' || typeof documentReference !== 'function') {
+    refuse('invalid-dependencies');
+  }
+  return async (work) =>
+    runTransaction(async (transaction) => {
+      const facade = {
+        async get(path) {
+          const snapshot = await transaction.get(documentReference(path));
+          const exists = typeof snapshot.exists === 'function' ? snapshot.exists() : snapshot.exists === true;
+          return exists ? (snapshot.data() ?? null) : null;
+        },
+        set(path, value) {
+          transaction.set(documentReference(path), value);
+        },
+        update(path, value) {
+          transaction.update(documentReference(path), value);
+        },
+        delete(path) {
+          transaction.delete(documentReference(path));
+        },
+      };
+      return work(facade);
+    });
+}
