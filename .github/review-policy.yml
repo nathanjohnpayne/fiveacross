@@ -249,18 +249,33 @@ feedback_policy:
 #     arm of `p4b_same_head_barrier`, whose inner `case "$cls_cx"` is around
 #     line 1437) — so the barrier opens with no CodeRabbit report at all,
 #     because the head has been read by the agent that actually gates the merge.
-#     The invariant that makes that safe is upstream:
-#     `crw_rate_limit_masks_blocking_marker` in scripts/coderabbit-wait.sh emits
-#     rc 2 when a rate-limit stanza shares a body with a blocking marker, so a
-#     `rate_limit` that reaches the classifier is a refusal with nothing unread
-#     behind it. Every other Codex class escalates immediately, EXCEPT
-#     `not-yet`, which marks the run pending and waits the head-anchored budget.
+#     The invariant that makes that safe is upstream, and it is a COMPOSITE
+#     guard rather than the single-body predicate an earlier version of this
+#     note named. `crw_rate_limit_hides_a_finding` in
+#     scripts/coderabbit-wait.sh asks one question — is a blocking finding
+#     published behind this refusal? — over every surface that can carry one,
+#     and `--probe` exits rc 2 on a yes. It reads three.
+#     `crw_rate_limit_masks_blocking_marker` is only the FIRST, and covers just
+#     the notice body that shares itself with a marker. The second is the
+#     head-pinned review OBJECT's own body, which that helper's own comment
+#     calls the PRIMARY summary surface and which is scoped by the object's
+#     GitHub-owned `commit_id` rather than by a commits range. The third is the
+#     marker-selected PR-level summary, head-anchored through
+#     `crw_head_summary_holds_blocking_marker`. A bare refusal body can coexist
+#     with a finding on either of the other two, so the narrow helper on its
+#     own is not the contract — cite the composite one. A surface that cannot
+#     be READ returns 3 and the probe dies rather than reporting a bare
+#     refusal, so a `rate_limit` that reaches the classifier is a refusal with
+#     nothing unread behind it on any of the three.
+#
+#     Every other Codex class escalates immediately, EXCEPT `not-yet`, which
+#     marks the run pending and waits the head-anchored budget.
 #     That wait is on Codex, not on CodeRabbit: the Codex arm is self-clearing,
 #     so the next probe can find it reported and open the barrier. Only once the
 #     budget is exhausted does the run route to the manual fallback, with the
-#     rate-limit reason appended to the reason string (same file, around line
-#     1491). Do not read a rate-limited CodeRabbit on a Codex-reported head as a
-#     stall that needs a human.
+#     rate-limit reason appended to the reason string (back in
+#     scripts/phase-4b/lib.sh, around line 1491). Do not read a rate-limited
+#     CodeRabbit on a Codex-reported head as a stall that needs a human.
 #
 # A rate-limit stall does NOT automatically page the human, and an earlier
 # version of this note said it did. The failover is live: when

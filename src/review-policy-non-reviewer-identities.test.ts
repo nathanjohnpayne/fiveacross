@@ -73,9 +73,28 @@ describe('review-policy.yml non_reviewer_identities (#1026)', () => {
 
   it('REVIEW_POLICY.md carries the section the gate block message sends operators to', () => {
     // merge-clearance-gate.sh blocks with "(see REVIEW_POLICY.md,
-    // non_reviewer_identities)". That pointer has to resolve.
+    // non_reviewer_identities)". That pointer has to resolve to a SECTION, not
+    // to a passing mention in some unrelated paragraph.
+    //
+    // Anchored on the key name the gate actually prints rather than on the
+    // heading's wording: rewording a heading does not break the pointer, so it
+    // should not break this test. What the pointer needs is that the first
+    // place the key is documented sits under a heading of its own AND names
+    // the account this repo denies — which is strictly more than a bare
+    // `toMatch(/non_reviewer_identities/)` over the whole file would pin.
     const doc = readRepoFile('../REVIEW_POLICY.md');
-    expect(doc).toMatch(/^### Non-reviewer identities$/m);
-    expect(doc).toMatch(/non_reviewer_identities/);
+    const at = doc.indexOf('non_reviewer_identities');
+    expect(at).toBeGreaterThanOrEqual(0);
+
+    // Nearest preceding ATX heading (2+ hashes, so a `# ...` YAML comment
+    // inside a fenced example cannot be mistaken for one), through the next.
+    const headings = [...doc.matchAll(/^#{2,6} .+$/gm)];
+    const owning = headings.filter((h) => (h.index as number) < at).pop();
+    expect(owning, 'the key is documented under no heading at all').toBeDefined();
+    const next = headings.find((h) => (h.index as number) > (owning?.index as number));
+    const section = doc.slice(owning?.index as number, next ? (next.index as number) : undefined);
+
+    expect(section).toMatch(/non_reviewer_identities/);
+    expect(section).toContain('nathanpayne-robot');
   });
 });
