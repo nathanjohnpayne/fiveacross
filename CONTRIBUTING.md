@@ -40,6 +40,7 @@ Run the main application test/build gates CI runs. This part of [`app-ci`](.gith
 | `npm test` | Game-logic unit + component tests (Vitest, jsdom) |
 | `npm run build` | Production Vite build; must succeed |
 | `npm run test:deploy` | Fixture-only deployment safety harness; never touches a live project |
+| `npm run test:ensure-java` | The shared JDK probe's own suite (`scripts/lib/ensure-java.sh`); pure shell, no emulator |
 | `npm run test:functions` | Cloud Functions notifier suite (installs `functions/` deps first; no emulator) |
 | `npm run test:rules` | Firestore/Storage security-rules suite against the emulators (needs Java) |
 | `npm run test:offline` | Offline-durability suite against its own Auth/Firestore emulator run (needs Java) |
