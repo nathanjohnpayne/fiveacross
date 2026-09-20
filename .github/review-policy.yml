@@ -194,10 +194,25 @@ feedback_policy:
 #     `p4b_same_head_barrier` (scripts/phase-4b/lib.sh) consults every provider
 #     whose top-level `enabled` is true, so with CodeRabbit enabled a Phase 4b
 #     run waits for a terminal CodeRabbit report on the exact head. No report,
-#     and the run is held and eventually routed to the manual fallback — even
-#     with no CodeRabbit finding anywhere. Disabling a provider in policy is the
-#     only route to "will-not-report"; the barrier cannot be told to skip one
+#     and the run is USUALLY held and eventually routed to the manual fallback —
+#     even with no CodeRabbit finding anywhere. Disabling a provider in policy is
+#     the only route to "will-not-report"; the barrier cannot be told to skip one
 #     that is enabled. Budget the extra wait when running Phase 4b here.
+#
+#     ONE EXCEPTION, and it is worth knowing before escalating: a bare
+#     rate-limit refusal does not hold the barrier when Codex has already
+#     reported on the same head. `p4b_same_head_barrier` classifies that
+#     CodeRabbit result as `rate_limit` and, for a Codex class of `reported`,
+#     neither sets a `why` nor marks the run pending (scripts/phase-4b/lib.sh,
+#     the `rate_limit)` arm, around line 1437) — so the barrier opens with no
+#     CodeRabbit report at all, because the head has been read by the agent that
+#     actually gates the merge. The invariant that makes that safe is upstream:
+#     `crw_rate_limit_masks_blocking_marker` in scripts/coderabbit-wait.sh emits
+#     rc 2 when a rate-limit stanza shares a body with a blocking marker, so a
+#     `rate_limit` that reaches the classifier is a refusal with nothing unread
+#     behind it. Every other Codex class in that arm still escalates. Do not
+#     read a rate-limited CodeRabbit on a Codex-reported head as a stall that
+#     needs a human.
 #
 # A rate-limit stall does NOT automatically page the human, and an earlier
 # version of this note said it did. The failover is live: when
