@@ -605,9 +605,9 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * That lookup asks for the OWNER's claims, not the Proof's (Codex P2 round 2 on
  * #1143). Only the owner's claim may steer a restore, and the bound below is
  * applied to the query — so a `proofId`-only lookup lets any signed-in user
- * decide what the query returns: 25 forged pending claims naming someone else's
- * Proof fill the page, the owner's real claim falls off the end, and Restore
- * publishes a photo whose claim nobody has judged. The forged docs are excluded
+ * decide what the query returns: enough forged pending claims naming someone
+ * else's Proof fill the page, the owner's real claim falls off the end, and
+ * Restore publishes a photo whose claim nobody has judged. The forged docs are excluded
  * where the exclusion cannot be crowded out — by the query itself — and the
  * in-transaction owner check below stays exactly as it was, because the query
  * reads a snapshot and only the live re-read can be trusted with the decision.
@@ -616,7 +616,7 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * The claims create rule binds `uid` to the caller and nothing else, so the
  * owner may mint further claims against their own Proof with `status:
  * 'confirmed'` already written — and an equality-only query with no `orderBy`
- * pages by document id, so 25 of them under ids that sort before the genuine
+ * pages by document id, so enough of them under ids that sort before the genuine
  * claim fill the page just as the forged ones did, the pending claim falls off
  * the end, and Restore publishes it. The `status` filter removes them the same
  * way the `uid` filter removes forged ones — in the query, before the cap — and
@@ -638,8 +638,28 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * neither can push the genuine claim off it. What the page can still be full of
  * is the owner's own pending claims, and any one of those keeps the Proof
  * `'pending'` — the outcome the genuine claim would have produced anyway.
+ *
+ * FIVE, not the twenty-five this started at (#1144 item 5). The original number
+ * was sized for a `proofId`-only lookup, where the page was a contested resource:
+ * any signed-in user could mint claims naming someone else's Proof, so the cap
+ * had to be generous enough that the owner's genuine claim survived a crowd of
+ * them. It is not contested any more. Both exclusions moved into the query, so
+ * the page can only ever hold claims that are the owner's, still pending, and
+ * about this Proof — of which exactly one is legitimate, and every additional one
+ * the owner minted against their own Proof says the same thing as the first.
+ *
+ * So the truncation this cap performs is OUTCOME-NEUTRAL: every document it can
+ * drop is one of the owner's pending claims, and reading one of those is enough
+ * to send the Proof back to `'pending'`, which is where any of them would have
+ * sent it. Shrinking the cap therefore cannot change a restore's destination —
+ * it only bounds the transactional read fan-out, from twenty-six documents in
+ * the worst case to six. Five leaves headroom over the one claim a well-behaved
+ * Proof has while keeping the bound small enough to be worth calling a bound.
+ *
+ * Exported so the boundary is pinned by a test rather than by the number's
+ * reappearance in one.
  */
-const RESTORE_CLAIM_LOOKUP_LIMIT = 25;
+export const RESTORE_CLAIM_LOOKUP_LIMIT = 5;
 
 export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
   // The owner, read plainly and outside the transaction: `uid` is written once at

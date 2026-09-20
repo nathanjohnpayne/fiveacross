@@ -91,7 +91,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { confirmClaim, hideProof, rejectClaim, restoreProof } from './admin';
+import { confirmClaim, hideProof, rejectClaim, restoreProof, RESTORE_CLAIM_LOOKUP_LIMIT } from './admin';
 import { safetyHideStands } from './moderation';
 import { attachProof } from './proofs';
 
@@ -592,7 +592,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
       { field: 'proofId', op: '==', value: 'P' },
       { field: 'uid', op: '==', value: 'u1' },
       { field: 'status', op: '==', value: 'pending' },
-      { __kind: 'limit', count: 25 },
+      { __kind: 'limit', count: RESTORE_CLAIM_LOOKUP_LIMIT },
     ]);
   });
 
@@ -648,6 +648,64 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
       'events/med-2026/proofs/P',
       'events/med-2026/claims/claim-z',
+    ]);
+  });
+
+  // --- the lookup cap, now that the page is uncontested (#1144 item 5) -------
+  //
+  // Twenty-five was sized for the `proofId`-only lookup, where the page was a
+  // contested resource — any signed-in user could mint claims naming someone
+  // else's Proof, so the cap had to outlast a crowd of them. The `uid` and
+  // `status` filters moved both exclusions into the query, so the page now holds
+  // nothing but the owner's own pending claims about this Proof, of which
+  // exactly one is legitimate. What is left is a read-budget bound, and these
+  // cases pin it at its boundary.
+
+  it('caps the owner-scoped lookup at a small, defensible page', async () => {
+    // The number itself is the decision: it bounds the transaction's read
+    // fan-out, and it has to stay comfortably above the one claim a well-behaved
+    // Proof carries. Pinned so shrinking it further is a deliberate edit.
+    expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBe(5);
+    expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBeGreaterThan(1);
+  });
+
+  it("reads every one of the owner's pending claims AT the cap", async () => {
+    // The boundary from below: a page exactly full is not a truncated page, so
+    // nothing is dropped here and every candidate still reaches the live
+    // in-transaction re-read that decides the restore.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => ({
+      id: `own-${i}`,
+      live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => `events/med-2026/claims/own-${i}`),
+    ]);
+  });
+
+  it("truncates the owner's OWN surplus pending claims without changing the destination", async () => {
+    // The boundary from above, and the reason a small cap is safe at all: every
+    // document this page can drop is one of the owner's pending claims, and any
+    // ONE of those sends the Proof back to `'pending'` — which is where all of
+    // them would have sent it. So the truncation is outcome-neutral, unlike the
+    // `proofId`-only page a stranger could fill with claims that steer nothing.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
+      id: `own-${i}`,
+      live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    // The surplus claim is never fetched and never read: the cap is spent before
+    // it, and the restore reaches the same answer for one document less.
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => `events/med-2026/claims/own-${i}`),
     ]);
   });
 
