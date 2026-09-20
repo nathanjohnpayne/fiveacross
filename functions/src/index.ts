@@ -791,21 +791,26 @@ export const repairLegacyMarkerEventIdentityOnWrite = onDocumentWritten(
  * `status → 'hidden'` update — and the project's default Gen2 compute identity
  * has none of that access (ADR 0008), which is the same reasoning the notifiers
  * and the Vision hide on these very paths already rely on. Unpinned, every
- * invocation would have failed its first read, and because `applyThresholdHide`
- * / `applyThresholdBackfill` are best-effort (ADR 0001) the failure is swallowed
- * into a `console.error`, so the shipped #43 auto-hide would have been failing
- * silently rather than loudly.
+ * invocation that got past the cheap short-circuits in `applyThresholdHide` /
+ * `applyThresholdBackfill` would have failed on its first read, and because both
+ * are best-effort (ADR 0001) that failure is swallowed into a `console.error`, so
+ * every hide the shipped #43 auto-hide owed would have failed silently rather
+ * than loudly.
  *
  * NO `retry: true`, unlike `hideProofOnVisionFlag` on the same document path and
- * unlike the adult-content pair below. Retry only does anything for a handler
- * that REJECTS, and neither `applyThresholdHide` nor `applyThresholdBackfill`
- * ever does: both wrap everything in a try/catch that logs and returns (ADR
- * 0001), so the flag would be unreachable configuration advertising a durability
- * this module deliberately does not offer. The module's actual answer to a
- * swallowed attempt is the "rose to at/over" gate in `shouldHideAtThreshold`,
- * which re-attempts the hide on the next report bump instead of requiring a
- * strict below→over crossing. This matches the #101 notifiers, which pin the
- * identity and likewise take no retry.
+ * unlike the adult-content pair below. A retry is a REDELIVERY of a delivery the
+ * platform saw fail — a rejected promise, but equally a timeout, an OOM kill or
+ * an instance crash — and neither `applyThresholdHide` nor
+ * `applyThresholdBackfill` ever rejects: both wrap everything in a try/catch that
+ * logs and returns (ADR 0001). So this module's real failure mode, a denied or
+ * transient Firestore call, is invisible to retry, and the flag would advertise a
+ * durability this module deliberately does not offer. The answer to a swallowed
+ * attempt is the "rose to at/over" gate in `shouldHideAtThreshold`, which
+ * re-attempts the hide on the next report bump instead of requiring a strict
+ * below→over crossing. This matches the #101 notifiers, which pin the identity
+ * and likewise take no retry. (The one delivery the platform WOULD see fail is a
+ * backfill sweep that outruns its timeout; see `backfillHideOnThresholdDecrease`
+ * below for why that tail is left to the next decrease and `runRolloutSweep`.)
  */
 export const hideProofAtThreshold = onDocumentWritten(
   { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
@@ -902,9 +907,15 @@ export const hideItemAtThreshold = onDocumentWritten(
  * Pinned to `ADMIN_SDK_SERVICE_ACCOUNT` and left without `retry` for exactly the
  * reasons spelled out on `hideProofAtThreshold` above: the sweep query and every
  * hide are Firestore data-plane calls the default Gen2 compute identity cannot
- * make, and `applyThresholdBackfill` never rejects, so a retry flag could never
- * fire. Its own re-attempt story is the next threshold decrease, plus the
- * operator-invokable `runRolloutSweep`.
+ * make, and `applyThresholdBackfill` never rejects, so retry cannot see this
+ * module's real failures. It CAN see one: this trigger sets no `timeoutSeconds`,
+ * so the 60s default applies, and an Event with a large over-threshold tail at a
+ * newly lowered bar can outrun it and leave the sweep partially applied. That
+ * tail is deliberately left to the next threshold decrease plus the
+ * operator-invokable `runRolloutSweep`, both of which re-sweep idempotently
+ * through the same transactional guard — a bounded, operator-closable gap,
+ * accepted rather than covered by a flag whose reach on the common failure is
+ * zero.
  */
 export const backfillHideOnThresholdDecrease = onDocumentWritten(
   { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
