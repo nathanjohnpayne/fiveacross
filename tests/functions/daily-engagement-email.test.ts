@@ -2461,6 +2461,84 @@ describe('sendDailyEmailForEvent', () => {
     expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
   });
 
+  // --- The Event's CONTAINERS, one layer up (#1214) ------------------------------
+  //
+  // Same untyped-container class as the three cases above, different field set
+  // and a different failure mode. `buildDailyEmailModel` and
+  // `buildAdminDigestModel` both guarded the Event's `days` already; this
+  // orchestrator did not, and every site it handed the raw field to sits ABOVE
+  // the per-recipient catch — `for…of` inside `standingsFreezeAtFor`, `.filter`
+  // inside `dueDayForDailyEmail`, `new Set` inside `readEmailRosterPage`. A
+  // throw there unwinds to `runDailyEmailSweep`'s per-Event catch and takes that
+  // Event's WHOLE morning send down, on every sweep, for as long as the field
+  // stays malformed.
+  //
+  // So these assert the sweep's own observable answer — it resolves, it reports,
+  // and it mails nothing it should not — rather than that a helper returns `[]`.
+  // Revert the guard and each one below becomes a rejected promise.
+  it.each([
+    ['an array-shaped map', { '0': gcbDay4 } as unknown],
+    ['a map under non-integer keys', { day4: gcbDay4 } as unknown],
+    ['a number', 42 as unknown],
+    ['a string', 'Day 4' as unknown],
+  ])('reports not-due instead of throwing when `days` is %s', async (_shape, days) => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], days };
+    const { result, sent } = await run(docs);
+    expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+    expect(sent).toEqual([]);
+  });
+
+  // `null` and an absent field were ALREADY safe, because `?? []` covers exactly
+  // those two and nothing else — which is what made the hole read as narrower
+  // than it was. Pinned so the guard's arrival is not mistaken for a change in
+  // how an Event with no schedule is treated.
+  it.each([
+    ['null', null as unknown],
+    ['absent', undefined as unknown],
+  ])('still reports not-due when `days` is %s, exactly as before the guard', async (_shape, days) => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], days };
+    const { result, sent } = await run(docs);
+    expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+    expect(sent).toEqual([]);
+  });
+
+  // The ban roster reaches `new Set` twice — once inside `readEmailRosterPage`
+  // and once for the standings filter — and a malformed one threw there before
+  // a single recipient was looked up. The Event's schedule is untouched here, so
+  // the right answer is not "not-due": it is the whole roster, mailed, with
+  // nobody hidden.
+  it.each([
+    ['a map', { theo: true } as unknown],
+    ['an array-shaped map', { '0': 'theo' } as unknown],
+    ['a number', 1 as unknown],
+  ])(
+    'mails the whole roster when `bannedUids` is %s, rather than losing the Event its morning',
+    async (_shape, bannedUids) => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], bannedUids };
+      const { result, sent, db } = await run(docs);
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+      expect(sent.map((m) => m.to[0]).sort()).toEqual(['jess@example.com', 'theo@example.com']);
+      expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
+      expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
+    },
+  );
+
+  // The shape that does NOT throw, and the reason the hole looked narrower than
+  // it was: `new Set('theo')` is a four-CHARACTER ban set, not a ban on `theo`.
+  // Every uid on this roster is longer than one character, so this is the one
+  // case here that answers the same with the guard reverted. It is pinned for
+  // what the guard now decides BY SHAPE rather than by that accident.
+  it('bans nobody when `bannedUids` is a string, by shape rather than by accident', async () => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], bannedUids: 'theo' };
+    const { result, sent } = await run(docs);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent.map((m) => m.to[0]).sort()).toEqual(['jess@example.com', 'theo@example.com']);
+  });
+
   // #633: fail-closed regression. Exercises the REAL `sendEmail` (not a boolean
   // stub) with a Resend-shaped `{ error }` — the exact response an unverified
   // `EMAIL_FROM` domain produces — and proves the rejection propagates all the
@@ -2922,5 +3000,47 @@ describe('runDailyEmailSweep', () => {
       releaseFirst();
       await sweep;
     }
+  });
+
+  // #1214, at the layer the consequence is actually visible. The per-Event catch
+  // here already contains the blast radius of one malformed container; what it
+  // cannot do is deliver the mail it swallowed. Before the guard, this Event's
+  // morning ended in this log line on every sweep — so the assertion is that
+  // nothing lands in it, and that the Event's neighbour is untouched either way.
+  it("keeps the sweep quiet, and the other Events mailing, when one Event's `days` is malformed", async () => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], days: { '0': gcbDay4 } as unknown };
+    docs['events/other'] = { ...seedEvent()['events/med-2026'] };
+    docs['events/other/players/other-player'] = {
+      displayName: 'Other',
+      bingoCount: 1,
+      squaresMarked: 6,
+      firstBingoAt: 9000,
+    };
+    docs['hostnames/other.example.com'] = {
+      eventId: 'other',
+      canonicalHost: 'other.example.com',
+      edition: 'fiveacross',
+      status: 'active',
+      isCanonical: true,
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: string[] = [];
+
+    await runDailyEmailSweep(makeDb(docs), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push(args.to[0]);
+        return true;
+      },
+    });
+
+    expect(error).not.toHaveBeenCalledWith(
+      'runDailyEmailSweep: event failed',
+      'med-2026',
+      expect.anything(),
+    );
+    expect(sent).toEqual(['other-player@example.com']);
+    error.mockRestore();
   });
 });

@@ -39,7 +39,13 @@ import {
   visibleFinaleRoster,
   type FinaleReadSource,
 } from './unlockDay';
-import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
+import {
+  formatDayDate,
+  placeLabel,
+  readableDayList,
+  readableUidList,
+  type EmailDay,
+} from './dailyEmailContent';
 import {
   MAX_PERSISTED_MOST_LOVED_WINNERS,
   podiumStandings,
@@ -1807,8 +1813,12 @@ export async function podiumEmailInputFor(
   // it is a distinct reason rather than folded into `no-podium`.
   if (!payload || !Array.isArray(payload.dailyHonors)) return { due: false, reason: 'no-payload' };
 
-  const days = (Array.isArray(event.days) ? event.days : []) as EmailDay[];
-  const banned = (Array.isArray(event.bannedUids) ? event.bannedUids : []) as string[];
+  // The SHARED coercion, not a third spelling of it (#1214). This sweep already
+  // guarded both containers inline; the rule now has one statement in
+  // `dailyEmailContent.ts`, so the daily sweep's own guard and this one cannot
+  // come apart.
+  const days = readableDayList(event.days);
+  const banned = readableUidList(event.bannedUids);
   // BOUNDED AT THE QUERY, ceiling plus one so overflow is detectable from the
   // raw page rather than from the ban-filtered roster — a banned row inside the
   // page must not hide the fact that valid participants beyond it were cut off.
