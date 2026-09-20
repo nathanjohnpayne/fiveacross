@@ -237,13 +237,37 @@ describe('dealDayCard — the join is a precondition (#1158)', () => {
     expect(H.txSet).not.toHaveBeenCalled();
   });
 
-  it('writes NOTHING for another Player\'s row — the uid has to MATCH, not merely be present', async () => {
+  it('deals for a row that carries joinedAt but NO stored uid — the document ID is the identity (Codex P2, round 4)', async () => {
+    // The shape the round-4 finding names. `firestore.rules` validates no
+    // field on `players/{uid}` (ADR 0001), so a pre-existing row can carry the
+    // join stamp with the `uid` field missing. `Board` reads such a row as
+    // joined (`playerConverter` pins `uid` to the doc id, #1151, and
+    // `joinedAt` is present), so it fires the lazy deal — and while this guard
+    // matched the STORED `uid` it answered the opposite, no-opped, and left
+    // the Card on "Dealing…" with nothing in the effect's inputs left to move.
+    // Both sides read `joinedAt` now, so the deal proceeds: the row is
+    // addressed by this Player's uid, and the address is the identity.
+    readyDay();
+    H.player = { displayName: 'Sailor', joinedAt: PAST };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+
+    expect(writtenBoard()).not.toBeNull();
+  });
+
+  it('deals for a row whose stored uid DISAGREES with the document it lives at — same reason', async () => {
+    // The other half of "the field is not the identity": only the owner or an
+    // Admin can write `events/{id}/players/{uid}` and only at that address, so
+    // a foreign value in the field is decoration on THIS Player's row, not
+    // evidence of somebody else's. Refusing on it would stall the Card for a
+    // Player whose join demonstrably landed, which is the defect above with a
+    // different corruption in front of it.
     readyDay();
     H.player = { uid: 'someone-else', displayName: 'Interloper', joinedAt: PAST };
 
-    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
 
-    expect(H.txSet).not.toHaveBeenCalled();
+    expect(writtenBoard()).not.toBeNull();
   });
 
   it('deals as soon as the join HAS landed — the guard is a wait, not a refusal', async () => {

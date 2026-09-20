@@ -868,11 +868,13 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // quiesce declined the join, the Card tab dealt anyway, and the Player
     // existed only as a statistics bucket.
     //
-    // `uid` is the marker because `joinAndDeal` is its ONLY writer — it merges
-    // `{ uid, displayName, photoURL }` on every visit, in the same write that
-    // stamps `joinedAt` the first time. The marker is deliberately a FIELD the
-    // join writes rather than the row's EXISTENCE, because the row is not the
-    // join's to create alone: `savePlayerTheme`/`clearPlayerTheme` merge
+    // `joinedAt` is the marker, the SAME one `Board` keys its lazy-deal guard
+    // on (Codex P2, #1158 review round 4). `joinAndDeal` is its only writer —
+    // stamped in the same merge that carries `{ uid, displayName, photoURL }`,
+    // and nothing else in the app or the converter ever produces it — so its
+    // presence means the join COMMITTED. The marker is deliberately a FIELD
+    // the join writes rather than the row's EXISTENCE, because the row is not
+    // the join's to create alone: `savePlayerTheme`/`clearPlayerTheme` merge
     // `{ theme }` onto `rawPlayer(uid)`, which CREATES the document when it is
     // absent, and `firestore.rules` validates no field on `players/{uid}` at
     // all (ADR 0001) — so a `{theme}`-only row with no identity commits. `More`
@@ -881,12 +883,25 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // shape on an OPEN Event. (During the quiesce itself the theme write is
     // denied by the same `eventOpenForPlay` arm that defers the join, so the
     // deferral window cannot produce one; the window after play REOPENS can.)
-    // Requiring the field to MATCH is free: the row is addressed by this uid,
-    // so anything else is another Player's document.
     //
-    // Read from the RAW snapshot, never through `playerConverter`, which pins
-    // `uid` to the doc id on every converted read (#1151) — `Board`'s own
-    // "has the join landed?" test keys on `joinedAt` for exactly that reason.
+    // NOT the stored `uid`, which this guard used to match against `u.uid`.
+    // The two sides of one guard have to read one field, and the rules
+    // validate `uid` no more than any other (ADR 0001), so a pre-existing row
+    // can carry `joinedAt` with that field missing — or holding somebody
+    // else's id, which an Admin write can leave behind. `Board` calls such a
+    // row joined and fires the lazy deal; this guard called it unjoined and
+    // no-opped; and when `joinAndDeal` later repaired the field, NOTHING
+    // `Board`'s effect depends on moved — `playerConverter` had been
+    // synthesising the converted `uid` from the doc id all along (#1151) — so
+    // the Card sat on "Dealing…" until an unrelated render. Keying both sides
+    // on `joinedAt` removes the disagreement. Dropping the match costs no
+    // safety: the write target is `rawPlayer(u.uid, …)`, addressed by the
+    // authenticated uid, and `firestore.rules` gates it on that ADDRESS —
+    // the document id is the identity here, which is why `playerConverter`
+    // pins `uid` to it and the archive builder freezes rows under it. Read
+    // from the RAW snapshot all the same: the converter would answer for
+    // `uid`, and reading the stored document is what keeps this predicate
+    // about what is actually persisted.
     //
     // Returning `false` rather than throwing keeps the no-op family this
     // function already has (locked Day, unstamped snapshot, existing card): the
@@ -894,7 +909,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // resolves itself. `Board` re-fires the lazy deal the moment the join
     // commits, because the identity is part of the key its in-flight guard uses.
     const latestPlayerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : null;
-    if (latestPlayerData?.uid !== u.uid) return false;
+    if (typeof latestPlayerData?.joinedAt !== 'number') return false;
 
     const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
     const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];

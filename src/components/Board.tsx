@@ -732,14 +732,16 @@ export default function Board() {
   // nothing else in the app ever writes it), and the converter does not
   // synthesise it — so its presence means the join COMMITTED.
   //
-  // Deliberately NOT `player.uid`, which `dealDayCard` checks on its own RAW
-  // read: `playerConverter` pins `uid` to the doc id on every converted read
-  // (src/data/converters.ts, #1151), so on this subscription `player.uid ===
-  // uid` is true the moment the DOCUMENT exists — for a `{dayStats}`-only row
-  // left by a pre-#1158 deal, or a `{theme}`-only row `savePlayerTheme`
-  // created from More — and the two sides would then disagree about exactly
-  // the case the guard exists for. Distinct from `identityKnown` above, which
-  // asks whether the SUBSCRIPTION has settled.
+  // Deliberately NOT `player.uid`: `playerConverter` pins `uid` to the doc id
+  // on every converted read (src/data/converters.ts, #1151), so on this
+  // subscription `player.uid === uid` is true the moment the DOCUMENT exists
+  // — for a `{dayStats}`-only row left by a pre-#1158 deal, or a `{theme}`-only
+  // row `savePlayerTheme` created from More — and this side would then call
+  // joined exactly the rows the guard exists for. `dealDayCard`'s own RAW-read
+  // guard reads `joinedAt` too (Codex P2, #1158 review round 4), so the two
+  // predicates are one question asked of one stored field and cannot disagree.
+  // Distinct from `identityKnown` above, which asks whether the SUBSCRIPTION
+  // has settled.
   const playerJoined = uid !== undefined && typeof player?.joinedAt === 'number';
   const { data: event } = useEventDoc();
   // The Day schedule (daily-cards-spec § "Data model"): `[]` on a not-yet-migrated
