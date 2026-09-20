@@ -36,7 +36,14 @@
 // that knows it is running on Cloudflare.
 
 import { classifyHost, NAMESPACES } from './host';
-import { headEditsFor, isHeadRewritable, type HtmlHeadRewriter } from './htmlHead';
+import {
+  dropConditionalValidators,
+  dropOriginValidators,
+  headEditsFor,
+  isHeadRewritable,
+  isHtmlDocumentRequest,
+  type HtmlHeadRewriter,
+} from './htmlHead';
 import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
 import { resolveHost, type ResolveDeps, type ServedRecord, reportDiagnostic } from './resolve';
@@ -297,6 +304,19 @@ async function proxyToOrigin(
   headers.set('x-forwarded-host', url.hostname);
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
+  // A conditional revalidation of a document is sent on UNCONDITIONALLY
+  // (#1118). The origin's validators describe one baked `index.html` served to
+  // every hostname, so a forwarded `if-none-match` can be answered `304`
+  // truthfully by the origin and wrongly for this host — the registry may have
+  // repointed the hostname to another Edition since, and a `304` leaves no body
+  // to rewrite and the client on the previous Edition's Crawler identity. Only
+  // the serving path and only a document request: an asset keeps its validators
+  // and its cheap `304`, and the `/__/auth/*` exemption (`record === null`) is
+  // untouched like everything else about it.
+  if (record !== null && isHtmlDocumentRequest(request)) {
+    dropConditionalValidators(headers);
+  }
+
   const init: RequestInit & { duplex?: 'half' } = {
     method: request.method,
     headers,
@@ -338,16 +358,23 @@ async function proxyToOrigin(
 
   // The per-hostname `<head>` rewrite (#1118). Gated on a resolved record, so
   // it is unreachable from every fail-closed outcome and from the auth
-  // exemption; gated on `isHeadRewritable`, so a failing origin, a bodyless
-  // response and every non-HTML asset are relayed byte-for-byte. A rewrite
-  // that cannot run is a relay, never an error — the transform must not be
-  // able to convert an origin failure into a Worker runtime error.
+  // exemption; gated on `isHeadRewritable`, so a failing origin, a partial
+  // representation, a bodyless response and every non-HTML asset are relayed
+  // byte-for-byte. A rewrite that cannot run is a relay, never an error — the
+  // transform must not be able to convert an origin failure into a Worker
+  // runtime error.
   if (record !== null && isHeadRewritable(originResponse)) {
     // The rewrite changes the document's length, and the origin's
     // `content-length` describes the bytes BEFORE it. Relaying it would
     // truncate or stall the response, so it is dropped and the runtime frames
     // the transformed body itself.
     responseHeaders.delete('content-length');
+    // For the same reason one step further out: the origin's `etag` and
+    // `last-modified` describe those same pre-rewrite bytes, identically for
+    // every hostname. Handing them back would let the client revalidate its
+    // way to this Edition's document after the registry had moved the hostname
+    // to another one.
+    dropOriginValidators(responseHeaders);
     return deps.htmlRewriter(
       new Response(originResponse.body, {
         status: originResponse.status,

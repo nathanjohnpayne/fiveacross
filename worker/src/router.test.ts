@@ -91,7 +91,7 @@ function harness(
   return { deps, requests, lookup, rewrites, htmlRewriter };
 }
 
-/** An origin response the `<head>` rewrite is allowed to touch: 2xx, HTML,
+/** An origin response the `<head>` rewrite is allowed to touch: 200, HTML,
  *  with a body. Built per call because a `Response` body is single-use. */
 function htmlOrigin(init: ResponseInit = {}): Response {
   return new Response('<!doctype html><html><head><title>app</title></head><body></body></html>', {
@@ -840,10 +840,124 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
     expect(response.headers.get('content-length')).toBeNull();
   });
 
+  describe('a conditional revalidation of a document', () => {
+    const CONDITIONAL = {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'if-none-match': '"origin-index"',
+      'if-modified-since': 'Wed, 01 Jul 2026 00:00:00 GMT',
+    };
+
+    it('reaches the origin with neither validator, so a body comes back to rewrite', async () => {
+      // The origin serves one baked `index.html` to every hostname, so its
+      // validators are still current after the registry has repointed this
+      // hostname to another Edition. Forwarding them invites a `304` that is
+      // true of the origin and false of what this host must serve.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => htmlOrigin(),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', { headers: CONDITIONAL }),
+        CONFIG,
+        deps,
+      );
+
+      const proxied = requests.at(-1)!;
+      expect(proxied.headers.get('if-none-match')).toBeNull();
+      expect(proxied.headers.get('if-modified-since')).toBeNull();
+      expect(proxied.headers.get('accept')).toBe(CONDITIONAL.accept);
+      expect(response.status).toBe(200);
+      expect(rewrites).toHaveLength(1);
+      expect(contentFor(rewrites[0]!.edits, 'meta[property="og:site_name"]')).toBe(
+        brandFor('vacay').documentTitle,
+      );
+    });
+
+    it('is answered with none of the origin’s own validators', async () => {
+      // They describe the pre-rewrite bytes, identically for every hostname.
+      // Handing them back would re-open the same window one cache generation
+      // later; emitting nothing closes it after one unconditional fetch.
+      const { deps } = harness({
+        seed: vacaySeed,
+        originFor: () =>
+          htmlOrigin({
+            headers: {
+              etag: '"origin-index"',
+              'last-modified': 'Wed, 01 Jul 2026 00:00:00 GMT',
+              'cache-control': 'no-cache',
+            },
+          }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', { headers: CONDITIONAL }),
+        CONFIG,
+        deps,
+      );
+
+      expect(response.headers.get('etag')).toBeNull();
+      expect(response.headers.get('last-modified')).toBeNull();
+      // Everything else the origin said about caching is still its own.
+      expect(response.headers.get('cache-control')).toBe('no-cache');
+    });
+
+    it('keeps if-range, which qualifies a Range whose answer is relayed', async () => {
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/', {
+          headers: { ...CONDITIONAL, 'if-range': '"origin-index"', range: 'bytes=0-99' },
+        }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('if-range')).toBe('"origin-index"');
+      expect(requests.at(-1)!.headers.get('range')).toBe('bytes=0-99');
+    });
+
+    it('leaves an asset request’s validators alone and relays its 304', async () => {
+      // The other half of the rule: an asset is not rewritten, so its
+      // revalidation is still worth exactly what it was worth before.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => new Response(null, { status: 304, headers: { etag: '"asset"' } }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/assets/app.js', {
+          headers: { accept: '*/*', 'if-none-match': '"asset"' },
+        }),
+        CONFIG,
+        deps,
+      );
+
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"asset"');
+      expect(response.status).toBe(304);
+      expect(response.headers.get('etag')).toBe('"asset"');
+      expect(rewrites).toHaveLength(0);
+    });
+
+    it('leaves the /__/auth/* exemption’s validators alone, like everything else about it', async () => {
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/__/auth/handler', { headers: CONDITIONAL }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"origin-index"');
+    });
+  });
+
   it.each([
     ['a 404 from the origin', () => htmlOrigin({ status: 404 })],
     ['a 500 from the origin', () => htmlOrigin({ status: 500 })],
     ['an origin redirect', () => htmlOrigin({ status: 302, headers: { location: '/elsewhere' } })],
+    [
+      'a 206 partial representation',
+      () =>
+        htmlOrigin({
+          status: 206,
+          headers: { 'content-range': 'bytes 0-71/4096' },
+        }),
+    ],
+    ['a 203 from a transforming proxy', () => htmlOrigin({ status: 203 })],
     [
       'a non-HTML asset',
       () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
@@ -867,6 +981,38 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
     expect(rewrites).toHaveLength(0);
     expect(response.headers.get('x-event-router')).toBe('test-1');
     expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('relays a 206 byte-for-byte, content-range and content-length intact', async () => {
+    // A `Range` answer is a WINDOW described by byte offsets. Substituting a
+    // string of a different length inside it while relaying the offsets that
+    // frame it is how a client assembling or resuming the document ends up
+    // reassembling a corrupted one — so the partial representation is relayed
+    // whole, including the `content-length` a rewritten 200 loses.
+    const window = '<!doctype html><html><head><title>app</title>';
+    const { deps, rewrites } = harness({
+      seed: vacaySeed,
+      originFor: () =>
+        new Response(window, {
+          status: 206,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'content-range': `bytes 0-${window.length - 1}/4096`,
+            'content-length': String(window.length),
+          },
+        }),
+    });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/', { headers: { range: 'bytes=0-43' } }),
+      CONFIG,
+      deps,
+    );
+
+    expect(rewrites).toHaveLength(0);
+    expect(response.status).toBe(206);
+    expect(response.headers.get('content-range')).toBe(`bytes 0-${window.length - 1}/4096`);
+    expect(response.headers.get('content-length')).toBe(String(window.length));
+    expect(await response.text()).toBe(window);
   });
 
   it('relays a bodyless HEAD response untouched', async () => {

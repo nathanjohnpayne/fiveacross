@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { headEditsFor, isHeadRewritable } from './htmlHead';
+import {
+  dropConditionalValidators,
+  dropOriginValidators,
+  headEditsFor,
+  isHeadRewritable,
+  isHtmlDocumentRequest,
+} from './htmlHead';
 import { EDITION_IDS } from '../../src/edition-registry';
 // `edition-brands`, NOT `editions`: this program has no DOM lib and no
 // `vite/client`, the same reason #546 split the brand table out.
@@ -22,20 +28,37 @@ const html = (init: ResponseInit = {}) =>
   });
 
 describe('which origin responses may be rewritten', () => {
-  it('accepts a 2xx HTML response with a body', () => {
+  it('accepts a 200 HTML response with a body', () => {
     expect(isHeadRewritable(html())).toBe(true);
-    expect(isHeadRewritable(html({ status: 203 }))).toBe(true);
   });
 
-  it.each([301, 302, 304, 400, 404, 500, 502])('refuses status %i', (status) => {
-    // An error page is not this Edition's share block, and #599 as amended
-    // forbids the router touching a redirect at all.
+  it.each([201, 203, 206, 301, 302, 304, 400, 404, 500, 502])('refuses status %i', (status) => {
+    // An error page is not this Edition's share block, #599 as amended forbids
+    // the router touching a redirect at all, and the 2xx siblings are refused
+    // for the reason 206 is: only the full representation this origin serves
+    // for a plain GET is a document whose bytes may be substituted.
     const body = status === 304 ? null : '<!doctype html>';
     expect(
       isHeadRewritable(
         new Response(body, { status, headers: { 'content-type': 'text/html' } }),
       ),
     ).toBe(false);
+  });
+
+  it('refuses a 206, whose content-range describes offsets a substitution invalidates', () => {
+    // The whole reason the status check is `=== 200` rather than the 2xx
+    // class. A rewritten window would still be framed by the origin's
+    // `content-range`, so a client assembling or resuming the document would
+    // reassemble a corrupted one.
+    const partial = new Response('<!doctype html><head></head>', {
+      status: 206,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'content-range': 'bytes 0-27/4096',
+      },
+    });
+    expect(isHeadRewritable(partial)).toBe(false);
+    expect(partial.headers.get('content-range')).toBe('bytes 0-27/4096');
   });
 
   it('refuses a response with no body, which a HEAD and a 304 both are', () => {
@@ -131,5 +154,77 @@ describe('what the edge writes for a resolved hostname', () => {
       expect(url.port).toBe('');
       expect(url.pathname).toBe('/');
     }
+  });
+});
+
+describe('which requests must not carry a cache validator to the origin', () => {
+  const get = (accept: string | null) =>
+    new Request('https://bodega-bay.fiveacross.app/board', {
+      headers: accept === null ? {} : { accept },
+    });
+
+  it.each([
+    'text/html',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'application/xhtml+xml',
+    'TEXT/HTML; charset=utf-8',
+  ])('recognises a document request accepting %s', (accept) => {
+    expect(isHtmlDocumentRequest(get(accept))).toBe(true);
+  });
+
+  it.each(['*/*', 'application/javascript', 'image/png,image/svg+xml', 'text/htmlx', ''])(
+    'leaves a request accepting %s alone, so asset revalidation still costs a 304',
+    (accept) => {
+      expect(isHtmlDocumentRequest(get(accept))).toBe(false);
+    },
+  );
+
+  it('leaves a request with no Accept at all alone', () => {
+    expect(isHtmlDocumentRequest(get(null))).toBe(false);
+  });
+
+  it.each(['HEAD', 'POST', 'PUT', 'DELETE'])('refuses %s, whose validator is a precondition', (method) => {
+    // Only a GET can be answered with a body the rewrite would touch, and on
+    // any other method `if-none-match` is optimistic concurrency rather than a
+    // cache revalidation — removing it would change what the origin is asked
+    // to do.
+    expect(
+      isHtmlDocumentRequest(
+        new Request('https://bodega-bay.fiveacross.app/board', {
+          method,
+          headers: { accept: 'text/html' },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('removes both revalidation validators and nothing else', () => {
+    const headers = new Headers({
+      'if-none-match': '"origin-index"',
+      'if-modified-since': 'Wed, 01 Jul 2026 00:00:00 GMT',
+      'if-range': '"origin-index"',
+      accept: 'text/html',
+    });
+    dropConditionalValidators(headers);
+    expect(headers.get('if-none-match')).toBeNull();
+    expect(headers.get('if-modified-since')).toBeNull();
+    // `if-range` is meaningful only alongside `Range`, whose answer is relayed
+    // rather than rewritten; removing it would let a Range apply to a
+    // representation the client did not mean.
+    expect(headers.get('if-range')).toBe('"origin-index"');
+    expect(headers.get('accept')).toBe('text/html');
+  });
+
+  it('removes the origin validators from a rewritten response and emits none in their place', () => {
+    const headers = new Headers({
+      etag: '"origin-index"',
+      'last-modified': 'Wed, 01 Jul 2026 00:00:00 GMT',
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-cache',
+    });
+    dropOriginValidators(headers);
+    expect(headers.get('etag')).toBeNull();
+    expect(headers.get('last-modified')).toBeNull();
+    expect([...headers.keys()].sort()).toEqual(['cache-control', 'content-type']);
   });
 });

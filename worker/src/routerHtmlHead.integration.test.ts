@@ -82,8 +82,21 @@ export default { fetch: () => new Response('control plane', { status: 404 }) };
  * `content-length` is set deliberately, and it is the interesting header: it
  * describes the bytes BEFORE the rewrite, so a router that relayed it would
  * truncate the document the moment a substituted string changed its length.
+ *
+ * It also behaves like the real origin in the two ways #1118's review turned
+ * on: it answers a `Range` with a `206` framed by a `content-range`, and it
+ * answers a matching `if-none-match` with a `304`. Both are the origin telling
+ * the truth about its own baked document, which is exactly why neither may be
+ * relayed to a client whose hostname resolves to a different Edition.
  */
+const INDEX_ETAG = '"origin-index"';
+const ASSET_ETAG = '"origin-asset"';
+const LAST_MODIFIED = 'Wed, 01 Jul 2026 00:00:00 GMT';
+const PARTIAL_BYTES = 200;
+
 const originWorker = `
+const INDEX_ETAG = '${INDEX_ETAG}';
+const ASSET_ETAG = '${ASSET_ETAG}';
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -93,20 +106,41 @@ export default {
       return new Response(body, { status: Number(fail[1]), headers: { 'content-type': 'text/html; charset=utf-8' } });
     }
     if (url.pathname === '/asset.js') {
+      if (request.headers.get('if-none-match') === ASSET_ETAG) {
+        return new Response(null, { status: 304, headers: { etag: ASSET_ETAG } });
+      }
       return new Response('export const og = "Gay Cruise Bingo";', {
         status: 200,
-        headers: { 'content-type': 'application/javascript' },
+        headers: { 'content-type': 'application/javascript', etag: ASSET_ETAG },
       });
     }
     if (url.pathname === '/no-type') {
       return new Response('<!doctype html><meta property="og:title" content="Gay Cruise Bingo">', { status: 200 });
     }
     const body = env.INDEX_HTML;
+    const bytes = new TextEncoder().encode(body);
+    if (request.headers.get('range')) {
+      const partial = bytes.slice(0, ${PARTIAL_BYTES});
+      return new Response(partial, {
+        status: 206,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'content-range': 'bytes 0-' + (partial.byteLength - 1) + '/' + bytes.byteLength,
+          'content-length': String(partial.byteLength),
+          etag: INDEX_ETAG,
+        },
+      });
+    }
+    if (request.headers.get('if-none-match') === INDEX_ETAG) {
+      return new Response(null, { status: 304, headers: { etag: INDEX_ETAG } });
+    }
     return new Response(body, {
       status: 200,
       headers: {
         'content-type': 'text/html; charset=utf-8',
-        'content-length': String(new TextEncoder().encode(body).byteLength),
+        'content-length': String(bytes.byteLength),
+        etag: INDEX_ETAG,
+        'last-modified': '${LAST_MODIFIED}',
         'x-origin-forwarded-host': request.headers.get('x-forwarded-host') ?? '',
       },
     });
@@ -163,9 +197,27 @@ function miniflare(): Miniflare {
   return instance;
 }
 
-async function request(instance: Miniflare, host: string, path = '/'): Promise<Response> {
-  return instance.dispatchFetch(`https://${host}${path}`) as unknown as Promise<Response>;
+async function request(
+  instance: Miniflare,
+  host: string,
+  path = '/',
+  init?: RequestInit,
+): Promise<Response> {
+  return instance.dispatchFetch(
+    `https://${host}${path}`,
+    init as Parameters<Miniflare['dispatchFetch']>[1],
+  ) as unknown as Promise<Response>;
 }
+
+/** What a browser sends on a document navigation, with a cached copy of the
+ *  origin's baked `index.html` to revalidate. */
+const CONDITIONAL_NAVIGATION: RequestInit = {
+  headers: {
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
+    'if-none-match': INDEX_ETAG,
+    'if-modified-since': LAST_MODIFIED,
+  },
+};
 
 /** The `content` of one meta tag, read out of the served markup the way a
  *  crawler's parser would rather than by string inclusion. */
@@ -244,8 +296,57 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     expect(html.trimEnd().endsWith('</html>')).toBe(true);
     expect(html).toContain('<script type="module"');
     expect(response.headers.get('content-length')).toBeNull();
+    // The origin's validators go the same way and for the same reason: they
+    // describe those pre-rewrite bytes, identically for every hostname.
+    expect(response.headers.get('etag')).toBeNull();
+    expect(response.headers.get('last-modified')).toBeNull();
     expect(response.headers.get('x-event-router')).toBe('head-1');
     expect(response.headers.get('x-event-router-revision')).toBe('42');
+  });
+
+  it('answers a conditional navigation with a rewritten 200 rather than the origin’s 304', async () => {
+    // The origin's `index.html` really is unchanged, so its `304` is true —
+    // and wrong for this host, because the registry resolves it to an Edition
+    // the cached copy was not branded for. The router must therefore not carry
+    // the validators to it.
+    const instance = miniflare();
+    const response = await request(instance, VACAY_ALTERNATE, '/', CONDITIONAL_NAVIGATION);
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('vacay').documentTitle);
+    // Nothing for the client to revalidate WITH next time, which is what makes
+    // the fix converge instead of recurring one cache generation later.
+    expect(response.headers.get('etag')).toBeNull();
+    expect(response.headers.get('last-modified')).toBeNull();
+  });
+
+  it('still lets a conditional asset request be answered 304', async () => {
+    // The other half: an asset is never rewritten, so its revalidation is
+    // worth exactly what it was worth before, and its validators travel.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/asset.js', {
+      headers: { accept: '*/*', 'if-none-match': ASSET_ETAG },
+    });
+    expect(response.status).toBe(304);
+    expect(response.headers.get('etag')).toBe(ASSET_ETAG);
+  });
+
+  it('relays a 206 byte-for-byte with its content-range intact', async () => {
+    // A `Range` answer is a window described by byte offsets. Rewriting inside
+    // it while relaying the offsets that frame it is how a client assembling
+    // or resuming the document reassembles a corrupted one.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
+      headers: { range: `bytes=0-${PARTIAL_BYTES - 1}` },
+    });
+    const origin = new TextEncoder().encode(boundIndexHtml());
+    const partial = origin.slice(0, PARTIAL_BYTES);
+
+    expect(response.status).toBe(206);
+    expect(response.headers.get('content-range')).toBe(
+      `bytes 0-${partial.byteLength - 1}/${origin.byteLength}`,
+    );
+    expect(response.headers.get('content-length')).toBe(String(partial.byteLength));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(partial);
   });
 
   it.each([404, 500, 502])('relays a %i from the origin untouched', async (status) => {
