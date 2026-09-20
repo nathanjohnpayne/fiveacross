@@ -209,13 +209,22 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
     await expect(page.locator('.install-prompt')).toBeVisible({ timeout: 10_000 });
 
     // Open a real claim sheet (the ＋ "Add proof" affordance on the
-    // now-marked Square) and leave it open — UpdatePrompt must defer while
-    // it's up. ASSERTED, not probed (#1122): `locator.isVisible()` never waits,
-    // so the old best-effort check could report the sheet closed purely because
-    // it ran in the same tick as the click, quietly dropping the defer leg this
-    // case exists to prove.
-    await page.locator('.grid .cell').filter({ hasText: firstPrompt }).locator('button.proofbtn').click();
-    await expect(page.locator('.sheet-title', { hasText: firstPrompt })).toBeVisible({ timeout: 10_000 });
+    // now-marked Square) — UpdatePrompt must defer while it's up. ASSERTED,
+    // not probed (#1122): `locator.isVisible()` never waits, so the old
+    // best-effort check could report the sheet closed purely because it ran in
+    // the same tick as the click, quietly dropping the defer leg this case
+    // exists to prove. Wrapped as a pair because the case opens and closes the
+    // sheet TWICE — once around the arriving build, once around a banner
+    // already on screen (Codex P2 on #1249, at the second open below).
+    const openClaimSheet = async () => {
+      await page.locator('.grid .cell').filter({ hasText: firstPrompt }).locator('button.proofbtn').click();
+      await expect(page.locator('.sheet-title', { hasText: firstPrompt })).toBeVisible({ timeout: 10_000 });
+    };
+    const closeClaimSheet = async () => {
+      await page.getByRole('button', { name: 'Cancel' }).click();
+      await expect(page.locator('.sheet-title', { hasText: firstPrompt })).toHaveCount(0);
+    };
+    await openClaimSheet();
 
     // Force a genuinely new deployed build: re-run the SAME `vite build` the
     // webServer used, with one inert env var bumped (GITHUB_SHA — vite.config.ts's
@@ -270,11 +279,22 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
         await reg?.update();
       });
 
-      // Wait on the WORKER, not on a timer (#1122). `registration.waiting`
-      // becoming non-null IS the event `useRegisterSW` turns into
-      // `needRefresh`, so the suppression assertion below only means anything
-      // once it has happened; a fixed sleep either asserted too early (proving
-      // nothing) or padded every run for no reason.
+      // Wait on the WORKER, not on a timer (#1122) — but as a PRECONDITION,
+      // not as the synchronisation the defer leg rests on (Codex P2 on #1249).
+      // `registration.waiting` becoming non-null is what eventually becomes
+      // `needRefresh`, and it is the only thing that can be waited on while
+      // the sheet is up, but it is NOT the same instant: workbox-window holds
+      // its `waiting` dispatch back by 200 ms (`WAITING_TIMEOUT_DURATION`,
+      // workbox-window 7.4.0 `src/Workbox.ts`) and vite-plugin-pwa's
+      // `registerSW` raises `needRefresh` only from that later event
+      // (`wb.addEventListener('waiting', showSkipWaitingPrompt)`,
+      // `dist/client/build/register.js`). A poll that catches the worker
+      // inside that 200 ms is therefore ahead of the app. It stays because it
+      // tells the two failures apart — no replacement worker was ever built,
+      // versus the app never reacted to one — and because a fixed sleep either
+      // asserted too early (proving nothing) or padded every run for no
+      // reason. What carries the defer claim is the SECOND sheet, opened
+      // further down against a banner that has already been seen on screen.
       //
       // It must be `expect.poll` over an async `page.evaluate` — the idiom
       // `fireFakeInstallPrompt` above already uses — and NOT
@@ -299,18 +319,42 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
         )
         .toBe(true);
 
-      // Deferred: needRefresh is true internally, but the claim sheet being
-      // open must suppress the banner.
-      await expect(page.locator('.update-prompt')).toHaveCount(0);
-      await page.screenshot({ path: `${SHOTS}/pwa-update-deferred-sheet-open.png`, fullPage: true });
-      await page.getByRole('button', { name: 'Cancel' }).click();
-
-      // Now visible (sheet closed) — urgent priority banner, real copy/actions.
+      // The build landed UNDER an open sheet — the first acceptance bullet's
+      // own ordering (specs/d15-pwa-toasts.md) — and no banner is on screen.
+      // Read for what it is: a sample, not the proof. Nothing observable from
+      // out here tells "the sheet is suppressing it" apart from "it is not
+      // eligible yet", because `needRefresh` has no reader outside the React
+      // tree and the banner it drives is the very thing under suppression.
+      // The screenshot is of that state.
       const updateToast = page.locator('.update-prompt');
+      await expect(updateToast).toHaveCount(0);
+      await page.screenshot({ path: `${SHOTS}/pwa-update-deferred-sheet-open.png`, fullPage: true });
+      await closeClaimSheet();
+
+      // Sheet closed with `needRefresh` still true — the banner appears
+      // immediately (third acceptance bullet), urgent priority, real
+      // copy/actions. This is ALSO the application-level commit signal: a
+      // rendered `.update-prompt` is `needRefresh` having reached React state,
+      // which is the one fact no worker-side read can establish.
       await expect(updateToast).toBeVisible({ timeout: 20_000 });
       await expect(updateToast).toHaveAttribute('role', 'status');
       await expect(updateToast.getByRole('button', { name: 'Reload' })).toBeVisible();
       await expect(updateToast.getByRole('button', { name: 'Not now' })).toBeVisible();
+
+      // The defer leg (second acceptance bullet), re-run from a state where
+      // the flag is KNOWN to have committed: the banner was on screen one
+      // assertion ago, so it withdrawing here can only be
+      // `useClaimSheetOpen()` withdrawing it, and this assertion cannot pass
+      // for the reason the sampled one above can (Codex P2 on #1249).
+      // Deterministic in both directions — `toHaveCount` retries, so a banner
+      // that stays up fails rather than races.
+      await openClaimSheet();
+      await expect(updateToast).toHaveCount(0);
+      await closeClaimSheet();
+      // And it comes straight back off the same already-true `needRefresh` —
+      // "no re-check needed" (specs/d15-pwa-toasts.md § "Update banner: defer
+      // while a claim sheet is open", third acceptance bullet).
+      await expect(updateToast).toBeVisible({ timeout: 20_000 });
 
       // Stacking: both toasts visible at once (MAX_VISIBLE_TOASTS=2), update
       // ranked ABOVE install (urgent outranks invitational — lower --toast-index).
