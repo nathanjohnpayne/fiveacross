@@ -255,6 +255,27 @@ describe('dealDayCard — the join is a precondition (#1158)', () => {
     expect(writtenBoard()).not.toBeNull();
   });
 
+  it('writes NOTHING for a MALFORMED joinedAt, and deals once the join repairs it to a number (Codex P2, round 6)', async () => {
+    // The third state a nullish-only repair used to strand: the row is
+    // self-writable and the rules validate no field on it (ADR 0001), so
+    // `joinedAt` can hold a string. It is not a number, so the guard no-ops
+    // exactly as it does for an unstamped row — and that no-op resolves
+    // itself, because `joinAndDeal` now repairs any non-number stamp (see
+    // `src/components/w1-board-deal-join.test.tsx` § "REPAIRS a malformed
+    // joinedAt"). Here is the other half of that chain: the same row deals
+    // the moment the stamp is numeric.
+    readyDay();
+    H.player = { uid: 'sailor-1', displayName: 'Sailor', joinedAt: 'yesterday' };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+    expect(H.txSet).not.toHaveBeenCalled();
+
+    H.player = { uid: 'sailor-1', displayName: 'Sailor', joinedAt: PAST };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+    expect(writtenBoard()).not.toBeNull();
+  });
+
   it('deals for a row whose stored uid DISAGREES with the document it lives at — same reason', async () => {
     // The other half of "the field is not the identity": only the owner or an
     // Admin can write `events/{id}/players/{uid}` and only at that address, so

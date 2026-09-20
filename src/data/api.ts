@@ -543,7 +543,23 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
       // Identity always merged; aggregates only for fields not already present, so a
       // racing `dealDayCard` dayStats write is never clobbered back to zero.
       const seed: Record<string, unknown> = { uid: u.uid, displayName, photoURL };
-      if (existing?.joinedAt == null) seed.joinedAt = Date.now();
+      // Stamped whenever the stored value is NOT a number — the exact
+      // complement of `alreadyJoined` above, and of `dealDayCard`'s own gate
+      // and `Board`'s `playerJoined` (Codex P2, #1158 review round 6), so all
+      // four predicates are one rule. A nullish-only check left a third state
+      // unrepairable: `players/{uid}` is self-writable and `firestore.rules`
+      // validates no field on it (ADR 0001), so a pre-existing row can carry
+      // a string or an object here. Every reader calls such a row UNJOINED,
+      // and the repair skipped it because the field was not nullish — so the
+      // stamp never became numeric, the Day deal no-opped forever, and the
+      // Card sat on "Dealing…" across every repeat of the join. Repairing on
+      // the predicate the readers use is what makes that no-op self-resolving.
+      // `NaN` and `Infinity` are deliberately LEFT ALONE: they are `typeof
+      // number`, so every predicate already reads that row as joined, and the
+      // Player is identified by the document id regardless — narrowing to
+      // `Number.isFinite` would re-stamp a joined row on every visit and buy
+      // nothing (CodeRabbit's finding to that effect was rebutted).
+      if (typeof existing?.joinedAt !== 'number') seed.joinedAt = Date.now();
       if (typeof existing?.bingoCount !== 'number') seed.bingoCount = 0;
       if (typeof existing?.squaresMarked !== 'number') seed.squaresMarked = 0;
       if (existing?.firstBingoAt === undefined) seed.firstBingoAt = null;

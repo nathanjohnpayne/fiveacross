@@ -498,6 +498,31 @@ describe('joinAndDeal freeze-at-join', () => {
     expect(seed).not.toHaveProperty('bingoCount'); // aggregates untouched
   });
 
+  it('daily: REPAIRS a malformed joinedAt to a number, so the Day deal it gates stops no-opping (Codex P2, #1158 round 6)', async () => {
+    // `players/{uid}` is self-writable and `firestore.rules` validates no field
+    // on it (ADR 0001), so a pre-existing row can carry a non-number here. Every
+    // reader of the marker calls that row unjoined — `alreadyJoined`, `Board`'s
+    // `playerJoined` and `dealDayCard`'s own guard — but while the repair below
+    // only fired for a NULLISH value the stamp could never become numeric, and
+    // the Day Card sat on "Dealing…" however many times the join re-ran.
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // saved profile: none
+    H.getDoc.mockResolvedValueOnce({ exists: () => true, data: () => ({ days: [{ index: 0 }] }) }); // mode: daily
+    H.txGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ uid: 'sailor-1', joinedAt: 'yesterday', bingoCount: 3, reshufflesUsed: 2 }),
+    });
+
+    // Not already joined — the row carries no usable stamp — so this IS the
+    // analytic-worthy first join, exactly as an unstamped row would be.
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(true);
+
+    const seed = H.txSet.mock.calls[0][1] as Record<string, unknown>;
+    expect(typeof seed.joinedAt).toBe('number'); // repaired, not skipped
+    expect(seed).not.toHaveProperty('bingoCount'); // aggregates still untouched
+    expect(seed).not.toHaveProperty('reshufflesUsed'); // and no rules-denied rewind
+  });
+
   it('deals once from the active non-free pool (24 Prompts + marked Free Space)', async () => {
     const docs = [...activeItems(30), mkItem('free', true)].map((it) => ({ data: () => it }));
     H.getDocs.mockResolvedValueOnce({ docs });
