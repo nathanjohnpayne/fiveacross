@@ -13,7 +13,7 @@ Before #688, they had no generator. The three per-Edition renders landed as bina
 | `public/og-fiveacross.png` | Five Across unfurl, 1200×630 | same |
 | `plans/og-images/*-og.png` | the wireframes' reference copies | written from the same render |
 | `public/og-default.png` | the superseded bare-URL unfurl, 2400×1260 | `scripts/og/og-default.html` |
-| `plans/og-images/share-final-photo-*.png` | reference pictures of the final-standings share card | none — see [Share cards](#share-cards) |
+| `plans/og-images/share-final-photo-*.png` | reference pictures of the final-standings share card, 600×750 | the `.shc` artboards in `plans/daily-cards-wireframes.html` — see [Share cards](#share-cards) |
 
 `plans/og-images/<slug>-og.png` must stay **byte-identical** to its `public/` counterpart. The renderer writes both from one screenshot so they cannot drift, and `src/recon-share-og.test.ts` fails if they ever do.
 
@@ -69,9 +69,21 @@ It prints a per-band difference score — eyebrow, wordmark, byline/rule, descri
 
 ## Share cards
 
-`plans/og-images/share-final-photo-*.png` are a different kind of asset: they are static pictures of a **live component**. `src/components/ShareCard.tsx` draws the real card's footer as `${appName} ${lexicon.shareMark}`, so when the brand table changes a mark the shipped app is already correct and only these reference pictures are stale.
+`plans/og-images/share-final-photo-*.png` are a different kind of asset: they are pictures of the final-standings share card in its photo-hero composition, embedded by the `fx-share-final-photo-*` frames in `plans/daily-cards-wireframes.html`. The app renders that card on the Player's own device (`src/components/ShareCard.tsx`, ADR 0005) from a real photo blob, so the shipped component is not something a script can screenshot offline. What it answers to is: the wireframes doc draws each card as a live `.shc` artboard at half scale — 300×375 CSS px representing the rendered 600×750 — and the committed PNGs are 2× captures of exactly those elements.
 
-That is all #681 needed from them, so there is a narrow tool for exactly that line:
+Until #887 that capture was hand-driven, and it produced both failures an unreproducible asset produces. The GCB refresh in #867 caught the adjacent Vacay artboard in shot and composited it over the upper-right corner, obscuring the wordmark line and half of `FINAL STANDINGS`; and the same picture still read `Turntilla` on its 👑 row long after the artboard beside it was corrected to `Logan Murdock`, because nobody was going to re-screenshot three cards for one row. So there is a renderer:
+
+```bash
+node scripts/og/render-share-rasters.mjs --edition gcb
+```
+
+It opens the wireframes document in Playwright's chromium at `deviceScaleFactor: 2`, rewrites the footer line from the brand table (`${appName} ${lexicon.shareMark}`, uppercased by the artboard's own CSS), and screenshots the artboard. The capture is staged beside its destination and only replaces the committed picture once it is 600×750 and its upper-right quadrant is not mostly cream — the #887 overlay, expressed as a check. `--edition` is required and `--all` is the explicit opt-in, for the same reason the unfurl renderer gives; `--out <dir>` writes to a scratch directory for a first look, and `--check` reports without writing.
+
+`src/recon-share-og.test.ts` holds the other end: the renderer has to exist and name the artboards, the pictures have to be 600×750 truecolor, and the two dark-ground cards have to stay free of a composited overlay. That guard runs in `npm test`, which is why its PNG reader (`scripts/og/png-pixels.mjs`) is a dependency-free decoder rather than the headless-Chromium canvas the renderers next door use.
+
+**Changing what the cards say is an edit to the artboard, not to the picture.** The frame in `plans/daily-cards-wireframes.html` is the source; re-run the renderer for the Edition whose frame moved.
+
+The one exception is the brand footer, which has a narrower tool because it is the one line the brand table owns outright. That is all #681 needed:
 
 ```bash
 node scripts/og/render-share-footer.mjs --edition vacay
@@ -81,15 +93,15 @@ It repaints the footer band with the card's own background — sampled from the 
 
 The clear is done row by row, walking in from each edge until the pixel already matches the interior ground, rather than filling the row's full width. The obvious version is a full-width `fillRect`, and it is wrong: these cards carry a rounded outer border, so it paints over the card's own outline and leaves a 32-row gap in it on both sides. Deriving the interior span per row keeps that correct through the corner curvature and on any border width or colour. Verify with `--no-crush`, which skips the `pngquant` pass — quantisation perturbs pixels everywhere, so it is impossible to prove the redraw stayed inside the band from a crushed file.
 
-Unlike the unfurl artwork, these **are** quantised: they are soft-focus reference pictures in `plans/`, not brand assets crawlers serve, and the canvas re-encode hands back a lossless PNG that is larger than the original. Quantising takes Vacay's card from 244 KB to 40 KB at a measured mean channel difference of 0.68/255 with no visible banding — a smaller file than the one it replaces.
+That tool reaches for `pngquant` after its canvas re-encode, on the reasoning that these are soft-focus reference pictures in `plans/` rather than brand assets crawlers serve. All three committed cards are nevertheless **truecolor** (PNG colour type 2), which is what `scripts/og/render-share-rasters.mjs` writes and what `src/recon-share-og.test.ts` now requires, for the same reason the unfurl renders are truecolor: a palette pass perturbs pixels everywhere, so "only the thing you meant to move moved" stops being provable. Run the footer refresher with `--no-crush` to keep that true.
 
 `--edition` is required rather than defaulting to all three: a re-render rewrites the PNG whether or not its mark moved, so running the full set for a one-Edition change commits binary diffs that carry no content change.
 
-**If the card's layout ever changes, this is the wrong tool.** These references then need re-screenshotting from the real component, because nothing else in them (the photo hero, the standings rows, the honors chips) has a design source in this repo.
+**If anything other than the footer line changes, this is the wrong tool** — re-render from the artboard instead. It is also the wrong tool for a layout change, which is an edit to the artboard first and a re-render second.
 
 ## After a change
 
-1. `npx vitest run src/recon-share-og.test.ts` — mirrors byte-identical, dimensions still 1200×630, no brand copy retyped into the generator.
+1. `npx vitest run src/recon-share-og.test.ts` — mirrors byte-identical, unfurl dimensions still 1200×630, no brand copy retyped into the generator, and the share-card references still 600×750 truecolor with nothing composited over them.
 2. Check the file sizes the renderer prints. The renders are **truecolor**, like the #609 originals, and land near 250 KB — comfortably inside WhatsApp's 600 KB `og:image` cap. The renderer only reaches for `pngquant` if a render misses a 500 KB budget, and says so loudly when it does. That is deliberate: `render-og-default.mjs` next door always quantises because at 2400×1260 it is ~1.6 MB lossless, but at 1200×630 there is nothing to buy, and the palette is not free — it takes a corner radial wash from ~70 distinct values across a row to ~16, which is invisible at size but shows as contour rings under contrast amplification.
 3. These are static assets under `public/`, so they publish on the next hosting deploy of the project that serves them — `og-vacay.png` and `og-fiveacross.png` are served from `fiveacross.web.app` per the `ogImage` rows in `src/edition-brands.ts`, `og-gcb.png` from the GCB project.
 4. Crawler caches hold old unfurls. The URLs do not change, so previously-unfurled links keep the old picture until each platform re-fetches.
