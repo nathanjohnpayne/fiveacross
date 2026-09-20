@@ -99,6 +99,46 @@ available_reviewers:
   - nathanpayne-codex
 
 # ---------------------------------------------------------------------------
+# Non-Reviewer Identities (#1026, machinery from mergepath#1080)
+# ---------------------------------------------------------------------------
+# Accounts that hold write access so automation can run, and that must NEVER
+# carry reviewer standing. GitHub counts an approval from ANY account with write
+# access toward `required_approving_review_count` and offers nothing to tell a
+# service account apart from a person — both are `type: "User"` — so without
+# this declaration a CI token that reaches a review command satisfies branch
+# protection on its own. That is not hypothetical: on 2026-08-22 a stale
+# agent→1Password-item map handed a local Codex session the `nathanpayne-robot`
+# token, which posted two APPROVED reviews on
+# nathanjohnpayne/nathanpaynedotcom#668 and left an ordinary under-threshold PR
+# reading APPROVED/CLEAN on the standing of a CI account.
+#
+# `scripts/merge-clearance-gate.sh` reads this list on EVERY lane (through
+# `read_non_reviewer_identities` in scripts/lib/reviewers-helpers.sh) and blocks
+# when a login here holds a latest-state APPROVED review anywhere on the PR. The
+# check is PR-wide, not HEAD-pinned, because whether an older approval still
+# counts is decided by `dismiss_stale_reviews`, which the gate cannot read — a
+# HEAD-pinned check would let a non-reviewer approve and then push past it. A
+# push that dismisses the approval flips its latest state to DISMISSED and
+# clears the gate. The derive-only query modes are exempt by design.
+#
+# Shape is load-bearing. Absent, empty or `[]` is a legitimate declaration
+# meaning "no such identity here" and makes the check inert. A non-empty INLINE
+# value the block reader cannot consume — a flow list like
+# `[nathanpayne-robot]`, or a bare scalar — exits 2 rather than passing
+# silently, because that shape is otherwise indistinguishable from an absent
+# key. Keep the dash-prefixed block form below, one login per line.
+#
+# Deny-list, not allow-list: an allow-list would have to answer "is this login a
+# human?" to avoid blocking legitimate approvals, and GitHub gives no such
+# signal. Only accounts this repo has DECLARED non-reviewers belong here. The
+# review-provider App bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`)
+# deliberately do not, because Phase 2.5 and Phase 4a depend on their standing.
+#
+# See REVIEW_POLICY.md § Non-reviewer identities.
+non_reviewer_identities:
+  - nathanpayne-robot
+
+# ---------------------------------------------------------------------------
 # Default External Reviewer
 # ---------------------------------------------------------------------------
 # When the agent needs to suggest an external reviewer in a handoff message,

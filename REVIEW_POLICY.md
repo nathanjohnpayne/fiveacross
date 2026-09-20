@@ -39,6 +39,30 @@ Each agent has a dedicated reviewer identity used exclusively for code review:
 
 To add a new agent, register a GitHub account following the pattern `nathanpayne-{agent}` and add it to the `available_reviewers` list in the repo's `review-policy.yml`.
 
+### Non-reviewer identities
+
+Some accounts hold write access purely so automation can run, and must never carry reviewer standing. They are declared as a deny-list in `.github/review-policy.yml`:
+
+```yaml
+non_reviewer_identities:
+  - nathanpayne-robot
+```
+
+The declaration exists because GitHub counts an approval from **any** account with write access toward `required_approving_review_count`, and offers no way to tell a service account apart from a person — both are `type: "User"`. On 2026-08-22 a stale agent→1Password-item map handed a local Codex session the `nathanpayne-robot` CI token; it posted two `APPROVED` reviews on `nathanjohnpayne/nathanpaynedotcom#668`, and that one-approval repo read `APPROVED`/`CLEAN` on the standing of a CI account until the reviews were dismissed. No gate was looking: the identity arms of `merge-clearance-gate.sh` only ran on the Dependabot and external-review lanes, and the PR was an ordinary under-threshold one.
+
+`scripts/merge-clearance-gate.sh` now runs an identity assertion on **every** lane and fails closed when a declared non-reviewer holds a latest-state `APPROVED` review anywhere on the PR (mergepath#1080). The rules it enforces:
+
+- The check is **PR-wide, not HEAD-pinned.** Whether an older approval still counts is decided by `dismiss_stale_reviews`, which the gate cannot read, so pinning to HEAD would let a non-reviewer approve and then push to slip past it. A push that dismisses the approval flips its latest state to `DISMISSED` and clears the gate.
+- **Absent, empty or `[]` is legitimate** and makes the check inert, so a repo that has not adopted the key keeps working exactly as before.
+- **A non-empty inline value the block reader cannot consume** — a YAML flow list such as `[nathanpayne-robot]`, or a bare scalar — exits 2 rather than passing silently, because that shape is otherwise indistinguishable from an absent key. Use the dash-prefixed block form, one login per line.
+- **Query modes are exempt.** `--derive-rate-limit-protection` and the other derive-only modes answer narrow questions about review coverage; folding an identity verdict into those booleans would change what their callers think they asked.
+
+It is a deny-list rather than an allow-list on purpose. An allow-list of `available_reviewers` would have to answer "is this login a human?" to avoid blocking legitimate human approvals, and GitHub gives no such signal. A deny-list of identities the repo has declared has no false positives, and encodes a claim this document already makes in prose — the PAT lookup table below marks `nathanpayne-robot` as "CI (not a reviewer)".
+
+The review-provider App bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are deliberately **not** listed: Phase 2.5 and Phase 4a depend on their review standing.
+
+When the gate blocks on this rule, dismiss the review and then find out which process is holding that token — an approval from a CI account is a credential-routing incident, not a review to argue with.
+
 ### Identity Rules
 
 - An agent **never** reviews its own code under the same identity that authored it.
