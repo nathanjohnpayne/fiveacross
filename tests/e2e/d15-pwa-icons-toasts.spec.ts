@@ -275,11 +275,29 @@ test.describe('update banner: defers while a claim sheet is open; stacks over th
       // `needRefresh`, so the suppression assertion below only means anything
       // once it has happened; a fixed sleep either asserted too early (proving
       // nothing) or padded every run for no reason.
-      await page.waitForFunction(
-        async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
-        undefined,
-        { timeout: 30_000 },
-      );
+      //
+      // It must be `expect.poll` over an async `page.evaluate` — the idiom
+      // `fireFakeInstallPrompt` above already uses — and NOT
+      // `page.waitForFunction`, which cannot express this at all: Playwright's
+      // in-page loop is synchronous and truthiness-based (`const success =
+      // predicate(); if (success) fulfill(success);`), so an `async` predicate
+      // hands it a Promise, a Promise is always truthy, and it settles on the
+      // FIRST tick with whatever that Promise later resolves to — true or
+      // false, no retry, no timeout. That matters here rather than being
+      // merely untidy: `reg.update()` two statements up resolves while the
+      // replacement worker is still `installing` (Chrome resolves the update
+      // job inside the Install step, before the whole precache install runs),
+      // so the first read is false and the suppression assertion below would
+      // run at a moment when `needRefresh` could not possibly be true — and
+      // `Cancel` would close the sheet before the worker ever parked in
+      // `waiting`, retiring the one leg this case is named for.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.waiting),
+          { timeout: 30_000, message: 'the replacement worker never parked in `waiting`' },
+        )
+        .toBe(true);
 
       // Deferred: needRefresh is true internally, but the claim sheet being
       // open must suppress the banner.
