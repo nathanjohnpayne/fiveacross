@@ -29,7 +29,11 @@ PROJECT_ID='demo-gaycruisebingo-e2e'
 # presence check reports success on machines that have none that actually
 # work (keg-only Homebrew openjdk plus the macOS /usr/bin/java stub, #1018).
 # Shared with scripts/test-rules.sh, scripts/test-offline.sh and
-# scripts/emulator.sh so the probe lives in one place.
+# scripts/emulator.sh — the emulator-backed npm entry points — so the probe
+# lives in one place for all four. scripts/marketing-shots.sh boots an
+# emulator too but keeps its own equivalent inline copy of the probe; it is
+# deliberately not wired to the shared helper, so changing that helper does
+# not change marketing-shots.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/ensure-java.sh
 source "$SCRIPT_DIR/lib/ensure-java.sh"

@@ -44,7 +44,9 @@ Run the main application test/build gates CI runs. This part of [`app-ci`](.gith
 | `npm run test:rules` | Firestore/Storage security-rules suite against the emulators (needs Java) |
 | `npm run test:offline` | Offline-durability suite against its own Auth/Firestore emulator run (needs Java) |
 
-`npm run test:e2e` is a **local** Playwright smoke runner — it is intentionally *not* run in CI. Run it locally when you touch a user-facing flow end-to-end.
+`npm run test:e2e` is a **local** Playwright smoke runner (needs Java) — it is intentionally *not* run in CI. Run it locally when you touch a user-facing flow end-to-end.
+
+**The emulator-backed scripts need a JDK.** `npm run test:rules`, `npm run test:offline`, `npm run test:e2e` and `npm run emulator` all boot the Firebase emulators, and the Firestore emulator is a Java program. Each of those four sources [`scripts/lib/ensure-java.sh`](scripts/lib/ensure-java.sh) first, which probes by *running* `java -version` rather than by looking for the binary — macOS ships a `/usr/bin/java` stub that a presence check finds but that exits 1 when invoked — and then falls back to `JAVA_HOME`, `/usr/libexec/java_home`, and Homebrew's keg-only `openjdk` prefixes, prepending the first one that actually runs. If none does, the script stops before firebase with an actionable message: install a JDK with `brew install openjdk@21` (Homebrew's openjdk is keg-only, so no `brew link` is needed — the probe finds the keg). The helper has its own suite, `npm run test:ensure-java`. `scripts/marketing-shots.sh` boots an emulator too and keeps its own equivalent copy of the probe.
 
 At minimum, `npm run typecheck` and `npm test` should be green before every push; run the rules/functions suites too when you touch `firestore.rules`, `storage.rules`, or `functions/`.
 

@@ -35,6 +35,11 @@ PROJECT_ID='demo-fiveacross-marketing'
 # The probe RUNS java rather than testing `command -v`: macOS ships a
 # /usr/bin/java stub that exists on PATH and exits 1, so a presence check
 # passes on exactly the machines that have no JDK at all.
+#
+# This is a deliberate standalone copy of the probe the npm emulator entry
+# points share via scripts/lib/ensure-java.sh (#1018) — this script is not an
+# npm script and already worked, so it was left on its own copy. Keep the two
+# in step by hand: a fix to one does NOT reach the other.
 java_works() { java -version >/dev/null 2>&1; }
 if ! java_works; then
   # Both Homebrew prefixes, versioned and unversioned: /opt/homebrew on Apple

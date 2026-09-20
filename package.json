@@ -22,6 +22,7 @@
     "test:offline": "scripts/test-offline.sh",
     "test:functions": "npm --prefix functions install && vitest run --config vitest.functions.config.ts",
     "test:deploy": "bash tests/test_deploy.sh",
+    "test:ensure-java": "bash tests/test_ensure_java.sh",
     "test:e2e": "scripts/test-e2e.sh",
     "worker:dev": "npm --prefix worker install && npm --prefix worker run dev",
     "worker:deploy": "scripts/worker-deploy.sh",
