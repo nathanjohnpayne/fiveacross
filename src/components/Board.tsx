@@ -726,12 +726,21 @@ export default function Board() {
   // string either way: its sheet only opens after a render with the row loaded in
   // practice, and #78 pins auth as its explicit pre-load fallback.
   const identityKnown = !playerLoading && (player !== null || playerConfirmed);
-  // Whether the join has actually landed on the subscribed row (#1158). `uid`
-  // is the marker because `joinAndDeal` is its only writer, in the same merge
-  // that carries `displayName` and stamps `joinedAt` — a row created by an
-  // earlier Day deal holds a `dayStats` bucket alone. Distinct from
-  // `identityKnown` above, which asks whether the SUBSCRIPTION has settled.
-  const playerJoined = uid !== undefined && player?.uid === uid;
+  // Whether the join has actually landed on the subscribed row (#1158).
+  // `joinedAt` is the marker: `joinAndDeal` is its only writer (it stamps the
+  // field in the same merge that carries `uid`/`displayName`/`photoURL`, and
+  // nothing else in the app ever writes it), and the converter does not
+  // synthesise it — so its presence means the join COMMITTED.
+  //
+  // Deliberately NOT `player.uid`, which `dealDayCard` checks on its own RAW
+  // read: `playerConverter` pins `uid` to the doc id on every converted read
+  // (src/data/converters.ts, #1151), so on this subscription `player.uid ===
+  // uid` is true the moment the DOCUMENT exists — for a `{dayStats}`-only row
+  // left by a pre-#1158 deal, or a `{theme}`-only row `savePlayerTheme`
+  // created from More — and the two sides would then disagree about exactly
+  // the case the guard exists for. Distinct from `identityKnown` above, which
+  // asks whether the SUBSCRIPTION has settled.
+  const playerJoined = uid !== undefined && typeof player?.joinedAt === 'number';
   const { data: event } = useEventDoc();
   // The Day schedule (daily-cards-spec § "Data model"): `[]` on a not-yet-migrated
   // (legacy) Event or while the doc loads, which keeps the entire day-scoped path
@@ -1388,9 +1397,10 @@ export default function Board() {
     eventId,
     uid,
     displayName,
-    // `?? null` guards the undefined case, not just null: `dealDayCard` can create
-    // the player row with ONLY a `dayStats` bucket (the join-vs-deal race,
-    // api.ts:291), so a LOADED `player` can still lack the `photoURL` field
+    // `?? null` guards the undefined case, not just null: `dealDayCard` USED to
+    // create the player row with ONLY a `dayStats` bucket (the join-vs-deal
+    // race, closed by the fail-closed guard in `dealDayCard`, #1158) and rows
+    // of that shape persist, so a LOADED `player` can still lack the `photoURL` field
     // entirely (undefined, despite PlayerDoc typing it `string | null`). Passing
     // that undefined into a Moment `setDoc` throws "Unsupported field value:
     // undefined" and silently loses the whole BINGO/Blackout/First-to-BINGO
@@ -2862,8 +2872,9 @@ export default function Board() {
           // than `??`-chaining: PlayerDoc.photoURL is nullable, and a loaded row
           // with a null photo means "no avatar" — that null must win over the
           // stale auth photo, not be masked by it. The trailing `?? null` guards
-          // the UNDEFINED case (not just null): `dealDayCard` can create the
-          // player row with only a `dayStats` bucket (api.ts:291), so a loaded
+          // the UNDEFINED case (not just null): `dealDayCard` used to create the
+          // player row with only a `dayStats` bucket (the race its fail-closed
+          // guard now refuses, #1158) and such rows persist, so a loaded
           // `player` can lack `photoURL` entirely — and undefined into a proof
           // `setDoc`/transaction throws, dropping the proofed Mark's attribution.
           displayName={displayName}

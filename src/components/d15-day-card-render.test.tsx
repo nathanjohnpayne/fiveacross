@@ -326,6 +326,15 @@ describe('Board daily-cards wiring (#246)', () => {
     // made before the join committed is a no-op. The identity is therefore
     // part of what an attempt IS: without it in the in-flight key the Card
     // would sit on "Dealing…" until some unrelated render happened along.
+    //
+    // The middle step is the one that matters: a Player ROW that exists
+    // WITHOUT the join's identity. `playerConverter` pins `uid` to the doc id
+    // on every converted read, so a subscribed row's `uid` always matches and
+    // cannot tell "the row exists" from "the join landed" — `joinedAt` can,
+    // because `joinAndDeal` is its only writer and the converter never
+    // synthesises it (#1158 review round 1, finding 1). This shape is not
+    // hypothetical: a pre-#1158 Day deal left `{dayStats}` alone, and a Theme
+    // pick from More still creates `{theme}` alone.
     const now = Date.now();
     H.event = {
       claimMode: 'honor',
@@ -342,8 +351,21 @@ describe('Board daily-cards wiring (#246)', () => {
     rerender(<Board />);
     expect(H.dealDayCard).toHaveBeenCalledTimes(1);
 
+    // A row APPEARS, but it carries no identity — the shape the converter
+    // yields for a `{dayStats}`- or `{theme}`-only document. The join has
+    // still not landed, so this is not a new attempt.
+    H.player = { uid: 'u1', dayStats: {} } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
     // The join commits and the Player row arrives with its identity.
-    H.player = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null } as unknown as PlayerDoc;
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
     rerender(<Board />);
     expect(H.dealDayCard).toHaveBeenCalledTimes(2);
     expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);

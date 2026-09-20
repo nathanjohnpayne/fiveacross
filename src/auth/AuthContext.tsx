@@ -1683,21 +1683,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ) {
           track('join_event');
         }
-        // A DEFERRED join is not a completed deal (#1158). The Event was shut
-        // to gameplay when the join asked, so nothing was written and the join
-        // is still owed — for a first-time visitor, that means no Player row
-        // and no Board at all. Forgetting the gate inputs this attempt ran
-        // under is how that is recorded: the dedupe exists to stop TWO runs
-        // under one open gate, and a deferral means the gate's own work never
-        // happened, so the next evaluation must be allowed to try again rather
-        // than read the deferral as "already dealt for these inputs". The
-        // evaluation that matters is the Event reopening — `eventPlayPhase` is
-        // one of those inputs — but any other (a reconnect, an admission
-        // answer) resumes it just as well. Clearing a ref triggers no render,
-        // so this can never loop on its own.
-        if (dealt === 'deferred' && activeEventIdRef.current === ownedEventId) {
-          lastDealGateRef.current = null;
-        }
+        // A DEFERRED join is not a completed deal (#1158), and the deal gate's
+        // dedupe KEY is what records that: `eventPlayPhase` rides in it, so
+        // the Event reopening moves the key and reruns the join exactly once.
+        // Nothing is done HERE on a deferral — see the gate effect below for
+        // why clearing the recorded inputs from this callback would be dead
+        // weight at best and a re-ask per render at worst.
       },
       () => {},
     );
@@ -1886,6 +1877,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // rerun — while the Event stays closed the key does not move, so the
     // server-backed decline stays declined, and the flip back to `'open'`
     // changes the key once.
+    //
+    // The KEY is the WHOLE mechanism: a deferral deliberately does NOT clear
+    // the recorded inputs from `runDeal`'s settle. Every gate evaluation that
+    // could resume a deferred join already arrives with the record cleared or
+    // the key moved — the branch above clears it on offline/authority-lost/
+    // signed-out, the auth callback clears it on an account change, the
+    // Event-switch layout effect clears it on an Event change, an admission
+    // answer moves `state.kind`, and a reload starts from nothing. The ONLY
+    // evaluation left is the admission mirror catching up with an answer the
+    // coordinator already gave (the `begin` publish above re-renders in the
+    // same flush), which repeats the key EXACTLY — and it always runs before
+    // any join has settled, so clearing on a deferral could never have helped
+    // it. What it could do is turn a repeated-input evaluation into another
+    // forbidden join attempt, which is the opposite of "the server-backed
+    // decline stays declined". So the dedupe holds for a deferral exactly as
+    // it holds for a join (#1158 review round 1, finding 2).
     const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}\u0000${eventPlayPhase}`;
     if (lastDealGateRef.current === gate) return;
     lastDealGateRef.current = gate;

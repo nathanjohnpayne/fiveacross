@@ -506,9 +506,11 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     //
     // This must NOT early-return merely because a row EXISTS: `App` renders `Board`
     // while `runDeal()` is still in flight, so the lazy Day-Card effect can call
-    // `dealDayCard()` concurrently — and that write creates `players/{uid}` with
-    // ONLY a `dayStats` bucket. If that write wins the race, an `exists()`-only
-    // guard would return early and the row would be stranded WITHOUT
+    // `dealDayCard()` concurrently — and that write USED to create `players/{uid}`
+    // with ONLY a `dayStats` bucket (the race the fail-closed guard in
+    // `dealDayCard` now refuses, #1158). Pre-#1158 rows of that shape persist, and
+    // a Theme pick (`savePlayerTheme`) can still create a `{theme}`-only row, so an
+    // `exists()`-only guard would return early and leave the row stranded WITHOUT
     // uid/displayName/photoURL/joinedAt (a nameless leaderboard entry — Codex #247
     // P2). So the identity fields are ALWAYS merged, and the zeroed aggregates are
     // seeded only for fields the row doesn't already carry — so a concurrent
@@ -715,7 +717,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
  *     scheduler lag; the client shows the wait state rather than dealing from an
  *     unfrozen pool), or
  *   - a Day Card already exists for this Player+Day (mirrors `joinAndDeal`'s
- *     existing-board early return; re-opening never re-deals).
+ *     existing-board early return; re-opening never re-deals), or
+ *   - the Player row does not yet carry a `uid` matching the dealing Player —
+ *     the join has not committed, so this fails closed to it (#1158). Unlike
+ *     the three above, this one RESOLVES ITSELF: `joinAndDeal` merges the
+ *     identity a moment later and `Board` re-fires the lazy deal, which is why
+ *     a caller sees `false` here rather than a retryable rejection.
  */
 export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   const eventId = EVENT_ID;
@@ -861,12 +868,25 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // quiesce declined the join, the Card tab dealt anyway, and the Player
     // existed only as a statistics bucket.
     //
-    // `uid` is the marker because the join is its ONLY writer — `joinAndDeal`
-    // merges `{ uid, displayName, photoURL }` on every visit, in the same write
-    // that stamps `joinedAt` the first time — while every other writer of this
-    // row (this function, `setMark`, the profile mirror) only ever touches a row
-    // the join has already made. Requiring it to MATCH is free: the row is
-    // addressed by this uid, so anything else is a document from another Player.
+    // `uid` is the marker because `joinAndDeal` is its ONLY writer — it merges
+    // `{ uid, displayName, photoURL }` on every visit, in the same write that
+    // stamps `joinedAt` the first time. The marker is deliberately a FIELD the
+    // join writes rather than the row's EXISTENCE, because the row is not the
+    // join's to create alone: `savePlayerTheme`/`clearPlayerTheme` merge
+    // `{ theme }` onto `rawPlayer(uid)`, which CREATES the document when it is
+    // absent, and `firestore.rules` validates no field on `players/{uid}` at
+    // all (ADR 0001) — so a `{theme}`-only row with no identity commits. `More`
+    // renders while `runDeal`'s join is still in flight, exactly as `Board`
+    // does, which is how a brand-new account with no legacy data reaches that
+    // shape on an OPEN Event. (During the quiesce itself the theme write is
+    // denied by the same `eventOpenForPlay` arm that defers the join, so the
+    // deferral window cannot produce one; the window after play REOPENS can.)
+    // Requiring the field to MATCH is free: the row is addressed by this uid,
+    // so anything else is another Player's document.
+    //
+    // Read from the RAW snapshot, never through `playerConverter`, which pins
+    // `uid` to the doc id on every converted read (#1151) — `Board`'s own
+    // "has the join landed?" test keys on `joinedAt` for exactly that reason.
     //
     // Returning `false` rather than throwing keeps the no-op family this
     // function already has (locked Day, unstamped snapshot, existing card): the
