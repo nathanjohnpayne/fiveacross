@@ -143,11 +143,27 @@ async function read(db: Firestore, path: string): Promise<Doc | null> {
   return snapshot.exists() ? (snapshot.data() as Doc) : null;
 }
 
-/** Writes a hostname document and backfills its ledger, leaving both at revision 1. */
-async function seedConverged(db: Firestore, host: string, document: Doc): Promise<void> {
+/** Writes a hostname document and backfills its ledger, leaving both at revision 1.
+ *  Answers the plan, because its projection digest is the evidence a repoint
+ *  or a delete needs at that revision. */
+async function seedConverged(db: Firestore, host: string, document: Doc): Promise<Doc> {
   await setDoc(doc(db, `hostnames/${host}`), document);
-  await applyHostnameMutation(mutation({ intent: 'backfill-ledger', host }), dependencies(db));
+  return (await applyHostnameMutation(
+    mutation({ intent: 'backfill-ledger', host }),
+    dependencies(db),
+  )) as Doc;
 }
+
+/**
+ * The audit evidence `repoint` and `delete` require: the revision AND the
+ * digest the private audit reads back from the Durable Object once it has
+ * committed that projection. Taken from the plan the helper itself reported
+ * for that revision, which is the value the audit will echo — revision
+ * equality alone is satisfied by a poisoned object carrying a different
+ * payload, which is why both intents ask for the digest.
+ */
+const committedDigest = (plan: Doc): string =>
+  ((plan.projections as Doc[])[0] as { digest: string }).digest;
 
 async function refusalCode(work: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -247,16 +263,38 @@ describe('the trusted hostname mutation helper against a real transaction', () =
 
   it('repoints only behind the disabled barrier and keeps the projection equal to the source', async () => {
     await trusted(async (db) => {
-      await seedConverged(db, HOST, hostnameDocument());
+      const seeded = await seedConverged(db, HOST, hostnameDocument());
       expect(
         await refusalCode(() =>
-          applyHostnameMutation(mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' } }), dependencies(db)),
+          applyHostnameMutation(
+            mutation({
+              intent: 'repoint',
+              host: HOST,
+              changes: { eventId: 'sonoma-2027' },
+              converged: { revision: '1', digest: committedDigest(seeded) },
+            }),
+            dependencies(db),
+          ),
         ),
       ).toBe('repoint-requires-disabled');
       expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ eventId: EVENT_ID });
 
-      await applyHostnameMutation(mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' } }), dependencies(db));
-      await applyHostnameMutation(mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' } }), dependencies(db));
+      // The disabling revision is written here; the edge has to have
+      // COMMITTED it before the identity may move, so the repoint carries the
+      // revision and digest the audit reports for it.
+      const disabled = (await applyHostnameMutation(
+        mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' } }),
+        dependencies(db),
+      )) as Doc;
+      await applyHostnameMutation(
+        mutation({
+          intent: 'repoint',
+          host: HOST,
+          changes: { eventId: 'sonoma-2027' },
+          converged: { revision: '2', digest: committedDigest(disabled) },
+        }),
+        dependencies(db),
+      );
       expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ eventId: 'sonoma-2027' });
       expect(await read(db, `routerReplicas/${HOST}`)).toMatchObject({ revision: '3', desired: { eventId: 'sonoma-2027' } });
     });
@@ -363,8 +401,16 @@ describe('the trusted hostname mutation helper against a real transaction', () =
 
   it('deletes the source and leaves a permanent tombstone the address cannot be reclaimed from', async () => {
     await trusted(async (db) => {
-      await seedConverged(db, HOST, hostnameDocument({ status: 'disabled' }));
-      await applyHostnameMutation(mutation({ intent: 'delete', host: HOST, convergedRevision: '1' }), dependencies(db));
+      const seeded = await seedConverged(db, HOST, hostnameDocument({ status: 'disabled' }));
+      await applyHostnameMutation(
+        mutation({
+          intent: 'delete',
+          host: HOST,
+          convergedRevision: '1',
+          convergedDigest: committedDigest(seeded),
+        }),
+        dependencies(db),
+      );
       expect(await read(db, `hostnames/${HOST}`)).toBeNull();
       expect(await read(db, `routerReplicas/${HOST}`)).toMatchObject({ revision: '2', desired: { kind: 'tombstone' } });
 
@@ -385,10 +431,18 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       // about what the host serves: `root: 'doorway'` is the live doorway
       // `specs/path-addressing-and-root.md` § D1 defines, and the tombstone
       // would be permanent.
-      await seedConverged(db, APEX, { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+      const doorway = await seedConverged(db, APEX, { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
       expect(
         await refusalCode(() =>
-          applyHostnameMutation(mutation({ intent: 'delete', host: APEX, convergedRevision: '1' }), dependencies(db)),
+          applyHostnameMutation(
+            mutation({
+              intent: 'delete',
+              host: APEX,
+              convergedRevision: '1',
+              convergedDigest: committedDigest(doorway),
+            }),
+            dependencies(db),
+          ),
         ),
       ).toBe('delete-requires-inactive');
       expect(await read(db, `hostnames/${APEX}`)).toMatchObject({ root: 'doorway' });
@@ -396,8 +450,19 @@ describe('the trusted hostname mutation helper against a real transaction', () =
 
       // Its non-serving sibling is deletable: retiring the host's remaining
       // path capability is a real operation.
-      await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }), dependencies(db));
-      await applyHostnameMutation(mutation({ intent: 'delete', host: APEX, convergedRevision: '2' }), dependencies(db));
+      const marker = (await applyHostnameMutation(
+        mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }),
+        dependencies(db),
+      )) as Doc;
+      await applyHostnameMutation(
+        mutation({
+          intent: 'delete',
+          host: APEX,
+          convergedRevision: '2',
+          convergedDigest: committedDigest(marker),
+        }),
+        dependencies(db),
+      );
       expect(await read(db, `hostnames/${APEX}`)).toBeNull();
       expect(await read(db, `routerReplicas/${APEX}`)).toMatchObject({ revision: '3', desired: { kind: 'tombstone' } });
     });
