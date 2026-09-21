@@ -517,6 +517,71 @@ describe('repoint', () => {
     ).toBe('repoint-requires-disabled');
   });
 
+  // A repoint moves the host to ANOTHER Event, so the previous Event's public
+  // face must not travel with it: the `preview` postcard the sign-in gate
+  // renders, the `canonicalHost` analytics attribute to, the `isCanonical`
+  // claim, and `adultContent`, which is a content warning and therefore wrong
+  // to inherit in either direction. There is no deletion sentinel here, so a
+  // merge could not even have removed an obsolete one.
+  it('clears the previous Event metadata when the repoint supplies none', async () => {
+    const before = hostnameDocument({
+      status: 'disabled',
+      canonicalHost: 'bodega-bay.vacaybingo.com',
+      isCanonical: false,
+      adultContent: true,
+      preview: { headline: 'Bodega Bay' },
+    });
+    const { docs, dependencies } = store(converged(HOST, '5', before));
+    await applyHostnameMutation(
+      mutation({
+        intent: 'repoint',
+        host: HOST,
+        changes: { eventId: 'sonoma-2027', slug: 'bodega-bay' },
+        converged: edgeConverged(HOST, '5', before),
+      }),
+      dependencies,
+    );
+    expect(docs.get(`hostnames/${HOST}`)).toEqual({
+      eventId: 'sonoma-2027',
+      edition: 'fiveacross',
+      status: 'disabled',
+      slug: 'bodega-bay',
+    });
+  });
+
+  it('replaces the Event metadata the repoint does supply, and keeps the host-scoped fields', async () => {
+    const before = { root: undefined, ...hostnameDocument({ status: 'disabled', pathNamespace: null, adultContent: true }) };
+    delete before.root;
+    const { docs, dependencies } = store(converged(HOST, '5', before));
+    await applyHostnameMutation(
+      mutation({
+        intent: 'repoint',
+        host: HOST,
+        changes: {
+          eventId: 'sonoma-2027',
+          canonicalHost: 'sonoma.fiveacross.app',
+          isCanonical: false,
+          adultContent: false,
+          preview: { headline: 'Sonoma' },
+        },
+        converged: edgeConverged(HOST, '5', before),
+      }),
+      dependencies,
+    );
+    expect(docs.get(`hostnames/${HOST}`)).toEqual({
+      eventId: 'sonoma-2027',
+      edition: 'fiveacross',
+      status: 'disabled',
+      slug: 'bodega-bay',
+      // Host-scoped, so it survives the move.
+      pathNamespace: null,
+      canonicalHost: 'sonoma.fiveacross.app',
+      isCanonical: false,
+      adultContent: false,
+      preview: { headline: 'Sonoma' },
+    });
+  });
+
   it('refuses combining the barrier with the status move it exists to separate', async () => {
     const { dependencies } = store(converged(HOST, '5', hostnameDocument({ status: 'disabled' })));
     expect(

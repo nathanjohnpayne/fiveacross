@@ -91,6 +91,28 @@ const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanoni
  */
 const ROUTE_ONLY_FIELDS = ['eventId', 'status', 'slug', 'apexPath'];
 
+/**
+ * The fields that describe THE EVENT rather than the host, and are therefore
+ * reset by a repoint unless the caller supplies new values.
+ *
+ * A repoint moves a host from one Event to another, and a merge carried the
+ * previous Event's public face with it: the old `preview` postcard the
+ * sign-in gate renders, the old `canonicalHost` analytics attribute to, the
+ * old `isCanonical` claim, and the old `adultContent` posture — which is a
+ * content warning, so inheriting it is wrong in both directions. There is no
+ * deletion sentinel in this helper, and deliberately so, which meant an
+ * obsolete `preview` could not be removed through `changes` at all. Repoint
+ * therefore REPLACES the document rather than patching it.
+ *
+ * `apexPath` is here because it is per-Event by definition; a repointed host
+ * is `disabled` rather than archived, so it should never carry one, and
+ * resetting costs nothing. Everything not named here is host-scoped and
+ * survives: `pathNamespace` is a pure function of the host, `edition` and
+ * `status` are barriered moves of their own, and `root` cannot appear on a
+ * document this intent accepts.
+ */
+const EVENT_SCOPED_FIELDS = ['adultContent', 'apexPath', 'canonicalHost', 'isCanonical', 'preview'];
+
 const INTENTS = new Set([
   'provision',
   'update',
@@ -520,14 +542,24 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
     if (!PROJECTED_FIELDS.has(key) && !NON_PROJECTED_FIELDS.has(key)) refuse('unknown-field');
   }
   if (!Object.hasOwn(changes, 'eventId') && !Object.hasOwn(changes, 'slug')) refuse('repoint-requires-identity');
-  const document = { ...state.hostname, ...changes };
+  // Event-scoped metadata does not survive the move. Reset first, then apply
+  // `changes`, so a caller that supplies a new `preview` or `adultContent`
+  // replaces it and a caller that supplies neither is left with none rather
+  // than with the previous Event's.
+  const retained = { ...state.hostname };
+  for (const field of EVENT_SCOPED_FIELDS) delete retained[field];
+  const document = { ...retained, ...changes };
   // The Event the host would point at AFTER the move, which is the one that
   // matters: re-homing a document onto an archived Event publishes a route
   // to it that § D8 retired.
   await requireLiveEvent(transaction, document.eventId);
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
-  buffer.update(`hostnames/${host}`, changes);
+  // A whole-document SET, not a patch: this is the second lifecycle write
+  // that replaces rather than merges, for the same reason the mirror-root
+  // conversion does — Firestore's delete sentinel is not plumbed through
+  // this helper, so removing a field means writing the document without it.
+  buffer.set(`hostnames/${host}`, document);
   ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   return { host, projectedChange: true, resultingHostname: document };
 }

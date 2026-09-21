@@ -408,6 +408,34 @@ describe('three-way reconciliation', () => {
     expect(report.flagCounts).toEqual({ tombstoned: 0, locked: 1, 'epoch-unfenced': 1 });
   });
 
+  // The prefix is refused to every CLAIM, but only the two closed patterns
+  // are controller-owned. A host under the prefix matching neither is owned
+  // by nothing — the publisher, the worker and `validateHostShape` all
+  // reject it — so reporting it reserved-class hid a partial Admin write
+  // behind a class that never produced it.
+  it('reports an arbitrary r2- host as invalid rather than as controller-owned', async () => {
+    const garbage = 'r2-garbage.fiveacross.app';
+    const deps = dependencies({
+      pages: [
+        {
+          entries: [
+            { host: garbage, hostname: hostnameDocument(), routerReplica: null },
+            { host: SYNTHETIC, hostname: null, routerReplica: null },
+          ],
+          nextPageToken: null,
+        },
+      ],
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts.map((row) => [row.host, row.state])).toEqual([
+      [garbage, 'invalid-host'],
+      [SYNTHETIC, 'reserved-class'],
+    ]);
+    // Neither was audited, but for different reasons, and neither reached
+    // the endpoint.
+    expect(deps.readHostAuditPage).not.toHaveBeenCalled();
+  });
+
   it('never audits or repairs a globally reserved rehearsal host', async () => {
     const deps = dependencies({
       pages: [{ entries: [{ host: SYNTHETIC, hostname: null, routerReplica: null }], nextPageToken: null }],
@@ -558,6 +586,45 @@ describe('pagination', () => {
     ],
   ])('refuses %s', async (_why, overrides, expected) => {
     expect(await refusal(input(), dependencies(overrides))).toBe(expected);
+  });
+
+  // A cursor that merely advances lets an adapter skip ahead: one page
+  // carrying sequence 1 with nextAfter 100, then an empty terminal page,
+  // reads as a complete one-record history and the host is reported
+  // recovered from a span nothing verified.
+  it('refuses a cursor that skips past the records the page returned', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const deps = dependencies({
+      audits: {
+        [HOST]: [
+          auditPage({ committed, records: [record('1', null, committed)], nextAfter: '100' }),
+          { ...auditPage({ committed, records: [], nextAfter: null }), __after: '100' },
+        ],
+      },
+    });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
+  it('refuses a non-terminal page that returned no records at all', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const deps = dependencies({
+      audits: { [HOST]: [auditPage({ committed, records: [], nextAfter: '1' })] },
+    });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
+  it('walks a well-formed two-page history whose cursor names each page last record', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const deps = dependencies({
+      audits: {
+        [HOST]: [
+          auditPage({ committed, records: [record('1', null, null), record('2', null, committed)], nextAfter: '2' }),
+          { ...auditPage({ committed, records: [record('3', committed, committed)], nextAfter: null }), __after: '2' },
+        ],
+      },
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts[0]).toMatchObject({ state: 'recovered', recoveryRecordCount: 3 });
   });
 
   it('refuses an audit cursor that does not advance', async () => {

@@ -27,8 +27,8 @@
 import {
   deriveCanonicalProjection,
   HostnameProjectionRefusal,
+  isExactRehearsalHost,
   isRecord,
-  isReservedClassHost,
   sameValue,
   validateHostShape,
   validateLedgerDocument,
@@ -279,6 +279,16 @@ async function collectAudit(dependencies, host) {
     if (!decimalWire(next, NON_NEGATIVE_DECIMAL) || BigInt(next) <= BigInt(cursor)) {
       refuse('audit-pagination-unbounded', host);
     }
+    // The cursor is BOUND TO THE PAGE it came with: it must name the last
+    // record this page actually returned. A cursor that merely advances
+    // lets an adapter skip ahead — a page carrying sequence 1 with
+    // `nextAfter: '100'` followed by an empty terminal page reads as a
+    // complete history of one record, silently dropping 2 through 100 and
+    // every conflict in them, and the host is then reported `recovered` from
+    // a history nothing verified. An empty page that is not terminal is the
+    // same claim with no record at all behind it.
+    const last = page.records[page.records.length - 1];
+    if (last === undefined || next !== last.sequence) refuse('malformed-audit-page', host);
     cursor = next;
   } while (true);
   const committed = committedRef(head.committed ?? null, host);
@@ -334,7 +344,7 @@ function classify(host, entry, audit) {
   // there is no lock or epoch state to report and the two flags below must
   // stay behind this. `invalid-host` never reaches here for that reason;
   // reserved-class is restated so the function is total on its own inputs.
-  if (isReservedClassHost(host)) return { state: 'reserved-class', ...unknown };
+  if (isExactRehearsalHost(host)) return { state: 'reserved-class', ...unknown };
 
   // The lock and the epoch fence are properties of the audited edge object
   // alone, so they are read BEFORE anything that can classify the host early.
@@ -484,9 +494,14 @@ export async function reconcileHostnameReplicas(input, dependencies) {
 
   for (const entry of entries) {
     const { host } = entry;
-    if (isReservedClassHost(host)) {
+    if (isExactRehearsalHost(host)) {
       // #970's controller owns every synthetic state; this command neither
-      // audits its Durable Object nor repairs it.
+      // audits its Durable Object nor repairs it. The EXACT classes only:
+      // the prefix is refused to every claim, but a host under it that
+      // matches neither closed pattern is owned by nothing — the publisher,
+      // the worker and `validateHostShape` all reject it — so calling it
+      // controller-owned would hide a partial Admin write behind a class
+      // that never produced it. Those fall through to `invalid-host` below.
       hosts.push({
         host,
         state: 'reserved-class',

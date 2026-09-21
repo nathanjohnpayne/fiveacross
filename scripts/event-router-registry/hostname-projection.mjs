@@ -308,6 +308,23 @@ export function isReservedClassHost(host) {
   return isNonempty(host) && host.split('.')[0].startsWith('r2-');
 }
 
+/**
+ * Whether the host is one of the two EXACT rehearsal classes, as opposed to
+ * merely carrying the reserved prefix.
+ *
+ * The two predicates answer different questions and the difference is not
+ * cosmetic. A CLAIM is refused on the whole prefix, because an organizer must
+ * never get a `r2-`-shaped address of any kind. But #970's controller owns
+ * only the two closed classes, so a host under the prefix that matches
+ * neither is nobody's: the publisher, the worker and `validateHostShape` all
+ * reject it, and treating it as controller-owned hides a partial Admin write
+ * behind a class that never produced it. Reads classify with this; claims
+ * keep the prefix rule.
+ */
+export function isExactRehearsalHost(host) {
+  return isNonempty(host) && (SYNTHETIC_EVENT.test(host) || SYNTHETIC_ROOT.test(host));
+}
+
 export function validSlug(slug) {
   return (
     isNonempty(slug) &&
