@@ -150,7 +150,13 @@ function qualityOf(parameters: readonly string[]): number {
   for (const parameter of parameters) {
     const [name, value] = parameter.split('=');
     if (name?.trim().toLowerCase() !== 'q') continue;
-    const quality = Number(value?.trim());
+    // A blank value is malformed, not zero: `Number('')` is `0`, which would
+    // read `q=` as a refusal and drop a real navigation out of the candidate
+    // set. Malformed reads as absent, so it stays at 1 like any other broken
+    // parameter (CodeRabbit, PR #1248).
+    const text = value?.trim() ?? '';
+    if (text === '') return 1;
+    const quality = Number(text);
     return Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 1;
   }
   return 1;

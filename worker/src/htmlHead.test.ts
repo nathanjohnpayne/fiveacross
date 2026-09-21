@@ -339,6 +339,7 @@ describe('which requests are document candidates, for the validators and the enc
     ['text/html;q=1.0', 'the explicit maximum'],
     ['text/*;q=0.5', 'the subtype wildcard, when the exact type is unnamed'],
     ['text/html;q=0.001', 'a quality small enough to look like zero and is not'],
+    ['text/html;q=', 'a blank quality, which is malformed and so reads as absent, not as zero'],
     ['text/html; charset=utf-8', 'a parameter that is not q at all'],
     ['application/json, text/html', 'HTML named second, with no q'],
     ['text/html;q=0.8;level=1', 'an accept-extension after the q'],
