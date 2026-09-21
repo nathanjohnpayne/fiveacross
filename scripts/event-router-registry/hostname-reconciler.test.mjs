@@ -185,6 +185,36 @@ describe('three-way reconciliation', () => {
   // tombstone arm this row read as `already-correct`: the derivation answered
   // a tombstone, the ledger held one, and the audit reported the matching
   // digest, so a ledger that can never be published looked converged.
+  // The deployed audit endpoint requires `host === normalizeHost(host)` and
+  // answers 400 for anything else, so a single non-canonical document id used
+  // to take the whole run down before any report existed. It is now
+  // classified before the audit is attempted, like `reserved-class`, and the
+  // good rows beside it are still reported. No flags: there is no audited
+  // object to have read a lock or an epoch from.
+  it('classifies an unauditable host without calling the audit endpoint, and keeps going', async () => {
+    const deps = dependencies({
+      pages: [
+        {
+          entries: [
+            { host: UNPROJECTABLE, hostname: null, routerReplica: null },
+            { host: HOST, hostname: hostnameDocument(), routerReplica: ledgerFor(HOST, '4', hostnameDocument()) },
+          ],
+          nextPageToken: null,
+        },
+      ],
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts.map((row) => [row.host, row.state])).toEqual([
+      [UNPROJECTABLE, 'invalid-host'],
+      [HOST, 'already-correct'],
+    ]);
+    expect(report.hosts[0].flags).toEqual([]);
+    expect(report.counts['invalid-host']).toBe(1);
+    expect(report.counts['already-correct']).toBe(1);
+    // The endpoint that would have answered 400 was never called for it.
+    expect(deps.readHostAuditPage.mock.calls.map(([args]) => args.host)).toEqual([HOST]);
+  });
+
   it('classifies a tombstone keyed to an unclaimable host as invalid source rather than converged', async () => {
     const host = 'admin.fiveacross.app';
     const tombstone = { schemaVersion: 1, revision: '9', host, desired: { kind: 'tombstone' }, updatedAt: NOW };
@@ -239,7 +269,12 @@ describe('three-way reconciliation', () => {
     // false operational alarm on every never-quarantined host. The floor is
     // varied across its own initial and post-rotation values to show the flag
     // is off because of the sentinel and not because of the comparison.
-    for (const minimumPublisherEpoch of ['0', '1', '9']) {
+    // `'0'` is deliberately NOT in this list: the floor is a positive
+    // canonical decimal in `RegistryState` — only the two high-water marks
+    // carry the zero sentinel — so an audit page answering zero for it is
+    // malformed evidence rather than a never-quarantined object, and is
+    // refused by the case below rather than classified from.
+    for (const minimumPublisherEpoch of ['1', '9']) {
       const deps = dependencies({
         audits: { [HOST]: [auditPage({ minimumPublisherEpoch, highestQuarantinedPublisherEpoch: '0' })] },
       });
@@ -253,6 +288,26 @@ describe('three-way reconciliation', () => {
       audits: { [HOST]: [auditPage({ minimumPublisherEpoch: '7', highestQuarantinedPublisherEpoch: '7' })] },
     });
     expect((await reconcileHostnameReplicas(input(), quarantined)).hosts[0].flags).toEqual(['epoch-unfenced']);
+  });
+
+  // The floor is the one epoch field that may not be zero, so it is validated
+  // apart from the two high-water marks. Accepting zero took a shape the
+  // Durable Object never stores as evidence, and a floor of zero is not a
+  // floor at all — the fence comparison below it cannot mean anything.
+  it('refuses an audit page whose minimumPublisherEpoch is the zero sentinel', async () => {
+    const deps = dependencies({
+      audits: { [HOST]: [auditPage({ minimumPublisherEpoch: '0' })] },
+    });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
+  it.each(['0', '1'])('still accepts the zero sentinel on a high-water mark (%s)', async (value) => {
+    const deps = dependencies({
+      audits: {
+        [HOST]: [auditPage({ highestAuthenticatedPublisherEpoch: value, highestQuarantinedPublisherEpoch: '0' })],
+      },
+    });
+    expect((await reconcileHostnameReplicas(input(), deps)).hosts[0].state).toBe('already-correct');
   });
 
   // The two edge flags describe the audited Durable Object rather than the
@@ -280,7 +335,6 @@ describe('three-way reconciliation', () => {
         routerReplica: ledgerFor(HOST, '4', hostnameDocument()),
       },
     ],
-    ['invalid-host', UNPROJECTABLE, { hostname: null, routerReplica: null }],
   ])('reports a held lock and an unfenced epoch on the %s early return', async (state, host, entry) => {
     const deps = dependencies({
       pages: [{ entries: [{ host, ...entry }], nextPageToken: null }],

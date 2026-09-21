@@ -30,6 +30,7 @@ import {
   isRecord,
   isReservedClassHost,
   sameValue,
+  validateHostShape,
   validateLedgerDocument,
 } from './hostname-projection.mjs';
 
@@ -255,14 +256,32 @@ async function collectAudit(dependencies, host) {
     // last thing it recorded doing, even allowing for unrecorded syncs.
     refuse('conflicting-recovery-history', host);
   }
-  for (const field of [
-    'minimumPublisherEpoch',
-    'highestAuthenticatedPublisherEpoch',
-    'highestQuarantinedPublisherEpoch',
-  ]) {
+  // The floor is POSITIVE; only the two high-water marks may be zero.
+  //
+  // `RegistryState` initializes `minimumPublisherEpoch` to `1` and
+  // `parseStoredRegistryState` requires a canonical positive decimal for it,
+  // while zero is the no-quarantine sentinel the other two carry before
+  // anything has happened. Accepting `0` here took malformed edge evidence as
+  // fact — and it is the value the epoch-fence comparison below is least able
+  // to read, since a floor of zero is not a floor at all. Validated
+  // separately so the reconciler fails closed on an adapter that answers a
+  // shape the Durable Object never stores.
+  if (!POSITIVE_DECIMAL.test(String(head.minimumPublisherEpoch ?? ''))) refuse('malformed-audit-page', host);
+  for (const field of ['highestAuthenticatedPublisherEpoch', 'highestQuarantinedPublisherEpoch']) {
     if (!NON_NEGATIVE_DECIMAL.test(String(head[field] ?? ''))) refuse('malformed-audit-page', host);
   }
   return { ...head, committed, records, pages };
+}
+
+/** Whether this projection may describe the host at all, asked without throwing. */
+function projectableHost(host) {
+  try {
+    validateHostShape(host);
+    return true;
+  } catch (error) {
+    if (error instanceof HostnameProjectionRefusal) return false;
+    throw error;
+  }
 }
 
 /**
@@ -279,9 +298,11 @@ async function collectAudit(dependencies, host) {
 function classify(host, entry, audit) {
   const flags = [];
   const unknown = { flags, sourceRevision: null, sourceDigest: null };
-  // The one classification reached with no audit at all: the caller returns a
-  // reserved-class row before it reads the Durable Object, so there is no lock
-  // or epoch state to report and the two flags below must stay behind this.
+  // The classifications reached with no audit at all: the caller returns a
+  // reserved-class or invalid-host row before it reads the Durable Object, so
+  // there is no lock or epoch state to report and the two flags below must
+  // stay behind this. `invalid-host` never reaches here for that reason;
+  // reserved-class is restated so the function is total on its own inputs.
   if (isReservedClassHost(host)) return { state: 'reserved-class', ...unknown };
 
   // The lock and the epoch fence are properties of the audited edge object
@@ -311,7 +332,10 @@ function classify(host, entry, audit) {
     canonical = deriveCanonicalProjection(host, entry.hostname ?? null);
   } catch (error) {
     if (error instanceof HostnameProjectionRefusal) {
-      return { state: error.code === 'invalid-host' ? 'invalid-host' : 'malformed-source', ...unknown };
+      // `invalid-host` cannot arrive here: the caller validated the host
+      // before the audit and reported it without one. What is left is a
+      // source document this host may not hold.
+      return { state: 'malformed-source', ...unknown };
     }
     throw error;
   }
@@ -435,6 +459,26 @@ export async function reconcileHostnameReplicas(input, dependencies) {
       hosts.push({
         host,
         state: 'reserved-class',
+        flags: [],
+        sourceRevision: null,
+        committedRevision: null,
+        digestMatches: null,
+        recoveryRecordCount: null,
+      });
+      continue;
+    }
+    // The SECOND classification reached with no audit at all, and it has to
+    // be: the deployed audit endpoint requires `host === normalizeHost(host)`
+    // and answers 400 for anything else, so a single non-canonical document
+    // id — an uppercase host, a reserved label — made `collectAudit` fail and
+    // took the whole reconciliation down with it, producing no report at all
+    // instead of one bad row among the good ones. A row nothing can audit is
+    // reported the way `reserved-class` is: no lock, no epoch, no revisions,
+    // because there is no audited object to have read them from.
+    if (!projectableHost(host)) {
+      hosts.push({
+        host,
+        state: 'invalid-host',
         flags: [],
         sourceRevision: null,
         committedRevision: null,

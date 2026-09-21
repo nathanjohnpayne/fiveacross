@@ -60,7 +60,6 @@ import {
   validateLedgerDocument,
 } from './hostname-projection.mjs';
 
-const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 
 /**
  * The complete seam list. An exact set rather than a minimum, so a future
@@ -327,9 +326,20 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
     // publisher acceptance and edge inspection, which happen after this write.
     refuse('provision-requires-disabled');
   }
-  const document = Object.hasOwn(input.hostname, 'root')
+  // `pathNamespace` is PERSISTED as an explicit `null` when the caller omits
+  // it, rather than stored as an absence that happens to project to `null`.
+  // `deriveCanonicalProjection` reads an absent field as `null`, so the two
+  // are the same projection — but `recovery-controller.mjs` validates the RAW
+  // hostname document for its source attestation and requires
+  // `source.pathNamespace === null`, so a document that merely omits the
+  // field can be published and can never be attested, which is exactly the
+  // recovery path it would need after a drift. Writing what we project keeps
+  // the stored document and the derivation agreeing about a field whose
+  // absence is meaningful.
+  const provided = Object.hasOwn(input.hostname, 'pathNamespace')
     ? { ...input.hostname }
-    : { ...input.hostname, status: 'disabled' };
+    : { ...input.hostname, pathNamespace: null };
+  const document = Object.hasOwn(provided, 'root') ? provided : { ...provided, status: 'disabled' };
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso);
@@ -534,6 +544,18 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
   // refused a duplicate, so the loop can match it at most once.
   if (apexPathHost === null) refuse('archive-apex-target-missing');
   if (!mappings.includes(apexPathHost)) refuse('apex-path-target-unknown');
+  // A configured apex or mirror flagship is retired by CONVERSION, never by
+  // being switched to `archived` as a route. Its `status` is what gates the
+  // whole HOST, so an archived route on `vacaybingo.com` takes that host's
+  // path capability down with it and every other Event addressed by path
+  // there stops resolving — which is why § D8 turns such a mapping into the
+  // `root: 'not-found'` marker that keeps `pathNamespace`. The caller is
+  // pointed at `mirrorRootConversions` rather than converted silently: which
+  // marker a retired root host should carry is a decision, not a default.
+  for (const host of mappings) {
+    if (!ROOT_HOSTS.has(host)) continue;
+    refuse(host === apexPathHost ? 'apex-path-target-ineligible' : 'archive-root-host-requires-conversion');
+  }
 
   const event = (await transaction.get(`events/${eventId}`)) ?? null;
   if (event === null) refuse('event-missing');
@@ -541,6 +563,26 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
   const states = new Map();
   for (const host of hosts) {
     states.set(host, await readHostState(transaction, host));
+  }
+
+  // A mapping that ALREADY carries the flag, read before anything is written.
+  //
+  // `apexPath` is not projected, so `requireConvergedPreState` below cannot
+  // see it: a source and a ledger that agree on the projection agree whether
+  // or not the source carries this field. A legacy or partial Admin write can
+  // therefore leave the flag on an ACTIVE mapping, and the write loop would
+  // preserve it — `changes` names only `status`, and an update is a merge —
+  // while adding the flag to the target, leaving the Event with two archived
+  // mappings eligible for apex paths. That is refused rather than cleared:
+  // which of the two the operator meant is not something this transaction may
+  // decide, and silently dropping a flag somebody wrote is the more dangerous
+  // repair. This narrows an earlier round's reasoning, which correctly ruled
+  // out an ARCHIVED flagged mapping (`archive-requires-active` refuses it) but
+  // did not cover an active one.
+  for (const host of mappings) {
+    if (host === apexPathHost) continue;
+    const hostname = states.get(host).hostname;
+    if (isRecord(hostname) && hostname.apexPath === true) refuse('archive-apex-flag-carried');
   }
 
   for (const host of mappings) {
@@ -556,7 +598,6 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
       // a different field on a different document from the host-wide
       // `pathNamespace`; it is target/client resolution data and is never
       // projected to the edge.
-      if (ROOT_HOSTS.has(host)) refuse('apex-path-target-ineligible');
       changes.apexPath = true;
     }
     const document = { ...state.hostname, ...changes };
@@ -628,6 +669,15 @@ async function planDelete(input, transaction, clock, buffer, revisions, projecti
     (stored.desired.kind === 'route' && stored.desired.status === 'active') ||
     (stored.desired.kind === 'root' && stored.desired.root === 'doorway');
   if (serving) refuse('delete-requires-inactive');
+  // The apex archive address is NOT non-serving, whatever its `status` says.
+  // After a legitimate archive the target mapping is `archived` with
+  // `apexPath: true`, which is precisely the document that answers the apex
+  // path § D8 retired the Event's own subdomain in favour of — so the
+  // predicate above reads it as deletable, and deleting it tombstones the
+  // address permanently and strands the archive exactly as an archive with no
+  // target would have. `apexPath` is not projected, so no revision or digest
+  // can carry this fact; it is read from the source document.
+  if (state.hostname.apexPath === true) refuse('delete-apex-archive-target');
   // "After inactive convergence" — the operator proves convergence by naming the
   // revision the private audit read back from the Durable Object's committed
   // state. A mismatch means the edge has not accepted the inactive projection
@@ -701,7 +751,13 @@ async function planAdvanceLedger(input, transaction, clock, buffer, revisions, p
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
-  if (!POSITIVE_DECIMAL.test(String(input.durableObjectHighWaterRevision ?? ''))) refuse('invalid-input');
+  // A STRING, validated as one. Revisions are canonical decimal text
+  // precisely so they stay lossless under `BigInt`, and coercing through
+  // `String()` accepted a JSON number — which above `Number.MAX_SAFE_INTEGER`
+  // has already been rounded by the time it arrives, so the floor computed
+  // from it can name a revision that is not actually above the Durable
+  // Object and the repair earns a stale, conflict or gap answer instead.
+  if (!isCanonicalRevision(input.durableObjectHighWaterRevision)) refuse('invalid-input');
   requireHttpsUrl(input.incidentUrl, 'invalid-input');
   // A missing or malformed ledger is exactly what this transaction repairs, so
   // it reads the stored revision defensively rather than validating the whole

@@ -136,6 +136,26 @@ describe('provision', () => {
     expect(plan.projections[0].digest).toBe(projectionDigest('1', HOST, plan.projections[0].desired));
   });
 
+  // The stored document has to say what the projection says. `recovery-
+  // controller.mjs` validates the RAW hostname document for its source
+  // attestation and requires `source.pathNamespace === null`, so a document
+  // that merely omits the field derives the same projection here and can
+  // never be attested there — the host is publishable and unrecoverable.
+  it('persists an explicit null pathNamespace when the caller omits it', async () => {
+    const { docs, dependencies } = store();
+    await applyHostnameMutation(
+      mutation({
+        intent: 'provision',
+        host: HOST,
+        hostname: { eventId: 'bodega-bay-2026', canonicalHost: HOST, edition: 'fiveacross', slug: 'bodega-bay', isCanonical: true },
+      }),
+      dependencies,
+    );
+    const stored = docs.get(`hostnames/${HOST}`);
+    expect(Object.hasOwn(stored, 'pathNamespace')).toBe(true);
+    expect(stored.pathNamespace).toBe(null);
+  });
+
   it('is a dry run by default and writes nothing while planning identically', async () => {
     const { docs, dependencies } = store();
     const input = mutation({
@@ -468,24 +488,26 @@ describe('archive', () => {
   });
 
   // A non-target mapping that already carries `apexPath` would leave the Event
-  // with two apex archive addresses, which § D8 forbids. The state is not
-  // reachable through this helper and this pins the refusal that makes it so:
-  // `apexPath` is written by the archive alone, in the same `changes` that
-  // sets `status: 'archived'` (an update and a repoint both refuse the key as
-  // `apex-path-barrier`, a provision as `unknown-field`, and the mirror-root
-  // conversion strips it), and an archived document can never come back —
-  // `unarchive-barrier` refuses the status change and `repoint-requires-
-  // disabled` refuses the re-home. So a flagged mapping is always an archived
-  // one, and an archived mapping is refused here before the buffer flushes.
-  it('refuses an archive whose non-target mapping already carries apexPath, before any write', async () => {
+  // with two apex archive addresses, which § D8 forbids, and the write loop
+  // cannot see the field: `apexPath` is not projected, so a source and a
+  // ledger that agree on the projection agree whether or not the source
+  // carries it, and an update is a merge, so the flag survives while the
+  // target gains its own. Refused for BOTH statuses the state can be in — an
+  // archived one from a previous archive, and an active one from the legacy
+  // or partial Admin write the flag has no other route onto — and refused
+  // before anything is written either way.
+  it.each([
+    ['archived', 'the mapping a previous archive left flagged'],
+    ['active', 'a legacy or partial Admin write'],
+  ])('refuses an archive whose non-target mapping carries apexPath while %s, from %s', async (status) => {
     const seed = flagship();
-    seed[`hostnames/${ALIAS}`] = { ...seed[`hostnames/${ALIAS}`], status: 'archived', apexPath: true };
+    seed[`hostnames/${ALIAS}`] = { ...seed[`hostnames/${ALIAS}`], status, apexPath: true };
     seed[`routerReplicas/${ALIAS}`] = ledgerFor(ALIAS, '2', seed[`hostnames/${ALIAS}`]);
     const { docs, dependencies } = store(seed);
-    expect(await refusal(archiveInput(), dependencies)).toBe('archive-requires-active');
+    expect(await refusal(archiveInput(), dependencies)).toBe('archive-apex-flag-carried');
     expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
     expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
-    expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status: 'archived', apexPath: true });
+    expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status, apexPath: true });
     expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
     expect(docs.get('events/bodega-bay-2026').status).toBe('active');
   });
@@ -503,6 +525,22 @@ describe('archive', () => {
     expect(await refusal(archiveInput({ mappings: [HOST, HOST] }), store(flagship()).dependencies)).toBe(
       'invalid-input',
     );
+  });
+
+  // A root host's `status` gates the WHOLE host, so archiving one as a route
+  // takes its path capability down and every other Event addressed by path
+  // there stops resolving. § D8 retires it by conversion instead, and the
+  // caller is pointed at that array rather than converted silently.
+  it('refuses a configured root host placed in mappings instead of mirrorRootConversions', async () => {
+    const { docs, dependencies } = store(flagship());
+    expect(
+      await refusal(
+        archiveInput({ mappings: [HOST, ALIAS, MIRROR], mirrorRootConversions: [] }),
+        dependencies,
+      ),
+    ).toBe('archive-root-host-requires-conversion');
+    expect(docs.get(`hostnames/${MIRROR}`)).toMatchObject({ status: 'active', pathNamespace: 'vacaybingo.com' });
+    expect(docs.get('events/bodega-bay-2026').status).toBe('active');
   });
 
   it('refuses an apexPath target that is not one of the Event mappings or is a root host', async () => {
@@ -595,6 +633,25 @@ describe('delete', () => {
     ).toBe('delete-requires-convergence');
   });
 
+  // The apex archive address is archived AND serving, which no projected
+  // field records: `apexPath` is not copied to the edge, so the converged
+  // inactive projection says nothing about it. Deleting it tombstones the
+  // address permanently and strands the archive exactly as an archive with no
+  // target would have.
+  it('refuses to delete the apex archive target however converged it is', async () => {
+    const archived = hostnameDocument({ status: 'archived', apexPath: true });
+    const { docs, dependencies } = store(converged(HOST, '4', archived));
+    expect(
+      await refusal(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), dependencies),
+    ).toBe('delete-apex-archive-target');
+    expect(docs.has(`hostnames/${HOST}`)).toBe(true);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+    // The same archived route WITHOUT the flag is an ordinary retirement.
+    const plain = store(converged(HOST, '4', hostnameDocument({ status: 'archived' })));
+    await applyHostnameMutation(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), plain.dependencies);
+    expect(plain.docs.has(`hostnames/${HOST}`)).toBe(false);
+  });
+
   it('refuses a serving root marker and accepts the non-serving one', async () => {
     // `root: 'doorway'` IS the live platform/Edition doorway, so it is as
     // serving as an active route even though a root marker has no `status`.
@@ -662,6 +719,31 @@ describe('backfill and the explicit Admin ledger advance', () => {
       incidentUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/971',
       ...overrides,
     });
+
+  // Revisions are canonical decimal TEXT so they stay lossless under BigInt.
+  // A JSON number above `Number.MAX_SAFE_INTEGER` has already been rounded by
+  // the time it arrives, so a floor computed from it can name a revision that
+  // is not actually above the Durable Object and the repair earns a stale,
+  // conflict or gap answer instead.
+  it.each([
+    ['a number', 11],
+    ['a rounded number above MAX_SAFE_INTEGER', 9007199254740993],
+    ['a non-canonical string', '011'],
+    ['zero', '0'],
+  ])('refuses a durableObjectHighWaterRevision supplied as %s', async (_why, durableObjectHighWaterRevision) => {
+    const { dependencies } = store(converged(HOST, '4', hostnameDocument()));
+    expect(await refusal(advance({ durableObjectHighWaterRevision }), dependencies)).toBe('invalid-input');
+  });
+
+  it('stays lossless on a high-water mark above MAX_SAFE_INTEGER', async () => {
+    const { docs, dependencies } = store(converged(HOST, '4', hostnameDocument()));
+    const plan = await applyHostnameMutation(
+      advance({ durableObjectHighWaterRevision: '9007199254740993' }),
+      dependencies,
+    );
+    expect(plan.revisions).toEqual([{ host: HOST, from: '4', to: '9007199254740994' }]);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('9007199254740994');
+  });
 
   it('advances a source-behind ledger above the Durable Object high-water mark from the current canonical projection', async () => {
     const { docs, dependencies } = store(converged(HOST, '4', hostnameDocument()));

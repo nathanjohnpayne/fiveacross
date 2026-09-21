@@ -177,7 +177,16 @@ export function normalizeTimestamp(value) {
     return null;
   }
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
-  return date.toISOString();
+  // The canonical text goes back through the SAME predicate the string branch
+  // applies, so the two encodings accept exactly the same instants. Without
+  // it a `Timestamp` for a year below 0100 answered `0099-...` text that the
+  // string branch — and therefore the deployed publisher and the worker —
+  // refuse, so `authoritativeNow` could store a ledger the edge would never
+  // accept. It also closes the expanded-year form `toISOString()` produces
+  // outside 0000-9999, which is not RFC 3339 at all.
+  const canonical = date.toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
 }
 
 /**

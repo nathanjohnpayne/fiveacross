@@ -194,6 +194,30 @@ describe('projection parity with the #970 recovery controller', () => {
     expect(sourceAudit.revision).toBe(REVISION);
   });
 
+  // Every fixture above carries `pathNamespace` EXPLICITLY, which is why this
+  // suite never saw the one place the two derivations disagree: this module
+  // reads an absent field as `null`, and the controller requires
+  // `source.pathNamespace === null` off the raw document. A writer that stored
+  // the omission would therefore publish a host that can never be attested,
+  // which is why `planProvision` persists the explicit `null` instead.
+  it('refuses a source document that omits pathNamespace, though this module derives one from it', async () => {
+    const omitted = { eventId: 'synthetic-event', edition: 'fiveacross', status: 'active', slug: LABEL };
+    const desired = deriveCanonicalProjection(HOST, omitted);
+    expect(desired.pathNamespace).toBe(null);
+    const ledger = buildLedgerDocument(HOST, REVISION, desired, READ_AT);
+    await expect(buildRecoveryArtifacts(recoveryInput(HOST), dependencies(HOST, omitted, ledger))).rejects.toBeInstanceOf(
+      RecoveryControllerRefusal,
+    );
+    // The same document with the field written out is the shape the helper now
+    // stores, and the controller attests it.
+    const explicit = { ...omitted, pathNamespace: null };
+    const artifacts = await buildRecoveryArtifacts(
+      recoveryInput(HOST),
+      dependencies(HOST, explicit, buildLedgerDocument(HOST, REVISION, deriveCanonicalProjection(HOST, explicit), READ_AT)),
+    );
+    expect(artifacts.request.sourceAudit.canonicalProjection.desired).toEqual(desired);
+  });
+
   it('refuses a ledger this module would not have produced for the host', async () => {
     const desired = deriveCanonicalProjection(HOST, FIXTURES[0][2]);
     const ledger = buildLedgerDocument(HOST, REVISION, desired, READ_AT);

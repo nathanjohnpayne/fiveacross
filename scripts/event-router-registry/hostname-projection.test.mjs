@@ -229,6 +229,22 @@ describe('stored ledger validation', () => {
     expect(digests.size).toBe(1);
   });
 
+  // Both encodings must accept exactly the same instants, or `authoritativeNow`
+  // can store a ledger the publisher refuses: the string branch rejects a year
+  // below 0100, so the Timestamp branch has to as well.
+  it.each([
+    ['a year before 0100', '0099-12-31T23:59:59.000Z'],
+    ['the year zero', '0000-01-01T00:00:00.000Z'],
+  ])('refuses a stored Timestamp for %s, exactly as the string branch does', (_why, iso) => {
+    const value = new Date(0);
+    value.setUTCFullYear(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
+    value.setUTCHours(23, 59, 59, 0);
+    expect(value.toISOString().slice(0, 4)).toBe(iso.slice(0, 4));
+    expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: { toDate: () => value } })))).toBe(
+      'malformed-ledger',
+    );
+  });
+
   it('still separates two instants a millisecond apart', () => {
     expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.000Z' })).documentDigest).not.toBe(
       validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.001Z' })).documentDigest,
