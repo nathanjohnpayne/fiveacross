@@ -473,4 +473,25 @@ describe('the publisher timestamp canonicalizer', () => {
       'invalid router replica event',
     );
   });
+
+  // `Date.parse` ROLLS an impossible day forward instead of refusing it, so
+  // without the calendar check the publisher would put an instant on the wire
+  // that no ledger ever named: `2026-02-30T12:00:00Z` parses to March 2.
+  it.each([
+    ['a day past the end of February', '2026-02-30T12:00:00Z'],
+    ['a thirty-first of April', '2026-04-31T12:00:00Z'],
+    ['a leap day in a year that has none', '2025-02-29T12:00:00Z'],
+    ['a zeroth day', '2026-09-00T12:00:00Z'],
+    ['a day past the end of a month under an offset', '2026-02-30T12:00:00+02:00'],
+  ])('refuses %s rather than rolling it forward', (_why, updatedAt) => {
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
+      'invalid router replica event',
+    );
+  });
+
+  it('publishes the leap day of a year that has one', () => {
+    expect(replicaPayloadFromEvent(HOST, payloadFor('2028-02-29T12:00:00Z')).updatedAt).toBe(
+      '2028-02-29T12:00:00.000Z',
+    );
+  });
 });

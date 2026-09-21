@@ -118,12 +118,42 @@ function isNonempty(value) {
  * computed it. Sub-millisecond digits are truncated rather than refused, since
  * a Firestore `Timestamp` loses them at `toDate()` too, so millisecond
  * resolution is the canonical resolution of the whole layer.
+ *
+ * The shape is not enough on its own, which is the sharp half. `Date.parse`
+ * ROLLS an impossible day forward instead of refusing it — `2026-02-30`
+ * answers March 2, `2025-02-29` answers March 1 — so a canonicalizer that
+ * trusted the regex and the parse would publish and digest a DIFFERENT instant
+ * than the one the ledger names, which is worse than the divergence
+ * canonicalizing is here to remove. An out-of-range month, hour, minute or
+ * second is already `NaN` in V8, but that is an implementation detail rather
+ * than a contract, so the calendar components are read back from `Date.UTC`
+ * and every one of them must survive the round trip. Leap years fall out of
+ * that check rather than being special-cased.
  */
-const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RFC_3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Whether an RFC 3339 match names a calendar instant that exists, judged on
+ * the components AS WRITTEN: the offset shifts which UTC instant the text
+ * denotes, but `2026-02-30T12:00:00+02:00` is not a date in any zone.
+ */
+function namesARealInstant(match) {
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day &&
+    probe.getUTCHours() === hour &&
+    probe.getUTCMinutes() === minute &&
+    probe.getUTCSeconds() === second
+  );
+}
 
 export function normalizeTimestamp(value) {
   if (typeof value === 'string') {
-    if (!RFC_3339.test(value)) return null;
+    const match = RFC_3339.exec(value);
+    if (match === null || !namesARealInstant(match)) return null;
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
   }

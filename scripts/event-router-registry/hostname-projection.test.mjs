@@ -200,6 +200,25 @@ describe('stored ledger validation', () => {
     expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
   });
 
+  // `Date.parse` ROLLS these forward rather than refusing them, so before the
+  // calendar check a digest was taken over an instant the ledger never named:
+  // `2026-02-30T12:00:00Z` parses to March 2.
+  it.each([
+    ['a day past the end of February', '2026-02-30T12:00:00Z'],
+    ['a thirty-first of April', '2026-04-31T12:00:00Z'],
+    ['a leap day in a year that has none', '2025-02-29T12:00:00Z'],
+    ['a zeroth day', '2026-09-00T12:00:00Z'],
+    ['a day past the end of a month under an offset', '2026-02-30T12:00:00+02:00'],
+  ])('refuses a ledger whose updatedAt is %s rather than rolling it forward', (_why, updatedAt) => {
+    expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
+  });
+
+  it('accepts the leap day of a year that has one', () => {
+    expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2028-02-29T12:00:00Z' })).documentDigest).toBe(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2028-02-29T12:00:00.000Z' })).documentDigest,
+    );
+  });
+
   it('refuses to build a ledger around a timestamp that does not round-trip', () => {
     expect(
       code(() =>

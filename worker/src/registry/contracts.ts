@@ -63,8 +63,39 @@ const ROOT_KEYS = ['edition', 'kind', 'pathNamespace', 'root'];
 const TOMBSTONE_KEYS = ['kind'];
 const EDITIONS = new Set<RegistryEdition>(['gcb', 'vacay', 'fiveacross']);
 const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
-const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RFC_3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
+
+/**
+ * Whether an RFC 3339 match names a calendar instant that exists, judged on
+ * the components AS WRITTEN. The shape alone is not enough, and neither is a
+ * finite `Date.parse`: V8 ROLLS an impossible day forward rather than refusing
+ * it, so `2026-02-30T12:00:00Z` parses to March 2 and would be stored as a
+ * date the source never wrote. The source and the publisher refuse it for the
+ * same reason (`normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs` and
+ * `replicaPayloadFromEvent` in `router-publisher/src/runtime.ts`), and the
+ * edge does not trust the hop in between. Reading the components back out of
+ * `Date.UTC` gets leap years right for free.
+ */
+function namesARealInstant(match: RegExpExecArray): boolean {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day &&
+    probe.getUTCHours() === hour &&
+    probe.getUTCMinutes() === minute &&
+    probe.getUTCSeconds() === second
+  );
+}
 /**
  * A rehearsal host is one of the two closed label classes under one of the two
  * Namespaces. The label halves come from `src/slug.ts` and the Namespace half
@@ -335,7 +366,12 @@ export function parseSyncRequest(body: string, contentType: string | null): Rout
   const host = requireString(decoded.host, 'host');
   if (host !== normalizeHost(host) || host.endsWith('.')) throw new Error('host must be canonical');
   const updatedAt = requireString(decoded.updatedAt, 'updatedAt');
-  if (!RFC_3339.test(updatedAt) || !Number.isFinite(Date.parse(updatedAt))) {
+  const updatedAtMatch = RFC_3339.exec(updatedAt);
+  if (
+    updatedAtMatch === null ||
+    !namesARealInstant(updatedAtMatch) ||
+    !Number.isFinite(Date.parse(updatedAt))
+  ) {
     throw new Error('invalid updatedAt');
   }
   return {

@@ -21,7 +21,34 @@ const FIRESTORE_SUBJECT_PREFIX = 'documents/routerReplicas/';
  * RAW string before that string is parsed, because `Date.parse` also accepts
  * texts RFC 3339 does not and an offsetless one is read as LOCAL time.
  */
-const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RFC_3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Whether an RFC 3339 match names a calendar instant that exists, judged on
+ * the components AS WRITTEN. The shape alone is not enough: `Date.parse` ROLLS
+ * an impossible day forward rather than refusing it (`2026-02-30` answers
+ * March 2), so a canonicalizer that trusted the regex would publish a
+ * different instant than the ledger names. Reading the components back out of
+ * `Date.UTC` gets leap years right for free.
+ */
+function namesARealInstant(match: RegExpExecArray): boolean {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day &&
+    probe.getUTCHours() === hour &&
+    probe.getUTCMinutes() === minute &&
+    probe.getUTCSeconds() === second
+  );
+}
 const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
   ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
@@ -389,7 +416,10 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     // `scripts/event-router-registry/hostname-projection.mjs`), and a reader
     // that echoed the text would make the two layers disagree about a
     // document neither of them changed.
-    if (!RFC_3339.test(timestamp)) throw new Error('invalid router replica event');
+    const match = RFC_3339.exec(timestamp);
+    if (match === null || !namesARealInstant(match)) {
+      throw new Error('invalid router replica event');
+    }
     const parsed = Date.parse(timestamp);
     if (!Number.isFinite(parsed)) throw new Error('invalid router replica event');
     updatedAt = new Date(parsed).toISOString();
