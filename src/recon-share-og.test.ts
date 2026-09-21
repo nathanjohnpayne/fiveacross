@@ -471,6 +471,13 @@ describe('recon: the reference share-card rasters are regenerable and unoverlaid
     // everywhere, which is what makes "only the thing you meant to move moved"
     // unprovable.
     expect(header.colorType).toBe(2);
+    // Non-interlaced, asserted here rather than left to the pixel test below.
+    // The two dark-ground cards reach `readPngPixels`, which refuses an
+    // interlaced image, but Vacay is deliberately excluded from that test — so
+    // without this line an interlaced 600x750 8-bit truecolor Vacay card would
+    // pass `npm test` while the renderer, the converter and
+    // `docs/app/og-artwork.md` all declare all three non-interlaced.
+    expect(header.interlace).toBe(0);
   });
 
   it.each(SHARE_CARDS.filter((c) => c.edition !== 'vacay'))(

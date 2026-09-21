@@ -264,8 +264,21 @@ export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
  * The commit phase holds `withDestinationLocks` for its whole duration, as
  * `commitStaged`'s concurrency contract requires of every caller publishing to
  * a shared destination — `plans/og-images/` is shared with a second run of
- * this same command. Staging needs no lock: `scratchPathFor` mints a
- * per-invocation path that no other run can be writing.
+ * this same command, and with the other renderer.
+ *
+ * `readsDestination` widens that window, and the footer refresher sets it
+ * (#887 round 5). A screenshot of an artboard does not read the file it is
+ * about to replace, so locking the commit alone is enough: whatever was there
+ * is irrelevant to what gets written. A band repaint is a read-modify-write of
+ * that very file, and locking only the commit leaves the classic lost update —
+ * the footer process reads the card, a full render commits a newer one while
+ * the paint is in flight, and the footer process then takes the lock and
+ * publishes a repaint of the snapshot it read before any of that, silently
+ * discarding the newer render. With `readsDestination: true` the locks are
+ * taken over the whole run instead, before the first capture, so the bytes a
+ * capture reads are the bytes its commit replaces. It is off by default
+ * because holding three destination locks across three screenshots would block
+ * a concurrent single-Edition run for no reason.
  */
 export async function renderCardSet({
   ids,
@@ -279,12 +292,18 @@ export async function renderCardSet({
   commit = commitStaged,
   discard = discardStaged,
   lock = withDestinationLocks,
+  readsDestination = false,
 }) {
-  await preflight();
+  const targets = ids.map((id) => ({ id, dest: join(destDir, fileFor(id)) }));
+  // Taken before `preflight`, not merely before the capture loop: a `capture`
+  // that reads its destination must not observe bytes another run is about to
+  // replace, and the cheapest way to promise that is for no part of the run to
+  // happen outside the lock.
+  const heldThroughout = readsDestination ? lock(targets) : null;
   const staged = [];
   try {
-    for (const id of ids) {
-      const dest = join(destDir, fileFor(id));
+    await preflight();
+    for (const { id, dest } of targets) {
       // Recorded BEFORE the capture runs, so a screenshot that fails halfway
       // through writing its file still has that file swept up below.
       const entry = { id, dest, scratch: stagePathFor(dest) };
@@ -304,11 +323,14 @@ export async function renderCardSet({
     // render-og-editions.mjs: a Chromium shutdown that fails AFTER the commit
     // would report a run that actually published as a failed one.
     await beforeCommit();
-    const release = lock(staged);
+    // Already holding every one of these locks when `readsDestination` is set.
+    // Re-acquiring would deadlock against this process's own lock files, which
+    // are exclusive rather than reentrant, so the run would simply time out.
+    const release = heldThroughout ?? lock(staged);
     try {
       commit(staged);
     } finally {
-      release();
+      if (release !== heldThroughout) release();
     }
   } catch (error) {
     // Either a target failed its own checks — every earlier target in this run
@@ -319,6 +341,8 @@ export async function renderCardSet({
     // exactly as it was before the run started.
     discard(staged);
     throw error;
+  } finally {
+    if (heldThroughout) heldThroughout();
   }
   return staged;
 }

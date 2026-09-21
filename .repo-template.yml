@@ -253,6 +253,13 @@ spec_test_map:
     - scripts/og/og-stage-commit-concurrency.test.mjs
     - scripts/og/og-commit-lock.test.mjs
     - scripts/og/og-commit-lock-atomicity.test.mjs
+    # The share-card publisher (#887) composes the same three commit-safety
+    # modules over plans/og-images/share-final-photo-*.png: its output guard,
+    # its all-or-nothing batch and its widened lock scope.
+    - scripts/og/share-raster-format.test.mjs
+    - scripts/og/png-truecolor.test.mjs
+    - scripts/og/render-share-rasters.test.mjs
+    - scripts/og/render-share-footer.test.mjs
   # cloud-vision-moderation spans five layers — the hide decision (functions:
   # the arms themselves, the scanner hand-off that keeps a verdict reaching a
   # Proof that does not exist yet from creating one, and the block pinning that

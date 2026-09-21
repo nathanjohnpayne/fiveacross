@@ -41,6 +41,16 @@
 // published. `--all` publishes all three or none of them, through the same
 // `commitStaged` phase.
 //
+// CONCURRENCY (#887 round 5). A band repaint is a read-modify-write of a file
+// the OTHER renderer also publishes, so the destination locks are held across
+// the read, the paint, the staging AND the commit — `readsDestination: true`
+// on the `renderCardSet` call below. Locking only the commit phase, which is
+// all a screenshot-from-an-artboard run needs, left the lost update in plain
+// sight: this process reads the card, `render-share-rasters.mjs` commits a
+// freshly rendered one while the paint is in flight, and this process then
+// takes the lock and publishes a repaint of the picture it read before any of
+// that, discarding the new render with no error anywhere.
+//
 // Usage:
 //   node scripts/og/render-share-footer.mjs --edition vacay
 //   node scripts/og/render-share-footer.mjs --all
@@ -79,16 +89,29 @@ const DATA_URL_PREFIX = 'data:image/png;base64,';
 /**
  * Turn a band-painting step into the `capture` seam `renderCardSet` takes.
  *
- * `paint(id)` hands back exactly what `canvas.toDataURL('image/png')` returns:
- * a `data:image/png;base64,…` string. Everything between that and a staged
- * file lives here rather than in the CLI, so the conversion and its refusal
- * are exercised by render-share-footer.test.mjs through the same seam the
- * raster generator's staging tests use — with a synthetic RGBA image in place
- * of a browser.
+ * This is a read-modify-write: the input is the CURRENTLY committed card, and
+ * the output replaces it. The read therefore lives HERE rather than in the
+ * CLI (#887 round 5, finding 4058679280), because `renderCardSet` calls this
+ * with the destination locks already held when it is given
+ * `readsDestination: true`. Reading in the CLI, before that call, reopened the
+ * lost update the lock exists to prevent: the footer process would snapshot
+ * the card, a full render would commit a newer one while the paint was in
+ * flight, and the footer process would then take the lock and publish a
+ * repaint of the stale snapshot over it. Inside the seam the bytes a capture
+ * reads are, by construction, the bytes its own commit replaces.
+ *
+ * `paint(id, currentCardBase64)` hands back exactly what
+ * `canvas.toDataURL('image/png')` returns: a `data:image/png;base64,…` string.
+ * Everything either side of it lives here rather than in the CLI, so the read,
+ * the conversion and its refusal are all exercised by
+ * render-share-footer.test.mjs through the same seam the raster generator's
+ * staging tests use — with a synthetic RGBA image in place of a browser.
  */
-export function footerCaptureFrom(paint) {
+export function footerCaptureFrom(paint, { destDir, fileFor = (id) => CARDS[id].file, read = readFileSync } = {}) {
+  if (!destDir) throw new Error('render-share-footer.mjs: footerCaptureFrom needs the destDir it reads cards from.');
   return async (id, scratch) => {
-    const dataUrl = await paint(id);
+    const current = read(join(destDir, fileFor(id)));
+    const dataUrl = await paint(id, current.toString('base64'));
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith(DATA_URL_PREFIX)) {
       // Without this, a canvas that returned `data:,` on an encode failure
       // would split to `undefined` and stage an empty file, and the reader
@@ -208,14 +231,14 @@ async function main() {
     await browser.close();
   };
 
-  /** One band pass, reported the way this tool has always reported it. The
-   *  input is the CURRENTLY committed card: this is a repaint of an existing
+  /** One band pass, reported the way this tool has always reported it. `b64`
+   *  is the CURRENTLY committed card, handed over by the capture seam, which
+   *  reads it under the destination lock: this is a repaint of an existing
    *  picture, not a render from the artboard. */
-  const paint = async (id) => {
+  const paint = async (id, b64) => {
     const card = CARDS[id];
     const brand = editionBrand(id);
     const line = `${brand.appName.toUpperCase()} ${brand.lexicon.shareMark}`;
-    const b64 = readFileSync(join(destDir, card.file)).toString('base64');
     const page = await browser.newPage({ viewport: { width: CARD_W, height: BAND.h }, deviceScaleFactor: 1 });
     try {
       const out = await paintBand(page, {
@@ -235,7 +258,9 @@ async function main() {
 
   try {
     if (checkOnly) {
-      for (const id of ids) await paint(id);
+      // Reported, not written, so there is nothing to lose to a concurrent
+      // render and nothing to lock: a --check run publishes nothing.
+      for (const id of ids) await paint(id, readFileSync(join(destDir, CARDS[id].file)).toString('base64'));
       console.log('\n--check: nothing written.');
       return;
     }
@@ -245,7 +270,11 @@ async function main() {
       destDir,
       fileFor: (id) => CARDS[id].file,
       beforeCommit: closeBrowser,
-      capture: footerCaptureFrom(paint),
+      capture: footerCaptureFrom(paint, { destDir }),
+      // A band repaint reads the card it replaces, so the destination locks
+      // have to span the read as well as the commit. See the note on
+      // `footerCaptureFrom` and on `renderCardSet`'s own parameter.
+      readsDestination: true,
     });
     for (const { id, dest, report } of staged) {
       console.log(
