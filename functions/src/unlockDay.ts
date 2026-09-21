@@ -875,24 +875,62 @@ export function visibleFinaleRoster(roster: readonly FinalePlayer[], bannedUids:
   return roster.filter((p) => !bannedUids.includes(p.uid));
 }
 
-/** Every pinned per-Day honor doc (#266) — days/{i}/meta/{i}, present ones only. */
+/**
+ * The pinned per-Day honours, WITH whether every Day's doc was actually read
+ * (CodeRabbit Major on PR #1242).
+ *
+ * The per-Day `catch` is what makes the plain reader best-effort, and for the
+ * podium payload that is right: one unreadable `meta` doc costs the Moment one
+ * honour line rather than the whole beat. For the freeze capture it is not. A
+ * failed read there is indistinguishable from a Day that pinned nothing, so an
+ * Event whose roster shows no Marks and whose ONE pinned honour could not be
+ * read came out as a confident `false` — the unknown-as-false slip this ticket
+ * exists to close, in the arm added to close it. The two callers need different
+ * things from the same read, so the read reports both: what it got, and whether
+ * that is everything.
+ */
+interface DayHonorsRead {
+  /** The pins that were read and name a first bingo. */
+  honors: FinaleDayHonorDoc[];
+  /** `false` when ANY Day's `meta` read failed — so `honors` is a floor, not an
+   *  inventory, and absence from it proves nothing. */
+  complete: boolean;
+}
+
+async function readDayHonorsWithCompleteness(
+  db: FinaleReadSource,
+  eventId: string,
+  days: readonly FinaleDay[],
+): Promise<DayHonorsRead> {
+  const reads = await Promise.all(
+    days.map(async (d) => {
+      try {
+        const snap = await db.doc(`events/${eventId}/days/${d.index}/meta/${d.index}`).get();
+        const firstBingo = (snap.data() as { firstBingo?: FinaleDayHonorDoc['firstBingo'] } | undefined)?.firstBingo;
+        // READ, and either pinned or not — distinct from the failure below,
+        // which is the distinction the freeze capture is decided on.
+        return { read: true, honor: firstBingo ? ({ dayIndex: d.index, firstBingo } as FinaleDayHonorDoc) : null };
+      } catch {
+        return { read: false, honor: null };
+      }
+    }),
+  );
+  return {
+    honors: reads.map((r) => r.honor).filter((h): h is FinaleDayHonorDoc => h !== null),
+    complete: reads.every((r) => r.read),
+  };
+}
+
+/** Every pinned per-Day honor doc (#266) — days/{i}/meta/{i}, present ones only.
+ *  Best-effort by design: an unreadable Day contributes no entry, exactly as a
+ *  Day that pinned nothing does. A caller that cannot treat those two the same
+ *  reads `readDayHonorsWithCompleteness` instead. */
 export async function readDayHonors(
   db: FinaleReadSource,
   eventId: string,
   days: readonly FinaleDay[],
 ): Promise<FinaleDayHonorDoc[]> {
-  const honors = await Promise.all(
-    days.map(async (d) => {
-      try {
-        const snap = await db.doc(`events/${eventId}/days/${d.index}/meta/${d.index}`).get();
-        const firstBingo = (snap.data() as { firstBingo?: FinaleDayHonorDoc['firstBingo'] } | undefined)?.firstBingo;
-        return firstBingo ? ({ dayIndex: d.index, firstBingo } as FinaleDayHonorDoc) : null;
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return honors.filter((h): h is FinaleDayHonorDoc => h !== null);
+  return (await readDayHonorsWithCompleteness(db, eventId, days)).honors;
 }
 
 // --- Snapshot stamping ----------------------------------------------------------
@@ -1411,21 +1449,38 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
         // A pin is positive evidence and a cleared count is a self-reported
         // negative, so the pin wins: the claim this fact gates is refused
         // unless every signal the record carries agrees nothing was marked. The
-        // honours are taken exactly as the podium payload takes them — the same
-        // `readDayHonors` over the same Days, a pin counting when it names a
-        // first bingo — so the two halves of one Moment cannot contradict each
-        // other, and a meta doc neither can read leaves neither naming it.
+        // honours are the same pins the podium payload prints, over the same
+        // Days, a pin counting when it names a first bingo — so the two halves
+        // of one Moment cannot contradict each other.
+        //
+        // READ COMPLETENESS IS PART OF THE ANSWER (CodeRabbit Major on PR
+        // #1242). `readDayHonors` turns a Day whose `meta` doc could not be
+        // read into no entry, which is right for the payload — one unreadable
+        // Day costs one honour line — and wrong here, because it makes an
+        // unread pin indistinguishable from a Day that pinned nothing. An Event
+        // with no Marks on its roster and one unreadable pin would have come
+        // out a confident `false`, persisted it, and let the immutable email
+        // say nobody played: the unknown-as-false slip this ticket exists to
+        // close, in the arm added to close it. So the three answers are read
+        // off what was actually established. Any successful signal proving play
+        // is `true` — a Mark on the roster, or a pin that WAS read — because
+        // evidence in hand does not need the rest of the reads to agree.
+        // `false` needs the roster read AND every honour read to have
+        // succeeded, because it is the answer that carries a claim. Anything
+        // else is unknown, written as `null` and omitted from the Moment,
+        // exactly as a failed roster read already is.
         //
         // NO CUTOFF IS INTRODUCED HERE. A pin carries an instant, but bounding
         // this fact by the freeze is the change rebutted at Codex
         // `4058610368`: the ceremonial Day unlocks AT the cutoff, so a bound
         // would read the ceremonial-only Event as unplayed, which is the defect
         // #1192 removed.
-        const [roster, honors] = await Promise.all([
+        const [roster, dayHonors] = await Promise.all([
           readFinaleRoster(db, eventId),
-          readDayHonors(db, eventId, finaleDays),
+          readDayHonorsWithCompleteness(db, eventId, finaleDays),
         ]);
-        playRecorded = roster.some(anyMarksRecorded) || honors.some((h) => h.firstBingo != null);
+        const played = roster.some(anyMarksRecorded) || dayHonors.honors.some((h) => h.firstBingo != null);
+        playRecorded = played ? true : dayHonors.complete ? false : undefined;
       } catch (err) {
         console.error('runFinaleBeats: freeze playRecorded capture failed', eventId, err);
       }

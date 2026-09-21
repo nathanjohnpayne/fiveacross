@@ -1208,6 +1208,63 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       expect(podium?.dailyHonors).toHaveLength(1);
       expect(podium?.playRecorded).toBe(true);
     });
+
+    /** Fail one Day's `meta` read and leave every other read alone — the shape
+     *  `readDayHonors` turns into no entry, which is indistinguishable from a
+     *  Day that pinned nothing unless the read reports its own completeness. */
+    const honourReadFails = (db: AdminFirestore, dayIndex: number): AdminFirestore => {
+      const realDoc = db.doc;
+      return {
+        ...db,
+        doc: (path: string) => {
+          if (path.endsWith(`/days/${dayIndex}/meta/${dayIndex}`)) throw new Error('meta read failed');
+          return realDoc(path);
+        },
+      };
+    };
+
+    it('stays UNKNOWN when a roster with no Marks meets an honour read that FAILED', async () => {
+      // CodeRabbit Major on PR #1242. The honour arm above closed the gap where
+      // a cleared roster outvoted a pin — and opened a narrower one, because a
+      // pin that could not be READ leaves the same empty list a Day with no pin
+      // does. The Event below has both: nothing marked on the roster, and its
+      // one pinned honour behind a failing read. Answering `false` there would
+      // persist a claim nobody established, on a Moment written once and never
+      // amended, which is this whole ticket in miniature.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        dayHonors: { 8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } } },
+      });
+      await runFinaleBeats(honourReadFails(db, 8), 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The freeze still lands — the capture is best-effort, the freeze is not.
+      expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+      // …and it states the unknown rather than the unestablished `false`.
+      expect(db.readEvent().frozenPlayRecorded).toBeNull();
+      expect(postedPodium(db)?.podium).not.toHaveProperty('playRecorded');
+    });
+
+    it('still answers TRUE when one honour read fails and another pin IS read', async () => {
+      // The other side of the same guard: unknown is what a MISSING signal
+      // buys, never what a failed read imposes on the signals that did arrive.
+      // Evidence in hand does not need the rest of the reads to agree, so a pin
+      // that was read proves play whatever happened to its neighbour.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        dayHonors: {
+          8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } },
+          9: { firstBingo: { uid: 'nathan', displayName: 'Nathan', at: D10_UNLOCK + 1 } },
+        },
+      });
+      await runFinaleBeats(honourReadFails(db, 8), 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
   });
 
   it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {
