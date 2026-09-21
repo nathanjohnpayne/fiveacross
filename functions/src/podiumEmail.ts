@@ -66,6 +66,7 @@ import type { FinalePlayer, PodiumPayload } from './finaleContent';
 import {
   buildPodiumEmailModel,
   singleLine,
+  type PodiumEmailHonours,
   type VisibleMostLovedAward,
 } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
@@ -80,8 +81,10 @@ export interface PodiumEmailInput {
     name?: unknown;
     settings?: { dailyEmailEnabled?: unknown; reportHideThreshold?: unknown } | undefined;
   };
-  /** The payload written to the `podium` Moment, passed through verbatim. */
-  podium: PodiumPayload;
+  /** The payload written to the `podium` Moment, passed through verbatim —
+   *  including an ABSENT `playRecorded`, which is how a Moment says the fact is
+   *  unknown (`PodiumEmailHonours`). */
+  podium: PodiumEmailHonours;
   /** `podiumStandings(...)` output, ban-filtered — the ranked roster whose head
    *  IS `podium.champion`. Doubles as the recipient list: every row carries the
    *  uid and display name the send needs, so the fan-out costs no extra read. */
@@ -1902,17 +1905,25 @@ export async function podiumEmailInputFor(
   // can still be mailed by the first sweep after deploy — and the freeze capture
   // (#1218) leaves it unstated two further ways, a roster read that failed at the
   // freeze and an Event stamped `frozenAt` by some path other than the finale
-  // beat. All three arrive here identically, as a payload with no field. The
-  // fallback is read off the frozen record alone — never off the live roster,
-  // which a post-freeze self-write can move (ADR 0001) — and it refuses the empty
-  // claim whenever the record names ANY honour: a champion, the Event-wide ⭐, or
-  // one Day's pinned honour. The residual it cannot recover is a legacy Event
-  // whose only play was ceremonial Squares with no bingo anywhere; that one reads
-  // as empty, and every Event frozen from here on carries the real answer.
-  const playRecorded =
+  // beat. All three arrive here identically, as a payload with no field.
+  //
+  // AND UNKNOWN STAYS UNKNOWN ALL THE WAY TO THE COPY (Codex P2 `4058610372`).
+  // The frozen record can still PROVE the Event was played — it names a
+  // champion, the Event-wide ⭐, or one Day's pinned honour — and that reading
+  // is kept, because it can only ever answer `true`. What it cannot do is prove
+  // the opposite: an Event whose only play was ceremonial Squares with no bingo
+  // anywhere names no honour at all, so deriving `false` from their absence is
+  // the `champion == null` inference this whole field replaced, moved one field
+  // along. Three states, then, and the third is written as `undefined`: the
+  // record says the Event was played, the record says it was not, or the record
+  // does not say. Read off the frozen record alone either way — never off the
+  // live roster, which a post-freeze self-write can move (ADR 0001).
+  const playRecorded: boolean | undefined =
     typeof payload.playRecorded === 'boolean'
       ? payload.playRecorded
-      : payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0;
+      : payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0
+        ? true
+        : undefined;
 
   return {
     due: true,
@@ -1942,7 +1953,12 @@ export async function podiumEmailInputFor(
       // never anything read off the live roster. Resolved from the payload BEFORE
       // the honour filtering above, so a withheld banned champion is still never
       // mistaken for a board nobody played. See `playRecorded` above.
-      boardWasEmpty: !playRecorded,
+      //
+      // A KNOWN `false`, not merely a falsy one (Codex P2 `4058610372`): `!x`
+      // reads `undefined` as an empty board, which is the one thing an unknown
+      // fact does not say. The claim needs the record to make it; unknown mails
+      // the honest rows with no sentence.
+      boardWasEmpty: playRecorded === false,
       bannedUids: banned,
       closingDay,
       honorDayLabels,

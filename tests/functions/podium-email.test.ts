@@ -1688,13 +1688,75 @@ describe('an all-ceremonial Event is not an empty board (#1192, Codex P2 r14)', 
     expect(got.input.podium.champion).toBeNull();
     expect(got.input.boardWasEmpty).toBe(false);
 
-    // …and a legacy Moment naming nothing at all still reads as empty.
+    // …and a Moment naming nothing at all says NOTHING, which is its own case
+    // below — not the empty board this one refuses on stronger evidence.
     const bare = await podiumEmailInputFor(
       makeDb(seedCeremonialOnly({ podium: { champion: null, firstBingo: null, dailyHonors: [] } })),
       'med-2026',
     );
     if (!bare.due) throw new Error('expected due');
-    expect(bare.input.boardWasEmpty).toBe(true);
+    expect(bare.input.boardWasEmpty).toBe(false);
+  });
+
+  it('says nothing about an UNKNOWN board rather than calling it empty', async () => {
+    // Codex P2 `4058610372`. The honour fallback could only ever PROVE play; it
+    // cannot prove the absence of it, and this is the Event where the two come
+    // apart — every Mark on a ceremonial Day, so no champion, and no bingo
+    // anywhere, so no ⭐ and no pinned honour either. Reading that silence as
+    // `false` is the `champion == null` inference the field replaced, one field
+    // along: the mail would tell a roster that marked squares all morning that
+    // nobody marked one. The Moment here carries no `playRecorded` at all — the
+    // shape a freeze whose roster read failed writes (#1218), and the shape
+    // every Moment written before the field existed already has.
+    const got = await podiumEmailInputFor(
+      makeDb(seedCeremonialOnly({ podium: { champion: null, firstBingo: null, dailyHonors: [] } })),
+      'med-2026',
+    );
+    if (!got.due) throw new Error('expected due');
+    // Unknown survives the module boundary rather than collapsing there.
+    expect(got.input.podium.playRecorded).toBeUndefined();
+    expect(got.input.boardWasEmpty).toBe(false);
+
+    const model = modelFor('gcb', {
+      podium: got.input.podium,
+      mostLoved: null,
+      ranked: got.input.ranked,
+      boardWasEmpty: got.input.boardWasEmpty,
+    });
+    // The claim is not made, in either alternative — the assertion a recipient
+    // would have read.
+    expect(model.standingsEmptyLine).toBeNull();
+    for (const part of [renderPodiumEmailText(model), renderPodiumEmailHtml(model)]) {
+      expect(part).not.toContain('Nobody marked a square');
+      expect(part).not.toContain('the board closed empty');
+    }
+    // And the neutral variant is the one already in the template: the honest
+    // zero rows a ceremonial-only Event has, and the reader's own placing —
+    // exactly what the known-played case above renders.
+    expect(model.standingsRows.map((r) => [r.displayName, r.bingoCount, r.squaresMarked])).toEqual([
+      ['Logan Murdock', 0, 0],
+      ['Nathan Payne', 0, 0],
+    ]);
+    expect(model.youLine).toBe('You finished #2—0 bingos and 0 squares.');
+  });
+
+  it('fills the standings slot when there is nothing to rank and no claim to make', () => {
+    // The one place the unknown fact can reach an EMPTY row list: a roster with
+    // no visible rows (every Player banned, or an unreadable read) under a
+    // Moment that states no honour. The claim stays unavailable, so without a
+    // neutral line the standings module would render blank in both parts.
+    const model = modelFor('gcb', {
+      podium: { champion: null, firstBingo: null, dailyHonors: [] },
+      mostLoved: null,
+      ranked: [],
+      boardWasEmpty: false,
+    });
+    expect(model.standingsRows).toEqual([]);
+    expect(model.standingsEmptyLine).toBe('No standings to show for this cruise.');
+    for (const part of [renderPodiumEmailText(model), renderPodiumEmailHtml(model)]) {
+      expect(part).toContain('No standings to show for this cruise.');
+      expect(part).not.toContain('Nobody marked a square');
+    }
   });
 });
 
