@@ -40,6 +40,7 @@ import {
   dropConditionalValidators,
   dropOriginEncoding,
   dropOriginValidators,
+  dropRangeRequest,
   headEditsFor,
   isDocumentCandidate,
   isHeadRewritable,
@@ -306,9 +307,9 @@ async function proxyToOrigin(
   headers.set('x-forwarded-host', url.hostname);
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
-  // Two things a document subrequest must ask for differently from an asset's
-  // (#1118), both decided by one predicate because both are the same question
-  // one step early: is a rewritable document what comes back?
+  // Three things a document subrequest must ask for differently from an
+  // asset's (#1118), all decided by one predicate because all are the same
+  // question one step early: is a rewritable document what comes back?
   //
   // A conditional revalidation is sent on UNCONDITIONALLY. The origin's
   // validators describe one baked `index.html` served to every hostname, so a
@@ -324,13 +325,24 @@ async function proxyToOrigin(
   // nothing, changes nothing, reports success, and the client receives the
   // bundle's baked Edition.
   //
+  // And the `range` goes, so the answer is the whole representation. A `206`
+  // is refused by the rewrite, so a ranged document used to be relayed as the
+  // origin wrote it — safe alone, wrong in company: the same URL answers an
+  // ordinary `GET` with the REWRITTEN representation, a different length, so a
+  // client resuming or assembling the document splices baked bytes into
+  // rewritten ones and a range over the head gets the wrong Edition. A byte
+  // range over the SPA shell has no legitimate use, and a server may always
+  // answer one with the full `200` it would otherwise have sent. `if-range`
+  // goes with it, having nothing left to qualify.
+  //
   // Only the serving path, and only a document candidate: an asset — a path
   // with a file extension asked for with a wildcard, or any request naming a
   // non-HTML media type — keeps its validators, its cheap `304` and its
-  // negotiated encoding, and the `/__/auth/*` exemption (`record === null`) is
-  // untouched like everything else about it.
+  // negotiated encoding and its `Range`, and the `/__/auth/*` exemption
+  // (`record === null`) is untouched like everything else about it.
   if (record !== null && isDocumentCandidate(request, url)) {
     dropConditionalValidators(headers);
+    dropRangeRequest(headers);
     negotiateIdentityEncoding(headers);
   }
 

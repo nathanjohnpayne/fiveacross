@@ -4,6 +4,7 @@ import {
   dropConditionalValidators,
   dropOriginEncoding,
   dropOriginValidators,
+  dropRangeRequest,
   headEditsFor,
   isDocumentCandidate,
   isDocumentShapedPath,
@@ -187,11 +188,31 @@ describe('what a document subrequest and its rewritten answer must not carry', (
     dropConditionalValidators(headers);
     expect(headers.get('if-none-match')).toBeNull();
     expect(headers.get('if-modified-since')).toBeNull();
-    // `if-range` is meaningful only alongside `Range`, whose answer is relayed
-    // rather than rewritten; removing it would let a Range apply to a
-    // representation the client did not mean.
+    // `if-range` is not a revalidation header — it qualifies a `Range` — so it
+    // is `dropRangeRequest`'s to remove, and taking it here while leaving the
+    // range behind would let that range apply to a representation the client
+    // did not mean.
     expect(headers.get('if-range')).toBe('"origin-index"');
     expect(headers.get('accept')).toBe('text/html');
+  });
+
+  it('takes the range request off a document subrequest, and only that', () => {
+    // A ranged document would come back `206`: bytes and byte offsets from the
+    // baked representation, while an ordinary GET of the same URL is answered
+    // with the rewritten one, which is a different length. Dropping the range
+    // is what stops a client splicing the two.
+    const headers = new Headers({
+      range: 'bytes=0-99',
+      'if-range': '"origin-index"',
+      accept: 'text/html',
+      'if-none-match': '"origin-index"',
+    });
+    dropRangeRequest(headers);
+    expect(headers.get('range')).toBeNull();
+    expect(headers.get('if-range')).toBeNull();
+    expect(headers.get('accept')).toBe('text/html');
+    // The revalidation headers are the sibling function's business.
+    expect(headers.get('if-none-match')).toBe('"origin-index"');
   });
 
   it('asks the origin for identity, whatever the runtime negotiated', () => {

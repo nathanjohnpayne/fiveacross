@@ -115,7 +115,21 @@ export default {
       if (request.headers.get('if-none-match') === ASSET_ETAG) {
         return new Response(null, { status: 304, headers: { etag: ASSET_ETAG } });
       }
-      return new Response('export const og = "Gay Cruise Bingo";', {
+      const asset = new TextEncoder().encode('export const og = "Gay Cruise Bingo";');
+      if (request.headers.get('range')) {
+        const window = asset.slice(0, ${PARTIAL_BYTES});
+        return new Response(window, {
+          status: 206,
+          headers: {
+            'content-type': 'application/javascript',
+            'content-range': 'bytes 0-' + (window.byteLength - 1) + '/' + asset.byteLength,
+            'content-length': String(window.byteLength),
+            etag: ASSET_ETAG,
+            'x-origin-accept-encoding': askedWith,
+          },
+        });
+      }
+      return new Response(asset, {
         status: 200,
         headers: {
           'content-type': 'application/javascript',
@@ -130,6 +144,12 @@ export default {
     const body = env.INDEX_HTML;
     const bytes = new TextEncoder().encode(body);
     if (request.headers.get('range')) {
+      // Reachable only if the router forwarded a range for the document,
+      // which it must not: the rewritten representation is a different length
+      // from this one, so a client splicing the two corrupts the result. The
+      // document range case below asserts a full 200 precisely because this
+      // arm stays unreached. (No backticks in here: this whole worker is a
+      // template literal.)
       const partial = bytes.slice(0, ${PARTIAL_BYTES});
       return new Response(partial, {
         status: 206,
@@ -512,22 +532,42 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('gcb').documentTitle);
   });
 
-  it('relays a 206 byte-for-byte with its content-range intact', async () => {
+  it('relays an ASSET 206 byte-for-byte with its content-range intact', async () => {
     // A `Range` answer is a window described by byte offsets. Rewriting inside
     // it while relaying the offsets that frame it is how a client assembling
-    // or resuming the document reassembles a corrupted one.
-    const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
-      headers: { range: `bytes=0-${PARTIAL_BYTES - 1}` },
+    // or resuming a resource reassembles a corrupted one. An asset is where a
+    // `206` can still arise, because its range travels to the origin.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/asset.js', {
+      headers: { accept: '*/*', range: `bytes=0-${PARTIAL_BYTES - 1}` },
     });
-    const origin = new TextEncoder().encode(boundIndexHtml());
-    const partial = origin.slice(0, PARTIAL_BYTES);
+    const origin = new TextEncoder().encode('export const og = "Gay Cruise Bingo";');
+    const window = origin.slice(0, PARTIAL_BYTES);
 
     expect(response.status).toBe(206);
     expect(response.headers.get('content-range')).toBe(
-      `bytes 0-${partial.byteLength - 1}/${origin.byteLength}`,
+      `bytes 0-${window.byteLength - 1}/${origin.byteLength}`,
     );
-    expect(response.headers.get('content-length')).toBe(String(partial.byteLength));
-    expect(new Uint8Array(await response.arrayBuffer())).toEqual(partial);
+    expect(response.headers.get('content-length')).toBe(String(window.byteLength));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(window);
+  });
+
+  it.each([
+    ['a crawler', { accept: '*/*' }],
+    ['a browser', { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' }],
+  ])('answers %s ranged document request with the whole rewritten document', async (_who, headers) => {
+    // The range never reaches the origin, so there is no second, baked
+    // representation of this URL for a client to splice into the rewritten
+    // one. The stub would answer `206` from the index if it did, which is what
+    // makes this assertion sharp.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
+      headers: { ...headers, range: `bytes=0-${PARTIAL_BYTES - 1}` },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-range')).toBeNull();
+    const html = await response.text();
+    expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('vacay').documentTitle);
+    expect(html.trimEnd().endsWith('</html>')).toBe(true);
   });
 
   it.each([404, 500, 502])('relays a %i from the origin untouched', async (status) => {

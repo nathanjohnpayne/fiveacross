@@ -903,17 +903,81 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       expect(response.headers.get('cache-control')).toBe('no-cache');
     });
 
-    it('keeps if-range, which qualifies a Range whose answer is relayed', async () => {
-      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
-      await handleRequest(
+    it.each([
+      ['a browser', CONDITIONAL.accept],
+      ['a crawler', '*/*'],
+    ])('takes the Range and If-Range off %s ranged document request', async (_who, accept) => {
+      // A `206` is refused by the rewrite, so a ranged document used to be
+      // relayed exactly as the origin wrote it. Safe alone, wrong in company:
+      // the same URL answers an ordinary `GET` with the REWRITTEN
+      // representation, a different length, so a client resuming or
+      // assembling the document splices baked bytes into rewritten ones and a
+      // range covering the head hands back the Edition the bundle was built
+      // with. A byte range over the SPA shell has no legitimate use, and a
+      // server may always answer one with the full `200` instead.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: (request) =>
+          request.headers.get('range') !== null
+            ? new Response('<!doctype html><head>', {
+                status: 206,
+                headers: {
+                  'content-type': 'text/html; charset=utf-8',
+                  'content-range': 'bytes 0-20/4096',
+                },
+              })
+            : htmlOrigin(),
+      });
+      const response = await handleRequest(
         get('https://bodega-bay.fiveacross.app/', {
-          headers: { ...CONDITIONAL, 'if-range': '"origin-index"', range: 'bytes=0-99' },
+          headers: { accept, 'if-range': '"origin-index"', range: 'bytes=0-99' },
         }),
         CONFIG,
         deps,
       );
-      expect(requests.at(-1)!.headers.get('if-range')).toBe('"origin-index"');
-      expect(requests.at(-1)!.headers.get('range')).toBe('bytes=0-99');
+
+      expect(requests.at(-1)!.headers.get('range')).toBeNull();
+      // Nothing left for it to qualify.
+      expect(requests.at(-1)!.headers.get('if-range')).toBeNull();
+      // The stub answers `206` to any forwarded range, so a `200` here is the
+      // proof that none was forwarded.
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-range')).toBeNull();
+      expect(rewrites).toHaveLength(1);
+    });
+
+    it('leaves an asset request’s Range alone and relays its 206 byte for byte', async () => {
+      // Where a `206` can still arise, and the reason it is safe there: an
+      // asset is never rewritten, so the origin's representation is the only
+      // one this URL has and its byte offsets still describe it.
+      const partial = 'export cons';
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () =>
+          new Response(partial, {
+            status: 206,
+            headers: {
+              'content-type': 'application/javascript',
+              'content-range': 'bytes 0-10/36',
+              'content-length': String(partial.length),
+            },
+          }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/assets/app.js', {
+          headers: { accept: '*/*', 'if-range': '"asset"', range: 'bytes=0-10' },
+        }),
+        CONFIG,
+        deps,
+      );
+
+      expect(requests.at(-1)!.headers.get('range')).toBe('bytes=0-10');
+      expect(requests.at(-1)!.headers.get('if-range')).toBe('"asset"');
+      expect(response.status).toBe(206);
+      expect(response.headers.get('content-range')).toBe('bytes 0-10/36');
+      expect(response.headers.get('content-length')).toBe(String(partial.length));
+      expect(await response.text()).toBe(partial);
+      expect(rewrites).toHaveLength(0);
     });
 
     it('leaves an asset request’s validators alone and relays its 304', async () => {

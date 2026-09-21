@@ -60,9 +60,13 @@ export type HtmlHeadRewriter = (
  *   byte offsets in its own `content-range`. Substituting a string of a
  *   different length inside that window leaves the offsets describing bytes
  *   that are no longer there, so a client assembling or resuming the document
- *   reassembles a corrupted one — a body transform's worst failure mode,
- *   reached by a header this router never has to honour itself. A partial
- *   representation is relayed whole, `content-range` and all.
+ *   reassembles a corrupted one — a body transform's worst failure mode. A
+ *   partial representation is relayed whole, `content-range` and all. Since
+ *   {@link dropRangeRequest} takes the `Range` off every document candidate,
+ *   the only `206` that can now reach this test is an asset's, which is also
+ *   the only one whose bytes are the same for every hostname; the status test
+ *   stays `=== 200` so that remains true by construction rather than by
+ *   depending on the request-side rule.
  * - **No body.** A `HEAD` response and a `304` carry none; handing a null body
  *   to a transform is the shape that turns an origin failure into a Worker
  *   runtime error, which is precisely what this route may not do.
@@ -221,13 +225,47 @@ export function isDocumentCandidate(request: Request, url: URL): boolean {
  * Take the cache validators off a request, so the origin must answer with a
  * body the rewrite can act on.
  *
- * `if-range` is deliberately NOT removed: it is meaningful only alongside
- * `Range`, whose answer is relayed rather than rewritten, and removing it would
- * let a `Range` apply to a representation the client did not mean.
+ * Scoped to the two REVALIDATION headers. `if-range` is not a cache validator
+ * — it qualifies a `Range` — so it is {@link dropRangeRequest}'s to remove,
+ * and removing it here while leaving the `Range` behind would let that range
+ * apply to a representation the client did not mean.
  */
 export function dropConditionalValidators(headers: Headers): void {
   headers.delete('if-none-match');
   headers.delete('if-modified-since');
+}
+
+/**
+ * Take the range request off a document subrequest, so the origin answers with
+ * the whole representation.
+ *
+ * The rewrite refuses a `206` — a window described by byte offsets cannot have
+ * a string of a different length substituted inside it — so a ranged document
+ * used to be relayed exactly as the origin wrote it. Relaying it is safe on
+ * its own and wrong in company: the SAME resource answers an ordinary `GET`
+ * with the REWRITTEN representation, which is a different length, so a client
+ * that resumes or assembles the document splices baked bytes into rewritten
+ * ones, and a range covering the head hands back the Edition the bundle was
+ * built with. Two representations of one URL, and the client picks the seam.
+ *
+ * Dropping the range rather than answering `416` or ranging over the
+ * transformed body: a byte range over the SPA shell has no legitimate use —
+ * it is one small `no-cache` document, not a media file — and a server may
+ * always answer a ranged request with the full `200` it would otherwise have
+ * sent, which is exactly the representation a document client must see.
+ * Ranging over the transform instead would mean buffering the rewritten
+ * document to know its length, giving up the streaming this module is built
+ * around, for a client that does not exist.
+ *
+ * `if-range` goes with it, because a precondition on a range that is no longer
+ * being asked for has nothing left to qualify.
+ *
+ * Applied only to a document candidate. Every other request keeps its `Range`
+ * and its `206`, which is what the relay path continues to serve.
+ */
+export function dropRangeRequest(headers: Headers): void {
+  headers.delete('range');
+  headers.delete('if-range');
 }
 
 /**
