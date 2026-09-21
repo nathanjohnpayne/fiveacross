@@ -881,6 +881,64 @@ describe('buildEventArchive — a ban hides, it never reassigns', () => {
     // rather than the derived runner-up.
     expect(archive.dailyHonors).toEqual([]);
   });
+
+  // #1217, the DERIVED half of the same rule. The pinned case above was already
+  // right: a day-meta pin carries its own name and instant, so
+  // `pinnedOrDerivedDailyHonors` checks it against `bannedUids` directly. The
+  // unpinned fallback was not, because this builder handed that selector a
+  // ban-FILTERED roster — indistinguishable from a roster the banned Player was
+  // never on — so `perDayHonors` picked the earliest bingo among whoever was
+  // left and Day 1's honour moved down to a Player who was never first, frozen
+  // permanently on the one write that can never be amended. The selection runs
+  // over the raw ranking now and the ban is applied to its OUTPUT; only the
+  // standings rows stay ban-filtered, because a rank is a position and a
+  // position closes the gap (`specs/w2-leaderboard.md` § Design decisions).
+  it('leaves an UNPINNED Day unheld when its derived honoree is banned, and touches no other Day', () => {
+    const elsewhere = mkPlayer({
+      uid: 'elsewhere',
+      displayName: 'Elsewhere',
+      bingoCount: 1,
+      squaresMarked: 3,
+      firstBingoAt: 4000,
+      dayStats: { 2: { bingoCount: 1, squaresMarked: 3, firstBingoAt: 4000 } },
+    });
+    const archive = buildEventArchive({
+      players: [banned, later, elsewhere],
+      event: { days: DAYS, bannedUids: ['banned'] },
+      archivedAt: 1,
+    });
+    // Day 1's earliest bingo is the banned Player's, so Day 1 carries nothing —
+    // `later` bingoed on it too and is NOT promoted. Day 2 is untouched.
+    expect(archive.dailyHonors.map((h) => [h.dayIndex, h.uid])).toEqual([[2, 'elsewhere']]);
+    // …and the positions still close up over the rows a reader can see.
+    expect(archive.standings.map((r) => r.uid)).toEqual(['later', 'elsewhere']);
+    expect(archive.playerCount).toBe(2);
+  });
+
+  it('baseline: with nobody banned, that same Day carries its earliest bingo', () => {
+    // Proves the ban is what withheld Day 1 above, not a broken fixture.
+    const archive = buildEventArchive({
+      players: [banned, later],
+      event: { days: DAYS, bannedUids: [] },
+      archivedAt: 1,
+    });
+    expect(archive.dailyHonors.map((h) => [h.dayIndex, h.uid])).toEqual([[1, 'banned']]);
+  });
+
+  it('keeps an UNBANNED holder’s pinned honour while a banned Player sits on the same Day', () => {
+    // The other direction of #1217: withholding must not spread. The pin names
+    // `later`, who is not banned, so Day 1 keeps its chip even though the
+    // banned Player bingoed earlier on that Day.
+    const archive = buildEventArchive({
+      players: [banned, later],
+      event: { days: DAYS, bannedUids: ['banned'] },
+      dayMetas: new Map<number, DayMetaDoc>([
+        [1, { firstBingo: { uid: 'later', displayName: 'Later', at: 3000 } }],
+      ]),
+      archivedAt: 1,
+    });
+    expect(archive.dailyHonors.map((h) => [h.dayIndex, h.uid])).toEqual([[1, 'later']]);
+  });
 });
 
 // Codex P2, PR #1139. `players/{uid}` is self-written under the honour system
