@@ -103,8 +103,8 @@ if (process.platform !== 'darwin' && !allowForeign) {
 
 // The brand table comes from the shared bundling loader in
 // `load-editions.mjs`. This script used to transpile `src/editions.ts` alone
-// and stub its `require`, on a comment claiming the only import was a
-// type-only one; that stopped being true when the module started importing
+// and stub its `require`, on a comment claiming the module's only import was a
+// type-only one; that stopped being true when it started importing
 // `EDITION_IDS` and `brandFor` for real values, and this script died on load
 // from then on. The shared loader bundles the sibling modules instead.
 const { editionBrand, wordmarkSegments } = loadEditions();

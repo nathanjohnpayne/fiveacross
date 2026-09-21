@@ -65,6 +65,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadEditions } from './load-editions.mjs';
 import { toTruecolorPng } from './png-truecolor.mjs';
 import { renderCardSet } from './render-share-rasters.mjs';
 
@@ -213,12 +214,12 @@ async function main() {
   }
 
   // The brand table comes from the shared bundling loader in
-  // `load-editions.mjs`. This script used to transpile `src/editions.ts` alone
-  // and stub its `require`, which died on load once the module started
-  // importing `EDITION_IDS` and `brandFor` for real values. Loaded inside
-  // `main` (it shells out to esbuild) so importing this file for its capture
-  // seam costs nothing.
-  const { loadEditions } = await import('./load-editions.mjs');
+  // `load-editions.mjs` (#1254). This script used to transpile
+  // `src/editions.ts` alone and stub its `require`, which died on load once
+  // the module started importing `EDITION_IDS` and `brandFor` for real values.
+  // The import is static so `load-editions.test.mjs` can see it; the CALL is
+  // here, inside `main`, because it shells out to esbuild and importing this
+  // file for its capture seam should not.
   const { editionBrand } = loadEditions();
   const destDir = join(repo, 'plans', 'og-images');
 

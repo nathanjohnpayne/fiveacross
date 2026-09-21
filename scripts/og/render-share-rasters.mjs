@@ -82,6 +82,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadEditions } from './load-editions.mjs';
 import { withDestinationLocks } from './og-commit-lock.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
@@ -449,14 +450,12 @@ async function main() {
   }
 
   // The brand table comes from the shared bundling loader in
-  // `load-editions.mjs`. This script introduced that loader inline; it moved to
-  // its own module once the two renderers next door adopted it, because the
-  // transpile-and-stub loader they had each copied rotted the moment
-  // `src/editions.ts` grew a real import — one defect in three places.
-  //
-  // Loaded here rather than at module scope (it shells out to esbuild) so
-  // importing this file for its staging logic costs nothing.
-  const { loadEditions } = await import('./load-editions.mjs');
+  // `load-editions.mjs` (#1254), which bundles `src/editions.ts` rather than
+  // transpiling it and stubbing its `require` — the arrangement that rotted in
+  // every renderer at once the moment that module grew a real import. The
+  // import is static so `load-editions.test.mjs` can see it; the CALL is here,
+  // inside `main`, because it shells out to esbuild and importing this file
+  // for its staging logic should not.
   const { editionBrand } = loadEditions();
   const footerFor = (id) => {
     const brand = editionBrand(id);
@@ -563,7 +562,8 @@ async function main() {
 }
 
 // Importable for its staging logic, runnable as the generator. Nothing above
-// this line touches the filesystem, the brand table or a browser.
+// this line reads the filesystem, evaluates the brand table or starts a
+// browser — `loadEditions` and `chromium` are only reached from `main`.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main();
 }
