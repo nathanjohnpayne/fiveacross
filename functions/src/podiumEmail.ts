@@ -1918,12 +1918,25 @@ export async function podiumEmailInputFor(
   // record says the Event was played, the record says it was not, or the record
   // does not say. Read off the frozen record alone either way — never off the
   // live roster, which a post-freeze self-write can move (ADR 0001).
-  const playRecorded: boolean | undefined =
-    typeof payload.playRecorded === 'boolean'
+  //
+  // AND A NAMED HONOUR OUTRANKS AN EXPLICIT `false` (Codex P2 `4058671218`).
+  // The scheduler's capture is the authority on this fact, and the freeze now
+  // reads the honour pins beside the roster — but a Moment is written once and
+  // never amended, so a record already carrying `false` beside a champion, a
+  // ⭐ or a pinned honour can still arrive here, and no later freeze can repair
+  // it. The two halves contradict each other and only one of them is evidence:
+  // a pin is a server-written record of a bingo, a count is a Player's own
+  // figure on a row that validates no field (ADR 0001) and that the holder can
+  // clear. So the honour reading is asked FIRST and can only ever answer
+  // `true`; the stored fact decides only what the record does not otherwise
+  // name.
+  const recordNamesAnHonour =
+    payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0;
+  const playRecorded: boolean | undefined = recordNamesAnHonour
+    ? true
+    : typeof payload.playRecorded === 'boolean'
       ? payload.playRecorded
-      : payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0
-        ? true
-        : undefined;
+      : undefined;
 
   return {
     due: true,

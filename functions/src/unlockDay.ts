@@ -987,8 +987,15 @@ export async function stampDaySnapshot(
  * `playRecorded` is the frozen Event's "did anybody play" fact — the value this
  * run wrote, or, when it lost the race, the one the already-frozen document
  * carries. `undefined` is UNKNOWN: an Event frozen before the field existed, one
- * whose roster read failed, or one this run could not freeze at all. The podium
+ * whose capture failed, or one this run could not freeze at all. The podium
  * beat treats that as unknown rather than `false`.
+ *
+ * IT IS THE WHOLE ANSWER, not an improvement on what the caller already had
+ * (Codex P2 `4058671215`). A committed freeze reports what it wrote, `null`
+ * included, and a lost race reports what the winner stored, so the caller
+ * REPLACES its opening value with this one rather than keeping the older
+ * reading when this one is unknown — otherwise a pre-freeze value an admin
+ * wrote outlives the transaction that was supposed to settle the question.
  *
  * The two are reported separately because they answer for different writes:
  * `committed` gates nothing outside the freeze itself, while `frozen` is what
@@ -1008,11 +1015,24 @@ function frozenPlayRecordedOf(event: EventLike | undefined): boolean | undefined
   return typeof event?.frozenPlayRecorded === 'boolean' ? event.frozenPlayRecorded : undefined;
 }
 
-/** The `frozenPlayRecorded` half of a freeze write: present only when the fact
- *  is known, because Firestore has no "write undefined" and absence is how this
- *  contract says unknown. */
+/**
+ * The `frozenPlayRecorded` half of a freeze write. ALWAYS PRESENT, carrying
+ * `null` when the capture came out unknown (Codex P2 `4058671215`).
+ *
+ * Writing nothing looks equivalent and is not. This field is NOT in
+ * `firestore.rules`' no-client-writes set — the Event arm sits at Firestore's
+ * expression cap (#1142) — so an Event admin can write it, and `frozenAt`
+ * independently of it, which makes an UNFROZEN Event carrying a pre-freeze
+ * value reachable. Omitting the key then leaves that value in place and the
+ * freeze stamps beside it, so a hand-written guess is published as the frozen
+ * answer by this run and by every podium retry after it. An explicit `null`
+ * neutralises it in the same update that stamps `frozenAt`, which is what makes
+ * "the fact and the stamp land together or not at all" true of the unknown case
+ * too. `frozenPlayRecordedOf` reads `null` and absence identically, so nothing
+ * downstream has to tell the two apart.
+ */
 function frozenPlayRecordedWrite(playRecorded: boolean | undefined): Record<string, unknown> {
-  return playRecorded === undefined ? {} : { frozenPlayRecorded: playRecorded };
+  return { frozenPlayRecorded: playRecorded ?? null };
 }
 
 /**
@@ -1349,6 +1369,11 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   // winning run stored is the only one that describes the Event at the freeze.
   // The freeze arm overwrites it only when it can learn something better.
   let frozenPlayRecorded = frozenPlayRecordedOf(event);
+  // ONE READING of the Event's Day list for both arms below — the freeze's
+  // honour half (#1218, Codex P2 `4058671218`) and the podium's payload build
+  // ask the same question of the same schedule, and two spellings of the
+  // coercion are two chances for them to disagree about which Days exist.
+  const finaleDays = (Array.isArray(event.days) ? event.days : []) as FinaleDay[];
   // …AND WHETHER THERE IS A FROZEN RECORD TO QUOTE AT ALL (#1218, CodeRabbit on
   // PR #1242). Seeded from the same opening read, where it is already the whole
   // answer for a run that does not owe the freeze: `postPodium` and `freeze` are
@@ -1373,7 +1398,34 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       // the beat says so rather than the freeze being skipped.
       let playRecorded: boolean | undefined;
       try {
-        playRecorded = (await readFinaleRoster(db, eventId)).some(anyMarksRecorded);
+        // THE ROSTER IS NOT THE ONLY WITNESS (Codex P2 `4058671218`). A Player
+        // row is client-authoritative and validates no field (ADR 0001), so a
+        // Player who clears their own roots and buckets after taking a Day's
+        // honour leaves a roster that says nobody marked anything — while
+        // `meta.firstBingo`, which no client can write, still records the bingo
+        // that won it. Captured from the roster alone, the freeze then stored
+        // `false`, the podium printed the pin beside it, and the email, which
+        // trusts an EXPLICIT `false` over its own honour reading, restored the
+        // #1192 sentence against the Moment's own evidence.
+        //
+        // A pin is positive evidence and a cleared count is a self-reported
+        // negative, so the pin wins: the claim this fact gates is refused
+        // unless every signal the record carries agrees nothing was marked. The
+        // honours are taken exactly as the podium payload takes them — the same
+        // `readDayHonors` over the same Days, a pin counting when it names a
+        // first bingo — so the two halves of one Moment cannot contradict each
+        // other, and a meta doc neither can read leaves neither naming it.
+        //
+        // NO CUTOFF IS INTRODUCED HERE. A pin carries an instant, but bounding
+        // this fact by the freeze is the change rebutted at Codex
+        // `4058610368`: the ceremonial Day unlocks AT the cutoff, so a bound
+        // would read the ceremonial-only Event as unplayed, which is the defect
+        // #1192 removed.
+        const [roster, honors] = await Promise.all([
+          readFinaleRoster(db, eventId),
+          readDayHonors(db, eventId, finaleDays),
+        ]);
+        playRecorded = roster.some(anyMarksRecorded) || honors.some((h) => h.firstBingo != null);
       } catch (err) {
         console.error('runFinaleBeats: freeze playRecorded capture failed', eventId, err);
       }
@@ -1391,8 +1443,12 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
           await freezeStandings(db, eventId, times.standingsFreezeAt, playRecorded);
       // Whether this run committed or lost the race, the outcome carries the
       // fact the FROZEN document now holds — which is what the podium must
-      // quote. `undefined` leaves the opening read's value alone.
-      if (outcome.playRecorded !== undefined) frozenPlayRecorded = outcome.playRecorded;
+      // quote. It REPLACES the opening read unconditionally, `undefined`
+      // included (Codex P2 `4058671215`): the transaction has just settled the
+      // question, and keeping an older reading because the new one is unknown
+      // is exactly how a pre-freeze value an admin wrote reached the Moment as
+      // the frozen answer.
+      frozenPlayRecorded = outcome.playRecorded;
       eventFrozen = outcome.frozen;
     } catch (err) {
       console.error('runFinaleBeats: freeze failed', eventId, err);
@@ -1423,10 +1479,9 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       // day-meta pins. Best-effort like the last-call content.
       let extra: Record<string, unknown> | undefined;
       try {
-        const days = (Array.isArray(event.days) ? event.days : []) as FinaleDay[];
         const [roster, honors] = await Promise.all([
           readFinaleRoster(db, eventId),
-          readDayHonors(db, eventId, days),
+          readDayHonors(db, eventId, finaleDays),
         ]);
         // The freeze cutoff is NOT optional here (Phase 4b P1). This beat is
         // retried until the podium Moment actually lands, so a run that happens
@@ -1450,7 +1505,7 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
         // derivation would be the defect, dressed as a default.
         const { playRecorded: _derivedLive, ...frozen } = buildPodiumPayload(
           roster,
-          days,
+          finaleDays,
           honors,
           times.standingsFreezeAt,
         );

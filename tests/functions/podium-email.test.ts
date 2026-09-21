@@ -1740,6 +1740,45 @@ describe('an all-ceremonial Event is not an empty board (#1192, Codex P2 r14)', 
     expect(model.youLine).toBe('You finished #2—0 bingos and 0 squares.');
   });
 
+  it('refuses the claim when the record names an honour and says `false` anyway', async () => {
+    // Codex P2 `4058671218`, the half no later freeze can repair. The capture
+    // now reads the pinned honours beside the roster, so the scheduler will not
+    // write this shape again — but a Moment is written once and never amended,
+    // and one already carrying `false` beside a pin outlives the fix. The two
+    // halves contradict each other and only one is evidence: the pin is a
+    // server-written record of a bingo, the count is a figure its own holder
+    // can clear on a row that validates no field (ADR 0001).
+    const got = await podiumEmailInputFor(
+      makeDb(
+        seedCeremonialOnly({
+          podium: {
+            champion: null,
+            firstBingo: null,
+            dailyHonors: [{ dayIndex: 0, uid: 'logan', displayName: 'Logan Murdock', at: 4_000 }],
+            playRecorded: false,
+          },
+        }),
+      ),
+      'med-2026',
+    );
+    if (!got.due) throw new Error('expected due');
+    // The honour wins, so the strongest negative sentence the mail can print is
+    // not available to it.
+    expect(got.input.podium.playRecorded).toBe(true);
+    expect(got.input.boardWasEmpty).toBe(false);
+    const model = modelFor('gcb', {
+      podium: got.input.podium,
+      mostLoved: null,
+      ranked: got.input.ranked,
+      boardWasEmpty: got.input.boardWasEmpty,
+    });
+    expect(model.standingsEmptyLine).toBeNull();
+    for (const part of [renderPodiumEmailText(model), renderPodiumEmailHtml(model)]) {
+      expect(part).not.toContain('Nobody marked a square');
+      expect(part).not.toContain('the board closed empty');
+    }
+  });
+
   it('fills the standings slot when there is nothing to rank and no claim to make', () => {
     // The one place the unknown fact can reach an EMPTY row list: a roster with
     // no visible rows (every Player banned, or an unreadable read) under a

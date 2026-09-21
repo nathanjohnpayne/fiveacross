@@ -474,8 +474,15 @@ export interface EventDoc {
    * (#1142) — so an Event admin can still write it, exactly as they can
    * `frozenAt`. The exposure is one sentence of email copy rather than a gate on
    * an irreversible write, which is why it rides the existing admin gate.
+   *
+   * AND `null` SAYS UNKNOWN TOO, deliberately (Codex P2 `4058671215`). That
+   * admin-writable gate is also what makes an UNFROZEN Event carrying a
+   * pre-freeze value reachable, so a freeze whose capture came out unknown
+   * writes `null` rather than leaving the key alone — omitting it would let the
+   * earlier value stand as the frozen answer. Readers treat `null` and absence
+   * identically; nothing distinguishes them, and nothing should.
    */
-  frozenPlayRecorded?: boolean;
+  frozenPlayRecorded?: boolean | null;
   /**
    * The composite FINALE-COMPLETE marker (ms epoch, #1151, Codex P1 on PR
    * #1162): when every required finale beat had landed — the freeze stamp AND
