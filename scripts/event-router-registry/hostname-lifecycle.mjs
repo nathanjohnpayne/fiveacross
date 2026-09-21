@@ -708,6 +708,15 @@ async function planBackfill(input, transaction, clock, buffer, revisions, projec
 }
 
 /**
+ * Whether the stored ledger CLAIMS to be a tombstone, whatever else is wrong
+ * with it. Asked structurally rather than through the validator, because the
+ * point is to recognise the claim in a document the validator rejects.
+ */
+function tombstoneShaped(ledger) {
+  return isRecord(ledger) && isRecord(ledger.desired) && ledger.desired.kind === 'tombstone';
+}
+
+/**
  * Whether the stored ledger is a WELL-FORMED tombstone. A malformed ledger
  * answers false rather than refusing, because repairing exactly that is what
  * the advance below is for; only a ledger that validates can be relied on to
@@ -778,6 +787,22 @@ async function planAdvanceLedger(input, transaction, clock, buffer, revisions, p
   // remaining case — the tombstone with no hostname document, which is the
   // converged one — still advances, because that is how a tombstone the edge
   // is ahead of gets republished.
+  // A ledger that CLAIMS a tombstone but does not validate is not evidence
+  // that the address is free, and this is the one intent that would otherwise
+  // read it that way: the advance deliberately tolerates a missing or
+  // malformed ledger, because repairing exactly that is what it is for, and
+  // `validTombstone` answers false for a malformed one. So a tombstone
+  // carrying an extra field, or a timestamp that will not normalise, fell
+  // through the retirement check — and if a partial Admin write had also
+  // recreated `hostnames/{host}`, the advance republished the retired address
+  // as a live route at a higher revision, permanently. The claim is therefore
+  // honoured before it is validated: a tombstone-shaped ledger that does not
+  // validate refuses for investigation, with or without a source document,
+  // because which of the two documents is the corrupt one is exactly what a
+  // human has to decide.
+  if (tombstoneShaped(state.ledger) && !validTombstone(host, state.ledger)) {
+    refuse('tombstoned-address-malformed');
+  }
   if (validTombstone(host, state.ledger) && state.hostname !== null) refuse('tombstoned-address');
   const desired = project(() => deriveCanonicalProjection(host, state.hostname));
   const highWater = BigInt(input.durableObjectHighWaterRevision);

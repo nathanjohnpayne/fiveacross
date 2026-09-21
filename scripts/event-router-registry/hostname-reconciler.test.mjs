@@ -179,12 +179,6 @@ describe('three-way reconciliation', () => {
     expect(report.counts[state]).toBe(1);
   });
 
-  // The label is syntactically a wildcard-Namespace subdomain but is reserved,
-  // so no organizer could claim it and neither the publisher nor the worker
-  // would accept a projection for it. Before the host rule reached the
-  // tombstone arm this row read as `already-correct`: the derivation answered
-  // a tombstone, the ledger held one, and the audit reported the matching
-  // digest, so a ledger that can never be published looked converged.
   // The deployed audit endpoint requires `host === normalizeHost(host)` and
   // answers 400 for anything else, so a single non-canonical document id used
   // to take the whole run down before any report existed. It is now
@@ -215,6 +209,12 @@ describe('three-way reconciliation', () => {
     expect(deps.readHostAuditPage.mock.calls.map(([args]) => args.host)).toEqual([HOST]);
   });
 
+  // The label is syntactically a wildcard-Namespace subdomain but is reserved,
+  // so no organizer could claim it and neither the publisher nor the worker
+  // would accept a projection for it. Before the host rule reached the
+  // tombstone arm this row read as `already-correct`: the derivation answered
+  // a tombstone, the ledger held one, and the audit reported the matching
+  // digest, so a ledger that can never be published looked converged.
   it('classifies a tombstone keyed to an unclaimable host as invalid source rather than converged', async () => {
     const host = 'admin.fiveacross.app';
     const tombstone = { schemaVersion: 1, revision: '9', host, desired: { kind: 'tombstone' }, updatedAt: NOW };
@@ -294,6 +294,36 @@ describe('three-way reconciliation', () => {
   // apart from the two high-water marks. Accepting zero took a shape the
   // Durable Object never stores as evidence, and a floor of zero is not a
   // floor at all — the fence comparison below it cannot mean anything.
+  // The audit contract emits revisions, sequences, cursors and epochs as
+  // canonical decimal TEXT, for the reason every revision here is text: they
+  // stay lossless under BigInt. A `String(...)` coercion accepted the
+  // JSON-number form of each, and a number above MAX_SAFE_INTEGER has
+  // already been rounded by the time it is stringified, so the reconciler
+  // would compare and report a value the object never emitted.
+  it.each([
+    ['a committed revision', { committed: { revision: 4, digest: 'f'.repeat(64) } }],
+    ['a rounded committed revision above MAX_SAFE_INTEGER', { committed: { revision: 9007199254740993, digest: 'f'.repeat(64) } }],
+    ['the epoch floor', { minimumPublisherEpoch: 2 }],
+    ['a high-water mark', { highestQuarantinedPublisherEpoch: 0 }],
+  ])('refuses an audit page answering %s as a JSON number', async (_why, overrides) => {
+    const deps = dependencies({ audits: { [HOST]: [auditPage(overrides)] } });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
+  // The cursor keeps its own refusal, which is the one that already names
+  // what went wrong with a pagination value.
+  it('refuses an audit page answering its cursor as a JSON number', async () => {
+    const deps = dependencies({ audits: { [HOST]: [auditPage({ nextAfter: 1 })] } });
+    expect(await refusal(input(), deps)).toBe('audit-pagination-unbounded');
+  });
+
+  it('refuses a recovery record whose sequence is a JSON number', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const numeric = { ...record('1', null, committed), sequence: 1 };
+    const deps = dependencies({ audits: { [HOST]: [auditPage({ committed, records: [numeric] })] } });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
   it('refuses an audit page whose minimumPublisherEpoch is the zero sentinel', async () => {
     const deps = dependencies({
       audits: { [HOST]: [auditPage({ minimumPublisherEpoch: '0' })] },

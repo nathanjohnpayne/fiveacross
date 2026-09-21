@@ -103,6 +103,31 @@ function namesARealInstant(match: RegExpExecArray): boolean {
     probe.getUTCSeconds() === second
   );
 }
+
+/**
+ * The canonical text for an accepted instant, or null — the same function as
+ * `canonicalInstant` in `router-publisher/src/runtime.ts` and
+ * `scripts/event-router-registry/hostname-projection.mjs`, because the three
+ * layers must accept exactly the same texts.
+ *
+ * Both ends are checked. The components are judged as WRITTEN, before the
+ * offset is applied, so a text at either end of the supported range can
+ * validate and still canonicalise outside it: `0100-01-01T00:00:00+01:00`
+ * answers `0099-12-31T23:00:00.000Z`, which the year bound refuses, and
+ * `9999-12-31T23:59:59-01:00` answers the expanded `+010000-...` form, which
+ * is not RFC 3339 at all. The edge stores the text it was sent rather than
+ * the canonical form — the publisher only ever sends the canonical form —
+ * but it accepts on the same terms.
+ */
+function canonicalInstant(value: string): string | null {
+  const match = RFC_3339.exec(value);
+  if (match === null || !namesARealInstant(match)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
+}
 /**
  * A rehearsal host is one of the two closed label classes under one of the two
  * Namespaces. The label halves come from `src/slug.ts` and the Namespace half
@@ -373,14 +398,7 @@ export function parseSyncRequest(body: string, contentType: string | null): Rout
   const host = requireString(decoded.host, 'host');
   if (host !== normalizeHost(host) || host.endsWith('.')) throw new Error('host must be canonical');
   const updatedAt = requireString(decoded.updatedAt, 'updatedAt');
-  const updatedAtMatch = RFC_3339.exec(updatedAt);
-  if (
-    updatedAtMatch === null ||
-    !namesARealInstant(updatedAtMatch) ||
-    !Number.isFinite(Date.parse(updatedAt))
-  ) {
-    throw new Error('invalid updatedAt');
-  }
+  if (canonicalInstant(updatedAt) === null) throw new Error('invalid updatedAt');
   return {
     schemaVersion: 1,
     revision,

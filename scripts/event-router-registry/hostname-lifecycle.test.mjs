@@ -820,6 +820,38 @@ describe('backfill and the explicit Admin ledger advance', () => {
     });
     expect(await refusal(advance(), malformed.dependencies)).toBe('tombstoned-address');
   });
+
+  // The advance is the one intent that tolerates a malformed ledger, so a
+  // tombstone that fails validation for an UNRELATED reason fell through the
+  // retirement check entirely: `validTombstone` answered false, and with a
+  // recreated source beside it the retired address was republished as a live
+  // route at a higher revision. The claim is now honoured before it is
+  // validated, and the refusal is its own code because a corrupt tombstone
+  // is an investigation rather than a repair this intent may perform.
+  it.each([
+    ['an extra field', { extra: true }],
+    ['a timestamp that will not normalise', { updatedAt: '2026-02-30T12:00:00Z' }],
+    ['a revision that is not canonical', { revision: '05' }],
+  ])('refuses to advance past a tombstone carrying %s, with or without a source', async (_why, overrides) => {
+    const corrupt = {
+      schemaVersion: 1,
+      revision: '5',
+      host: HOST,
+      desired: { kind: 'tombstone' },
+      updatedAt: NOW,
+      ...overrides,
+    };
+    const recreated = store({ [`hostnames/${HOST}`]: hostnameDocument(), [`routerReplicas/${HOST}`]: corrupt });
+    expect(await refusal(advance(), recreated.dependencies)).toBe('tombstoned-address-malformed');
+    expect(recreated.docs.get(`routerReplicas/${HOST}`)).toEqual(corrupt);
+    expect(recreated.docs.get(`hostnames/${HOST}`)).toEqual(hostnameDocument());
+
+    // Also refused with no source document: the converged retirement is the
+    // case the advance may republish, and a corrupt one is not it.
+    const alone = store({ [`routerReplicas/${HOST}`]: corrupt });
+    expect(await refusal(advance(), alone.dependencies)).toBe('tombstoned-address-malformed');
+    expect(alone.docs.get(`routerReplicas/${HOST}`)).toEqual(corrupt);
+  });
 });
 
 describe('the helper boundary', () => {

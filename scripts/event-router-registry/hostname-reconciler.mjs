@@ -38,6 +38,22 @@ const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 
 /**
+ * Whether a value off the audit wire is a canonical decimal, asked of a
+ * STRING and never of a coercion.
+ *
+ * The Durable Object audit contract emits revisions, recovery sequences,
+ * cursors and epochs as canonical decimal text, for the reason every revision
+ * in this system is text: they stay lossless under `BigInt`. A `String(...)`
+ * coercion accepted the JSON-number form of all four, and a number above
+ * `Number.MAX_SAFE_INTEGER` has already been rounded by the time it is
+ * stringified — so the reconciler would compare, report and paginate from a
+ * value the object never emitted, rather than refusing malformed evidence.
+ */
+function decimalWire(value, pattern) {
+  return typeof value === 'string' && pattern.test(value);
+}
+
+/**
  * Exactly these seams, for the reason the header gives: an exact set is what
  * keeps a later caller from handing the reconciler a KV namespace, a cache, or
  * an acknowledgement writer.
@@ -82,10 +98,10 @@ function exactKeys(value, expected, code, host) {
  */
 function committedRef(value, host) {
   if (value === null || value === undefined) return null;
-  if (!isRecord(value) || !POSITIVE_DECIMAL.test(String(value.revision ?? '')) || !isNonempty(value.digest)) {
+  if (!isRecord(value) || !decimalWire(value.revision, POSITIVE_DECIMAL) || !isNonempty(value.digest)) {
     refuse('malformed-audit-page', host);
   }
-  return { revision: String(value.revision), digest: value.digest };
+  return { revision: value.revision, digest: value.digest };
 }
 
 /**
@@ -221,7 +237,7 @@ async function collectAudit(dependencies, host) {
     if (head === null) head = page;
     if (!Array.isArray(page.records)) refuse('malformed-audit-page', host);
     for (const record of page.records) {
-      if (!isRecord(record) || !POSITIVE_DECIMAL.test(String(record.sequence ?? ''))) {
+      if (!isRecord(record) || !decimalWire(record.sequence, POSITIVE_DECIMAL)) {
         refuse('malformed-audit-page', host);
       }
       // The history is append-only and contiguous from sequence 1, so the very
@@ -245,10 +261,10 @@ async function collectAudit(dependencies, host) {
     }
     const next = page.nextAfter;
     if (next === null) break;
-    if (!NON_NEGATIVE_DECIMAL.test(String(next ?? '')) || BigInt(next) <= BigInt(cursor)) {
+    if (!decimalWire(next, NON_NEGATIVE_DECIMAL) || BigInt(next) <= BigInt(cursor)) {
       refuse('audit-pagination-unbounded', host);
     }
-    cursor = String(next);
+    cursor = next;
   } while (true);
   const committed = committedRef(head.committed ?? null, host);
   if (records.length > 0 && !publisherReachable(previousAfter, committed)) {
@@ -266,9 +282,9 @@ async function collectAudit(dependencies, host) {
   // to read, since a floor of zero is not a floor at all. Validated
   // separately so the reconciler fails closed on an adapter that answers a
   // shape the Durable Object never stores.
-  if (!POSITIVE_DECIMAL.test(String(head.minimumPublisherEpoch ?? ''))) refuse('malformed-audit-page', host);
+  if (!decimalWire(head.minimumPublisherEpoch, POSITIVE_DECIMAL)) refuse('malformed-audit-page', host);
   for (const field of ['highestAuthenticatedPublisherEpoch', 'highestQuarantinedPublisherEpoch']) {
-    if (!NON_NEGATIVE_DECIMAL.test(String(head[field] ?? ''))) refuse('malformed-audit-page', host);
+    if (!decimalWire(head[field], NON_NEGATIVE_DECIMAL)) refuse('malformed-audit-page', host);
   }
   return { ...head, committed, records, pages };
 }

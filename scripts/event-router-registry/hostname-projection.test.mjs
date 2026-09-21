@@ -263,6 +263,11 @@ describe('stored ledger validation', () => {
     // draw the same bound; moving one of the three means moving all three.
     ['a year before 0100, which this layer will not treat as a publish instant', '0099-12-31T23:59:59Z'],
     ['the year zero', '0000-01-01T00:00:00Z'],
+    // Written components inside the range, canonical result outside it: the
+    // offset is applied AFTER they are judged, so the emitted text has to be
+    // validated too or the digest takes a form this layer refuses.
+    ['an offset that carries the first supported year below the bound', '0100-01-01T00:00:00+01:00'],
+    ['an offset that carries the last supported year into the expanded form', '9999-12-31T23:59:59-01:00'],
   ])('refuses a ledger whose updatedAt is %s', (_why, updatedAt) => {
     expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
   });

@@ -162,13 +162,30 @@ function namesARealInstant(match) {
   );
 }
 
+/**
+ * The canonical text for an accepted instant, or null.
+ *
+ * BOTH ends are checked, and the second is not redundant: the components are
+ * judged as WRITTEN, before the offset is applied, so a text at either end of
+ * the supported range can validate and still canonicalise outside it.
+ * `0100-01-01T00:00:00+01:00` answers `0099-12-31T23:00:00.000Z`, which the
+ * year bound refuses, and `9999-12-31T23:59:59-01:00` answers the expanded
+ * form `+010000-01-01T00:59:59.000Z`, which is not RFC 3339 at all. A reader
+ * that returned either would hand the digest — and the publisher — a text its
+ * own rules reject.
+ */
+function canonicalInstant(value) {
+  const match = RFC_3339.exec(value);
+  if (match === null || !namesARealInstant(match)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
+}
+
 export function normalizeTimestamp(value) {
-  if (typeof value === 'string') {
-    const match = RFC_3339.exec(value);
-    if (match === null || !namesARealInstant(match)) return null;
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
-  }
+  if (typeof value === 'string') return canonicalInstant(value);
   if (!isRecord(value) || typeof value.toDate !== 'function') return null;
   let date;
   try {

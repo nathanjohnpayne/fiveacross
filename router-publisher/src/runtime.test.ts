@@ -456,7 +456,7 @@ describe('the publisher timestamp canonicalizer', () => {
     ['a shifted-offset spelling', '2026-09-20T14:00:00+02:00'],
     ['a sub-millisecond spelling', '2026-09-20T12:00:00.000123Z'],
     ['a Firestore Timestamp', { toDate: () => new Date('2026-09-20T12:00:00.000Z') }],
-  ])('publishes %s as the one canonical instant', (_why, updatedAt) => {
+  ])('publishes %s as the one canonical instant', (_why, updatedAt: unknown) => {
     expect(replicaPayloadFromEvent(HOST, payloadFor(updatedAt)).updatedAt).toBe(
       '2026-09-20T12:00:00.000Z',
     );
@@ -473,6 +473,11 @@ describe('the publisher timestamp canonicalizer', () => {
     // closed. Both layers must move together or they disagree about which
     // texts are admissible.
     ['a year before 0100, which is not a publish instant', '0099-12-31T23:59:59Z'],
+    // The offset is applied AFTER the written components are judged, so the
+    // emitted text is validated too: these two canonicalise outside the
+    // range the source and the worker accept.
+    ['an offset that carries the first supported year below the bound', '0100-01-01T00:00:00+01:00'],
+    ['an offset that carries the last supported year into the expanded form', '9999-12-31T23:59:59-01:00'],
   ])('refuses %s', (_why, updatedAt) => {
     expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
       'invalid router replica event',
@@ -497,6 +502,17 @@ describe('the publisher timestamp canonicalizer', () => {
   it('publishes the leap day of a year that has one', () => {
     expect(replicaPayloadFromEvent(HOST, payloadFor('2028-02-29T12:00:00Z')).updatedAt).toBe(
       '2028-02-29T12:00:00.000Z',
+    );
+  });
+
+  // The Timestamp branch goes through the same predicate, so the two
+  // encodings accept the same instants here as they do on the source side.
+  it('refuses a Firestore Timestamp for a year the string branch refuses', () => {
+    const before0100 = new Date(0);
+    before0100.setUTCFullYear(99, 11, 31);
+    before0100.setUTCHours(23, 59, 59, 0);
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor({ toDate: () => before0100 }))).toThrow(
+      'invalid router replica event',
     );
   });
 });

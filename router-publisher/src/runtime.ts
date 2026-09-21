@@ -56,6 +56,25 @@ function namesARealInstant(match: RegExpExecArray): boolean {
     probe.getUTCSeconds() === second
   );
 }
+
+/**
+ * The canonical text for an accepted instant, or null — the same function as
+ * `canonicalInstant` in
+ * `scripts/event-router-registry/hostname-projection.mjs` and the worker's
+ * `src/registry/contracts.ts`, because the three layers must accept exactly
+ * the same texts. Both ends are checked: the components are judged as
+ * WRITTEN, before the offset is applied, so a text at either end of the
+ * supported range can validate and still canonicalise outside it.
+ */
+function canonicalInstant(value: string): string | null {
+  const match = RFC_3339.exec(value);
+  if (match === null || !namesARealInstant(match)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
+}
 const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
   ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
@@ -422,14 +441,13 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     // (`normalizeTimestamp` in
     // `scripts/event-router-registry/hostname-projection.mjs`), and a reader
     // that echoed the text would make the two layers disagree about a
-    // document neither of them changed.
-    const match = RFC_3339.exec(timestamp);
-    if (match === null || !namesARealInstant(match)) {
-      throw new Error('invalid router replica event');
-    }
-    const parsed = Date.parse(timestamp);
-    if (!Number.isFinite(parsed)) throw new Error('invalid router replica event');
-    updatedAt = new Date(parsed).toISOString();
+    // document neither of them changed. `canonicalInstant` validates the
+    // EMITTED text as well as the written components, because a text at
+    // either end of the supported range can validate and canonicalise
+    // outside it.
+    const canonical = canonicalInstant(timestamp);
+    if (canonical === null) throw new Error('invalid router replica event');
+    updatedAt = canonical;
   } else if (
     isRecord(timestamp) &&
     typeof timestamp.toDate === 'function'
@@ -438,13 +456,17 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
       throw new Error('invalid router replica event');
     }
-    updatedAt = value.toISOString();
+    // Through the SAME predicate as the string branch, so the two encodings
+    // accept the same instants here as they do on the source side.
+    const canonical = canonicalInstant(value.toISOString());
+    if (canonical === null) throw new Error('invalid router replica event');
+    updatedAt = canonical;
   } else {
     throw new Error('invalid router replica event');
   }
+  // `updatedAt` needs no further shape check: both branches above answer
+  // canonical text or throw.
   if (
-    !RFC_3339.test(updatedAt) ||
-    !Number.isFinite(Date.parse(updatedAt)) ||
     host !== host.toLowerCase() ||
     host.endsWith('.') ||
     !validDesired(host, data.desired)

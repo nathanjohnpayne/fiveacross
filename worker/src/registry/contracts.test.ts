@@ -60,6 +60,11 @@ describe('registry sync request contract', () => {
     // field is a publish instant, so a first-century year is corruption and
     // refusing it fails closed. All three layers move together or not at all.
     ['a year before 0100', route({ updatedAt: '0099-12-31T23:59:59Z' })],
+    // The offset is applied after the written components are judged, so the
+    // canonical result is validated too; both of these land outside the
+    // range the source and the publisher accept.
+    ['an offset carrying the first supported year below the bound', route({ updatedAt: '0100-01-01T00:00:00+01:00' })],
+    ['an offset carrying the last supported year into the expanded form', route({ updatedAt: '9999-12-31T23:59:59-01:00' })],
     ['foreign tombstone host', route({ host: 'example.com', desired: { kind: 'tombstone' } })],
   ])('rejects %s before storage', (_label, payload) => {
     expect(() => parseSyncRequest(JSON.stringify(payload), 'application/json')).toThrow();
