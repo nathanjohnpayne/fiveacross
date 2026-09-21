@@ -96,6 +96,9 @@ describe('the renderers get through their brand-table load', () => {
     // the line above nor a reader looking for the dependency at the top of the
     // file, and it is the shape a renderer drifts into when it wants to defer
     // the esbuild cost. Deferring the CALL is the supported way to do that.
-    expect(code).not.toMatch(/import\(['"]\.\/load-editions\.mjs['"]\)/);
+    // The matcher tolerates whitespace inside the parentheses and a template
+    // literal specifier, so `import ( './load-editions.mjs' )` and
+    // import(`./load-editions.mjs`) are refused as well (CodeRabbit, PR #1246).
+    expect(code).not.toMatch(/import\s*\(\s*[`'"]\.\/load-editions\.mjs[`'"]\s*\)/);
   });
 });
