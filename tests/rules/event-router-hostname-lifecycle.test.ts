@@ -68,6 +68,15 @@ const hostnameDocument = (overrides: Doc = {}): Doc => ({
   ...overrides,
 });
 
+/** An armed path-capability deployment record, as `provision` and the two
+ *  repair intents require for a capability-bearing source. */
+const BARRIER = {
+  releaseTag: 'v2026.09.19-path-capability',
+  workerVersionId: 'a1b2c3d4-0000-4000-8000-000000000001',
+  resolutionCacheSchemaVersion: 4,
+  armedAt: '2026-09-19T00:00:00.000Z',
+};
+
 let testEnv: RulesTestEnvironment;
 
 beforeAll(async () => {
@@ -149,7 +158,17 @@ async function read(db: Firestore, path: string): Promise<Doc | null> {
 async function seedConverged(db: Firestore, host: string, document: Doc): Promise<Doc> {
   await setDoc(doc(db, `hostnames/${host}`), document);
   return (await applyHostnameMutation(
-    mutation({ intent: 'backfill-ledger', host }),
+    mutation({
+      intent: 'backfill-ledger',
+      host,
+      // A repair is the FIRST edge publication for a source nothing in the
+      // helper wrote, so a capability-bearing one owes the same deployment
+      // barrier `provision` requires. A source projecting `pathNamespace:
+      // null` needs none and passes nothing.
+      ...(document.pathNamespace === undefined || document.pathNamespace === null
+        ? {}
+        : { pathCapabilityBarrier: BARRIER }),
+    }),
     dependencies(db),
   )) as Doc;
 }
