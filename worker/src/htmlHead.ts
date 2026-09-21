@@ -103,24 +103,100 @@ function isIdentityEncoded(headers: Headers): boolean {
 /** The two media ranges a client uses to say it is asking for a document. */
 const HTML_MEDIA_RANGES = ['text/html', 'application/xhtml+xml'];
 
-/** Every media range a request offered, lowercased and stripped of its
- *  parameters, so `text/html; charset=utf-8` and `*\/*;q=0.8` compare as the
- *  ranges they are. */
-function acceptedMediaRanges(headers: Headers): string[] {
-  return (headers.get('accept') ?? '')
-    .split(',')
-    .map((range) => range.split(';')[0]!.trim().toLowerCase())
-    .filter((range) => range !== '');
+/** The subtype wildcard that covers `text/html`. `application/*` deliberately
+ *  has no equivalent here: it would make a client asking for any application
+ *  type a document candidate on the strength of `application/xhtml+xml`, which
+ *  is not what such a client means. */
+const HTML_SUBTYPE_WILDCARD = 'text/*';
+
+/** One entry of an `Accept` header: the media range, lowercased and stripped
+ *  of its parameters, and the quality value that says how much the client
+ *  wants it. */
+interface AcceptedRange {
+  range: string;
+  quality: number;
 }
 
-/** Whether the request named an HTML media range explicitly. */
+/**
+ * Parse an `Accept` header into ranges and qualities.
+ *
+ * The quality is the whole point of parsing rather than splitting.
+ * `application/json, text/html;q=0` NAMES `text/html` and simultaneously
+ * refuses it, so a parser that drops the parameters reads an explicit
+ * rejection of HTML as a request for it — and then takes that client's
+ * validators, its `Range` and its compression away, turning a `304` or a `206`
+ * it was entitled to into a full uncompressed `200`.
+ *
+ * `q` defaults to `1` when absent, and a malformed one is read as absent
+ * rather than as `0`. The two errors are not symmetric: reading a broken
+ * parameter as a rejection would drop a real document navigation out of the
+ * candidate set and serve it the wrong Edition, while reading it as "no
+ * opinion" costs at most one request its `304`.
+ */
+function acceptedMediaRanges(headers: Headers): AcceptedRange[] {
+  return (headers.get('accept') ?? '')
+    .split(',')
+    .map((entry) => {
+      const [range, ...parameters] = entry.split(';');
+      return { range: range!.trim().toLowerCase(), quality: qualityOf(parameters) };
+    })
+    .filter((parsed) => parsed.range !== '');
+}
+
+/** The `q` parameter of one media range, defaulting to `1`. Other parameters
+ *  (`charset`, and any accept-extension after `q`) are ignored, which is what
+ *  lets `text/html; charset=utf-8` still read as plain `text/html`. */
+function qualityOf(parameters: readonly string[]): number {
+  for (const parameter of parameters) {
+    const [name, value] = parameter.split('=');
+    if (name?.trim().toLowerCase() !== 'q') continue;
+    const quality = Number(value?.trim());
+    return Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 1;
+  }
+  return 1;
+}
+
+/** The quality this header gave one exact range, or `undefined` if it never
+ *  mentioned it. A repeated range is malformed; the last wins, so the answer
+ *  is at least deterministic. */
+function qualityFor(ranges: readonly AcceptedRange[], range: string): number | undefined {
+  return ranges.filter((candidate) => candidate.range === range).at(-1)?.quality;
+}
+
+/**
+ * Whether the request named HTML and is willing to receive it.
+ *
+ * Willing is the operative word, and specificity decides it the way RFC 9110
+ * does: an exact `text/html` answers for `text/html` whatever `text/*` says
+ * beside it, so `text/html;q=0, text/*;q=1` is a refusal of HTML rather than
+ * an acceptance of it. Only when the type is not mentioned exactly does the
+ * subtype wildcard speak for it.
+ *
+ * `*\/*` deliberately does not count as NAMING html. A client that accepts
+ * anything has said nothing about documents, and it is handled by the
+ * no-preference arm of {@link isDocumentCandidate}, which consults the path
+ * before treating it as one.
+ */
 function acceptNamesHtml(headers: Headers): boolean {
-  return acceptedMediaRanges(headers).some((range) => HTML_MEDIA_RANGES.includes(range));
+  const ranges = acceptedMediaRanges(headers);
+  for (const html of HTML_MEDIA_RANGES) {
+    const exact = qualityFor(ranges, html);
+    if (exact !== undefined) {
+      if (exact > 0) return true;
+      // Named and refused. The subtype wildcard is less specific, so it does
+      // not get to overrule that for this type.
+      continue;
+    }
+    if (!html.startsWith('text/')) continue;
+    const wildcard = qualityFor(ranges, HTML_SUBTYPE_WILDCARD);
+    if (wildcard !== undefined && wildcard > 0) return true;
+  }
+  return false;
 }
 
 /**
  * Whether the request stated no preference at all: no `Accept`, or nothing in
- * it but `*\/*`.
+ * it but `*\/*` that it is actually willing to receive.
  *
  * This is the shape a link-preview crawler sends. `facebookexternalhit`,
  * `Twitterbot`, `Slackbot`, `LinkedInBot`, `Discordbot` and the iMessage
@@ -129,10 +205,13 @@ function acceptNamesHtml(headers: Headers): boolean {
  * which is precisely the client class this whole rewrite exists for. A range
  * list carrying anything MORE specific does not qualify, so a request that
  * asked for `application/json` and would also take anything is still a
- * request that asked for JSON.
+ * request that asked for JSON. Neither does `*\/*;q=0`: a client that refuses
+ * every media type has stated a preference, and it is not for a document.
  */
 function acceptStatesNoPreference(headers: Headers): boolean {
-  return acceptedMediaRanges(headers).every((range) => range === '*/*');
+  return acceptedMediaRanges(headers).every(
+    (range) => range.range === '*/*' && range.quality > 0,
+  );
 }
 
 /**
@@ -198,10 +277,18 @@ export function isDocumentShapedPath(pathname: string): boolean {
  *   carries no body to rewrite, but dropping its validators is what turns a
  *   crawler probe into a `200` it will follow with a `GET` rather than a `304`
  *   that lets it keep what it has.
- * - **An `Accept` naming an HTML media range**, at any path. That is a
- *   statement about the representation wanted, so the path is not consulted.
+ * - **An `Accept` under which HTML is acceptable with a POSITIVE quality**,
+ *   at any path. `text/html` or `application/xhtml+xml` named outright, or
+ *   `text/*` when neither is, and in each case with a `q` above zero: naming
+ *   a range is not the same as wanting it, and `application/json,
+ *   text/html;q=0` names HTML precisely in order to refuse it. Specificity
+ *   decides, as in RFC 9110, so an exact `text/html;q=0` answers for
+ *   `text/html` whatever `text/*` says beside it. An acceptable HTML range is
+ *   a statement about the representation wanted, so the path is not
+ *   consulted.
  * - **Or an `Accept` stating no preference at all** — absent, or nothing but
- *   `*\/*` — for a path shaped like a document. That is the link-preview
+ *   a `*\/*` the client is actually willing to receive — for a path shaped
+ *   like a document. That is the link-preview
  *   crawler arm, and it is the point rather than a nicety:
  *   `facebookexternalhit`, `Twitterbot`, `Slackbot`, `LinkedInBot`,
  *   `Discordbot` and the iMessage fetcher all ask this way, so a rule keyed on

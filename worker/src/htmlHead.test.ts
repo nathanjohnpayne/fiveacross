@@ -335,6 +335,51 @@ describe('which requests are document candidates, for the validators and the enc
   });
 
   it.each([
+    ['text/html;q=0.1', 'a grudging but positive quality'],
+    ['text/html;q=1.0', 'the explicit maximum'],
+    ['text/*;q=0.5', 'the subtype wildcard, when the exact type is unnamed'],
+    ['text/html;q=0.001', 'a quality small enough to look like zero and is not'],
+    ['text/html; charset=utf-8', 'a parameter that is not q at all'],
+    ['application/json, text/html', 'HTML named second, with no q'],
+    ['text/html;q=0.8;level=1', 'an accept-extension after the q'],
+    ['text/html;Q=0.9', 'an uppercase parameter name'],
+    ['text/html;q=bogus', 'a malformed q, read as absent rather than as a rejection'],
+  ])('takes %s — %s', (accept) => {
+    expect(asked('/board', { accept })).toBe(true);
+  });
+
+  it.each([
+    ['application/json, text/html;q=0', 'the defect: HTML named and refused in one header'],
+    ['text/html;q=0', 'refused on its own'],
+    ['text/html;q=0.0', 'refused, written long'],
+    ['text/html;q=0, text/*;q=1', 'the specific refusal outranks the subtype wildcard'],
+    ['text/*;q=0', 'the whole text type refused'],
+    ['application/xhtml+xml;q=0', 'the other HTML range refused'],
+  ])('refuses %s — %s', (accept) => {
+    // Naming a media range is not the same as wanting it. A parser that
+    // dropped the parameters read `application/json, text/html;q=0` as a
+    // request FOR html, and then took that client's validators, its Range and
+    // its compression away — turning a 304 or a 206 it was entitled to into a
+    // full uncompressed 200.
+    expect(asked('/board', { accept })).toBe(false);
+  });
+
+  it('reads a q=0 wildcard as a preference rather than as no preference', () => {
+    // A client that refuses every media type has stated a preference, and it
+    // is not for a document — so it does not reach the no-preference arm even
+    // at a document-shaped path.
+    expect(asked('/', { accept: '*/*;q=0' })).toBe(false);
+    expect(asked('/', { accept: '*/*;q=0.1' })).toBe(true);
+  });
+
+  it('lets a later duplicate of the same range win, deterministically', () => {
+    // A repeated range is malformed and no rule says which wins; answering
+    // the same way every time is the property worth having.
+    expect(asked('/board', { accept: 'text/html;q=1, text/html;q=0' })).toBe(false);
+    expect(asked('/board', { accept: 'text/html;q=0, text/html;q=1' })).toBe(true);
+  });
+
+  it.each([
     'application/json',
     'image/png',
     'application/javascript',

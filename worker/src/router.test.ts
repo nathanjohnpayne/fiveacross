@@ -1132,6 +1132,64 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       expect(rewrites).toHaveLength(0);
     });
 
+    it('leaves a request that NAMES html and refuses it exactly as it arrived', async () => {
+      // `application/json, text/html;q=0` names `text/html` and rejects it in
+      // the same header. A parser that dropped the parameters read that as a
+      // document request and took this client's validators, its Range and its
+      // compression away, turning the `304` it was entitled to into a full
+      // uncompressed `200`.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: (request) =>
+          request.headers.get('if-none-match') === '"origin-index"'
+            ? new Response(null, { status: 304, headers: { etag: '"origin-index"' } })
+            : htmlOrigin(),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/board', {
+          headers: {
+            accept: 'application/json, text/html;q=0',
+            'accept-encoding': 'gzip, br',
+            'if-none-match': '"origin-index"',
+            range: 'bytes=0-99',
+          },
+        }),
+        CONFIG,
+        deps,
+      );
+
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"origin-index"');
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, br');
+      expect(requests.at(-1)!.headers.get('range')).toBe('bytes=0-99');
+      expect(response.status).toBe(304);
+      expect(response.headers.get('etag')).toBe('"origin-index"');
+      expect(rewrites).toHaveLength(0);
+    });
+
+    it('still takes a grudging but positive HTML quality as a document request', async () => {
+      // The other side of the same rule: `q=0.1` is a preference, not a
+      // refusal, and reading every q as a rejection would drop real
+      // navigations out of the candidate set.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => htmlOrigin(),
+      });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/board', {
+          headers: {
+            accept: 'application/json, text/html;q=0.1',
+            'accept-encoding': 'gzip, br',
+            'if-none-match': '"origin-index"',
+          },
+        }),
+        CONFIG,
+        deps,
+      );
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBeNull();
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('identity');
+      expect(rewrites).toHaveLength(1);
+    });
+
     it('leaves a document path asked for as JSON with both its validators', async () => {
       // A client that named a media type, and named one that is not HTML. Its
       // path is never second-guessed, on either half of the rule.
