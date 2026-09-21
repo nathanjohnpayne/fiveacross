@@ -32,3 +32,6 @@ export type PngRect = { x: number; y: number; width: number; height: number };
 export function readPngHeader(buffer: Uint8Array): PngHeader;
 export function readPngPixels(buffer: Uint8Array): PngImage;
 export function lightPixelShare(image: PngImage, rect: PngRect, floor?: number): number;
+
+/** The PNG Paeth predictor, shared with the encoder in png-truecolor.mjs. */
+export function paeth(a: number, b: number, c: number): number;

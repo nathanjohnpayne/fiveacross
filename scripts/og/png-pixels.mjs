@@ -53,7 +53,11 @@ export function readPngHeader(bytes) {
   };
 }
 
-function paeth(a, b, c) {
+/** The PNG Paeth predictor. Exported because the encoder next door
+ *  (png-truecolor.mjs) filters scanlines with the same function the decoder
+ *  unfilters them with, and two copies of a six-line predictor is exactly the
+ *  kind of duplication that drifts. */
+export function paeth(a, b, c) {
   const p = a + b - c;
   const pa = Math.abs(p - a);
   const pb = Math.abs(p - b);

@@ -236,9 +236,15 @@ export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
 /**
  * Stage every target, validate every target, and only then publish them all.
  *
- * The seams (`preflight`, `capture`, `inspect`, `beforeCommit`, and the
- * commit/discard/lock trio) are parameters so the staging contract itself is
- * testable with plain files and no browser — the arrangement og-stage-commit.mjs
+ * `render-share-footer.mjs` publishes through this too (#887 round 4): it
+ * paints one band on an existing card rather than screenshotting an artboard,
+ * but it writes the same three destinations and needs the same all-or-nothing
+ * publication and the same proof of format, so it supplies its own `capture`
+ * and lets everything else here stand.
+ *
+ * The seams (`preflight`, `capture`, `inspect`, `fileFor`, `beforeCommit`, and
+ * the commit/discard/lock trio) are parameters so the staging contract itself
+ * is testable with plain files and no browser — the arrangement og-stage-commit.mjs
  * and og-scratch-path.mjs already make for the unfurl renders, and the reason
  * render-share-rasters.test.mjs can pin "a batch whose second target fails
  * changes nothing" without launching Chromium.
@@ -268,6 +274,7 @@ export async function renderCardSet({
   preflight = async () => {},
   beforeCommit = async () => {},
   inspect = inspectCapture,
+  fileFor = (id) => CARDS[id].file,
   stagePathFor = scratchPathFor,
   commit = commitStaged,
   discard = discardStaged,
@@ -277,7 +284,7 @@ export async function renderCardSet({
   const staged = [];
   try {
     for (const id of ids) {
-      const dest = join(destDir, CARDS[id].file);
+      const dest = join(destDir, fileFor(id));
       // Recorded BEFORE the capture runs, so a screenshot that fails halfway
       // through writing its file still has that file swept up below.
       const entry = { id, dest, scratch: stagePathFor(dest) };
