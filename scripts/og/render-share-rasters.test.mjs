@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readPngHeader, readPngPixels } from './png-pixels.mjs';
 import { encodePng } from './png-truecolor.mjs';
+import { FOOTER_OPTIONS } from './render-share-footer.mjs';
 import {
   CARDS,
   DISPLAY_FACE_STACK,
@@ -34,6 +35,7 @@ import {
   optionValue,
   renderCardSet,
   resolvedDisplayFace,
+  unknownOptions,
 } from './render-share-rasters.mjs';
 import { MAX_DARK_CARD_LIGHT_SHARE, isOverlaid, overlayLightShare } from './share-card-overlay.mjs';
 
@@ -391,6 +393,56 @@ describe('option parsing (#887): an option token is never a value', () => {
         { cwd, encoding: 'utf8', timeout: 60_000 },
       );
       expect(result.stderr).toContain('render-share-rasters.mjs: --out needs a directory.');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('unknown options (#887): a typo never publishes', () => {
+  it('names the token nobody recognised, and passes a well-formed line', () => {
+    // The finding: `--edition gcb --chek` left `only` populated and
+    // `checkOnly` false, so the run rendered and replaced the committed
+    // picture. The flag that exists to write nothing is the one a typo
+    // silently removes.
+    expect(unknownOptions(['--edition', 'gcb', '--chek'])).toEqual(['--chek']);
+    expect(unknownOptions(['--edition', 'gcb', '--out', '/tmp/x', '--check'])).toEqual([]);
+    expect(unknownOptions(['--all', '--allow-foreign-platform'])).toEqual([]);
+    // A stray positional is unrecognised too: this tool takes none.
+    expect(unknownOptions(['--all', 'gcb'])).toEqual(['gcb']);
+    // A valued flag's value is consumed, so a path is never itself reported.
+    expect(unknownOptions(['--out', '--all'])).toEqual([]);
+    // The footer tool takes no --out, so for it that flag IS unknown.
+    expect(unknownOptions(['--edition', 'gcb', '--out', '/tmp/x'], FOOTER_OPTIONS)).toEqual(['--out', '/tmp/x']);
+  });
+
+  it.each([
+    ['render-share-rasters.mjs'],
+    ['render-share-footer.mjs'],
+  ])('%s exits 1 on a mistyped flag without launching a browser or writing', (script) => {
+    // Deliberately paired with an Edition id that does not exist. If the
+    // unknown-option check ever regressed, the unknown-edition check still
+    // stops the run before Chromium, so a regression fails this test rather
+    // than repainting a committed card from the test suite.
+    const cwd = mkdtempSync(join(tmpdir(), 'og-unknown-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL(`./${script}`, import.meta.url)),
+          '--edition',
+          'not-an-edition',
+          '--allow-foreign-platform',
+          '--chek',
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toContain(`${script}: unrecognised option --chek.`);
+      // Not the Edition check, and not a render: the typo is what stopped it.
+      expect(result.stderr).not.toContain('Unknown edition');
+      expect(result.stdout).toBe('');
       expect(result.status).toBe(1);
       expect(readdirSync(cwd)).toEqual([]);
     } finally {

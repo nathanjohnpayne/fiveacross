@@ -21,7 +21,14 @@ import { isLocked, withDestinationLocks } from './og-commit-lock.mjs';
 import { readPngHeader, readPngPixels } from './png-pixels.mjs';
 import { encodePng } from './png-truecolor.mjs';
 import { CARDS, footerCaptureFrom } from './render-share-footer.mjs';
-import { FOOTER_SELECTOR, THEMES_CSS_PATH, WIREFRAMES_PATH, footerStyleFor } from './share-card-footer-style.mjs';
+import {
+  FOOTER_SELECTOR,
+  THEMES_CSS_PATH,
+  WIREFRAMES_PATH,
+  footerStyleFor,
+  themeTokenDisagreements,
+  themeTokenTable,
+} from './share-card-footer-style.mjs';
 import { renderCardSet } from './render-share-rasters.mjs';
 
 const STALE = 'the card that is already committed';
@@ -227,12 +234,14 @@ describe('the footer repaint takes its style from the artboard (#887)', () => {
       .slice(html.indexOf(`id="fx-share-final-photo-${edition}"`))
       .match(/class="shc"\s+data-theme="([^"]+)"/)[1];
     const token = rule.match(/color:\s*var\(--([\w-]+)\)/)[1];
-    const themeBlock = css.match(new RegExp(`\\[data-theme='${theme}'\\]\\s*\\{([\\s\\S]*?)\\}`))[1];
+    // From the WIREFRAMES' own [data-theme] block, which is the CSS the
+    // artboard renders: the document links no stylesheet for these tokens.
+    const themeBlock = html.match(new RegExp(`\\[data-theme='${theme}'\\]\\s*\\{([^}]*)\\}`))[1];
     return {
       theme,
       fontPx,
       letterSpacingPx: Number(rule.match(/letter-spacing:\s*([\d.]+)em/)[1]) * fontPx,
-      ink: themeBlock.match(new RegExp(`--${token}:\\s*([^;]+);`))[1].trim(),
+      ink: themeBlock.match(new RegExp(`--${token}:\\s*([^;]+)[;}]`))[1].trim(),
       uppercase: /text-transform:\s*uppercase/.test(rule),
     };
   }
@@ -281,13 +290,52 @@ describe('the footer repaint takes its style from the artboard (#887)', () => {
     expect(code).toContain('ctx.fillStyle = style.ink');
   });
 
+  it('takes the ink from the stylesheet the artboard renders, not the app stylesheet', () => {
+    // The finding: the tokens were read from src/theme/themes.css, which the
+    // wireframes document does not link. Its inline [data-theme] blocks are
+    // what Chromium applies to the card the full render screenshots, so a
+    // divergence between the two tables would have had the refresher commit a
+    // footer colour the full render never draws.
+    expect(html).not.toMatch(/<link[^>]+themes\.css/);
+    const artboard = themeTokenTable(html);
+    for (const [edition] of EDITIONS) {
+      const style = footerStyleFor(edition, { scale: SCALE });
+      expect(style.ink, `${edition} (${style.theme})`).toBe(artboard.get(style.theme).dim);
+    }
+  });
+
+  it('reports every token the artboard and app stylesheets disagree on, by name', () => {
+    // A report, not a reconciliation: these predate this work and fixing them
+    // is a different change. Pinned as an exact inventory so a NEW divergence
+    // fails here instead of being discovered in a rendered asset — which is
+    // precisely how this one was found.
+    expect(themeTokenDisagreements({ html, css })).toEqual([
+      { theme: 'fiveacross-slate', token: 'on-gradient', wireframes: '#fff', themes: '#000' },
+      { theme: 'fiveacross-slate', token: 'primary', wireframes: '#3f66f0', themes: '#718ef4' },
+      { theme: 'fiveacross-slate', token: 'secondary', wireframes: '#2c4bd8', themes: '#647be2' },
+    ]);
+    // And the one the footer actually reads is not among them for any card.
+    const themes = new Set(EDITIONS.map(([edition]) => footerStyleFor(edition, { scale: SCALE }).theme));
+    for (const drift of themeTokenDisagreements({ html, css })) {
+      expect(drift.token === 'dim' && themes.has(drift.theme)).toBe(false);
+    }
+  });
+
+  it('refuses a stylesheet that declares one theme token two different ways', () => {
+    // Both of the wireframes' <style> blocks repeat most themes. They agree
+    // today; if they ever stop, "whichever the regex found first" must not
+    // silently become the answer.
+    const contradictory = html.replace("--dim:#d0a8ab", "--dim:#000000");
+    expect(() => themeTokenTable(contradictory)).toThrow(/declares --dim for the so-long-farewell theme twice/);
+  });
+
   it('refuses rather than guessing when a source stops looking the way it must', () => {
     // A silent fallback here is how the drift would come back.
     expect(FOOTER_SELECTOR).toBe('.shc .foot');
-    expect(() => footerStyleFor('gcb', { html: '<style>.shc{}</style>', css })).toThrow(
+    expect(() => footerStyleFor('gcb', { html: '<style>.shc{}</style>' })).toThrow(
       /no \.shc \.foot rule in the wireframes document/,
     );
     const twoStacks = html.replace('font:14px/1.45 "Helvetica Neue",Arial,sans-serif', 'font:14px/1.45 Georgia,serif');
-    expect(() => footerStyleFor('gcb', { html: twoStacks, css })).toThrow(/2 different body font stacks/);
+    expect(() => footerStyleFor('gcb', { html: twoStacks })).toThrow(/2 different body font stacks/);
   });
 });

@@ -18,14 +18,24 @@
 // A second table cannot be kept in step by review — it was not — so there is
 // no second table. Everything here is read from:
 //
-//   - `plans/daily-cards-wireframes.html`: the `.shc .foot` rule, the font
-//     family the rule inherits, and each `fx-share-final-photo-*` frame's
-//     `data-theme`.
-//   - `src/theme/themes.css`: the colour token that rule names (`--dim`), for
-//     that theme.
+//   - `plans/daily-cards-wireframes.html`, and only that file: the
+//     `.shc .foot` rule, the font family the rule inherits, each
+//     `fx-share-final-photo-*` frame's `data-theme`, AND the `[data-theme]`
+//     token block that theme resolves against.
 //
-// These are the same two files the artboard itself renders from, so "the
-// repaint matches the capture" stops being a thing anyone has to remember.
+// That last one was wrong at first (#887 round 8, id 4058904673). The tokens
+// were read from `src/theme/themes.css`, which is the app's stylesheet and not
+// the artboard's: the wireframes document links no stylesheet for them, it
+// declares its own `[data-theme]` blocks inline, and those are what Chromium
+// actually applies when the full render screenshots the card. The two tables
+// are near-copies, so it looked right, but they are maintained separately and
+// have already diverged — `fiveacross-slate` carries a different `--primary`,
+// `--secondary` and `--on-gradient` in each. The day `--dim` diverged the same
+// way, a footer refresh would have committed a colour the full render never
+// draws, while this module claimed to derive the artboard's own style. So the
+// ink comes from the CSS the artboard renders. `themeTokenDisagreements` below
+// reports the divergences that already exist, by name, so they are visible
+// rather than silent; reconciling them is not this change's business.
 //
 // The parsing is deliberately narrow. This is not a CSS engine: it resolves
 // ONE property set on ONE rule, with an explicit, short inheritance chain for
@@ -42,7 +52,9 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** The artboards, and the frames that carry each Edition's theme. */
 export const WIREFRAMES_PATH = join(repo, 'plans', 'daily-cards-wireframes.html');
-/** The theme tokens the artboards' `var(--…)` colours resolve against. */
+/** The app's own theme tokens. NOT what the artboard renders — kept here only
+ *  so `themeTokenDisagreements` can report where the two tables have drifted
+ *  apart. Nothing the footer paints is read from this file. */
 export const THEMES_CSS_PATH = join(repo, 'src', 'theme', 'themes.css');
 /** The artboard rule that owns the footer band's type. */
 export const FOOTER_SELECTOR = '.shc .foot';
@@ -130,10 +142,78 @@ function themeOf(html, id) {
   return required(match && match[1], `the data-theme on #${frame}`);
 }
 
-/** A custom property's value for one theme, from `themes.css`. */
-function themeToken(css, theme, token) {
-  const block = css.match(new RegExp(`\\[data-theme=['"]${theme}['"]\\]\\s*\\{([\\s\\S]*?)\\}`));
-  return required(declaration(block && block[1], `--${token}`), `--${token} for the ${theme} theme`);
+/**
+ * Every `[data-theme]` token block in a stylesheet, as `theme -> { token:
+ * value }`.
+ *
+ * A source may declare the same theme more than once — the wireframes document
+ * carries two `<style>` blocks and repeats most themes across them — and the
+ * copies must agree, because "whichever one the regex found first" is not a
+ * source of truth. Blocks that declare no custom properties (a rule like
+ * `[data-theme='summer-white'] .title{…}`) are not token tables and are
+ * skipped.
+ */
+export function themeTokenTable(source) {
+  const table = new Map();
+  for (const match of source.matchAll(/\[data-theme=['"]([\w-]+)['"]\]\s*\{([^}]*)\}/g)) {
+    const [, theme, body] = match;
+    const tokens = Object.fromEntries(
+      [...body.matchAll(/--([\w-]+)\s*:\s*([^;]+)/g)].map(([, name, value]) => [name, value.trim()]),
+    );
+    if (Object.keys(tokens).length === 0) continue;
+    const seen = table.get(theme);
+    if (seen) {
+      for (const [name, value] of Object.entries(tokens)) {
+        if (seen[name] !== undefined && seen[name] !== value) {
+          throw new Error(
+            `share-card-footer-style.mjs: the stylesheet declares --${name} for the ${theme} theme twice, ` +
+              `as "${seen[name]}" and "${value}". One of them is what renders and this module cannot tell which.`,
+          );
+        }
+      }
+      Object.assign(seen, tokens);
+      continue;
+    }
+    table.set(theme, tokens);
+  }
+  return table;
+}
+
+/** A custom property's value for one theme, from the stylesheet given. */
+function themeToken(source, theme, token) {
+  const tokens = themeTokenTable(source).get(theme);
+  return required(tokens && tokens[token], `--${token} for the ${theme} theme`);
+}
+
+/** Whitespace and a leading-zero-less alpha are formatting, not disagreement:
+ *  `rgba(0,0,0,.35)` and `rgba(0, 0, 0, 0.35)` are the same colour. */
+const normaliseValue = (value) => value.replace(/\s+/g, '').replace(/(^|[,(])\./g, '$10.');
+
+/**
+ * Every token the artboard's stylesheet and the app's stylesheet declare
+ * DIFFERENTLY, as `{ theme, token, wireframes, themes }`, sorted.
+ *
+ * Only tokens both files declare for a theme both files carry are compared: a
+ * token one side simply does not have is an absence, not a contradiction, and
+ * saying otherwise would bury the contradictions in noise. This reports; it
+ * fixes nothing. The footer reads the artboard's table and is correct whatever
+ * this returns — the point is that the next divergence is visible in a test
+ * rather than discovered in a rendered asset.
+ */
+export function themeTokenDisagreements({ html = read(WIREFRAMES_PATH), css = read(THEMES_CSS_PATH) } = {}) {
+  const artboard = themeTokenTable(html);
+  const app = themeTokenTable(css);
+  const out = [];
+  for (const [theme, tokens] of [...artboard].sort(([a], [b]) => a.localeCompare(b))) {
+    const appTokens = app.get(theme);
+    if (!appTokens) continue;
+    for (const token of Object.keys(tokens).sort()) {
+      if (appTokens[token] === undefined) continue;
+      if (normaliseValue(tokens[token]) === normaliseValue(appTokens[token])) continue;
+      out.push({ theme, token, wireframes: tokens[token], themes: appTokens[token] });
+    }
+  }
+  return out;
 }
 
 /**
@@ -145,7 +225,7 @@ function themeToken(css, theme, token) {
  * ink, uppercase }` — `font` and `letterSpacing` being the strings a canvas 2D
  * context takes, so the caller assembles nothing of its own.
  */
-export function footerStyleFor(id, { scale = SCALE, html = read(WIREFRAMES_PATH), css = read(THEMES_CSS_PATH) } = {}) {
+export function footerStyleFor(id, { scale = SCALE, html = read(WIREFRAMES_PATH) } = {}) {
   const rule = ruleBody(html, FOOTER_SELECTOR);
   if (rule === null) {
     throw new Error(`share-card-footer-style.mjs: no ${FOOTER_SELECTOR} rule in the wireframes document.`);
@@ -187,7 +267,10 @@ export function footerStyleFor(id, { scale = SCALE, html = read(WIREFRAMES_PATH)
     fontFamily,
     font: `${DEFAULT_FONT_WEIGHT} ${fontPx}px ${fontFamily}`,
     letterSpacing: `${letterSpacingPx}px`,
-    ink: themeToken(css, theme, tokenMatch[1]),
+    // From the artboard's OWN stylesheet, not the app's: the wireframes
+    // document links no stylesheet for these tokens, so its inline blocks are
+    // what Chromium applies to the card the full render captures.
+    ink: themeToken(html, theme, tokenMatch[1]),
     uppercase: declaration(rule, 'text-transform') === 'uppercase',
   };
 }

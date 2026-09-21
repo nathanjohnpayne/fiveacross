@@ -67,7 +67,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadEditions } from './load-editions.mjs';
 import { toTruecolorPng } from './png-truecolor.mjs';
-import { CARDS, optionValue, renderCardSet } from './render-share-rasters.mjs';
+import { CARDS, assertKnownOptions, optionValue, renderCardSet } from './render-share-rasters.mjs';
 import { footerStyleFor } from './share-card-footer-style.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -93,6 +93,14 @@ export const CENTRE_X = 300;
 export const CARD_W = 600;
 
 const DATA_URL_PREFIX = 'data:image/png;base64,';
+
+/** What this tool accepts. It repaints the committed cards in place, so there
+ *  is no `--out`: a band repaint of a card somewhere else is not a thing
+ *  anyone wants. */
+export const FOOTER_OPTIONS = {
+  valued: ['--edition'],
+  flags: ['--all', '--check', '--allow-foreign-platform'],
+};
 
 /**
  * Turn a band-painting step into the `capture` seam `renderCardSet` takes.
@@ -195,8 +203,11 @@ async function paintBand(page, { b64, band, style, line, centreX, cardW }) {
 
 async function main() {
   const args = process.argv.slice(2);
-  // Shared with the raster generator, and for the same reason: `--edition
-  // --all` must not be read as an Edition id (#887 round 7).
+  // Both shared with the raster generator, and for the same reasons: a typo
+  // must not be the reason a run publishes (#887 round 8), and `--edition
+  // --all` must not be read as an Edition id (round 7). This tool takes no
+  // `--out`, so its option set is the raster one minus that flag.
+  assertKnownOptions('render-share-footer.mjs', args, FOOTER_OPTIONS);
   const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');

@@ -356,6 +356,59 @@ export function optionValue(args, flag) {
   return next === undefined || next.startsWith('--') ? null : next;
 }
 
+/**
+ * The options each share-card script accepts. `valued` flags take the next
+ * token; `flags` stand alone.
+ */
+export const RASTER_OPTIONS = {
+  valued: ['--edition', '--out'],
+  flags: ['--all', '--check', '--allow-foreign-platform'],
+};
+
+/**
+ * Every token on the command line that is not one of these options, or a
+ * value belonging to one.
+ *
+ * The gap this closes (#887 round 8, id 4058904681): an unrecognised token was
+ * simply ignored, so `--edition gcb --chek` rendered and replaced the
+ * committed picture. The one flag that exists to make a run write nothing is
+ * the one a typo silently removes, which is the worst possible member of that
+ * class. A caller must refuse before it launches Chromium or touches the
+ * filesystem — an operator who mistyped the safety flag has not asked for a
+ * publish.
+ *
+ * A valued flag's value is consumed here so a directory path or an Edition id
+ * is never itself reported as unknown; a value that begins with two dashes is
+ * not consumed, because `optionValue` does not accept it either and the
+ * value-less guard should be what reports it.
+ */
+export function unknownOptions(args, { valued, flags } = RASTER_OPTIONS) {
+  const unknown = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (valued.includes(token)) {
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith('--')) i++;
+      continue;
+    }
+    if (flags.includes(token)) continue;
+    unknown.push(token);
+  }
+  return unknown;
+}
+
+/** Print and exit 1 if the command line carries anything unrecognised. Called
+ *  first in every `main`, before any other check. */
+export function assertKnownOptions(script, args, options = RASTER_OPTIONS) {
+  const unknown = unknownOptions(args, options);
+  if (unknown.length === 0) return;
+  const known = [...options.valued.map((f) => `${f} <value>`), ...options.flags].join(', ');
+  console.error(
+    `${script}: unrecognised ${unknown.length === 1 ? 'option' : 'options'} ${unknown.join(', ')}. Known: ${known}.`,
+  );
+  process.exit(1);
+}
+
 /** Ask the page which display face the artboards actually resolve to. Split
  *  from `assertDisplayFace` so the decision is testable without a browser and
  *  this half stays a thin `page.evaluate`. */
@@ -434,6 +487,11 @@ async function applyFooter(frame, id, footer) {
 
 async function main() {
   const args = process.argv.slice(2);
+  // First, before every other check: a typo must never be the reason a run
+  // publishes. `--edition gcb --chek` used to render and replace the committed
+  // picture, because the token nobody recognised was the one that would have
+  // stopped it.
+  assertKnownOptions('render-share-rasters.mjs', args);
   const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');
