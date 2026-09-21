@@ -96,7 +96,10 @@ export interface PodiumEmailModel {
   /** "Final standings · Day 10 of 10 · Friday, Jul 24 · 🇪🇸 Barcelona" */
   contextLine: string;
   standingsHeading: string;
-  /** Top three (or fewer). Empty only when the Event's board was empty. */
+  /** Top three (or fewer). Empty when the Event's board was empty, and also
+   *  when there is no visible ranking to print at all — an all-banned roster,
+   *  or an unknown play fact with no rows — so an empty array is not by itself
+   *  the empty-board claim; `standingsEmptyLine` says which case it is. */
   standingsRows: FinaleStandingsRow[];
   /** The sentence printed IN PLACE of the rows, or `null` when `standingsRows`
    *  carries the podium. It is the empty-board claim when the frozen record
