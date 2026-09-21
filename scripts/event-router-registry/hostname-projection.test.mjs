@@ -3,6 +3,7 @@ import {
   HostnameProjectionRefusal,
   LEDGER_MAX_BYTES,
   buildLedgerDocument,
+  normalizeTimestamp,
   deriveCanonicalProjection,
   isReservedClassHost,
   nextRevision,
@@ -156,7 +157,7 @@ describe('canonical hostname projection', () => {
       revision: '4',
       host: 'admin.fiveacross.app',
       desired: { kind: 'tombstone' },
-      updatedAt: '2026-09-20T00:00:00.000Z',
+      updatedAt: { toDate: () => new Date('2026-09-20T00:00:00.000Z') },
     };
     expect(code(() => validateLedgerDocument('admin.fiveacross.app', ledger))).toBe('invalid-host');
   });
@@ -189,6 +190,8 @@ describe('stored ledger validation', () => {
       deriveCanonicalProjection(EVENT_HOST, eventDocument()),
       '2026-09-20T00:00:00.000Z',
     ),
+    // A STORED row carries a Firestore `Timestamp`, never text.
+    updatedAt: { toDate: () => new Date('2026-09-20T00:00:00.000Z') },
     ...overrides,
   });
 
@@ -216,8 +219,12 @@ describe('stored ledger validation', () => {
   // member the projection contracts for.
   const storedTimestamp = (iso) => ({ toDate: () => new Date(iso) });
 
-  it('hashes every spelling of one instant to one documentDigest', () => {
-    const digests = new Set(
+  // Two readers, one instant. A RECEIPT is normalized JSON and carries text;
+  // a STORED row carries a `Timestamp`. Both must answer the same canonical
+  // form, or one ledger has two digests and a cross-layer comparison reports
+  // a mismatch that is an artifact of the encoding.
+  it('normalizes every spelling of one instant to one canonical text', () => {
+    const texts = new Set(
       [
         '2026-09-20T12:00:00Z',
         '2026-09-20T12:00:00+00:00',
@@ -225,9 +232,31 @@ describe('stored ledger validation', () => {
         '2026-09-20T14:00:00+02:00',
         '2026-09-20T12:00:00.000123Z',
         storedTimestamp('2026-09-20T12:00:00.000Z'),
-      ].map((updatedAt) => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })).documentDigest),
+      ].map((value) => normalizeTimestamp(value)),
     );
-    expect(digests.size).toBe(1);
+    expect(texts).toEqual(new Set(['2026-09-20T12:00:00.000Z']));
+  });
+
+  it('hashes two stored Timestamps for one instant to one documentDigest', () => {
+    expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2026-09-20T12:00:00.000Z') })).documentDigest).toBe(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2026-09-20T14:00:00+02:00') })).documentDigest,
+    );
+  });
+
+  // The stored path and the receipt path are deliberately different: the
+  // deployed Eventarc parser accepts `updatedAt` only as a `timestampValue`,
+  // so a partial Admin write storing text is a document whose trigger can
+  // never publish it, and validating it as well formed let it serve as a
+  // converged mutation pre-state and be classified converged by the
+  // reconciler.
+  it('refuses a stored ledger carrying text, while the receipt path still normalizes the same text', () => {
+    expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.000Z' })))).toBe(
+      'malformed-ledger',
+    );
+    expect(normalizeTimestamp('2026-09-20T12:00:00.000Z')).toBe('2026-09-20T12:00:00.000Z');
+    expect(
+      buildLedgerDocument(EVENT_HOST, '4', deriveCanonicalProjection(EVENT_HOST, eventDocument()), '2026-09-20T12:00:00.000Z'),
+    ).toMatchObject({ updatedAt: '2026-09-20T12:00:00.000Z' });
   });
 
   // Both encodings must accept exactly the same instants, or `authoritativeNow`
@@ -247,8 +276,10 @@ describe('stored ledger validation', () => {
   });
 
   it('still separates two instants a millisecond apart', () => {
-    expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.000Z' })).documentDigest).not.toBe(
-      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2026-09-20T12:00:00.001Z' })).documentDigest,
+    expect(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2026-09-20T12:00:00.000Z') })).documentDigest,
+    ).not.toBe(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2026-09-20T12:00:00.001Z') })).documentDigest,
     );
   });
 
@@ -269,7 +300,8 @@ describe('stored ledger validation', () => {
     // validated too or the digest takes a form this layer refuses.
     ['an offset that carries the first supported year below the bound', '0100-01-01T00:00:00+01:00'],
     ['an offset that carries the last supported year into the expanded form', '9999-12-31T23:59:59-01:00'],
-  ])('refuses a ledger whose updatedAt is %s', (_why, updatedAt) => {
+  ])('refuses %s, on the receipt path and in a stored row alike', (_why, updatedAt) => {
+    expect(normalizeTimestamp(updatedAt)).toBe(null);
     expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
   });
 
@@ -282,13 +314,17 @@ describe('stored ledger validation', () => {
     ['a leap day in a year that has none', '2025-02-29T12:00:00Z'],
     ['a zeroth day', '2026-09-00T12:00:00Z'],
     ['a day past the end of a month under an offset', '2026-02-30T12:00:00+02:00'],
-  ])('refuses a ledger whose updatedAt is %s rather than rolling it forward', (_why, updatedAt) => {
+  ])('refuses %s rather than rolling it forward', (_why, updatedAt) => {
+    expect(normalizeTimestamp(updatedAt)).toBe(null);
     expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
   });
 
   it('accepts the leap day of a year that has one', () => {
-    expect(validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2028-02-29T12:00:00Z' })).documentDigest).toBe(
-      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: '2028-02-29T12:00:00.000Z' })).documentDigest,
+    expect(normalizeTimestamp('2028-02-29T12:00:00Z')).toBe('2028-02-29T12:00:00.000Z');
+    expect(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2028-02-29T12:00:00Z') })).documentDigest,
+    ).toBe(
+      validateLedgerDocument(EVENT_HOST, ledger({ updatedAt: storedTimestamp('2028-02-29T12:00:00.000Z') })).documentDigest,
     );
   });
 

@@ -433,7 +433,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
 }
 
 async function planUpdate(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
+  boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['converged'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
@@ -487,6 +487,17 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   // created disabled.
   if (statusChange && changes.status === 'active') {
     await requireLiveEvent(transaction, { ...state.hostname, ...changes }.eventId);
+    // ACTIVATION IS A CONVERGENCE BARRIER TOO. "Wait for publisher acceptance
+    // and edge inspection before activation" is what provision defers to, and
+    // "disabled and converge, repoint, active and converge" is what the
+    // repoint sequence rests on — and both were only the Firestore half. A
+    // caller could provision and activate, or repoint and activate, before
+    // the disabled or new-identity revision ever reached the edge, so the
+    // host went live at a projection the edge had never accepted. The
+    // evidence is the same shape `repoint` takes, compared against the
+    // PRIOR ledger, which is the revision activation is supposed to be
+    // waiting on.
+    requireEdgeConvergence(input.converged, stored, 'activation-requires-convergence');
   }
 
   const document = { ...state.hostname, ...changes };
@@ -840,19 +851,59 @@ async function planDelete(input, transaction, clock, buffer, revisions, projecti
   return { host, projectedChange: true, resultingHostname: null };
 }
 
+/**
+ * What a REPAIR owes the two rules an ordinary write already keeps.
+ *
+ * `backfill-ledger` and `advance-ledger` both publish a source document that
+ * nothing in this helper wrote, and both used to publish it exactly as found.
+ * Two things follow from that and neither is optional:
+ *
+ * 1. NORMALIZE THE SOURCE. An omitted `pathNamespace` derives as `null`, so
+ *    the ledger is right, but `recovery-controller.mjs` validates the RAW
+ *    document and requires the explicit `null` — a pre-helper route could
+ *    therefore be backfilled, published, and then never attested, which is
+ *    the one thing it would need after a drift. The default is written onto
+ *    the hostname document in the SAME batch as the ledger, so the pair the
+ *    edge converges on and the pair an attestor reads are one write.
+ *
+ * 2. KEEP THE DEPLOYMENT BARRIER. `provision` refuses to publish a non-null
+ *    `pathNamespace` without the attested barrier record, and for a legacy or
+ *    partial-Admin source a repair is the FIRST edge publication of that
+ *    capability — so publishing it here without the barrier arms path routing
+ *    before the capability-aware Worker, the cache-schema bump and forced
+ *    advancement are, which is the exposure the barrier exists for.
+ */
+function prepareRepairSource(input, host, hostname, clock, buffer) {
+  const desired = project(() => deriveCanonicalProjection(host, hostname));
+  if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
+    if ((input.pathCapabilityBarrier ?? null) === null) refuse('path-capability-barrier-required');
+    validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso);
+  }
+  if (isRecord(hostname) && !Object.hasOwn(hostname, 'pathNamespace')) {
+    buffer.update(`hostnames/${host}`, { pathNamespace: null });
+    return { desired, resultingHostname: { ...hostname, pathNamespace: null } };
+  }
+  return { desired, resultingHostname: hostname };
+}
+
 async function planBackfill(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(input, ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host'], 'invalid-input');
+  boundedKeys(
+    input,
+    ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host'],
+    ['pathCapabilityBarrier'],
+    'invalid-input',
+  );
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
   if (state.hostname === null) refuse('hostname-missing');
-  // Backfill creates a missing ledger and changes no public document. An
+  // Backfill creates a missing ledger and changes no PROJECTED field. An
   // existing ledger — however wrong — is a reconciliation question, not a
   // backfill one.
   if (state.ledger !== null) refuse('ledger-exists');
-  const desired = project(() => deriveCanonicalProjection(host, state.hostname));
+  const { desired, resultingHostname } = prepareRepairSource(input, host, state.hostname, clock, buffer);
   ledgerWrite(buffer, host, '1', desired, clock.stamp, revisions, projections, null);
-  return { host, projectedChange: true, resultingHostname: state.hostname };
+  return { host, projectedChange: true, resultingHostname };
 }
 
 /**
@@ -891,7 +942,7 @@ function validTombstone(host, ledger) {
  * fresh signed audit follow; this call blesses nothing by itself.
  */
 async function planAdvanceLedger(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(
+  boundedKeys(
     input,
     [
       'schemaVersion',
@@ -903,6 +954,7 @@ async function planAdvanceLedger(input, transaction, clock, buffer, revisions, p
       'durableObjectHighWaterRevision',
       'incidentUrl',
     ],
+    ['pathCapabilityBarrier'],
     'invalid-input',
   );
   const { host } = input;
@@ -952,7 +1004,7 @@ async function planAdvanceLedger(input, transaction, clock, buffer, revisions, p
     refuse('tombstoned-address-malformed');
   }
   if (validTombstone(host, state.ledger) && state.hostname !== null) refuse('tombstoned-address');
-  const desired = project(() => deriveCanonicalProjection(host, state.hostname));
+  const { desired, resultingHostname } = prepareRepairSource(input, host, state.hostname, clock, buffer);
   const highWater = BigInt(input.durableObjectHighWaterRevision);
   // Monotonicity is CONSTRUCTED, not checked: flooring at the greater of the
   // stored revision and the named high-water mark and adding one is what makes
@@ -962,7 +1014,7 @@ async function planAdvanceLedger(input, transaction, clock, buffer, revisions, p
   const floor = BigInt(storedRevision) > highWater ? BigInt(storedRevision) : highWater;
   const revision = (floor + 1n).toString(10);
   ledgerWrite(buffer, host, revision, desired, clock.stamp, revisions, projections, storedRevision === '0' ? null : storedRevision);
-  return { host, projectedChange: true, resultingHostname: state.hostname };
+  return { host, projectedChange: true, resultingHostname };
 }
 
 const PLANNERS = {

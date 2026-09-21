@@ -87,7 +87,10 @@ const ledgerFor = (host, revision, document) => ({
   revision,
   host,
   desired: deriveCanonicalProjection(host, document),
-  updatedAt: '2026-09-01T00:00:00.000Z',
+  // A STORED row carries a Firestore `Timestamp`; the deployed Eventarc
+  // parser accepts only a `timestampValue`, so text here would be a document
+  // whose trigger can never publish it.
+  updatedAt: Timestamp.fromDate(new Date('2026-09-01T00:00:00.000Z')),
 });
 
 const converged = (host, revision, document) => ({
@@ -232,7 +235,7 @@ describe('provision', () => {
       await refusal(
         claim,
         store({
-          [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '9', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW },
+          [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '9', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW_STAMP },
         }).dependencies,
       ),
     ).toBe('tombstoned-address');
@@ -367,6 +370,60 @@ describe('ordinary update', () => {
   });
 });
 
+describe('the activation convergence barrier', () => {
+  // Provision defers activation to "publisher acceptance and edge
+  // inspection", and the repoint sequence is disabled and CONVERGE, repoint,
+  // active and CONVERGE. Both were only the Firestore half: a caller could
+  // provision or repoint and activate immediately, taking the host live at a
+  // projection the edge had never accepted.
+  it.each([
+    ['the edge is still behind the disabling revision', (document) => ({ ...edgeConverged(HOST, '3', document), revision: '3' })],
+    ['the edge is poisoned at that revision', (document) => ({ ...edgeConverged(HOST, '4', document), digest: 'f'.repeat(64) })],
+  ])('refuses an activation when %s', async (_why, evidence) => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '4', document));
+    expect(
+      await refusal(
+        mutation({ intent: 'update', host: HOST, changes: { status: 'active' }, converged: evidence(document) }),
+        dependencies,
+      ),
+    ).toBe('activation-requires-convergence');
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+  });
+
+  it('activates on the audited evidence for the disabled revision, and leaves every other update alone', async () => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '4', document));
+    await applyHostnameMutation(
+      mutation({
+        intent: 'update',
+        host: HOST,
+        changes: { status: 'active' },
+        converged: edgeConverged(HOST, '4', document),
+      }),
+      dependencies,
+    );
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('5');
+
+    // Disabling, and every non-activating update, needs no evidence: the
+    // barrier is about going LIVE at a projection the edge has not taken.
+    const live = store(converged(HOST, '4', hostnameDocument()));
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' } }),
+      live.dependencies,
+    );
+    expect(live.docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+    const nonProjected = store(converged(HOST, '4', hostnameDocument()));
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: HOST, changes: { adultContent: true } }),
+      nonProjected.dependencies,
+    );
+    expect(nonProjected.docs.get(`hostnames/${HOST}`).adultContent).toBe(true);
+  });
+});
+
 describe('the archived-Event barrier', () => {
   const eventDoc = (overrides = {}) => ({ 'events/bodega-bay-2026': { status: 'active', admins: ['n'], ...overrides } });
   const hostname = { eventId: 'bodega-bay-2026', canonicalHost: HOST, edition: 'fiveacross', slug: 'bodega-bay', isCanonical: true };
@@ -432,9 +489,15 @@ describe('the archived-Event barrier', () => {
     await applyHostnameMutation(mutation({ intent: 'provision', host: HOST, hostname }), absent.dependencies);
     expect(absent.docs.get(`hostnames/${HOST}`).status).toBe('disabled');
 
-    const activating = store({ ...converged(HOST, '4', hostnameDocument({ status: 'disabled' })), ...eventDoc() });
+    const disabled = hostnameDocument({ status: 'disabled' });
+    const activating = store({ ...converged(HOST, '4', disabled), ...eventDoc() });
     await applyHostnameMutation(
-      mutation({ intent: 'update', host: HOST, changes: { status: 'active' } }),
+      mutation({
+        intent: 'update',
+        host: HOST,
+        changes: { status: 'active' },
+        converged: edgeConverged(HOST, '4', disabled),
+      }),
       activating.dependencies,
     );
     expect(activating.docs.get(`hostnames/${HOST}`).status).toBe('active');
@@ -1080,13 +1143,63 @@ describe('delete', () => {
 });
 
 describe('backfill and the explicit Admin ledger advance', () => {
-  it('backfills a missing ledger at revision 1 and changes no public document', async () => {
+  it('backfills a missing ledger at revision 1, normalizing the source and changing no projected value', async () => {
     const { docs, dependencies } = store({ [`hostnames/${HOST}`]: hostnameDocument() });
     const before = structuredClone(docs.get(`hostnames/${HOST}`));
     const plan = await applyHostnameMutation(mutation({ intent: 'backfill-ledger', host: HOST }), dependencies);
     expect(plan.revisions).toEqual([{ host: HOST, from: null, to: '1' }]);
-    expect(docs.get(`hostnames/${HOST}`)).toEqual(before);
+    // The one write it makes to the public document is the absent-to-null
+    // default the recovery consumer requires, in the same batch as the
+    // ledger. No projected value moves.
+    expect(docs.get(`hostnames/${HOST}`)).toEqual({ ...before, pathNamespace: null });
     expect(docs.get(`routerReplicas/${HOST}`).desired).toEqual(deriveCanonicalProjection(HOST, before));
+  });
+
+  // A repair is the FIRST edge publication for a legacy or partial-Admin
+  // source, so it owes the same deployment barrier provision does: publishing
+  // a capability here without it arms path routing before the
+  // capability-aware Worker, the cache-schema bump and forced advancement
+  // are. Both repair intents, because both publish whatever they find.
+  it.each([
+    ['backfill-ledger', (extra = {}) => mutation({ intent: 'backfill-ledger', host: APEX, ...extra })],
+    [
+      'advance-ledger',
+      (extra = {}) =>
+        mutation({
+          intent: 'advance-ledger',
+          host: APEX,
+          durableObjectHighWaterRevision: '11',
+          incidentUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/971',
+          ...extra,
+        }),
+    ],
+  ])('refuses %s on a capability-bearing source with no barrier, and accepts it with one', async (_intent, build) => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const bare = store({ [`hostnames/${APEX}`]: marker });
+    expect(await refusal(build(), bare.dependencies)).toBe('path-capability-barrier-required');
+    expect(bare.docs.has(`routerReplicas/${APEX}`)).toBe(false);
+
+    const stale = store({ [`hostnames/${APEX}`]: marker });
+    expect(
+      await refusal(build({ pathCapabilityBarrier: { ...BARRIER, resolutionCacheSchemaVersion: 0 } }), stale.dependencies),
+    ).toBe('path-capability-barrier');
+
+    const barriered = store({ [`hostnames/${APEX}`]: marker });
+    await applyHostnameMutation(build({ pathCapabilityBarrier: BARRIER }), barriered.dependencies);
+    expect(barriered.docs.get(`routerReplicas/${APEX}`).desired).toEqual({
+      kind: 'root',
+      root: 'not-found',
+      edition: 'vacay',
+      pathNamespace: 'vacaybingo.com',
+    });
+  });
+
+  // An Event subdomain projects `pathNamespace: null`, so a repair on one
+  // needs no barrier at all: there is no capability to publish.
+  it('needs no barrier to repair a source that carries no capability', async () => {
+    const { docs, dependencies } = store({ [`hostnames/${HOST}`]: hostnameDocument() });
+    await applyHostnameMutation(mutation({ intent: 'backfill-ledger', host: HOST }), dependencies);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('1');
   });
 
   it('refuses to backfill over an existing ledger', async () => {
@@ -1133,7 +1246,7 @@ describe('backfill and the explicit Admin ledger advance', () => {
     const plan = await applyHostnameMutation(advance(), dependencies);
     expect(plan.revisions).toEqual([{ host: HOST, from: '4', to: '12' }]);
     expect(docs.get(`routerReplicas/${HOST}`).desired).toEqual(deriveCanonicalProjection(HOST, hostnameDocument()));
-    expect(docs.get(`hostnames/${HOST}`)).toEqual(hostnameDocument());
+    expect(docs.get(`hostnames/${HOST}`)).toEqual({ ...hostnameDocument(), pathNamespace: null });
   });
 
   it('never lowers a revision when the ledger is already ahead of the edge', async () => {
@@ -1149,7 +1262,7 @@ describe('backfill and the explicit Admin ledger advance', () => {
 
     const poisoned = store({
       [`hostnames/${HOST}`]: hostnameDocument(),
-      [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: NOW },
+      [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: NOW_STAMP },
     });
     // The pair is inadmissible to every other intent...
     expect(await refusal(mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' } }), poisoned.dependencies)).toBe(
@@ -1167,7 +1280,7 @@ describe('backfill and the explicit Admin ledger advance', () => {
 
   it('derives a tombstone when the hostname is gone and refuses a non-https incident URL', async () => {
     const { docs, dependencies } = store({
-      [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '5', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW },
+      [`routerReplicas/${HOST}`]: { schemaVersion: 1, revision: '5', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW_STAMP },
     });
     await applyHostnameMutation(advance(), dependencies);
     expect(docs.get(`routerReplicas/${HOST}`)).toMatchObject({ revision: '12', desired: { kind: 'tombstone' } });
@@ -1184,7 +1297,7 @@ describe('backfill and the explicit Admin ledger advance', () => {
     // The advance reads the CURRENT source, so without this guard it would
     // derive a live route from the recreated document and republish the
     // retired address at a higher revision than the tombstone.
-    const tombstone = { schemaVersion: 1, revision: '5', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW };
+    const tombstone = { schemaVersion: 1, revision: '5', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW_STAMP };
     const route = store({ [`hostnames/${HOST}`]: hostnameDocument(), [`routerReplicas/${HOST}`]: tombstone });
     expect(await refusal(advance(), route.dependencies)).toBe('tombstoned-address');
     expect(route.docs.get(`routerReplicas/${HOST}`)).toEqual(tombstone);
@@ -1221,7 +1334,7 @@ describe('backfill and the explicit Admin ledger advance', () => {
       revision: '5',
       host: HOST,
       desired: { kind: 'tombstone' },
-      updatedAt: NOW,
+      updatedAt: NOW_STAMP,
       ...overrides,
     };
     const recreated = store({ [`hostnames/${HOST}`]: hostnameDocument(), [`routerReplicas/${HOST}`]: corrupt });

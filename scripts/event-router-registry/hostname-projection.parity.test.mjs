@@ -211,8 +211,17 @@ describe('projection parity with the #970 recovery controller', () => {
   // suite never saw the one place the two derivations disagree: this module
   // reads an absent field as `null`, and the controller requires
   // `source.pathNamespace === null` off the raw document. A writer that stored
-  // the omission would therefore publish a host that can never be attested,
-  // which is why `planProvision` persists the explicit `null` instead.
+  // the omission would therefore publish a host that can never be attested.
+  //
+  // This is the SHAPE half of that loop. The drive half cannot be written as
+  // one test, because the two programs have disjoint host domains by design:
+  // the controller refuses every real hostname at its boundary and the
+  // lifecycle helper refuses every reserved class, so no host reaches both.
+  // What closes it is that `planProvision` writes the explicit `null` on the
+  // way in, and `backfill-ledger` and `advance-ledger` now normalize a legacy
+  // source that omits it — pinned over a real host in
+  // `hostname-lifecycle.test.mjs` — so the shape those three produce is the
+  // shape this test proves the controller accepts.
   it('refuses a source document that omits pathNamespace, though this module derives one from it', async () => {
     const omitted = { eventId: 'synthetic-event', edition: 'fiveacross', status: 'active', slug: LABEL };
     const desired = deriveCanonicalProjection(HOST, omitted);

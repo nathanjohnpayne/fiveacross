@@ -29,12 +29,17 @@ const hostnameDocument = (overrides = {}) => ({
   ...overrides,
 });
 
+// A stored `routerReplicas/{host}` row carries a Firestore `Timestamp`, not
+// text: the deployed Eventarc parser accepts only a `timestampValue`, so
+// `validateLedgerDocument` refuses a stored string.
+const storedStamp = (iso) => ({ toDate: () => new Date(iso) });
+
 const ledgerFor = (host, revision, document) => ({
   schemaVersion: 1,
   revision,
   host,
   desired: deriveCanonicalProjection(host, document),
-  updatedAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: storedStamp('2026-09-01T00:00:00.000Z'),
 });
 
 const digestOf = (host, revision, document) => projectionDigest(revision, host, deriveCanonicalProjection(host, document));
@@ -166,7 +171,7 @@ describe('three-way reconciliation', () => {
     ],
     [
       'malformed-ledger',
-      { hostname: hostnameDocument(), routerReplica: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: NOW } },
+      { hostname: hostnameDocument(), routerReplica: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: storedStamp(NOW) } },
       auditPage(),
     ],
   ])('classifies %s', async (state, entry, page) => {
@@ -217,7 +222,7 @@ describe('three-way reconciliation', () => {
   // digest, so a ledger that can never be published looked converged.
   it('classifies a tombstone keyed to an unclaimable host as invalid source rather than converged', async () => {
     const host = 'admin.fiveacross.app';
-    const tombstone = { schemaVersion: 1, revision: '9', host, desired: { kind: 'tombstone' }, updatedAt: NOW };
+    const tombstone = { schemaVersion: 1, revision: '9', host, desired: { kind: 'tombstone' }, updatedAt: storedStamp(NOW) };
     const committed = { revision: '9', digest: projectionDigest('9', host, { kind: 'tombstone' }) };
     const deps = dependencies({
       pages: [{ entries: [{ host, hostname: null, routerReplica: tombstone }], nextPageToken: null }],
@@ -239,7 +244,7 @@ describe('three-way reconciliation', () => {
   });
 
   it('flags a permanent tombstone, a held recovery lock and an unfenced quarantined epoch', async () => {
-    const tombstone = { schemaVersion: 1, revision: '9', host: HOST, desired: { kind: 'tombstone' }, updatedAt: NOW };
+    const tombstone = { schemaVersion: 1, revision: '9', host: HOST, desired: { kind: 'tombstone' }, updatedAt: storedStamp(NOW) };
     const committed = { revision: '9', digest: projectionDigest('9', HOST, { kind: 'tombstone' }) };
     const deps = dependencies({
       pages: [{ entries: [{ host: HOST, hostname: null, routerReplica: tombstone }], nextPageToken: null }],
@@ -376,7 +381,7 @@ describe('three-way reconciliation', () => {
       HOST,
       {
         hostname: hostnameDocument(),
-        routerReplica: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: NOW },
+        routerReplica: { schemaVersion: 1, revision: '4', host: HOST, desired: { kind: 'route' }, updatedAt: storedStamp(NOW) },
       },
     ],
     [
@@ -592,6 +597,56 @@ describe('pagination', () => {
   // carrying sequence 1 with nextAfter 100, then an empty terminal page,
   // reads as a complete one-record history and the host is reported
   // recovered from a span nothing verified.
+  // The records and the classification have to describe ONE state. Keeping
+  // the first page metadata while consuming later records let an acquire-lock
+  // record on page two chain successfully while the reported lock stayed
+  // null, so `locked` was omitted and an apply-mode backfill could proceed
+  // during containment.
+  it('refuses a page walk whose object state changed under it, and reports the lock when it has not', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const changed = dependencies({
+      audits: {
+        [HOST]: [
+          auditPage({ committed, recoveryLock: null, records: [record('1', null, committed)], nextAfter: '1' }),
+          {
+            ...auditPage({ committed, recoveryLock: HELD_LOCK, records: [record('2', committed, committed)], nextAfter: null }),
+            __after: '1',
+          },
+        ],
+      },
+    });
+    expect(await refusal(input(), changed)).toBe('audit-state-changed');
+
+    // The same two-page walk with the lock held from the first page reports
+    // it, which is what makes the refusal about the CHANGE rather than about
+    // locks or about pagination.
+    const steady = dependencies({
+      audits: {
+        [HOST]: [
+          auditPage({ committed, recoveryLock: HELD_LOCK, records: [record('1', null, committed)], nextAfter: '1' }),
+          {
+            ...auditPage({ committed, recoveryLock: HELD_LOCK, records: [record('2', committed, committed)], nextAfter: null }),
+            __after: '1',
+          },
+        ],
+      },
+    });
+    const report = await reconcileHostnameReplicas(input(), steady);
+    expect(report.hosts[0].flags).toContain('locked');
+    expect(report.hosts[0].recoveryRecordCount).toBe(2);
+  });
+
+  // `before` and `after` are legitimately null at the ends of a history, so
+  // a nullish fallback read an OMITTED field as that legitimate value and a
+  // truncated record satisfied the chain.
+  it.each([['before'], ['after']])('refuses a recovery record that omits %s entirely', async (field) => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const truncated = record('1', null, committed);
+    delete truncated[field];
+    const deps = dependencies({ audits: { [HOST]: [auditPage({ committed, records: [truncated] })] } });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
   it('refuses a cursor that skips past the records the page returned', async () => {
     const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
     const deps = dependencies({

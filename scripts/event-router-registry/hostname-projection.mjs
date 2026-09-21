@@ -228,6 +228,24 @@ function canonicalInstant(value) {
   return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
 }
 
+/**
+ * The STORED ledger's `updatedAt`, which must be a Firestore `Timestamp` and
+ * may not be text.
+ *
+ * `normalizeTimestamp` below deliberately takes both shapes, because a
+ * source-attestor RECEIPT is normalized JSON rather than a Firestore
+ * snapshot. A stored `routerReplicas/{host}` row is not: the deployed
+ * Eventarc parser accepts `updatedAt` only as a `timestampValue`, so a
+ * partial Admin write that stored RFC 3339 text produces a document whose
+ * trigger can never publish it — and validating that document as well formed
+ * let it serve as a converged pre-state for a mutation and be classified
+ * `edge-behind` or converged by the reconciler. Reading a receipt and
+ * validating a stored row are therefore two functions rather than one.
+ */
+function storedTimestamp(value) {
+  return typeof value === 'string' ? null : normalizeTimestamp(value);
+}
+
 export function normalizeTimestamp(value) {
   if (typeof value === 'string') return canonicalInstant(value);
   if (!isRecord(value) || typeof value.toDate !== 'function') return null;
@@ -483,7 +501,7 @@ export function validateLedgerDocument(host, ledger) {
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     refuseProjection('malformed-ledger');
   }
-  const updatedAt = normalizeTimestamp(ledger.updatedAt);
+  const updatedAt = storedTimestamp(ledger.updatedAt);
   if (
     ledger.schemaVersion !== 1 ||
     !isCanonicalRevision(ledger.revision) ||

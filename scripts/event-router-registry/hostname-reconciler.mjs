@@ -249,7 +249,18 @@ async function collectAudit(dependencies, host) {
       'malformed-audit-page',
       host,
     );
-    if (head === null) head = page;
+    if (head === null) {
+      head = page;
+    } else if (!sameSnapshot(head, page)) {
+      // The records and the classification must describe ONE state of the
+      // object. Keeping the first page's metadata while consuming records
+      // from later snapshots let an ordinary sync between pages be compared
+      // against a stale committed revision, and — the sharp case — let an
+      // `acquire-lock` record on page two chain successfully while the
+      // reported `recoveryLock` stayed null, so the `locked` flag was
+      // omitted and an apply-mode backfill could proceed during containment.
+      refuse('audit-state-changed', host);
+    }
     if (!Array.isArray(page.records)) refuse('malformed-audit-page', host);
     for (const record of page.records) {
       if (!isRecord(record) || !decimalWire(record.sequence, POSITIVE_DECIMAL)) {
@@ -261,8 +272,15 @@ async function collectAudit(dependencies, host) {
       if (BigInt(record.sequence) !== BigInt(records.length + 1)) {
         refuse('conflicting-recovery-history', host);
       }
-      const before = committedRef(record.before ?? null, host);
-      const after = committedRef(record.after ?? null, host);
+      // PRESENT, then nullable. `before` and `after` are legitimately null on
+      // a record that opens or closes a history, so a `?? null` fallback read
+      // an OMITTED field as that legitimate value — and since only `sequence`
+      // is otherwise required, a truncated record satisfied the monotonic
+      // chain and let the host be reported `recovered` from evidence that was
+      // never complete.
+      if (!('before' in record) || !('after' in record)) refuse('malformed-audit-page', host);
+      const before = committedRef(record.before, host);
+      const after = committedRef(record.after, host);
       // Internal consistency only: an `apply` may repair a DIFFERENT payload
       // at the equal revision or jump to a higher one (§ Audit and recovery,
       // step 2), so a record's own digests may differ where its revisions do
@@ -312,6 +330,30 @@ async function collectAudit(dependencies, host) {
     if (!decimalWire(head[field], NON_NEGATIVE_DECIMAL)) refuse('malformed-audit-page', host);
   }
   return { ...head, committed, records, pages };
+}
+
+/**
+ * Whether two audit pages describe the same object state: the same committed
+ * reference and the same recovery lock. A page walk that spans a change is
+ * not a snapshot, and every comparison drawn from it describes a state the
+ * object was never in.
+ */
+function sameSnapshot(first, later) {
+  // The epochs are in the comparison for the same reason the committed
+  // reference is, and they are the sibling the lock case would otherwise
+  // have left open: they are validated on the FIRST page and read from it by
+  // the fence, so a quarantine landing between pages would be classified
+  // from a snapshot the records no longer belong to.
+  const fields = [
+    'minimumPublisherEpoch',
+    'highestAuthenticatedPublisherEpoch',
+    'highestQuarantinedPublisherEpoch',
+  ];
+  return (
+    sameValue(first.committed ?? null, later.committed ?? null) &&
+    sameValue(first.recoveryLock ?? null, later.recoveryLock ?? null) &&
+    fields.every((field) => first[field] === later[field])
+  );
 }
 
 /** Whether this projection may describe the host at all, asked without throwing. */
