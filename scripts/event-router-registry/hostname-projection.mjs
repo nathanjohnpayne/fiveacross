@@ -136,6 +136,18 @@ const RFC_3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?
  * Whether an RFC 3339 match names a calendar instant that exists, judged on
  * the components AS WRITTEN: the offset shifts which UTC instant the text
  * denotes, but `2026-02-30T12:00:00+02:00` is not a date in any zone.
+ *
+ * DELIBERATE BOUND: `Date.UTC` maps the years 0 through 99 onto 1900 through
+ * 1999, so a year below `0100` never reads back and is refused. That is the
+ * wanted answer rather than a gap to close. This probe judges exactly one
+ * field — the ledger's `updatedAt`, a publish instant the helper's own clock
+ * writes — so a year in the first century is corruption rather than a date
+ * anyone needs, and refusing it fails closed. The same bound is applied by
+ * `router-publisher/src/runtime.ts` and the worker's
+ * `src/registry/contracts.ts`, so no layer disagrees with another about which
+ * texts are admissible. A caller that ever needs a user-supplied or
+ * externally sourced date here must switch all three to
+ * `new Date(0)` + `setUTCFullYear` + `setUTCHours`, together.
  */
 function namesARealInstant(match) {
   const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);

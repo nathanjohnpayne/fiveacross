@@ -241,6 +241,12 @@ describe('stored ledger validation', () => {
     ['a date with no time of day', '2026-09-20'],
     ['an RFC 3339 shape that names no instant', '2026-13-40T25:00:00Z'],
     ['an empty string', ''],
+    // The `Date.UTC` year bound, pinned as a decision rather than left as an
+    // accident: this field is a publish instant, so a first-century year is
+    // corruption and refusing it fails closed. The publisher and the worker
+    // draw the same bound; moving one of the three means moving all three.
+    ['a year before 0100, which this layer will not treat as a publish instant', '0099-12-31T23:59:59Z'],
+    ['the year zero', '0000-01-01T00:00:00Z'],
   ])('refuses a ledger whose updatedAt is %s', (_why, updatedAt) => {
     expect(code(() => validateLedgerDocument(EVENT_HOST, ledger({ updatedAt })))).toBe('malformed-ledger');
   });

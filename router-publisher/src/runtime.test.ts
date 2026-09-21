@@ -468,6 +468,11 @@ describe('the publisher timestamp canonicalizer', () => {
     ['a date with no time of day', '2026-09-20'],
     ['an RFC 3339 shape that names no instant', '2026-13-40T25:00:00Z'],
     ['an empty string', ''],
+    // The `Date.UTC` year bound the source draws too: this field is a publish
+    // instant, so a first-century year is corruption and refusing it fails
+    // closed. Both layers must move together or they disagree about which
+    // texts are admissible.
+    ['a year before 0100, which is not a publish instant', '0099-12-31T23:59:59Z'],
   ])('refuses %s', (_why, updatedAt) => {
     expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
       'invalid router replica event',

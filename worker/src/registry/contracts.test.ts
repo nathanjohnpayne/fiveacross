@@ -56,6 +56,10 @@ describe('registry sync request contract', () => {
     ['a thirty-first of April', route({ updatedAt: '2026-04-31T12:00:00Z' })],
     ['a leap day in a year that has none', route({ updatedAt: '2025-02-29T12:00:00Z' })],
     ['a zeroth day', route({ updatedAt: '2026-09-00T12:00:00Z' })],
+    // The `Date.UTC` year bound the source and the publisher draw too: this
+    // field is a publish instant, so a first-century year is corruption and
+    // refusing it fails closed. All three layers move together or not at all.
+    ['a year before 0100', route({ updatedAt: '0099-12-31T23:59:59Z' })],
     ['foreign tombstone host', route({ host: 'example.com', desired: { kind: 'tombstone' } })],
   ])('rejects %s before storage', (_label, payload) => {
     expect(() => parseSyncRequest(JSON.stringify(payload), 'application/json')).toThrow();

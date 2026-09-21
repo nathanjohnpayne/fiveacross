@@ -78,6 +78,13 @@ const POSITIVE_DECIMAL = /^[1-9]\d*$/;
  * `replicaPayloadFromEvent` in `router-publisher/src/runtime.ts`), and the
  * edge does not trust the hop in between. Reading the components back out of
  * `Date.UTC` gets leap years right for free.
+ *
+ * DELIBERATE BOUND: `Date.UTC` maps the years 0 through 99 onto 1900 through
+ * 1999, so a year below `0100` never reads back and is refused. This probe
+ * judges exactly one field — the sync request's `updatedAt` publish instant —
+ * where a first-century year is corruption rather than a date anyone needs,
+ * so refusing it fails closed. The source and the publisher apply the same
+ * bound, so no layer disagrees about which texts are admissible.
  */
 function namesARealInstant(match: RegExpExecArray): boolean {
   const year = Number(match[1]);

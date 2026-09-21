@@ -467,6 +467,29 @@ describe('archive', () => {
     expect(docs.get('events/bodega-bay-2026').status).toBe('active');
   });
 
+  // A non-target mapping that already carries `apexPath` would leave the Event
+  // with two apex archive addresses, which § D8 forbids. The state is not
+  // reachable through this helper and this pins the refusal that makes it so:
+  // `apexPath` is written by the archive alone, in the same `changes` that
+  // sets `status: 'archived'` (an update and a repoint both refuse the key as
+  // `apex-path-barrier`, a provision as `unknown-field`, and the mirror-root
+  // conversion strips it), and an archived document can never come back —
+  // `unarchive-barrier` refuses the status change and `repoint-requires-
+  // disabled` refuses the re-home. So a flagged mapping is always an archived
+  // one, and an archived mapping is refused here before the buffer flushes.
+  it('refuses an archive whose non-target mapping already carries apexPath, before any write', async () => {
+    const seed = flagship();
+    seed[`hostnames/${ALIAS}`] = { ...seed[`hostnames/${ALIAS}`], status: 'archived', apexPath: true };
+    seed[`routerReplicas/${ALIAS}`] = ledgerFor(ALIAS, '2', seed[`hostnames/${ALIAS}`]);
+    const { docs, dependencies } = store(seed);
+    expect(await refusal(archiveInput(), dependencies)).toBe('archive-requires-active');
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+    expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
+    expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status: 'archived', apexPath: true });
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+    expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+  });
+
   // Two eligible mappings, one named: the archive is legal and EXACTLY one of
   // them takes the flag. A second `apexPath` cannot be written whatever the
   // caller asks for, because `apexPathHost` is one host and a duplicate

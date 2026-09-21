@@ -31,6 +31,13 @@ const RFC_3339 =
  * March 2), so a canonicalizer that trusted the regex would publish a
  * different instant than the ledger names. Reading the components back out of
  * `Date.UTC` gets leap years right for free.
+ *
+ * DELIBERATE BOUND: `Date.UTC` maps the years 0 through 99 onto 1900 through
+ * 1999, so a year below `0100` never reads back and is refused. This probe
+ * judges exactly one field — the ledger's `updatedAt` publish instant — where
+ * a first-century year is corruption rather than a date anyone needs, so
+ * refusing it fails closed. The source and the worker apply the same bound,
+ * so no layer disagrees about which texts are admissible.
  */
 function namesARealInstant(match: RegExpExecArray): boolean {
   const year = Number(match[1]);
