@@ -56,6 +56,50 @@ export const ROOT_HOSTS = new Map([
   ['gaycruisebingo.vercel.app', { edition: 'gcb', pathNamespace: null }],
 ]);
 
+/**
+ * The root hosts that render a DOORWAY once the flagship they carried is
+ * archived, as opposed to the non-serving `not-found` marker.
+ *
+ * `specs/path-addressing-and-root.md` § D1 settles this per host rather than
+ * per class: the canonical apexes render a doorway — the platform's on
+ * `fiveacross.app`, the Edition's on `vacaybingo.com`, and the GCB apex
+ * becomes its Edition doorway exactly when the archive retires the live
+ * Event — while a brand mirror is deliberately not-found afterwards, because
+ * a mirror exists to land a Player IN the game and answering the emergency
+ * with a doorway is not that. The archive's conversion reads this rather
+ * than forcing every root host to one marker.
+ */
+export const DOORWAY_ROOT_HOSTS = new Set(['fiveacross.app', 'vacaybingo.com', 'gaycruisebingo.com']);
+
+/**
+ * The path Namespaces whose APEX may carry an archive address today.
+ *
+ * MIRROR of the apex entries in `FIRST_PARTY_AUTH_HOSTS`
+ * (`src/auth-domain.ts`), and a precondition rather than a preference:
+ * `specs/path-addressing-and-root.md` § D7 states that an apex may not serve
+ * regime (b) until it is registered as a first-party auth host, in that set,
+ * in Firebase Auth's authorized domains, and on the project's Google OAuth
+ * web client. `fiveacross.app` is registered; `vacaybingo.com` is not, and
+ * the last of those steps is console-only and human-performed. An archive
+ * parked at `vacaybingo.com/<slug>` would therefore render
+ * `auth-unconfigured` instead of the sign-in gate, on an Event that can
+ * never be un-archived. Until the registration lands, Vacay archives belong
+ * at `fiveacross.app/<slug>`, which is registered and serves the same Event.
+ * Pinned against the real predicate by `src/slug.test.ts`.
+ */
+export const AUTH_READY_PATH_NAMESPACES = new Set(['fiveacross.app']);
+
+/**
+ * The 2 KiB sync-request ceiling, MIRRORED from `SYNC_MAX_BYTES` in
+ * `worker/src/registry/contracts.ts`, where the edge enforces it on the
+ * request body and `publishRouterReplica` enforces it before sending. A
+ * ledger document larger than this is a revision the edge can never accept
+ * and every publisher retry fails on, so it is refused at the write rather
+ * than discovered at the wire. The two constants are pinned equal by
+ * `hostname-projection.parity.test.mjs`.
+ */
+export const LEDGER_MAX_BYTES = 2_048;
+
 const EVENT_HOST = /^([a-z0-9-]+)\.(fiveacross\.app|vacaybingo\.com)$/;
 export const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
 export const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
@@ -316,6 +360,16 @@ export function validateHostShape(host) {
 }
 
 /**
+ * The Namespace an Event subdomain's archive address would live under — the
+ * apex whose `/<slug>` path replaces the host when the Event is archived.
+ * Null for anything that is not an Event subdomain.
+ */
+export function apexPathNamespace(host) {
+  const event = EVENT_HOST.exec(host);
+  return event === null ? null : event[2];
+}
+
+/**
  * The strict derivation. Absence derives only a tombstone; anything else must
  * be a well-formed route or root document for THIS host, or the derivation
  * refuses rather than inventing a projection.
@@ -489,12 +543,26 @@ export function normalizeDesired(host, desired) {
  */
 export function buildLedgerDocument(host, revision, desired, updatedAt) {
   if (!isCanonicalRevision(revision)) refuseProjection('malformed-revision');
-  if (normalizeTimestamp(updatedAt) === null) refuseProjection('malformed-timestamp');
-  return {
+  const normalized = normalizeTimestamp(updatedAt);
+  if (normalized === null) refuseProjection('malformed-timestamp');
+  const document = {
     schemaVersion: 1,
     revision,
     host,
     desired: structuredClone(desired),
     updatedAt,
   };
+  // The 2 KiB ceiling, measured on the SHAPE THAT GOES ON THE WIRE: the
+  // publisher sends this document with `updatedAt` as RFC 3339 text, so the
+  // envelope is weighed with the normalized string rather than with the
+  // Firestore `Timestamp` the field is stored as. Nothing else bounds the
+  // projected values — `eventId` is only required to be non-empty and a
+  // revision is any run of digits — so an oversized one would otherwise
+  // commit a Firestore revision that `publishRouterReplica` refuses and the
+  // edge never sees, with every trigger retry failing on the same bytes.
+  const envelope = JSON.stringify({ ...document, updatedAt: normalized });
+  if (new TextEncoder().encode(envelope).byteLength > LEDGER_MAX_BYTES) {
+    refuseProjection('projection-exceeds-sync-limit');
+  }
+  return document;
 }

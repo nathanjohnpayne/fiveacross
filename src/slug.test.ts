@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NAMESPACES } from '../worker/src/host';
+import { isAuthConfiguredForHost } from './auth-domain';
 import {
   isRehearsalEventLabel,
   isRehearsalLabel,
@@ -171,6 +172,44 @@ describe('reserved-label mirrors in separately deployed programs', () => {
     expect(
       parseSet('scripts/event-router-registry/hostname-projection.mjs', 'RESERVED_SLUGS').sort(),
     ).toEqual(expected);
+  });
+});
+
+/**
+ * A THIRD mirror, and the one with a human step behind it.
+ *
+ * `specs/path-addressing-and-root.md` § D7 makes apex path serving conditional
+ * on the apex being a registered first-party auth host — in
+ * `FIRST_PARTY_AUTH_HOSTS`, in Firebase Auth's authorized domains, and on the
+ * project's Google OAuth web client. The archive intent has to refuse a target
+ * whose apex is not, because an archive parked there renders `auth-unconfigured`
+ * on an Event that can never be un-archived, and it cannot import this module.
+ *
+ * So the mirror is derived rather than restated: the expected set is computed
+ * from the real predicate over the Namespaces the projection module itself
+ * lists, which means registering `vacaybingo.com` fails this test until the
+ * mirror is widened to match — the drift direction that matters, since the
+ * registration is console-only and lands outside this repository.
+ */
+describe('the apex auth-readiness mirror', () => {
+  const parseHostSet = (path: string, constName: string): string[] => {
+    const src = readFileSync(resolve(process.cwd(), path), 'utf-8');
+    const start = src.indexOf(`${constName} = new Set(`);
+    if (start === -1) throw new Error(`${constName} not found in ${path}`);
+    const open = src.indexOf('[', start);
+    const close = src.indexOf(']', open);
+    if (open === -1 || close === -1) throw new Error(`${constName} literal unparsable in ${path}`);
+    return [...src.slice(open, close).matchAll(/'([a-z0-9.-]+)'/g)].map((m) => m[1]);
+  };
+
+  it('admits exactly the path-namespace apexes sign-in can complete on', () => {
+    const projection = 'scripts/event-router-registry/hostname-projection.mjs';
+    const namespaces = parseHostSet(projection, 'PATH_NAMESPACES');
+    // Both Namespaces present, so an empty parse cannot pass vacuously.
+    expect(namespaces.sort()).toEqual(['fiveacross.app', 'vacaybingo.com']);
+    expect(parseHostSet(projection, 'AUTH_READY_PATH_NAMESPACES').sort()).toEqual(
+      namespaces.filter((host) => isAuthConfiguredForHost('gaycruisebingo.firebaseapp.com', host)).sort(),
+    );
   });
 });
 

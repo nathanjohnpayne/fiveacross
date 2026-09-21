@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   HostnameProjectionRefusal,
+  LEDGER_MAX_BYTES,
   buildLedgerDocument,
   deriveCanonicalProjection,
   isReservedClassHost,
@@ -297,6 +298,37 @@ describe('stored ledger validation', () => {
         buildLedgerDocument(EVENT_HOST, '4', deriveCanonicalProjection(EVENT_HOST, eventDocument()), '2026-09-20T12:00:00'),
       ),
     ).toBe('malformed-timestamp');
+  });
+});
+
+describe('the 2 KiB sync envelope', () => {
+  const desiredFor = (eventId) => ({
+    kind: 'route',
+    eventId,
+    status: 'active',
+    slug: 'bodega-bay',
+    edition: 'fiveacross',
+    pathNamespace: null,
+  });
+
+  // Nothing else bounds a projected value: `eventId` is only required to be
+  // non-empty and a revision is any run of digits. Past 2 KiB the publisher
+  // refuses the body and the edge never sees it, so a ledger written at that
+  // size is a revision that can never converge and every trigger retry fails
+  // on the same bytes.
+  it.each([
+    ['an oversized eventId', () => buildLedgerDocument(EVENT_HOST, '4', desiredFor('e'.repeat(2048)), '2026-09-20T00:00:00.000Z')],
+    ['an oversized revision', () => buildLedgerDocument(EVENT_HOST, '9'.repeat(2048), desiredFor('e'), '2026-09-20T00:00:00.000Z')],
+  ])('refuses a ledger document the publisher could never send, with %s', (_why, build) => {
+    expect(code(build)).toBe('projection-exceeds-sync-limit');
+  });
+
+  it('measures the wire shape and admits a document just inside the limit', () => {
+    const document = buildLedgerDocument(EVENT_HOST, '4', desiredFor('bodega-bay-2026'), '2026-09-20T00:00:00.000Z');
+    // Weighed with `updatedAt` as the RFC 3339 text the publisher sends,
+    // which is the shape the edge measures.
+    const envelope = JSON.stringify({ ...document, updatedAt: '2026-09-20T00:00:00.000Z' });
+    expect(new TextEncoder().encode(envelope).byteLength).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
   });
 });
 

@@ -317,6 +317,28 @@ describe('three-way reconciliation', () => {
     expect(await refusal(input(), deps)).toBe('audit-pagination-unbounded');
   });
 
+  // The object emits a lowercase 64-character SHA-256 hex digest. Accepting
+  // any non-empty string let a truncated or non-hex value decide a
+  // classification: at an equal revision the comparison reports poisoned,
+  // and across a recovery span it feeds the reachability check.
+  it.each([
+    ['truncated', 'f'.repeat(63)],
+    ['over-long', 'f'.repeat(65)],
+    ['non-hex', 'g'.repeat(64)],
+    ['uppercase', 'F'.repeat(64)],
+    ['empty', ''],
+  ])('refuses an audit page whose committed digest is %s', async (_why, digest) => {
+    const deps = dependencies({ audits: { [HOST]: [auditPage({ committed: { revision: '4', digest } })] } });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
+  it('refuses a recovery record whose digest is not a SHA-256 hex string', async () => {
+    const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
+    const truncated = record('1', null, { revision: '4', digest: 'a'.repeat(10) });
+    const deps = dependencies({ audits: { [HOST]: [auditPage({ committed, records: [truncated] })] } });
+    expect(await refusal(input(), deps)).toBe('malformed-audit-page');
+  });
+
   it('refuses a recovery record whose sequence is a JSON number', async () => {
     const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
     const numeric = { ...record('1', null, committed), sequence: 1 };

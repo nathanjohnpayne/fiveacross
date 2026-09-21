@@ -54,6 +54,21 @@ function decimalWire(value, pattern) {
 }
 
 /**
+ * The digest shape the Durable Object emits: a lowercase, unpadded,
+ * 64-character SHA-256 hex string, the same shape
+ * `worker/src/registry/identifiers.ts` names. Accepting any non-empty string
+ * let a truncated or non-hex digest decide a classification — at an equal
+ * revision the comparison reports `poisoned`, and across a recovery span it
+ * feeds the reachability check — so a malformed digest is malformed evidence
+ * and refuses the page rather than producing a finding.
+ */
+const SHA_256_HEX = /^[0-9a-f]{64}$/;
+
+function digestWire(value) {
+  return typeof value === 'string' && SHA_256_HEX.test(value);
+}
+
+/**
  * Exactly these seams, for the reason the header gives: an exact set is what
  * keeps a later caller from handing the reconciler a KV namespace, a cache, or
  * an acknowledgement writer.
@@ -98,7 +113,7 @@ function exactKeys(value, expected, code, host) {
  */
 function committedRef(value, host) {
   if (value === null || value === undefined) return null;
-  if (!isRecord(value) || !decimalWire(value.revision, POSITIVE_DECIMAL) || !isNonempty(value.digest)) {
+  if (!isRecord(value) || !decimalWire(value.revision, POSITIVE_DECIMAL) || !digestWire(value.digest)) {
     refuse('malformed-audit-page', host);
   }
   return { revision: value.revision, digest: value.digest };

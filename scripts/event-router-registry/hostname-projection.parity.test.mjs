@@ -30,8 +30,10 @@ import { RecoveryControllerRefusal, buildRecoveryArtifacts } from './recovery-co
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 import { applyHostnameMutation } from './hostname-lifecycle.mjs';
 import { replicaPayloadFromFirestoreEvent } from '../../router-publisher/src/runtime.ts';
+import { SYNC_MAX_BYTES } from '../../worker/src/registry/contracts.ts';
 import {
   HostnameProjectionRefusal,
+  LEDGER_MAX_BYTES,
   buildLedgerDocument,
   cloneDocumentValue,
   deriveCanonicalProjection,
@@ -178,6 +180,17 @@ const FIXTURES = [
   ['a synthetic not-found root', ROOT_HOST, { root: 'not-found', edition: 'vacay', pathNamespace: null }],
   ['an absent document', HOST, null],
 ];
+
+describe('the sync-size ceiling is one number in two programs', () => {
+  // The projection module cannot import the worker's TypeScript, so the
+  // constant is stated twice and pinned here rather than left to drift: a
+  // helper that allowed more than the edge accepts writes revisions that can
+  // never converge, and one that allowed less would refuse documents the
+  // edge would have taken.
+  it('states the same ceiling as the worker sync parser', () => {
+    expect(LEDGER_MAX_BYTES).toBe(SYNC_MAX_BYTES);
+  });
+});
 
 describe('projection parity with the #970 recovery controller', () => {
   it.each(FIXTURES)('agrees on %s', async (_why, host, hostname) => {

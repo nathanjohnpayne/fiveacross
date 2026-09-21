@@ -43,9 +43,12 @@
  * mapping set is a query rather than a point read.
  */
 import {
+  AUTH_READY_PATH_NAMESPACES,
+  DOORWAY_ROOT_HOSTS,
   HostnameProjectionRefusal,
   ROOT_HOSTS,
   STATUSES,
+  apexPathNamespace,
   buildLedgerDocument,
   cloneDocumentValue,
   deriveCanonicalProjection,
@@ -251,6 +254,38 @@ function requireConvergedPreState(host, hostname, ledger) {
 }
 
 /**
+ * Refuses a route that would point at an Event the platform has already
+ * retired, or is in the middle of retiring.
+ *
+ * The archive interlock retires an Event's own hosts in favour of the opted-in
+ * apex path, and `unarchive-barrier` keeps an EXISTING routing document from
+ * coming back. Neither covered a route that did not exist when the Event was
+ * archived: `provision` never read `events/{eventId}`, so a fresh mapping
+ * could be created `disabled` against an archived Event and then activated by
+ * an ordinary update, whose own source status had never been `archived`. The
+ * archived Event would serve at its own hostname again, which is exactly what
+ * § D8 retires. `repoint` re-homes a document onto a DIFFERENT Event and is
+ * the same hole through the other door.
+ *
+ * Both halves of the freeze count. `archiving: true` is the quiesce
+ * `beginArchive` installs, and `specs/post-sailing-archive.md` treats it as
+ * closed for every gameplay write, so publishing a new address into it would
+ * race the flip this transaction cannot see.
+ *
+ * A MISSING Event document is not refused. Provisioning a hostname before the
+ * Event document exists is an ordinary operator order, and refusing it would
+ * be a new precondition rather than this defect; what is refused is a live
+ * route onto an Event that is demonstrably not live.
+ */
+async function requireLiveEvent(transaction, eventId) {
+  if (!isNonempty(eventId)) return;
+  const event = await transaction.get(`events/${eventId}`);
+  if (event === null) return;
+  if (!isRecord(event)) refuse('event-not-live');
+  if (event.status === 'archived' || event.archiving === true) refuse('event-not-live');
+}
+
+/**
  * The operator's proof that the EDGE has accepted the projection Firestore
  * holds — not merely that Firestore holds it.
  *
@@ -369,6 +404,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso);
   }
+  if (desired.kind === 'route') await requireLiveEvent(transaction, desired.eventId);
   buffer.set(`hostnames/${host}`, document);
   ledgerWrite(buffer, host, '1', desired, clock.stamp, revisions, projections, null);
   return { host, projectedChange: true, resultingHostname: document };
@@ -423,6 +459,13 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   // `EventDoc.status` together; un-archiving one routing document alone would
   // serve an "archive" whose Event document still refuses every gameplay write.
   if (statusChange && state.hostname.status === 'archived') refuse('unarchive-barrier');
+  // Activation is the other door onto an archived Event. `unarchive-barrier`
+  // above guards the DOCUMENT's own history; this guards the Event the
+  // document points at, which may have been archived after the mapping was
+  // created disabled.
+  if (statusChange && changes.status === 'active') {
+    await requireLiveEvent(transaction, { ...state.hostname, ...changes }.eventId);
+  }
 
   const document = { ...state.hostname, ...changes };
   if (!projectedChange) {
@@ -478,6 +521,10 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
   }
   if (!Object.hasOwn(changes, 'eventId') && !Object.hasOwn(changes, 'slug')) refuse('repoint-requires-identity');
   const document = { ...state.hostname, ...changes };
+  // The Event the host would point at AFTER the move, which is the one that
+  // matters: re-homing a document onto an archived Event publishes a route
+  // to it that § D8 retired.
+  await requireLiveEvent(transaction, document.eventId);
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
   buffer.update(`hostnames/${host}`, changes);
@@ -591,6 +638,19 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     if (!ROOT_HOSTS.has(host)) continue;
     refuse(host === apexPathHost ? 'apex-path-target-ineligible' : 'archive-root-host-requires-conversion');
   }
+  // The apex the target's archive address would live under has to be able to
+  // SIGN A PLAYER IN. § D7 states the precondition: an apex may not serve
+  // regime (b) until it is registered as a first-party auth host, and
+  // `vacaybingo.com` is not — so an archive parked at `vacaybingo.com/<slug>`
+  // renders `auth-unconfigured` rather than the sign-in gate, on an Event
+  // that can never be un-archived. Vacay archives belong at
+  // `fiveacross.app/<slug>` until that registration lands. Read from the
+  // Namespace table rather than from a host literal, so the refusal lifts by
+  // editing the set the spec names.
+  const targetNamespace = apexPathNamespace(apexPathHost);
+  if (targetNamespace === null || !AUTH_READY_PATH_NAMESPACES.has(targetNamespace)) {
+    refuse('archive-apex-target-auth-unready');
+  }
 
   const event = (await transaction.get(`events/${eventId}`)) ?? null;
   if (event === null) refuse('event-missing');
@@ -652,7 +712,20 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     if (state.hostname.status !== 'active') refuse('archive-requires-active');
     const rootHost = ROOT_HOSTS.get(host);
     if (rootHost === undefined) refuse('root-marker-ineligible');
-    if (root !== 'not-found') refuse('root-marker-ineligible');
+    // WHICH marker is a property of the host class, not one answer for every
+    // conversion. § D1 gives a canonical apex a doorway once its flagship is
+    // archived — the platform's on `fiveacross.app`, the Edition's on
+    // `vacaybingo.com`, and the GCB apex becomes its Edition doorway exactly
+    // when this transaction retires the live Event — while a brand mirror is
+    // deliberately not-found, because a mirror exists to land a Player in the
+    // game rather than to answer the emergency with a doorway. Forcing
+    // `not-found` everywhere made archiving the live GCB Event impossible to
+    // do correctly: including `gaycruisebingo.com` is required for
+    // completeness, and the only marker this branch accepted would have left
+    // the canonical GCB surface offline instead of on its Edition doorway.
+    if (root !== (DOORWAY_ROOT_HOSTS.has(host) ? 'doorway' : 'not-found')) {
+      refuse('root-marker-ineligible');
+    }
     // The marker retains the host's path capability and its Edition and keeps
     // no Event field at all, so `/` is not-found while `/<slug>` can still
     // resolve other mirrored Events.

@@ -367,6 +367,80 @@ describe('ordinary update', () => {
   });
 });
 
+describe('the archived-Event barrier', () => {
+  const eventDoc = (overrides = {}) => ({ 'events/bodega-bay-2026': { status: 'active', admins: ['n'], ...overrides } });
+  const hostname = { eventId: 'bodega-bay-2026', canonicalHost: HOST, edition: 'fiveacross', slug: 'bodega-bay', isCanonical: true };
+
+  // `unarchive-barrier` guards a DOCUMENT's own history. Neither it nor the
+  // archive interlock covered a route that did not exist when the Event was
+  // archived: provision never read the Event, so a fresh mapping could be
+  // created disabled against an archived Event and then activated by an
+  // ordinary update whose own source status had never been archived — the
+  // archived Event serving at its own hostname again, which is what § D8
+  // retires.
+  it.each([
+    ['archived', { status: 'archived' }],
+    ['in the archiving quiesce', { archiving: true }],
+  ])('refuses provisioning a route onto an Event that is %s', async (_why, overrides) => {
+    const { docs, dependencies } = store(eventDoc(overrides));
+    expect(await refusal(mutation({ intent: 'provision', host: HOST, hostname }), dependencies)).toBe('event-not-live');
+    expect(docs.has(`hostnames/${HOST}`)).toBe(false);
+    expect(docs.has(`routerReplicas/${HOST}`)).toBe(false);
+  });
+
+  it('refuses activating a disabled mapping whose Event archived in between', async () => {
+    const { docs, dependencies } = store({
+      ...converged(HOST, '4', hostnameDocument({ status: 'disabled' })),
+      ...eventDoc({ status: 'archived' }),
+    });
+    expect(
+      await refusal(mutation({ intent: 'update', host: HOST, changes: { status: 'active' } }), dependencies),
+    ).toBe('event-not-live');
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+  });
+
+  it('refuses re-homing a host onto an archived Event', async () => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store({
+      ...converged(HOST, '5', document),
+      'events/sonoma-2027': { status: 'archived' },
+    });
+    expect(
+      await refusal(
+        mutation({
+          intent: 'repoint',
+          host: HOST,
+          changes: { eventId: 'sonoma-2027' },
+          converged: edgeConverged(HOST, '5', document),
+        }),
+        dependencies,
+      ),
+    ).toBe('event-not-live');
+    expect(docs.get(`hostnames/${HOST}`).eventId).toBe('bodega-bay-2026');
+  });
+
+  // A MISSING Event document is not refused: provisioning a hostname before
+  // the Event exists is an ordinary operator order, and refusing it would be
+  // a new precondition rather than this defect.
+  it('still provisions and activates against a live or not-yet-created Event', async () => {
+    const live = store(eventDoc());
+    await applyHostnameMutation(mutation({ intent: 'provision', host: HOST, hostname }), live.dependencies);
+    expect(live.docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+
+    const absent = store();
+    await applyHostnameMutation(mutation({ intent: 'provision', host: HOST, hostname }), absent.dependencies);
+    expect(absent.docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+
+    const activating = store({ ...converged(HOST, '4', hostnameDocument({ status: 'disabled' })), ...eventDoc() });
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: HOST, changes: { status: 'active' } }),
+      activating.dependencies,
+    );
+    expect(activating.docs.get(`hostnames/${HOST}`).status).toBe('active');
+  });
+});
+
 describe('repoint', () => {
   it('refuses while the host is active and succeeds once it is disabled', async () => {
     const active = store(converged(HOST, '4', hostnameDocument()));
@@ -473,8 +547,14 @@ describe('repoint', () => {
 });
 
 describe('archive', () => {
+  // A SECOND mapping in the auth-ready Namespace, so "two eligible targets"
+  // can be exercised: the `vacaybingo.com` alias below is a mapping of the
+  // same Event but is not an admissible archive address yet (§ D7).
+  const SECOND = 'bodega-bay-2026.fiveacross.app';
+
   const flagship = () => ({
     ...converged(HOST, '4', hostnameDocument()),
+    ...converged(SECOND, '3', hostnameDocument({ canonicalHost: HOST, isCanonical: false, slug: 'bodega-bay-2026' })),
     ...converged(ALIAS, '2', hostnameDocument({ canonicalHost: HOST, isCanonical: false, slug: 'bodega-bay' })),
     ...converged(MIRROR, '7', {
       eventId: 'bodega-bay-2026',
@@ -500,7 +580,7 @@ describe('archive', () => {
     mutation({
       intent: 'archive',
       eventId: 'bodega-bay-2026',
-      mappings: [HOST, ALIAS],
+      mappings: [HOST, SECOND, ALIAS],
       apexPathHost: HOST,
       mirrorRootConversions: [{ host: MIRROR, root: 'not-found' }],
       ...overrides,
@@ -511,6 +591,7 @@ describe('archive', () => {
     const plan = await applyHostnameMutation(archiveInput(), dependencies);
     expect(plan.revisions).toEqual([
       { host: HOST, from: '4', to: '5' },
+      { host: SECOND, from: '3', to: '4' },
       { host: ALIAS, from: '2', to: '3' },
       { host: MIRROR, from: '7', to: '8' },
     ]);
@@ -597,13 +678,75 @@ describe('archive', () => {
   // mapping is already refused as `invalid-input`.
   it('marks exactly one of two eligible mappings when both could have taken the flag', async () => {
     const { docs, dependencies } = store(flagship());
-    await applyHostnameMutation(archiveInput({ apexPathHost: ALIAS }), dependencies);
-    expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status: 'archived', apexPath: true });
+    await applyHostnameMutation(archiveInput({ apexPathHost: SECOND }), dependencies);
+    expect(docs.get(`hostnames/${SECOND}`)).toMatchObject({ status: 'archived', apexPath: true });
     expect(docs.get(`hostnames/${HOST}`).status).toBe('archived');
     expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
     expect(await refusal(archiveInput({ mappings: [HOST, HOST] }), store(flagship()).dependencies)).toBe(
       'invalid-input',
     );
+  });
+
+  // Which marker a retired root host takes is a property of the host class.
+  // § D1 gives a canonical apex its doorway once the flagship archives — the
+  // GCB apex becomes its Edition doorway exactly at this transaction — while
+  // a brand mirror is deliberately not-found. Forcing `not-found` everywhere
+  // made archiving the live GCB Event impossible to do correctly: including
+  // `gaycruisebingo.com` is required for completeness, and the only marker
+  // the branch accepted would have left the canonical surface offline.
+  it.each([
+    ['the canonical GCB apex', 'gaycruisebingo.com', 'gcb', null, 'doorway', 'not-found'],
+    ['a brand mirror', MIRROR, 'vacay', 'vacaybingo.com', 'not-found', 'doorway'],
+  ])('converts %s to its own marker and refuses the other', async (_why, host, edition, pathNamespace, allowed, refused) => {
+    const seed = () => ({
+      ...converged(HOST, '4', hostnameDocument()),
+      ...converged(host, '6', {
+        eventId: 'bodega-bay-2026',
+        edition,
+        status: 'active',
+        slug: 'bodega-bay',
+        pathNamespace,
+      }),
+      'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
+    });
+    const input = (root) =>
+      mutation({
+        intent: 'archive',
+        eventId: 'bodega-bay-2026',
+        mappings: [HOST],
+        apexPathHost: HOST,
+        mirrorRootConversions: [{ host, root }],
+      });
+    expect(await refusal(input(refused), store(seed()).dependencies)).toBe('root-marker-ineligible');
+
+    const { docs, dependencies } = store(seed());
+    await applyHostnameMutation(input(allowed), dependencies);
+    expect(docs.get(`hostnames/${host}`)).toEqual({ root: allowed, edition, pathNamespace });
+    expect(docs.get(`routerReplicas/${host}`).desired).toEqual({
+      kind: 'root',
+      root: allowed,
+      edition,
+      pathNamespace,
+    });
+  });
+
+  // The archive address has to be able to SIGN A PLAYER IN, and the apex it
+  // would live under decides that. § D7 states the precondition and records
+  // that `vacaybingo.com` has not met it, so an archive parked there renders
+  // auth-unconfigured on an Event that can never be un-archived.
+  it('refuses an archive target whose apex cannot sign a Player in yet', async () => {
+    const { docs, dependencies } = store(flagship());
+    expect(await refusal(archiveInput({ apexPathHost: ALIAS }), dependencies)).toBe(
+      'archive-apex-target-auth-unready',
+    );
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+    expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+
+    // The registered apex is admissible, which is what makes the refusal
+    // about registration rather than about archives at a path.
+    const ready = store(flagship());
+    await applyHostnameMutation(archiveInput({ apexPathHost: HOST }), ready.dependencies);
+    expect(ready.docs.get(`hostnames/${HOST}`)).toMatchObject({ status: 'archived', apexPath: true });
   });
 
   // A root host's `status` gates the WHOLE host, so archiving one as a route
@@ -650,7 +793,7 @@ describe('archive', () => {
     expect(
       await refusal(
         archiveInput({
-          mappings: [HOST],
+          mappings: [HOST, SECOND],
           mirrorRootConversions: [
             { host: ALIAS, root: 'not-found' },
             { host: MIRROR, root: 'not-found' },
