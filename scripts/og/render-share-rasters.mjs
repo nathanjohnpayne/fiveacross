@@ -488,7 +488,6 @@ async function main() {
   };
 
   const destDir = outDir ?? join(repo, 'plans', 'og-images');
-  if (outDir) mkdirSync(outDir, { recursive: true });
   const wireframes = pathToFileURL(join(repo, 'plans', 'daily-cards-wireframes.html')).href;
 
   const { chromium } = await import('playwright');
@@ -526,6 +525,11 @@ async function main() {
       console.log('\n--check: nothing written.');
       return;
     }
+
+    // Only a run that will write creates the requested output directory: a
+    // `--check` against a directory that does not exist yet must leave the
+    // filesystem exactly as it found it (CodeRabbit, PR #1246).
+    if (outDir) mkdirSync(outDir, { recursive: true });
 
     const staged = await renderCardSet({
       ids,
