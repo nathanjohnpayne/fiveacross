@@ -109,6 +109,19 @@ function dependencies(db: Firestore) {
       // with `transaction.get(query)`. Each named host is still point-read
       // inside the transaction, which is what the archive decides on; this
       // listing only has to name a host the operator left out.
+      //
+      // THIS ARM PROVES THE RULES, NOT THE CONCURRENCY CONTRACT (Codex P2,
+      // PR #1245). The client SDK has no transactional query, so the
+      // completeness check here is not atomic: an alias provisioned between
+      // this `getDocs` and the commit is absent from `hosts`, is never
+      // point-read, and stays active while the Event archives — the exact
+      // partial archive the check exists to prevent. Production archives do
+      // not run through this adapter. They run through the operator
+      // command's Admin runner, where the same query is `transaction.get(query)`
+      // inside the transaction and a late alias conflicts the commit. This
+      // suite exists to drive the emulator's rules against real transactions,
+      // which is the one thing a client SDK can establish, and the atomicity
+      // claim in `specs/event-router-registry.md` is about the Admin path.
       listEventMappings: async (eventId: string) => {
         const snapshot = await getDocs(query(collection(db, 'hostnames'), where('eventId', '==', eventId)));
         return snapshot.docs.map((entry) => entry.id);
