@@ -495,8 +495,24 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   // `pinnedOrDerivedDailyHonors`, so the record cannot name a different holder
   // from the last live strip. It is handed the ban roster explicitly, because a
   // pin needs no Player row to render and roster absence is not a ban.
+  //
+  // …AND OVER THE RAW ROSTER, exactly like the ⭐ pin above (#1217). This used
+  // to pass the ban-filtered `roster`, and a ban-filtered input is
+  // indistinguishable from a roster the banned Player was never on — so
+  // `perDayHonors` picked the earliest bingo among whoever was left and a Day
+  // whose true First to BINGO was banned handed its chip to the next Player.
+  // That is the promotion `specs/w2-ban-console.md` § Leaderboard forbids: an
+  // honour is hidden, never reassigned. The PINNED branch was already right,
+  // because a day-meta pin carries its own name and instant and is checked
+  // against `bannedUids` directly; only the derived fallback promoted. Hiding
+  // belongs on the OUTPUT (`specs/w2-leaderboard.md` § Design decisions), which
+  // is where the selector applies it, so the raw roster is what it has to see.
+  // `draftEventArchive` moved in the same change, because #1151 requires the
+  // frozen record to say what the last live strip said. The displayed ROWS
+  // below still come off `roster`: a rank is a position, and a position closes
+  // the gap.
   const honorByDay = new Map(
-    pinnedOrDerivedDailyHonors(roster, event?.days, dayMetas, dayMetasLoaded, bannedUids).map(
+    pinnedOrDerivedDailyHonors(players, event?.days, dayMetas, dayMetasLoaded, bannedUids).map(
       (h) => [h.dayIndex, h],
     ),
   );
