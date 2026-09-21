@@ -50,6 +50,7 @@ import {
   STATUSES,
   apexPathNamespace,
   buildLedgerDocument,
+  carriesPathCapability,
   cloneDocumentValue,
   deriveCanonicalProjection,
   isCanonicalRevision,
@@ -61,6 +62,7 @@ import {
   sameValue,
   validateHostShape,
   validateLedgerDocument,
+  validatePathCapabilityBarrier,
 } from './hostname-projection.mjs';
 
 
@@ -231,38 +233,6 @@ function validateDependencies(dependencies) {
 }
 
 /**
- * The enablement barrier from `specs/path-addressing-and-root.md`: the endpoint
- * and capability-aware worker ship, the release arms forced advancement and
- * retires the root-scoped precaches, and the resolution cache's schema version
- * is bumped so no client evaluates install UI against a pre-capability answer —
- * and ONLY THEN may `pathNamespace` be published. None of that is observable
- * from inside a Firestore transaction, so the barrier is an explicit attested
- * record the operator supplies; absent, the mutation fails closed.
- *
- * Only `provision` consults it, for the reason the module header gives: the
- * capability is a constant per host, so the one write that can first publish it
- * for a host is the write that creates that host's document.
- */
-function validatePathCapabilityBarrier(barrier, observedAt) {
-  exactKeys(
-    barrier,
-    ['releaseTag', 'workerVersionId', 'resolutionCacheSchemaVersion', 'armedAt'],
-    'path-capability-barrier',
-  );
-  if (
-    !isNonempty(barrier.releaseTag) ||
-    !isNonempty(barrier.workerVersionId) ||
-    !Number.isInteger(barrier.resolutionCacheSchemaVersion) ||
-    barrier.resolutionCacheSchemaVersion < 1 ||
-    !isNonempty(barrier.armedAt)
-  ) {
-    refuse('path-capability-barrier');
-  }
-  const armed = Date.parse(barrier.armedAt);
-  if (!Number.isFinite(armed) || armed > Date.parse(observedAt)) refuse('path-capability-barrier');
-}
-
-/**
  * A mutation may only be layered on a host whose ledger ALREADY projects its
  * hostname document. Drift means one of the two was written outside this
  * helper, and the spec is explicit that attestation never blesses drift: the
@@ -424,7 +394,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
   const document = Object.hasOwn(provided, 'root') ? provided : { ...provided, status: 'disabled' };
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
-    validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso);
+    project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso));
   }
   if (desired.kind === 'route') await requireLiveEvent(transaction, desired.eventId);
   buffer.set(`hostnames/${host}`, document);
@@ -474,6 +444,16 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
     // Repoint is its own barriered intent precisely so that an "update" cannot
     // move an Event's address while the host is serving.
     refuse(state.hostname.status === 'active' ? 'active-repoint-barrier' : 'repoint-requires-intent');
+  }
+  // `adultContent` only ever RISES for one Event. It records a client's
+  // acknowledgement, and the dedicated #608 derivation treats it as monotone,
+  // so a second writer that could clear it would be a way around the
+  // acknowledgement rather than a second way to set it. The round-8 repoint
+  // reset is not a lowering and is deliberately untouched: a repoint changes
+  // which Event the host serves, so the field is cleared for a DIFFERENT
+  // Event rather than withdrawn for this one.
+  if (Object.hasOwn(changes, 'adultContent') && state.hostname.adultContent === true && changes.adultContent !== true) {
+    refuse('adult-content-monotone');
   }
   if (statusChange && changes.status === 'archived') refuse('archive-barrier');
   if (statusChange && !STATUSES.has(changes.status)) refuse('malformed-hostname-source');
@@ -877,7 +857,7 @@ function prepareRepairSource(input, host, hostname, clock, buffer) {
   const desired = project(() => deriveCanonicalProjection(host, hostname));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     if ((input.pathCapabilityBarrier ?? null) === null) refuse('path-capability-barrier-required');
-    validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso);
+    project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso));
   }
   if (isRecord(hostname) && !Object.hasOwn(hostname, 'pathNamespace')) {
     buffer.update(`hostnames/${host}`, { pathNamespace: null });

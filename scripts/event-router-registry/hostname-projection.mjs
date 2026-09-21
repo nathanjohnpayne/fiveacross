@@ -358,6 +358,53 @@ export function validSlug(slug) {
 }
 
 /**
+ * The enablement barrier from `specs/path-addressing-and-root.md`: the endpoint
+ * and capability-aware worker ship, the release arms forced advancement and
+ * retires the root-scoped precaches, and the resolution cache's schema version
+ * is bumped so no client evaluates install UI against a pre-capability answer —
+ * and ONLY THEN may `pathNamespace` be published. None of that is observable
+ * from inside a Firestore transaction, so the barrier is an explicit attested
+ * record the operator supplies; absent, the mutation fails closed.
+ *
+ * It lives HERE rather than in the lifecycle helper because three callers now
+ * consult it and they must agree on what an armed record is: `provision`,
+ * which first publishes a capability for a host; the two repair intents,
+ * which are the first edge publication for a source nothing in the helper
+ * wrote; and the reconciler, which forwards one into an applied backfill.
+ * Two validators would be two definitions of armed.
+ */
+export function validatePathCapabilityBarrier(barrier, observedAt) {
+  if (!isRecord(barrier)) refuseProjection('path-capability-barrier');
+  const keys = Object.keys(barrier).sort();
+  const expected = ['armedAt', 'releaseTag', 'resolutionCacheSchemaVersion', 'workerVersionId'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    refuseProjection('path-capability-barrier');
+  }
+  if (
+    !isNonempty(barrier.releaseTag) ||
+    !isNonempty(barrier.workerVersionId) ||
+    !Number.isInteger(barrier.resolutionCacheSchemaVersion) ||
+    barrier.resolutionCacheSchemaVersion < 1 ||
+    !isNonempty(barrier.armedAt)
+  ) {
+    refuseProjection('path-capability-barrier');
+  }
+  const armed = Date.parse(barrier.armedAt);
+  if (!Number.isFinite(armed) || armed > Date.parse(observedAt)) refuseProjection('path-capability-barrier');
+}
+
+/**
+ * Whether a stored hostname document would publish a path capability. A
+ * capability-bearing source always carries the field explicitly, because the
+ * derivation requires a root host's `pathNamespace` to equal the table's
+ * non-null value and refuses an omitted one, so this needs no derivation and
+ * cannot throw on a malformed document.
+ */
+export function carriesPathCapability(hostname) {
+  return isRecord(hostname) && hostname.pathNamespace !== null && hostname.pathNamespace !== undefined;
+}
+
+/**
  * A hostname this projection may describe at all: canonical lowercase, and one
  * of exactly the three classes every downstream consumer admits — a known root
  * host, one of the two closed rehearsal classes, or an Event subdomain whose

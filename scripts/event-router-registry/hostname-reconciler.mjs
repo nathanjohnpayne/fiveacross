@@ -25,6 +25,7 @@
  * exactly the host whose history most needs reading.
  */
 import {
+  carriesPathCapability,
   deriveCanonicalProjection,
   HostnameProjectionRefusal,
   isExactRehearsalHost,
@@ -32,6 +33,7 @@ import {
   sameValue,
   validateHostShape,
   validateLedgerDocument,
+  validatePathCapabilityBarrier,
 } from './hostname-projection.mjs';
 
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
@@ -94,6 +96,14 @@ function refuse(code, host) {
 
 function isNonempty(value) {
   return typeof value === 'string' && value.length > 0;
+}
+
+/** Every required key present, no key outside required union optional. */
+function boundedKeys(value, required, optional, code, host) {
+  if (!isRecord(value)) refuse(code, host);
+  const actual = new Set(Object.keys(value));
+  for (const key of required) if (!actual.has(key)) refuse(code, host);
+  for (const key of actual) if (!required.includes(key) && !optional.includes(key)) refuse(code, host);
 }
 
 function exactKeys(value, expected, code, host) {
@@ -501,10 +511,29 @@ const STATES = [
 ];
 
 function validateInput(input) {
-  exactKeys(input, ['schemaVersion', 'mode', 'apply', 'actor', 'reason', 'sourcePageSize'], 'invalid-input');
+  boundedKeys(
+    input,
+    ['schemaVersion', 'mode', 'apply', 'actor', 'reason', 'sourcePageSize'],
+    ['pathCapabilityBarrier'],
+    'invalid-input',
+  );
   if (input.schemaVersion !== 1) refuse('invalid-input');
   if (input.mode !== 'audit' && input.mode !== 'backfill') refuse('invalid-input');
   if (typeof input.apply !== 'boolean') refuse('invalid-input');
+  // `audit` cannot write, so `apply` on it is a claim the mode cannot keep:
+  // the report said `dryRun: false` over a run that was read-only by
+  // construction, which is exactly the line an operator or an automation
+  // reads to decide whether anything changed. Refused rather than quietly
+  // reinterpreted, so the caller learns their intent did not survive.
+  if (input.mode === 'audit' && input.apply) refuse('audit-mode-cannot-apply');
+  if ((input.pathCapabilityBarrier ?? null) !== null) {
+    try {
+      validatePathCapabilityBarrier(input.pathCapabilityBarrier, new Date().toISOString());
+    } catch (error) {
+      if (error instanceof HostnameProjectionRefusal) refuse('path-capability-barrier');
+      throw error;
+    }
+  }
   if (!isNonempty(input.actor)) refuse('invalid-input');
   if (!isNonempty(input.reason) || input.reason.trim() !== input.reason) refuse('invalid-input');
   if (!Number.isInteger(input.sourcePageSize) || input.sourcePageSize < 1 || input.sourcePageSize > 500) {
@@ -530,6 +559,21 @@ export async function reconcileHostnameReplicas(input, dependencies) {
   const observedAt = authoritativeNow(dependencies);
 
   const { entries, pages: sourcePages } = await collectSource(dependencies, input.sourcePageSize);
+  // UP FRONT, because a reconciliation that aborts halfway is worse than one
+  // that never starts: a repair is the first edge publication of a
+  // capability for a source nothing in the helper wrote, so `backfill-ledger`
+  // requires the attested barrier, and without it an applied run over the
+  // serving hosts would have thrown the moment it reached a missing ledger
+  // for a root such as `fiveacross.app` — after backfilling whatever came
+  // before it in the listing. Scope is the listing rather than the subset
+  // that turns out to need a ledger, because which hosts those are is not
+  // known until each has been audited, and the operator can always supply
+  // the record they would need anyway.
+  if (input.mode === 'backfill' && input.apply && (input.pathCapabilityBarrier ?? null) === null) {
+    for (const entry of entries) {
+      if (carriesPathCapability(entry.hostname)) refuse('path-capability-barrier-required', entry.host);
+    }
+  }
   const hosts = [];
   const applied = [];
   let auditPages = 0;
@@ -599,6 +643,11 @@ export async function reconcileHostnameReplicas(input, dependencies) {
         actor: input.actor,
         reason: input.reason,
         host,
+        // Forwarded, not re-derived: the repair validates it again with its
+        // own clock inside the transaction.
+        ...(input.pathCapabilityBarrier === undefined
+          ? {}
+          : { pathCapabilityBarrier: input.pathCapabilityBarrier }),
       });
       if (!isRecord(result) || !Array.isArray(result.revisions) || result.revisions.length !== 1) {
         refuse('backfill-result-malformed', host);
@@ -615,7 +664,8 @@ export async function reconcileHostnameReplicas(input, dependencies) {
   for (const row of hosts) for (const flag of row.flags) flagCounts[flag] += 1;
 
   return {
-    dryRun: !input.apply,
+    // Derived from what the mode can actually WRITE, not from the flag alone.
+    dryRun: !(input.mode === 'backfill' && input.apply),
     mode: input.mode,
     observedAt,
     actor: input.actor,

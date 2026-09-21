@@ -519,6 +519,83 @@ describe('backfill', () => {
     expect(deps.applyMutation).not.toHaveBeenCalled();
   });
 
+  // An applied repair is the first edge publication of a capability for a
+  // source nothing in the helper wrote, so backfill-ledger requires the
+  // attested barrier. The reconciler has to carry one or the run would have
+  // thrown the moment it reached a missing ledger for a serving root, AFTER
+  // backfilling whatever came earlier in the listing.
+  const APEX_HOST = 'fiveacross.app';
+  const apexSource = { root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' };
+  const BARRIER = {
+    releaseTag: 'v2026.09.19-path-capability',
+    workerVersionId: 'a1b2c3d4-0000-4000-8000-000000000001',
+    resolutionCacheSchemaVersion: 4,
+    armedAt: '2026-09-19T00:00:00.000Z',
+  };
+  const apexDeps = (applyMutation) =>
+    dependencies({
+      pages: [{ entries: [{ host: APEX_HOST, hostname: apexSource, routerReplica: null }], nextPageToken: null }],
+      audits: { [APEX_HOST]: [auditPage({ committed: null, lookup: { kind: 'unknown-host' } })] },
+      applyMutation,
+    });
+
+  it('refuses an applied run up front when a capability-bearing source is in scope and no barrier was supplied', async () => {
+    const applyMutation = vi.fn(async () => ({ revisions: [{ host: APEX_HOST, from: null, to: '1' }] }));
+    expect(await refusal(input({ mode: 'backfill', apply: true }), apexDeps(applyMutation))).toBe(
+      'path-capability-barrier-required',
+    );
+    // Nothing was repaired: the refusal is before the walk, not inside it.
+    expect(applyMutation).not.toHaveBeenCalled();
+  });
+
+  it('forwards the attested barrier into the backfill that repairs a serving root', async () => {
+    const applyMutation = vi.fn(async () => ({ revisions: [{ host: APEX_HOST, from: null, to: '1' }] }));
+    const report = await reconcileHostnameReplicas(
+      input({ mode: 'backfill', apply: true, pathCapabilityBarrier: BARRIER }),
+      apexDeps(applyMutation),
+    );
+    expect(report.hosts[0].state).toBe('backfilled');
+    expect(applyMutation.mock.calls[0][0]).toMatchObject({
+      intent: 'backfill-ledger',
+      host: APEX_HOST,
+      pathCapabilityBarrier: BARRIER,
+    });
+  });
+
+  it('refuses a malformed barrier rather than carrying it to the repair', async () => {
+    expect(
+      await refusal(
+        input({ mode: 'backfill', apply: true, pathCapabilityBarrier: { ...BARRIER, resolutionCacheSchemaVersion: 0 } }),
+        apexDeps(vi.fn()),
+      ),
+    ).toBe('path-capability-barrier');
+  });
+
+  // A capability-free listing needs no barrier at all, which is what keeps
+  // the up-front refusal about capability rather than about applying.
+  it('applies a backfill with no barrier when nothing in scope carries a capability', async () => {
+    const applyMutation = vi.fn(async () => ({ revisions: [{ host: HOST, from: null, to: '1' }] }));
+    const deps = dependencies({
+      pages: [{ entries: [{ host: HOST, hostname: hostnameDocument(), routerReplica: null }], nextPageToken: null }],
+      audits: { [HOST]: [auditPage({ committed: null, lookup: { kind: 'unknown-host' } })] },
+      applyMutation,
+    });
+    const report = await reconcileHostnameReplicas(input({ mode: 'backfill', apply: true }), deps);
+    expect(report.hosts[0].state).toBe('backfilled');
+    expect(applyMutation.mock.calls[0][0].pathCapabilityBarrier).toBeUndefined();
+  });
+
+  // `audit` cannot write, so `apply` on it is a claim the mode cannot keep,
+  // and the report said dryRun false over a read-only run.
+  it('refuses apply on an audit run rather than reporting a dry run as applied', async () => {
+    expect(await refusal(input({ mode: 'audit', apply: true }), dependencies())).toBe('audit-mode-cannot-apply');
+    const audited = await reconcileHostnameReplicas(input(), dependencies());
+    expect(audited.dryRun).toBe(true);
+    const planned = await reconcileHostnameReplicas(input({ mode: 'backfill', apply: false }), dependencies());
+    expect(planned.dryRun).toBe(true);
+    expect(planned.counts.backfilled).toBe(0);
+  });
+
   it('refuses a backfill result that does not name exactly one revision', async () => {
     const deps = dependencies({ ...missingLedger, applyMutation: vi.fn(async () => ({ revisions: [] })) });
     expect(await refusal(input({ mode: 'backfill', apply: true }), deps)).toBe('backfill-result-malformed');

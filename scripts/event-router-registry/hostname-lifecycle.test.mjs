@@ -370,6 +370,53 @@ describe('ordinary update', () => {
   });
 });
 
+describe('the adultContent acknowledgement', () => {
+  // It records a client acknowledgement and the #608 derivation only ever
+  // raises it, so a second writer that could clear it would be a way around
+  // the acknowledgement rather than a second way to set it.
+  it('refuses an ordinary update that lowers it, and allows a raise and a restatement', async () => {
+    const flagged = hostnameDocument({ adultContent: true });
+    const lowered = store(converged(HOST, '4', flagged));
+    expect(
+      await refusal(mutation({ intent: 'update', host: HOST, changes: { adultContent: false } }), lowered.dependencies),
+    ).toBe('adult-content-monotone');
+    expect(lowered.docs.get(`hostnames/${HOST}`).adultContent).toBe(true);
+
+    const raised = store(converged(HOST, '4', hostnameDocument()));
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: HOST, changes: { adultContent: true } }),
+      raised.dependencies,
+    );
+    expect(raised.docs.get(`hostnames/${HOST}`).adultContent).toBe(true);
+
+    // Restating the value it already holds is not a lowering and stays an
+    // ordinary no-revision write.
+    const unchanged = store(converged(HOST, '4', flagged));
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: HOST, changes: { adultContent: true } }),
+      unchanged.dependencies,
+    );
+    expect(unchanged.docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+  });
+
+  // The repoint reset is not a lowering: it clears the field for a DIFFERENT
+  // Event rather than withdrawing it for this one.
+  it('still clears it on a repoint, which changes which Event the host serves', async () => {
+    const before = hostnameDocument({ status: 'disabled', adultContent: true });
+    const { docs, dependencies } = store(converged(HOST, '5', before));
+    await applyHostnameMutation(
+      mutation({
+        intent: 'repoint',
+        host: HOST,
+        changes: { eventId: 'sonoma-2027' },
+        converged: edgeConverged(HOST, '5', before),
+      }),
+      dependencies,
+    );
+    expect(docs.get(`hostnames/${HOST}`).adultContent).toBeUndefined();
+  });
+});
+
 describe('the activation convergence barrier', () => {
   // Provision defers activation to "publisher acceptance and edge
   // inspection", and the repoint sequence is disabled and CONVERGE, repoint,
