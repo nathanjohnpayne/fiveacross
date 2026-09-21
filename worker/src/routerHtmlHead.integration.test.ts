@@ -246,13 +246,18 @@ async function request(
   ) as unknown as Promise<Response>;
 }
 
+/** A cached copy of the origin's baked `index.html` to revalidate against. */
+const CONDITIONAL_VALIDATORS = {
+  'if-none-match': INDEX_ETAG,
+  'if-modified-since': LAST_MODIFIED,
+};
+
 /** What a browser sends on a document navigation, with a cached copy of the
  *  origin's baked `index.html` to revalidate. */
 const CONDITIONAL_NAVIGATION: RequestInit = {
   headers: {
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
-    'if-none-match': INDEX_ETAG,
-    'if-modified-since': LAST_MODIFIED,
+    ...CONDITIONAL_VALIDATORS,
   },
 };
 
@@ -378,6 +383,29 @@ describe('the head rewrite, on the runtime rather than on a seam', () => {
     expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('vacay').documentTitle);
     // Nothing for the client to revalidate WITH next time, which is what makes
     // the fix converge instead of recurring one cache generation later.
+    expect(response.headers.get('etag')).toBeNull();
+    expect(response.headers.get('last-modified')).toBeNull();
+  });
+
+  it('answers a conditional CRAWLER fetch the same way, although it names no media type', async () => {
+    // The half a narrow validator rule missed. A crawler that caches the
+    // document revalidates with `if-none-match`; the origin's baked
+    // `index.html` is genuinely unchanged, so it answers `304` truthfully, and
+    // a bodyless response is refused by the rewrite — leaving the crawler on
+    // the Edition metadata it already had. One predicate now decides the
+    // validators and the encoding together, so this fetch reaches the origin
+    // carrying neither validator and asking for `identity`.
+    const response = await request(miniflare(), VACAY_ALTERNATE, '/', {
+      headers: { ...(CRAWLER_FETCH.headers as Record<string, string>), ...CONDITIONAL_VALIDATORS },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-origin-accept-encoding')).toBe('identity');
+    const html = await response.text();
+    expect(metaContent(html, 'property', 'og:site_name')).toBe(brandFor('vacay').documentTitle);
+    expect(metaContent(html, 'name', 'theme-color')).toBe(
+      webManifestForEdition('vacay').theme_color,
+    );
     expect(response.headers.get('etag')).toBeNull();
     expect(response.headers.get('last-modified')).toBeNull();
   });

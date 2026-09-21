@@ -41,9 +41,8 @@ import {
   dropOriginEncoding,
   dropOriginValidators,
   headEditsFor,
-  isDocumentEncodingCandidate,
+  isDocumentCandidate,
   isHeadRewritable,
-  isHtmlDocumentRequest,
   negotiateIdentityEncoding,
   type HtmlHeadRewriter,
 } from './htmlHead';
@@ -308,32 +307,30 @@ async function proxyToOrigin(
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
   // Two things a document subrequest must ask for differently from an asset's
-  // (#1118), both so that a body the rewrite can act on comes back — and they
-  // are asked on DIFFERENT predicates, because being wrong costs different
-  // things in each direction.
+  // (#1118), both decided by one predicate because both are the same question
+  // one step early: is a rewritable document what comes back?
   //
   // A conditional revalidation is sent on UNCONDITIONALLY. The origin's
   // validators describe one baked `index.html` served to every hostname, so a
   // forwarded `if-none-match` can be answered `304` truthfully by the origin
   // and wrongly for this host — the registry may have repointed the hostname
   // to another Edition since, and a `304` leaves no body to rewrite and the
-  // client on the previous Edition's Crawler identity. Narrow, on an explicit
-  // HTML `accept`: dropping a validator from a request that turns out to be an
-  // asset costs that asset its cheap `304` on every revalidation.
-  if (record !== null && isHtmlDocumentRequest(request)) {
-    dropConditionalValidators(headers);
-  }
-
+  // client on the previous Edition's Crawler identity.
+  //
   // And the encoding is pinned to `identity`. The runtime negotiates
   // compression on a subrequest whether or not this file asks it to, so an
   // origin that honours `accept-encoding` answers a document in `gzip` or
   // `br`, and `HTMLRewriter` then parses bytes that are not markup: it matches
   // nothing, changes nothing, reports success, and the client receives the
-  // bundle's baked Edition. Wider, because failing to ask costs a document its
-  // Edition while asking too often costs one asset its compression on this one
-  // internal hop — and because a link-preview crawler, the client this rewrite
-  // exists for, asks with `accept: */*` or with no `accept` at all.
-  if (record !== null && isDocumentEncodingCandidate(request, url)) {
+  // bundle's baked Edition.
+  //
+  // Only the serving path, and only a document candidate: an asset — a path
+  // with a file extension asked for with a wildcard, or any request naming a
+  // non-HTML media type — keeps its validators, its cheap `304` and its
+  // negotiated encoding, and the `/__/auth/*` exemption (`record === null`) is
+  // untouched like everything else about it.
+  if (record !== null && isDocumentCandidate(request, url)) {
+    dropConditionalValidators(headers);
     negotiateIdentityEncoding(headers);
   }
 

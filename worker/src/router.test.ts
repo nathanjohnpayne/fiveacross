@@ -57,7 +57,9 @@ function harness(
   options: {
     seed?: Record<string, RegistryLookup>;
     origin?: Response;
-    originFor?: () => Response;
+    /** Takes the outbound subrequest, so a stub origin can answer the way the
+     *  real one does — a `304` to a forwarded validator, say. */
+    originFor?: (request: Request) => Response;
     originError?: Error;
   } = {},
 ) {
@@ -69,7 +71,7 @@ function harness(
     const request = input instanceof Request ? input : new Request(String(input), init);
     requests.push(request);
     if (options.originError) throw options.originError;
-    if (options.originFor) return options.originFor();
+    if (options.originFor) return options.originFor(request);
     return options.origin ?? new Response('<!doctype html><title>app</title>', { status: 200 });
   });
 
@@ -1004,20 +1006,89 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       },
     );
 
-    it('still leaves that crawler’s validators alone, because only the encoding rule widened', async () => {
-      // The two predicates are not the same, and this is the difference made
-      // visible: widening the validator rule to a wildcard `Accept` would cost
-      // every asset on the host its `304`, so it stayed narrow.
-      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
-      await handleRequest(
+    it('takes that crawler’s validators off too, against an origin that would answer 304', async () => {
+      // One predicate decides both, and this is why it has to. A crawler that
+      // caches the document revalidates with `if-none-match`; the origin's
+      // baked `index.html` really is unchanged, so it answers `304` truthfully
+      // — and `isHeadRewritable` refuses a bodyless response, so the rewrite
+      // never runs and the crawler keeps the Edition metadata it already had.
+      // The stub below answers `304` to any forwarded validator, so this case
+      // fails outright if either header travels.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: (request) =>
+          request.headers.get('if-none-match') === '"origin-index"' ||
+          request.headers.get('if-modified-since') !== null
+            ? new Response(null, { status: 304, headers: { etag: '"origin-index"' } })
+            : htmlOrigin({ headers: { etag: '"origin-index"' } }),
+      });
+      const response = await handleRequest(
         get('https://bodega-bay.fiveacross.app/', {
-          headers: { ...CRAWLER, 'if-none-match': '"origin-index"' },
+          headers: {
+            ...CRAWLER,
+            'if-none-match': '"origin-index"',
+            'if-modified-since': 'Wed, 01 Jul 2026 00:00:00 GMT',
+          },
         }),
         CONFIG,
         deps,
       );
+
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBeNull();
+      expect(requests.at(-1)!.headers.get('if-modified-since')).toBeNull();
       expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('identity');
+      expect(response.status).toBe(200);
+      expect(rewrites).toHaveLength(1);
+      expect(contentFor(rewrites[0]!.edits, 'meta[property="og:site_name"]')).toBe(
+        brandFor('vacay').documentTitle,
+      );
+      // And nothing for it to revalidate with next time.
+      expect(response.headers.get('etag')).toBeNull();
+    });
+
+    it('still lets a conditional asset request be answered 304 under the same wildcard Accept', async () => {
+      // The other half of the rule, and the reason the path test rather than
+      // the `Accept` test is what protects an asset: the crawler headers are
+      // identical, only the extension differs.
+      const { deps, requests, rewrites } = harness({
+        seed: vacaySeed,
+        originFor: () => new Response(null, { status: 304, headers: { etag: '"asset"' } }),
+      });
+      const response = await handleRequest(
+        get('https://bodega-bay.fiveacross.app/assets/app.js', {
+          headers: { ...CRAWLER, 'if-none-match': '"asset"' },
+        }),
+        CONFIG,
+        deps,
+      );
+
+      expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"asset"');
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, deflate, br');
+      expect(response.status).toBe(304);
+      expect(rewrites).toHaveLength(0);
+    });
+
+    it('leaves a document path asked for as JSON with both its validators', async () => {
+      // A client that named a media type, and named one that is not HTML. Its
+      // path is never second-guessed, on either half of the rule.
+      const { deps, requests } = harness({ seed: vacaySeed, originFor: () => htmlOrigin() });
+      await handleRequest(
+        get('https://bodega-bay.fiveacross.app/board', {
+          headers: {
+            accept: 'application/json',
+            'accept-encoding': 'gzip, br',
+            'if-none-match': '"origin-index"',
+            'if-modified-since': 'Wed, 01 Jul 2026 00:00:00 GMT',
+          },
+        }),
+        CONFIG,
+        deps,
+      );
       expect(requests.at(-1)!.headers.get('if-none-match')).toBe('"origin-index"');
+      expect(requests.at(-1)!.headers.get('if-modified-since')).toBe(
+        'Wed, 01 Jul 2026 00:00:00 GMT',
+      );
+      expect(requests.at(-1)!.headers.get('accept-encoding')).toBe('gzip, br');
     });
 
     it('leaves a document path asked for as JSON to negotiate its own encoding', async () => {

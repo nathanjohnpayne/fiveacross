@@ -5,10 +5,9 @@ import {
   dropOriginEncoding,
   dropOriginValidators,
   headEditsFor,
-  isDocumentEncodingCandidate,
+  isDocumentCandidate,
   isDocumentShapedPath,
   isHeadRewritable,
-  isHtmlDocumentRequest,
   negotiateIdentityEncoding,
 } from './htmlHead';
 import { EDITION_IDS } from '../../src/edition-registry';
@@ -177,47 +176,7 @@ describe('what the edge writes for a resolved hostname', () => {
   });
 });
 
-describe('which requests must not carry a cache validator to the origin', () => {
-  const get = (accept: string | null) =>
-    new Request('https://bodega-bay.fiveacross.app/board', {
-      headers: accept === null ? {} : { accept },
-    });
-
-  it.each([
-    'text/html',
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'application/xhtml+xml',
-    'TEXT/HTML; charset=utf-8',
-  ])('recognises a document request accepting %s', (accept) => {
-    expect(isHtmlDocumentRequest(get(accept))).toBe(true);
-  });
-
-  it.each(['*/*', 'application/javascript', 'image/png,image/svg+xml', 'text/htmlx', ''])(
-    'leaves a request accepting %s alone, so asset revalidation still costs a 304',
-    (accept) => {
-      expect(isHtmlDocumentRequest(get(accept))).toBe(false);
-    },
-  );
-
-  it('leaves a request with no Accept at all alone', () => {
-    expect(isHtmlDocumentRequest(get(null))).toBe(false);
-  });
-
-  it.each(['HEAD', 'POST', 'PUT', 'DELETE'])('refuses %s, whose validator is a precondition', (method) => {
-    // Only a GET can be answered with a body the rewrite would touch, and on
-    // any other method `if-none-match` is optimistic concurrency rather than a
-    // cache revalidation — removing it would change what the origin is asked
-    // to do.
-    expect(
-      isHtmlDocumentRequest(
-        new Request('https://bodega-bay.fiveacross.app/board', {
-          method,
-          headers: { accept: 'text/html' },
-        }),
-      ),
-    ).toBe(false);
-  });
-
+describe('what a document subrequest and its rewritten answer must not carry', () => {
   it('removes both revalidation validators and nothing else', () => {
     const headers = new Headers({
       'if-none-match': '"origin-index"',
@@ -293,24 +252,34 @@ describe('which requests must not carry a cache validator to the origin', () => 
   });
 });
 
-describe('which requests must ask the origin for an unencoded body', () => {
+describe('which requests are document candidates, for the validators and the encoding alike', () => {
+  // ONE predicate decides both (#1118, round five). It was two for a round, on
+  // the theory that dropping a validator from a request that turns out to be
+  // an asset costs that asset its cheap 304 while negotiating identity for one
+  // costs only compression. What actually protects an asset here is the PATH
+  // test, not the narrowness of the Accept test, so the narrow validator rule
+  // bought assets nothing and cost a crawler the fix: it asked with a
+  // wildcard, kept its validators, was answered 304, and isHeadRewritable then
+  // refused the bodyless response.
   const asked = (
     path: string,
     headers: Record<string, string> = {},
     method = 'GET',
   ): boolean => {
     const url = new URL(`https://bodega-bay.fiveacross.app${path}`);
-    return isDocumentEncodingCandidate(new Request(url, { method, headers }), url);
+    return isDocumentCandidate(new Request(url, { method, headers }), url);
   };
 
   it.each([
     'text/html',
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'application/xhtml+xml',
+    'TEXT/HTML; charset=utf-8',
   ])('takes a browser navigation accepting %s, whatever its path', (accept) => {
     expect(asked('/board', { accept })).toBe(true);
     // An explicit HTML Accept is a statement about the representation, so the
-    // path is never consulted for it.
+    // path is never consulted for it — and the media range is matched at a
+    // token boundary, case-insensitively, parameters and all.
     expect(asked('/weird.name', { accept })).toBe(true);
   });
 
@@ -344,7 +313,14 @@ describe('which requests must ask the origin for an unencoded body', () => {
     expect(asked(path, { accept: '*/*' })).toBe(false);
   });
 
-  it.each(['application/json', 'image/png', 'application/javascript', 'text/css,*/*;q=0.1'])(
+  it.each([
+    'application/json',
+    'image/png',
+    'application/javascript',
+    'image/png,image/svg+xml',
+    'text/htmlx',
+    'text/css,*/*;q=0.1',
+  ])(
     'leaves a document-shaped path asked for as %s alone',
     (accept) => {
       // A client that named a media type, and named one that is not HTML. Its
@@ -355,10 +331,16 @@ describe('which requests must ask the origin for an unencoded body', () => {
   );
 
   it('takes a HEAD as well as a GET, and no other method', () => {
-    // A HEAD carries no body to rewrite, but a crawler that probes with one
-    // first should be told about the representation the GET will return.
+    // Both are safe and cacheable, so a validator on them is a cache
+    // revalidation. A HEAD carries no body to rewrite, but dropping its
+    // validators turns a crawler probe into a 200 it will follow with a GET
+    // rather than a 304 that lets it keep what it has.
     expect(asked('/', { accept: '*/*' }, 'HEAD')).toBe(true);
+    expect(asked('/board', { accept: 'text/html' }, 'HEAD')).toBe(true);
     for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+      // On an unsafe method a validator is a PRECONDITION rather than a cache
+      // revalidation, so removing it would change what the origin is asked to
+      // do.
       expect(asked('/', { accept: 'text/html' }, method), method).toBe(false);
     }
   });
