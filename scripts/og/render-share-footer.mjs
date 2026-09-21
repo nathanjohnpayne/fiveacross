@@ -67,20 +67,27 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadEditions } from './load-editions.mjs';
 import { toTruecolorPng } from './png-truecolor.mjs';
-import { renderCardSet } from './render-share-rasters.mjs';
+import { CARDS, optionValue, renderCardSet } from './render-share-rasters.mjs';
+import { footerStyleFor } from './share-card-footer-style.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
 
-// Geometry measured off the committed cards. The band is the full-width strip
-// the footer line occupies; it is repainted with the card's own background
-// colour, sampled from inside the band well left of the centred text, so this
-// works on Vacay's cream ground and the other two Editions' dark ones alike.
-export const CARDS = {
-  gcb: { file: 'share-final-photo-gcb.png', ink: '#d0a8ab' },
-  vacay: { file: 'share-final-photo-vacay.png', ink: '#8a857b' },
-  fiveacross: { file: 'share-final-photo-fa.png', ink: '#9aa3b2' },
-};
+// Which file each Edition's card is, from the raster generator that publishes
+// the same three destinations — not a second table (#887 round 7). The one
+// field this file used to add, a per-Edition `ink`, is gone: the artboard's
+// own `.shc .foot` rule and the Edition's theme token say what the footer
+// looks like, and `share-card-footer-style.mjs` reads them. Keeping a private
+// copy is how Vacay's ink came to be `#8a857b` when its theme sets `#66625a`.
+export { CARDS };
+
+// Geometry measured off the committed cards, and genuinely this tool's own:
+// the artboard lays the footer out with `margin-top:auto` inside a flex
+// column, so there is no rule to read a band offset from. The band is the
+// full-width strip the footer line occupies; it is repainted with the card's
+// own background colour, sampled from inside the band well left of the centred
+// text, so this works on Vacay's cream ground and the other two Editions' dark
+// ones alike.
 export const BAND = { y: 694, h: 32, sampleX: 90 };
 export const CENTRE_X = 300;
 export const CARD_W = 600;
@@ -134,9 +141,9 @@ export function footerCaptureFrom(paint, { destDir, fileFor = (id) => CARDS[id].
  *  draw the footer — all in one canvas pass, so the new type is antialiased
  *  against the same ground the old type was. Returns the canvas data URL plus
  *  the numbers the run reports. */
-async function paintBand(page, { b64, band, ink, line, centreX, cardW }) {
+async function paintBand(page, { b64, band, style, line, centreX, cardW }) {
   return page.evaluate(
-    async ({ b64, band, ink, line, centreX, cardW }) => {
+    async ({ b64, band, style, line, centreX, cardW }) => {
       const img = new Image();
       img.src = `data:image/png;base64,${b64}`;
       await img.decode();
@@ -168,10 +175,12 @@ async function paintBand(page, { b64, band, ink, line, centreX, cardW }) {
         while (right > left && !matches(base + right * 4)) right--;
         if (right > left) ctx.fillRect(left, band.y + row, right - left + 1, 1);
       }
-      // Letter-spaced uppercase, matching the committed cards' footer.
-      ctx.letterSpacing = '3px';
-      ctx.font = '400 16px "Helvetica Neue", Helvetica, Arial, sans-serif';
-      ctx.fillStyle = ink;
+      // Every one of these comes from the artboard rule and the Edition's
+      // theme, resolved before the page was opened. Nothing about the footer's
+      // appearance is decided in this file.
+      ctx.letterSpacing = style.letterSpacing;
+      ctx.font = style.font;
+      ctx.fillStyle = style.ink;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(line, centreX, band.y + band.h / 2 + 1);
@@ -180,19 +189,21 @@ async function paintBand(page, { b64, band, ink, line, centreX, cardW }) {
       // converts and proves; see the OUTPUT FORMAT note in the header.
       return { png: c.toDataURL('image/png'), bg, width: Math.round(w) };
     },
-    { b64, band, ink, line, centreX, cardW },
+    { b64, band, style, line, centreX, cardW },
   );
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  const argOf = (f) => {
-    const i = args.indexOf(f);
-    return i === -1 ? null : args[i + 1];
-  };
-  const only = argOf('--edition');
+  // Shared with the raster generator, and for the same reason: `--edition
+  // --all` must not be read as an Edition id (#887 round 7).
+  const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');
+  if (args.includes('--edition') && !only) {
+    console.error('render-share-footer.mjs: --edition needs an Edition id.');
+    process.exit(1);
+  }
   if (!only && !all) {
     console.error(
       'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
@@ -237,20 +248,27 @@ async function main() {
    *  reads it under the destination lock: this is a repaint of an existing
    *  picture, not a render from the artboard. */
   const paint = async (id, b64) => {
-    const card = CARDS[id];
     const brand = editionBrand(id);
-    const line = `${brand.appName.toUpperCase()} ${brand.lexicon.shareMark}`;
+    // `text-transform: uppercase` on the artboard rule, applied here because a
+    // canvas has no such thing — and applied to the whole line, which is what
+    // the rule does.
+    const style = footerStyleFor(id);
+    const composed = `${brand.appName} ${brand.lexicon.shareMark}`;
+    const line = style.uppercase ? composed.toUpperCase() : composed;
     const page = await browser.newPage({ viewport: { width: CARD_W, height: BAND.h }, deviceScaleFactor: 1 });
     try {
       const out = await paintBand(page, {
         b64,
         band: BAND,
-        ink: card.ink,
+        style,
         line,
         centreX: CENTRE_X,
         cardW: CARD_W,
       });
-      console.log(`${id.padEnd(11)} "${line}"  ink ${card.ink}  ground ${out.bg}  line width ${out.width}px`);
+      console.log(
+        `${id.padEnd(11)} "${line}"  ${style.fontPx}px/${style.letterSpacingPx}px  ink ${style.ink} ` +
+          `(${style.theme} --dim)  ground ${out.bg}  line width ${out.width}px`,
+      );
       return out.png;
     } finally {
       await page.close();

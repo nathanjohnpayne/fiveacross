@@ -337,6 +337,25 @@ export async function renderCardSet({
   return staged;
 }
 
+/**
+ * The value of `--flag`, or `null` when it has none.
+ *
+ * "None" includes the case that bit (#887 round 7, id 4058824583): a flag
+ * followed by another option rather than a value. A plain `args[i + 1]`
+ * answered `--all` for `--out --all`, the value-less guard below never fired,
+ * and the run created a directory literally named `--all` and wrote three
+ * cards into it — or, with `--out --check`, created that directory while
+ * reporting that nothing had been written. An option token is never a value
+ * here: no destination directory, Edition id or path this tool takes begins
+ * with two dashes.
+ */
+export function optionValue(args, flag) {
+  const at = args.indexOf(flag);
+  if (at === -1) return null;
+  const next = args[at + 1];
+  return next === undefined || next.startsWith('--') ? null : next;
+}
+
 /** Ask the page which display face the artboards actually resolve to. Split
  *  from `assertDisplayFace` so the decision is testable without a browser and
  *  this half stays a thin `page.evaluate`. */
@@ -415,25 +434,31 @@ async function applyFooter(frame, id, footer) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const argOf = (f) => {
-    const i = args.indexOf(f);
-    return i === -1 ? null : args[i + 1];
-  };
-  const only = argOf('--edition');
+  const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');
-  const outDir = argOf('--out');
+  const outDir = optionValue(args, '--out');
 
+  // Both value-less checks come BEFORE anything reads or writes the
+  // filesystem, and before the `--all` fallback below, so a mistyped command
+  // costs a message rather than a directory named after an option.
+  //
+  // `--out` without a value would otherwise fall back to the committed
+  // directory, which is the one place someone reaching for `--out` is trying
+  // not to write. `--edition` without one would be read as `--all` whenever
+  // `--all` also happened to be on the line.
+  if (args.includes('--edition') && !only) {
+    console.error('render-share-rasters.mjs: --edition needs an Edition id.');
+    process.exit(1);
+  }
+  if (args.includes('--out') && !outDir) {
+    console.error('render-share-rasters.mjs: --out needs a directory.');
+    process.exit(1);
+  }
   if (!only && !all) {
     console.error(
       'render-share-rasters.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
     );
-    process.exit(1);
-  }
-  // A value-less `--out` would otherwise fall back to the committed directory,
-  // which is the one place someone reaching for `--out` is trying not to write.
-  if (args.includes('--out') && !outDir) {
-    console.error('render-share-rasters.mjs: --out needs a directory.');
     process.exit(1);
   }
   if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform')) {

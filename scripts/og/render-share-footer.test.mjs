@@ -21,6 +21,7 @@ import { isLocked, withDestinationLocks } from './og-commit-lock.mjs';
 import { readPngHeader, readPngPixels } from './png-pixels.mjs';
 import { encodePng } from './png-truecolor.mjs';
 import { CARDS, footerCaptureFrom } from './render-share-footer.mjs';
+import { FOOTER_SELECTOR, THEMES_CSS_PATH, WIREFRAMES_PATH, footerStyleFor } from './share-card-footer-style.mjs';
 import { renderCardSet } from './render-share-rasters.mjs';
 
 const STALE = 'the card that is already committed';
@@ -207,5 +208,86 @@ describe('render-share-footer concurrency (#887): the repaint reads what it repl
       held();
     }
     expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('the footer repaint takes its style from the artboard (#887)', () => {
+  const html = readFileSync(WIREFRAMES_PATH, 'utf8');
+  const css = readFileSync(THEMES_CSS_PATH, 'utf8');
+  /** The capture's deviceScaleFactor: the artboards are drawn at half scale. */
+  const SCALE = 2;
+
+  /** The canonical values, read out of the two source files by this test
+   *  rather than by the module under test, so the two derivations have to
+   *  agree. */
+  function canonical(edition) {
+    const rule = html.match(/\.shc \.foot\{([^}]*)\}/)[1];
+    const fontPx = Number(rule.match(/font-size:\s*([\d.]+)px/)[1]) * SCALE;
+    const theme = html
+      .slice(html.indexOf(`id="fx-share-final-photo-${edition}"`))
+      .match(/class="shc"\s+data-theme="([^"]+)"/)[1];
+    const token = rule.match(/color:\s*var\(--([\w-]+)\)/)[1];
+    const themeBlock = css.match(new RegExp(`\\[data-theme='${theme}'\\]\\s*\\{([\\s\\S]*?)\\}`))[1];
+    return {
+      theme,
+      fontPx,
+      letterSpacingPx: Number(rule.match(/letter-spacing:\s*([\d.]+)em/)[1]) * fontPx,
+      ink: themeBlock.match(new RegExp(`--${token}:\\s*([^;]+);`))[1].trim(),
+      uppercase: /text-transform:\s*uppercase/.test(rule),
+    };
+  }
+
+  // The frame slug in the wireframes is not always the Edition id.
+  const EDITIONS = [
+    ['gcb', 'gcb'],
+    ['vacay', 'vacay'],
+    ['fiveacross', 'fa'],
+  ];
+
+  it.each(EDITIONS)('derives %s from the artboard rule and the theme token', (edition, slug) => {
+    const expected = canonical(slug);
+    expect(footerStyleFor(edition, { scale: SCALE })).toMatchObject(expected);
+  });
+
+  it('paints the size, tracking and inks the committed cards actually carry', () => {
+    // Spelled out as well as derived, so a change to either source file shows
+    // up in review as a changed expectation rather than only as a changed
+    // derivation. 8.5px at 2x is 17px, and .16em of 17px is 2.72px.
+    expect(EDITIONS.map(([edition]) => footerStyleFor(edition, { scale: SCALE }))).toEqual([
+      expect.objectContaining({ theme: 'so-long-farewell', fontPx: 17, letterSpacingPx: 2.72, ink: '#d0a8ab' }),
+      expect.objectContaining({ theme: 'fog-froth-farewells', fontPx: 17, letterSpacingPx: 2.72, ink: '#66625a' }),
+      expect.objectContaining({ theme: 'fiveacross-slate', fontPx: 17, letterSpacingPx: 2.72, ink: '#9aa3b2' }),
+    ]);
+    // The exact drift the finding named: the repaint used to paint 16px type
+    // with 3px tracking, and Vacay in an ink its theme does not contain.
+    expect(footerStyleFor('vacay', { scale: SCALE }).ink).not.toBe('#8a857b');
+    // And the ink it now paints is genuinely the one that theme declares,
+    // rather than a value that merely differs from the old one.
+    expect(css).toMatch(/\[data-theme='fog-froth-farewells'\][\s\S]*?--dim:\s*#66625a;/);
+  });
+
+  it('keeps no second definition of the footer style in the repainter', () => {
+    // A private table is what drifted. If one comes back, it comes back as a
+    // hex literal or a hardcoded type size in this file.
+    const code = readFileSync(new URL('./render-share-footer.mjs', import.meta.url), 'utf8')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*'))
+      .join('\n');
+    expect(code).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(code).not.toMatch(/\d+px\s+["']Helvetica/);
+    // And the canvas is handed the derived strings, not assembled ones.
+    expect(code).toContain('ctx.font = style.font');
+    expect(code).toContain('ctx.letterSpacing = style.letterSpacing');
+    expect(code).toContain('ctx.fillStyle = style.ink');
+  });
+
+  it('refuses rather than guessing when a source stops looking the way it must', () => {
+    // A silent fallback here is how the drift would come back.
+    expect(FOOTER_SELECTOR).toBe('.shc .foot');
+    expect(() => footerStyleFor('gcb', { html: '<style>.shc{}</style>', css })).toThrow(
+      /no \.shc \.foot rule in the wireframes document/,
+    );
+    const twoStacks = html.replace('font:14px/1.45 "Helvetica Neue",Arial,sans-serif', 'font:14px/1.45 Georgia,serif');
+    expect(() => footerStyleFor('gcb', { html: twoStacks, css })).toThrow(/2 different body font stacks/);
   });
 });

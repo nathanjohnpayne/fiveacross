@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readPngHeader, readPngPixels } from './png-pixels.mjs';
 import { encodePng } from './png-truecolor.mjs';
 import {
@@ -30,6 +31,7 @@ import {
   DISPLAY_FACE_STACK,
   REQUIRED_DISPLAY_FACE,
   assertDisplayFace,
+  optionValue,
   renderCardSet,
   resolvedDisplayFace,
 } from './render-share-rasters.mjs';
@@ -345,5 +347,54 @@ describe('the overlay boundary (#887): the cap itself is refused, not accepted',
     expect(staged[0].report.lightShare).toBeLessThan(MAX_DARK_CARD_LIGHT_SHARE);
     expect(readPngHeader(readFileSync(dest)).colorType).toBe(2);
     expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('option parsing (#887): an option token is never a value', () => {
+  it('reads a real value', () => {
+    expect(optionValue(['--edition', 'gcb', '--out', '/tmp/rasters'], '--out')).toBe('/tmp/rasters');
+    expect(optionValue(['--edition', 'gcb'], '--edition')).toBe('gcb');
+  });
+
+  it('returns null for a flag that is absent, last, or followed by another option', () => {
+    // The finding: `args[i + 1]` answered `--all` for `--out --all`, so the
+    // value-less guard never fired and the run created a directory literally
+    // named `--all` and wrote the cards into it. `--out --check` created that
+    // directory while reporting that nothing had been written.
+    expect(optionValue(['--all'], '--out')).toBeNull();
+    expect(optionValue(['--edition', 'gcb', '--out'], '--out')).toBeNull();
+    expect(optionValue(['--edition', 'gcb', '--out', '--all'], '--out')).toBeNull();
+    expect(optionValue(['--edition', 'gcb', '--out', '--check'], '--out')).toBeNull();
+    // Same defect, same fix, on the other flag that takes a value.
+    expect(optionValue(['--edition', '--all'], '--edition')).toBeNull();
+    expect(optionValue(['--edition'], '--edition')).toBeNull();
+  });
+
+  it.each([
+    ['--out', '--all'],
+    ['--out', '--check'],
+  ])('refuses %s %s before touching the filesystem', (flag, followedBy) => {
+    // Spawned in an empty directory, because the defect was a directory being
+    // created: an assertion on the parser alone cannot see that.
+    const cwd = mkdtempSync(join(tmpdir(), 'render-share-rasters-cli-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-rasters.mjs', import.meta.url)),
+          '--edition',
+          'gcb',
+          '--allow-foreign-platform',
+          flag,
+          followedBy,
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toContain('render-share-rasters.mjs: --out needs a directory.');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
