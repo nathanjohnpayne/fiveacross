@@ -23,6 +23,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readPngHeader, readPngPixels } from './png-pixels.mjs';
+import { encodePng } from './png-truecolor.mjs';
 import {
   CARDS,
   DISPLAY_FACE_STACK,
@@ -31,6 +33,7 @@ import {
   renderCardSet,
   resolvedDisplayFace,
 } from './render-share-rasters.mjs';
+import { MAX_DARK_CARD_LIGHT_SHARE, isOverlaid, overlayLightShare } from './share-card-overlay.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 /** A real committed capture: 600×750, 8-bit non-interlaced truecolor, with a
@@ -271,5 +274,76 @@ describe('assertDisplayFace (#887)', () => {
     }
     for (const family of DISPLAY_FACE_STACK) expect(message).toContain(`${family}: document.fonts.check`);
     expect(message).toContain('document.fonts.ready resolves either way');
+  });
+});
+
+describe('the overlay boundary (#887): the cap itself is refused, not accepted', () => {
+  const W = 600;
+  const H = 750;
+  /** The quadrant the reading is taken over, in pixels. */
+  const QUADRANT = (W / 2) * (H / 2);
+
+  /**
+   * A 600x750 truecolor card on a near-black ground with exactly `lightPixels`
+   * near-white pixels inside the measured quadrant — the #887 overlay, dialled
+   * to a chosen share.
+   */
+  function cardWithLightPixels(lightPixels) {
+    const data = Buffer.alloc(W * H * 3);
+    for (let i = 0; i < data.length; i += 3) {
+      data[i] = 17;
+      data[i + 1] = 18;
+      data[i + 2] = 23;
+    }
+    let painted = 0;
+    for (let y = 0; y < H / 2 && painted < lightPixels; y++) {
+      for (let x = W / 2; x < W && painted < lightPixels; x++) {
+        const at = (y * W + x) * 3;
+        // `lightPixelShare`'s floor is 216 on every channel.
+        data[at] = 255;
+        data[at + 1] = 255;
+        data[at + 2] = 255;
+        painted++;
+      }
+    }
+    return encodePng({ width: W, height: H, channels: 3, data });
+  }
+
+  it('measures the fixture at exactly the cap, so the boundary case is the one being tested', () => {
+    // If this drifts, the two tests below stop straddling the boundary and
+    // quietly start proving nothing.
+    const atCap = readPngPixels(cardWithLightPixels(QUADRANT * MAX_DARK_CARD_LIGHT_SHARE));
+    expect(QUADRANT).toBe(112500);
+    expect(overlayLightShare(atCap)).toBe(MAX_DARK_CARD_LIGHT_SHARE);
+    expect(isOverlaid(MAX_DARK_CARD_LIGHT_SHARE)).toBe(true);
+  });
+
+  it('refuses a capture sitting exactly on the cap, and commits nothing', async () => {
+    // The finding: this used to be published by a run that reported success,
+    // because the renderer refused only a share strictly ABOVE the cap while
+    // src/recon-share-og.test.ts requires one strictly BELOW it. The next
+    // `npm test` then failed on a file the renderer had just written.
+    const dest = seedCommitted('gcb');
+    await expect(
+      renderCardSet({
+        ids: ['gcb'],
+        destDir: dir,
+        capture: captureWriting({ gcb: cardWithLightPixels(13_500) }),
+      }),
+    ).rejects.toThrow(/upper-right quadrant is 12\.0% near-white/);
+    expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: gcb`);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('accepts a capture one pixel under the cap', async () => {
+    const dest = seedCommitted('gcb');
+    const staged = await renderCardSet({
+      ids: ['gcb'],
+      destDir: dir,
+      capture: captureWriting({ gcb: cardWithLightPixels(13_499) }),
+    });
+    expect(staged[0].report.lightShare).toBeLessThan(MAX_DARK_CARD_LIGHT_SHARE);
+    expect(readPngHeader(readFileSync(dest)).colorType).toBe(2);
+    expect(leftovers()).toEqual([]);
   });
 });

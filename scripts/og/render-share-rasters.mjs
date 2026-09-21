@@ -85,7 +85,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { withDestinationLocks } from './og-commit-lock.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
-import { lightPixelShare, readPngHeader, readPngPixels } from './png-pixels.mjs';
+import { readPngHeader, readPngPixels } from './png-pixels.mjs';
+import { assertNoOverlay } from './share-card-overlay.mjs';
 import { assertCapturedCardFormat } from './share-raster-format.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -103,16 +104,14 @@ export const CARD_H = 750;
 /** The artboards are drawn at half scale, so the capture runs at 2× to land on
  *  the committed 600×750. */
 export const SCALE = 2;
-/**
- * Upper-right quadrant near-white share above which the capture is rejected.
- *
- * This is the #887 defect expressed as a number a machine can check: the
- * overlaid Vacay card was a large cream block in that quadrant and scored
- * 27.4%, while the clean dark-ground artboards score a few percent of thin
- * antialiased ink. Vacay's own card is cream end to end and is exempted below
- * rather than scored against a threshold that means nothing for it.
- */
-export const MAX_DARK_CARD_LIGHT_SHARE = 0.12;
+// The overlay guard — the cap, the boundary, the quadrant and the Vacay
+// exemption — lives in `share-card-overlay.mjs`, because
+// `src/recon-share-og.test.ts` applies the same check to the files already in
+// the tree and the two ends must not be able to disagree. They did: this
+// module rejected a share strictly above 0.12 while the recon guard required
+// one strictly below it, so a capture landing exactly on the cap was published
+// by a run that reported success and immediately reddened `npm test` (#887
+// round 6).
 
 /** The display stack the artboards' `.shc` rules request, in the order CSS
  *  resolves it (`plans/daily-cards-wireframes.html`, `.shc .big` / `.who` /
@@ -215,21 +214,11 @@ export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
   // capture in the wrong PNG format would replace the committed file and only
   // red `src/recon-share-og.test.ts` afterwards. See share-raster-format.mjs.
   assertCapturedCardFormat(id, header, { width: CARD_W, height: CARD_H });
-  let lightShare = null;
-  if (id !== 'vacay') {
-    lightShare = lightPixelShare(readPngPixels(bytes), {
-      x: CARD_W / 2,
-      y: 0,
-      width: CARD_W / 2,
-      height: CARD_H / 2,
-    });
-    if (lightShare > MAX_DARK_CARD_LIGHT_SHARE) {
-      throw new Error(
-        `render-share-rasters.mjs: ${id}'s upper-right quadrant is ${(lightShare * 100).toFixed(1)}% ` +
-          `near-white (cap ${(MAX_DARK_CARD_LIGHT_SHARE * 100).toFixed(0)}%) — something is composited over the card (#887).`,
-      );
-    }
-  }
+  // The decode is inside the thunk so the Vacay exemption governs it too: an
+  // exempt card's pixels are never inflated, which is the property
+  // share-raster-format.mjs relies on when it explains why the IHDR check
+  // cannot be left to the decoder.
+  const lightShare = assertNoOverlay(id, () => readPngPixels(bytes));
   return { width: header.width, height: header.height, colorType: header.colorType, bytes: bytes.length, lightShare };
 }
 

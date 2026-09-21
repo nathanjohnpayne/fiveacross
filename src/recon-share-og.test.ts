@@ -5,7 +5,8 @@ import { DAYS } from './data/seed';
 import { editionBrand } from './editions';
 import { THEMES } from './theme/themes';
 import { OG_EDITION_ART } from '../scripts/og/og-edition-art.mjs';
-import { lightPixelShare, readPngHeader, readPngPixels } from '../scripts/og/png-pixels.mjs';
+import { readPngHeader, readPngPixels } from '../scripts/og/png-pixels.mjs';
+import { isOverlaid, isScoredForOverlay, overlayLightShare } from '../scripts/og/share-card-overlay.mjs';
 
 // Reconciliation guard for ADR 0005 (issue #39), not an app unit test: it
 // asserts on the *contents* (and, for cloud-run/, the *absence*) of the repo
@@ -438,17 +439,13 @@ describe('recon: the reference share-card rasters are regenerable and unoverlaid
     { edition: 'vacay', frame: 'fx-share-final-photo-vacay', file: 'share-final-photo-vacay.png' },
     { edition: 'fiveacross', frame: 'fx-share-final-photo-fa', file: 'share-final-photo-fa.png' },
   ];
-  /**
-   * Upper-right quadrant near-white share above which a dark-ground card is
-   * carrying something that is not the card.
-   *
-   * The number is calibrated, not guessed: the overlaid Vacay card scored
-   * 27.4% of that quadrant, while the clean `so-long-farewell` and
-   * `fiveacross-slate` cards score ~4% — thin antialiased display type on a
-   * near-black ground. Vacay's own card is cream end to end and is excluded
-   * rather than measured against a threshold that means nothing for it.
-   */
-  const MAX_DARK_CARD_LIGHT_SHARE = 0.12;
+  // The cap, the boundary, the quadrant and the Vacay exemption all come from
+  // `scripts/og/share-card-overlay.mjs`, which the renderer's own staged-capture
+  // guard imports too. They used to be restated here, and the two copies
+  // disagreed about the boundary: the renderer refused a share strictly above
+  // the cap while this guard required one strictly below it, so a capture
+  // landing exactly on it was published by a run that reported success and
+  // reddened this very test on the next `npm test` (#887 round 6).
 
   it('ships a renderer that reads the wireframe artboards', () => {
     expect(existsSync(resolve('../scripts/og/render-share-rasters.mjs'))).toBe(true);
@@ -480,12 +477,14 @@ describe('recon: the reference share-card rasters are regenerable and unoverlaid
     expect(header.interlace).toBe(0);
   });
 
-  it.each(SHARE_CARDS.filter((c) => c.edition !== 'vacay'))(
+  it.each(SHARE_CARDS.filter((c) => isScoredForOverlay(c.edition)))(
     'leaves no foreign card composited over $file',
     ({ file }) => {
       const image = readPngPixels(readFileSync(resolve(`../plans/og-images/${file}`)));
-      const share = lightPixelShare(image, { x: 300, y: 0, width: 300, height: 375 });
-      expect(share).toBeLessThan(MAX_DARK_CARD_LIGHT_SHARE);
+      const share = overlayLightShare(image);
+      expect(isOverlaid(share), `${file} scores ${(share * 100).toFixed(1)}% near-white in its upper-right quadrant`).toBe(
+        false,
+      );
     },
   );
 
