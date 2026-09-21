@@ -114,6 +114,51 @@ describe('canonical hostname projection', () => {
       expect(code(() => validateHostShape(host)), host).toBe('invalid-host');
     }
   });
+
+  // A label the wildcard pattern accepts but no organizer could ever claim.
+  // The publisher's `isRegistryHost` and the worker's sync parser both reach
+  // `validateSlug` and refuse these, so a projection derived for one of them
+  // is a desired state the edge can never accept.
+  it.each([
+    ['a reserved label', 'admin.fiveacross.app'],
+    ['a label shorter than three characters', 'ab.fiveacross.app'],
+    ['a double-hyphen label', 'ab--cd.fiveacross.app'],
+    ['a trailing-hyphen label', 'bodega-.vacaybingo.com'],
+    ['an r2- label that is not one of the closed classes', 'r2-short.fiveacross.app'],
+  ])('refuses %s, which no downstream consumer would admit', (_why, host) => {
+    expect(code(() => validateHostShape(host)), host).toBe('invalid-host');
+  });
+
+  it.each([SYNTHETIC_HOST, SYNTHETIC_ROOT_HOST, 'bodega-bay.fiveacross.app', 'gaycruisebingo.com'])(
+    'still admits %s',
+    (host) => {
+      expect(code(() => validateHostShape(host)), host).toBe(null);
+    },
+  );
+
+  // The tombstone arm is the one that derives from an ABSENT source, so it has
+  // no slug of its own to check and reached only the syntactic gate before the
+  // host rule moved into it. `advance-ledger` could therefore write a
+  // tombstone for a host the sync endpoint refuses, and nothing on this side
+  // would call the pair malformed.
+  it.each(['admin.fiveacross.app', 'ab.fiveacross.app', 'ab--cd.fiveacross.app'])(
+    'refuses to derive a tombstone for %s rather than projecting one that can never converge',
+    (host) => {
+      expect(code(() => deriveCanonicalProjection(host, null))).toBe('invalid-host');
+      expect(code(() => deriveCanonicalProjection(host, undefined))).toBe('invalid-host');
+    },
+  );
+
+  it('refuses a stored tombstone ledger keyed to a host no consumer admits', () => {
+    const ledger = {
+      schemaVersion: 1,
+      revision: '4',
+      host: 'admin.fiveacross.app',
+      desired: { kind: 'tombstone' },
+      updatedAt: '2026-09-20T00:00:00.000Z',
+    };
+    expect(code(() => validateLedgerDocument('admin.fiveacross.app', ledger))).toBe('invalid-host');
+  });
 });
 
 describe('the one canonicalizer', () => {

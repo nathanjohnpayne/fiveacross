@@ -453,6 +453,35 @@ describe('archive', () => {
     expect(docs.get('events/bodega-bay-2026').status).toBe('active');
   });
 
+  // The archive is a one-way door: with no target named, every mapping and
+  // the Event document retire while the apex archive address never becomes
+  // eligible, and an ordinary update refuses both to add `apexPath` and to
+  // un-archive. Refused before the first read rather than repaired after.
+  it('refuses an archive that names no apexPath target, leaving both sides untouched', async () => {
+    const { docs, dependencies } = store(flagship());
+    expect(await refusal(archiveInput({ apexPathHost: null }), dependencies)).toBe('archive-apex-target-missing');
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+    expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
+    expect(docs.get(`hostnames/${ALIAS}`).status).toBe('active');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+    expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+  });
+
+  // Two eligible mappings, one named: the archive is legal and EXACTLY one of
+  // them takes the flag. A second `apexPath` cannot be written whatever the
+  // caller asks for, because `apexPathHost` is one host and a duplicate
+  // mapping is already refused as `invalid-input`.
+  it('marks exactly one of two eligible mappings when both could have taken the flag', async () => {
+    const { docs, dependencies } = store(flagship());
+    await applyHostnameMutation(archiveInput({ apexPathHost: ALIAS }), dependencies);
+    expect(docs.get(`hostnames/${ALIAS}`)).toMatchObject({ status: 'archived', apexPath: true });
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('archived');
+    expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
+    expect(await refusal(archiveInput({ mappings: [HOST, HOST] }), store(flagship()).dependencies)).toBe(
+      'invalid-input',
+    );
+  });
+
   it('refuses an apexPath target that is not one of the Event mappings or is a root host', async () => {
     expect(await refusal(archiveInput({ apexPathHost: 'sonoma.fiveacross.app' }), store(flagship()).dependencies)).toBe(
       'apex-path-target-unknown',

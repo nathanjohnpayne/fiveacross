@@ -241,18 +241,40 @@ export function validSlug(slug) {
 }
 
 /**
- * A hostname this projection may describe at all: canonical lowercase, and
- * either a known root host or an Event subdomain in a wildcard Namespace. A
- * reserved-class host is a valid host shape and is deliberately NOT refused
- * here — #970's controller derives projections for its own synthetic states
- * through this module, and the ordinary-claim refusal belongs to the lifecycle
- * helper, which is the path an operator reaches.
+ * A hostname this projection may describe at all: canonical lowercase, and one
+ * of exactly the three classes every downstream consumer admits — a known root
+ * host, one of the two closed rehearsal classes, or an Event subdomain whose
+ * label is a CLAIMABLE Slug.
+ *
+ * That last clause is the one a syntactic check would miss, and missing it is
+ * how a ledger gets written that can never converge. The wildcard-Namespace
+ * pattern accepts `admin.fiveacross.app`, `ab.fiveacross.app` and
+ * `ab--cd.fiveacross.app`, but the deployed publisher's `isRegistryHost` and
+ * the worker's sync parser both reach `validateSlug` and refuse all three, so
+ * a projection derived for one of them is a desired state the edge will never
+ * accept. The route derivation below already refused them — its source has to
+ * carry a `slug` equal to the label — but a TOMBSTONE derives from an absent
+ * source and has no slug to check, so before this rule lived here
+ * `advance-ledger` could write a tombstone that `validateLedgerDocument` then
+ * called well formed while the sync endpoint rejected every attempt to publish
+ * it, and the reconciler read the pair as a valid source rather than as the
+ * dead end it is.
+ *
+ * A reserved-class host is still deliberately NOT refused: #970's controller
+ * derives projections for its own synthetic states through this module. What
+ * is admitted is the EXACT rehearsal classes rather than any `r2-` prefix,
+ * because the publisher admits exactly those; the ordinary-claim refusal for
+ * them stays in the lifecycle helper, which is the path an operator reaches.
  */
 export function validateHostShape(host) {
   if (!isNonempty(host) || host !== host.toLowerCase() || host.endsWith('.') || host.includes('/')) {
     refuseProjection('invalid-host');
   }
-  if (!ROOT_HOSTS.has(host) && EVENT_HOST.exec(host) === null) refuseProjection('invalid-host');
+  if (ROOT_HOSTS.has(host)) return;
+  const event = EVENT_HOST.exec(host);
+  if (event === null) refuseProjection('invalid-host');
+  if (SYNTHETIC_EVENT.test(host) || SYNTHETIC_ROOT.test(host)) return;
+  if (!validSlug(event[1])) refuseProjection('invalid-host');
 }
 
 /**

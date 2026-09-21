@@ -491,6 +491,11 @@ function requireCompleteMappingSet(mapped, hosts) {
  * address, the mirror-root conversion to the non-serving `root: 'not-found'`
  * marker, and `EventDoc.status` all move in ONE transaction. Nothing observes a
  * half-archived Event, and no active Event becomes reachable at an apex path.
+ *
+ * The `apexPath` half is not optional. An archive with no target named would
+ * retire the Event without activating the address that replaces it, which
+ * `archive-apex-target-missing` refuses below before the transaction reads
+ * anything.
  */
 async function planArchive(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(
@@ -514,7 +519,21 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
   }
   const hosts = [...mappings, ...mirrorRootConversions.map((entry) => (isRecord(entry) ? entry.host : entry))];
   if (hosts.length === 0 || new Set(hosts).size !== hosts.length) refuse('invalid-input');
-  if (apexPathHost !== null && !mappings.includes(apexPathHost)) refuse('apex-path-target-unknown');
+  // EXACTLY ONE mapping must take `apexPath`, and the refusal is here, before
+  // the first read, because the archive is otherwise a one-way door. § D8 of
+  // `specs/path-addressing-and-root.md` retires every mapping and the Event
+  // document together and makes the target's apex-path address live in the
+  // same transaction; with no target named, the loop below marks nothing, so
+  // the Event stops serving at its own hosts while the archive URL it is
+  // replaced by never becomes eligible. Nothing can repair that afterwards:
+  // an ordinary update refuses to add `apexPath` and refuses to un-archive, so
+  // the Event is stranded permanently.
+  //
+  // One target is also the MOST that can be marked, and that needs no separate
+  // refusal: `apexPathHost` is a single host and `hosts` above has already
+  // refused a duplicate, so the loop can match it at most once.
+  if (apexPathHost === null) refuse('archive-apex-target-missing');
+  if (!mappings.includes(apexPathHost)) refuse('apex-path-target-unknown');
 
   const event = (await transaction.get(`events/${eventId}`)) ?? null;
   if (event === null) refuse('event-missing');

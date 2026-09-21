@@ -179,6 +179,26 @@ describe('three-way reconciliation', () => {
     expect(report.counts[state]).toBe(1);
   });
 
+  // The label is syntactically a wildcard-Namespace subdomain but is reserved,
+  // so no organizer could claim it and neither the publisher nor the worker
+  // would accept a projection for it. Before the host rule reached the
+  // tombstone arm this row read as `already-correct`: the derivation answered
+  // a tombstone, the ledger held one, and the audit reported the matching
+  // digest, so a ledger that can never be published looked converged.
+  it('classifies a tombstone keyed to an unclaimable host as invalid source rather than converged', async () => {
+    const host = 'admin.fiveacross.app';
+    const tombstone = { schemaVersion: 1, revision: '9', host, desired: { kind: 'tombstone' }, updatedAt: NOW };
+    const committed = { revision: '9', digest: projectionDigest('9', host, { kind: 'tombstone' }) };
+    const deps = dependencies({
+      pages: [{ entries: [{ host, hostname: null, routerReplica: tombstone }], nextPageToken: null }],
+      audits: { [host]: [auditPage({ committed, lookup: { kind: 'committed', revision: '9' } })] },
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.hosts[0].state).toBe('invalid-host');
+    expect(report.counts['invalid-host']).toBe(1);
+    expect(report.counts['already-correct']).toBe(0);
+  });
+
   it('classifies a repaired host as recovered once its history is non-empty', async () => {
     const committed = { revision: '4', digest: digestOf(HOST, '4', hostnameDocument()) };
     const deps = dependencies({
