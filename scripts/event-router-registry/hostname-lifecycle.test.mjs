@@ -95,6 +95,17 @@ const converged = (host, revision, document) => ({
   [`routerReplicas/${host}`]: ledgerFor(host, revision, document),
 });
 
+/**
+ * The audit evidence an operator reads back from the Durable Object before a
+ * repoint or a delete: the revision AND the digest the object reports as
+ * committed. The digest is what a poisoned edge cannot forge, which is why
+ * both intents ask for it rather than for the revision alone.
+ */
+const edgeConverged = (host, revision, document) => ({
+  revision,
+  digest: projectionDigest(revision, host, deriveCanonicalProjection(host, document)),
+});
+
 const mutation = (overrides) => ({
   schemaVersion: 1,
   apply: true,
@@ -360,12 +371,25 @@ describe('repoint', () => {
   it('refuses while the host is active and succeeds once it is disabled', async () => {
     const active = store(converged(HOST, '4', hostnameDocument()));
     expect(
-      await refusal(mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' } }), active.dependencies),
+      await refusal(
+        mutation({
+          intent: 'repoint',
+          host: HOST,
+          changes: { eventId: 'sonoma-2027' },
+          converged: edgeConverged(HOST, '4', hostnameDocument()),
+        }),
+        active.dependencies,
+      ),
     ).toBe('repoint-requires-disabled');
 
     const disabled = store(converged(HOST, '5', hostnameDocument({ status: 'disabled' })));
     const plan = await applyHostnameMutation(
-      mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' } }),
+      mutation({
+        intent: 'repoint',
+        host: HOST,
+        changes: { eventId: 'sonoma-2027' },
+        converged: edgeConverged(HOST, '5', hostnameDocument({ status: 'disabled' })),
+      }),
       disabled.dependencies,
     );
     expect(plan.revisions).toEqual([{ host: HOST, from: '5', to: '6' }]);
@@ -375,11 +399,60 @@ describe('repoint', () => {
     });
   });
 
+  // A disabled `status` in Firestore says only that the disabling revision
+  // was WRITTEN. Until the Durable Object has committed it the edge still
+  // serves the previous Event, so moving the identity there hands that
+  // Event's traffic to a host whose source now names another one. The
+  // evidence is an input because no Firestore transaction can see the edge.
+  it.each([
+    ['the edge is still a revision behind', (host, document) => ({ ...edgeConverged(host, '4', document), revision: '4' })],
+    ['the edge is poisoned at the same revision', (host, document) => ({ ...edgeConverged(host, '5', document), digest: 'f'.repeat(64) })],
+  ])('refuses a repoint when %s', async (_why, evidence) => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '5', document));
+    expect(
+      await refusal(
+        mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' }, converged: evidence(HOST, document) }),
+        dependencies,
+      ),
+    ).toBe('repoint-requires-convergence');
+    expect(docs.get(`hostnames/${HOST}`).eventId).toBe('bodega-bay-2026');
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('5');
+  });
+
+  it('refuses a repoint whose convergence evidence is malformed, and asks for the disable first', async () => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { dependencies } = store(converged(HOST, '5', document));
+    for (const converged_ of [undefined, {}, { revision: '5' }, { revision: 5, digest: 'a' }, { revision: '05', digest: 'a' }]) {
+      expect(
+        await refusal(
+          mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' }, converged: converged_ }),
+          dependencies,
+        ),
+        JSON.stringify(converged_ ?? null),
+      ).toBe('invalid-input');
+    }
+    // The status barrier still answers first, so an operator who skipped the
+    // disable is not told about a barrier they have not reached yet.
+    const active = store(converged(HOST, '4', hostnameDocument()));
+    expect(
+      await refusal(
+        mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' }, converged: { revision: '9', digest: 'f'.repeat(64) } }),
+        active.dependencies,
+      ),
+    ).toBe('repoint-requires-disabled');
+  });
+
   it('refuses combining the barrier with the status move it exists to separate', async () => {
     const { dependencies } = store(converged(HOST, '5', hostnameDocument({ status: 'disabled' })));
     expect(
       await refusal(
-        mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027', status: 'active' } }),
+        mutation({
+          intent: 'repoint',
+          host: HOST,
+          changes: { eventId: 'sonoma-2027', status: 'active' },
+          converged: edgeConverged(HOST, '5', hostnameDocument({ status: 'disabled' })),
+        }),
         dependencies,
       ),
     ).toBe('combined-barrier');
@@ -387,7 +460,13 @@ describe('repoint', () => {
 
   it('refuses a repoint that moves no identity', async () => {
     const { dependencies } = store(converged(HOST, '5', hostnameDocument({ status: 'disabled' })));
-    expect(await refusal(mutation({ intent: 'repoint', host: HOST, changes: { edition: 'vacay' } }), dependencies)).toBe(
+    const evidence = edgeConverged(HOST, '5', hostnameDocument({ status: 'disabled' }));
+    expect(
+      await refusal(
+        mutation({ intent: 'repoint', host: HOST, changes: { edition: 'vacay' }, converged: evidence }),
+        dependencies,
+      ),
+    ).toBe(
       'repoint-requires-identity',
     );
   });
@@ -621,16 +700,67 @@ describe('delete', () => {
   it('refuses an active host and a revision the edge has not converged on', async () => {
     expect(
       await refusal(
-        mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }),
+        mutation({
+          intent: 'delete',
+          host: HOST,
+          convergedRevision: '4',
+          convergedDigest: edgeConverged(HOST, '4', hostnameDocument()).digest,
+        }),
         store(converged(HOST, '4', hostnameDocument())).dependencies,
       ),
     ).toBe('delete-requires-inactive');
     expect(
       await refusal(
-        mutation({ intent: 'delete', host: HOST, convergedRevision: '3' }),
+        mutation({
+          intent: 'delete',
+          host: HOST,
+          convergedRevision: '3',
+          convergedDigest: edgeConverged(HOST, '3', hostnameDocument({ status: 'disabled' })).digest,
+        }),
         store(converged(HOST, '4', hostnameDocument({ status: 'disabled' }))).dependencies,
       ),
     ).toBe('delete-requires-convergence');
+  });
+
+  // Revision equality is satisfied by a POISONED object: the same revision
+  // carrying a different and possibly still-serving payload, which is a state
+  // the reconciler classifies and which equal-revision recovery can produce.
+  // So the digest is what proves the edge stopped serving, and without it
+  // this delete tombstones the source of a route the edge still answers.
+  it('refuses a delete when the edge is poisoned at the converged revision', async () => {
+    const document = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '4', document));
+    expect(
+      await refusal(
+        mutation({ intent: 'delete', host: HOST, convergedRevision: '4', convergedDigest: 'f'.repeat(64) }),
+        dependencies,
+      ),
+    ).toBe('delete-requires-converged-payload');
+    expect(docs.has(`hostnames/${HOST}`)).toBe(true);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+
+    // The digest the audit reports for the projection the ledger holds is the
+    // one that lets it through.
+    await applyHostnameMutation(
+      mutation({
+        intent: 'delete',
+        host: HOST,
+        convergedRevision: '4',
+        convergedDigest: edgeConverged(HOST, '4', document).digest,
+      }),
+      dependencies,
+    );
+    expect(docs.has(`hostnames/${HOST}`)).toBe(false);
+  });
+
+  it('refuses a delete whose converged digest is missing or not a string', async () => {
+    const { dependencies } = store(converged(HOST, '4', hostnameDocument({ status: 'disabled' })));
+    for (const convergedDigest of [undefined, '', 7]) {
+      expect(
+        await refusal(mutation({ intent: 'delete', host: HOST, convergedRevision: '4', convergedDigest }), dependencies),
+        String(convergedDigest),
+      ).toBe('invalid-input');
+    }
   });
 
   // The apex archive address is archived AND serving, which no projected
@@ -642,13 +772,29 @@ describe('delete', () => {
     const archived = hostnameDocument({ status: 'archived', apexPath: true });
     const { docs, dependencies } = store(converged(HOST, '4', archived));
     expect(
-      await refusal(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), dependencies),
+      await refusal(
+        mutation({
+          intent: 'delete',
+          host: HOST,
+          convergedRevision: '4',
+          convergedDigest: edgeConverged(HOST, '4', archived).digest,
+        }),
+        dependencies,
+      ),
     ).toBe('delete-apex-archive-target');
     expect(docs.has(`hostnames/${HOST}`)).toBe(true);
     expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
     // The same archived route WITHOUT the flag is an ordinary retirement.
     const plain = store(converged(HOST, '4', hostnameDocument({ status: 'archived' })));
-    await applyHostnameMutation(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), plain.dependencies);
+    await applyHostnameMutation(
+      mutation({
+        intent: 'delete',
+        host: HOST,
+        convergedRevision: '4',
+        convergedDigest: edgeConverged(HOST, '4', hostnameDocument({ status: 'archived' })).digest,
+      }),
+      plain.dependencies,
+    );
     expect(plain.docs.has(`hostnames/${HOST}`)).toBe(false);
   });
 
@@ -658,21 +804,42 @@ describe('delete', () => {
     const doorway = { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
     expect(
       await refusal(
-        mutation({ intent: 'delete', host: APEX, convergedRevision: '3' }),
+        mutation({
+          intent: 'delete',
+          host: APEX,
+          convergedRevision: '3',
+          convergedDigest: edgeConverged(APEX, '3', doorway).digest,
+        }),
         store(converged(APEX, '3', doorway)).dependencies,
       ),
     ).toBe('delete-requires-inactive');
 
     const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
     const { docs, dependencies } = store(converged(MIRROR, '3', marker));
-    await applyHostnameMutation(mutation({ intent: 'delete', host: MIRROR, convergedRevision: '3' }), dependencies);
+    await applyHostnameMutation(
+      mutation({
+        intent: 'delete',
+        host: MIRROR,
+        convergedRevision: '3',
+        convergedDigest: edgeConverged(MIRROR, '3', marker).digest,
+      }),
+      dependencies,
+    );
     expect(docs.has(`hostnames/${MIRROR}`)).toBe(false);
     expect(docs.get(`routerReplicas/${MIRROR}`)).toMatchObject({ revision: '4', desired: { kind: 'tombstone' } });
   });
 
   it('deletes the hostname and advances the ledger to a permanent tombstone', async () => {
     const { docs, dependencies } = store(converged(HOST, '4', hostnameDocument({ status: 'disabled' })));
-    const plan = await applyHostnameMutation(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), dependencies);
+    const plan = await applyHostnameMutation(
+      mutation({
+        intent: 'delete',
+        host: HOST,
+        convergedRevision: '4',
+        convergedDigest: edgeConverged(HOST, '4', hostnameDocument({ status: 'disabled' })).digest,
+      }),
+      dependencies,
+    );
     expect(plan.revisions).toEqual([{ host: HOST, from: '4', to: '5' }]);
     expect(docs.has(`hostnames/${HOST}`)).toBe(false);
     expect(docs.get(`routerReplicas/${HOST}`)).toEqual({
@@ -686,7 +853,15 @@ describe('delete', () => {
 
   it('never reuses the address: a fresh claim on the tombstoned host is refused', async () => {
     const { dependencies } = store(converged(HOST, '4', hostnameDocument({ status: 'disabled' })));
-    await applyHostnameMutation(mutation({ intent: 'delete', host: HOST, convergedRevision: '4' }), dependencies);
+    await applyHostnameMutation(
+      mutation({
+        intent: 'delete',
+        host: HOST,
+        convergedRevision: '4',
+        convergedDigest: edgeConverged(HOST, '4', hostnameDocument({ status: 'disabled' })).digest,
+      }),
+      dependencies,
+    );
     expect(
       await refusal(
         mutation({ intent: 'provision', host: HOST, hostname: { eventId: 'new', edition: 'fiveacross', slug: 'bodega-bay' } }),

@@ -251,6 +251,31 @@ function requireConvergedPreState(host, hostname, ledger) {
 }
 
 /**
+ * The operator's proof that the EDGE has accepted the projection Firestore
+ * holds — not merely that Firestore holds it.
+ *
+ * Two intents are barriered on inactive convergence rather than on inactive
+ * state, and neither can observe the Durable Object from inside a Firestore
+ * transaction, so the evidence is an input: the revision and digest the
+ * private audit read back from the object's committed state. Both are
+ * required, and the digest is the half that does the work. Revision equality
+ * alone is satisfied by a POISONED object — the same revision carrying a
+ * different and possibly still-serving payload, which is a state the
+ * reconciler has a classification for and which equal-revision recovery can
+ * produce — so a repoint or a delete resting on the revision alone would move
+ * or retire a source while the edge still served the old Event.
+ *
+ * `stored.digest` is the digest of the ledger's own projection at its own
+ * revision, computed by `validateLedgerDocument`, so this compares what the
+ * edge reports against what the source says the edge should be holding.
+ */
+function requireEdgeConvergence(converged, stored, code) {
+  exactKeys(converged, ['revision', 'digest'], 'invalid-input');
+  if (!isCanonicalRevision(converged.revision) || !isNonempty(converged.digest)) refuse('invalid-input');
+  if (converged.revision !== stored.revision || converged.digest !== stored.digest) refuse(code);
+}
+
+/**
  * Collects the writes a plan would make, so a dry run executes exactly the same
  * read-and-derive path as an apply and differs only in whether the collected
  * writes are flushed. Firestore requires every read before the first write, and
@@ -421,7 +446,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
 }
 
 async function planRepoint(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(input, [...MUTATION_KEYS, 'changes'], 'invalid-input');
+  exactKeys(input, [...MUTATION_KEYS, 'changes', 'converged'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
@@ -433,6 +458,16 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
   // prohibited." The disable and the re-activate are ordinary updates; this
   // intent is only ever the middle step.
   if (state.hostname.status !== 'disabled') refuse('repoint-requires-disabled');
+  // "active → disabled AND CONVERGE → repoint" — the converge is half the
+  // barrier and was the half nothing checked. A disabled `status` in
+  // Firestore says only that the disabling revision was written; until the
+  // Durable Object has committed it the edge is still serving the previous
+  // Event, and moving the identity there hands that Event's traffic to a
+  // host whose source now names another one. Checked AFTER the status, so an
+  // operator who skipped the disable still reads `repoint-requires-disabled`
+  // rather than a convergence complaint about a barrier they have not
+  // reached yet.
+  requireEdgeConvergence(input.converged, stored, 'repoint-requires-convergence');
 
   const changes = input.changes;
   validateChanges(changes);
@@ -649,7 +684,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
 async function planDelete(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(
     input,
-    ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host', 'convergedRevision'],
+    ['schemaVersion', 'intent', 'apply', 'actor', 'reason', 'host', 'convergedRevision', 'convergedDigest'],
     'invalid-input',
   );
   const { host } = input;
@@ -684,6 +719,14 @@ async function planDelete(input, transaction, clock, buffer, revisions, projecti
   // yet, so deleting the source would strand a serving route with no source.
   if (!isCanonicalRevision(input.convergedRevision)) refuse('invalid-input');
   if (input.convergedRevision !== stored.revision) refuse('delete-requires-convergence');
+  // The revision is not enough on its own. A POISONED object carries the
+  // ledger's revision with a different payload — the reconciler classifies
+  // exactly that state, and § Audit and recovery lets `apply` repair a
+  // different payload at an equal revision — so the edge can report this
+  // revision while still serving the route this delete is about to tombstone
+  // the source of. The committed DIGEST is what says which payload it holds.
+  if (!isNonempty(input.convergedDigest)) refuse('invalid-input');
+  if (input.convergedDigest !== stored.digest) refuse('delete-requires-converged-payload');
   const desired = { kind: 'tombstone' };
   buffer.delete(`hostnames/${host}`);
   // The ledger and the DO state are never deleted and the address is never
