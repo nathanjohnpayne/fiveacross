@@ -421,3 +421,98 @@ describe('rehearsal-class call sites in the registry publisher', () => {
     }
   });
 });
+
+/**
+ * The `updatedAt` half of the source/edge agreement (#971, CodeRabbit round).
+ *
+ * `replicaPayloadFromEvent` is the second reader of a stored ledger's
+ * `updatedAt`, after `normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs`, and the two are
+ * required to answer one text for one instant: the source digests its answer
+ * into `documentDigest`, so a publisher that echoed the stored spelling would
+ * put a body on the wire that an audit could not match against the row it was
+ * published from. Only the canonical `toISOString()` form is published.
+ */
+describe('the publisher timestamp canonicalizer', () => {
+  const HOST = 'bodega-bay.fiveacross.app';
+  const payloadFor = (updatedAt: unknown): Record<string, unknown> => ({
+    schemaVersion: 1,
+    revision: '1',
+    host: HOST,
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition: 'fiveacross',
+      pathNamespace: null,
+    },
+    updatedAt,
+  });
+
+  it.each([
+    ['a Z spelling', '2026-09-20T12:00:00Z'],
+    ['a zero-offset spelling', '2026-09-20T12:00:00+00:00'],
+    ['a shifted-offset spelling', '2026-09-20T14:00:00+02:00'],
+    ['a sub-millisecond spelling', '2026-09-20T12:00:00.000123Z'],
+    ['a Firestore Timestamp', { toDate: () => new Date('2026-09-20T12:00:00.000Z') }],
+  ])('publishes %s as the one canonical instant', (_why, updatedAt: unknown) => {
+    expect(replicaPayloadFromEvent(HOST, payloadFor(updatedAt)).updatedAt).toBe(
+      '2026-09-20T12:00:00.000Z',
+    );
+  });
+
+  it.each([
+    ['an offsetless string a machine would read as local time', '2026-09-20T12:00:00'],
+    ['a text Date.parse accepts but RFC 3339 does not', 'Sep 20 2026 12:00:00 GMT+0000'],
+    ['a date with no time of day', '2026-09-20'],
+    ['an RFC 3339 shape that names no instant', '2026-13-40T25:00:00Z'],
+    ['an empty string', ''],
+    // The `Date.UTC` year bound the source draws too: this field is a publish
+    // instant, so a first-century year is corruption and refusing it fails
+    // closed. Both layers must move together or they disagree about which
+    // texts are admissible.
+    ['a year before 0100, which is not a publish instant', '0099-12-31T23:59:59Z'],
+    // The offset is applied AFTER the written components are judged, so the
+    // emitted text is validated too: these two canonicalise outside the
+    // range the source and the worker accept.
+    ['an offset that carries the first supported year below the bound', '0100-01-01T00:00:00+01:00'],
+    ['an offset that carries the last supported year into the expanded form', '9999-12-31T23:59:59-01:00'],
+  ])('refuses %s', (_why, updatedAt) => {
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
+      'invalid router replica event',
+    );
+  });
+
+  // `Date.parse` ROLLS an impossible day forward instead of refusing it, so
+  // without the calendar check the publisher would put an instant on the wire
+  // that no ledger ever named: `2026-02-30T12:00:00Z` parses to March 2.
+  it.each([
+    ['a day past the end of February', '2026-02-30T12:00:00Z'],
+    ['a thirty-first of April', '2026-04-31T12:00:00Z'],
+    ['a leap day in a year that has none', '2025-02-29T12:00:00Z'],
+    ['a zeroth day', '2026-09-00T12:00:00Z'],
+    ['a day past the end of a month under an offset', '2026-02-30T12:00:00+02:00'],
+  ])('refuses %s rather than rolling it forward', (_why, updatedAt) => {
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor(updatedAt))).toThrow(
+      'invalid router replica event',
+    );
+  });
+
+  it('publishes the leap day of a year that has one', () => {
+    expect(replicaPayloadFromEvent(HOST, payloadFor('2028-02-29T12:00:00Z')).updatedAt).toBe(
+      '2028-02-29T12:00:00.000Z',
+    );
+  });
+
+  // The Timestamp branch goes through the same predicate, so the two
+  // encodings accept the same instants here as they do on the source side.
+  it('refuses a Firestore Timestamp for a year the string branch refuses', () => {
+    const before0100 = new Date(0);
+    before0100.setUTCFullYear(99, 11, 31);
+    before0100.setUTCHours(23, 59, 59, 0);
+    expect(() => replicaPayloadFromEvent(HOST, payloadFor({ toDate: () => before0100 }))).toThrow(
+      'invalid router replica event',
+    );
+  });
+});
