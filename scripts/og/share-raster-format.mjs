@@ -7,12 +7,22 @@
 // non-interlaced truecolor (PNG colour type 2), and
 // `src/recon-share-og.test.ts` requires exactly that of the files in the tree.
 // Checking the capture's dimensions alone does not keep them that way: the
-// repo's PNG reader decodes colour type 6 as readily as 2, the Vacay card
-// skips the pixel check that would touch the decoder at all, and a 16-bit or
-// interlaced capture at the right size would therefore sail past the renderer,
+// repo's PNG reader decodes colour type 6 as readily as 2, so a decode alone
+// cannot tell a truecolor capture from an RGBA one, and a 16-bit or
+// interlaced capture at the right size would therefore sail past a decode,
 // replace the committed file, and only surface as a red suite afterwards —
 // with the good picture already gone. The cheap fix is to read the rest of
-// IHDR here and refuse by name, while the capture is still staged.
+// IHDR here and refuse by name, while the capture is still staged — this runs
+// whether or not the capture is one `inspectCapture` also decodes.
+
+// This check standing alone was also once the ONLY thing an exempt Edition's
+// capture had to pass, because `assertNoOverlay` returned before ever calling
+// the decoder for it: a capture that kept a valid signature and IHDR but was
+// truncated after that point — no IDAT, no IEND — read as a conforming card
+// here and was never caught (#887, finding 4075112564). `inspectCapture` now
+// decodes every capture, exempt or not, before applying the exemption; this
+// guard is unchanged, and still needed, because a decode alone would accept
+// colour type 6 as readily as 2.
 
 /**
  * Throws unless `header` describes the committed cards' PNG contract:

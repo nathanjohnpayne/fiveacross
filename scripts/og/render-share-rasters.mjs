@@ -211,15 +211,25 @@ export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
   const bytes = read(scratch);
   const header = readPngHeader(bytes);
   // Size AND format. Size alone was not enough: `readPngPixels` decodes colour
-  // type 6 as readily as 2 and Vacay skips it entirely, so a correctly sized
-  // capture in the wrong PNG format would replace the committed file and only
-  // red `src/recon-share-og.test.ts` afterwards. See share-raster-format.mjs.
+  // type 6 as readily as 2, so a correctly sized capture in the wrong PNG
+  // format would replace the committed file and only red
+  // `src/recon-share-og.test.ts` afterwards. See share-raster-format.mjs.
   assertCapturedCardFormat(id, header, { width: CARD_W, height: CARD_H });
-  // The decode is inside the thunk so the Vacay exemption governs it too: an
-  // exempt card's pixels are never inflated, which is the property
-  // share-raster-format.mjs relies on when it explains why the IHDR check
-  // cannot be left to the decoder.
-  const lightShare = assertNoOverlay(id, () => readPngPixels(bytes));
+  // Decoded unconditionally, for every Edition including the ones exempt from
+  // the overlay SCORE below (#887, finding 4075112564). `assertCapturedCardFormat`
+  // only proves the fixed 33-byte IHDR record; it says nothing about whether
+  // the rest of the file — the IDAT stream an overlay score would otherwise be
+  // the only thing to touch — is even present. A 33-byte prefix of the
+  // committed Vacay PNG (signature + IHDR, nothing else) passed that guard as
+  // a conforming 600×750 truecolor card while `assertNoOverlay` used to return
+  // for Vacay without ever calling this decode, so a truncated or corrupt
+  // Vacay capture could reach `commitStaged` with nothing having read a single
+  // pixel of it. Decoding here, before the exemption is applied, proves every
+  // capture is a structurally complete PNG — through its last IDAT chunk and
+  // the inflate it takes to prove that — whether or not its pixels are ever
+  // scored for an overlay.
+  const image = readPngPixels(bytes);
+  const lightShare = assertNoOverlay(id, () => image);
   return { width: header.width, height: header.height, colorType: header.colorType, bytes: bytes.length, lightShare };
 }
 

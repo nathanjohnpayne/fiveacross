@@ -82,10 +82,16 @@ export function isOverlaid(share) {
  * Throw if `id`'s card carries an overlay; return the measured share, or
  * `null` for an Edition that is not scored.
  *
- * `decode` is a thunk rather than an image so the exemption governs the decode
- * as well as the reading: an exempt Edition's pixels are never inflated at
- * all, which is the property `share-raster-format.mjs` relies on when it
- * explains why the IHDR check cannot be left to the decoder.
+ * `decode` is a thunk so a caller that has not already decoded the image can
+ * defer that to here — but the exemption governs only the SCORING, not
+ * whether the decode itself runs. It used to govern both: an exempt Edition's
+ * pixels were never inflated at all, which let a truncated or corrupt capture
+ * for that Edition reach `commitStaged` with nothing ever proving its IDAT
+ * data was even present (#887, finding 4075112564). `render-share-rasters.mjs`
+ * now decodes every capture before calling this, exempt or not, and passes
+ * the already-decoded image back through the thunk; this function still skips
+ * the SHARE calculation for an exempt Edition, because Vacay's card is cream
+ * end to end and a near-white reading of it would mean nothing.
  */
 export function assertNoOverlay(id, decode) {
   if (!isScoredForOverlay(id)) return null;

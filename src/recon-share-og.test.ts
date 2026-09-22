@@ -477,6 +477,21 @@ describe('recon: the reference share-card rasters are regenerable and unoverlaid
     expect(header.interlace).toBe(0);
   });
 
+  it.each(SHARE_CARDS)('decodes as a complete PNG, scored for overlay or not ($file)', ({ file }) => {
+    // Every committed card must decode all the way through its IDAT stream —
+    // Vacay included, even though its score is never read below. The renderer
+    // guard used to skip the decode entirely for an exempt Edition, because
+    // `assertNoOverlay` returned before ever calling it; a 33-byte prefix of
+    // this very file (the PNG signature and IHDR, nothing past it) passed the
+    // format guard as a conforming 600×750 truecolor card and would have
+    // reached `commitStaged` with nothing here ever proving it decodes (#887,
+    // finding 4075112564). This test, unlike the one below, is not filtered by
+    // `isScoredForOverlay`.
+    const image = readPngPixels(readFileSync(resolve(`../plans/og-images/${file}`)));
+    expect(image.width).toBe(600);
+    expect(image.height).toBe(750);
+  });
+
   it.each(SHARE_CARDS.filter((c) => isScoredForOverlay(c.edition)))(
     'leaves no foreign card composited over $file',
     ({ file }) => {

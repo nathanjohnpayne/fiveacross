@@ -133,12 +133,35 @@ function inheritedFontFamily(html) {
   return distinct[0];
 }
 
-/** The `data-theme` on an Edition's share-card artboard. */
+/**
+ * The `data-theme` on an Edition's share-card artboard.
+ *
+ * Bound to the requested frame, and order-independent on the tag it reads
+ * (#887, finding 4075112560). The old regex searched forward from the frame's
+ * `id=` with no upper bound and required `class="shc"` to appear immediately
+ * before `data-theme` in source order, so a semantically equivalent artboard
+ * with its attributes written the other way round —
+ * `<div data-theme="so-long-farewell" class="shc">` — was invisible to it, and
+ * the search fell through past the WHOLE unit to the next frame's `.shc` div,
+ * silently returning that Edition's theme instead of refusing. The full
+ * raster renderer never had this failure mode: `#frame .shc` (see
+ * `render-share-rasters.mjs`) is a real CSS selector Chromium resolves against
+ * the parsed DOM, where attribute order carries no meaning at all. This
+ * scopes the search to the frame's own unit — from its `id=` to the next
+ * `<div class="unit"` sibling — finds the one `.shc` opening tag in that
+ * scope by testing the whole tag rather than an ordered pair of attributes,
+ * and reads `data-theme` from that same tag, independently of where either
+ * attribute sits on it.
+ */
 function themeOf(html, id) {
   const frame = required(CARDS[id], `an artboard for edition "${id}"`).frame;
-  const unit = html.indexOf(`id="${frame}"`);
-  if (unit === -1) throw new Error(`share-card-footer-style.mjs: no #${frame} frame in the wireframes document.`);
-  const match = html.slice(unit).match(/class="shc"\s+data-theme="([^"]+)"/);
+  const unitAt = html.indexOf(`id="${frame}"`);
+  if (unitAt === -1) throw new Error(`share-card-footer-style.mjs: no #${frame} frame in the wireframes document.`);
+  const nextUnitAt = html.indexOf('<div class="unit"', unitAt + 1);
+  const scope = html.slice(unitAt, nextUnitAt === -1 ? undefined : nextUnitAt);
+  const shcTag = [...scope.matchAll(/<div\b[^>]*>/g)].map((m) => m[0]).find((tag) => /\bclass="shc"/.test(tag));
+  if (!shcTag) throw new Error(`share-card-footer-style.mjs: no .shc artboard inside #${frame}.`);
+  const match = shcTag.match(/data-theme="([^"]+)"/);
   return required(match && match[1], `the data-theme on #${frame}`);
 }
 

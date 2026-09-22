@@ -338,4 +338,42 @@ describe('the footer repaint takes its style from the artboard (#887)', () => {
     const twoStacks = html.replace('font:14px/1.45 "Helvetica Neue",Arial,sans-serif', 'font:14px/1.45 Georgia,serif');
     expect(() => footerStyleFor('gcb', { html: twoStacks })).toThrow(/2 different body font stacks/);
   });
+
+  it('reads the theme off a reordered artboard tag instead of falling through to the next frame (#887, finding 4075112560)', () => {
+    // The finding: the old lookup required `class="shc"` to precede
+    // `data-theme` in source order and had no upper bound, so a semantically
+    // equivalent GCB artboard written the other way round searched clean past
+    // the whole GCB unit and matched the next `.shc data-theme="…"` tag in the
+    // document instead — silently painting GCB's footer in another artboard's
+    // `--dim` colour rather than GCB's own. `replaceAll` (not `replace`)
+    // matters here: the wireframes document repeats
+    // `<div class="shc" data-theme="so-long-farewell">` verbatim on more than
+    // one frame (`fx-share-final-gcb` carries the exact same opening tag as
+    // `fx-share-final-photo-gcb`), so a single-occurrence replace edits the
+    // WRONG frame and leaves this test proving nothing.
+    const reordered = html.replaceAll(
+      '<div class="shc" data-theme="so-long-farewell">',
+      '<div data-theme="so-long-farewell" class="shc">',
+    );
+    expect(reordered).not.toBe(html);
+    const style = footerStyleFor('gcb', { html: reordered });
+    expect(style.theme).toBe('so-long-farewell');
+    expect(style.ink).toBe('#d0a8ab');
+    // Never a different frame's theme, which is what the fall-through risked
+    // selecting instead.
+    expect(style.theme).not.toBe('fog-froth-farewells');
+  });
+
+  it('refuses a frame whose artboard carries no data-theme, rather than guessing or falling through (#887, finding 4075112560)', () => {
+    // A missing theme must be a named refusal, not a fall-through to the next
+    // frame's `.shc` the way the unbounded, order-sensitive lookup used to
+    // manage — see the reordered-attribute case above. `replaceAll` for the
+    // same reason as that test: the tag being stripped of its `data-theme`
+    // is not unique in the document.
+    const untethered = html.replaceAll('<div class="shc" data-theme="so-long-farewell">', '<div class="shc">');
+    expect(untethered).not.toBe(html);
+    expect(() => footerStyleFor('gcb', { html: untethered })).toThrow(
+      /could not read the data-theme on #fx-share-final-photo-gcb/,
+    );
+  });
 });

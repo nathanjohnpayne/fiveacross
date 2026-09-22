@@ -570,3 +570,101 @@ describe('assertNoRepeatedOptions (#887, finding 4074926161): a repeat refuses, 
     }
   });
 });
+
+describe('render-share-footer.mjs repeat guard (#887, finding 4075112554): the footer CLI shares FOOTER_OPTIONS with the raster CLI and must refuse its own repeats', () => {
+  // Both Edition ids below are deliberately fake. The raster CLI's own
+  // repeat-guard tests above pass a real `--out` as a belt-and-suspenders
+  // fallback, so a regressed guard's render lands in a disposable tmpdir
+  // instead of `plans/og-images/`; this CLI takes no `--out` at all (see its
+  // header: "there is no --out … a band repaint of a card somewhere else is
+  // not a thing anyone wants"), so an unknown Edition id has to be the safety
+  // net instead — if `assertNoRepeatedOptions` were ever missing from `main`
+  // again, `optionValue` would resolve to one of these bogus ids and the
+  // "Unknown edition" check several lines later would still stop the run
+  // before `loadEditions`, Playwright or the committed pictures are touched.
+  it('refuses a repeated --edition, not a silent "first wins"', () => {
+    // The finding's first half, reproduced on the footer CLI: only the raster
+    // CLI had ever been made to call `assertNoRepeatedOptions`, so this CLI's
+    // own `--edition vacay --edition gcb` used to reach `optionValue` (which
+    // reads only the first occurrence) and repaint Vacay's footer.
+    const cwd = mkdtempSync(join(tmpdir(), 'og-footer-repeated-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-footer.mjs', import.meta.url)),
+          '--edition',
+          'not-an-edition',
+          '--edition',
+          'also-not-an-edition',
+          '--allow-foreign-platform',
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toContain('render-share-footer.mjs: --edition was passed more than once.');
+      expect(result.stdout).toBe('');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing bare --edition as a repeat or a missing value, but never renders', () => {
+    // The finding's second half: a trailing bare `--edition` used to bypass
+    // the missing-value guard on this CLI too, because `unknownOptions`
+    // accepts every occurrence of a known flag. Either refusal reason is
+    // acceptable — what matters is that nothing is written and nothing
+    // rendered.
+    const cwd = mkdtempSync(join(tmpdir(), 'og-footer-repeated-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-footer.mjs', import.meta.url)),
+          '--edition',
+          'not-an-edition',
+          '--edition',
+          '--allow-foreign-platform',
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toMatch(/passed more than once|needs an Edition id/);
+      expect(result.stdout).toBe('');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('inspectCapture (#887, finding 4075112564): every capture is decoded before the overlay exemption applies', () => {
+  it('refuses a truncated Vacay capture rather than exempting it straight to commit', async () => {
+    // The finding: `assertCapturedCardFormat` proves only the fixed 33-byte
+    // IHDR record, and `assertNoOverlay` used to return for an exempt
+    // Edition without ever calling the decoder — so a capture that kept a
+    // valid signature and IHDR but was truncated right after it (no IDAT, no
+    // IEND) read as a conforming 600×750 truecolor card and would have
+    // reached `commitStaged`. Truncating the real committed Vacay PNG to
+    // exactly the IHDR record reproduces that: `inspectCapture` must now
+    // decode it and refuse, because there is nothing past the header to
+    // decode.
+    const dest = seedCommitted('vacay');
+    const truncated = conformingPng('vacay').subarray(0, 33);
+    // Sanity on the fixture: still a conforming IHDR by itself, so this is
+    // testing the decode gap and not a format-guard rejection.
+    expect(readPngHeader(truncated)).toMatchObject({ width: 600, height: 750, bitDepth: 8, colorType: 2 });
+
+    await expect(
+      renderCardSet({
+        ids: ['vacay'],
+        destDir: dir,
+        capture: captureWriting({ vacay: truncated }),
+      }),
+    ).rejects.toThrow(/vacay failed/);
+
+    expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: vacay`);
+    expect(leftovers()).toEqual([]);
+  });
+});

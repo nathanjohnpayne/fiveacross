@@ -67,7 +67,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadEditions } from './load-editions.mjs';
 import { toTruecolorPng } from './png-truecolor.mjs';
-import { CARDS, assertKnownOptions, optionValue, renderCardSet } from './render-share-rasters.mjs';
+import { CARDS, assertKnownOptions, assertNoRepeatedOptions, optionValue, renderCardSet } from './render-share-rasters.mjs';
 import { footerStyleFor } from './share-card-footer-style.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -208,6 +208,14 @@ async function main() {
   // --all` must not be read as an Edition id (round 7). This tool takes no
   // `--out`, so its option set is the raster one minus that flag.
   assertKnownOptions('render-share-footer.mjs', args, FOOTER_OPTIONS);
+  // Second, before `optionValue` ever reads a value, same as the raster
+  // generator and for the same reason (#887, finding 4075112554): this CLI
+  // shares FOOTER_OPTIONS and `optionValue`'s first-occurrence read with that
+  // one, so without its own call here `--edition vacay --edition gcb` still
+  // republished Vacay and a trailing bare `--edition` still bypassed the
+  // missing-value check below — only the raster CLI had ever been made to
+  // refuse this.
+  assertNoRepeatedOptions('render-share-footer.mjs', args, FOOTER_OPTIONS);
   const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');
