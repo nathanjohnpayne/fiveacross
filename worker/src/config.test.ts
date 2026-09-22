@@ -123,6 +123,9 @@ describe('an entirely unbound Worker', () => {
       // `{}` is exactly what the runtime hands over before the registry service
       // exists beside this Worker.
       registry: registryFromEnv({}),
+      // Never reached on any of these paths — an unconfigured router contacts
+      // no origin, so there is no response to transform.
+      htmlRewriter: (response) => response,
     };
 
     const response = await handleRequest(new Request(url), routerConfigFromEnv({}), deps);

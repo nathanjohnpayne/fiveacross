@@ -10,10 +10,10 @@
 // the manifest FILE at install time, so a multi-Event bundle — which does not
 // know its Edition until `hostnames/{host}` answers — cannot bake them, and the
 // app deliberately does not patch them at runtime either (`editions.ts`
-// `applyEditionDocumentIdentity` repairs the document title and the iOS label
-// and stops, because rewriting the manifest client-side strands an installed
-// app with an identity no server can later correct). The edge is the only place
-// left.
+// `applyEditionDocumentIdentity` repairs the document title, the iOS label and
+// the chrome colour, and stops there, because rewriting the manifest
+// client-side strands an installed app with an identity no server can later
+// correct). The edge is the only place left.
 //
 // The document is built by `src/web-manifest.ts`, the same module
 // `vite.config.ts` emits `dist/manifest.webmanifest` from, so the file a guest

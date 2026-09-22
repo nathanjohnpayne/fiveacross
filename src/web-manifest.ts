@@ -75,18 +75,6 @@ const START_URL = '/';
 const SCOPE = '/';
 const LANG = 'en';
 
-/**
- * The dark chrome colour, shared with `index.html`'s `<meta name="theme-color">`
- * — `specs/w1-pwa.md` requires the two to match exactly.
- *
- * Edition-INVARIANT, and that is this ticket's scope line rather than an
- * oversight. The meta tag is static markup inside a proxied HTML response, so
- * making the manifest's colours per-Edition here while the tag stayed
- * `#07060d` would manufacture the mismatch that spec forbids. Both move
- * together in the follow-up that rewrites the proxied `<head>` (#1118).
- */
-const CHROME_COLOR = '#07060d';
-
 /** One shared icon set. There is no per-Edition PWA icon art anywhere in the
  *  repo — the only per-Edition images are the 1200x630 `og-*.png` unfurls,
  *  wrong aspect and wrong purpose — so "icons match the Edition" is satisfied
@@ -107,6 +95,16 @@ const ICONS: readonly WebManifestIcon[] = [
  * #364). iOS reads neither — it takes its home-screen label from
  * `apple-mobile-web-app-title` in the markup — so the two platforms are set
  * independently and this file cannot fix the iOS half.
+ *
+ * `background_color` and `theme_color` became Edition-scoped in #1118 and are
+ * one value, not two, because they always were: they read the same
+ * `brand.chromeColor` the way they used to read the same constant. They could
+ * not move in #546 — `index.html`'s `<meta name="theme-color">` was static
+ * markup inside a proxied HTML response, so per-Edition colours here alone
+ * would have broken the equality `specs/w1-pwa.md` requires — and they move
+ * now because the edge rewrites that tag per hostname from this same builder.
+ * The default Edition's value is unchanged, so no installed gcb app's chrome
+ * or splash moves.
  */
 export function buildWebManifest(brand: EditionBrand): WebManifest {
   return {
@@ -115,8 +113,8 @@ export function buildWebManifest(brand: EditionBrand): WebManifest {
     description: brand.appDescription,
     start_url: START_URL,
     display: 'standalone',
-    background_color: CHROME_COLOR,
-    theme_color: CHROME_COLOR,
+    background_color: brand.chromeColor,
+    theme_color: brand.chromeColor,
     lang: LANG,
     scope: SCOPE,
     orientation: 'portrait',
