@@ -225,12 +225,13 @@ const ART = {
     rule: { width: 100, background: 'linear-gradient(90deg,#2e7fa8,#8fd0c3)' },
     desc: { size: 26 },
     // The artwork names the Edition's own apex, NOT `ogUrl`'s hostname. Vacay
-    // is the one Edition whose og:url is Event-scoped
-    // (bodega-bay.fiveacross.app) until the #1118 edge HTML rewrite emits it
-    // per hostname — see the field note on `EditionBrand.ogUrl`. An unfurl is a
-    // brand impression, so it wears the brand's address; the other two
-    // Editions' apexes and og:url hosts already agree, so only this row has to
-    // say so.
+    // is the one Edition whose brand-row og:url is Event-scoped
+    // (bodega-bay.fiveacross.app), because a build can bake only one origin;
+    // the #1118 edge HTML rewrite replaces the SERVED tag per hostname, but
+    // this renderer reads the row — see the field note on
+    // `EditionBrand.ogUrl`. An unfurl is a brand impression, so it wears the
+    // brand's address; the other two Editions' apexes and og:url hosts already
+    // agree, so only this row has to say so.
     domain: 'vacaybingo.com',
     // Gaps are box-to-box, so they read smaller than the ink-to-ink rhythm
     // they produce (24 / 33 / 32 / 32 / 41 measured off the #609 render).

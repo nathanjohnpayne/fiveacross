@@ -14,6 +14,8 @@ import {
   CANONICAL_NAMESPACE_APEX,
 } from './editions';
 import { assertEditionRegistryParity, EDITION_IDS } from './edition-registry.ts';
+import { THEME_COLOR_SELECTOR, themeColorFor } from './html-head-identity';
+import { webManifestForEdition } from './web-manifest';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 // The router's OWN namespace set — the source of truth this table must not drift from.
 import { NAMESPACES } from '../worker/src/host';
@@ -219,8 +221,10 @@ describe('editions — the share block (#587, artwork #609)', () => {
   it('keeps every og:url on HTTPS with no other Edition’s hostname', () => {
     // og:url is the canonical identity a crawler files the link under. The
     // vacay row carries its Event canonical host (bodega-bay) rather than the
-    // legacy serving alias or dead vacaybingo.com apex — per-Event truth stays
-    // here until the edge HTML rewrite (#1118) emits it per hostname.
+    // legacy serving alias or dead vacaybingo.com apex — a build can bake only
+    // one, so this row is what a direct-Hosting response carries, while the
+    // edge HTML rewrite (#1118) replaces it with the requested hostname's own
+    // origin on every host the Worker fronts.
     expect(editionBrand('vacay').ogUrl).toBe('https://bodega-bay.fiveacross.app/');
     expect(editionBrand('fiveacross').ogUrl).toBe('https://fiveacross.app/');
     for (const edition of ['vacay', 'fiveacross']) {
@@ -323,6 +327,10 @@ describe('brandHtmlIdentity — baking the Edition into index.html', () => {
       expect(out, edition).toContain(`<meta property="og:image" content="${brand.ogImage}" />`);
       expect(out, edition).toContain(`<meta property="og:image:alt" content="${brand.ogImageAlt}" />`);
       expect(out, edition).toContain(`<meta name="twitter:image" content="${brand.ogImage}" />`);
+      // The PWA chrome colour (#1118): baked here so a single-Event build's
+      // meta tag equals the manifest it ships beside, now that both are
+      // Edition-scoped.
+      expect(out, edition).toContain(`<meta name="theme-color" content="${brand.chromeColor}" />`);
     }
   });
 });
@@ -332,10 +340,24 @@ describe('applyEditionDocumentIdentity — the runtime half, for resolved builds
   afterEach(() => {
     document.title = originalTitle;
     document.head.querySelector('meta[name="apple-mobile-web-app-title"]')?.remove();
+    document.head.querySelector(THEME_COLOR_SELECTOR)?.remove();
   });
 
   const appleMeta = () =>
     document.head.querySelector('meta[name="apple-mobile-web-app-title"]')?.getAttribute('content');
+
+  const themeColorMeta = () =>
+    document.head.querySelector(THEME_COLOR_SELECTOR)?.getAttribute('content');
+
+  /** The tag as `index.html` ships it, branded for the Edition the bundle was
+   *  built with — which is what a precached shell keeps serving after the
+   *  registry repoints its hostname somewhere else. */
+  const givenThemeColorMeta = (content: string) => {
+    const meta = document.createElement('meta');
+    meta.setAttribute('name', 'theme-color');
+    meta.setAttribute('content', content);
+    document.head.appendChild(meta);
+  };
 
   it('retitles the tab and the iOS label from the active Edition', () => {
     // A hostname-resolved build cannot bake either tag — one bundle, many
@@ -365,7 +387,32 @@ describe('applyEditionDocumentIdentity — the runtime half, for resolved builds
     // title still has to be set either way.
     applyEditionDocumentIdentity('vacay');
     expect(appleMeta()).toBeUndefined();
+    expect(themeColorMeta()).toBeUndefined();
     expect(document.title).toBe('Vacay Bingo');
+  });
+
+  it.each(EDITIONS)('repaints the chrome colour for %s, equal to that Edition’s manifest', (edition) => {
+    // The surface the edge rewrite cannot reach (#1118): an installed shell
+    // serves its navigations from the precached `index.html` through the
+    // service worker, so the proxied document is never what it renders. After
+    // a hostname is repointed, without this the shell keeps the previous
+    // Edition's chrome while the manifest it re-reads and the app it opens
+    // into both moved — the per-Edition equality `specs/w1-pwa.md` requires,
+    // broken on the one surface no deploy can fix.
+    givenThemeColorMeta('#07060d');
+
+    applyEditionDocumentIdentity(edition);
+
+    expect(themeColorMeta(), edition).toBe(webManifestForEdition(edition).theme_color);
+    // The same source the edge rewrite reads, which is what makes the two
+    // writers agree by construction rather than by review.
+    expect(themeColorMeta(), edition).toBe(themeColorFor(editionBrand(edition)));
+  });
+
+  it('falls back to the default Edition’s colour for an unknown Edition', () => {
+    givenThemeColorMeta('#ffffff');
+    applyEditionDocumentIdentity('no-such-edition');
+    expect(themeColorMeta()).toBe(webManifestForEdition(DEFAULT_EDITION).theme_color);
   });
 });
 
