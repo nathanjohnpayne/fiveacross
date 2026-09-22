@@ -383,6 +383,44 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     expect(rawTotal).toBe(2 * MAX_ARCHIVE_NUMBER);
     expect(rawTotal).toBeGreaterThan(podium.champion?.bingoCount ?? 0);
   });
+
+  // #1192. `champion == null` is not "nobody played": the champion is the head of
+  // the standings with every ceremonial Day's contribution removed, so an Event
+  // whose only Marks sit on a ceremonial Day has no champion and was plainly
+  // played. `playRecorded` states that separately; the functions-side mirror is
+  // pinned against this by `tests/functions/finale-parity.test.ts`.
+  describe('playRecorded — whether anybody played, stated not inferred', () => {
+    it('is true for Marks on a CEREMONIAL Day the standings cannot see', () => {
+      // Day 2 is the closing Day, so its Marks are excluded from the standings —
+      // and it is NOT a Tutorial Day here, which is what keeps the honour.
+      const days = [DAYS[0], DAYS[1], day({ index: 2, pool: 'closing', tutorial: false })];
+      const players = [
+        player({
+          uid: 'logan',
+          bingoCount: 1,
+          squaresMarked: 7,
+          firstBingoAt: NOW,
+          dayStats: { 2: { bingoCount: 1, squaresMarked: 7, firstBingoAt: NOW } },
+        }),
+      ];
+      const podium = buildPodium(players, days);
+      expect(podium.champion).toBeNull();
+      expect(podium.firstBingo?.uid).toBe('logan');
+      expect(podium.playRecorded).toBe(true);
+    });
+
+    it('reads roots or buckets, and is false only when nothing anywhere is positive', () => {
+      expect(buildPodium([player({ uid: 'a', squaresMarked: 1 })], DAYS).playRecorded).toBe(true);
+      expect(
+        buildPodium(
+          [player({ uid: 'b', dayStats: { 1: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } } })],
+          DAYS,
+        ).playRecorded,
+      ).toBe(true);
+      expect(buildPodium([player({ uid: 'c' })], DAYS).playRecorded).toBe(false);
+      expect(buildPodium([], DAYS).playRecorded).toBe(false);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

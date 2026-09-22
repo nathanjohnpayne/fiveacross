@@ -2357,6 +2357,114 @@ describe('sendDailyEmailForEvent', () => {
       expect(unchanged.sent[0].text).not.toContain('Theo *');
       expect(unchanged.sent[0].text).not.toContain('Jess *');
     });
+
+    // #1218, Codex P2 on PR #1242. The container coercion (#1214) is right at the
+    // OPENING read — an Event whose stored schedule is unreadable has nothing due
+    // and goes quiet — and it is a licence at the delivery-time re-read, which is
+    // the one place this call has already built everything it is about to mail.
+    // Coerce and continue there and the sender ships the opening read's Day,
+    // standings and ⭐ on the authority of a document that no longer says they are
+    // due; and because `standingsFreezeAtFor` DERIVES the cutoff from the first
+    // ceremonial Day when no `standingsFreezeAt` is configured — which is both
+    // live Events — an empty schedule does not merely lose the Day, it resolves
+    // the freeze to `null` and waves the whole roster through after the real
+    // boundary. Before the coercion landed that value threw and nothing was
+    // mailed. These pin the refusal that replaces the throw.
+    /** The live-Event shape for that bypass: no configured freeze, and a
+     *  ceremonial Day whose own unlock IS the derived one. */
+    const seedDerivedFreeze = (freezeAt: number): Docs => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = {
+        ...docs['events/med-2026'],
+        days: [
+          ...(gcbEvent.days ?? []),
+          { index: 4, date: '2026-07-19', unlockAt: freezeAt, theme: 'fog-froth-farewells', scoring: 'ceremonial', pool: 'closing' },
+        ],
+      };
+      return docs;
+    };
+
+    it('refuses the send when the FRESH `days` container is malformed, rather than mailing past the freeze it erases', async () => {
+      const freezeAt = DAY4_UNLOCK + 2 * 60 * 60 * 1000;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      // Opens a minute short of the derived freeze — Day 4 is due, and the same
+      // Event mails in full on the last control below — then arrives a minute
+      // past it with `days` stored as a map. Coerced and continued, the fresh
+      // freeze is `null`, the cutoff never fires, and both recipients get a card
+      // after scoring closed.
+      const { result, sent } = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], days: { '3': gcbDay4 } };
+        },
+      );
+      expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+      // And still no second log line: the re-read refuses rather than announcing
+      // (§ Shared domain contract). The opening read was valid here, and the next
+      // sweep's opening read is what names a container that stays malformed.
+      expect(error).not.toHaveBeenCalled();
+      error.mockRestore();
+
+      // The answer the coercion was hiding: same timing, fresh read left intact.
+      // The freeze it derives has passed, so this is `not-due` on its own merits
+      // — which is what makes the case above a bypass rather than a difference of
+      // opinion about the Day.
+      const readable = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt + 60_000,
+      );
+      expect(readable.result).toMatchObject({ sent: 0, reason: 'not-due' });
+
+      // …and the control that keeps the guard from being a blanket refusal: a
+      // readable fresh schedule, arriving a millisecond before the same freeze,
+      // still mails the morning in full.
+      const inTime = await runCrossingTheFreeze(
+        seedDerivedFreeze(freezeAt),
+        freezeAt - 60_000,
+        freezeAt - 1,
+      );
+      expect(inTime.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(inTime.sent).toHaveLength(2);
+    });
+
+    it('revalidates due-ness on the fresh schedule, so a Day withdrawn mid-sweep is never mailed', async () => {
+      // The other half, and the one no shape check reaches: the fresh container
+      // is a perfectly good array that simply no longer carries the Day this call
+      // prepared. Everything above the re-read — `day`, the standings snapshot,
+      // the ⭐ — was built from the schedule the call opened with, so continuing
+      // mails a card for a Day the Event has withdrawn.
+      const withdrawn = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = {
+            ...docs['events/med-2026'],
+            days: (gcbEvent.days ?? []).filter((d) => d.index !== gcbDay4.index),
+          };
+        },
+      );
+      expect(withdrawn.result).toMatchObject({ sent: 0, reason: 'not-due' });
+      expect(withdrawn.sent).toEqual([]);
+
+      // The control: the same re-read, the same mid-sweep rewrite, the same
+      // schedule. Asking the question again is not what refuses — the answer
+      // changing is.
+      const rewritten = await runCrossingTheFreeze(
+        seedEvent(),
+        DAY4_UNLOCK + 60_000,
+        DAY4_UNLOCK + 60_000,
+        (docs) => {
+          docs['events/med-2026'] = { ...docs['events/med-2026'], days: [...(gcbEvent.days ?? [])] };
+        },
+      );
+      expect(rewritten.result).toMatchObject({ sent: 2, failed: 0 });
+      expect(rewritten.sent).toHaveLength(2);
+    });
   });
 
   it('is idempotent — a second sweep inside the same window sends nothing', async () => {
@@ -2459,6 +2567,120 @@ describe('sendDailyEmailForEvent', () => {
     expect(sent[0].text).not.toContain('Tonight:');
     expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
     expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
+  });
+
+  // --- The Event's CONTAINERS, one layer up (#1214) ------------------------------
+  //
+  // Same untyped-container class as the three cases above, different field set
+  // and a different failure mode. `buildDailyEmailModel` and
+  // `buildAdminDigestModel` both guarded the Event's `days` already; this
+  // orchestrator did not, and every site it handed the raw field to sits ABOVE
+  // the per-recipient catch — `for…of` inside `standingsFreezeAtFor`, `.filter`
+  // inside `dueDayForDailyEmail`, `new Set` inside `readEmailRosterPage`. A
+  // throw there unwinds to `runDailyEmailSweep`'s per-Event catch and takes that
+  // Event's WHOLE morning send down, on every sweep, for as long as the field
+  // stays malformed.
+  //
+  // So these assert the sweep's own observable answer — it resolves, it reports,
+  // it mails nothing it should not, AND IT SAYS WHY — rather than that a helper
+  // returns `[]`. Revert the guard and every malformed shape below becomes a
+  // rejected promise; drop the log line and the malformed Event goes dark
+  // instead, which is the half the throw used to cover.
+
+  /** The one line a coerced container is expected to leave behind, and the
+   *  reason every case below asserts it. The throw was this Event's only
+   *  announcement that the field was unreadable; coercing it away without
+   *  replacing the signal would trade a loud recoverable failure for an Event
+   *  that mails nobody, forever, with nothing naming the cause. */
+  const malformedLog = (field: 'days' | 'bannedUids', stored: string) =>
+    [
+      `sendDailyEmailForEvent: malformed ${field} container; read as an empty list`,
+      'med-2026',
+      stored,
+    ] as const;
+
+  const malformedDays: ReadonlyArray<[string, unknown, string]> = [
+    ['an array-shaped map', { '0': gcbDay4 }, 'object'],
+    ['a map under non-integer keys', { day4: gcbDay4 }, 'object'],
+    ['a number', 42, 'number'],
+    ['a string', 'Day 4', 'string'],
+  ];
+  it.each(malformedDays)(
+    'reports not-due and names the malformed container when `days` is %s',
+    async (_shape, days, stored) => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], days };
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { result, sent } = await run(docs);
+      expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+      expect(sent).toEqual([]);
+      expect(error).toHaveBeenCalledWith(...malformedLog('days', stored));
+      error.mockRestore();
+    },
+  );
+
+  // `null` and an absent field were ALREADY safe, because `?? []` covers exactly
+  // those two and nothing else — which is what made the hole read as narrower
+  // than it was. Pinned so the guard's arrival is not mistaken for a change in
+  // how an Event with no schedule is treated — INCLUDING the log: an Event that
+  // carries no schedule is not a malformed one, and logging it would bury the
+  // real case under every Event that simply has neither field.
+  it.each([
+    ['null', null as unknown],
+    ['absent', undefined as unknown],
+  ])('still reports not-due, and logs nothing, when `days` is %s', async (_shape, days) => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], days };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { result, sent } = await run(docs);
+    expect(result).toMatchObject({ sent: 0, skipped: 0, failed: 0, reason: 'not-due' });
+    expect(sent).toEqual([]);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  // The ban roster reaches `new Set` twice — once inside `readEmailRosterPage`
+  // and once for the standings filter — and a malformed one threw there before
+  // a single recipient was looked up. The Event's schedule is untouched here, so
+  // the right answer is not "not-due": it is the whole roster, mailed, with
+  // nobody hidden — and SAID OUT LOUD, because a ban roster that coerces to
+  // nobody returns moderated participants to the recipient list and to the
+  // standings. Failing open is the right direction; doing it silently is not.
+  const malformedBans: ReadonlyArray<[string, unknown, string]> = [
+    ['a map', { theo: true }, 'object'],
+    ['an array-shaped map', { '0': 'theo' }, 'object'],
+    ['a number', 1, 'number'],
+  ];
+  it.each(malformedBans)(
+    'mails the whole roster, and names the reversal, when `bannedUids` is %s',
+    async (_shape, bannedUids, stored) => {
+      const docs = seedEvent();
+      docs['events/med-2026'] = { ...docs['events/med-2026'], bannedUids };
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { result, sent, db } = await run(docs);
+      expect(result).toMatchObject({ sent: 2, failed: 0 });
+      expect(sent.map((m) => m.to[0]).sort()).toEqual(['jess@example.com', 'theo@example.com']);
+      expect(db.docs['events/med-2026/emailPrefs/theo'].lastSentDayIndex).toBe(3);
+      expect(db.docs['events/med-2026/emailPrefs/jess'].lastSentDayIndex).toBe(3);
+      expect(error).toHaveBeenCalledWith(...malformedLog('bannedUids', stored));
+      error.mockRestore();
+    },
+  );
+
+  // The shape that does NOT throw, and the reason the hole looked narrower than
+  // it was: `new Set('theo')` is a four-CHARACTER ban set, not a ban on `theo`.
+  // Every uid on this roster is longer than one character, so this is the one
+  // case here whose DELIVERY answers the same with the guard reverted. Its log
+  // line is what separates the two: the guard decides by shape, and says so.
+  it('bans nobody when `bannedUids` is a string, by shape rather than by accident', async () => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], bannedUids: 'theo' };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { result, sent } = await run(docs);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent.map((m) => m.to[0]).sort()).toEqual(['jess@example.com', 'theo@example.com']);
+    expect(error).toHaveBeenCalledWith(...malformedLog('bannedUids', 'string'));
+    error.mockRestore();
   });
 
   // #633: fail-closed regression. Exercises the REAL `sendEmail` (not a boolean
@@ -2922,5 +3144,55 @@ describe('runDailyEmailSweep', () => {
       releaseFirst();
       await sweep;
     }
+  });
+
+  // #1214, at the layer the consequence is actually visible. The per-Event catch
+  // here already contains the blast radius of one malformed container; what it
+  // cannot do is deliver the mail it swallowed. Before the guard, this Event's
+  // morning ended in the per-Event failure line on every sweep — so the
+  // assertions are that nothing lands in THAT line, that the Event's neighbour
+  // is mailed either way, and that the Event is still named: the per-Event catch
+  // is replaced by a read-site line, not by silence, because an Event that mails
+  // nobody for as long as its `days` stays malformed must not do it unannounced.
+  it("keeps the sweep mailing, and still names the Event, when one Event's `days` is malformed", async () => {
+    const docs = seedEvent();
+    docs['events/med-2026'] = { ...docs['events/med-2026'], days: { '0': gcbDay4 } as unknown };
+    docs['events/other'] = { ...seedEvent()['events/med-2026'] };
+    docs['events/other/players/other-player'] = {
+      displayName: 'Other',
+      bingoCount: 1,
+      squaresMarked: 6,
+      firstBingoAt: 9000,
+    };
+    docs['hostnames/other.example.com'] = {
+      eventId: 'other',
+      canonicalHost: 'other.example.com',
+      edition: 'fiveacross',
+      status: 'active',
+      isCanonical: true,
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: string[] = [];
+
+    await runDailyEmailSweep(makeDb(docs), {
+      ...baseDeps(),
+      send: async (args) => {
+        sent.push(args.to[0]);
+        return true;
+      },
+    });
+
+    expect(error).not.toHaveBeenCalledWith(
+      'runDailyEmailSweep: event failed',
+      'med-2026',
+      expect.anything(),
+    );
+    expect(error).toHaveBeenCalledWith(
+      'sendDailyEmailForEvent: malformed days container; read as an empty list',
+      'med-2026',
+      'object',
+    );
+    expect(sent).toEqual(['other-player@example.com']);
+    error.mockRestore();
   });
 });
