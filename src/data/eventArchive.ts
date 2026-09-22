@@ -488,12 +488,28 @@ export function finaleHasRun(
  * decides whether anyone is mailed, and a console that read it more loosely
  * would warn about a send that was never going to happen.
  *
- * TWO RESIDUALS, and both over-warn rather than under-warn. A podium Moment that
- * never landed leaves the send `no-podium` and one that landed with no payload
- * leaves it `no-payload`; the Moment is a subcollection this surface does not
- * read, so either Event keeps the acknowledgement on screen for a send that may
- * never go out. That is the safe direction for a warning the Admin can tick
- * through in one click, and the opposite direction is the defect this closes.
+ * THE UNDER-WARN RESIDUAL IS CONSOLE-ONLY, and stated rather than claimed away
+ * (#1224). This predicate is evaluated against a subscription, so ANY state
+ * change between the render that reads it and the archive transaction that
+ * re-keys the ask can leave the warning stale; an edit that leaves the ask
+ * where it is (a rename, a ban) cannot. Two are known. Another Admin enabling
+ * `settings.dailyEmailEnabled` between the render and the transaction archives
+ * an Event the console never had cause to warn about. And the finale sweep
+ * committing `frozenAt` and the podium Moment inside the quiesce round trip
+ * moves the ask from `pre-freeze` to `podium+email` after the tick was already
+ * taken, so an Admin who acknowledged `pre-freeze` can archive an Event that
+ * became frozen underneath them, with the announcement newly owed and never
+ * acknowledged. Neither is closed by a console-side re-read — that narrows the
+ * window without closing it, since the finale sweep can still commit between
+ * the read and the flip's transaction — so this stays a documented residual
+ * rather than a `podiumEmailAt` gate on `archiveEvent`.
+ *
+ * TWO FURTHER RESIDUALS over-warn instead. A podium Moment that never landed
+ * leaves the send `no-podium` and one that landed with no payload leaves it
+ * `no-payload`; the Moment is a subcollection this surface does not read, so
+ * either Event keeps the acknowledgement on screen for a send that may never
+ * go out. That is the safe direction for a warning the Admin can tick through
+ * in one click, and the opposite direction is the defect this closes.
  *
  * The archived case is deliberately the call site's rather than a further fact
  * here: the fields read the same on a frozen Event as on a live one — the send
