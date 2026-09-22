@@ -195,7 +195,8 @@ describe('Firebase handoff commit Worker adapter', () => {
 
   // A re-audit gate, not a version floor. The commit path above depends on
   // source-level Firebase Auth behaviour that no public type pins: the exported
-  // persistence object's `type`, the absence of a silent persistence fallback,
+  // persistence object's `type`, the explicit hierarchy's fallback destination
+  // (in-memory, never browser storage) and error propagation,
   // the assign-then-persist order inside `updateCurrentUser`, and the IndexedDB
   // helpers resolving a request before its transaction completes. Do NOT bump
   // these literals to match a dependency PR. Diff the two `@firebase/auth`
