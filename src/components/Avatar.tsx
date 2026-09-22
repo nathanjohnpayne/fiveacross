@@ -4,11 +4,13 @@ export default function Avatar({
   customPhoto,
   size,
 }: {
-  /** Nullable at runtime (#317): a Player row can transiently exist WITHOUT its
-   *  identity fields — `dealDayCard` seeds `players/{uid}` with only a
-   *  `dayStats` bucket while `joinAndDeal`'s identity merge is still in flight
-   *  (the documented race in src/data/api.ts), and the persistent cache can
-   *  replay that identity-less row as a later page's FIRST roster snapshot.
+  /** Nullable at runtime (#317): a Player row can exist WITHOUT its identity
+   *  fields — `dealDayCard` USED to seed `players/{uid}` with only a
+   *  `dayStats` bucket while `joinAndDeal`'s identity merge was still in
+   *  flight (the race its fail-closed guard now refuses, #1158), pre-#1158
+   *  rows of that shape persist, and a `{theme}`-only row a Player's Theme
+   *  pick created has the same shape; the persistent cache can replay any of
+   *  them as a later page's FIRST roster snapshot.
    *  `name.trim()` on that row threw during the Leaderboard render, and with
    *  no error boundary above it React unmounted the ENTIRE app — a blank
    *  screen for every viewer until the identity write landed. Render the `?`

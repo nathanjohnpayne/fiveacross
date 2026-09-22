@@ -18,6 +18,12 @@ import {
   MAX_ARCHIVED_UID,
   writableArchiveRecord,
 } from './eventArchive';
+import {
+  observedEventPlayPhase,
+  recordEventPlayPhase,
+  resetEventPlayPhaseForTests,
+  subscribeEventPlayPhase,
+} from './eventPlayPhase';
 import { buildPodium, dayHonorChipLabel, pinnedOrDerivedDailyHonors } from './finale';
 import { MAX_DAYS, canonicalDayStatsKey } from './eventLimits';
 import { comparePlayers } from '../game/logic';
@@ -208,6 +214,83 @@ describe('isEventArchiving', () => {
     expect(isEventArchiving(closing)).toBe(true);
     expect(isEventArchived(archived)).toBe(true);
     expect(isEventArchiving(archived)).toBe(false);
+  });
+});
+
+describe('the observed play phase — the store the deal gate resumes on (#1158)', () => {
+  const COMMITTED = { fromCache: false, hasPendingWrites: false };
+  beforeEach(() => resetEventPlayPhaseForTests());
+
+  it('reads OPEN for an Event nothing has observed', () => {
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('records both halves of the freeze as closed, and a reopen as open', () => {
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(observedEventPlayPhase('event-a')).toBe('closed');
+    recordEventPlayPhase('event-a', false, COMMITTED);
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('ignores a snapshot that is not fully server-committed', () => {
+    // A cached `archiving: true` can describe a quiesce another Admin has
+    // since lifted, and an Admin's own optimistic close is undecided until the
+    // rules answer — the same three-flag rule the Card tab's redirect and the
+    // join's own decline follow.
+    recordEventPlayPhase('event-a', true, { fromCache: true, hasPendingWrites: false });
+    recordEventPlayPhase('event-a', true, { fromCache: false, hasPendingWrites: true });
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('is scoped to the Event it observed — another Event reads open', () => {
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(observedEventPlayPhase('event-b')).toBe('open');
+  });
+
+  it('notifies subscribers only when that Event\'s record actually moves', () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeEventPlayPhase(listener);
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(1);
+    recordEventPlayPhase('event-a', true, COMMITTED); // the same snapshot again
+    expect(listener).toHaveBeenCalledTimes(1);
+    recordEventPlayPhase('event-a', false, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    recordEventPlayPhase('event-a', true, COMMITTED);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a LATE snapshot for a retired Event out of the live Event\'s record', () => {
+    // The window `useDocSub`'s observer documents: the Event id is captured
+    // where the listener was OPENED, so between an `EVENT_ID` switch and the
+    // old listener's cleanup a snapshot for Event A can still land while the
+    // visit is on Event B. Held in ONE slot, that snapshot evicted B's
+    // recorded `'closed'` and B fell back to `'open'` — a phase nothing ever
+    // observed for it (#1158 review round 2, finding 1).
+    recordEventPlayPhase('event-b', true, COMMITTED);
+    recordEventPlayPhase('event-a', false, COMMITTED); // the late one, for the OLD Event
+    expect(observedEventPlayPhase('event-b')).toBe('closed');
+    expect(observedEventPlayPhase('event-a')).toBe('open');
+  });
+
+  it('still MOVES the live Event across the reopen notification after that late snapshot', () => {
+    // The half that strands the join: `useSyncExternalStore` re-renders only
+    // when the snapshot it reads back differs. If the late Event-A snapshot
+    // had already flipped B's read to `'open'`, B's genuine reopen would
+    // notify with the same value on both sides, React would be free to bail
+    // out, and the deferred join would never be resumed.
+    const seen: string[] = [];
+    const unsubscribe = subscribeEventPlayPhase(() => seen.push(observedEventPlayPhase('event-b')));
+    recordEventPlayPhase('event-b', true, COMMITTED);
+    recordEventPlayPhase('event-a', false, COMMITTED); // the late one, for the OLD Event
+    expect(observedEventPlayPhase('event-b')).toBe('closed');
+    recordEventPlayPhase('event-b', false, COMMITTED); // an Admin reopens play on B
+    expect(observedEventPlayPhase('event-b')).toBe('open');
+    // Closed on its own notification, closed still when A's landed, open on
+    // the reopen — so the value B reads back changed across it.
+    expect(seen).toEqual(['closed', 'closed', 'open']);
+    unsubscribe();
   });
 });
 
