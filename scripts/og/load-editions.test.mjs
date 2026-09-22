@@ -18,7 +18,10 @@ import { DEFAULT_EDITION, editionBrand, wordmarkSegments } from '../../src/editi
 import { loadEditions } from './load-editions.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const RENDERERS = ['render-og-editions.mjs', 'render-share-footer.mjs'];
+// #887 adds a third: the share-card raster generator reads the brand table
+// through the same loader, to rewrite the footer line from it before a
+// capture, and is exposed to exactly the same load-time rot.
+const RENDERERS = ['render-og-editions.mjs', 'render-share-footer.mjs', 'render-share-rasters.mjs'];
 
 describe('loadEditions', () => {
   const loaded = loadEditions();
@@ -42,20 +45,27 @@ describe('loadEditions', () => {
 });
 
 describe('the renderers get through their brand-table load', () => {
-  // Each renderer calls `loadEditions()` at module scope, before it validates
-  // `--edition` and long before it launches a browser. So an Edition id that
-  // does not exist is the cheapest way to execute that module scope for real:
-  // a working loader reaches the `Unknown edition` check and exits 1 on it,
-  // while the loader this replaced threw a TypeError before either script got
-  // that far. No browser, no network, no fonts, and nothing written —
-  // `render-og-editions.mjs` is pointed at a scratch `--out` that must stay
-  // empty, and `render-share-footer.mjs` runs with `--check`.
+  // An Edition id that does not exist is the cheapest way to execute a
+  // renderer's load path for real: a working script reaches the `Unknown
+  // edition` check and exits 1 on it, while the loader this replaced threw a
+  // TypeError before either script got that far. No browser, no network, no
+  // fonts, and nothing written — `render-og-editions.mjs` is pointed at a
+  // scratch `--out` that must stay empty, and the two share-card scripts run
+  // with `--check`.
+  //
+  // `render-og-editions.mjs` still calls `loadEditions()` at module scope. The
+  // two share-card scripts (#887) import the loader statically but call it
+  // inside `main`, because they are also imported by their own unit tests for
+  // the staging seams they export and evaluating the brand table on import
+  // would make every one of those tests shell out to esbuild. The spawn below
+  // covers both shapes: it runs the real command line either way.
   const outDir = mkdtempSync(join(tmpdir(), 'og-load-editions-'));
   afterAll(() => rmSync(outDir, { recursive: true, force: true }));
 
   const cases = [
     ['render-og-editions.mjs', ['--out', outDir]],
     ['render-share-footer.mjs', ['--check']],
+    ['render-share-rasters.mjs', ['--out', outDir, '--check']],
   ];
   for (const [script, extra] of cases) {
     it(`${script} rejects an unknown edition instead of crashing on load`, () => {
@@ -82,5 +92,13 @@ describe('the renderers get through their brand-table load', () => {
     const code = readFileSync(join(here, script), 'utf8');
     expect(code).toContain("import { loadEditions } from './load-editions.mjs';");
     expect(code).not.toMatch(/from 'esbuild'/);
+    // A dynamic `await import('./load-editions.mjs')` would satisfy neither
+    // the line above nor a reader looking for the dependency at the top of the
+    // file, and it is the shape a renderer drifts into when it wants to defer
+    // the esbuild cost. Deferring the CALL is the supported way to do that.
+    // The matcher tolerates whitespace inside the parentheses and a template
+    // literal specifier, so `import ( './load-editions.mjs' )` and
+    // import(`./load-editions.mjs`) are refused as well (CodeRabbit, PR #1246).
+    expect(code).not.toMatch(/import\s*\(\s*[`'"]\.\/load-editions\.mjs[`'"]\s*\)/);
   });
 });
