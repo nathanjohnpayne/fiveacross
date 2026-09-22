@@ -38,7 +38,7 @@ import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { transformSync } from 'esbuild';
+import { loadEditions } from './load-editions.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -66,13 +66,10 @@ if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform'))
   process.exit(1);
 }
 
-function loadEditions() {
-  const src = readFileSync(join(repo, 'src', 'editions.ts'), 'utf8');
-  const js = transformSync(src, { loader: 'ts', format: 'cjs', target: 'node20' }).code;
-  const module = { exports: {} };
-  new Function('module', 'exports', 'require', js)(module, module.exports, () => ({}));
-  return module.exports;
-}
+// The brand table comes from the shared bundling loader in
+// `load-editions.mjs`. This script used to transpile `src/editions.ts` alone
+// and stub its `require`, which died on load once the module started importing
+// `EDITION_IDS` and `brandFor` for real values.
 const { editionBrand } = loadEditions();
 
 // Geometry measured off the committed cards. The band is the full-width strip
