@@ -108,15 +108,25 @@ export interface EditionBrand {
   appName: string;
   appShortName: string;
   appDescription: string;
+  /** The PWA chrome colour: the manifest's `theme_color` and
+   *  `background_color`, and `index.html`'s `<meta name="theme-color">`, which
+   *  `specs/w1-pwa.md` requires to match it exactly (#1118). Edition-scoped
+   *  since the edge rewrite made the meta tag movable per hostname; each row
+   *  carries its own default Theme's `--bg` (`src/theme/themes.css`), so the
+   *  chrome a browser paints is the colour the app itself opens in. */
+  chromeColor: string;
   /** The `<meta name="description">` line (#587). Crawlers read it without
    *  running JS, so it is baked into index.html at build time alongside the
-   *  og:* block — see `HTML_IDENTITY_TOKENS` in `src/editions.ts`. */
+   *  og:* block — see `HTML_IDENTITY_TOKENS` in `src/html-head-identity.ts` —
+   *  and rewritten per hostname at the edge (#1118). */
   metaDescription: string;
   /** `og:url` — the canonical origin an unfurl attributes the link to (#587).
-   *  Strictly this is a per-EVENT fact (the Event's canonical hostname), but a
+   *  Strictly this is a per-EVENT fact (the Event's canonical hostname), and a
    *  build can only bake per-Edition data, so each Edition carries its flagship
-   *  origin here until the edge Worker rewrites the tag per hostname (#1118,
-   *  the follow-up #546 split the HTML head into). */
+   *  origin here. On any hostname the edge router fronts, #1118 replaces it
+   *  with the requested hostname's own origin — this row is what a
+   *  direct-Hosting response still carries, and the reason the vacay row names
+   *  one Event's host. */
   ogUrl: string;
   /** `og:image` / `twitter:image` — an ABSOLUTE URL (#587, artwork #609).
    *  Absolute because crawlers resolve unfurl images poorly against relative
