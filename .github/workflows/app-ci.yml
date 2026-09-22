@@ -157,6 +157,13 @@ jobs:
       - name: Deployment safety harness
         run: npm run test:deploy
 
+      # The runnable-JDK probe every emulator-booting script sources (#1018,
+      # scripts/lib/ensure-java.sh). Its shell suite lives beside the deployment
+      # harness above because both are bash fixtures; nothing else runs it, so a
+      # regression in the probe would otherwise merge green.
+      - name: Ensure-java probe suite
+        run: npm run test:ensure-java
+
       # The Cloud Functions notifier suite (tests/functions/) imports
       # functions/src, whose resend / firebase-admin deps live only in
       # functions/package.json. `test:functions` runs `npm --prefix functions

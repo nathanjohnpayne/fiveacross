@@ -28,32 +28,17 @@ set -euo pipefail
 PROJECT_ID='demo-fiveacross-marketing'
 
 # The Firestore emulator is a Java program and `firebase emulators:exec` only
-# looks on PATH. Homebrew's openjdk is keg-only (never symlinked into
-# /opt/homebrew/bin), so a shell that has never sourced it fails with
-# "Unable to locate a Java Runtime" — prepend it when it is the one present.
-#
-# The probe RUNS java rather than testing `command -v`: macOS ships a
-# /usr/bin/java stub that exists on PATH and exits 1, so a presence check
-# passes on exactly the machines that have no JDK at all.
-java_works() { java -version >/dev/null 2>&1; }
-if ! java_works; then
-  # Both Homebrew prefixes, versioned and unversioned: /opt/homebrew on Apple
-  # silicon, /usr/local on Intel. `brew install openjdk` (no @21) is the common
-  # form and lands on the unversioned path (Codex P2 on #1020).
-  for jdk in /opt/homebrew/opt/openjdk@21 /opt/homebrew/opt/openjdk \
-             /usr/local/opt/openjdk@21 /usr/local/opt/openjdk; do
-    if [[ -x "$jdk/bin/java" ]]; then
-      PATH="$jdk/bin:$PATH"
-      export PATH
-      break
-    fi
-  done
-fi
-java_works || {
-  echo "marketing-shots: no working Java runtime; the Firestore emulator needs one." >&2
-  echo "  brew install openjdk@21" >&2
-  exit 1
-}
+# looks on PATH, so this script needs the same JDK probe every other
+# emulator-booting script runs — scripts/lib/ensure-java.sh (#1018). It used
+# to carry its own inline copy, which had drifted: no JAVA_HOME, no
+# /usr/libexec/java_home, and only openjdk@21 among the versioned kegs, so a
+# Mac whose compatible JDK sat anywhere else failed a capture the shared
+# helper would have rescued (Codex P1 on #1241). Sourced rather than executed
+# because a PATH fix only reaches `firebase` from the shell that execs it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ensure-java.sh
+source "$SCRIPT_DIR/lib/ensure-java.sh"
+ensure_java
 
 cmd="npx playwright test --config playwright.marketing.config.ts"
 for arg in "$@"; do
