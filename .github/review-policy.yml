@@ -99,6 +99,46 @@ available_reviewers:
   - nathanpayne-codex
 
 # ---------------------------------------------------------------------------
+# Non-Reviewer Identities (#1026, machinery from mergepath#1080)
+# ---------------------------------------------------------------------------
+# Accounts that hold write access so automation can run, and that must NEVER
+# carry reviewer standing. GitHub counts an approval from ANY account with write
+# access toward `required_approving_review_count` and offers nothing to tell a
+# service account apart from a person — both are `type: "User"` — so without
+# this declaration a CI token that reaches a review command satisfies branch
+# protection on its own. That is not hypothetical: on 2026-08-22 a stale
+# agent→1Password-item map handed a local Codex session the `nathanpayne-robot`
+# token, which posted two APPROVED reviews on
+# nathanjohnpayne/nathanpaynedotcom#668 and left an ordinary under-threshold PR
+# reading APPROVED/CLEAN on the standing of a CI account.
+#
+# `scripts/merge-clearance-gate.sh` reads this list on EVERY lane (through
+# `read_non_reviewer_identities` in scripts/lib/reviewers-helpers.sh) and blocks
+# when a login here holds a latest-state APPROVED review anywhere on the PR. The
+# check is PR-wide, not HEAD-pinned, because whether an older approval still
+# counts is decided by `dismiss_stale_reviews`, which the gate cannot read — a
+# HEAD-pinned check would let a non-reviewer approve and then push past it. A
+# push that dismisses the approval flips its latest state to DISMISSED and
+# clears the gate. The derive-only query modes are exempt by design.
+#
+# Shape is load-bearing. Absent, empty or `[]` is a legitimate declaration
+# meaning "no such identity here" and makes the check inert. A non-empty INLINE
+# value the block reader cannot consume — a flow list like
+# `[nathanpayne-robot]`, or a bare scalar — exits 2 rather than passing
+# silently, because that shape is otherwise indistinguishable from an absent
+# key. Keep the dash-prefixed block form below, one login per line.
+#
+# Deny-list, not allow-list: an allow-list would have to answer "is this login a
+# human?" to avoid blocking legitimate approvals, and GitHub gives no such
+# signal. Only accounts this repo has DECLARED non-reviewers belong here. The
+# review-provider App bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`)
+# deliberately do not, because Phase 2.5 and Phase 4a depend on their standing.
+#
+# See REVIEW_POLICY.md § Non-reviewer identities.
+non_reviewer_identities:
+  - nathanpayne-robot
+
+# ---------------------------------------------------------------------------
 # Default External Reviewer
 # ---------------------------------------------------------------------------
 # When the agent needs to suggest an external reviewer in a handoff message,
@@ -194,10 +234,48 @@ feedback_policy:
 #     `p4b_same_head_barrier` (scripts/phase-4b/lib.sh) consults every provider
 #     whose top-level `enabled` is true, so with CodeRabbit enabled a Phase 4b
 #     run waits for a terminal CodeRabbit report on the exact head. No report,
-#     and the run is held and eventually routed to the manual fallback — even
-#     with no CodeRabbit finding anywhere. Disabling a provider in policy is the
-#     only route to "will-not-report"; the barrier cannot be told to skip one
+#     and the run is USUALLY held and eventually routed to the manual fallback —
+#     even with no CodeRabbit finding anywhere. Disabling a provider in policy is
+#     the only route to "will-not-report"; the barrier cannot be told to skip one
 #     that is enabled. Budget the extra wait when running Phase 4b here.
+#
+#     ONE EXCEPTION, and it is worth knowing before escalating: a bare
+#     rate-limit refusal does not hold the barrier when Codex has already
+#     reported on the same head. `p4b_same_head_barrier` classifies that
+#     CodeRabbit result as `rate-limited` — the class name
+#     `p4b_barrier_class_coderabbit` prints when the probe's `observed` is
+#     `rate_limit` — and, for a Codex class of `reported`, neither sets a `why`
+#     nor marks the run pending (scripts/phase-4b/lib.sh, the `rate-limited)`
+#     arm of `p4b_same_head_barrier`, whose inner `case "$cls_cx"` is around
+#     line 1437) — so the barrier opens with no CodeRabbit report at all,
+#     because the head has been read by the agent that actually gates the merge.
+#     The invariant that makes that safe is upstream, and it is a COMPOSITE
+#     guard rather than the single-body predicate an earlier version of this
+#     note named. `crw_rate_limit_hides_a_finding` in
+#     scripts/coderabbit-wait.sh asks one question — is a blocking finding
+#     published behind this refusal? — over every surface that can carry one,
+#     and `--probe` exits rc 2 on a yes. It reads three.
+#     `crw_rate_limit_masks_blocking_marker` is only the FIRST, and covers just
+#     the notice body that shares itself with a marker. The second is the
+#     head-pinned review OBJECT's own body, which that helper's own comment
+#     calls the PRIMARY summary surface and which is scoped by the object's
+#     GitHub-owned `commit_id` rather than by a commits range. The third is the
+#     marker-selected PR-level summary, head-anchored through
+#     `crw_head_summary_holds_blocking_marker`. A bare refusal body can coexist
+#     with a finding on either of the other two, so the narrow helper on its
+#     own is not the contract — cite the composite one. A surface that cannot
+#     be READ returns 3 and the probe dies rather than reporting a bare
+#     refusal, so a `rate_limit` that reaches the classifier is a refusal with
+#     nothing unread behind it on any of the three.
+#
+#     Every other Codex class escalates immediately, EXCEPT `not-yet`, which
+#     marks the run pending and waits the head-anchored budget.
+#     That wait is on Codex, not on CodeRabbit: the Codex arm is self-clearing,
+#     so the next probe can find it reported and open the barrier. Only once the
+#     budget is exhausted does the run route to the manual fallback, with the
+#     rate-limit reason appended to the reason string (back in
+#     scripts/phase-4b/lib.sh, around line 1491). Do not read a rate-limited
+#     CodeRabbit on a Codex-reported head as a stall that needs a human.
 #
 # A rate-limit stall does NOT automatically page the human, and an earlier
 # version of this note said it did. The failover is live: when
@@ -214,6 +292,25 @@ feedback_policy:
 # the classifier calls for it. `severity_gate.enabled` below is FALSE per the
 # operator's 2026-09-11 decision, so `scripts/coderabbit-severity-gate.sh` is a
 # green no-op and a CodeRabbit finding cannot hold a merge by itself.
+#
+# "Advisory" is scoped to that gate, and one more finding-based block survives
+# outside it. When CodeRabbit publishes a blocking `Potential issue`/⚠️ marker
+# carried SOLELY by the PR-level summary comment, `coderabbit-wait.sh --probe`
+# returns rc 2, `p4b_barrier_class_coderabbit` maps that to `escalate`
+# (scripts/phase-4b/lib.sh, around line 211) and `p4b_same_head_barrier`
+# escalates it to the manual fallback unconditionally (same file, around line
+# 1465). Neither reads `severity_gate.enabled`, so turning the severity gate off
+# does not remove this one. That is deliberate — but NOT because the severity
+# gate is blind to that surface. `scripts/coderabbit-severity-gate.sh` does read
+# it (`issues/{pr}/comments` and `pulls/{pr}/reviews`, #832) and would
+# disposition exactly this class; it simply exits 0 before reading anything
+# while `severity_gate.enabled` is false. The conversation gate covers only
+# threads, and a summary-only finding has none; the Phase 4b adapter sees only
+# the diff. So WHILE THE GATE IS OFF the barrier is the only reader a
+# summary-only finding has — flipping the gate back on would add a second reader
+# for precisely this class, not leave it unread. An agent that meets this
+# escalation has not found a policy bug — a human has to read that summary
+# comment before Phase 4b can proceed.
 #
 # That pairing is deliberate and worth keeping. The gate is live, not inert —
 # it was observed FAILING on PR #1209 while it was still true. Turning it back
