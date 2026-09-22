@@ -48,7 +48,8 @@ jobs:
         run: npm run check:no-admin --prefix router-publisher
 
       # Miniflare stays in the Worker's separately installed dependency tree;
-      # the root suite imports it only for the registry's real-workerd test.
+      # the root suite imports it for the registry's real-workerd test and for
+      # the #1118 head-rewrite integration test (worker/src/routerHtmlHead.integration.test.ts).
       - name: Install isolated Event router dependencies
         run: npm ci --prefix worker
 

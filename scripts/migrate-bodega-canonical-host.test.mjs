@@ -146,10 +146,10 @@ describe('Bodega canonical-host migration plan', () => {
     expect(rulesContract).toContain("const CANONICAL = 'bodega-bay.fiveacross.app';");
     expect(rulesContract).toContain("const ALIAS = 'bodega-bay.vacaybingo.com';");
     expect(ogRenderer).toContain(
-      '(bodega-bay.fiveacross.app) until the #1118 edge HTML rewrite emits it',
+      '(bodega-bay.fiveacross.app), because a build can bake only one origin;',
     );
     expect(wireframes).toContain(
-      '<code>bodega-bay.fiveacross.app</code>) until the #1118 edge HTML rewrite owns it per hostname',
+      '<code>bodega-bay.fiveacross.app</code>), because a build can bake only one origin;',
     );
   });
 

@@ -34,9 +34,15 @@ function appVersion(): string {
  * (src/editions.ts), beside the brand table they read, so they are unit-tested
  * without running a build. This is only the Vite seam.
  *
- * A hostname-resolved build has no single Edition to bake; it repairs the same
- * two tags after resolution instead (`applyEditionDocumentIdentity`), and
- * whatever this baked is simply overwritten.
+ * A hostname-resolved build has no single Edition to bake, and the two
+ * surfaces that correct what it baked are not the same surface. `<title>` and
+ * `apple-mobile-web-app-title` are repaired in the DOM after resolution
+ * (`applyEditionDocumentIdentity`), so whatever this baked for those two is
+ * overwritten in the page. The crawler-facing share block and
+ * `%EDITION_THEME_COLOR%` have no runtime repair path at all — a crawler runs
+ * no JavaScript — so what this baked for them stands until the edge Worker's
+ * per-hostname `<head>` rewrite corrects it (#1118).
+ * `assertHeadIdentityCoverage` refuses a placeholder that has neither.
  */
 function editionHtmlIdentity(brand: EditionBrand): Plugin {
   return {
@@ -167,11 +173,13 @@ export default defineConfig(({ command, mode }) => {
   const env = targetBuild ? process.env : loadEnv(mode, process.cwd(), 'VITE_');
   // `buildTimeEdition` keeps a hostname-resolved bundle independent of stale
   // VITE_EDITION. A named target may carry a trusted static fallback for the
-  // static HTML identity the edge cannot yet rewrite per host (#1118) and for
-  // the manifest a host serves before the Worker routes are attached. Always
-  // an EXPLICIT id, never `editionBrand()`'s default argument: that resolves
-  // through `activeEdition()`, which reads `import.meta.env` and does not exist
-  // here.
+  // static HTML identity and for the manifest a host serves before the
+  // Worker's routes are attached — the edge rewrites the crawler-facing
+  // `<head>` per host (#1118) and answers the manifest per host (#546), but
+  // only once it is in the request path at all, which is a human cutover.
+  // Always an EXPLICIT id, never `editionBrand()`'s default argument: that
+  // resolves through `activeEdition()`, which reads `import.meta.env` and does
+  // not exist here.
   const brand = editionBrand(
     buildTimeEdition(
       env.VITE_EVENT_ID,

@@ -15,7 +15,10 @@
 //      identity (`manifest.ts`, #546) — the one address whose correct answer
 //      depends on which hostname asked, taken from that same lookup too
 //   6. proxies what survives to the Firebase Hosting origin with a rewritten
-//      Host header, leaving the public hostname in the browser untouched
+//      Host header, leaving the public hostname in the browser untouched — and
+//      on that one path rewrites the proxied document's `<head>` per hostname
+//      (`htmlHead.ts`, #1118), because the share block and the theme colour a
+//      crawler reads are baked at build time and no JavaScript can repair them
 //
 // The seventh — the one it refuses — is REDIRECTING. This Worker is not a
 // canonicaliser. #599 as amended removed edge canonicalization outright: every
@@ -33,6 +36,17 @@
 // that knows it is running on Cloudflare.
 
 import { classifyHost, NAMESPACES } from './host';
+import {
+  dropConditionalValidators,
+  dropOriginEncoding,
+  dropOriginValidators,
+  dropRangeRequest,
+  headEditsFor,
+  isDocumentCandidate,
+  isHeadRewritable,
+  negotiateIdentityEncoding,
+  type HtmlHeadRewriter,
+} from './htmlHead';
 import { isWebManifestRequest, webManifestResponse } from './manifest';
 import { notFoundResponse } from './notFound';
 import { resolveHost, type ResolveDeps, type ServedRecord, reportDiagnostic } from './resolve';
@@ -53,6 +67,18 @@ export interface RouterConfig {
 
 export interface RouterDeps extends ResolveDeps {
   fetch: typeof fetch;
+  /**
+   * The runtime's streaming HTML transform, used for the per-hostname `<head>`
+   * rewrite (#1118). Injected like `fetch` and the registry because
+   * `HTMLRewriter` exists only in workerd; `worker/src/htmlHead.ts` holds the
+   * workerd implementation and every decision about WHEN to use it.
+   *
+   * It is a body transform, not a second source of routing truth: it is
+   * reached only on the serving proxy path, only after the namespace guard and
+   * resolution have already let the request through, and it can neither
+   * consult a record nor change a status.
+   */
+  htmlRewriter: HtmlHeadRewriter;
 }
 
 /** Firebase Hosting's reserved namespace, which serves the Google sign-in
@@ -186,7 +212,14 @@ export async function handleRequest(
     return response;
   }
 
-  return proxyToOrigin(request, url, config, deps, resolution.record.revision);
+  // The serving proxy, and the ONE path that carries a resolved record into
+  // `proxyToOrigin`. That record is what lets the response's `<head>` be
+  // rewritten for the Edition this hostname resolved to (#1118) — which is why
+  // the record travels rather than just its revision: the rewrite sits after
+  // the namespace guard and after resolution exactly like the manifest route,
+  // so a reserved label, an out-of-namespace host and an unknown or inactive
+  // Event never reach it.
+  return proxyToOrigin(request, url, config, deps, resolution.record);
 }
 
 /**
@@ -245,14 +278,22 @@ function pathCapabilityResponse(record: ServedRecord, version: string): Response
  * with it, a 3xx from the origin is handed to the browser exactly as the origin
  * wrote it, and this Worker has no code path anywhere that constructs a
  * redirect of its own. There is no canonical host in this file to bounce to.
+ *
+ * `record` is the resolved projection on the serving path and `null` on the
+ * `/__/auth/*` exemption, which resolves nothing. It supplies both the
+ * revision stamp and the Edition the `<head>` rewrite brands with, so the auth
+ * helper's own HTML is relayed untouched — there is no Edition to brand it
+ * with, and a response the exemption exists to keep working is the last one to
+ * put a body transform in front of.
  */
 async function proxyToOrigin(
   request: Request,
   url: URL,
   config: RouterConfig,
   deps: RouterDeps,
-  revision: string | null,
+  record: ServedRecord | null,
 ): Promise<Response> {
+  const revision = record?.revision ?? null;
   const originUrl = new URL(url.toString());
   originUrl.protocol = 'https:';
   originUrl.hostname = config.originHost;
@@ -265,6 +306,45 @@ async function proxyToOrigin(
   // key on without this file having to change again.
   headers.set('x-forwarded-host', url.hostname);
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
+
+  // Three things a document subrequest must ask for differently from an
+  // asset's (#1118), all decided by one predicate because all are the same
+  // question one step early: is a rewritable document what comes back?
+  //
+  // A conditional revalidation is sent on UNCONDITIONALLY. The origin's
+  // validators describe one baked `index.html` served to every hostname, so a
+  // forwarded `if-none-match` can be answered `304` truthfully by the origin
+  // and wrongly for this host — the registry may have repointed the hostname
+  // to another Edition since, and a `304` leaves no body to rewrite and the
+  // client on the previous Edition's Crawler identity.
+  //
+  // And the encoding is pinned to `identity`. The runtime negotiates
+  // compression on a subrequest whether or not this file asks it to, so an
+  // origin that honours `accept-encoding` answers a document in `gzip` or
+  // `br`, and `HTMLRewriter` then parses bytes that are not markup: it matches
+  // nothing, changes nothing, reports success, and the client receives the
+  // bundle's baked Edition.
+  //
+  // And the `range` goes, so the answer is the whole representation. A `206`
+  // is refused by the rewrite, so a ranged document used to be relayed as the
+  // origin wrote it — safe alone, wrong in company: the same URL answers an
+  // ordinary `GET` with the REWRITTEN representation, a different length, so a
+  // client resuming or assembling the document splices baked bytes into
+  // rewritten ones and a range over the head gets the wrong Edition. A byte
+  // range over the SPA shell has no legitimate use, and a server may always
+  // answer one with the full `200` it would otherwise have sent. `if-range`
+  // goes with it, having nothing left to qualify.
+  //
+  // Only the serving path, and only a document candidate: an asset — a path
+  // with a file extension asked for with a wildcard, or any request naming a
+  // non-HTML media type — keeps its validators, its cheap `304` and its
+  // negotiated encoding and its `Range`, and the `/__/auth/*` exemption
+  // (`record === null`) is untouched like everything else about it.
+  if (record !== null && isDocumentCandidate(request, url)) {
+    dropConditionalValidators(headers);
+    dropRangeRequest(headers);
+    negotiateIdentityEncoding(headers);
+  }
 
   const init: RequestInit & { duplex?: 'half' } = {
     method: request.method,
@@ -299,10 +379,50 @@ async function proxyToOrigin(
     });
   }
 
+  const responseHeaders = stampRouterHeaders(
+    new Headers(originResponse.headers),
+    config.version,
+    revision,
+  );
+
+  // The per-hostname `<head>` rewrite (#1118). Gated on a resolved record, so
+  // it is unreachable from every fail-closed outcome and from the auth
+  // exemption; gated on `isHeadRewritable`, so a failing origin, a partial
+  // representation, a bodyless response, a body still carrying a
+  // `content-encoding` and every non-HTML asset are relayed byte-for-byte. A
+  // rewrite that cannot run is a relay, never an error — the transform must
+  // not be able to convert an origin failure into a Worker runtime error.
+  if (record !== null && isHeadRewritable(originResponse)) {
+    // The rewrite changes the document's length, and the origin's
+    // `content-length` describes the bytes BEFORE it. Relaying it would
+    // truncate or stall the response, so it is dropped and the runtime frames
+    // the transformed body itself.
+    responseHeaders.delete('content-length');
+    // For the same reason one step further out: the origin's `etag` and
+    // `last-modified` describe those same pre-rewrite bytes, identically for
+    // every hostname. Handing them back would let the client revalidate its
+    // way to this Edition's document after the registry had moved the hostname
+    // to another one.
+    dropOriginValidators(responseHeaders);
+    // And the encoding framing, for the third time the same reason: the body
+    // is `identity` by negotiation and rebuilt by the transform, so an
+    // explicit `content-encoding` claims nothing and the origin's
+    // `Vary: Accept-Encoding` records a negotiation this hop did not perform.
+    dropOriginEncoding(responseHeaders);
+    return deps.htmlRewriter(
+      new Response(originResponse.body, {
+        status: originResponse.status,
+        statusText: originResponse.statusText,
+        headers: responseHeaders,
+      }),
+      headEditsFor(record.edition, url.hostname),
+    );
+  }
+
   return new Response(originResponse.body, {
     status: originResponse.status,
     statusText: originResponse.statusText,
-    headers: stampRouterHeaders(new Headers(originResponse.headers), config.version, revision),
+    headers: responseHeaders,
   });
 }
 

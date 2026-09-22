@@ -122,13 +122,41 @@ export async function stubAuthWidgetCdn(page: Page): Promise<void> {
   await ctx.route(/^https:\/\/(apis\.google\.com|www\.gstatic\.com)\//, cacheThroughGapi);
 }
 
-/** Best-effort dismiss of the analytics disclosure banner — it never blocks
- * the sign-in control, but clearing it keeps the viewport tidy for later
- * taps on small/short viewports. */
+/**
+ * Dismiss the analytics disclosure banner (`src/components/ConsentNotice.tsx`).
+ *
+ * It is a `position: fixed; top: 0` banner over the whole app chrome, so on the
+ * 393×852 parity canvas it covers the header and the day-switcher strip until a
+ * Player taps "Got it" — which every real Player does on the sign-in gate,
+ * before the signed-in shell exists.
+ *
+ * The wait is the load-bearing part (#1122). `locator.isVisible()` NEVER waits —
+ * its `timeout` option is inert, exactly as `tests/marketing/support/fixture.ts`
+ * already notes — so the previous check ran the instant `page.goto('/')`
+ * resolved, against a document still showing `index.html`'s static boot loader.
+ * `main.tsx` only calls `root.render` once `bootstrapEventResolution()` has
+ * round-tripped the hostname document, which is comfortably after `load`, so the
+ * check saw no button, silently no-opped, and left the banner up for the whole
+ * spec: it intercepted the day-chip clicks in the mockup-parity walk and sat in
+ * every visual baseline.
+ *
+ * The boot loader's removal is React's own first commit, and `ConsentNotice` is
+ * a sibling in that same commit (`appTree`), so once it is gone the banner is
+ * either on screen or already dismissed on this device — no timer, no guess.
+ * Waiting is still fail-soft: a root that never mounts is the caller's failure
+ * to report, not this helper's.
+ */
 export async function dismissConsentNotice(page: Page): Promise<void> {
-  const gotIt = page.getByRole('button', { name: 'Got it' });
-  if (await gotIt.isVisible({ timeout: 2000 }).catch(() => false)) {
+  await page
+    .locator('.boot-loader')
+    .waitFor({ state: 'detached', timeout: 30_000 })
+    .catch(() => {});
+  // Exact, so the coach overlay's "Got it—deal me in." can never be matched by
+  // a caller that runs this after the signed-in shell has rendered.
+  const gotIt = page.getByRole('button', { name: 'Got it', exact: true });
+  if (await gotIt.isVisible()) {
     await gotIt.click();
+    await expect(page.locator('.consent-notice')).toHaveCount(0);
   }
 }
 
