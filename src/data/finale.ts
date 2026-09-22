@@ -211,9 +211,10 @@ function podiumStandingRow(
  * render; the only reason to hide one is the ban policy, and that is now the
  * only thing that does.
  *
- * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and callers
- * that have already ban-filtered their roster pass the same list again — the
- * derived fallback reads the roster, the pin reads the list.
+ * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and since
+ * #1216/#1217 every caller hands this the RAW roster: the pin reads the list,
+ * the derived fallback reads the roster and is filtered by that same list
+ * afterwards. Both halves of the honour rule then land in one place.
  *
  * AND AN HONOUR IS ONLY EVER DERIVED FOR A DAY THE CONTRACT HAS (#1151, Codex P2
  * on PR #1162, round 7). `perDayHonors` reads its `dayIndex` off a `dayStats`
@@ -274,13 +275,17 @@ export function pinnedOrDerivedDailyHonors(
   bannedUids: readonly string[] = [],
 ): DayHonor[] {
   // A DERIVED honour is dropped for a banned holder AFTER the selection, never
-  // before it. A caller that hands this a RAW roster (`buildPodium`) therefore
-  // gets that Day withheld — "hidden, never reassigned", the same rule the pin
-  // branch below already applied — rather than the next-earliest Player handed a
-  // chip they did not earn. A caller that ban-filters its roster first
-  // (`Leaderboard`, `draftEventArchive`) selects from rows this can no longer
-  // see, so for those this line is a no-op and their promotion residual is
-  // unchanged by it.
+  // before it, so that Day is withheld — "hidden, never reassigned", the same
+  // rule the pin branch below already applied — rather than the next-earliest
+  // Player handed a chip they did not earn.
+  //
+  // WHICH ONLY WORKS ON A RAW ROSTER. A caller that ban-filters on the way IN
+  // hands this rows indistinguishable from a roster the banned Player was never
+  // on, and `perDayHonors` then picks the earliest bingo among whoever is left
+  // — this line sees nothing to drop and the promotion has already happened.
+  // `buildPodium` passes the raw roster (#1216); the live Leaderboard's strip
+  // and `draftEventArchive` do too (#1217), so all three surfaces read one
+  // answer and the frozen record still says what the last live strip said.
   const derivedHonors = perDayHonors(players).filter(
     (h) => supportedDayIndex(h.dayIndex) && !isBanned(h.uid, bannedUids),
   );

@@ -1220,11 +1220,14 @@ export interface EventArchiveDraft {
  *    (Codex P2, PR #1139).
  *  - **Daily honours** come from `pinnedOrDerivedDailyHonors` — the write-once
  *    day-meta pin first, the roster-derived fallback for unpinned Days — over
- *    the ban-filtered roster, with the ban roster passed EXPLICITLY so a pin
- *    whose holder no longer has a Player row is KEPT rather than silently
- *    dropped (#1146, #1142 item 8). It is the same helper the live strip and the
- *    frozen podium read, so the record cannot name a different holder from the
- *    last live strip.
+ *    the FULL, RAW roster, like the headline above and for the same reason
+ *    (#1217): the selector applies the ban to its own output, so a Day whose
+ *    derived First to BINGO is banned goes UNHELD rather than passing to the
+ *    next-earliest Player. The ban roster is passed EXPLICITLY, so a pin whose
+ *    holder no longer has a Player row is KEPT rather than silently dropped
+ *    (#1146, #1142 item 8). It is the same helper the live strip and the frozen
+ *    podium read, so the record cannot name a different holder from the last
+ *    live strip.
  *
  * `freezeAt` is the resolved Standings Freeze (`resolvedStandingsFreezeAt`), so
  * the archived hall of fame cuts on the SAME instant as the live pin, the podium
@@ -1337,8 +1340,16 @@ export function draftEventArchive(params: {
   const identified = players.filter((p) => usableUid(p.uid)).map(withReadableDayStats);
   const skippedRows = players.length - identified.length;
 
-  const roster = identified.filter((p) => !isBanned(p.uid, bannedUids));
-  const ranked = sortPlayers([...roster]);
+  // RANKED FIRST, BAN-FILTERED SECOND (#1217). The two derivations below want
+  // different rosters and the same order: the standings want the filtered rows,
+  // because a rank is a row's place among the rows being shown, while the
+  // honour selections want the raw ones, because an honour names who WON and a
+  // ban can only hide it. Sorting the identified roster once and filtering the
+  // result gives both from a single comparator pass, and the filtered list is
+  // the same array `sortPlayers` over a pre-filtered roster produced — dropping
+  // rows from a sorted list cannot reorder what is left.
+  const rankedAll = sortPlayers([...identified]);
+  const ranked = rankedAll.filter((p) => !isBanned(p.uid, bannedUids));
 
   const winner = eventFirstBingoWinner(identified, isTutorialDay, freezeAt);
   const firstBingo =
@@ -1361,8 +1372,20 @@ export function draftEventArchive(params: {
   // THE HONOUR SELECTION, TAKEN ONCE SO WHAT IT DROPS CAN BE COUNTED (#1151,
   // Codex P2 on PR #1162). See `carriedHonors` for what the filter refuses and
   // why a discarded pin leaves the Day with no honour at all.
+  //
+  // OVER THE RAW RANKING, like the headline honour above and for the same
+  // reason (#1217). This passed `ranked` — the BAN-FILTERED list — and a
+  // ban-filtered input is indistinguishable from a roster the banned Player was
+  // never on, so the derived fallback picked the earliest bingo among whoever
+  // was left and froze that Day's honour on a Player who was never first. The
+  // pinned branch was already right (a pin carries its own name and is checked
+  // against `bannedUids` directly, #1146); only the fallback promoted. The
+  // selector applies the ban to its OUTPUT, so the Day now goes unheld — hidden,
+  // never reassigned (`specs/w2-ban-console.md` § Leaderboard). The live strip
+  // moved in the same change, because the record's promise is that it says what
+  // the last live strip said (#1151).
   const selectedHonors = pinnedOrDerivedDailyHonors(
-    ranked,
+    rankedAll,
     days,
     dayMetas,
     dayMetasLoaded,

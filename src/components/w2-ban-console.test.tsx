@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import type { EventDoc, ItemDoc, ProofDoc, PlayerDoc } from '../types';
+import type { DayDef, EventDoc, ItemDoc, ProofDoc, PlayerDoc } from '../types';
 
 // specs/w2-ban-console.md, component layer (RTL-jsdom). Two surfaces:
 //   1. Admin console — the Ban / Unban control (#108): each queue row can ban its
@@ -21,6 +21,10 @@ const H = vi.hoisted(() => ({
   flagged: [] as ProofDoc[],
   items: [] as ItemDoc[],
   players: [] as PlayerDoc[],
+  // The Leaderboard's day-meta PIN source (#264). Empty for every test but the
+  // honours-strip ones below, which need a pinned Day to tell the pinned branch
+  // of `pinnedOrDerivedDailyHonors` from its derived fallback.
+  dayMetas: new Map() as Map<number, { firstBingo: { uid: string; displayName: string; at: number } }>,
   banUser: vi.fn(),
   unbanUser: vi.fn(),
   // The rest of the admin writes are stubbed so the console renders; only ban/unban
@@ -74,7 +78,7 @@ vi.mock('../hooks/useData', async (importOriginal) => {
     usePendingClaims: () => ({ claims: H.claims }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: H.items, loading: false }),
-    useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
+    useDayMetasStatus: () => ({ metas: H.dayMetas, loaded: true }),
     useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: true }),
   };
 });
@@ -194,6 +198,7 @@ beforeEach(() => {
   H.flagged = [];
   H.items = [];
   H.players = [];
+  H.dayMetas = new Map();
 });
 
 describe('Admin ban control (specs/w2-ban-console.md)', () => {
@@ -330,5 +335,103 @@ describe('Leaderboard — presentational ban filter + first-bingo split (specs/w
 
     const row = screen.getByText('First Banned').closest('.row') as HTMLElement;
     expect(within(row).getByText(/First BINGO/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The DAILY honours strip (#1217)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Event-wide ⭐ above is one honour; each Day's own First to BINGO is
+ * another, and the same clause covers both — "hidden, never reassigned"
+ * (`specs/w2-ban-console.md` § Leaderboard). The PINNED branch was already
+ * right, because a day-meta pin carries its own name and instant and is checked
+ * against `bannedUids` explicitly (#1146). The DERIVED fallback was not: this
+ * component handed `pinnedOrDerivedDailyHonors` the ban-FILTERED `roster`, which
+ * is indistinguishable from a roster the banned Player was never on, so
+ * `perDayHonors` picked the earliest bingo among whoever was left and that Day's
+ * chip named a Player who never held it. The strip reads the RAW roster now,
+ * exactly as the ⭐ pin already did and for the reason the rule's own mechanism
+ * clause gives: hiding belongs on the OUTPUT, never on the roster going in
+ * (`specs/w2-leaderboard.md` § Design decisions).
+ */
+describe('Leaderboard honours strip — a banned DERIVED honoree vacates the Day (#1217)', () => {
+  const days: DayDef[] = [0, 1, 2].map(
+    (index) =>
+      ({
+        index,
+        date: `2026-07-1${index}`,
+        place: `Port ${index}`,
+        placeEmoji: '🏖️',
+        theme: 'neon-playground',
+        tonight: [],
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 0,
+      }) as DayDef,
+  );
+
+  const dayPlayer = (
+    uid: string,
+    displayName: string,
+    dayStats: PlayerDoc['dayStats'],
+  ): PlayerDoc => ({
+    uid,
+    displayName,
+    photoURL: null,
+    joinedAt: 1,
+    bingoCount: 1,
+    squaresMarked: 5,
+    firstBingoAt: null,
+    blackout: false,
+    reshufflesUsed: 0,
+    dayStats,
+  });
+
+  // `earliest` is Day 1's true First to BINGO; `later` bingoed on the same Day
+  // afterwards, and on Day 2 alone.
+  const earliest = dayPlayer('earliest', 'Earliest Eddy', {
+    1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 100 },
+  });
+  const later = dayPlayer('later', 'Later Lena', {
+    1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 900 },
+    2: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 950 },
+  });
+
+  const chipNames = (): Array<string | null | undefined> =>
+    Array.from(
+      within(screen.getByLabelText('Daily First to BINGO')).getAllByRole('listitem'),
+    ).map((li) => li.querySelector('.lb-honor-name')?.textContent);
+
+  it("leaves the Day's chip UNHELD when its derived holder is banned, and promotes nobody", () => {
+    H.players = [earliest, later];
+    H.event = { ...H.event, days, bannedUids: ['earliest'] } as EventDoc;
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+
+    // Day 1 shows the placeholder rather than `Later Lena`, who bingoed on that
+    // Day but not first. Day 2, which the ban does not touch, is unchanged.
+    expect(chipNames()).toEqual(['—', '—', 'Later Lena']);
+    expect(screen.queryByText('Earliest Eddy')).toBeNull();
+  });
+
+  it('baseline: with nobody banned, that same Day names its earliest bingo', () => {
+    // Proves the ban is what emptied the chip above, not a broken fixture.
+    H.players = [earliest, later];
+    H.event = { ...H.event, days, bannedUids: [] } as EventDoc;
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+
+    expect(chipNames()).toEqual(['—', 'Earliest Eddy', 'Later Lena']);
+  });
+
+  it('keeps an UNBANNED holder’s PINNED honour on a Day a banned Player also bingoed on', () => {
+    // Withholding must not spread. The pin names `later`, who is not banned, so
+    // Day 1 keeps its chip even though the banned Player bingoed on it earlier.
+    H.players = [earliest, later];
+    H.event = { ...H.event, days, bannedUids: ['earliest'] } as EventDoc;
+    H.dayMetas = new Map([[1, { firstBingo: { uid: 'later', displayName: 'Later Lena', at: 900 } }]]);
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+
+    expect(chipNames()).toEqual(['—', 'Later Lena', 'Later Lena']);
   });
 });
