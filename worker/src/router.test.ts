@@ -22,24 +22,42 @@ const CONFIG: RouterConfig = {
   version: 'test-1',
 };
 
-const SERVING: RegistryLookup = {
-  kind: 'committed',
-  schemaVersion: 1,
-  revision: '42',
-  desired: {
-    kind: 'route',
-    eventId: 'bodega-bay-2026',
-    status: 'active',
-    slug: 'bodega-bay',
-    edition: 'fiveacross',
-    pathNamespace: null,
-  },
-};
+/** The address the fail-closed tables below are driven against, named so the
+ *  envelopes they seed can be BOUND to it (#1133). */
+const HOST = 'bodega-bay.fiveacross.app';
+
+/**
+ * Every committed-derived envelope names the canonical host it was projected
+ * from, and the router compares it byte for byte before it reads anything else
+ * out of the record (#1133) — so a serving projection is built FOR an address
+ * rather than shared between two. The two Namespaces below share a first
+ * label, which is exactly the case the binding exists to tell apart, so
+ * seeding one envelope under both would now be seeding a cross-host defect.
+ */
+function servingAt(host: string, edition: 'fiveacross' | 'vacay' = 'fiveacross'): RegistryLookup {
+  return {
+    kind: 'committed',
+    schemaVersion: 1,
+    revision: '42',
+    host,
+    desired: {
+      kind: 'route',
+      eventId: 'bodega-bay-2026',
+      status: 'active',
+      slug: 'bodega-bay',
+      edition,
+      pathNamespace: null,
+    },
+  };
+}
+
+const SERVING = servingAt('bodega-bay.fiveacross.app');
 
 const APEX_ROOT: RegistryLookup = {
   kind: 'committed',
   schemaVersion: 1,
   revision: '5',
+  host: 'fiveacross.app',
   desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
 };
 
@@ -106,7 +124,7 @@ function htmlOrigin(init: ResponseInit = {}): Response {
 
 const servingSeed = {
   'bodega-bay.fiveacross.app': SERVING,
-  'bodega-bay.vacaybingo.com': SERVING,
+  'bodega-bay.vacaybingo.com': servingAt('bodega-bay.vacaybingo.com'),
 };
 
 function get(url: string, init?: RequestInit): Request {
@@ -259,7 +277,7 @@ describe('failing closed', () => {
       const { deps, requests, lookup } = harness({
         // Even a committed projection that names this host must not promote it:
         // the guard is decided before any registry work is created.
-        seed: { [`${label}.fiveacross.app`]: SERVING },
+        seed: { [`${label}.fiveacross.app`]: servingAt(`${label}.fiveacross.app`) },
       });
       const response = await handleRequest(get(`https://${label}.fiveacross.app/`), CONFIG, deps);
       expect(response.status).toBe(404);
@@ -294,7 +312,11 @@ describe('failing closed', () => {
   // while every refusal with no record to attribute publishes none.
   it.each([
     [{ kind: 'unknown-host' } as RegistryLookup, 'unknown-host', null],
-    [{ kind: 'unknown-host', schemaVersion: 1, revision: '9' } as RegistryLookup, 'unknown-host', '9'],
+    [
+      { kind: 'unknown-host', schemaVersion: 1, revision: '9', host: HOST } as RegistryLookup,
+      'unknown-host',
+      '9',
+    ],
     [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable', null],
     [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed', null],
     [
@@ -302,6 +324,7 @@ describe('failing closed', () => {
         kind: 'committed',
         schemaVersion: 1,
         revision: '3',
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -315,7 +338,13 @@ describe('failing closed', () => {
       '3',
     ],
     [
-      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '9',
+        host: HOST,
+        desired: { kind: 'tombstone' },
+      } as RegistryLookup,
       'unknown-host',
       '9',
     ],
@@ -324,6 +353,7 @@ describe('failing closed', () => {
         kind: 'committed',
         schemaVersion: 1,
         revision: '3',
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -334,6 +364,27 @@ describe('failing closed', () => {
         },
       } as RegistryLookup,
       'slug-mismatch',
+      null,
+    ],
+    // The record is a sibling Namespace's, not this address's, whatever its
+    // first label says (#1133). It is refused before its status or revision
+    // is read, so it publishes neither.
+    [
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '3',
+        host: 'bodega-bay.vacaybingo.com',
+        desired: {
+          kind: 'route',
+          eventId: 'e',
+          status: 'disabled',
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+      } as RegistryLookup,
+      'replica-malformed',
       null,
     ],
     // A projection committed under a schema version this router build cannot
@@ -347,6 +398,7 @@ describe('failing closed', () => {
         kind: 'committed',
         schemaVersion: 2,
         revision: '3',
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -360,7 +412,7 @@ describe('failing closed', () => {
       null,
     ],
     [
-      { kind: 'unknown-host', schemaVersion: 2, revision: '9' } as RegistryLookup,
+      { kind: 'unknown-host', schemaVersion: 2, revision: '9', host: HOST } as RegistryLookup,
       'replica-malformed',
       null,
     ],
@@ -457,7 +509,13 @@ describe('the path-capability projection', () => {
     [{ kind: 'unavailable' } as RegistryLookup, 'lookup-unavailable'],
     [{ kind: 'malformed' } as RegistryLookup, 'replica-malformed'],
     [
-      { kind: 'committed', schemaVersion: 1, revision: '9', desired: { kind: 'tombstone' } } as RegistryLookup,
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '9',
+        host: HOST,
+        desired: { kind: 'tombstone' },
+      } as RegistryLookup,
       'unknown-host',
     ],
     [
@@ -465,6 +523,7 @@ describe('the path-capability projection', () => {
         kind: 'committed',
         schemaVersion: 1,
         revision: '3',
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -483,6 +542,7 @@ describe('the path-capability projection', () => {
         kind: 'committed',
         schemaVersion: 2,
         revision: '3',
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -537,19 +597,12 @@ describe('the path-capability projection', () => {
 });
 
 describe('the per-hostname PWA manifest (#546)', () => {
-  const VACAY: RegistryLookup = {
-    kind: 'committed',
-    schemaVersion: 1,
-    revision: '42',
-    desired: {
-      kind: 'route',
-      eventId: 'bodega-bay-2026',
-      status: 'active',
-      slug: 'bodega-bay',
-      edition: 'vacay',
-      pathNamespace: null,
-    },
-  };
+  // One Event, reached on either of its registered hosts. Each host's
+  // envelope is bound to THAT host (#1133) — the point of the pair below is
+  // that the same Event serves its own Edition at both addresses, not that
+  // one address's record may answer for the other.
+  const vacayAt = (host: string): RegistryLookup => servingAt(host, 'vacay');
+  const VACAY = vacayAt('bodega-bay.vacaybingo.com');
   const manifestUrl = (host: string) => `https://${host}${WEB_MANIFEST_PATH}`;
 
   it('answers from the resolved Edition rather than proxying to the origin', async () => {
@@ -580,7 +633,10 @@ describe('the per-hostname PWA manifest (#546)', () => {
 
   it('answers the same committed projection on either Namespace', async () => {
     const { deps } = harness({
-      seed: { 'bodega-bay.fiveacross.app': VACAY, 'bodega-bay.vacaybingo.com': VACAY },
+      seed: {
+        'bodega-bay.fiveacross.app': vacayAt('bodega-bay.fiveacross.app'),
+        'bodega-bay.vacaybingo.com': VACAY,
+      },
     });
     const canonical = await handleRequest(get(manifestUrl('bodega-bay.fiveacross.app')), CONFIG, deps);
     const alternate = await handleRequest(get(manifestUrl('bodega-bay.vacaybingo.com')), CONFIG, deps);
@@ -608,6 +664,7 @@ describe('the per-hostname PWA manifest (#546)', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '42',
+      host: HOST,
       desired: {
         kind: 'route',
         eventId: 'bodega-bay-2026',
@@ -635,7 +692,7 @@ describe('the per-hostname PWA manifest (#546)', () => {
     ['bodega-bay.example.com', 'out-of-namespace'],
     ['ab.fiveacross.app', 'invalid-slug:too-short'],
   ] as const)('fails closed at %s with reason %s', async (host, reason) => {
-    const { deps, requests } = harness({ seed: { 'admin.fiveacross.app': VACAY } });
+    const { deps, requests } = harness({ seed: { 'admin.fiveacross.app': vacayAt('admin.fiveacross.app') } });
     const response = await handleRequest(get(manifestUrl(host)), CONFIG, deps);
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe(reason);
@@ -648,6 +705,7 @@ describe('the per-hostname PWA manifest (#546)', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '42',
+      host: HOST,
       desired: {
         kind: 'route',
         eventId: 'bodega-bay-2026',
@@ -729,22 +787,14 @@ describe('the per-hostname PWA manifest (#546)', () => {
 });
 
 describe('the per-hostname HTML head rewrite (#1118)', () => {
-  const VACAY: RegistryLookup = {
-    kind: 'committed',
-    schemaVersion: 1,
-    revision: '42',
-    desired: {
-      kind: 'route',
-      eventId: 'bodega-bay-2026',
-      status: 'active',
-      slug: 'bodega-bay',
-      edition: 'vacay',
-      pathNamespace: null,
-    },
-  };
+  // Same binding the PWA-manifest suite above already applies (#1133): each
+  // Namespace gets its OWN committed envelope naming that host, rather than
+  // one envelope reused across both, which the mandatory host key on
+  // `RegistryLookup` now catches as replica-malformed.
+  const vacayAt = (host: string): RegistryLookup => servingAt(host, 'vacay');
   const vacaySeed = {
-    'bodega-bay.fiveacross.app': VACAY,
-    'bodega-bay.vacaybingo.com': VACAY,
+    'bodega-bay.fiveacross.app': vacayAt('bodega-bay.fiveacross.app'),
+    'bodega-bay.vacaybingo.com': vacayAt('bodega-bay.vacaybingo.com'),
   };
 
   /** What an edit list says for one selector, so an assertion can name the tag
@@ -822,7 +872,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
 
   it('gives two Editions two different chrome colours, so the equality is not vacuous', async () => {
     const { deps, rewrites } = harness({
-      seed: { 'bodega-bay.fiveacross.app': VACAY, 'fiveacross.app': APEX_ROOT },
+      seed: { 'bodega-bay.fiveacross.app': vacayAt('bodega-bay.fiveacross.app'), 'fiveacross.app': APEX_ROOT },
       originFor: () => htmlOrigin(),
     });
     await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
@@ -1439,7 +1489,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
     // namespace guard and after resolution, so an address that does not serve
     // an app does not get an app's identity written into anything.
     const { deps, requests, rewrites } = harness({
-      seed: { 'admin.fiveacross.app': VACAY },
+      seed: { 'admin.fiveacross.app': vacayAt('admin.fiveacross.app') },
       originFor: () => htmlOrigin(),
     });
     const response = await handleRequest(get(`https://${host}/`), CONFIG, deps);
@@ -1454,6 +1504,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '42',
+      host: 'bodega-bay.fiveacross.app',
       desired: {
         kind: 'route',
         eventId: 'bodega-bay-2026',

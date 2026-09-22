@@ -49,8 +49,9 @@ export type NotFoundReason =
   | 'unknown-host'
   /** A committed route whose `status` is not `active` — disabled or archived. */
   | 'inactive'
-  /** The registry answered, and its committed projection is malformed or
-   *  carries a shape this router does not support. Distinguished from
+  /** The registry answered, and its committed projection is malformed, carries
+   *  a shape this router does not support, or is bound to a different
+   *  canonical hostname than the one looked up. Distinguished from
    *  `lookup-unavailable` because it alerts and will not heal on a retry. */
   | 'replica-malformed'
   /** A committed route whose denormalised `slug` names a different first label
@@ -195,15 +196,15 @@ function notFound(reason: NotFoundReason, revision: string | null = null): Resol
  * never actually agreed with. `parseDesired` refuses contradictory shapes on
  * the way in; a separately deployed consumer has to refuse them on the way out.
  *
- * `revision` and `schemaVersion` are optional on the `unknown-host` arm, so it
- * is expressed as the keys ALLOWED rather than the keys required; the pairing
- * rule below is what makes the optional pair coherent.
+ * `revision`, `schemaVersion` and `host` are optional on the `unknown-host`
+ * arm, so it is expressed as the keys ALLOWED rather than the keys required;
+ * the pairing rule below is what makes the optional trio coherent.
  */
 const ENVELOPE_KEYS: Record<string, readonly string[]> = {
-  'unknown-host': ['kind', 'revision', 'schemaVersion'],
+  'unknown-host': ['host', 'kind', 'revision', 'schemaVersion'],
   unavailable: ['kind'],
   malformed: ['kind'],
-  committed: ['desired', 'kind', 'revision', 'schemaVersion'],
+  committed: ['desired', 'host', 'kind', 'revision', 'schemaVersion'],
 };
 
 function hasExactEnvelopeKeys(lookup: RegistryLookup): boolean {
@@ -225,6 +226,29 @@ function hasExactEnvelopeKeys(lookup: RegistryLookup): boolean {
   const allowed = ENVELOPE_KEYS[kind];
   const actual = Object.keys(lookup);
   return actual.every((key) => allowed.includes(key));
+}
+
+/**
+ * Whether an envelope that NAMES a canonical host names this one, compared
+ * byte for byte (#1133).
+ *
+ * The comparison is `===` against the host the lookup was made for, with no
+ * normalisation, no case folding and no trailing-dot tolerance, because both
+ * sides are already canonical: the registry stores `hostnameKey(host)` as the
+ * committed payload's `host` and as the object's own document ID, and
+ * `RegistryLookupEntrypoint` refuses a raw host that does not equal its own
+ * normalisation before it ever reaches an object. Anything this comparison
+ * would have had to normalise is therefore a defect on one side or the other,
+ * and normalising it here would be this module quietly repairing a projection
+ * it cannot vouch for — the coercion the whole boundary revalidation exists to
+ * refuse.
+ *
+ * Presence is a separate question from equality, and the two arms answer it
+ * differently: a committed projection must always name its host, while an
+ * uninitialized object has no committed record to name one from.
+ */
+function namesCanonicalHost(lookup: RegistryLookup, host: string): boolean {
+  return (lookup as { host?: unknown }).host === host;
 }
 
 /**
@@ -355,6 +379,13 @@ export async function resolveHost(
  * host that has none — accepted at exactly the boundary the revalidation exists
  * to survive. Anything that does not conform is `replica-malformed`, never
  * coerced data.
+ *
+ * "Against the host" now means the WHOLE host and not only its host class:
+ * every committed-derived envelope names the canonical hostname it was
+ * projected from, and that name must equal the requested one byte for byte
+ * before any arm is entered (#1133). The denormalised `slug` cross-check that
+ * used to be the only address test compares a single label, which two sibling
+ * Namespaces share.
  */
 export function decide(host: string, lookup: RegistryLookup, expectedSlug: string | null): Resolution {
   // The ENVELOPE is checked before its discriminant is read, and the order is
@@ -377,24 +408,47 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
   // only the fields they happen to look at.
   if (!hasExactEnvelopeKeys(lookup)) return notFound('replica-malformed');
 
+  // THE ADDRESS THE RECORD BELONGS TO, before the discriminant selects an arm
+  // and therefore before any status, Edition, root marker or revision is read
+  // out of it (#1133).
+  //
+  // Until now the only cross-check between a committed record and the address
+  // it came back for was the denormalised `slug`, which is the host's FIRST
+  // LABEL — shared by `bodega-bay.fiveacross.app` and
+  // `bodega-bay.vacaybingo.com`. A registry that answered a lookup of one with
+  // the other's projection would pass that check, and the router would then
+  // serve a sibling host's status and Edition, or publish its revision as this
+  // address's recovery evidence. Slug equality is not address equality, and the
+  // registry is a separately deployed Worker: the router cannot assume the
+  // envelope it gets back was fetched for the host it asked about.
+  //
+  // So every envelope that names a canonical host must name THIS one. Whether
+  // an arm is REQUIRED to name one is decided below, where the arm knows
+  // whether it is derived from a committed record.
+  if (Object.hasOwn(lookup, 'host') && !namesCanonicalHost(lookup, host)) {
+    return notFound('replica-malformed');
+  }
+
   switch (lookup.kind) {
     case 'unknown-host': {
-      // `revision` and `schemaVersion` travel TOGETHER on this arm, and are
-      // therefore judged together. Both are stamped from a committed record —
-      // the tombstone that reads as unknown from outside while keeping the
-      // revision the recovery machine's canonical probe has to observe — and
-      // both are absent when there is no committed record at all. ONLY that
-      // second case is the ordinary unknown address.
+      // `revision`, `schemaVersion` and `host` travel TOGETHER on this arm,
+      // and are therefore judged together. All three are stamped from a
+      // committed record — the tombstone that reads as unknown from outside
+      // while keeping the revision the recovery machine's canonical probe has
+      // to observe — and all three are absent when there is no committed
+      // record at all. ONLY that second case is the ordinary unknown address.
       //
-      // Either half arriving alone is a half-written envelope: something
-      // committed existed to stamp one of them, and the other did not survive
-      // the crossing. Reading "no record here" off it would infer an absence
+      // Any one of them arriving alone is a half-written envelope: something
+      // committed existed to stamp it, and the rest did not survive the
+      // crossing. Reading "no record here" off it would infer an absence
       // from a defect, which is the one coercion this module refuses
       // everywhere else — and it would let an unsupported-version tombstone
       // that lost its revision pass as an ordinary unknown host instead of
       // raising the `replica-malformed` alert that the state actually needs,
       // leaving that host unable to produce the revision-bearing evidence
-      // `clear-lock` consumes.
+      // `clear-lock` consumes. A registry too old to stamp `host` therefore
+      // fails closed here rather than having its tombstone revision accepted
+      // unbound (#1133).
       //
       // Past that pairing, the version gates the revision for the same reason
       // it gates a projection: publishing a revision read out of a record
@@ -404,16 +458,20 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       // same way one on a committed projection is — the shape rule is the
       // projection's, not the arm's.
       // Absence is judged by OWN-KEY presence, not by value: the contract says
-      // an uninitialized object carries neither field, and the service binding
-      // carries `undefined` values intact where JSON would drop them. An
-      // envelope that names either key with an `undefined` value is a
-      // version-skewed or half-written tombstone, not an ordinary unknown
-      // address, and it falls through to the shape rules below, which refuse
-      // it (Codex P2 on #1120).
+      // an uninitialized object carries none of the three fields, and the
+      // service binding carries `undefined` values intact where JSON would
+      // drop them. An envelope that names any of those keys with an
+      // `undefined` value is a version-skewed or half-written tombstone, not
+      // an ordinary unknown address, and it falls through to the shape rules
+      // below, which refuse it (Codex P2 on #1120). A named-but-undefined
+      // `host` is already refused by the binding check above, for which
+      // `undefined` is simply not this address.
       const { revision, schemaVersion } = lookup;
       const namesRevision = Object.hasOwn(lookup, 'revision');
       const namesSchemaVersion = Object.hasOwn(lookup, 'schemaVersion');
-      if (!namesRevision && !namesSchemaVersion) return notFound('unknown-host');
+      const namesHost = Object.hasOwn(lookup, 'host');
+      if (!namesRevision && !namesSchemaVersion && !namesHost) return notFound('unknown-host');
+      if (!namesHost) return notFound('replica-malformed');
       if (!isSupportedProjectionSchemaVersion(schemaVersion)) return notFound('replica-malformed');
       if (!isCanonicalRevision(revision)) return notFound('replica-malformed');
       return notFound('unknown-host', revision);
@@ -430,10 +488,21 @@ export function decide(host: string, lookup: RegistryLookup, expectedSlug: strin
       return notFound('replica-malformed');
   }
 
-  // THE VERSION FIRST, then everything the record says. `desired` is read
-  // under the rules of a particular schema, so a version this build does not
-  // understand has to be refused before any field of it is interpreted — that
-  // ordering is the fail-closed half of the contract, not a stylistic choice.
+  // THE ADDRESS FIRST, then the version, then everything the record says.
+  //
+  // Equality was already enforced at the envelope level; what is left is that
+  // a committed projection may not DECLINE to name its address. An envelope
+  // from a registry too old to stamp one therefore fails closed rather than
+  // being read under the pre-#1133 rules, which is the point of pinning the
+  // field: a projection whose binding cannot be checked is exactly as
+  // unusable as one whose binding is wrong, and the two must not be told
+  // apart by which registry build happened to answer.
+  if (!Object.hasOwn(lookup, 'host')) return notFound('replica-malformed');
+
+  // `desired` is read under the rules of a particular schema, so a version
+  // this build does not understand has to be refused before any field of it is
+  // interpreted — that ordering is the fail-closed half of the contract, not a
+  // stylistic choice.
   if (!isSupportedProjectionSchemaVersion(lookup.schemaVersion)) return notFound('replica-malformed');
   if (!isCanonicalRevision(lookup.revision)) return notFound('replica-malformed');
   const revision = lookup.revision;

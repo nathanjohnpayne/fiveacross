@@ -112,12 +112,14 @@ describe('per-host contiguous publisher state', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '1',
+      host: HOST,
       desired: desired('1').desired,
     });
     expect(registryLookup(locked(first.state))).toEqual({
       kind: 'committed',
       schemaVersion: 1,
       revision: '1',
+      host: HOST,
       desired: desired('1').desired,
     });
     expect(registryLookup(initialRegistryState())).toEqual({
@@ -144,6 +146,7 @@ describe('per-host contiguous publisher state', () => {
       kind: 'unknown-host',
       revision: '2',
       schemaVersion: 1,
+      host: HOST,
     });
   });
 
@@ -188,6 +191,7 @@ describe('per-host contiguous publisher state', () => {
         kind: 'committed',
         schemaVersion: 1,
         revision: '1',
+        host,
         desired: shape,
       });
     }
@@ -201,10 +205,46 @@ describe('per-host contiguous publisher state', () => {
       kind: 'unknown-host',
       revision: '1',
       schemaVersion: 1,
+      host: HOST,
     });
 
     // An uninitialized object has no committed record, so it stamps no version
     // and the router reads the same plain `unknown-host` it always did.
     expect(registryLookup(initialRegistryState())).toEqual({ kind: 'unknown-host' });
+  });
+
+  it('binds every committed-derived envelope to the canonical host it was projected from', async () => {
+    // #1133. The envelope used to carry the record's status, Edition and
+    // revision but not the hostname the record belongs to, so the only
+    // address cross-check the router could make was against the shared first
+    // LABEL — and `bodega-bay.fiveacross.app` and `bodega-bay.vacaybingo.com`
+    // share theirs. Stamping the canonical host on every committed-derived
+    // arm is what lets `worker/src/resolve.ts` compare the whole address
+    // instead, so this pins the field on the projection function rather than
+    // leaving it to the consumer's expectations.
+    //
+    // The value is the committed payload's own `host` — `hostnameKey(host)`,
+    // identical to the object's document ID — never a value derived at
+    // lookup time from the caller's argument, which would make the binding
+    // agree with whatever it was asked about and check nothing at all.
+    const sibling = 'r2-abcdefghijklmnopqrstuvwxyz.vacaybingo.com';
+    const applied = await applyPublisherSync(
+      initialRegistryState(),
+      { ...desired('1'), host: sibling },
+      '1',
+    );
+    expect(applied.response).toEqual({ status: 200, result: 'applied' });
+    expect(registryLookup(applied.state)).toMatchObject({ kind: 'committed', host: sibling });
+
+    const tombstoned = await applyPublisherSync(
+      initialRegistryState(),
+      { ...desired('1'), host: sibling, desired: { kind: 'tombstone' } },
+      '1',
+    );
+    expect(registryLookup(tombstoned.state)).toMatchObject({ kind: 'unknown-host', host: sibling });
+
+    // An uninitialized object was projected from nothing, so it names no host
+    // either — the absence the router reads as the ordinary unknown address.
+    expect(registryLookup(initialRegistryState())).not.toHaveProperty('host');
   });
 });

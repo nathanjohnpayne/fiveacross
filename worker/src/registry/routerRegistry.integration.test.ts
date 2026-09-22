@@ -272,15 +272,19 @@ describe('the router’s registry binding, on the platform rather than on a stub
     }
   });
 
-  it('hands the committed record’s schema version across the binding, on every committed arm', async () => {
+  it('hands the committed record’s schema version and canonical host across the binding, on every committed arm', async () => {
     // The envelope is the contract between two SEPARATELY DEPLOYED Workers, so
     // its shape is pinned here — over the real service binding, off the real
-    // Durable Object — rather than only against the projection function. What
-    // must survive the crossing is `schemaVersion`: without it an additive v2
-    // whose `desired` kept today's discriminants would reach the router looking
-    // exactly like a v1 route, and `worker/src/resolve.ts` could not return the
-    // `replica-malformed` that `specs/event-router-registry.md` § Failure
-    // semantics requires for unsupported committed state.
+    // Durable Object — rather than only against the projection function. Two
+    // things must survive the crossing. `schemaVersion`: without it an
+    // additive v2 whose `desired` kept today's discriminants would reach the
+    // router looking exactly like a v1 route, and `worker/src/resolve.ts`
+    // could not return the `replica-malformed` that
+    // `specs/event-router-registry.md` § Failure semantics requires for
+    // unsupported committed state. And `host` (#1133): without it the only
+    // address cross-check left is the shared first LABEL, so a sibling
+    // Namespace's projection for the same slug would be read as this
+    // address's.
     const instance = miniflare();
     const probe = await instance.getWorker('probe');
     const envelope = async (host: string): Promise<unknown> =>
@@ -312,6 +316,7 @@ describe('the router’s registry binding, on the platform rather than on a stub
         kind: 'committed',
         schemaVersion: 1,
         revision: '1',
+        host,
         desired: {
           kind: 'route',
           eventId: `${host.split('.')[0]}-event`,
@@ -327,6 +332,7 @@ describe('the router’s registry binding, on the platform rather than on a stub
       kind: 'committed',
       schemaVersion: 1,
       revision: '1',
+      host: ROOT_TEST_HOST,
       desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null },
     });
 
@@ -338,6 +344,7 @@ describe('the router’s registry binding, on the platform rather than on a stub
       kind: 'unknown-host',
       revision: '1',
       schemaVersion: 1,
+      host: TOMBSTONE_HOST,
     });
     await expect(envelope(UNKNOWN_HOST)).resolves.toEqual({ kind: 'unknown-host' });
   }, 30_000);

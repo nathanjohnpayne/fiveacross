@@ -56,16 +56,20 @@ const boundIndexHtml = () =>
  *  The router binds to this class by name exactly as it binds to the real one. */
 const registryStub = `
 import { WorkerEntrypoint } from 'cloudflare:workers';
-const route = (slug, edition) => ({
+// Every committed envelope names the host it was projected for (#1133), so a
+// table entry is built FOR its own key rather than shared between two — the
+// same binding router.test.ts's \`servingAt\` helper applies.
+const route = (host, slug, edition) => ({
   kind: 'committed',
   schemaVersion: 1,
   revision: '42',
+  host,
   desired: { kind: 'route', eventId: slug + '-event', status: 'active', slug, edition, pathNamespace: null },
 });
 const TABLE = {
-  '${VACAY_CANONICAL}': route('bodega-bay', 'vacay'),
-  '${VACAY_ALTERNATE}': route('bodega-bay', 'vacay'),
-  '${GCB_HOST}': route('med-2026', 'gcb'),
+  '${VACAY_CANONICAL}': route('${VACAY_CANONICAL}', 'bodega-bay', 'vacay'),
+  '${VACAY_ALTERNATE}': route('${VACAY_ALTERNATE}', 'bodega-bay', 'vacay'),
+  '${GCB_HOST}': route('${GCB_HOST}', 'med-2026', 'gcb'),
 };
 export class RegistryLookupEntrypoint extends WorkerEntrypoint {
   async lookup(host) {
