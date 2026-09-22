@@ -143,7 +143,7 @@ describe('recon: storage.rules drops the inert /og/** block', () => {
 describe('recon: bare-URL unfurl keeps working with no server', () => {
   // #587 Edition-scoped the static OG meta: the concrete gcb values this guard
   // used to pin are now `%EDITION_…%` placeholders substituted at build time
-  // (src/editions.ts, brandHtmlIdentity), and the per-Edition VALUES are pinned
+  // (src/html-head-identity.ts, brandHtmlIdentity), and the per-Edition VALUES are pinned
   // by src/editions.test.ts against the brand table. What stays recon-guarded
   // here is ADR 0005's property itself: a static meta block plus static images,
   // no server.
