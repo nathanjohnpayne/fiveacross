@@ -82,6 +82,11 @@ const BRANDS: Record<EditionId, EditionBrand> = {
     appName: 'Gay Cruise Bingo',
     appShortName: 'Gay Bingo',
     appDescription: 'Live multiplayer bingo for the high seas.',
+    // Neon Playground's `--bg` (`src/theme/themes.css`), this Edition's
+    // default Theme — and verbatim the Edition-invariant colour every
+    // manifest carried before #1118, so a gcb install's chrome and splash are
+    // byte-identical to what shipped.
+    chromeColor: '#07060d',
     // Verbatim the share block index.html hardcoded before #587: the flagship
     // unfurl's wording does not change, only its delivery. The artwork DID
     // change — og-gcb.png is the #609 render (1200×630), superseding the
@@ -155,10 +160,16 @@ const BRANDS: Record<EditionId, EditionBrand> = {
     appName: 'Vacay Bingo',
     appShortName: 'Vacay Bingo',
     appDescription: 'Live multiplayer bingo for the trip.',
+    // 🐦 The Birds' `--bg`, this Edition's default Theme. Same rule as gcb's
+    // row above: the chrome colour a player's browser paints is the one the
+    // app itself opens in, rather than a fourth near-black picked by hand.
+    chromeColor: '#0b0f0e',
     metaDescription: 'Live multiplayer bingo for the trip.',
     // The Event canonical host, not either Vacay alias: og:url is the one tag
-    // whose per-Event truth the edge HTML rewrite will own (#1118) — see the
-    // field note on `EditionBrand.ogUrl`.
+    // whose per-Event truth the edge HTML rewrite owns (#1118), which replaces
+    // this value with the requested hostname's own origin on any host the
+    // Worker fronts — see the field note on `EditionBrand.ogUrl`. This row is
+    // still what a direct-Hosting response and every other build carry.
     ogUrl: 'https://bodega-bay.fiveacross.app/',
     // Served by the fiveacross project (ADR 0008), which hosts every Five
     // Across Edition — vacaybingo.com hostnames included.
@@ -229,6 +240,9 @@ const BRANDS: Record<EditionId, EditionBrand> = {
     appName: 'Five Across',
     appShortName: 'Five Across',
     appDescription: 'Live multiplayer bingo for your group.',
+    // ✨ Marquee's `--bg`, this Edition's default Theme — same rule as the two
+    // rows above.
+    chromeColor: '#120d08',
     metaDescription: 'Live multiplayer bingo for your group.',
     ogUrl: 'https://fiveacross.app/',
     ogImage: 'https://fiveacross.web.app/og-fiveacross.png',
