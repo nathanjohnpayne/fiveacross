@@ -91,7 +91,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { confirmClaim, hideProof, rejectClaim, restoreProof } from './admin';
+import { confirmClaim, hideProof, rejectClaim, restoreProof, RESTORE_CLAIM_LOOKUP_LIMIT } from './admin';
 import { safetyHideStands } from './moderation';
 import { attachProof } from './proofs';
 
@@ -579,7 +579,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
   });
 
-  it("asks for the OWNER's PENDING claims, bounded — all three equalities, then the cap", async () => {
+  it("asks for the OWNER's PENDING claims, bounded — all three equalities, then the cap plus one", async () => {
     // Three equality filters and a limit. Equality-only conjunctions are served
     // by merging the single-field indexes Firestore maintains by default, so this
     // needs no composite index (firestore.indexes.json is untouched).
@@ -592,7 +592,11 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
       { field: 'proofId', op: '==', value: 'P' },
       { field: 'uid', op: '==', value: 'u1' },
       { field: 'status', op: '==', value: 'pending' },
-      { __kind: 'limit', count: 25 },
+      // One MORE row than the cap: the overflow sentinel (Codex P2 on #1237).
+      // The extra document is never a candidate — it is fetched so that a page
+      // longer than the cap can be recognised as a TRUNCATION of the owner's
+      // pending claims rather than all of them.
+      { __kind: 'limit', count: RESTORE_CLAIM_LOOKUP_LIMIT + 1 },
     ]);
   });
 
@@ -649,6 +653,111 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
       'events/med-2026/proofs/P',
       'events/med-2026/claims/claim-z',
     ]);
+  });
+
+  // --- the lookup cap and its overflow sentinel (#1144 item 5) --------------
+  //
+  // Twenty-five was sized for the `proofId`-only lookup, where the page was a
+  // contested resource — any signed-in user could mint claims naming someone
+  // else's Proof, so the cap had to outlast a crowd of them. The `uid` and
+  // `status` filters moved both exclusions into the query, so the page now holds
+  // nothing but the owner's own pending claims about this Proof, of which
+  // exactly one is legitimate. What is left is a read-budget bound — and a bound
+  // that silently truncates is a bound that can be mistaken for a complete
+  // answer, which is what the extra row the query asks for exists to prevent.
+  // These cases pin the boundary from both sides.
+
+  it('caps the owner-scoped lookup at a small, defensible page', async () => {
+    // The number itself is the decision: it bounds the transaction's read
+    // fan-out. It stays above one so the conservative arm below is reserved for
+    // a page that really is pathological — at a cap of one, an owner with two
+    // claims in flight would trip the sentinel and never see their Proof
+    // published by Restore. Pinned so changing it is a deliberate edit.
+    expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBe(5);
+    expect(RESTORE_CLAIM_LOOKUP_LIMIT).toBeGreaterThan(1);
+  });
+
+  it("reads every one of the owner's pending claims AT the cap", async () => {
+    // The boundary from below: a page exactly full is not a truncated page — the
+    // sentinel row does not come back — so nothing is dropped here and every
+    // candidate still reaches the live in-transaction re-read that decides the
+    // restore.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => ({
+      id: `own-${i}`,
+      live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => `events/med-2026/claims/own-${i}`),
+    ]);
+  });
+
+  it('still publishes when a WHOLE page resolves in the gap — the sentinel is not a blanket hold', async () => {
+    // The control for the case below, and the reason the conservative arm is
+    // tied to TRUNCATION rather than to a full page. Exactly the cap comes back,
+    // so there is no row the lookup dropped; all of them re-read as resolved
+    // inside the transaction, nothing is left undecided, and the Proof publishes
+    // exactly as it did before the sentinel existed.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => ({
+      id: `own-${i}`,
+      snapshot: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+      live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it('does NOT publish when the fetched page resolves in the gap and a DROPPED claim is still pending', async () => {
+    // Codex P2 on #1237, exactly as reported. The owner holds six pending claims
+    // for one Proof — the claim-create rule binds `uid` to the caller and
+    // nothing else, so it permits that — and all five the bounded page fetched
+    // are resolved between the out-of-transaction lookup and the transactional
+    // re-read. Before the sentinel, every fetched candidate re-read as resolved,
+    // `claimUndecided` stayed false, and Restore published a Proof whose sixth
+    // claim nobody had judged; shrinking the cap only made the window smaller,
+    // from twenty-six claims to six. The sentinel row makes the truncation
+    // visible, so the restore takes the conservative destination instead — back
+    // to the claim queue, where Confirm can still publish it, rather than
+    // straight into every Player's Feed.
+    claimsForProof = [
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => ({
+        id: `own-${i}`,
+        snapshot: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+        live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+      })),
+      // The sixth: never fetched as a candidate, still pending throughout.
+      { id: 'own-unread', live: { status: 'pending' as const, proofId: 'P', uid: 'u1' } },
+    ];
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+  });
+
+  it('settles a TRUNCATED page on the sentinel alone, without spending a read on the rows it kept', async () => {
+    // The boundary from above. Six of the owner's pending claims, so the query's
+    // cap-plus-one page comes back longer than the cap and the truncation is
+    // visible. The destination is `'pending'` — where any one of the six would
+    // have sent it anyway — and it is fixed before a single claim is re-read,
+    // because no re-read of the rows the page KEPT can say anything about the
+    // row it dropped. So the transaction spends its reads on the Proof alone,
+    // which is a smaller in-transaction fan-out than the untruncated case above,
+    // not a larger one.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
+      id: `own-${i}`,
+      live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await restoreProof('P');
+
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual(['events/med-2026/proofs/P']);
   });
 
   it('scopes the lookup with the owner from a plain read, not a transactional one', async () => {
