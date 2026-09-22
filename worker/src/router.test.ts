@@ -787,22 +787,14 @@ describe('the per-hostname PWA manifest (#546)', () => {
 });
 
 describe('the per-hostname HTML head rewrite (#1118)', () => {
-  const VACAY: RegistryLookup = {
-    kind: 'committed',
-    schemaVersion: 1,
-    revision: '42',
-    desired: {
-      kind: 'route',
-      eventId: 'bodega-bay-2026',
-      status: 'active',
-      slug: 'bodega-bay',
-      edition: 'vacay',
-      pathNamespace: null,
-    },
-  };
+  // Same binding the PWA-manifest suite above already applies (#1133): each
+  // Namespace gets its OWN committed envelope naming that host, rather than
+  // one envelope reused across both, which the mandatory host key on
+  // `RegistryLookup` now catches as replica-malformed.
+  const vacayAt = (host: string): RegistryLookup => servingAt(host, 'vacay');
   const vacaySeed = {
-    'bodega-bay.fiveacross.app': VACAY,
-    'bodega-bay.vacaybingo.com': VACAY,
+    'bodega-bay.fiveacross.app': vacayAt('bodega-bay.fiveacross.app'),
+    'bodega-bay.vacaybingo.com': vacayAt('bodega-bay.vacaybingo.com'),
   };
 
   /** What an edit list says for one selector, so an assertion can name the tag
@@ -880,7 +872,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
 
   it('gives two Editions two different chrome colours, so the equality is not vacuous', async () => {
     const { deps, rewrites } = harness({
-      seed: { 'bodega-bay.fiveacross.app': VACAY, 'fiveacross.app': APEX_ROOT },
+      seed: { 'bodega-bay.fiveacross.app': vacayAt('bodega-bay.fiveacross.app'), 'fiveacross.app': APEX_ROOT },
       originFor: () => htmlOrigin(),
     });
     await handleRequest(get('https://bodega-bay.fiveacross.app/'), CONFIG, deps);
@@ -1497,7 +1489,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
     // namespace guard and after resolution, so an address that does not serve
     // an app does not get an app's identity written into anything.
     const { deps, requests, rewrites } = harness({
-      seed: { 'admin.fiveacross.app': VACAY },
+      seed: { 'admin.fiveacross.app': vacayAt('admin.fiveacross.app') },
       originFor: () => htmlOrigin(),
     });
     const response = await handleRequest(get(`https://${host}/`), CONFIG, deps);
@@ -1512,6 +1504,7 @@ describe('the per-hostname HTML head rewrite (#1118)', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '42',
+      host: 'bodega-bay.fiveacross.app',
       desired: {
         kind: 'route',
         eventId: 'bodega-bay-2026',
