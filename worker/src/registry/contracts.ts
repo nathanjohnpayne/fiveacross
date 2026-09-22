@@ -63,8 +63,71 @@ const ROOT_KEYS = ['edition', 'kind', 'pathNamespace', 'root'];
 const TOMBSTONE_KEYS = ['kind'];
 const EDITIONS = new Set<RegistryEdition>(['gcb', 'vacay', 'fiveacross']);
 const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
-const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const RFC_3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
+
+/**
+ * Whether an RFC 3339 match names a calendar instant that exists, judged on
+ * the components AS WRITTEN. The shape alone is not enough, and neither is a
+ * finite `Date.parse`: V8 ROLLS an impossible day forward rather than refusing
+ * it, so `2026-02-30T12:00:00Z` parses to March 2 and would be stored as a
+ * date the source never wrote. The source and the publisher refuse it for the
+ * same reason (`normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs` and
+ * `replicaPayloadFromEvent` in `router-publisher/src/runtime.ts`), and the
+ * edge does not trust the hop in between. Reading the components back out of
+ * `Date.UTC` gets leap years right for free.
+ *
+ * DELIBERATE BOUND: `Date.UTC` maps the years 0 through 99 onto 1900 through
+ * 1999, so a year below `0100` never reads back and is refused. This probe
+ * judges exactly one field — the sync request's `updatedAt` publish instant —
+ * where a first-century year is corruption rather than a date anyone needs,
+ * so refusing it fails closed. The source and the publisher apply the same
+ * bound, so no layer disagrees about which texts are admissible.
+ */
+function namesARealInstant(match: RegExpExecArray): boolean {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day &&
+    probe.getUTCHours() === hour &&
+    probe.getUTCMinutes() === minute &&
+    probe.getUTCSeconds() === second
+  );
+}
+
+/**
+ * The canonical text for an accepted instant, or null — the same function as
+ * `canonicalInstant` in `router-publisher/src/runtime.ts` and
+ * `scripts/event-router-registry/hostname-projection.mjs`, because the three
+ * layers must accept exactly the same texts.
+ *
+ * Both ends are checked. The components are judged as WRITTEN, before the
+ * offset is applied, so a text at either end of the supported range can
+ * validate and still canonicalise outside it: `0100-01-01T00:00:00+01:00`
+ * answers `0099-12-31T23:00:00.000Z`, which the year bound refuses, and
+ * `9999-12-31T23:59:59-01:00` answers the expanded `+010000-...` form, which
+ * is not RFC 3339 at all. The edge stores the text it was sent rather than
+ * the canonical form — the publisher only ever sends the canonical form —
+ * but it accepts on the same terms.
+ */
+function canonicalInstant(value: string): string | null {
+  const match = RFC_3339.exec(value);
+  if (match === null || !namesARealInstant(match)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
+}
 /**
  * A rehearsal host is one of the two closed label classes under one of the two
  * Namespaces. The label halves come from `src/slug.ts` and the Namespace half
@@ -335,9 +398,7 @@ export function parseSyncRequest(body: string, contentType: string | null): Rout
   const host = requireString(decoded.host, 'host');
   if (host !== normalizeHost(host) || host.endsWith('.')) throw new Error('host must be canonical');
   const updatedAt = requireString(decoded.updatedAt, 'updatedAt');
-  if (!RFC_3339.test(updatedAt) || !Number.isFinite(Date.parse(updatedAt))) {
-    throw new Error('invalid updatedAt');
-  }
+  if (canonicalInstant(updatedAt) === null) throw new Error('invalid updatedAt');
   return {
     schemaVersion: 1,
     revision,

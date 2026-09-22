@@ -29,6 +29,23 @@ import type { PodiumPayload } from './finaleContent';
 import type { MostLovedPhotoAward } from '../../src/domainTypes';
 
 /**
+ * The podium payload as the EMAIL path carries it: `buildPodiumPayload`'s own
+ * output, with `playRecorded` OPTIONAL.
+ *
+ * The builder always states the fact, because it computes it from the roster it
+ * is handed. A MOMENT need not (#1192): `PodiumMomentPayload.playRecorded` is
+ * optional, a Moment is written once and never amended, and three separate
+ * paths reach this module with no value — a Moment written before the field
+ * existed, a freeze whose roster read failed (#1218), and an Event stamped
+ * `frozenAt` by something other than the finale beat. Absence is UNKNOWN, and
+ * the email must be able to hold that state rather than collapse it to `false`
+ * at the module boundary (Codex P2 `4058610372`). Nothing here reads the field
+ * — the claim it gates arrives as `boardWasEmpty`, resolved by the caller — so
+ * the widening costs the renderers nothing.
+ */
+export type PodiumEmailHonours = Omit<PodiumPayload, 'playRecorded'> & { playRecorded?: boolean };
+
+/**
  * The frozen award as the EMAIL sees it: validated, ban-filtered, and carrying
  * whether its tie size can still be stated exactly.
  *
@@ -79,10 +96,18 @@ export interface PodiumEmailModel {
   /** "Final standings · Day 10 of 10 · Friday, Jul 24 · 🇪🇸 Barcelona" */
   contextLine: string;
   standingsHeading: string;
-  /** Top three (or fewer). Empty only when the Event's board was empty. */
+  /** Top three (or fewer). Empty when the Event's board was empty, and also
+   *  when there is no visible ranking to print at all — an all-banned roster,
+   *  or an unknown play fact with no rows — so an empty array is not by itself
+   *  the empty-board claim; `standingsEmptyLine` says which case it is. */
   standingsRows: FinaleStandingsRow[];
-  /** The empty-board sentence, or `null` when `standingsRows` carries the
-   *  podium. */
+  /** The sentence printed IN PLACE of the rows, or `null` when `standingsRows`
+   *  carries the podium. It is the empty-board claim when the frozen record
+   *  says the board was empty, and a neutral line when there is simply nothing
+   *  to rank — an all-banned roster, or a roster that read empty under an
+   *  UNKNOWN play fact (Codex P2 `4058610372`). The slot is never left blank:
+   *  both alternatives fall back to it when the row list is empty, so a mail
+   *  with no rows cannot ship a standings module with nothing in it. */
   standingsEmptyLine: string | null;
   starHeading: string;
   /** "Logan Murdock took the cruise-wide First to BINGO—Day 2 in Split 🇭🇷.",
@@ -110,8 +135,9 @@ export interface BuildPodiumEmailArgs {
   /** The Event's name, for the footer's why-you-got-this line. */
   eventName: string;
   /** The podium payload as the Moment carries it — `buildPodiumPayload`'s
-   *  return value, passed through rather than recomputed. */
-  podium: PodiumPayload;
+   *  return value, passed through rather than recomputed, with `playRecorded`
+   *  optional for the reason `PodiumEmailHonours` states. */
+  podium: PodiumEmailHonours;
   /** The frozen Most-Loved award, or `null`/`undefined` for an Event whose
    *  award was never computed. Already ban-filtered and shape-validated by the
    *  caller — this module renders it, it does not vet it. */
@@ -126,6 +152,27 @@ export interface BuildPodiumEmailArgs {
    * told every recipient that nobody marked a square, directly above a `youLine`
    * reporting their own non-zero result. The caller knows which it is, because
    * it reads the Moment's payload BEFORE filtering it.
+   *
+   * AND THE CALLER READS A CARRIED FACT, not a third inference (#1192). The
+   * payload states `playRecorded`; this is its negation. `champion` could never
+   * have answered this, ban filter or no: it is the head of the standings with
+   * every ceremonial Day removed, so an Event whose only play sits on ceremonial,
+   * `tutorial: false` Days has no champion and a real ⭐ at once — and the
+   * suppressions below then printed "Nobody marked a square" beside that ⭐.
+   *
+   * WHAT IT SUPPRESSES IS THE CLAIM, NOT THE ZEROS. A board that is all zeros
+   * because every Mark was ceremonial is NOT an empty board: it renders its
+   * honest zero rows and keeps its ⭐, exactly as the daily card's snapshot does
+   * for the same Event (specs/daily-engagement-email.md § "a held ⭐ is never
+   * gated on the score"). Only a board nobody marked at all takes the sentence.
+   *
+   * AND ONLY A RECORD THAT SAYS SO (Codex P2 `4058610372`). The caller sets this
+   * from a KNOWN `playRecorded: false`, never from an unknown one: a Moment with
+   * no field states nothing about play, and turning that silence into the
+   * strongest negative sentence the mail can print is the same inference
+   * `champion == null` was, one field further along. Unknown therefore renders
+   * exactly as a played board does — rows, placing, no sentence — because the
+   * zeros are honest whatever happened and the claim is not.
    */
   boardWasEmpty: boolean;
   /**
@@ -258,7 +305,7 @@ export function finaleStatLine(row: FinaleStandingsRow | FinaleRankedPlayer): st
  * not gets the sentence without it, rather than a formatted guess.
  */
 function starLineFor(
-  podium: PodiumPayload,
+  podium: PodiumEmailHonours,
   register: EditionRegister,
   honorDayLabels: Readonly<Record<number, string>> | undefined,
 ): string | null {
@@ -447,9 +494,17 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
     ].join(' · '),
     standingsHeading: 'Final standings · frozen',
     standingsRows: emptyBoard ? [] : rows,
+    // THE CLAIM IS MADE ONLY WHEN THE RECORD MAKES IT, and the slot is filled
+    // either way (Codex P2 `4058610372`). `emptyBoard` is now a known-`false`
+    // `playRecorded` alone, so an unknown fact takes the rows path — and a
+    // roster with no visible rows would then have printed an empty standings
+    // module, which the neutral line replaces. It states what is true of the
+    // rows, never anything about whether the Event was played.
     standingsEmptyLine: emptyBoard
       ? `Nobody marked a square this ${register.occasion}—the board closed empty.`
-      : null,
+      : rows.length === 0
+        ? `No standings to show for this ${register.occasion}.`
+        : null,
     starHeading: 'The ⭐',
     starLine,
     mostLovedHeading: 'Most-loved photo',

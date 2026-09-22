@@ -79,12 +79,31 @@ describe('bodega-bay-2026 — pool pins', () => {
     expect(bodegaBay2026.EVENT_SEED.settings.spicyRatio).toBe(0);
   });
 
-  it('keeps the one intentional source-text quirk documented in the module header', () => {
+  it('corrects the jammies-prompt grammar going forward, with the live wording recorded as a legacy-verify quirk (#1019)', () => {
     const closingTexts = bodegaBay2026.CLOSING_ITEMS.map((i) => i.text);
     expect(new Set(closingTexts).size).toBe(40);
+    // The typo is gone from the source pool — every future Event seeded from
+    // EASY_ITEMS deals the corrected wording.
+    expect(
+      bodegaBay2026.EASY_ITEMS.some((i) => i.text === 'Post a picture of you and somebody else in your jammies'),
+    ).toBe(true);
     expect(
       bodegaBay2026.EASY_ITEMS.some((i) => i.text === 'Post of a picture of you and somebody else in your jammies'),
-    ).toBe(true);
+    ).toBe(false);
+    // The LIVE bodega-bay-2026 doc is deliberately left untouched (same
+    // reseed-safety reasoning as the id quirk), so VERIFY_ITEM_LEGACY_TEXT
+    // records exactly the one pre-fix wording `--verify` must still accept.
+    expect(bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT).toHaveLength(bodegaBay2026.ALL_ITEMS.length);
+    expect(bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT.filter((t) => t !== undefined)).toEqual([
+      'Post of a picture of you and somebody else in your jammies',
+    ]);
+    const quirkIndex = bodegaBay2026.ALL_ITEMS.findIndex(
+      (i) => i.text === 'Post a picture of you and somebody else in your jammies',
+    );
+    expect(quirkIndex).toBeGreaterThanOrEqual(0);
+    expect(bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT[quirkIndex]).toBe(
+      'Post of a picture of you and somebody else in your jammies',
+    );
     // The draft's markdown escape must NOT leak into data: '#hashtag', no backslash.
     expect(bodegaBay2026.CLOSING_ITEMS.some((i) => i.text === 'Give this trip a #hashtag')).toBe(true);
     expect(bodegaBay2026.ALL_ITEMS.some((i) => i.text.includes('\\'))).toBe(false);
@@ -107,29 +126,37 @@ describe('bodega-bay-2026 — pool pins', () => {
     }
   });
 
-  it('verifies the live in-place-edited pool against its recorded legacy ids', () => {
+  it('verifies the live in-place-edited pool against its recorded legacy ids and text (#1019)', () => {
     // #644 Phase 4b P1: the 2026-08-05 text correction deliberately kept the
     // old ids so Day 0's frozen snapshot and existing cards remain valid. The
     // verifier must accept ONLY this recorded identity generation—not a
     // fabricated arbitrary id—and still enforce every canonical field.
     expect(bodegaBay2026.VERIFY_ITEM_IDS).toHaveLength(bodegaBay2026.ALL_ITEMS.length);
     expect(new Set(bodegaBay2026.VERIFY_ITEM_IDS).size).toBe(bodegaBay2026.ALL_ITEMS.length);
-    const live = bodegaBay2026.ALL_ITEMS.map((item, index) => ({
-      id: bodegaBay2026.VERIFY_ITEM_IDS[index]!,
-      text: item.text,
-      spicy: item.spicy,
-      pool: item.pool ?? 'main',
-      createdBy: 'seed',
-      isFreeSpace: false,
-      status: 'active',
-      reportCount: 0,
-    }));
+    const makeLive = () =>
+      bodegaBay2026.ALL_ITEMS.map((item, index) => ({
+        id: bodegaBay2026.VERIFY_ITEM_IDS[index]!,
+        // #1019: simulate the REAL untouched Firestore doc, which still
+        // carries the recorded legacy wording where one exists — not a
+        // circular self-reference to the just-corrected source text.
+        text: bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT[index] ?? item.text,
+        spicy: item.spicy,
+        pool: item.pool ?? 'main',
+        createdBy: 'seed',
+        isFreeSpace: false,
+        status: 'active',
+        reportCount: 0,
+      }));
+
+    const live = makeLive();
     expect(
       verifySeedPool(
         live,
         bodegaBay2026.ALL_ITEMS,
         bodegaBay2026.EVENT_SEED.settings.reportHideThreshold,
         bodegaBay2026.VERIFY_ITEM_IDS,
+        undefined,
+        bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT,
       ),
     ).toMatchObject({ ok: true, missing: [], mismatched: [], stale: [] });
 
@@ -140,8 +167,34 @@ describe('bodega-bay-2026 — pool pins', () => {
         bodegaBay2026.ALL_ITEMS,
         bodegaBay2026.EVENT_SEED.settings.reportHideThreshold,
         bodegaBay2026.VERIFY_ITEM_IDS,
+        undefined,
+        bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT,
       ),
     ).toMatchObject({ ok: false, mismatched: [{ text: bodegaBay2026.ALL_ITEMS[0]!.text }] });
+
+    // The legacy-text allowance is scoped to the RECORDED legacy id only: a
+    // doc that resurfaces under a FRESH canonical id (a real reseed) must
+    // still carry the corrected text, or a genuinely stale doc could hide
+    // behind the same pre-fix string forever.
+    const quirkIndex = bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT.findIndex((t) => t !== undefined);
+    expect(quirkIndex).toBeGreaterThanOrEqual(0);
+    const freshCanonicalId = seedItemDocId(bodegaBay2026.ALL_ITEMS[quirkIndex]!.text);
+    const staleUnderFreshId = makeLive();
+    staleUnderFreshId[quirkIndex] = {
+      ...staleUnderFreshId[quirkIndex]!,
+      id: freshCanonicalId,
+      text: bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT[quirkIndex]!,
+    };
+    expect(
+      verifySeedPool(
+        staleUnderFreshId,
+        bodegaBay2026.ALL_ITEMS,
+        bodegaBay2026.EVENT_SEED.settings.reportHideThreshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+        undefined,
+        bodegaBay2026.VERIFY_ITEM_LEGACY_TEXT,
+      ),
+    ).toMatchObject({ ok: false, mismatched: [{ id: freshCanonicalId }] });
   });
 
   it('requires one complete identity generation — canonical or recorded legacy — for the edited live pool', () => {

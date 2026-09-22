@@ -376,7 +376,7 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     expect(award.heartCount).toBe(1);
   });
 
-  it('(g) an award-snapshot read failure keeps the freeze coupled to the award, while the podium still lands', async () => {
+  it('(g) an award-snapshot read failure keeps the freeze coupled to the award, and holds the podium with it', async () => {
     const db = makeDb({
       eventId: 'e1',
       event: { days: mainDays() },
@@ -395,12 +395,20 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     // The atomic freeze cannot leave a retry to rebuild the award from later
     // proof visibility, moderation settings, or ban-roster state.
     expect(db.readEvent().frozenAt).toBeUndefined();
-    expect(db.moments().filter((m) => m.kind === 'podium')).toHaveLength(1); // podium too
     expect(db.readEvent().mostLovedPhoto).toBeUndefined();
+    // AND THE PODIUM WAITS WITH THEM (#1218, CodeRabbit on PR #1242). This run
+    // owed the freeze and did not get it, so it has no frozen `playRecorded` to
+    // quote — and a podium Moment is written once and never amended, so posting
+    // one here would leave the healthy retry below with nowhere to put the fact
+    // it captures. The beat is guarded on the Moment's absence, so nothing is
+    // lost by waiting; it lands on the tick that freezes.
+    expect(db.moments().filter((m) => m.kind === 'podium')).toHaveLength(0);
 
-    // The next healthy tick retries the complete freeze snapshot.
+    // The next healthy tick retries the complete freeze snapshot — and posts
+    // the podium it deferred, now able to quote the freeze.
     const retryClock = D10_UNLOCK + 15 * 60_000;
     await runFinaleBeats(db, 'e1', { now: () => retryClock });
+    expect(db.moments().filter((m) => m.kind === 'podium')).toHaveLength(1);
     const award = db.readEvent().mostLovedPhoto!;
     expect(award.winners.map((w) => w.proofId)).toEqual(['p1']);
     expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);

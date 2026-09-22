@@ -25,6 +25,19 @@ set -euo pipefail
 # (Codex P2 on PR #114 round 3). Keep this literal in lockstep with env.ts.
 PROJECT_ID='demo-gaycruisebingo-e2e'
 
+# The emulator needs a runnable Java runtime, and a `command -v java` style
+# presence check reports success on machines that have none that actually
+# work (keg-only Homebrew openjdk plus the macOS /usr/bin/java stub, #1018).
+# A runnable java is not enough either: firebase-tools rejects majors below
+# 21, so the helper checks the reported version too. Shared with
+# scripts/test-rules.sh, scripts/test-offline.sh, scripts/emulator.sh and
+# scripts/marketing-shots.sh, so the probe lives in one place for every
+# script in the repo that boots an emulator.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ensure-java.sh
+source "$SCRIPT_DIR/lib/ensure-java.sh"
+ensure_java
+
 cmd="npx playwright test"
 for arg in "$@"; do
   cmd+=" $(printf '%q' "$arg")"

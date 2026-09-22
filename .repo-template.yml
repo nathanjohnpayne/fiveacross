@@ -250,6 +250,11 @@ spec_test_map:
     - worker/src/registry/routerRegistry.integration.test.ts
     - worker/src/registry/privateTracer.integration.test.ts
     - worker/src/routerBinding.test.ts
+    - scripts/event-router-registry/hostname-projection.test.mjs
+    - scripts/event-router-registry/hostname-projection.parity.test.mjs
+    - scripts/event-router-registry/hostname-lifecycle.test.mjs
+    - scripts/event-router-registry/hostname-reconciler.test.mjs
+    - tests/rules/event-router-hostname-lifecycle.test.ts
   og-renderer-commit-safety:
     - scripts/og/og-size-guard.test.mjs
     - scripts/og/og-scratch-path.test.mjs

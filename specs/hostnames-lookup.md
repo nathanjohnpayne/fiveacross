@@ -58,6 +58,20 @@ match /hostnames/{host} {
 
 **No client writes at all**, including admins. The mapping is authoritative routing state across a global namespace, where no per-Event admin has authority; a writable mapping would let a client point an existing hostname at an Event it should not see, or squat an address before its Event exists. Only the Admin SDK populates it.
 
+## Who writes a hostname document
+
+The rules contract above is unchanged by #971 and remains the whole client story: `get` only, never `list`, no client writes at all. What changed is on the trusted side, and it matters to anyone reading a hostname document, because a field's value now tells you which writer produced it.
+
+Every mutation of a **projected** field — `eventId`, `status`, `slug`, `edition`, and the `root` and `pathNamespace` fields `specs/path-addressing-and-root.md` defines — plus every create and delete, goes through the one transaction helper in `scripts/event-router-registry/hostname-lifecycle.mjs`, which writes this document and the private `routerReplicas/{host}` ledger in the same Firestore transaction ([`event-router-registry`](event-router-registry.md) § Provisioning, mutation, and deletion). A direct or partial Admin SDK write to one of those fields is a contract violation the reconciler reports as drift, and every later mutation of that host refuses until the explicit Admin ledger advance has repaired it.
+
+The **non-projected** fields are deliberately outside that helper, because the edge does not copy them and a change to one must not churn a revision. `adultContent` (#608) keeps its own derivation and trigger path in `functions/src/adultContent.ts`. `preview` (#647) keeps `scripts/provision-bodega-preview.mjs`. `canonicalHost` and `isCanonical` keep `scripts/migrate-bodega-canonical-host.mjs`. Each of those three writers touches only non-projected fields, which is exactly why they remain separate reviewed paths rather than becoming lifecycle intents.
+
+`apexPath` is the one field that is written by the lifecycle helper and still not projected: it is the archive transaction's per-Event apex-path opt-in, which the client resolver reads and the edge deliberately never sees. Only the archive intent writes it, and only onto the one target mapping named in that transaction; the same transaction's mirror-root conversion removes it, because the converted document names no Event.
+
+That transaction is also the one lifecycle path that reads this collection by query rather than by key. It asks `hostnames` for every document whose `eventId` is the Event being archived and refuses unless the operator named all of them, because an omitted alias would be left `active` and would keep serving an archived Event at its own address. The query runs with the Admin credential inside the archive transaction and changes nothing about the client contract above: `list` stays denied to every client, and no new index or reverse mapping is exposed.
+
+That conversion is also the one lifecycle write that replaces a hostname document rather than patching it. A root marker may not carry `eventId`, `status` or `slug`, and a Firestore `update` has no way to drop a field, so the marker is built by removing exactly those three and `apexPath` from the stored document. `adultContent`, `preview`, `canonicalHost` and `isCanonical` therefore survive the conversion unchanged, and the three writers named above stay the only things that decide their values.
+
 ## Bodega postcard provisioning
 
 The Bodega sign-in postcard is public display copy on the same pre-auth lookup; it must exist on **every serving Bodega hostname**, never only on the canonical host. `scripts/provision-bodega-preview.mjs` is the controlled Admin-SDK maintenance path. It validates the fixed live set (`bodega-bay.fiveacross.app`, `bodega-bay.vacaybingo.com`, and `fiveacross.app`) before it writes anything, refuses missing, inactive, or repointed documents, and applies only `preview` in one transaction. It never creates a routing document or changes `eventId`, `status`, or canonical metadata.
