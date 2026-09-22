@@ -409,6 +409,44 @@ export function assertKnownOptions(script, args, options = RASTER_OPTIONS) {
   process.exit(1);
 }
 
+/**
+ * The value-taking options that appear more than once on the command line.
+ *
+ * (#887, finding 4074926161). `optionValue`'s `indexOf` reads only the FIRST
+ * occurrence of a valued flag, so `--edition vacay --edition gcb` silently
+ * republished Vacay rather than the operator's actual, last-stated target —
+ * and `unknownOptions` accepts every occurrence of a recognised flag, so
+ * `--edition gcb --edition` was never reported as unknown, leaving nothing to
+ * stop the missing-value guard below from being satisfied by the first,
+ * valued occurrence while the trailing bare `--edition` was silently ignored.
+ * A repeat is refused outright rather than resolved to "last wins" or "first
+ * wins": there is no single operator intent to honor here, only a mistake to
+ * name before anything renders.
+ */
+export function repeatedOptions(args, { valued } = RASTER_OPTIONS) {
+  const seen = new Set();
+  const repeated = new Set();
+  for (const token of args) {
+    if (!valued.includes(token)) continue;
+    if (seen.has(token)) repeated.add(token);
+    else seen.add(token);
+  }
+  return [...repeated];
+}
+
+/** Print and exit 1 if any value-taking option appears more than once. Called
+ *  immediately after `assertKnownOptions` — before the missing-value guards
+ *  further down `main` — so a repeat is named for what it is instead of
+ *  falling through to "missing a value" (or, worse, to a render). */
+export function assertNoRepeatedOptions(script, args, options = RASTER_OPTIONS) {
+  const repeated = repeatedOptions(args, options);
+  if (repeated.length === 0) return;
+  console.error(
+    `${script}: ${repeated.join(', ')} ${repeated.length === 1 ? 'was' : 'were'} passed more than once. Pass each option once.`,
+  );
+  process.exit(1);
+}
+
 /** Ask the page which display face the artboards actually resolve to. Split
  *  from `assertDisplayFace` so the decision is testable without a browser and
  *  this half stays a thin `page.evaluate`. */
@@ -492,6 +530,11 @@ async function main() {
   // picture, because the token nobody recognised was the one that would have
   // stopped it.
   assertKnownOptions('render-share-rasters.mjs', args);
+  // Second, before `optionValue` ever reads a value: a repeat must never be
+  // resolved to "first wins" by `indexOf`, or slip past the missing-value
+  // guard below because `unknownOptions` accepts every occurrence of a known
+  // flag (#887, finding 4074926161).
+  assertNoRepeatedOptions('render-share-rasters.mjs', args);
   const only = optionValue(args, '--edition');
   const all = args.includes('--all');
   const checkOnly = args.includes('--check');

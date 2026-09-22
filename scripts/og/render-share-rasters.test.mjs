@@ -34,6 +34,7 @@ import {
   assertDisplayFace,
   optionValue,
   renderCardSet,
+  repeatedOptions,
   resolvedDisplayFace,
   unknownOptions,
 } from './render-share-rasters.mjs';
@@ -442,6 +443,125 @@ describe('unknown options (#887): a typo never publishes', () => {
       expect(result.stderr).toContain(`${script}: unrecognised option --chek.`);
       // Not the Edition check, and not a render: the typo is what stopped it.
       expect(result.stderr).not.toContain('Unknown edition');
+      expect(result.stdout).toBe('');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('repeatedOptions (#887, finding 4074926161): a repeat is never "first wins"', () => {
+  it('names a valued option that appears twice', () => {
+    // The finding: `optionValue`'s `indexOf` reads only the FIRST
+    // `--edition`, so `--edition vacay --edition gcb` silently republished
+    // Vacay rather than the operator's actual, last-stated target.
+    expect(repeatedOptions(['--edition', 'vacay', '--edition', 'gcb'])).toEqual(['--edition']);
+    expect(repeatedOptions(['--edition', 'gcb', '--out', '/tmp/a', '--out', '/tmp/b'])).toEqual(['--out']);
+    expect(repeatedOptions(['--edition', 'gcb', '--edition', '--out', '/tmp/a', '--out'])).toEqual([
+      '--edition',
+      '--out',
+    ]);
+  });
+
+  it('is silent for a single occurrence, and ignores flags entirely', () => {
+    expect(repeatedOptions(['--edition', 'gcb'])).toEqual([]);
+    expect(repeatedOptions(['--edition', 'gcb', '--out', '/tmp/a'])).toEqual([]);
+    // `--all`/`--check` are boolean `args.includes()` reads in `main`, not
+    // `optionValue` reads, so a repeat of one is harmless and out of scope
+    // for this guard.
+    expect(repeatedOptions(['--all', '--all', '--check', '--check'])).toEqual([]);
+  });
+
+  it('scopes to the options object passed in, like unknownOptions does', () => {
+    expect(repeatedOptions(['--edition', 'gcb', '--edition', 'vacay'], FOOTER_OPTIONS)).toEqual(['--edition']);
+  });
+});
+
+describe('assertNoRepeatedOptions (#887, finding 4074926161): a repeat refuses, and never renders', () => {
+  it('refuses --edition vacay --edition gcb as a repeat, not a silent "first wins"', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'og-repeated-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-rasters.mjs', import.meta.url)),
+          '--edition',
+          'vacay',
+          '--edition',
+          'gcb',
+          '--allow-foreign-platform',
+          // Belt-and-suspenders against the committed pictures: this refusal
+          // must fire before `main` ever computes a destination, but if that
+          // guard ever regressed, `--out` keeps a real render confined to
+          // this disposable tmpdir instead of `plans/og-images/`.
+          '--out',
+          cwd,
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toContain('render-share-rasters.mjs: --edition was passed more than once.');
+      expect(result.stdout).toBe('');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses --edition gcb --edition as a repeat or a missing value, but never renders', () => {
+    // The finding's second half: a trailing bare `--edition` used to bypass
+    // the missing-value guard, because `unknownOptions` had already accepted
+    // both occurrences of a known flag. Either refusal reason is acceptable
+    // here — "repeated" or "needs an Edition id" — what matters is that
+    // nothing is written and nothing rendered.
+    const cwd = mkdtempSync(join(tmpdir(), 'og-repeated-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-rasters.mjs', import.meta.url)),
+          '--edition',
+          'gcb',
+          '--edition',
+          '--allow-foreign-platform',
+          // See the belt-and-suspenders note above: confines a regressed
+          // guard's render to this tmpdir instead of `plans/og-images/`.
+          '--out',
+          cwd,
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).toMatch(/passed more than once|needs an Edition id/);
+      expect(result.stdout).toBe('');
+      expect(result.status).toBe(1);
+      expect(readdirSync(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still lets a single --edition through the repeat guard', () => {
+    // Paired with a nonexistent Edition id so the run fails fast at the
+    // Edition-validity check further down `main` — past both the
+    // unknown-option and repeated-option guards — without launching
+    // Chromium. If the repeat guard ever false-positived on a single
+    // occurrence, this test would fail here instead of at the Edition check.
+    const cwd = mkdtempSync(join(tmpdir(), 'og-repeated-option-'));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('./render-share-rasters.mjs', import.meta.url)),
+          '--edition',
+          'not-an-edition',
+          '--allow-foreign-platform',
+        ],
+        { cwd, encoding: 'utf8', timeout: 60_000 },
+      );
+      expect(result.stderr).not.toContain('passed more than once');
+      expect(result.stderr).toContain('Unknown edition "not-an-edition"');
       expect(result.stdout).toBe('');
       expect(result.status).toBe(1);
       expect(readdirSync(cwd)).toEqual([]);
