@@ -24,7 +24,20 @@ import type { RegistryLookupService } from './resolve';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROUTER_CONFIG = resolve(HERE, '../wrangler.toml');
 const GENERATED_TYPES = resolve(HERE, '../router-configuration.d.ts');
-const ROUTER_SOURCES = ['index.ts', 'router.ts', 'resolve.ts', 'config.ts', 'host.ts', 'notFound.ts'];
+// Every module the deployed router bundle pulls in from `worker/src/*.ts`.
+// `manifest.ts` and `htmlHead.ts` are here for the same reason the rest are:
+// the claim is about the ARTIFACT, so a file left off this list is a file the
+// sweep below stops checking.
+const ROUTER_SOURCES = [
+  'index.ts',
+  'router.ts',
+  'resolve.ts',
+  'config.ts',
+  'host.ts',
+  'notFound.ts',
+  'manifest.ts',
+  'htmlHead.ts',
+];
 const DEPLOY_WRAPPER = resolve(HERE, '../../scripts/worker-deploy.sh');
 
 /**

@@ -205,9 +205,10 @@ spec_test_map:
   # patterns below), so map every layer explicitly.
   # event-router's coverage is module-named (the shared Slug contract, the
   # namespace guard, the lookup's decision table, the request pipeline, the
-  # capability contract of its registry binding, and the guarded deploy) and
-  # spans two top-level directories, so none of them share the spec basename —
-  # map them all explicitly.
+  # per-hostname manifest and head rewrite, the capability contract of its
+  # registry binding, and the guarded deploy) and spans two top-level
+  # directories, so none of them share the spec basename — map them all
+  # explicitly.
   event-router:
     - src/slug.test.ts
     - worker/src/host.test.ts
@@ -217,7 +218,10 @@ spec_test_map:
     - worker/src/index.test.ts
     - worker/src/routerBinding.test.ts
     - worker/src/manifest.test.ts
+    - worker/src/htmlHead.test.ts
+    - worker/src/routerHtmlHead.integration.test.ts
     - src/web-manifest.test.ts
+    - src/html-head-identity.test.ts
     - src/sw-precache-audit.test.ts
     - scripts/worker-deploy.test.mjs
   # event-router-registry spans the control plane, the per-host Durable Object,
