@@ -14,10 +14,12 @@
 // transactional owner of acceptance and lookup, so a cached second answer could
 // only ever disagree with it. There is likewise no Firebase api key, project
 // id, or Firestore request to configure — the whole reader is gone (ADR 0014).
-// What remains is two seams: the origin `fetch` and the named lookup-only
-// registry service binding.
+// What remains is three seams: the origin `fetch`, the named lookup-only
+// registry service binding, and — since #1118 — the runtime's `HTMLRewriter`,
+// which is a body transform rather than a source of routing truth.
 
 import { registryFromEnv, routerConfigFromEnv, type RouterEnv } from './config';
+import { rewriteHeadWithHTMLRewriter } from './htmlHead';
 import { handleRequest, type RouterDeps } from './router';
 
 export type { RouterEnv as Env };
@@ -32,6 +34,12 @@ export default {
       // `undefined` normalised to `null` at the seam, so an unbound binding is
       // a fail-closed answer rather than a method call on `undefined`.
       registry: registryFromEnv(env),
+      // `HTMLRewriter` is a workerd global, so the per-hostname `<head>`
+      // rewrite (#1118) arrives as a seam like `fetch` does — this file stays
+      // the only one that names a Cloudflare runtime. The decision about WHICH
+      // responses reach it lives in `router.ts` and is testable without a
+      // runtime; only the transform itself is not.
+      htmlRewriter: rewriteHeadWithHTMLRewriter,
       // The two refusals the registry spec pages on, as one structured line
       // per refusal. `console.warn` is what Workers observability ingests; the
       // event is closed and bounded (reason + host), never the lookup body.

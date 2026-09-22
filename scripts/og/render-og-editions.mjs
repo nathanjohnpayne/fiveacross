@@ -51,11 +51,11 @@
 //   node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
 //   node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { transformSync } from 'esbuild';
+import { loadEditions } from './load-editions.mjs';
 import { OG_EDITION_ART } from './og-edition-art.mjs';
 import { assertWithinHardCap } from './og-size-guard.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
@@ -101,19 +101,12 @@ if (process.platform !== 'darwin' && !allowForeign) {
 // wireframes comes from og-edition-art.mjs; render-only geometry stays here.
 // ---------------------------------------------------------------------------
 
-/** Load `src/editions.ts` in this Node process. esbuild strips the types; the
- *  module is deliberately free of `import.meta.env` and `document` at module
- *  scope (see its header) precisely so non-browser callers like this one and
- *  vite.config.ts can import it. */
-function loadEditions() {
-  const src = readFileSync(join(repo, 'src', 'editions.ts'), 'utf8');
-  const js = transformSync(src, { loader: 'ts', format: 'cjs', target: 'node20' }).code;
-  const module = { exports: {} };
-  // The only import is a type-only one, which esbuild has already erased.
-  new Function('module', 'exports', 'require', js)(module, module.exports, () => ({}));
-  return module.exports;
-}
-
+// The brand table comes from the shared bundling loader in
+// `load-editions.mjs`. This script used to transpile `src/editions.ts` alone
+// and stub its `require`, on a comment claiming the module's only import was a
+// type-only one; that stopped being true when it started importing
+// `EDITION_IDS` and `brandFor` for real values, and this script died on load
+// from then on. The shared loader bundles the sibling modules instead.
 const { editionBrand, wordmarkSegments } = loadEditions();
 
 /** The share mark with U+FE0F (VARIATION SELECTOR-16) removed, for the design
@@ -232,12 +225,13 @@ const ART = {
     rule: { width: 100, background: 'linear-gradient(90deg,#2e7fa8,#8fd0c3)' },
     desc: { size: 26 },
     // The artwork names the Edition's own apex, NOT `ogUrl`'s hostname. Vacay
-    // is the one Edition whose og:url is Event-scoped
-    // (bodega-bay.fiveacross.app) until the #1118 edge HTML rewrite emits it
-    // per hostname — see the field note on `EditionBrand.ogUrl`. An unfurl is a
-    // brand impression, so it wears the brand's address; the other two
-    // Editions' apexes and og:url hosts already agree, so only this row has to
-    // say so.
+    // is the one Edition whose brand-row og:url is Event-scoped
+    // (bodega-bay.fiveacross.app), because a build can bake only one origin;
+    // the #1118 edge HTML rewrite replaces the SERVED tag per hostname, but
+    // this renderer reads the row — see the field note on
+    // `EditionBrand.ogUrl`. An unfurl is a brand impression, so it wears the
+    // brand's address; the other two Editions' apexes and og:url hosts already
+    // agree, so only this row has to say so.
     domain: 'vacaybingo.com',
     // Gaps are box-to-box, so they read smaller than the ink-to-ink rhythm
     // they produce (24 / 33 / 32 / 32 / 41 measured off the #609 render).
