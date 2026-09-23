@@ -1326,6 +1326,37 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       expect(podium?.dailyHonors).toEqual([]);
     });
 
+    it('does not let a frozen FALSE erase what the freeze could have seen (#1268)', async () => {
+      // Codex P1 `4088048309`. `frozenPlayRecorded` is admin-writable, so a
+      // `false` written over a played board between the freeze and a podium
+      // retry must not blank the champion, the Event-wide First to BINGO or a
+      // pin that predates the cutoff. Only the honour pinned AFTER the freeze,
+      // which no freeze could have read, is dropped beside it.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: false },
+        players: [{ uid: 'ada', displayName: 'Ada', bingoCount: 1, squaresMarked: 5, firstBingoAt: D9_UNLOCK + 1_000 }],
+        dayHonors: {
+          8: { firstBingo: { uid: 'ada', displayName: 'Ada', at: D9_UNLOCK + 1_000 } },
+          9: { firstBingo: { uid: 'ada', displayName: 'Ada', at: D10_UNLOCK + 60_000 } },
+        },
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+
+      const podium = postedPodium(db)?.podium as
+        | {
+            playRecorded?: unknown;
+            champion?: { uid?: string } | null;
+            firstBingo?: { uid?: string } | null;
+            dailyHonors?: Array<{ dayIndex: number }>;
+          }
+        | undefined;
+      expect(podium?.playRecorded).toBe(false);
+      expect(podium?.champion?.uid).toBe('ada');
+      expect(podium?.firstBingo?.uid).toBe('ada');
+      expect(podium?.dailyHonors?.map((h) => h.dayIndex)).toEqual([8]);
+    });
+
     it('still prints a post-freeze pin when the frozen answer is TRUE (#1263)', async () => {
       // The guard above is scoped to the frozen `false`. A board the freeze
       // recorded as played keeps the podium it has always posted, ceremonial

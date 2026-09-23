@@ -1582,21 +1582,39 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
           times.standingsFreezeAt,
         );
         //
-        // AND A FROZEN `false` IS THE WHOLE BOARD, not one field of it (#1263,
-        // Codex P2 `4074863801`). `false` is stored only when the freeze read
-        // the roster AND every Day's pin and found nothing, so the podium as of
-        // the freeze names nobody. This run's reads can still find a champion,
-        // a ⭐ or a pinned honour — `dailyHonors` carries no cutoff at all, and
-        // a ceremonial Day pins after the freeze by design — and the email
-        // asks those honours FIRST and lets any one of them outrank a stored
-        // `false`. Posted beside it, a pin acquired after the snapshot would
-        // overturn the frozen answer on the one record that cannot be amended.
-        // So a frozen `false` posts the empty board it froze. `true` and
-        // unknown keep the payload as built: neither makes a claim a later
-        // honour could contradict.
+        // AND A FROZEN `false` KEEPS WHAT THE FREEZE COULD NOT HAVE SEEN OFF THE
+        // BOARD (#1263, Codex P2 `4074863801`). `false` is stored only when the
+        // freeze read the roster AND every Day's pin and found nothing. This
+        // run's `dailyHonors` carry no cutoff, and a ceremonial Day pins after
+        // the freeze by design; the email asks those honours FIRST and lets any
+        // one of them outrank a stored `false`, so a pin acquired after the
+        // snapshot, posted beside it, would overturn the frozen answer on the one
+        // record that cannot be amended. A frozen `false` therefore drops every
+        // honour pinned at or after the cutoff (the same `>= freezeAt` bound the
+        // builder applies to the First to BINGO). The champion and the ⭐ are
+        // already resolved as of the freeze by the builder, so they stand.
+        //
+        // IT FILTERS, IT DOES NOT BLANK (#1268, Codex P1 `4088048309`).
+        // `frozenPlayRecorded` is admin-writable (the Event arm of
+        // `firestore.rules` is at its expression cap, #1142), so the podium must
+        // not trust a `false` to erase anything the freeze itself could have
+        // seen: an admin who rewrote the field between the freeze and a podium
+        // retry would otherwise publish a champion-less, honour-less Moment over
+        // a board that named winners. Filtering by instant keeps that exposure
+        // where the field's contract puts it, at the email's one sentence and
+        // the post-freeze ceremonial honours the frozen `false` already ruled
+        // out. `true` and unknown keep the payload as built: neither makes a
+        // claim a later honour could contradict.
+        const freezeCutoff = times.standingsFreezeAt;
         const podium =
           frozenPlayRecorded === false
-            ? { ...frozen, champion: null, firstBingo: null, dailyHonors: [], playRecorded: false }
+            ? {
+                ...frozen,
+                dailyHonors: frozen.dailyHonors.filter(
+                  (h) => typeof h.at === 'number' && Number.isFinite(h.at) && h.at < freezeCutoff,
+                ),
+                playRecorded: false,
+              }
             : frozenPlayRecorded === undefined
               ? frozen
               : { ...frozen, playRecorded: frozenPlayRecorded };

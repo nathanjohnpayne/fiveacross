@@ -482,8 +482,11 @@ export interface EventDoc {
    * for. Unlike `finaleCompletedAt` beside it this is NOT in the rules'
    * no-client-writes set — the Event arm sits at Firestore's expression cap
    * (#1142) — so an Event admin can still write it, exactly as they can
-   * `frozenAt`. The exposure is one sentence of email copy rather than a gate on
-   * an irreversible write, which is why it rides the existing admin gate.
+   * `frozenAt`. The exposure is one sentence of email copy, plus the
+   * post-freeze ceremonial honours a frozen `false` drops from the podium
+   * (#1263), rather than a gate on anything the freeze could see: the beat
+   * filters by the freeze cutoff and never blanks the board on this field
+   * (#1268), which is why it rides the existing admin gate.
    *
    * AND `null` SAYS UNKNOWN TOO, deliberately (Codex P2 `4058671215`). That
    * admin-writable gate is also what makes an UNFROZEN Event carrying a
