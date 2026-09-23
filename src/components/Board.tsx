@@ -593,6 +593,15 @@ function squareLabel(c: Cell): string {
 }
 
 /**
+ * The lazy Day deal's in-flight key. The join state is part of what an
+ * attempt IS (#1158), so the effect that fires a deal and the Retry that
+ * clears one must build the key the same way (#1255).
+ */
+function dealInFlightKey(eventId: string, uid: string, dayIndex: number, joined: boolean): string {
+  return `${eventId}:${uid}:${dayIndex}:${joined ? 'joined' : 'unjoined'}`;
+}
+
+/**
  * The locked-Day preview (daily-cards-spec § "Locked Day preview"): full
  * themed chrome for the viewed Day over a 5x5 grid of blank Squares — only
  * the free space (index 12, the same center the live deal uses) is
@@ -947,7 +956,7 @@ export default function Board() {
     // until some unrelated render happened along. The two attempts are safe to
     // overlap for the reason a Retry already is: the deal is a transaction that
     // re-checks the card's existence and no-ops for the loser.
-    const key = `${eventId}:${user.uid}:${day.index}:${playerJoined ? 'joined' : 'unjoined'}`;
+    const key = dealInFlightKey(eventId, user.uid, day.index, playerJoined);
     if (dealingDaysRef.current.has(key)) return;
     dealingDaysRef.current.add(key);
     const dealIndex = day.index;
@@ -2045,7 +2054,13 @@ export default function Board() {
             <button
               className="btn"
               onClick={() => {
-                if (uid) dealingDaysRef.current.delete(`${eventId}:${uid}:${viewedIndex}`);
+                // Both join states (#1255): an unjoined attempt can reject
+                // while the joined one is still in flight, and a Retry that
+                // left the joined key in place was skipped by the effect.
+                if (uid) {
+                  dealingDaysRef.current.delete(dealInFlightKey(eventId, uid, viewedIndex, false));
+                  dealingDaysRef.current.delete(dealInFlightKey(eventId, uid, viewedIndex, true));
+                }
                 setDayDealError(null);
                 setDealNonce((n) => n + 1);
               }}
