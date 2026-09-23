@@ -256,6 +256,26 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     ]);
   });
 
+  // #1263 / PR #1268 (Codex P1 `4088148821`): the podium Moment posted beside a
+  // frozen `false` drops every honour pinned at or after the freeze, so the
+  // in-app podium and share card must drop the same ones, or the card prints a
+  // ceremonial honour the Feed and the winner email omit. It filters by instant
+  // and never blanks: a pre-freeze pin stays, and `true` or unknown keep all.
+  it('drops only POST-freeze honours when the frozen answer is FALSE', () => {
+    const metas = new Map([
+      [1, { firstBingo: { uid: 'alice', displayName: 'Alice', at: NOW - HOUR } }],
+      [2, { firstBingo: { uid: 'bob', displayName: 'Bob', at: NOW + HOUR } }],
+    ]);
+    const frozenEmpty = buildPodium([], DAYS, metas, true, NOW, [], false);
+    expect(frozenEmpty.dailyHonors.map((h) => h.dayIndex)).toEqual([1]);
+    // The freeze instant itself is already frozen, matching `withinFreeze`.
+    const atCutoff = new Map([[2, { firstBingo: { uid: 'bob', displayName: 'Bob', at: NOW } }]]);
+    expect(buildPodium([], DAYS, atCutoff, true, NOW, [], false).dailyHonors).toEqual([]);
+    for (const answer of [true, null, undefined]) {
+      expect(buildPodium([], DAYS, metas, true, NOW, [], answer).dailyHonors.map((h) => h.dayIndex)).toEqual([1, 2]);
+    }
+  });
+
   // #1146 / #1142 item 8: a pin is hidden by the BAN LIST and by nothing else.
   // It used to be hidden whenever its holder was absent from the supplied
   // roster, which read roster absence as a ban — so an Admin deleting a Player

@@ -386,6 +386,9 @@ interface FarewellPodiumProps {
     // window before it.
     | 'frozenAt'
     | 'standingsFreezeAt'
+    // The freeze's stored "did anybody play" answer: a frozen `false` keeps a
+    // post-freeze honour off this podium as it is kept off the Moment (#1263).
+    | 'frozenPlayRecorded'
   > | null;
 }
 
@@ -485,6 +488,9 @@ function FarewellPodiumInner({
     dayMetasLoaded,
     freezeAt,
     event?.bannedUids ?? [],
+    // The freeze's stored answer, so a frozen `false` drops a post-freeze
+    // honour here exactly as the podium Moment does (#1263).
+    event?.frozenPlayRecorded,
   );
   const dayLabel = makeDayLabel(days);
 
