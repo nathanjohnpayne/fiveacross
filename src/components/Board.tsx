@@ -924,7 +924,12 @@ export default function Board() {
   // in flight; gating on `dayBoardConfirmed`
   // keeps a cache-miss (board unknown) from dealing a second card over an existing
   // one. Fire-and-forget: the day-scoped subscription renders the card once written.
-  const dealingDaysRef = useRef<Set<string>>(new Set());
+  // Each in-flight key maps to the attempt that owns it (#1255): Retry may
+  // evict a still-pending attempt and start its replacement under the same
+  // key, so only the attempt that still owns the key may release it or
+  // publish an error. A stale attempt settling late is otherwise inert.
+  const dealingDaysRef = useRef<Map<string, number>>(new Map());
+  const dealAttemptSeqRef = useRef(0);
   // The Day index whose lazy deal has FAILED (thin/malformed snapshot, or a
   // repeatedly-denied write), so the render can surface a retry instead of sitting
   // on "Dealing…" forever (Codex #247 P2). `dealNonce` bumps on a manual retry so
@@ -957,17 +962,23 @@ export default function Board() {
     // overlap for the reason a Retry already is: the deal is a transaction that
     // re-checks the card's existence and no-ops for the loser.
     const key = dealInFlightKey(eventId, user.uid, day.index, playerJoined);
-    if (dealingDaysRef.current.has(key)) return;
-    dealingDaysRef.current.add(key);
+    const inFlight = dealingDaysRef.current;
+    if (inFlight.has(key)) return;
+    const attempt = ++dealAttemptSeqRef.current;
+    inFlight.set(key, attempt);
     const dealIndex = day.index;
     void dealDayCard(user, dealIndex)
       .catch(() => {
         // A denied/failed deal leaves the board null; surface a retry for the
         // viewed Day rather than an indefinite "Dealing…" spinner. Scoped to the
-        // acted Day so switching away/among Days never shows a stale error.
-        setDayDealError({ eventId, dayIndex: dealIndex });
+        // acted Day so switching away/among Days never shows a stale error, and
+        // to the attempt that still owns the key, so one a Retry replaced
+        // cannot resurface the panel over its running replacement (#1255).
+        if (inFlight.get(key) === attempt) setDayDealError({ eventId, dayIndex: dealIndex });
       })
-      .finally(() => dealingDaysRef.current.delete(key));
+      .finally(() => {
+        if (inFlight.get(key) === attempt) inFlight.delete(key);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days`/`day` derive from event?.days; deps track the fields the deal actually reads.
   }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce, playerJoined]);
   // Open-time echo reconcile (specs/echo-marks.md, #446): once per board

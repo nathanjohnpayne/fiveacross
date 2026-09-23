@@ -480,6 +480,60 @@ describe('Board daily-cards wiring (#246)', () => {
     expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
   });
 
+  it('an attempt Retry replaced cannot resurface the error over its running replacement (#1255)', async () => {
+    // Retry evicts a still-pending joined attempt and starts a replacement
+    // under the SAME key. When the evicted attempt later rejects, it no longer
+    // owns the key: it must neither publish the error panel nor release the
+    // replacement's in-flight guard.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null;
+    let rejectUnjoined: (e: Error) => void = () => {};
+    let rejectJoined: (e: Error) => void = () => {};
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectUnjoined = reject;
+        }),
+    );
+    const { rerender } = render(<Board />);
+
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectJoined = reject;
+        }),
+    );
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    await act(async () => {
+      rejectUnjoined(new Error('denied'));
+    });
+
+    // The replacement hangs; the evicted joined attempt then rejects late.
+    H.dealDayCard.mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    });
+    expect(H.dealDayCard).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      rejectJoined(new Error('denied'));
+    });
+    expect(screen.queryByText(/couldn’t deal this day’s card/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
   it('renders the two-event "Tonight:" line on the dealt day card (schedule correction)', () => {
     const now = Date.now();
     H.event = {
