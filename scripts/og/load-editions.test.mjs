@@ -8,7 +8,7 @@
 // their arguments — and nothing in `npm test` executed either script's load
 // path, so the runbook kept pointing people at a command that crashed.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,8 +57,10 @@ describe('the renderers get through their brand-table load', () => {
   // two share-card scripts (#887) import the loader statically but call it
   // inside `main`, because they are also imported by their own unit tests for
   // the staging seams they export and evaluating the brand table on import
-  // would make every one of those tests shell out to esbuild. The spawn below
-  // covers both shapes: it runs the real command line either way.
+  // would make every one of those tests shell out to esbuild. So the spawn
+  // below reaches the loader only for `render-og-editions.mjs`: the share-card
+  // scripts refuse the unknown Edition before their loader call, and the
+  // valid-Edition runs in the next block are what reach it (#1257).
   const outDir = mkdtempSync(join(tmpdir(), 'og-load-editions-'));
   afterAll(() => rmSync(outDir, { recursive: true, force: true }));
 
@@ -84,7 +86,72 @@ describe('the renderers get through their brand-table load', () => {
   it('writes nothing while rejecting the edition', () => {
     expect(readdirSync(outDir)).toEqual([]);
   });
+});
 
+describe('the share-card renderers reach their real loader call with a valid Edition (#1257)', () => {
+  // The unknown-Edition cases above stop the two share-card scripts BEFORE
+  // `loadEditions()`, because those scripts call the loader inside `main`
+  // after validating the Edition — so a failure at either script's loader
+  // call, or in resolving a real Edition's brand row, passed every case
+  // there. These runs take a real Edition all the way through the loader and
+  // the brand-row resolution, and stop at the first thing after them:
+  // Chromium's launch, which fails deterministically because
+  // PLAYWRIGHT_BROWSERS_PATH points at an empty directory. No browser starts,
+  // no network, and nothing is written (`--check`, plus a scratch `--out`
+  // that must stay empty). A loader or brand-table failure surfaces as its
+  // own error instead of the launch error, and fails the test.
+  const scratch = mkdtempSync(join(tmpdir(), 'og-load-editions-valid-'));
+  const noBrowsers = join(scratch, 'no-browsers');
+  const outDir = join(scratch, 'out');
+  mkdirSync(noBrowsers);
+  mkdirSync(outDir);
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+  const cases = [
+    ['render-share-footer.mjs', ['--check']],
+    ['render-share-rasters.mjs', ['--out', outDir, '--check']],
+  ];
+  // One named Edition, and `--all`, which resolves every Edition's brand row.
+  const selectors = [
+    { label: `--edition ${DEFAULT_EDITION}`, selector: ['--edition', DEFAULT_EDITION] },
+    { label: '--all', selector: ['--all'] },
+  ];
+  for (const [script, extra] of cases) {
+    it.each(selectors)(`${script} $label gets through loadEditions() and the brand rows`, ({ selector }) => {
+      const result = spawnSync(
+        process.execPath,
+        [join(here, script), ...selector, '--allow-foreign-platform', ...extra],
+        {
+          encoding: 'utf8',
+          timeout: 60_000,
+          env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: noBrowsers },
+        },
+      );
+      expect(result.signal, 'the script must exit on its own').toBeNull();
+      expect(result.stderr).not.toMatch(/TypeError|Cannot read properties|Unknown edition|esbuild/);
+      expect(result.stderr).toMatch(/browserType\.launch: Executable doesn't exist/);
+      expect(result.status).toBe(1);
+    });
+
+    it(`${script} calls the loader before it launches the browser`, () => {
+      // What makes the run above a loader test: if the call moved after the
+      // launch, the launch error would arrive first and the loader would go
+      // unexercised again.
+      const code = readFileSync(join(here, script), 'utf8');
+      const loaderCall = code.indexOf('= loadEditions();');
+      const launch = code.indexOf("await import('playwright')");
+      expect(loaderCall).toBeGreaterThan(-1);
+      expect(launch).toBeGreaterThan(loaderCall);
+    });
+  }
+
+  it('writes nothing while stopping at the launch', () => {
+    expect(readdirSync(outDir)).toEqual([]);
+    expect(readdirSync(noBrowsers)).toEqual([]);
+  });
+});
+
+describe('the renderers share one loader', () => {
   it.each(RENDERERS)('%s reads the brand table through the shared loader', (script) => {
     // One loader, not one per renderer: the previous arrangement rotted in two
     // places at once, and a re-inlined copy would pass the spawn cases above

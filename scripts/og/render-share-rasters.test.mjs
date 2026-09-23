@@ -32,6 +32,7 @@ import {
   DISPLAY_FACE_STACK,
   REQUIRED_DISPLAY_FACE,
   assertDisplayFace,
+  inspectCapture,
   optionValue,
   renderCardSet,
   repeatedOptions,
@@ -639,6 +640,49 @@ describe('render-share-footer.mjs repeat guard (#887, finding 4075112554): the f
   });
 });
 
+describe('--all combined with --edition (#1264): both share-card CLIs refuse the pair instead of rendering one Edition', () => {
+  // Both selectors used to pass validation and `main` preferred `--edition`,
+  // so `--all --edition gcb` published GCB alone although the operator asked
+  // for the full set. The Edition id below is deliberately fake, and the
+  // raster CLI also gets a disposable `--out` plus `--check`, so a regressed
+  // guard is still stopped by the `Unknown edition` check before anything is
+  // loaded, rendered or written — which is why the assertions name the
+  // selector refusal rather than accepting any exit 1.
+  const cases = [
+    ['render-share-rasters.mjs', (cwd) => ['--out', join(cwd, 'out'), '--check']],
+    ['render-share-footer.mjs', () => ['--check']],
+  ];
+  for (const [script, extra] of cases) {
+    for (const order of [
+      ['--all', '--edition', 'not-an-edition'],
+      ['--edition', 'not-an-edition', '--all'],
+    ]) {
+      it(`${script} refuses ${order.join(' ')}`, () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'og-all-with-edition-'));
+        try {
+          const result = spawnSync(
+            process.execPath,
+            [
+              fileURLToPath(new URL(`./${script}`, import.meta.url)),
+              ...order,
+              '--allow-foreign-platform',
+              ...extra(cwd),
+            ],
+            { cwd, encoding: 'utf8', timeout: 60_000 },
+          );
+          expect(result.stderr).toContain(`${script}: --all and --edition are mutually exclusive.`);
+          expect(result.stderr).not.toContain('Unknown edition');
+          expect(result.stdout).toBe('');
+          expect(result.status).toBe(1);
+          expect(readdirSync(cwd)).toEqual([]);
+        } finally {
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+
 describe('inspectCapture (#887, finding 4075112564): every capture is decoded before the overlay exemption applies', () => {
   it('refuses a truncated Vacay capture rather than exempting it straight to commit', async () => {
     // The finding: `assertCapturedCardFormat` proves only the fixed 33-byte
@@ -665,6 +709,49 @@ describe('inspectCapture (#887, finding 4075112564): every capture is decoded be
     ).rejects.toThrow(/vacay failed/);
 
     expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: vacay`);
+    expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('inspectCapture (#1264, #1266): a capture must be a complete PNG through IEND, with every CRC intact', () => {
+  // The decode above proved the IDAT stream inflates, and nothing more: the
+  // chunk loop stopped quietly at end-of-file, so the real committed GCB card
+  // with its 12-byte IEND chunk cut off still inspected as a clean 600×750
+  // capture, and so did one with a corrupted CRC.
+  const IEND_LENGTH = 12;
+
+  it.each(Object.keys(CARDS))('accepts the intact committed %s card', (id) => {
+    expect(inspectCapture(id, 'unused', { read: () => conformingPng(id) })).toMatchObject({ width: 600, height: 750 });
+  });
+
+  it.each(Object.keys(CARDS))('refuses the committed %s card truncated after its last IDAT chunk', (id) => {
+    const whole = conformingPng(id);
+    expect(whole.toString('ascii', whole.length - 8, whole.length - 4)).toBe('IEND');
+    const truncated = whole.subarray(0, whole.length - IEND_LENGTH);
+    // The same bytes the committed-asset test (`src/recon-share-og.test.ts`)
+    // decodes, through the same reader it calls.
+    expect(() => readPngPixels(truncated)).toThrow(/no IEND chunk/);
+    expect(() => inspectCapture(id, 'unused', { read: () => truncated })).toThrow(/no IEND chunk/);
+  });
+
+  it('refuses the committed GCB card with a corrupted chunk CRC', () => {
+    const corrupt = Buffer.from(conformingPng('gcb'));
+    // The last byte before IEND is the final IDAT chunk's CRC.
+    corrupt[corrupt.length - IEND_LENGTH - 1] ^= 0xff;
+    expect(() => inspectCapture('gcb', 'unused', { read: () => corrupt })).toThrow(/IDAT chunk .*CRC mismatch/);
+  });
+
+  it('keeps the truncated capture out of the committed tree', async () => {
+    const dest = seedCommitted('gcb');
+    const whole = conformingPng('gcb');
+    await expect(
+      renderCardSet({
+        ids: ['gcb'],
+        destDir: dir,
+        capture: captureWriting({ gcb: whole.subarray(0, whole.length - IEND_LENGTH) }),
+      }),
+    ).rejects.toThrow(/gcb failed/);
+    expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: gcb`);
     expect(leftovers()).toEqual([]);
   });
 });

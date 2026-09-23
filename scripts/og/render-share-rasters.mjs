@@ -225,9 +225,10 @@ export function inspectCapture(id, scratch, { read = readFileSync } = {}) {
   // for Vacay without ever calling this decode, so a truncated or corrupt
   // Vacay capture could reach `commitStaged` with nothing having read a single
   // pixel of it. Decoding here, before the exemption is applied, proves every
-  // capture is a structurally complete PNG — through its last IDAT chunk and
-  // the inflate it takes to prove that — whether or not its pixels are ever
-  // scored for an overlay.
+  // capture is a structurally complete PNG — every chunk in bounds with a
+  // matching CRC, an IEND at the end, and exactly the scanlines IHDR declares
+  // once inflated (#1264, #1266) — whether or not its pixels are ever scored
+  // for an overlay.
   const image = readPngPixels(bytes);
   const lightShare = assertNoOverlay(id, () => image);
   return { width: header.width, height: header.height, colorType: header.colorType, bytes: bytes.length, lightShare };
@@ -457,6 +458,23 @@ export function assertNoRepeatedOptions(script, args, options = RASTER_OPTIONS) 
   process.exit(1);
 }
 
+/**
+ * Print and exit 1 if the command line names both selectors (#1264).
+ *
+ * `--all` and `--edition` each pass validation alone, and `main` picks
+ * `--edition` when both are present, so `--all --edition gcb` used to publish
+ * GCB alone while the operator had asked for the full set, with no warning.
+ * As with a repeated option there is no single intent to honor, so the pair
+ * is refused before anything renders. Called in both share-card CLIs after
+ * their missing-value checks, so `--out --all` or `--edition --all` is still
+ * named as the missing value it is.
+ */
+export function assertOneSelector(script, args) {
+  if (!(args.includes('--all') && args.includes('--edition'))) return;
+  console.error(`${script}: --all and --edition are mutually exclusive. Pass --edition <id> or --all, not both.`);
+  process.exit(1);
+}
+
 /** Ask the page which display face the artboards actually resolve to. Split
  *  from `assertDisplayFace` so the decision is testable without a browser and
  *  this half stays a thin `page.evaluate`. */
@@ -566,6 +584,10 @@ async function main() {
     console.error('render-share-rasters.mjs: --out needs a directory.');
     process.exit(1);
   }
+  // After the value-less checks, so `--out --all` is still named as a missing
+  // directory: `--all --edition gcb` is two different requests, not a
+  // narrowed one (#1264).
+  assertOneSelector('render-share-rasters.mjs', args);
   if (!only && !all) {
     console.error(
       'render-share-rasters.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
@@ -592,11 +614,18 @@ async function main() {
   // import is static so `load-editions.test.mjs` can see it; the CALL is here,
   // inside `main`, because it shells out to esbuild and importing this file
   // for its staging logic should not.
+  //
+  // Every target's footer is resolved here, before Chromium launches, so a
+  // brand table that loads but cannot answer for an Edition fails at this
+  // point, where `load-editions.test.mjs` reaches it without a browser (#1257).
   const { editionBrand } = loadEditions();
-  const footerFor = (id) => {
-    const brand = editionBrand(id);
-    return `${brand.appName} ${brand.lexicon.shareMark}`;
-  };
+  const footers = new Map(
+    ids.map((id) => {
+      const brand = editionBrand(id);
+      return [id, `${brand.appName} ${brand.lexicon.shareMark}`];
+    }),
+  );
+  const footerFor = (id) => footers.get(id);
 
   const destDir = outDir ?? join(repo, 'plans', 'og-images');
   const wireframes = pathToFileURL(join(repo, 'plans', 'daily-cards-wireframes.html')).href;

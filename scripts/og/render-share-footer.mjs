@@ -67,7 +67,14 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadEditions } from './load-editions.mjs';
 import { toTruecolorPng } from './png-truecolor.mjs';
-import { CARDS, assertKnownOptions, assertNoRepeatedOptions, optionValue, renderCardSet } from './render-share-rasters.mjs';
+import {
+  CARDS,
+  assertKnownOptions,
+  assertNoRepeatedOptions,
+  assertOneSelector,
+  optionValue,
+  renderCardSet,
+} from './render-share-rasters.mjs';
 import { footerStyleFor } from './share-card-footer-style.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -223,6 +230,10 @@ async function main() {
     console.error('render-share-footer.mjs: --edition needs an Edition id.');
     process.exit(1);
   }
+  // Shared with the raster generator, after the missing-value check as there:
+  // `--all --edition vacay` used to repaint Vacay alone while the operator
+  // asked for the full set (#1264).
+  assertOneSelector('render-share-footer.mjs', args);
   if (!only && !all) {
     console.error(
       'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
@@ -250,7 +261,12 @@ async function main() {
   // The import is static so `load-editions.test.mjs` can see it; the CALL is
   // here, inside `main`, because it shells out to esbuild and importing this
   // file for its capture seam should not.
+  //
+  // Every target's brand row is resolved here, before Chromium launches, so a
+  // brand table that loads but cannot answer for an Edition fails at this
+  // point, where `load-editions.test.mjs` reaches it without a browser (#1257).
   const { editionBrand } = loadEditions();
+  const brands = new Map(ids.map((id) => [id, editionBrand(id)]));
   const destDir = join(repo, 'plans', 'og-images');
 
   const { chromium } = await import('playwright');
@@ -267,7 +283,7 @@ async function main() {
    *  reads it under the destination lock: this is a repaint of an existing
    *  picture, not a render from the artboard. */
   const paint = async (id, b64) => {
-    const brand = editionBrand(id);
+    const brand = brands.get(id);
     // `text-transform: uppercase` on the artboard rule, applied here because a
     // canvas has no such thing — and applied to the whole line, which is what
     // the rule does.
