@@ -1475,12 +1475,29 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
         // `4058610368`: the ceremonial Day unlocks AT the cutoff, so a bound
         // would read the ceremonial-only Event as unplayed, which is the defect
         // #1192 removed.
-        const [roster, dayHonors] = await Promise.all([
+        //
+        // AND THE TWO WITNESSES ARE SETTLED INDEPENDENTLY (#1263, Codex P2
+        // `4074863795`). Under one `Promise.all`, a roster read that rejected
+        // took a successful honour read down with it, and a pin in hand was
+        // stored as `null`. Each read now answers for itself: a pin that was
+        // read proves play whatever happened to the roster, and a Mark on a
+        // roster that was read proves it whatever happened to the pins.
+        const [rosterRead, honorsRead] = await Promise.allSettled([
           readFinaleRoster(db, eventId),
           readDayHonorsWithCompleteness(db, eventId, finaleDays),
         ]);
-        const played = roster.some(anyMarksRecorded) || dayHonors.honors.some((h) => h.firstBingo != null);
-        playRecorded = played ? true : dayHonors.complete ? false : undefined;
+        if (rosterRead.status === 'rejected') {
+          console.error('runFinaleBeats: freeze roster read failed', eventId, rosterRead.reason);
+        }
+        if (honorsRead.status === 'rejected') {
+          console.error('runFinaleBeats: freeze honour read failed', eventId, honorsRead.reason);
+        }
+        const played =
+          (rosterRead.status === 'fulfilled' && rosterRead.value.some(anyMarksRecorded)) ||
+          (honorsRead.status === 'fulfilled' && honorsRead.value.honors.some((h) => h.firstBingo != null));
+        const everyReadComplete =
+          rosterRead.status === 'fulfilled' && honorsRead.status === 'fulfilled' && honorsRead.value.complete;
+        playRecorded = played ? true : everyReadComplete ? false : undefined;
       } catch (err) {
         console.error('runFinaleBeats: freeze playRecorded capture failed', eventId, err);
       }
@@ -1564,11 +1581,26 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
           honors,
           times.standingsFreezeAt,
         );
-        extra = {
-          podium: (frozenPlayRecorded === undefined
-            ? frozen
-            : { ...frozen, playRecorded: frozenPlayRecorded }) as unknown as Record<string, unknown>,
-        };
+        //
+        // AND A FROZEN `false` IS THE WHOLE BOARD, not one field of it (#1263,
+        // Codex P2 `4074863801`). `false` is stored only when the freeze read
+        // the roster AND every Day's pin and found nothing, so the podium as of
+        // the freeze names nobody. This run's reads can still find a champion,
+        // a ⭐ or a pinned honour — `dailyHonors` carries no cutoff at all, and
+        // a ceremonial Day pins after the freeze by design — and the email
+        // asks those honours FIRST and lets any one of them outrank a stored
+        // `false`. Posted beside it, a pin acquired after the snapshot would
+        // overturn the frozen answer on the one record that cannot be amended.
+        // So a frozen `false` posts the empty board it froze. `true` and
+        // unknown keep the payload as built: neither makes a claim a later
+        // honour could contradict.
+        const podium =
+          frozenPlayRecorded === false
+            ? { ...frozen, champion: null, firstBingo: null, dailyHonors: [], playRecorded: false }
+            : frozenPlayRecorded === undefined
+              ? frozen
+              : { ...frozen, playRecorded: frozenPlayRecorded };
+        extra = { podium: podium as unknown as Record<string, unknown> };
       } catch (err) {
         console.error('runFinaleBeats: podium content build failed', eventId, err);
       }
