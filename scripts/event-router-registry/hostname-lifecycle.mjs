@@ -86,6 +86,19 @@ const PROJECTED_FIELDS = new Set(['eventId', 'status', 'slug', 'edition', 'root'
 const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanonical', 'preview']);
 
 /**
+ * The non-projected fields this helper never takes from caller input on a
+ * mutation of an existing document. Each has ONE reviewed writer
+ * (`specs/hostnames-lookup.md`): `preview` is `provision-bodega-preview.mjs`'s
+ * and `canonicalHost`/`isCanonical` are `migrate-bodega-canonical-host.mjs`'s,
+ * and those writers validate what they write. Accepting them on `update` or
+ * `repoint` made this helper a second, unvalidated writer that could redirect
+ * analytics and email origin selection or mint a second canonical mapping. A
+ * repoint that moves the host to another Event clears them, and their owning
+ * writers re-derive them.
+ */
+const OWNER_RESTRICTED_FIELDS = new Set(['canonicalHost', 'isCanonical', 'preview']);
+
+/**
  * The fields only a route document may carry, which the archive's mirror-root
  * conversion therefore removes. `apexPath` belongs here rather than with the
  * non-projected fields above because it is per-Event, and the converted
@@ -95,7 +108,8 @@ const ROUTE_ONLY_FIELDS = ['eventId', 'status', 'slug', 'apexPath'];
 
 /**
  * The fields that describe THE EVENT rather than the host, and are therefore
- * reset by a repoint unless the caller supplies new values.
+ * reset by a repoint that changes `eventId` — `adultContent` unless the caller
+ * supplies a new value, the owner-restricted three always.
  *
  * A repoint moves a host from one Event to another, and a merge carried the
  * previous Event's public face with it: the old `preview` postcard the
@@ -416,6 +430,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   let projectedChange = false;
   for (const key of Object.keys(changes)) {
     if (key === 'apexPath') refuse('apex-path-barrier');
+    if (OWNER_RESTRICTED_FIELDS.has(key)) refuse('owner-restricted-field');
     if (NON_PROJECTED_FIELDS.has(key)) continue;
     if (!PROJECTED_FIELDS.has(key)) refuse('unknown-field');
     projectedChange = true;
@@ -530,15 +545,35 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
   for (const key of Object.keys(changes)) {
     if (key === 'status') refuse('combined-barrier');
     if (key === 'apexPath') refuse('apex-path-barrier');
+    if (OWNER_RESTRICTED_FIELDS.has(key)) refuse('owner-restricted-field');
     if (!PROJECTED_FIELDS.has(key) && !NON_PROJECTED_FIELDS.has(key)) refuse('unknown-field');
   }
-  if (!Object.hasOwn(changes, 'eventId') && !Object.hasOwn(changes, 'slug')) refuse('repoint-requires-identity');
-  // Event-scoped metadata does not survive the move. Reset first, then apply
-  // `changes`, so a caller that supplies a new `preview` or `adultContent`
-  // replaces it and a caller that supplies neither is left with none rather
-  // than with the previous Event's.
+  // An identity CHANGE, not an identity key. Restating the current `eventId`
+  // beside an Edition correction passed a presence test, and the moved
+  // Edition then satisfied the projection-inequality check below, so a host
+  // still serving the same Event had its Event-scoped fields reset — its
+  // `adultContent` acknowledgement cleared around the monotone rule, its
+  // `preview` and canonical metadata deleted. An Edition-only correction is
+  // an ordinary update.
+  const eventChange = Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId;
+  const slugChange = Object.hasOwn(changes, 'slug') && changes.slug !== state.hostname.slug;
+  if (!eventChange && !slugChange) refuse('repoint-requires-identity');
+  // Event-scoped metadata does not survive a move to ANOTHER Event. Reset
+  // first, then apply `changes`, so a caller that supplies a new
+  // `adultContent` replaces it and one that supplies none is left with none
+  // rather than with the previous Event's. A slug move that keeps the Event
+  // is still that Event's host, so nothing is reset and the monotone rule
+  // holds exactly as it does on an ordinary update.
   const retained = { ...state.hostname };
-  for (const field of EVENT_SCOPED_FIELDS) delete retained[field];
+  if (eventChange) {
+    for (const field of EVENT_SCOPED_FIELDS) delete retained[field];
+  } else if (
+    Object.hasOwn(changes, 'adultContent') &&
+    state.hostname.adultContent === true &&
+    changes.adultContent !== true
+  ) {
+    refuse('adult-content-monotone');
+  }
   const document = { ...retained, ...changes };
   // The Event the host would point at AFTER the move, which is the one that
   // matters: re-homing a document onto an archived Event publishes a route

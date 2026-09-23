@@ -389,8 +389,16 @@ export function validatePathCapabilityBarrier(barrier, observedAt) {
   ) {
     refuseProjection('path-capability-barrier');
   }
-  const armed = Date.parse(barrier.armedAt);
-  if (!Number.isFinite(armed) || armed > Date.parse(observedAt)) refuseProjection('path-capability-barrier');
+  // The canonical instant predicate, not `Date.parse` alone, which coerces a
+  // typo into an OLD instant — `"0"` into 2000-01-01, February 30 into March —
+  // and would read it as a satisfied barrier. The record is the evidence that
+  // forced advancement was armed before the capability was published, so
+  // anything that is not a real RFC 3339 instant fails closed.
+  const armed = canonicalInstant(barrier.armedAt);
+  const observed = typeof observedAt === 'string' ? canonicalInstant(observedAt) : null;
+  if (armed === null || observed === null || Date.parse(armed) > Date.parse(observed)) {
+    refuseProjection('path-capability-barrier');
+  }
 }
 
 /**

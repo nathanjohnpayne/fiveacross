@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
+import { normalizeTimestamp } from './hostname-projection.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
@@ -423,13 +424,20 @@ function validateSourceRead(host, receipt) {
   instant(receipt.readAt, 'invalid-source-transaction');
   if (receipt.routerReplica === null) refuse('missing-ledger');
   exactKeys(receipt.routerReplica, ['schemaVersion', 'revision', 'host', 'desired', 'updatedAt'], 'malformed-ledger');
-  const ledger = receipt.routerReplica;
+  // `updatedAt` goes through the SHARED strict canonicalizer before anything
+  // is digested or signed. `Date.parse` alone accepted a rolled-over date the
+  // worker's `parseSyncRequest` refuses — signed evidence nothing could use —
+  // and hashed the raw spelling, so two spellings of one instant produced two
+  // `ledgerDocumentDigest` values for one ledger.
+  const updatedAt = isNonempty(receipt.routerReplica.updatedAt)
+    ? normalizeTimestamp(receipt.routerReplica.updatedAt)
+    : null;
+  const ledger = { ...receipt.routerReplica, updatedAt };
   if (
     ledger.schemaVersion !== 1 ||
     !POSITIVE_DECIMAL.test(ledger.revision) ||
     ledger.host !== host ||
-    !isNonempty(ledger.updatedAt) ||
-    !Number.isFinite(Date.parse(ledger.updatedAt))
+    updatedAt === null
   ) {
     refuse('malformed-ledger');
   }

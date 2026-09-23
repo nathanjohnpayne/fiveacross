@@ -368,6 +368,29 @@ describe('ordinary update', () => {
       'source-ledger-drift',
     );
   });
+
+  // `preview`, `canonicalHost` and `isCanonical` each have ONE reviewed
+  // writer (`specs/hostnames-lookup.md`), and those writers validate what they
+  // write. An ordinary update that carried them would be a second, unvalidated
+  // writer able to redirect analytics and email origins or mint a second
+  // canonical mapping, so the helper takes none of them from caller input.
+  it.each([
+    ['canonicalHost', { canonicalHost: 'wrong.example' }],
+    ['isCanonical', { isCanonical: true }],
+    ['preview', { preview: { eventName: 'Somewhere else' } }],
+    ['an owner-only field beside a projected change', { edition: 'vacay', canonicalHost: 'wrong.example' }],
+  ])('refuses %s on an ordinary update and leaves both documents untouched', async (_why, changes) => {
+    const before = hostnameDocument({ canonicalHost: HOST, isCanonical: false });
+    const { docs, dependencies } = store(converged(HOST, '4', before));
+    const ledger = structuredClone(docs.get(`routerReplicas/${HOST}`));
+    expect(await refusal(mutation({ intent: 'update', host: HOST, changes }), dependencies)).toBe(
+      'owner-restricted-field',
+    );
+    expect(docs.get(`hostnames/${HOST}`)).toEqual(before);
+    expect(docs.get(`routerReplicas/${HOST}`)).toEqual(ledger);
+  });
+  // The permitted non-projected update (`adultContent`) is the first test in
+  // this block, so the refusal above is scoped to the owner-only three.
 });
 
 describe('the adultContent acknowledgement', () => {
@@ -659,21 +682,14 @@ describe('repoint', () => {
     });
   });
 
-  it('replaces the Event metadata the repoint does supply, and keeps the host-scoped fields', async () => {
-    const before = { root: undefined, ...hostnameDocument({ status: 'disabled', pathNamespace: null, adultContent: true }) };
-    delete before.root;
+  it('replaces the adultContent posture the repoint does supply, and keeps the host-scoped fields', async () => {
+    const before = hostnameDocument({ status: 'disabled', pathNamespace: null, adultContent: true });
     const { docs, dependencies } = store(converged(HOST, '5', before));
     await applyHostnameMutation(
       mutation({
         intent: 'repoint',
         host: HOST,
-        changes: {
-          eventId: 'sonoma-2027',
-          canonicalHost: 'sonoma.fiveacross.app',
-          isCanonical: false,
-          adultContent: false,
-          preview: { headline: 'Sonoma' },
-        },
+        changes: { eventId: 'sonoma-2027', adultContent: false },
         converged: edgeConverged(HOST, '5', before),
       }),
       dependencies,
@@ -685,11 +701,93 @@ describe('repoint', () => {
       slug: 'bodega-bay',
       // Host-scoped, so it survives the move.
       pathNamespace: null,
-      canonicalHost: 'sonoma.fiveacross.app',
-      isCanonical: false,
       adultContent: false,
-      preview: { headline: 'Sonoma' },
     });
+  });
+
+  // The repoint clears the previous Event's `preview`, `canonicalHost` and
+  // `isCanonical`; their reviewed writers re-derive them for the new Event.
+  // Taking replacements from the caller would make this intent the unvalidated
+  // second writer the ordinary update refuses to be.
+  it.each([
+    ['canonicalHost', { canonicalHost: 'sonoma.fiveacross.app' }],
+    ['isCanonical', { isCanonical: true }],
+    ['preview', { preview: { eventName: 'Sonoma' } }],
+  ])('refuses %s on a repoint and leaves both documents untouched', async (_why, extra) => {
+    const before = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '5', before));
+    expect(
+      await refusal(
+        mutation({
+          intent: 'repoint',
+          host: HOST,
+          changes: { eventId: 'sonoma-2027', ...extra },
+          converged: edgeConverged(HOST, '5', before),
+        }),
+        dependencies,
+      ),
+    ).toBe('owner-restricted-field');
+    expect(docs.get(`hostnames/${HOST}`)).toEqual(before);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('5');
+  });
+
+  // Key PRESENCE is not an identity change. Restating the current `eventId`
+  // beside an Edition correction satisfied the old presence test and the
+  // projection-inequality check (the Edition moved), and then reset every
+  // Event-scoped field of a host that still served the same Event — clearing
+  // its `adultContent` acknowledgement around the monotone rule and deleting
+  // its `preview` and canonical metadata. An Edition-only correction is an
+  // ordinary update.
+  it.each([
+    ['its unchanged eventId', { eventId: 'bodega-bay-2026', edition: 'vacay' }],
+    ['its unchanged slug', { slug: 'bodega-bay', edition: 'vacay' }],
+    ['both unchanged', { eventId: 'bodega-bay-2026', slug: 'bodega-bay', edition: 'vacay' }],
+  ])('refuses a repoint that restates %s', async (_why, changes) => {
+    const before = hostnameDocument({ status: 'disabled', adultContent: true, preview: { eventName: 'Bodega Bay' } });
+    const { docs, dependencies } = store(converged(HOST, '5', before));
+    expect(
+      await refusal(
+        mutation({ intent: 'repoint', host: HOST, changes, converged: edgeConverged(HOST, '5', before) }),
+        dependencies,
+      ),
+    ).toBe('repoint-requires-identity');
+    expect(docs.get(`hostnames/${HOST}`)).toEqual(before);
+    expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('5');
+  });
+
+  // A slug move that keeps the Event is still that Event's host, so nothing
+  // Event-scoped is reset and the monotone rule still holds. Only a root host
+  // can carry a route whose slug is not its own first label.
+  it('keeps the Event metadata on a slug-only repoint and refuses lowering adultContent there', async () => {
+    const ROOT = 'fiveacross.app';
+    const before = hostnameDocument({
+      canonicalHost: HOST,
+      isCanonical: false,
+      status: 'disabled',
+      pathNamespace: 'fiveacross.app',
+      adultContent: true,
+      preview: { eventName: 'Bodega Bay' },
+    });
+    const lowered = store(converged(ROOT, '5', before));
+    expect(
+      await refusal(
+        mutation({
+          intent: 'repoint',
+          host: ROOT,
+          changes: { slug: 'bodega', adultContent: false },
+          converged: edgeConverged(ROOT, '5', before),
+        }),
+        lowered.dependencies,
+      ),
+    ).toBe('adult-content-monotone');
+
+    const { docs, dependencies } = store(converged(ROOT, '5', before));
+    await applyHostnameMutation(
+      mutation({ intent: 'repoint', host: ROOT, changes: { slug: 'bodega' }, converged: edgeConverged(ROOT, '5', before) }),
+      dependencies,
+    );
+    expect(docs.get(`hostnames/${ROOT}`)).toEqual({ ...before, slug: 'bodega' });
+    expect(docs.get(`routerReplicas/${ROOT}`).revision).toBe('6');
   });
 
   it('refuses combining the barrier with the status move it exists to separate', async () => {
