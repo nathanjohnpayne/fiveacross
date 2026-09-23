@@ -81,8 +81,8 @@ export function readPngPixels(bytes) {
   if (header.interlace !== 0) throw new Error('PNG: interlaced images are not supported');
 
   // Every chunk is bounds-checked and CRC-checked, and the walk must end on an
-  // IEND chunk (#1264, #1266). The loop used to stop quietly at end-of-buffer,
-  // so a capture cut off after its last IDAT chunk — IEND and anything else
+  // IEND chunk that is empty and ends the file (#1264, #1266). The loop used
+  // to stop quietly at end-of-buffer, so a capture cut off after its last IDAT chunk — IEND and anything else
   // missing — decoded as complete whenever the compressed payload still
   // inflated, and a flipped byte anywhere a CRC covers went unnoticed.
   const parts = [];
@@ -103,6 +103,10 @@ export function readPngPixels(bytes) {
     if (type === 'IDAT') parts.push(buffer.subarray(offset + 8, offset + 8 + length));
     offset = end;
     if (type === 'IEND') {
+      // IEND is empty and last: a CRC-correct IEND with a payload, or any bytes
+      // after it, is not the file the chunks before it describe.
+      if (length !== 0) throw new Error(`PNG: IEND chunk at byte ${end - 12 - length} carries ${length} bytes (must be empty)`);
+      if (end !== buffer.length) throw new Error(`PNG: ${buffer.length - end} bytes follow the IEND chunk (it must be last)`);
       sawIend = true;
       break;
     }

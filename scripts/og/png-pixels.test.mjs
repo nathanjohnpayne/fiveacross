@@ -137,6 +137,17 @@ describe('readPngPixels refuses a PNG that is not structurally complete (#1264, 
     expect(() => readPngPixels(SAMPLE.subarray(0, SAMPLE.length - 4))).toThrow(/truncated/);
   });
 
+  it('refuses bytes after the IEND chunk', () => {
+    expect(() => readPngPixels(Buffer.concat([SAMPLE, Buffer.from([0])]))).toThrow(/1 bytes follow the IEND chunk/);
+    const trailingChunk = Buffer.concat([SAMPLE, chunk('tEXt', Buffer.from('k\0v'))]);
+    expect(() => readPngPixels(trailingChunk)).toThrow(/bytes follow the IEND chunk/);
+  });
+
+  it('refuses a CRC-correct IEND chunk that carries a payload', () => {
+    const nonEmpty = Buffer.concat([SAMPLE.subarray(0, SAMPLE.length - IEND_LENGTH), chunk('IEND', Buffer.from([1, 2]))]);
+    expect(() => readPngPixels(nonEmpty)).toThrow(/IEND chunk .*carries 2 bytes/);
+  });
+
   it('refuses a chunk whose declared length runs past the end of the file', () => {
     const overlong = Buffer.from(SAMPLE);
     overlong.writeUInt32BE(0x7fffffff, IDAT_AT);
