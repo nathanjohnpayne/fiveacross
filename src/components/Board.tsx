@@ -726,6 +726,23 @@ export default function Board() {
   // string either way: its sheet only opens after a render with the row loaded in
   // practice, and #78 pins auth as its explicit pre-load fallback.
   const identityKnown = !playerLoading && (player !== null || playerConfirmed);
+  // Whether the join has actually landed on the subscribed row (#1158).
+  // `joinedAt` is the marker: `joinAndDeal` is its only writer (it stamps the
+  // field in the same merge that carries `uid`/`displayName`/`photoURL`, and
+  // nothing else in the app ever writes it), and the converter does not
+  // synthesise it — so its presence means the join COMMITTED.
+  //
+  // Deliberately NOT `player.uid`: `playerConverter` pins `uid` to the doc id
+  // on every converted read (src/data/converters.ts, #1151), so on this
+  // subscription `player.uid === uid` is true the moment the DOCUMENT exists
+  // — for a `{dayStats}`-only row left by a pre-#1158 deal, or a `{theme}`-only
+  // row `savePlayerTheme` created from More — and this side would then call
+  // joined exactly the rows the guard exists for. `dealDayCard`'s own RAW-read
+  // guard reads `joinedAt` too (Codex P2, #1158 review round 4), so the two
+  // predicates are one question asked of one stored field and cannot disagree.
+  // Distinct from `identityKnown` above, which asks whether the SUBSCRIPTION
+  // has settled.
+  const playerJoined = uid !== undefined && typeof player?.joinedAt === 'number';
   const { data: event } = useEventDoc();
   // The Day schedule (daily-cards-spec § "Data model"): `[]` on a not-yet-migrated
   // (legacy) Event or while the doc loads, which keeps the entire day-scoped path
@@ -891,8 +908,11 @@ export default function Board() {
   // applies the stratified/tutorial deal). A Day that is `locked` (future),
   // `waking` (unlocked-by-clock but snapshot not yet stamped — scheduler lag), or
   // already `dealt` deals NOTHING here. `dealDayCard` re-checks all of this
-  // server-side and no-ops on an existing card, so the in-flight ref only avoids
-  // firing the same deal twice while one is in flight; gating on `dayBoardConfirmed`
+  // server-side and no-ops on an existing card — and on a Player row with no
+  // `joinedAt` stamp, the one precondition the schedule states do not cover
+  // (#1158), which `playerJoined` in the in-flight key below is what re-asks.
+  // So the in-flight ref only avoids firing the same deal twice while one is
+  // in flight; gating on `dayBoardConfirmed`
   // keeps a cache-miss (board unknown) from dealing a second card over an existing
   // one. Fire-and-forget: the day-scoped subscription renders the card once written.
   const dealingDaysRef = useRef<Set<string>>(new Set());
@@ -918,7 +938,16 @@ export default function Board() {
       hasBoard: false,
     });
     if (state !== 'ready') return;
-    const key = `${eventId}:${user.uid}:${day.index}`;
+    // The JOIN is part of what a deal attempt is (#1158): `dealDayCard` fails
+    // CLOSED for a `players/{uid}` row that carries no identity yet, rather
+    // than creating one that holds a `dayStats` bucket and nothing else. An
+    // attempt made before the join committed is therefore NOT the same attempt
+    // as one made after it, so the identity belongs in the in-flight key (and
+    // in the deps) — otherwise the no-op would leave the Card on "Dealing…"
+    // until some unrelated render happened along. The two attempts are safe to
+    // overlap for the reason a Retry already is: the deal is a transaction that
+    // re-checks the card's existence and no-ops for the loser.
+    const key = `${eventId}:${user.uid}:${day.index}:${playerJoined ? 'joined' : 'unjoined'}`;
     if (dealingDaysRef.current.has(key)) return;
     dealingDaysRef.current.add(key);
     const dealIndex = day.index;
@@ -931,7 +960,7 @@ export default function Board() {
       })
       .finally(() => dealingDaysRef.current.delete(key));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days`/`day` derive from event?.days; deps track the fields the deal actually reads.
-  }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce]);
+  }, [eventId, hasDays, user, event?.days, viewedIndex, board, dayBoardConfirmed, now, dealNonce, playerJoined]);
   // Open-time echo reconcile (specs/echo-marks.md, #446): once per board
   // identity per session, bring the opened Day Card up to date against the
   // Player's achieved set — the lazy backfill that self-heals pre-feature
@@ -1373,9 +1402,10 @@ export default function Board() {
     eventId,
     uid,
     displayName,
-    // `?? null` guards the undefined case, not just null: `dealDayCard` can create
-    // the player row with ONLY a `dayStats` bucket (the join-vs-deal race,
-    // api.ts:291), so a LOADED `player` can still lack the `photoURL` field
+    // `?? null` guards the undefined case, not just null: `dealDayCard` USED to
+    // create the player row with ONLY a `dayStats` bucket (the join-vs-deal
+    // race, closed by the fail-closed guard in `dealDayCard`, #1158) and rows
+    // of that shape persist, so a LOADED `player` can still lack the `photoURL` field
     // entirely (undefined, despite PlayerDoc typing it `string | null`). Passing
     // that undefined into a Moment `setDoc` throws "Unsupported field value:
     // undefined" and silently loses the whole BINGO/Blackout/First-to-BINGO
@@ -2847,8 +2877,9 @@ export default function Board() {
           // than `??`-chaining: PlayerDoc.photoURL is nullable, and a loaded row
           // with a null photo means "no avatar" — that null must win over the
           // stale auth photo, not be masked by it. The trailing `?? null` guards
-          // the UNDEFINED case (not just null): `dealDayCard` can create the
-          // player row with only a `dayStats` bucket (api.ts:291), so a loaded
+          // the UNDEFINED case (not just null): `dealDayCard` used to create the
+          // player row with only a `dayStats` bucket (the race its fail-closed
+          // guard now refuses, #1158) and such rows persist, so a loaded
           // `player` can lack `photoURL` entirely — and undefined into a proof
           // `setDoc`/transaction throws, dropping the proofed Mark's attribution.
           displayName={displayName}

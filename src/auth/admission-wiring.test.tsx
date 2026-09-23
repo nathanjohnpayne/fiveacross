@@ -591,3 +591,36 @@ describe('a visit carrying a pending Invitation', () => {
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
   });
 });
+
+describe('a join the quiesce DEFERRED (#1158)', () => {
+  it('is not re-asked when the admission mirror catches up under identical gate inputs', async () => {
+    // The one gate evaluation that repeats its inputs EXACTLY: `begin`
+    // publishes an answer the deal effect has already read synchronously, so
+    // the mirror catching up re-runs that effect with a byte-identical key.
+    // Reached here the way production reaches it — the origin's Invitation
+    // record expires between `classify` (which publishes `held`) and `begin`
+    // one commit later (which finds nothing and publishes `clear`).
+    //
+    // A join the quiesce declined must not be re-asked on that evaluation: the
+    // Event is still shut, the rules would refuse the same write again, and
+    // the resume this ticket adds rides on the dedupe KEY moving when play
+    // reopens — never on a deferral re-arming the gate, which would turn every
+    // repeated-input render into another forbidden attempt (#1158 review round
+    // 1, finding 2).
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    mocks.readPendingEventInvitation.mockReturnValueOnce({ record: record(), durable: true });
+
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+    // Flush the catch-up render and the deal's own settle, in both orders the
+    // scheduler can produce them.
+    await act(async () => void (await Promise.resolve()));
+    await act(async () => void (await Promise.resolve()));
+
+    expect(admissionKind()).toBe('clear');
+    expect(mocks.joinAndDeal).toHaveBeenCalledOnce();
+    // The expired record was never redeemed, and nothing was deleted for it.
+    expect(mocks.redeemEventInvitation).not.toHaveBeenCalled();
+  });
+});

@@ -49,9 +49,30 @@ describe('registry sync request contract', () => {
       },
     ],
     ['invalid timestamp', route({ updatedAt: 'not-a-time' })],
+    // `Date.parse` rolls these forward rather than refusing them, so a finite
+    // parse is not evidence the text names a date. The source and the
+    // publisher refuse them too; the edge does not trust the hop in between.
+    ['a day past the end of February', route({ updatedAt: '2026-02-30T12:00:00Z' })],
+    ['a thirty-first of April', route({ updatedAt: '2026-04-31T12:00:00Z' })],
+    ['a leap day in a year that has none', route({ updatedAt: '2025-02-29T12:00:00Z' })],
+    ['a zeroth day', route({ updatedAt: '2026-09-00T12:00:00Z' })],
+    // The `Date.UTC` year bound the source and the publisher draw too: this
+    // field is a publish instant, so a first-century year is corruption and
+    // refusing it fails closed. All three layers move together or not at all.
+    ['a year before 0100', route({ updatedAt: '0099-12-31T23:59:59Z' })],
+    // The offset is applied after the written components are judged, so the
+    // canonical result is validated too; both of these land outside the
+    // range the source and the publisher accept.
+    ['an offset carrying the first supported year below the bound', route({ updatedAt: '0100-01-01T00:00:00+01:00' })],
+    ['an offset carrying the last supported year into the expanded form', route({ updatedAt: '9999-12-31T23:59:59-01:00' })],
     ['foreign tombstone host', route({ host: 'example.com', desired: { kind: 'tombstone' } })],
   ])('rejects %s before storage', (_label, payload) => {
     expect(() => parseSyncRequest(JSON.stringify(payload), 'application/json')).toThrow();
+  });
+
+  it('accepts the leap day of a year that has one', () => {
+    const leapDay = route({ updatedAt: '2028-02-29T12:00:00.000Z' });
+    expect(parseSyncRequest(JSON.stringify(leapDay), 'application/json')).toEqual(leapDay);
   });
 
   it('requires the exact application/json content type', () => {

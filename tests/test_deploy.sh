@@ -122,11 +122,14 @@ skip() { echo "SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
 # Several cases below assert what a PREDEPLOY HOOK did — the write it was
 # denied, the timestamps it compared, the checkout it could not reach — and no
 # hook runs anywhere unless the deploy-scope classifier first PROVED a write
-# containment that can hold it. `ubuntu-latest`, where `app-ci` runs, can prove
-# none: `bwrap` is not installed and the kernel refuses an unprivileged user
-# namespace, so the classifier refuses every exemption before staging anything.
-# That is correct production behaviour, and it means those cases there would be
-# asserting a hook's effects on a machine that runs no hooks.
+# containment that can hold it. On a machine that can prove none the classifier
+# refuses every exemption before staging anything — correct production
+# behaviour, and it means those cases there would be asserting a hook's effects
+# on a machine that runs no hooks. `ubuntu-latest`, where `app-ci` runs, used to
+# be such a machine (no `bwrap`, and a kernel that refuses an unprivileged user
+# namespace) until the workflow started installing `bubblewrap` and failing
+# unless this same probe names a mechanism (#1164), so the cases below now run
+# there on the `bwrap` path.
 #
 # Asked of the classifier's own machinery rather than of `uname`: a Linux box
 # WITH `bwrap` runs every case exactly as this repository's development Mac
@@ -3741,13 +3744,12 @@ run_detached_writer_case 36b allowed
 # Case 37 (#1107): on a machine that can prove no write containment, deploy.sh
 # still deploys — conservatively — and no predeploy hook runs.
 #
-# This is the arm `app-ci` takes on every run: `ubuntu-latest` ships no `bwrap`
-# and refuses an unprivileged user namespace, so the classifier proves nothing
-# and refuses every exemption before staging. It is what replaces the cases
-# skipped above, and it runs on EVERY machine —
+# This is the arm any machine takes when it can prove nothing, and it is what
+# replaces the cases skipped above. It runs on EVERY machine —
 # `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT=1` makes a machine that CAN
-# contain a hook answer the same way, so the refusal is never a path only CI
-# exercises.
+# contain a hook answer the same way — which is now the only way `app-ci`
+# reaches it too, its runner having gained a `bwrap` it can prove (#1164). So
+# the refusal was never, and is still not, a path only one machine exercises.
 #
 # The fixture is 28b's, which really does export one endpoint and IS exempted
 # when a containment can be proved — so the reconciliation below is attributable

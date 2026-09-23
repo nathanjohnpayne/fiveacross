@@ -277,10 +277,23 @@ export function verifySeedPool(
   // The runtime verifier reads this directly from events/{id}; the optional
   // argument keeps this pure helper usable for item-only callers and tests.
   days = undefined,
+  // Optional per-prompt legacy TEXT, in the same order as `pool` (holes for
+  // every prompt without one). A source-only correction (#1019) can leave a
+  // live doc's stored `text` behind on purpose — the doc is still found by
+  // its recorded legacy id, but its text would otherwise read as drift the
+  // moment the canonical prompt changes. This is accepted ONLY under that
+  // prompt's legacy id, never under its canonical id, so a genuinely stale
+  // doc that happens to carry the old wording under a fresh id still fails.
+  legacyText = undefined,
 ) {
   if (!Array.isArray(pool)) {
     throw new Error(
       'verifySeedPool requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
+    );
+  }
+  if (legacyText !== undefined && (!Array.isArray(legacyText) || legacyText.length !== pool.length)) {
+    throw new Error(
+      'verifySeedPool legacyText must be an array the same length as the target event pool.',
     );
   }
   if (verifyItemIds !== undefined) {
@@ -298,6 +311,7 @@ export function verifySeedPool(
   const expected = pool.map(({ text, spicy, pool: itemPool }, index) => ({
     index,
     canonicalId: seedItemDocId(text),
+    legacyId: verifyItemIds ? verifyItemIds[index] : undefined,
     // The current content hash always remains valid, so a fresh seed and the
     // documented in-place production identity both verify cleanly. A Set
     // handles the ordinary case where the two ids happen to be the same.
@@ -309,6 +323,10 @@ export function verifySeedPool(
       // farewell) keeps its own tag — a live seed doc missing `pool` or
       // drifted to another pool is itself drift this check surfaces.
     text,
+    // The one documented pre-fix wording this prompt's live doc is allowed
+    // to still carry — see the legacyText param doc above. undefined when
+    // this prompt has no such quirk.
+    legacyText: legacyText ? legacyText[index] : undefined,
     spicy,
     isFreeSpace: false,
     status: 'active',
@@ -344,10 +362,19 @@ export function verifySeedPool(
   for (const expectedDoc of expected) {
     const { canonicalId: id, text } = expectedDoc;
     const live = expectedDoc.acceptedIds.map((acceptedId) => seedById.get(acceptedId)).find(Boolean);
+    // A doc matched under its recorded LEGACY id may still carry that
+    // prompt's one documented pre-fix wording (#1019) without counting as
+    // drift; matched under the canonical id, only the current text counts.
+    const textOk =
+      !!live &&
+      (live.text === expectedDoc.text ||
+        (expectedDoc.legacyText !== undefined &&
+          live.id === expectedDoc.legacyId &&
+          live.text === expectedDoc.legacyText));
     if (!live) {
       missing.push({ id, text });
     } else if (
-      live.text !== expectedDoc.text ||
+      !textOk ||
       live.spicy !== expectedDoc.spicy ||
       live.isFreeSpace !== expectedDoc.isFreeSpace ||
       live.status !== expectedDoc.status ||
@@ -362,7 +389,7 @@ export function verifySeedPool(
         text,
         expectedSpicy: expectedDoc.spicy,
         actualSpicy: live.spicy,
-        ...(live.text !== text ? { actualText: live.text } : {}),
+        ...(!textOk ? { actualText: live.text } : {}),
         ...(live.isFreeSpace !== expectedDoc.isFreeSpace
           ? { expectedIsFreeSpace: expectedDoc.isFreeSpace, actualIsFreeSpace: live.isFreeSpace }
           : {}),
@@ -669,6 +696,7 @@ async function seed() {
     EVENT_SEED.settings.reportHideThreshold,
     seedEvent.VERIFY_ITEM_IDS,
     eventSnap.data()?.days,
+    seedEvent.VERIFY_ITEM_LEGACY_TEXT,
   );
   if (!report.ok) {
     console.error(formatDriftReport(report, EVENT_ID));
@@ -768,6 +796,7 @@ async function verify() {
     seedEvent.EVENT_SEED.settings.reportHideThreshold,
     seedEvent.VERIFY_ITEM_IDS,
     eventSnap.data()?.days,
+    seedEvent.VERIFY_ITEM_LEGACY_TEXT,
   );
   if (report.ok) {
     console.log(

@@ -1,0 +1,379 @@
+// @vitest-environment node
+//
+// The footer refresher's publication path (#887 round 4), driven through the
+// same seams the raster generator's staging tests use: `footerCaptureFrom` is
+// the production capture step with the browser replaced by a synthetic canvas
+// result, and everything after it — staging, the format guard, the
+// all-or-nothing commit — is the production `renderCardSet`.
+//
+// The finding: `canvas.toDataURL('image/png')` encodes the default
+// alpha-enabled 2D canvas as colour type 6 however opaque its pixels are, and
+// this tool wrote those bytes straight over a committed card while claiming in
+// its own comment to be writing truecolor. All three committed cards are
+// colour type 2 and `src/recon-share-og.test.ts` requires it, so the next
+// footer refresh would have published an RGBA card and the suite would have
+// found out afterwards, with the good picture gone.
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isLocked, withDestinationLocks } from './og-commit-lock.mjs';
+import { readPngHeader, readPngPixels } from './png-pixels.mjs';
+import { encodePng } from './png-truecolor.mjs';
+import { CARDS, footerCaptureFrom } from './render-share-footer.mjs';
+import {
+  FOOTER_SELECTOR,
+  THEMES_CSS_PATH,
+  WIREFRAMES_PATH,
+  footerStyleFor,
+  themeTokenDisagreements,
+  themeTokenTable,
+} from './share-card-footer-style.mjs';
+import { renderCardSet } from './render-share-rasters.mjs';
+
+const STALE = 'the card that is already committed';
+
+let dir;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'render-share-footer-'));
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+function seedCommitted(id) {
+  const dest = join(dir, CARDS[id].file);
+  writeFileSync(dest, `${STALE}: ${id}`);
+  return dest;
+}
+
+function leftovers() {
+  const committed = new Set(Object.values(CARDS).map((c) => c.file));
+  return readdirSync(dir).filter((name) => !committed.has(name));
+}
+
+/** What the canvas hands back: a full-size card, RGBA because the context has
+ *  an alpha channel, on the dark ground the two non-Vacay cards carry. */
+function canvasDataUrl({ transparentAt = null } = {}) {
+  const width = 600;
+  const height = 750;
+  const data = Buffer.alloc(width * height * 4);
+  for (let pixel = 0; pixel < width * height; pixel++) {
+    data[pixel * 4] = 17;
+    data[pixel * 4 + 1] = 18;
+    data[pixel * 4 + 2] = 23;
+    data[pixel * 4 + 3] = 255;
+  }
+  if (transparentAt) data[(transparentAt.y * width + transparentAt.x) * 4 + 3] = 0;
+  const png = encodePng({ width, height, channels: 4, data });
+  // Sanity on the fixture itself: if this ever stopped being colour type 6 the
+  // tests below would be proving nothing.
+  expect(readPngHeader(png).colorType).toBe(6);
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
+const publish = (ids, paint, overrides = {}) =>
+  renderCardSet({
+    ids,
+    destDir: dir,
+    fileFor: (id) => CARDS[id].file,
+    capture: footerCaptureFrom(paint, { destDir: dir }),
+    // The property under test in the lock cases below, and harmless in the
+    // others: this is the production setting, because a band repaint reads the
+    // card it replaces.
+    readsDestination: true,
+    ...overrides,
+  });
+
+describe('render-share-footer publication (#887): the committed card stays colour type 2', () => {
+  it('converts an opaque RGBA canvas result and commits it as truecolor', () => {
+    const dest = seedCommitted('gcb');
+    return publish(['gcb'], async () => canvasDataUrl()).then((staged) => {
+      const header = readPngHeader(readFileSync(dest));
+      expect(header).toMatchObject({ width: 600, height: 750, bitDepth: 8, colorType: 2, interlace: 0 });
+      // The pixels survived the conversion, which is the whole reason it is a
+      // channel drop rather than a re-render.
+      const pixels = readPngPixels(readFileSync(dest));
+      expect([pixels.data[0], pixels.data[1], pixels.data[2]]).toEqual([17, 18, 23]);
+      // And the guard that proves it is the raster generator's, reported back.
+      expect(staged[0].report).toMatchObject({ colorType: 2, width: 600, height: 750 });
+      expect(leftovers()).toEqual([]);
+    });
+  });
+
+  it('refuses a canvas result with a transparent pixel and commits nothing', async () => {
+    const dest = seedCommitted('gcb');
+    await expect(publish(['gcb'], async () => canvasDataUrl({ transparentAt: { x: 12, y: 9 } }))).rejects.toThrow(
+      /refusing to drop the alpha channel/,
+    );
+    expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: gcb`);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('leaves every card alone when one Edition in an --all run fails', async () => {
+    // Same all-or-nothing guarantee the raster generator got: a mixed set of
+    // footers is exactly as bad as a mixed set of renders.
+    const dests = { gcb: seedCommitted('gcb'), fiveacross: seedCommitted('fiveacross') };
+    await expect(
+      publish(['gcb', 'fiveacross'], async (id) =>
+        canvasDataUrl(id === 'fiveacross' ? { transparentAt: { x: 1, y: 1 } } : {}),
+      ),
+    ).rejects.toThrow(/fiveacross failed/);
+
+    expect(readFileSync(dests.gcb, 'utf8')).toBe(`${STALE}: gcb`);
+    expect(readFileSync(dests.fiveacross, 'utf8')).toBe(`${STALE}: fiveacross`);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('refuses anything that is not a PNG data URL rather than staging an empty file', async () => {
+    // `toDataURL` answers `data:,` when the encode fails. Splitting that on a
+    // comma yields undefined, which would stage nothing and make the PNG
+    // reader blame the file instead of the encoder.
+    const dest = seedCommitted('gcb');
+    await expect(publish(['gcb'], async () => 'data:,')).rejects.toThrow(/did not return a PNG data URL for gcb/);
+    expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: gcb`);
+    expect(existsSync(join(dir, `${CARDS.gcb.file}.render-tmp`))).toBe(false);
+    expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('render-share-footer concurrency (#887): the repaint reads what it replaces', () => {
+  /** Stand-in for `render-share-rasters.mjs` committing a freshly rendered
+   *  card. It runs at the moment the footer run acquires its locks, which is
+   *  the last instant a concurrent publisher can still win the race. */
+  const newerRaster = () => Buffer.from('a full render committed by the other tool');
+
+  it('sees the raster that landed before it took the lock, not one read earlier', async () => {
+    const dest = seedCommitted('gcb');
+    const seen = [];
+    await publish(
+      ['gcb'],
+      async (id, b64) => {
+        seen.push(Buffer.from(b64, 'base64').toString('utf8'));
+        return canvasDataUrl();
+      },
+      {
+        lock: (targets) => {
+          // The concurrent full render commits here: after this footer run
+          // decided to run, and before it is allowed to read anything.
+          for (const t of targets) writeFileSync(t.dest, newerRaster());
+          return () => {};
+        },
+      },
+    );
+
+    expect(seen).toEqual([newerRaster().toString('utf8')]);
+    expect(readPngHeader(readFileSync(dest)).colorType).toBe(2);
+  });
+
+  it('would repaint the stale snapshot if the lock only covered the commit — the race is real', async () => {
+    // The finding, reproduced against the same code with the one flag off.
+    // With `readsDestination: false` the locks are taken at the commit phase,
+    // so the capture has already read the card the other tool is about to
+    // replace, and the repaint published over it is of the older picture.
+    seedCommitted('gcb');
+    const seen = [];
+    await publish(
+      ['gcb'],
+      async (id, b64) => {
+        seen.push(Buffer.from(b64, 'base64').toString('utf8'));
+        return canvasDataUrl();
+      },
+      {
+        readsDestination: false,
+        lock: (targets) => {
+          for (const t of targets) writeFileSync(t.dest, newerRaster());
+          return () => {};
+        },
+      },
+    );
+
+    expect(seen).toEqual([`${STALE}: gcb`]);
+  });
+
+  it('is refused rather than proceeding while another process holds the destination', async () => {
+    const dest = seedCommitted('gcb');
+    const held = withDestinationLocks([{ dest }]);
+    const painted = [];
+    try {
+      await expect(
+        publish(['gcb'], async (id, b64) => {
+          painted.push(id);
+          return canvasDataUrl();
+        }, { lock: (targets) => withDestinationLocks(targets, { timeoutMs: 200 }) }),
+      ).rejects.toThrow(/timed out/);
+
+      // Nothing was read, painted, staged or published, and the holder still
+      // owns the lock — a refused footer run must not disturb the run it lost
+      // to.
+      expect(painted).toEqual([]);
+      expect(readFileSync(dest, 'utf8')).toBe(`${STALE}: gcb`);
+      expect(isLocked(dest)).toBe(true);
+    } finally {
+      held();
+    }
+    expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('the footer repaint takes its style from the artboard (#887)', () => {
+  const html = readFileSync(WIREFRAMES_PATH, 'utf8');
+  const css = readFileSync(THEMES_CSS_PATH, 'utf8');
+  /** The capture's deviceScaleFactor: the artboards are drawn at half scale. */
+  const SCALE = 2;
+
+  /** The canonical values, read out of the two source files by this test
+   *  rather than by the module under test, so the two derivations have to
+   *  agree. */
+  function canonical(edition) {
+    const rule = html.match(/\.shc \.foot\{([^}]*)\}/)[1];
+    const fontPx = Number(rule.match(/font-size:\s*([\d.]+)px/)[1]) * SCALE;
+    const theme = html
+      .slice(html.indexOf(`id="fx-share-final-photo-${edition}"`))
+      .match(/class="shc"\s+data-theme="([^"]+)"/)[1];
+    const token = rule.match(/color:\s*var\(--([\w-]+)\)/)[1];
+    // From the WIREFRAMES' own [data-theme] block, which is the CSS the
+    // artboard renders: the document links no stylesheet for these tokens.
+    const themeBlock = html.match(new RegExp(`\\[data-theme='${theme}'\\]\\s*\\{([^}]*)\\}`))[1];
+    return {
+      theme,
+      fontPx,
+      letterSpacingPx: Number(rule.match(/letter-spacing:\s*([\d.]+)em/)[1]) * fontPx,
+      ink: themeBlock.match(new RegExp(`--${token}:\\s*([^;]+)[;}]`))[1].trim(),
+      uppercase: /text-transform:\s*uppercase/.test(rule),
+    };
+  }
+
+  // The frame slug in the wireframes is not always the Edition id.
+  const EDITIONS = [
+    ['gcb', 'gcb'],
+    ['vacay', 'vacay'],
+    ['fiveacross', 'fa'],
+  ];
+
+  it.each(EDITIONS)('derives %s from the artboard rule and the theme token', (edition, slug) => {
+    const expected = canonical(slug);
+    expect(footerStyleFor(edition, { scale: SCALE })).toMatchObject(expected);
+  });
+
+  it('paints the size, tracking and inks the committed cards actually carry', () => {
+    // Spelled out as well as derived, so a change to either source file shows
+    // up in review as a changed expectation rather than only as a changed
+    // derivation. 8.5px at 2x is 17px, and .16em of 17px is 2.72px.
+    expect(EDITIONS.map(([edition]) => footerStyleFor(edition, { scale: SCALE }))).toEqual([
+      expect.objectContaining({ theme: 'so-long-farewell', fontPx: 17, letterSpacingPx: 2.72, ink: '#d0a8ab' }),
+      expect.objectContaining({ theme: 'fog-froth-farewells', fontPx: 17, letterSpacingPx: 2.72, ink: '#66625a' }),
+      expect.objectContaining({ theme: 'fiveacross-slate', fontPx: 17, letterSpacingPx: 2.72, ink: '#9aa3b2' }),
+    ]);
+    // The exact drift the finding named: the repaint used to paint 16px type
+    // with 3px tracking, and Vacay in an ink its theme does not contain.
+    expect(footerStyleFor('vacay', { scale: SCALE }).ink).not.toBe('#8a857b');
+    // And the ink it now paints is genuinely the one that theme declares,
+    // rather than a value that merely differs from the old one.
+    expect(css).toMatch(/\[data-theme='fog-froth-farewells'\][\s\S]*?--dim:\s*#66625a;/);
+  });
+
+  it('keeps no second definition of the footer style in the repainter', () => {
+    // A private table is what drifted. If one comes back, it comes back as a
+    // hex literal or a hardcoded type size in this file.
+    const code = readFileSync(new URL('./render-share-footer.mjs', import.meta.url), 'utf8')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*'))
+      .join('\n');
+    expect(code).not.toMatch(/#[0-9a-fA-F]{6}/);
+    expect(code).not.toMatch(/\d+px\s+["']Helvetica/);
+    // And the canvas is handed the derived strings, not assembled ones.
+    expect(code).toContain('ctx.font = style.font');
+    expect(code).toContain('ctx.letterSpacing = style.letterSpacing');
+    expect(code).toContain('ctx.fillStyle = style.ink');
+  });
+
+  it('takes the ink from the stylesheet the artboard renders, not the app stylesheet', () => {
+    // The finding: the tokens were read from src/theme/themes.css, which the
+    // wireframes document does not link. Its inline [data-theme] blocks are
+    // what Chromium applies to the card the full render screenshots, so a
+    // divergence between the two tables would have had the refresher commit a
+    // footer colour the full render never draws.
+    expect(html).not.toMatch(/<link[^>]+themes\.css/);
+    const artboard = themeTokenTable(html);
+    for (const [edition] of EDITIONS) {
+      const style = footerStyleFor(edition, { scale: SCALE });
+      expect(style.ink, `${edition} (${style.theme})`).toBe(artboard.get(style.theme).dim);
+    }
+  });
+
+  it('reports every token the artboard and app stylesheets disagree on, by name', () => {
+    // A report, not a reconciliation: these predate this work and fixing them
+    // is a different change. Pinned as an exact inventory so a NEW divergence
+    // fails here instead of being discovered in a rendered asset — which is
+    // precisely how this one was found.
+    expect(themeTokenDisagreements({ html, css })).toEqual([
+      { theme: 'fiveacross-slate', token: 'on-gradient', wireframes: '#fff', themes: '#000' },
+      { theme: 'fiveacross-slate', token: 'primary', wireframes: '#3f66f0', themes: '#718ef4' },
+      { theme: 'fiveacross-slate', token: 'secondary', wireframes: '#2c4bd8', themes: '#647be2' },
+    ]);
+    // And the one the footer actually reads is not among them for any card.
+    const themes = new Set(EDITIONS.map(([edition]) => footerStyleFor(edition, { scale: SCALE }).theme));
+    for (const drift of themeTokenDisagreements({ html, css })) {
+      expect(drift.token === 'dim' && themes.has(drift.theme)).toBe(false);
+    }
+  });
+
+  it('refuses a stylesheet that declares one theme token two different ways', () => {
+    // Both of the wireframes' <style> blocks repeat most themes. They agree
+    // today; if they ever stop, "whichever the regex found first" must not
+    // silently become the answer.
+    const contradictory = html.replace("--dim:#d0a8ab", "--dim:#000000");
+    expect(() => themeTokenTable(contradictory)).toThrow(/declares --dim for the so-long-farewell theme twice/);
+  });
+
+  it('refuses rather than guessing when a source stops looking the way it must', () => {
+    // A silent fallback here is how the drift would come back.
+    expect(FOOTER_SELECTOR).toBe('.shc .foot');
+    expect(() => footerStyleFor('gcb', { html: '<style>.shc{}</style>' })).toThrow(
+      /no \.shc \.foot rule in the wireframes document/,
+    );
+    const twoStacks = html.replace('font:14px/1.45 "Helvetica Neue",Arial,sans-serif', 'font:14px/1.45 Georgia,serif');
+    expect(() => footerStyleFor('gcb', { html: twoStacks })).toThrow(/2 different body font stacks/);
+  });
+
+  it('reads the theme off a reordered artboard tag instead of falling through to the next frame (#887, finding 4075112560)', () => {
+    // The finding: the old lookup required `class="shc"` to precede
+    // `data-theme` in source order and had no upper bound, so a semantically
+    // equivalent GCB artboard written the other way round searched clean past
+    // the whole GCB unit and matched the next `.shc data-theme="…"` tag in the
+    // document instead — silently painting GCB's footer in another artboard's
+    // `--dim` colour rather than GCB's own. `replaceAll` (not `replace`)
+    // matters here: the wireframes document repeats
+    // `<div class="shc" data-theme="so-long-farewell">` verbatim on more than
+    // one frame (`fx-share-final-gcb` carries the exact same opening tag as
+    // `fx-share-final-photo-gcb`), so a single-occurrence replace edits the
+    // WRONG frame and leaves this test proving nothing.
+    const reordered = html.replaceAll(
+      '<div class="shc" data-theme="so-long-farewell">',
+      '<div data-theme="so-long-farewell" class="shc">',
+    );
+    expect(reordered).not.toBe(html);
+    const style = footerStyleFor('gcb', { html: reordered });
+    expect(style.theme).toBe('so-long-farewell');
+    expect(style.ink).toBe('#d0a8ab');
+    // Never a different frame's theme, which is what the fall-through risked
+    // selecting instead.
+    expect(style.theme).not.toBe('fog-froth-farewells');
+  });
+
+  it('refuses a frame whose artboard carries no data-theme, rather than guessing or falling through (#887, finding 4075112560)', () => {
+    // A missing theme must be a named refusal, not a fall-through to the next
+    // frame's `.shc` the way the unbounded, order-sensitive lookup used to
+    // manage — see the reordered-attribute case above. `replaceAll` for the
+    // same reason as that test: the tag being stripped of its `data-theme`
+    // is not unique in the document.
+    const untethered = html.replaceAll('<div class="shc" data-theme="so-long-farewell">', '<div class="shc">');
+    expect(untethered).not.toBe(html);
+    expect(() => footerStyleFor('gcb', { html: untethered })).toThrow(
+      /could not read the data-theme on #fx-share-final-photo-gcb/,
+    );
+  });
+});

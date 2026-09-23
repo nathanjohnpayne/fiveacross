@@ -5,6 +5,8 @@ import { DAYS } from './data/seed';
 import { editionBrand } from './editions';
 import { THEMES } from './theme/themes';
 import { OG_EDITION_ART } from '../scripts/og/og-edition-art.mjs';
+import { readPngHeader, readPngPixels } from '../scripts/og/png-pixels.mjs';
+import { isOverlaid, isScoredForOverlay, overlayLightShare } from '../scripts/og/share-card-overlay.mjs';
 
 // Reconciliation guard for ADR 0005 (issue #39), not an app unit test: it
 // asserts on the *contents* (and, for cloud-run/, the *absence*) of the repo
@@ -143,7 +145,7 @@ describe('recon: storage.rules drops the inert /og/** block', () => {
 describe('recon: bare-URL unfurl keeps working with no server', () => {
   // #587 Edition-scoped the static OG meta: the concrete gcb values this guard
   // used to pin are now `%EDITION_…%` placeholders substituted at build time
-  // (src/editions.ts, brandHtmlIdentity), and the per-Edition VALUES are pinned
+  // (src/html-head-identity.ts, brandHtmlIdentity), and the per-Edition VALUES are pinned
   // by src/editions.test.ts against the brand table. What stays recon-guarded
   // here is ADR 0005's property itself: a static meta block plus static images,
   // no server.
@@ -223,9 +225,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
     for (const file of ['og-edition.html', 'og-edition-art.mjs', 'render-og-editions.mjs', 'compare-og.mjs']) {
       expect(existsSync(resolve(`../scripts/og/${file}`)), file).toBe(true);
     }
-    // The reference share cards' brand footer has its own refresher, because
-    // those PNGs are pictures of a live component (ShareCard.tsx) rather than
-    // artwork with a design source (#681).
+    // The reference share cards keep their narrow brand-footer refresher
+    // alongside the full re-render #887 added: it repaints one 32-row band in
+    // place, which is the cheapest correct answer when only a share mark moved
+    // (#681).
     expect(existsSync(resolve('../scripts/og/render-share-footer.mjs'))).toBe(true);
   });
 
@@ -416,6 +419,101 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       expect(wireframesHtml).toMatch(/\.ogc \.ogstamp\{[^}]*box-sizing:border-box;/);
       expect(wireframesHtml).toContain('width:var(--og-bar-span)');
     });
+  });
+});
+
+// #887. The wireframes' three reference pictures of the final-standings share
+// card (photo-hero composition) were hand-driven screen captures with no
+// generator, and both failure modes that produces had shipped: the GCB capture
+// caught an adjacent Vacay artboard in shot and composited it over the upper-
+// right corner — obscuring the wordmark line and half of FINAL STANDINGS — and
+// it still read `Turntilla` on its 👑 row long after the artboard beside it was
+// corrected. `scripts/og/render-share-rasters.mjs` makes the refresh one
+// command against the artboards those pictures were always captures of, and
+// these guards keep the result honest: the renderer exists and points at the
+// artboards, the pictures are the size the wireframe embeds them at, and
+// nothing foreign is composited over the dark-ground cards.
+describe('recon: the reference share-card rasters are regenerable and unoverlaid (#887)', () => {
+  const SHARE_CARDS = [
+    { edition: 'gcb', frame: 'fx-share-final-photo-gcb', file: 'share-final-photo-gcb.png' },
+    { edition: 'vacay', frame: 'fx-share-final-photo-vacay', file: 'share-final-photo-vacay.png' },
+    { edition: 'fiveacross', frame: 'fx-share-final-photo-fa', file: 'share-final-photo-fa.png' },
+  ];
+  // The cap, the boundary, the quadrant and the Vacay exemption all come from
+  // `scripts/og/share-card-overlay.mjs`, which the renderer's own staged-capture
+  // guard imports too. They used to be restated here, and the two copies
+  // disagreed about the boundary: the renderer refused a share strictly above
+  // the cap while this guard required one strictly below it, so a capture
+  // landing exactly on it was published by a run that reported success and
+  // reddened this very test on the next `npm test` (#887 round 6).
+
+  it('ships a renderer that reads the wireframe artboards', () => {
+    expect(existsSync(resolve('../scripts/og/render-share-rasters.mjs'))).toBe(true);
+    const code = read('../scripts/og/render-share-rasters.mjs');
+    // The artboards are the source; a renderer that stopped naming one of them
+    // would be back to capturing something else.
+    for (const { frame } of SHARE_CARDS) expect(code, frame).toContain(frame);
+    expect(code).toContain('daily-cards-wireframes.html');
+  });
+
+  it.each(SHARE_CARDS)('renders $file at the 600x750 the wireframe embeds it at', ({ file }) => {
+    // The artboards are drawn at half scale, so a capture at the wrong device
+    // scale factor is the easy mistake — and `<img width="600" height="750">`
+    // would rescale it silently rather than look broken.
+    const header = readPngHeader(readFileSync(resolve(`../plans/og-images/${file}`)));
+    expect(header.width).toBe(600);
+    expect(header.height).toBe(750);
+    expect(header.bitDepth).toBe(8);
+    // Truecolor, like the unfurl renders: a palette pass perturbs pixels
+    // everywhere, which is what makes "only the thing you meant to move moved"
+    // unprovable.
+    expect(header.colorType).toBe(2);
+    // Non-interlaced, asserted here rather than left to the pixel test below.
+    // The two dark-ground cards reach `readPngPixels`, which refuses an
+    // interlaced image, but Vacay is deliberately excluded from that test — so
+    // without this line an interlaced 600x750 8-bit truecolor Vacay card would
+    // pass `npm test` while the renderer, the converter and
+    // `docs/app/og-artwork.md` all declare all three non-interlaced.
+    expect(header.interlace).toBe(0);
+  });
+
+  it.each(SHARE_CARDS)('decodes as a complete PNG, scored for overlay or not ($file)', ({ file }) => {
+    // Every committed card must decode all the way through its IDAT stream —
+    // Vacay included, even though its score is never read below. The renderer
+    // guard used to skip the decode entirely for an exempt Edition, because
+    // `assertNoOverlay` returned before ever calling it; a 33-byte prefix of
+    // this very file (the PNG signature and IHDR, nothing past it) passed the
+    // format guard as a conforming 600×750 truecolor card and would have
+    // reached `commitStaged` with nothing here ever proving it decodes (#887,
+    // finding 4075112564). This test, unlike the one below, is not filtered by
+    // `isScoredForOverlay`.
+    const image = readPngPixels(readFileSync(resolve(`../plans/og-images/${file}`)));
+    expect(image.width).toBe(600);
+    expect(image.height).toBe(750);
+  });
+
+  it.each(SHARE_CARDS.filter((c) => isScoredForOverlay(c.edition)))(
+    'leaves no foreign card composited over $file',
+    ({ file }) => {
+      const image = readPngPixels(readFileSync(resolve(`../plans/og-images/${file}`)));
+      const share = overlayLightShare(image);
+      expect(isOverlaid(share), `${file} scores ${(share * 100).toFixed(1)}% near-white in its upper-right quadrant`).toBe(
+        false,
+      );
+    },
+  );
+
+  it('stops calling the GCB picture stale and names the renderer instead', () => {
+    const match = wireframesHtml.match(
+      /<div class="unit" id="fx-share-final-photo-gcb">[\s\S]*?<p class="ogmeta">([\s\S]*?)<\/p>/,
+    );
+    if (!match) throw new Error('missing fx-share-final-photo-gcb ogmeta');
+    // The note used to say the capture predated the 👑 correction and could not
+    // be patched. Both halves are now false, and a caption that still said so
+    // would send the next reader back to a manual re-screenshot.
+    expect(match[1]).not.toContain('Turntilla');
+    expect(match[1]).not.toContain('stale');
+    expect(match[1]).toContain('render-share-rasters.mjs');
   });
 });
 

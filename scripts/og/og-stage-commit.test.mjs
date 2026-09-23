@@ -67,6 +67,37 @@ describe('commitStaged (#699 / #713)', () => {
     expect(readFileSync(staged[0].mirror, 'utf8')).toBe('new-gcb-bytes');
     expect(readFileSync(staged[1].dest, 'utf8')).toBe('new-vacay-bytes');
   });
+
+  it('publishes an entry with no mirror, and reports its mirror as null', () => {
+    // `render-share-rasters.mjs` (#887) stages one file per Edition into
+    // `plans/og-images/` with no second copy, and needs the same
+    // all-or-nothing publication the unfurl renders get. It reuses this
+    // primitive rather than carrying a second rollback implementation, so an
+    // entry without a `mirror` has to be a first-class case here.
+    const card = { id: 'gcb', scratch: join(dir, 'card.png.render-tmp.x.png'), dest: join(dir, 'card.png') };
+    writeFileSync(card.scratch, 'fresh-card-bytes');
+    writeFileSync(card.dest, 'committed-card-bytes');
+
+    expect(commitStaged([card])).toEqual([{ id: 'gcb', dest: card.dest, mirror: null }]);
+    expect(readFileSync(card.dest, 'utf8')).toBe('fresh-card-bytes');
+    expect(existsSync(card.scratch)).toBe(false);
+    expect(hasLeakedBackup(card.dest)).toBe(false);
+  });
+
+  it('rolls a mirror-less entry back when a later entry in the same call fails', () => {
+    const card = { id: 'gcb', scratch: join(dir, 'card.png.render-tmp.y.png'), dest: join(dir, 'card.png') };
+    writeFileSync(card.scratch, 'fresh-card-bytes');
+    writeFileSync(card.dest, 'committed-card-bytes');
+    // The second entry's scratch file does not exist, so its rename throws
+    // after the first entry has already been published.
+    const doomed = { id: 'vacay', scratch: join(dir, 'never-written.png'), dest: join(dir, 'other.png') };
+
+    expect(() => commitStaged([card, doomed])).toThrow();
+
+    expect(readFileSync(card.dest, 'utf8')).toBe('committed-card-bytes');
+    expect(existsSync(doomed.dest)).toBe(false);
+    expect(hasLeakedBackup(card.dest)).toBe(false);
+  });
 });
 
 describe('discardStaged (#713 — the partial-`--all`-failure case)', () => {

@@ -108,15 +108,25 @@ export interface EditionBrand {
   appName: string;
   appShortName: string;
   appDescription: string;
+  /** The PWA chrome colour: the manifest's `theme_color` and
+   *  `background_color`, and `index.html`'s `<meta name="theme-color">`, which
+   *  `specs/w1-pwa.md` requires to match it exactly (#1118). Edition-scoped
+   *  since the edge rewrite made the meta tag movable per hostname; each row
+   *  carries its own default Theme's `--bg` (`src/theme/themes.css`), so the
+   *  chrome a browser paints is the colour the app itself opens in. */
+  chromeColor: string;
   /** The `<meta name="description">` line (#587). Crawlers read it without
    *  running JS, so it is baked into index.html at build time alongside the
-   *  og:* block — see `HTML_IDENTITY_TOKENS` in `src/editions.ts`. */
+   *  og:* block — see `HTML_IDENTITY_TOKENS` in `src/html-head-identity.ts` —
+   *  and rewritten per hostname at the edge (#1118). */
   metaDescription: string;
   /** `og:url` — the canonical origin an unfurl attributes the link to (#587).
-   *  Strictly this is a per-EVENT fact (the Event's canonical hostname), but a
+   *  Strictly this is a per-EVENT fact (the Event's canonical hostname), and a
    *  build can only bake per-Edition data, so each Edition carries its flagship
-   *  origin here until the edge Worker rewrites the tag per hostname (#1118,
-   *  the follow-up #546 split the HTML head into). */
+   *  origin here. On any hostname the edge router fronts, #1118 replaces it
+   *  with the requested hostname's own origin — this row is what a
+   *  direct-Hosting response still carries, and the reason the vacay row names
+   *  one Event's host. */
   ogUrl: string;
   /** `og:image` / `twitter:image` — an ABSOLUTE URL (#587, artwork #609).
    *  Absolute because crawlers resolve unfurl images poorly against relative
@@ -449,6 +459,40 @@ export interface EventDoc {
   // best-effort write with its own retry guard — so it is not evidence the
   // finale finished; see `finaleCompletedAt` below (#1151).
   frozenAt?: number;
+  /**
+   * Whether ANY Mark had been recorded anywhere in the Event when the standings
+   * froze (#1218) — the podium payload's `playRecorded`, captured at the freeze
+   * instead of re-derived at the beat that quotes it. Written by
+   * `runFinaleBeats` in the same transaction as `frozenAt`, so the fact and the
+   * stamp land together or not at all.
+   *
+   * It is here rather than left to the podium beat because the beat cannot
+   * answer it as of the freeze. Every other podium field carries an instant and
+   * is resolved through the freeze cutoff; a COUNT carries none, and a
+   * ceremonial Day keeps recording Marks after the freeze by design (ADR 0011).
+   * The beat is retried until its Moment lands, so a delayed sweep or a retry
+   * after a failed write read live totals and could answer differently from the
+   * first attempt — a post-freeze Mark turning it true, a cleared count turning
+   * it false — on the one record that is written once and never amended.
+   *
+   * ABSENT MEANS UNKNOWN, not `false`: an Event frozen before this field
+   * existed carries no value, and the podium beat then omits `playRecorded`
+   * from the Moment rather than substituting a live derivation, which is the
+   * absence `podiumEmailInputFor` already states a frozen-record-only fallback
+   * for. Unlike `finaleCompletedAt` beside it this is NOT in the rules'
+   * no-client-writes set — the Event arm sits at Firestore's expression cap
+   * (#1142) — so an Event admin can still write it, exactly as they can
+   * `frozenAt`. The exposure is one sentence of email copy rather than a gate on
+   * an irreversible write, which is why it rides the existing admin gate.
+   *
+   * AND `null` SAYS UNKNOWN TOO, deliberately (Codex P2 `4058671215`). That
+   * admin-writable gate is also what makes an UNFROZEN Event carrying a
+   * pre-freeze value reachable, so a freeze whose capture came out unknown
+   * writes `null` rather than leaving the key alone — omitting it would let the
+   * earlier value stand as the frozen answer. Readers treat `null` and absence
+   * identically; nothing distinguishes them, and nothing should.
+   */
+  frozenPlayRecorded?: boolean | null;
   /**
    * The composite FINALE-COMPLETE marker (ms epoch, #1151, Codex P1 on PR
    * #1162): when every required finale beat had landed — the freeze stamp AND
@@ -1214,6 +1258,28 @@ export interface PodiumMomentPayload {
   champion: { uid: string; displayName: string; bingoCount: number; squaresMarked: number } | null;
   firstBingo: { uid: string; displayName: string; at: number } | null;
   dailyHonors: { dayIndex: number; uid: string; displayName: string; at: number }[];
+  /**
+   * Whether ANY Marks were recorded across the Event as of the freeze — Marks on
+   * ceremonial and Tutorial Days included, because this is the "did anybody
+   * play" fact rather than a scoring one (#1192).
+   *
+   * Its own field because it is NOT derivable from `champion`. The three fields
+   * above answer three questions under three different exclusions, and an Event
+   * whose only play sits on ceremonial, `tutorial: false` Days — the shape ADR
+   * 0011 exists to permit — has no champion and a real `firstBingo` at the same
+   * time. The winner-announcement email read `champion == null` as an empty
+   * board and so told every recipient nobody marked a square, printed directly
+   * beside the ⭐ naming the person who bingoed.
+   *
+   * OPTIONAL, because a podium Moment is written once and never amended: every
+   * Moment posted before this field existed lacks it, and absence means
+   * "unknown", not `false`. Consumers must state their own fallback for a legacy
+   * Moment rather than reading absence as an empty board — see
+   * `podiumEmailInputFor` (`functions/src/podiumEmail.ts`), which will not claim
+   * an empty board on a legacy payload naming any honour at all — a champion, the
+   * Event-wide ⭐, or one Day's pinned honour.
+   */
+  playRecorded?: boolean;
 }
 
 // A Notice (specs/admin-messages.md): an admin-authored broadcast — title + body,

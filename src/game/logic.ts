@@ -1037,8 +1037,13 @@ export function sortPlayers<T extends Rankable>(players: T[]): T[] {
  * The four states a Day Card can be in for a given Player, derived purely from
  * the DayDef schedule, the current clock, and whether the Player already has a
  * Board for that Day (daily-cards-spec § "Unlock mechanics"). This is the single
- * gate both the deal write path (`dealDayCard`) and the client (`useDayCard`)
- * read, so "when do we deal / what do we render" has one source of truth.
+ * SCHEDULE-level gate both the deal write path (`dealDayCard`) and the client
+ * (`useDayCard`) read, so "when do we deal / what do we render" has one source
+ * of truth about the Day. It is not the deal's only precondition: the Player's
+ * own row carries a second one — `dealDayCard` fails closed to the join and
+ * no-ops for a row with no persisted `joinedAt` (#1158). That fact is about
+ * whether the Player has joined at all rather than about the Day, and this
+ * function stays pure, so the marker is read where the row is read.
  *
  *   - `locked` — `now < unlockAt`: the Day is not open. Render the locked
  *     preview; never deal.

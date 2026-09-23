@@ -48,7 +48,9 @@ export const PODIUM_STANDING_ROWS = 3;
 export interface Podium {
   /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty
    *  board, and `null` when its holder is currently banned — the HONOUR is
-   *  withheld rather than handed down (`withholdBannedHonours`). */
+   *  withheld rather than handed down (`withholdBannedHonours`). Neither `null`
+   *  is the empty-board fact: an Event whose only play was ceremonial has no
+   *  ranking-eligible champion and was still played — see `playRecorded`. */
   champion: PodiumChampion | null;
   /** Cruise-wide First to BINGO across main-game Days; `null` when none
    *  qualifies, and `null` when its holder is currently banned. */
@@ -67,6 +69,22 @@ export interface Podium {
    * NOT touched, so nothing served changes.
    */
   standings: PodiumStandingRow[];
+  /**
+   * Whether ANY Marks were recorded across the Event — the "did anybody play"
+   * fact, stated rather than inferred from `champion` (#1192). Mirror of
+   * `PodiumPayload.playRecorded` (`functions/src/finaleContent.ts`), pinned
+   * against it by `tests/functions/finale-parity.test.ts`.
+   *
+   * NO CLIENT SURFACE READS IT YET, and it is carried anyway. The consumer that
+   * needs it is the winner-announcement email, which reads the functions-side
+   * payload off the Moment — but the two builders are a mirror, and the reason
+   * this mirror has a parity test at all is that they once drifted invisibly.
+   * A fact present on one side and absent on the other is the shape that drift
+   * takes, so it moves with its twin. The farewell view needs no empty-board
+   * copy today for the same reason it never had the bug: it OMITS the champion
+   * block rather than asserting anything about who played.
+   */
+  playRecorded: boolean;
 }
 
 /**
@@ -190,6 +208,42 @@ function podiumStandingRow(
 }
 
 /**
+ * Did this Player record ANY Marks — a marked Square or a bingo — on ANY Day?
+ *
+ * THE MARKS QUESTION, NOT THE SCORING ONE (#1192). Every other predicate on the
+ * podium path asks what COUNTS: `podiumStandingRow` above drops each ceremonial
+ * Day's contribution and `effectiveCruiseFirstBingoAt` drops each Tutorial Day's
+ * instant, because ADR 0011 makes pool identity, Tutorial framing and Scoring
+ * Policy three independent facts. This asks whether anything HAPPENED, which no
+ * exclusion can change: a Player who marked forty Squares on a ceremonial Day
+ * marked forty Squares. The Scoring Policy removed their score, not their Marks.
+ *
+ * ROOTS OR BUCKETS, either one positive — the root aggregates and the per-Day
+ * breakdown can disagree on a legacy or hybrid row (the state `playerRowRootLag`
+ * exists to detect), and the only claim this answer gates is "nobody marked a
+ * square", so it is refused unless every signal the row has agrees that nothing
+ * was marked. Malformed counts are already coerced by `withReadableDayStats` at
+ * the read boundary, and a non-finite or negative count is not positive anyway.
+ *
+ * The bucket guard is not decoration: this reads the map UNCONDITIONALLY, where
+ * `podiumStandingRow` reads it only on a schedule that has a ceremonial Day to
+ * exclude. `dayStats` is Player-written and validated by no rules arm (ADR 0001),
+ * so a roster that reaches here without passing `withReadableDayStats` hands this
+ * a `null` bucket the row builder would never have touched — and a throw inside
+ * `buildPodium` takes the farewell view down with it.
+ *
+ * Mirror of `anyMarksRecorded` in `functions/src/finaleContent.ts`, pinned
+ * against it by `tests/functions/finale-parity.test.ts`.
+ */
+function anyMarksRecorded(player: PlayerDoc): boolean {
+  if (player.bingoCount > 0 || player.squaresMarked > 0) return true;
+  for (const stat of Object.values(player.dayStats ?? {})) {
+    if (stat && (stat.bingoCount > 0 || stat.squaresMarked > 0)) return true;
+  }
+  return false;
+}
+
+/**
  * The podium the farewell view renders: cruise champion (top of the standings,
  * ceremonial Days excluded), Event-wide First to BINGO (main-game Days only), and
  * the per-Day honors strip. Computed from the live `PlayerDoc` aggregates + the
@@ -211,9 +265,10 @@ function podiumStandingRow(
  * render; the only reason to hide one is the ban policy, and that is now the
  * only thing that does.
  *
- * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and callers
- * that have already ban-filtered their roster pass the same list again — the
- * derived fallback reads the roster, the pin reads the list.
+ * `bannedUids` is therefore passed EXPLICITLY rather than inferred, and since
+ * #1216/#1217 every caller hands this the RAW roster: the pin reads the list,
+ * the derived fallback reads the roster and is filtered by that same list
+ * afterwards. Both halves of the honour rule then land in one place.
  *
  * AND AN HONOUR IS ONLY EVER DERIVED FOR A DAY THE CONTRACT HAS (#1151, Codex P2
  * on PR #1162, round 7). `perDayHonors` reads its `dayIndex` off a `dayStats`
@@ -274,13 +329,17 @@ export function pinnedOrDerivedDailyHonors(
   bannedUids: readonly string[] = [],
 ): DayHonor[] {
   // A DERIVED honour is dropped for a banned holder AFTER the selection, never
-  // before it. A caller that hands this a RAW roster (`buildPodium`) therefore
-  // gets that Day withheld — "hidden, never reassigned", the same rule the pin
-  // branch below already applied — rather than the next-earliest Player handed a
-  // chip they did not earn. A caller that ban-filters its roster first
-  // (`Leaderboard`, `draftEventArchive`) selects from rows this can no longer
-  // see, so for those this line is a no-op and their promotion residual is
-  // unchanged by it.
+  // before it, so that Day is withheld — "hidden, never reassigned", the same
+  // rule the pin branch below already applied — rather than the next-earliest
+  // Player handed a chip they did not earn.
+  //
+  // WHICH ONLY WORKS ON A RAW ROSTER. A caller that ban-filters on the way IN
+  // hands this rows indistinguishable from a roster the banned Player was never
+  // on, and `perDayHonors` then picks the earliest bingo among whoever is left
+  // — this line sees nothing to drop and the promotion has already happened.
+  // `buildPodium` passes the raw roster (#1216); the live Leaderboard's strip
+  // and `draftEventArchive` do too (#1217), so all three surfaces read one
+  // answer and the frozen record still says what the last live strip said.
   const derivedHonors = perDayHonors(players).filter(
     (h) => supportedDayIndex(h.dayIndex) && !isBanned(h.uid, bannedUids),
   );
@@ -448,6 +507,12 @@ export function buildPodium(
       bannedUids,
     ),
     standings,
+    // OVER THE RAW ROSTER, not over `standings` (#1192): the re-aggregated rows
+    // are where a ceremonial Day's Marks have already been dropped, so asking
+    // them whether anything was marked would answer the scoring question again
+    // under a different name. Unbounded by `withinFreeze` because counts carry
+    // no instant — the same reason the champion's own totals are not.
+    playRecorded: players.some(anyMarksRecorded),
   };
 }
 

@@ -12,15 +12,21 @@
 // 40 exploratory / 40 final-day, every entry tame (general-audience Event,
 // spicyRatio 0).
 //
-// KNOWN LIVE-DATA QUIRK:
-//   - "Post of a picture of you and somebody else in your jammies" carries
-//     the draft's typo verbatim.
+// KNOWN LIVE-DATA QUIRKS:
 //   - the live docs' ids still hash the PRE-edit texts (in-place edit), so
 //     `VERIFY_ITEM_IDS` below records the live identities. `--verify` accepts
 //     that one documented identity generation while still comparing every
 //     display/behaviour field. Do not reseed the live Event casually: once a
 //     Day has a frozen snapshot, this script deliberately refuses a
 //     `SEED_DAYS=1` overwrite rather than risking existing cards.
+//   - the easy pool's "Post a picture of you and somebody else in your
+//     jammies" entry originally read "Post OF a picture..." — the draft's
+//     typo, carried verbatim into the same-day in-place data pass. Fixed here
+//     (#1019) so every future Vacay Event seeded from this pool deals the
+//     corrected wording; the LIVE bodega-bay-2026 doc is deliberately left
+//     alone (same reseed-safety reasoning as the id quirk above), so
+//     `VERIFY_ITEM_LEGACY_TEXT` records the one pre-fix text `--verify` must
+//     still accept under that prompt's legacy id.
 //
 // PERSISTED pool literals are the LEGACY values ('embark' for the easy pool,
 // 'farewell' for the closing pool) — deliberately, while the #565 pool-value
@@ -45,7 +51,7 @@ export const EASY_ITEMS = [
   { text: `Capture a colorful buoy or crab pot`, spicy: false, pool: 'embark' },
   { text: `Make a toast about friendship`, spicy: false, pool: 'embark' },
   { text: `Post a candid that makes the group laugh`, spicy: false, pool: 'embark' },
-  { text: `Post of a picture of you and somebody else in your jammies`, spicy: false, pool: 'embark' },
+  { text: `Post a picture of you and somebody else in your jammies`, spicy: false, pool: 'embark' },
   { text: `Suggest something for the group to do tomorrow`, spicy: false, pool: 'embark' },
   { text: `Photograph the fog rolling in, or refusing to leave`, spicy: false, pool: 'embark' },
   { text: `Find the house's weirdest decorative object`, spicy: false, pool: 'embark' },
@@ -350,3 +356,18 @@ export const VERIFY_ITEM_IDS = Object.freeze([
 if (VERIFY_ITEM_IDS.length !== ALL_ITEMS.length || new Set(VERIFY_ITEM_IDS).size !== VERIFY_ITEM_IDS.length) {
   throw new Error('bodega-bay-2026 VERIFY_ITEM_IDS must be a unique, one-to-one list matching ALL_ITEMS.');
 }
+
+// #1019: the LIVE bodega-bay-2026 doc for each key below is matched by its
+// VERIFY_ITEM_IDS legacy id and still carries this pre-fix text — the source
+// fix above is forward-only (every future Vacay Event seeded from this pool
+// gets the corrected wording), so `--verify` must keep accepting the
+// untouched live doc under its legacy id rather than reading it as drift.
+// Keyed by the CURRENT (corrected) text so this stays correct regardless of
+// ALL_ITEMS' declaration order.
+const LEGACY_TEXT_QUIRKS = {
+  'Post a picture of you and somebody else in your jammies':
+    'Post of a picture of you and somebody else in your jammies',
+};
+export const VERIFY_ITEM_LEGACY_TEXT = Object.freeze(
+  ALL_ITEMS.map(({ text }) => LEGACY_TEXT_QUIRKS[text]),
+);

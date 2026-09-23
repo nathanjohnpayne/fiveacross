@@ -14,6 +14,67 @@ const FIRESTORE_SOURCE =
 const FIRESTORE_DOCUMENT_PREFIX =
   'projects/fiveacross/databases/(default)/documents/routerReplicas/';
 const FIRESTORE_SUBJECT_PREFIX = 'documents/routerReplicas/';
+/**
+ * The `updatedAt` text shape, matching `RFC_3339` in the worker's
+ * `src/registry/contracts.ts` and `normalizeTimestamp` in
+ * `scripts/event-router-registry/hostname-projection.mjs`. It is applied to a
+ * RAW string before that string is parsed, because `Date.parse` also accepts
+ * texts RFC 3339 does not and an offsetless one is read as LOCAL time.
+ */
+const RFC_3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Whether an RFC 3339 match names a calendar instant that exists, judged on
+ * the components AS WRITTEN. The shape alone is not enough: `Date.parse` ROLLS
+ * an impossible day forward rather than refusing it (`2026-02-30` answers
+ * March 2), so a canonicalizer that trusted the regex would publish a
+ * different instant than the ledger names. Reading the components back out of
+ * `Date.UTC` gets leap years right for free.
+ *
+ * DELIBERATE BOUND: `Date.UTC` maps the years 0 through 99 onto 1900 through
+ * 1999, so a year below `0100` never reads back and is refused. This probe
+ * judges exactly one field — the ledger's `updatedAt` publish instant — where
+ * a first-century year is corruption rather than a date anyone needs, so
+ * refusing it fails closed. The source and the worker apply the same bound,
+ * so no layer disagrees about which texts are admissible.
+ */
+function namesARealInstant(match: RegExpExecArray): boolean {
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day &&
+    probe.getUTCHours() === hour &&
+    probe.getUTCMinutes() === minute &&
+    probe.getUTCSeconds() === second
+  );
+}
+
+/**
+ * The canonical text for an accepted instant, or null — the same function as
+ * `canonicalInstant` in
+ * `scripts/event-router-registry/hostname-projection.mjs` and the worker's
+ * `src/registry/contracts.ts`, because the three layers must accept exactly
+ * the same texts. Both ends are checked: the components are judged as
+ * WRITTEN, before the offset is applied, so a text at either end of the
+ * supported range can validate and still canonicalise outside it.
+ */
+function canonicalInstant(value: string): string | null {
+  const match = RFC_3339.exec(value);
+  if (match === null || !namesARealInstant(match)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  const canonicalMatch = RFC_3339.exec(canonical);
+  return canonicalMatch !== null && namesARealInstant(canonicalMatch) ? canonical : null;
+}
 const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
   ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
@@ -374,7 +435,19 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
   const timestamp = data.updatedAt;
   let updatedAt: string;
   if (typeof timestamp === 'string') {
-    updatedAt = timestamp;
+    // Canonicalized rather than echoed, so `2026-09-20T12:00:00Z`,
+    // `...+00:00` and a `Timestamp` for one instant publish ONE body. The
+    // source side applies the same rule before it digests a stored ledger
+    // (`normalizeTimestamp` in
+    // `scripts/event-router-registry/hostname-projection.mjs`), and a reader
+    // that echoed the text would make the two layers disagree about a
+    // document neither of them changed. `canonicalInstant` validates the
+    // EMITTED text as well as the written components, because a text at
+    // either end of the supported range can validate and canonicalise
+    // outside it.
+    const canonical = canonicalInstant(timestamp);
+    if (canonical === null) throw new Error('invalid router replica event');
+    updatedAt = canonical;
   } else if (
     isRecord(timestamp) &&
     typeof timestamp.toDate === 'function'
@@ -383,13 +456,17 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
       throw new Error('invalid router replica event');
     }
-    updatedAt = value.toISOString();
+    // Through the SAME predicate as the string branch, so the two encodings
+    // accept the same instants here as they do on the source side.
+    const canonical = canonicalInstant(value.toISOString());
+    if (canonical === null) throw new Error('invalid router replica event');
+    updatedAt = canonical;
   } else {
     throw new Error('invalid router replica event');
   }
+  // `updatedAt` needs no further shape check: both branches above answer
+  // canonical text or throw.
   if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(updatedAt) ||
-    !Number.isFinite(Date.parse(updatedAt)) ||
     host !== host.toLowerCase() ||
     host.endsWith('.') ||
     !validDesired(host, data.desired)

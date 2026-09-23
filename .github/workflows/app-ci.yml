@@ -39,6 +39,77 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The deploy-scope classifier (scripts/validate-firebase-deploy-filters.mjs)
+      # rehearses predeploy hooks inside a platform write containment and
+      # refuses the single-endpoint exemption fail-closed when it can prove
+      # none. This runner could prove none: the image ships no `bwrap`, and
+      # Ubuntu 24.04 keeps `kernel.apparmor_restrict_unprivileged_userns=1`, so
+      # both `unshare` spellings die writing `/proc/self/uid_map`. Every case
+      # that needs a predeploy hook to have RUN was therefore skipped here — in
+      # the vitest suite under `npm test` and in `npm run test:deploy` alike —
+      # which left the Linux `bwrap` nesting path exercised by no machine at
+      # all (#1164).
+      #
+      # WHERE IT HAS TO SIT, pinned from both sides in
+      # scripts/app-ci-write-containment.test.mjs. AFTER `Install dependencies`:
+      # the probe imports the classifier, and that module's body resolves
+      # `commander`, `typescript`, seven `firebase-tools/lib/*` entry points and
+      # `portfinder` through `createRequire` before it exports anything, so on a
+      # runner that has not run `npm ci` yet the probe and its retry both die
+      # with MODULE_NOT_FOUND and the job ends before the first suite. AHEAD of
+      # `npm test` and `npm run test:deploy`: those are the consumers whose
+      # skips this step exists to lift. The root `npm ci` is the only install it
+      # needs — the `--prefix` installs below belong to the Worker and the
+      # registry publisher, neither of which the classifier loads.
+      #
+      # Two stages, because only the runner can settle which is needed: install
+      # `bubblewrap`, then drop the AppArmor user-namespace restriction only if
+      # the probe does not already name `bwrap`. Not "only if it proved
+      # nothing" — a probe that named an `unshare` spelling instead has not
+      # reached the path this step exists to reach, so it takes the second
+      # stage too, and if the drop does not move the answer to `bwrap` the job
+      # reds, which is the point. Ubuntu's own `bwrap-userns-restrict` profile
+      # would be the narrower grant, but neither `apparmor` nor
+      # `apparmor-profiles` ships it on noble, and hand-writing a policy that
+      # unconfines `bwrap` is no narrower than the sysctl on a single-use VM.
+      #
+      # The check is `probeWriteContainment` itself rather than a stand-in, so
+      # this asserts the very answer the suites go on to read, and it FAILS the
+      # job rather than letting the skips return unnoticed. It insists on
+      # `bwrap` by name and not merely on some mechanism: an `unshare` fallback
+      # that quietly won instead would run the cases while leaving the `bwrap`
+      # argv — the read-only checkout bound back over the writable set — as
+      # untested as it was before. A later regression is read off the three
+      # lines this prints: the `bwrap` version, the sysctl value, and the
+      # mechanism the probe named.
+      - name: Install bubblewrap (deploy-scope classifier write containment)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          echo "kernel.apparmor_restrict_unprivileged_userns = $(
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent
+          )"
+          probe() {
+            CLASSIFIER="$PWD/scripts/validate-firebase-deploy-filters.mjs" \
+              node --input-type=module -e '
+                const { pathToFileURL } = await import("node:url");
+                const { probeWriteContainment } = await import(
+                  pathToFileURL(process.env.CLASSIFIER).href
+                );
+                const answer = await probeWriteContainment();
+                console.log(
+                  "write-containment probe: " + (answer.ok ? answer.label : answer.reason),
+                );
+                if (answer.label !== "bwrap") process.exit(1);
+              '
+          }
+          if ! probe; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            probe
+          fi
+
       # The registry publisher is deliberately a separate Functions Framework
       # codebase so its runtime dependency graph cannot inherit firebase-admin.
       - name: Install isolated registry publisher dependencies
@@ -48,7 +119,8 @@ jobs:
         run: npm run check:no-admin --prefix router-publisher
 
       # Miniflare stays in the Worker's separately installed dependency tree;
-      # the root suite imports it only for the registry's real-workerd test.
+      # the root suite imports it for the registry's real-workerd test and for
+      # the #1118 head-rewrite integration test (worker/src/routerHtmlHead.integration.test.ts).
       - name: Install isolated Event router dependencies
         run: npm ci --prefix worker
 
@@ -84,6 +156,13 @@ jobs:
       # the wrapper and its fixtures are Five Across application code.
       - name: Deployment safety harness
         run: npm run test:deploy
+
+      # The runnable-JDK probe every emulator-booting script sources (#1018,
+      # scripts/lib/ensure-java.sh). Its shell suite lives beside the deployment
+      # harness above because both are bash fixtures; nothing else runs it, so a
+      # regression in the probe would otherwise merge green.
+      - name: Ensure-java probe suite
+        run: npm run test:ensure-java
 
       # The Cloud Functions notifier suite (tests/functions/) imports
       # functions/src, whose resend / firebase-admin deps live only in

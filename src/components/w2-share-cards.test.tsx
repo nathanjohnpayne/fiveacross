@@ -2914,6 +2914,7 @@ describe('FarewellPodium — share affordance', () => {
           firstBingo: null,
           dailyHonors: [],
           standings: [],
+          playRecorded: true,
         }}
       />,
     );

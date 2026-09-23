@@ -240,6 +240,35 @@ describe('moderateProof export gating (#126)', () => {
     );
   });
 
+  // #1137, specs/w4-server-authoritative-hide.md § Runtime identity. The three
+  // report-threshold triggers shipped unpinned, so they ran as the default Gen2
+  // compute identity, which this project deliberately gives NO Firestore
+  // data-plane access (ADR 0008). Every one of their paths is a data-plane call
+  // — the threshold read, the transactional re-read, the `status → 'hidden'`
+  // update — and `autohide.ts` swallows failures by design (ADR 0001), so the
+  // gap could only ever surface as a `console.error`, never as a broken deploy.
+  // Asserting the manifest is what keeps the pin from silently regressing.
+  it('pins all three report-threshold hides to the Admin identity, and takes no retry', async () => {
+    const mod = await importIndex();
+    const paths: Record<string, string> = {
+      hideProofAtThreshold: 'events/{eventId}/proofs/{proofId}',
+      hideItemAtThreshold: 'events/{eventId}/items/{itemId}',
+      backfillHideOnThresholdDecrease: 'events/{eventId}',
+    };
+    for (const [name, document] of Object.entries(paths)) {
+      const endpoint = mod[name].__endpoint;
+      expect(endpoint.eventTrigger.eventFilterPathPatterns.document, name).toBe(document);
+      expect(endpoint.serviceAccountEmail, name).toBe(
+        'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+      );
+      // Deliberately NOT retryable, unlike the Vision hide on the same Proof
+      // path: `applyThresholdHide` / `applyThresholdBackfill` never reject, so
+      // the platform has nothing to redeliver on. Their re-attempt is the "rose
+      // to at/over" gate, not a retry flag.
+      expect(endpoint.eventTrigger.retry, name).toBe(false);
+    }
+  });
+
   // ADR 0008: this repo deploys to two Firebase projects. A Service Account only
   // exists inside its own project, so a hardcoded `gaycruisebingo` pin failed the
   // `fiveacross` deploy outright with `iam.serviceaccounts.actAs` on a

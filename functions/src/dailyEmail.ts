@@ -54,6 +54,8 @@ import {
   eventFirstBingoUid,
   fromAddressFor,
   hasScheduledUnlock,
+  readableDayList,
+  readableUidList,
   standingsThrough,
   type EmailDay,
   type EmailEvent,
@@ -562,6 +564,46 @@ async function defaultGetEmailForUid(uid: string): Promise<string | null> {
 const defaultSleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
+/**
+ * The signal a coerced container gets, because the coercion must end the THROW
+ * without also ending the DIAGNOSTIC (#1214).
+ *
+ * #1214 recorded the one redeeming property of this failure mode: a malformed
+ * `days` unwound to `runDailyEmailSweep`'s per-Event catch, so the Event was
+ * named in the logs every morning it failed. Coerced and left silent, the same
+ * Event resolves `not-due`, mails nobody for as long as the field stays
+ * malformed — permanently, because nothing in this system repairs a stored
+ * container — and says nothing anywhere about why. That is the quieter failure
+ * the spec already refuses to call the smaller one. A malformed `bannedUids`
+ * reads worse still: it fails OPEN, which is the right direction, but an
+ * unannounced ban roster of nobody returns moderated participants to the
+ * recipient list and to the standings.
+ *
+ * So the line is restored at the layer that can still answer the call. The
+ * coerced value is untouched — this only says what was read.
+ *
+ * `null` and an absent field are NOT malformed and never log: they are how an
+ * Event says "no schedule" and "nobody is hidden", the reading `?? []` already
+ * gave them, and logging them would bury the real case under every Event that
+ * simply carries neither field.
+ *
+ * The stored value is described by TYPE rather than printed. `bannedUids` is a
+ * list of uids and a Day carries authored copy; neither belongs in a log line
+ * whose whole content is that a shape is wrong.
+ */
+function reportMalformedContainer(
+  eventId: string,
+  field: 'days' | 'bannedUids',
+  value: unknown,
+): void {
+  if (value == null || Array.isArray(value)) return;
+  console.error(
+    `sendDailyEmailForEvent: malformed ${field} container; read as an empty list`,
+    eventId,
+    typeof value,
+  );
+}
+
 export interface DailySendResult {
   /** Emails actually accepted by the transport. */
   sent: number;
@@ -614,6 +656,15 @@ export interface DailySendResult {
  * check, from the variable the check itself used — otherwise an extended freeze
  * would permit an email whose honour the superseded freeze had decided, which is
  * exactly the divergence the spec forbids.
+ *
+ * AND THE FRESH READ IS ASKED FOR DUE-NESS, NOT ONLY FOR THE FREEZE (#1218,
+ * Codex P2). Re-reading the document and then mailing the opening read's Day
+ * regardless left the rest of the re-read advisory: the container coercion
+ * resolves an unreadable fresh `days` to an empty list, which is right at the
+ * opening read and a licence here, and for a legacy Event with no configured
+ * `standingsFreezeAt` it takes the DERIVED cutoff down with it. So the due Day
+ * is resolved again from the fresh schedule and the fresh freeze, and the send
+ * is refused unless it is still the Day this call prepared.
  */
 export async function sendDailyEmailForEvent(
   db: DailyEmailFirestore,
@@ -632,13 +683,58 @@ export async function sendDailyEmailForEvent(
   if (eventClosedToPlay(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'archived' };
   if (!dailyEmailEnabled(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'disabled' };
 
+  // COERCED AT THE READ, because THIS is the module that reads raw (#1214).
+  // `event` is a bare `as EmailEvent` cast of a Firestore document, and these
+  // two CONTAINERS are as untyped at rest as the Place pair and `name` are
+  // (`specs/daily-engagement-email.md` § Shared domain contract):
+  // `firestore.rules` constrains `bannedUids` to a list only on a write that
+  // TOUCHES it and the `days` array's shape only on a write that CARRIES it,
+  // and both live Events had their `days` seeded through the Admin SDK, which
+  // bypasses rules entirely.
+  //
+  // `?? []` was never this guard. It admits every non-nullish value, so a
+  // stored map or number reached `for…of` inside `standingsFreezeAtFor`,
+  // `.filter` inside `dueDayForDailyEmail` and `new Set` inside
+  // `readEmailRosterPage` and threw there — ABOVE the per-recipient catch
+  // below, so the throw unwound to `runDailyEmailSweep`'s per-Event catch and
+  // took that Event's entire morning send down, on every sweep, for as long as
+  // the field stayed malformed.
+  //
+  // Coerced HERE rather than inside those three: each takes an already-typed
+  // parameter, and widening their signatures to `unknown` would spread the
+  // rawness instead of ending it. The two content modules coerce the same
+  // container at their own read, through this same helper.
+  const schedule = readableDayList(event.days);
+  const bannedUids = readableUidList(event.bannedUids);
+  // AND THE COERCION SAYS SO. The throw was this Event's only announcement that
+  // one of these containers was unreadable; silencing it without replacing it
+  // would trade a loud recoverable failure for a permanently dark Event. See
+  // `reportMalformedContainer` for why the value itself is left exactly as
+  // coerced, and why `null` and an absent field do not log.
+  //
+  // HERE ONLY, not also at the delivery-time re-read below. A container
+  // malformed at THIS read is what makes an Event go dark: the schedule coerces
+  // to `[]`, no Day is due, and the same answer repeats every sweep. One
+  // malformed at the re-read instead means the document changed mid-call — this
+  // send still resolves, and the very next sweep's opening read names it on this
+  // same line. A second call site would only duplicate that morning's line.
+  reportMalformedContainer(eventId, 'days', event.days);
+  reportMalformedContainer(eventId, 'bannedUids', event.bannedUids);
+
   // The freeze as this call opens, for the due check alone. The two readers that
   // must agree — the cutoff that stops the mail (#1121) and the instant the
   // headline ⭐ is settled against (#1052) — both read the DELIVERY-time
   // resolution below instead, off one variable, so no edit landing mid-sweep can
   // mail an email quoting a boundary the cutoff did not apply.
-  const freezeAt = standingsFreezeAtFor(event);
-  const day = dueDayForDailyEmail(event.days, now, event.timezone, { freezeAt });
+  //
+  // Handed the COERCED schedule rather than the document: `standingsFreezeAtFor`
+  // walks `days` with `for…of` and is the FIRST of the three to touch it, so an
+  // unguarded call here would throw before the due check could refuse anything.
+  const freezeAt = standingsFreezeAtFor({
+    standingsFreezeAt: event.standingsFreezeAt,
+    days: schedule,
+  });
+  const day = dueDayForDailyEmail(schedule, now, event.timezone, { freezeAt });
   // Covers the post-freeze morning too: nothing is due once scoring has closed,
   // so the Event simply stops mailing rather than reporting a new state.
   if (!day) return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
@@ -658,7 +754,7 @@ export async function sendDailyEmailForEvent(
   const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
 
-  const rosterPage = await readEmailRosterPage(db, eventId, event.bannedUids ?? [], maxRecipients + 1);
+  const rosterPage = await readEmailRosterPage(db, eventId, bannedUids, maxRecipients + 1);
   const roster = rosterPage.players;
   if (rosterPage.queriedCount > maxRecipients) {
     // Loud, because it means the Event is either pathological or has outgrown
@@ -687,11 +783,14 @@ export async function sendDailyEmailForEvent(
   // `scoring` key), and the ⭐ is resolved from the RAW roster rather than from
   // the ranked rows — a presentational ban must hide the holder's row without
   // promoting the next-earliest Player.
-  const schedule = event.days ?? [];
+  //
+  // Both read the SCHEDULE coerced at the top of this function (#1214), not
+  // `event.days` again: two readers of one raw container are two chances to
+  // forget the guard, and these two walk it with `for…of`.
   const tutorialDays = tutorialDayIndexes(schedule);
   const ceremonialDays = ceremonialDayIndexes(schedule);
   const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays, ceremonialDays);
-  const banned = new Set(event.bannedUids ?? []);
+  const banned = new Set(bannedUids);
   const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
   // THE FRESH READ, immediately before the first send (#1150). Everything above
@@ -713,8 +812,51 @@ export async function sendDailyEmailForEvent(
   // configured, moved or removed since the due check is the one that decides.
   // Answered `not-due`, exactly as the due check's own cutoff is: this Event has
   // nothing to send this morning, which is not a new state.
-  const freezeAtDelivery = standingsFreezeAtFor(atDelivery);
-  if (freezeHasPassed(freezeAtDelivery, clock())) {
+  //
+  // Its own coercion, because it is its own READ (#1214): this is a second cast
+  // of the document, taken after the preparation block, and a `days` container
+  // that became malformed in between is exactly the mid-sweep edit this re-read
+  // exists to notice. Reusing the opening read's `schedule` would read the old
+  // document to answer a question asked of the new one.
+  const scheduleAtDelivery = readableDayList(atDelivery.days);
+  // ONE reading of the clock for both questions below, for the reason the
+  // freeze is read once for both of its readers: two readings could answer them
+  // against two different instants.
+  const nowAtDelivery = clock();
+  const freezeAtDelivery = standingsFreezeAtFor({
+    standingsFreezeAt: atDelivery.standingsFreezeAt,
+    days: scheduleAtDelivery,
+  });
+  if (freezeHasPassed(freezeAtDelivery, nowAtDelivery)) {
+    return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
+  }
+  // AND THE DAY IS STILL THE DUE ONE ON THAT SAME FRESH SCHEDULE (#1218, Codex
+  // P2). The coercion above is right for the OPENING read — an Event whose
+  // stored schedule is unreadable has nothing due and goes quiet — and it is a
+  // licence here, because everything this send is about to mail was built from
+  // the opening read's valid schedule: `day`, the standings snapshot, the ⭐.
+  // Coerce and continue and the sender ships that stale card on the authority of
+  // a document that no longer says it is due.
+  //
+  // THE FREEZE IS THE HALF THAT BITES. `standingsFreezeAtFor` derives the cutoff
+  // from the first ceremonial Day when no `standingsFreezeAt` is configured —
+  // which is both live Events — so a malformed fresh `days` does not merely lose
+  // the schedule, it resolves the freeze to `null` and the check above waves the
+  // whole roster through AFTER the real derived freeze. Before the container
+  // coercion landed that value threw and nothing was mailed; this is that same
+  // answer, stated rather than thrown.
+  //
+  // Asking due-ness again is what closes both: a malformed container coerces to
+  // `[]` and an empty schedule has nothing due, a Day removed or re-dated
+  // mid-sweep is no longer due, and a schedule that is simply unchanged answers
+  // exactly as it did at the top. The comparison is on the Day's INDEX because
+  // that is its identity in the schedule — a Day object re-read from a new
+  // document is a different object either way. Answered `not-due`, like every
+  // other refusal here: this Event has nothing to send this morning.
+  const dayAtDelivery = dueDayForDailyEmail(scheduleAtDelivery, nowAtDelivery, atDelivery.timezone, {
+    freezeAt: freezeAtDelivery,
+  });
+  if (dayAtDelivery?.index !== day.index) {
     return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
   }
 

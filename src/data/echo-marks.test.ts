@@ -947,7 +947,15 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
       dayIndex: 1,
       cells: card((i) => ids[i] as string, day1Overrides),
     });
-    H.player = { uid: 'u1', dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } } };
+    // `joinedAt` is the join marker `dealDayCard` fails closed on (#1158, and
+    // round 4 moved that guard off the stored `uid` onto this field). This
+    // Player has a marked Day-1 card, so their join plainly landed; the stamp
+    // just has to be on the fixture for the deal to get past the guard.
+    H.player = {
+      uid: 'u1',
+      joinedAt: 1,
+      dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+    };
   };
   const u = { uid: 'u1', displayName: 'Alice', photoURL: null } as never;
 

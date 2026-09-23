@@ -656,6 +656,40 @@ function asText(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+/** A raw Firestore CONTAINER read as a list, or an empty list when it is not an
+ *  array. `asText` above resolves the untyped SCALARS this boundary reads; this
+ *  resolves the two untyped containers beside them (#1214).
+ *
+ *  Same reachability argument, one level up. `firestore.rules` constrains
+ *  `bannedUids` to a list only on a write that TOUCHES it, and the `days`
+ *  array's shape only on a write that CARRIES it — neither is a statement about
+ *  what the stored document holds — and both live Events had their `days`
+ *  seeded through the Admin SDK, which bypasses rules entirely, the same reason
+ *  the Place pair and `name` were reachable at all.
+ *
+ *  `?? []` IS NOT THIS GUARD, which is what made the hole easy to miss: it
+ *  admits every non-nullish value, so a stored map or number passed straight
+ *  through to `for…of`, `.filter` and `new Set` and threw there. A stored STRING
+ *  is the case that hides it further — `new Set('abc')` does not throw, it
+ *  quietly becomes a three-character ban set — so the container is guarded by
+ *  shape rather than by whether the next operation happens to survive it.
+ *
+ *  It guards the CONTAINER only, exactly as the `tonight` guard does: a real
+ *  list holding one unreadable entry keeps its readable half, because every
+ *  reader below already checks its entries one at a time. */
+export function readableDayList(days: unknown): EmailDay[] {
+  return Array.isArray(days) ? (days as EmailDay[]) : [];
+}
+
+/** The ban roster read as a list of uids, or an empty list when the stored value
+ *  is not an array — `readableDayList`'s twin, and the same rule. Empty means
+ *  "nobody is hidden", which is the reading an absent `bannedUids` already got
+ *  and the only safe one: a malformed field must not be able to decide that
+ *  everybody is banned, or that one is. */
+export function readableUidList(bannedUids: unknown): string[] {
+  return Array.isArray(bannedUids) ? (bannedUids as string[]) : [];
+}
+
 /** The Day's Place name alone: the neutral `place` wins, the pre-#566 `port` is
  *  the legacy fallback, `''` when the Day names none. ONE reader for both of
  *  this module's call sites — the context line's label and the morning line's
@@ -774,7 +808,7 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const register = registerFor(args.edition);
   const theme = emailThemeTokens(day.theme, args.edition);
   const timeZone = event.timezone || 'UTC';
-  const days = Array.isArray(event.days) ? event.days : [];
+  const days = readableDayList(event.days);
   const dayNumber = day.index + 1;
   const dayCount = days.length || dayNumber;
   // COERCED AT THE READ, exactly like every Place field above (#1192). It is

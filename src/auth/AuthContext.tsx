@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react';
 import {
@@ -27,6 +28,7 @@ import {
   readAdultAttestationFromCache,
   readAdultAttestationFromServer,
 } from '../data/api';
+import { observedEventPlayPhase, subscribeEventPlayPhase } from '../data/eventPlayPhase';
 import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
@@ -1681,6 +1683,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ) {
           track('join_event');
         }
+        // A DEFERRED join is not a completed deal (#1158), and the deal gate's
+        // dedupe KEY is what records that: `eventPlayPhase` rides in it, so
+        // the Event reopening moves the key and reruns the join exactly once.
+        // Nothing is done HERE on a deferral — see the gate effect below for
+        // why clearing the recorded inputs from this callback would be dead
+        // weight at best and a re-ask per render at worst.
       },
       () => {},
     );
@@ -1818,6 +1826,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     [],
   );
+  // The Event's gameplay lifecycle, as the shared Event subscription last
+  // observed it for THIS device (#1158, `src/data/eventPlayPhase.ts`). A join
+  // the quiesce declined is deferred, not done, and the thing that resumes it
+  // is play reopening — so the phase is one of the deal gate's inputs, on the
+  // same footing as connectivity and the admission answer.
+  //
+  // Read from the observer seam rather than from a subscription of this
+  // provider's own: `useEventDoc` already holds the document on every route,
+  // AuthProvider sits above all of them, and a second listener here would
+  // duplicate it while making the provider (and every suite that mounts it)
+  // depend on Firestore. An Event nobody has observed reads `'open'`, which is
+  // exactly today's behaviour for a cold visit.
+  const readEventPlayPhase = useCallback(() => observedEventPlayPhase(eventId), [eventId]);
+  const eventPlayPhase = useSyncExternalStore(
+    subscribeEventPlayPhase,
+    readEventPlayPhase,
+    readEventPlayPhase,
+  );
   useEffect(() => {
     if (!(user && mayDeal && online)) {
       // The gate closed (offline, authority retired, signed out). Forget the
@@ -1843,11 +1869,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // answers synchronously, so the run triggered by an Event or account
     // change already dealt from its answer; the run the admission mirror then
     // triggers is the same answer arriving through state, not a new one.
-    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}`;
+    //
+    // `eventPlayPhase` is a gate input for the same reason `online` is (#1158):
+    // the Event being shut to gameplay is a condition the join can do nothing
+    // under, and play REOPENING is the moment to try again. Carrying it in the
+    // KEY rather than only in the deps is what makes the resume exactly ONE
+    // rerun — while the Event stays closed the key does not move, so the
+    // server-backed decline stays declined, and the flip back to `'open'`
+    // changes the key once.
+    //
+    // The close edge MOVES the key but is NOT an attempt (CodeRabbit Major,
+    // #1158 review round 3). Observing the shut is a reason to stop asking,
+    // not a reason to ask again: the rules decline a join under the quiesce
+    // exactly as they declined the one a moment earlier, so dealing on
+    // `'closed'` would spend a forbidden attempt to learn what the phase just
+    // said — and a first deal the fallback `'open'` reading deferred would be
+    // re-attempted the instant the committed `'closed'` snapshot confirmed it
+    // could not succeed. So the branch below records the key and returns: the
+    // record is what lets the later flip to `'open'` move it exactly once and
+    // resume the join.
+    //
+    // The KEY is the WHOLE mechanism: a deferral deliberately does NOT clear
+    // the recorded inputs from `runDeal`'s settle. Every gate evaluation that
+    // could resume a deferred join already arrives with the record cleared or
+    // the key moved — the branch above clears it on offline/authority-lost/
+    // signed-out, the auth callback clears it on an account change, the
+    // Event-switch layout effect clears it on an Event change, an admission
+    // answer moves `state.kind`, and a reload starts from nothing. The ONLY
+    // evaluation left is the admission mirror catching up with an answer the
+    // coordinator already gave (the `begin` publish above re-renders in the
+    // same flush), which repeats the key EXACTLY — and it always runs before
+    // any join has settled, so clearing on a deferral could never have helped
+    // it. What it could do is turn a repeated-input evaluation into another
+    // forbidden join attempt, which is the opposite of "the server-backed
+    // decline stays declined". So the dedupe holds for a deferral exactly as
+    // it holds for a join (#1158 review round 1, finding 2).
+    const gate = `${eventId}\u0000${user.uid}\u0000${state.kind}\u0000${String(mayDeal)}\u0000${String(online)}\u0000${eventPlayPhase}`;
     if (lastDealGateRef.current === gate) return;
     lastDealGateRef.current = gate;
+    if (eventPlayPhase === 'closed') {
+      // Settle `dealing` on the way out, the same way the admission branch
+      // above settles it for `retryable` and `blocked`, and for the same
+      // reason: `retryBootstrap` leaves the flag true for the deal it expects
+      // to follow, and this branch runs no deal, so nothing else would retire
+      // it — a cold visit whose Event is ALREADY observed closed would strand
+      // the shell on its spinner. It mirrors what a deferral itself settles:
+      // `runDeal`'s `finally` clears exactly this flag when `joinAndDeal`
+      // reports `'deferred'`. `dealError` is deliberately NOT cleared here —
+      // no attempt settled on this branch, and replacing the error before a
+      // settle is the one thing the P3 discipline forbids.
+      setDealingFor(eventId, false);
+      return;
+    }
     void runDeal(user, eventId);
-  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded]);
+  }, [eventId, user, mayDeal, online, runDeal, admission, beginAdmissionIfNeeded, eventPlayPhase, setDealingFor]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same

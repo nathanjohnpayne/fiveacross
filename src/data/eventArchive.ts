@@ -488,12 +488,28 @@ export function finaleHasRun(
  * decides whether anyone is mailed, and a console that read it more loosely
  * would warn about a send that was never going to happen.
  *
- * TWO RESIDUALS, and both over-warn rather than under-warn. A podium Moment that
- * never landed leaves the send `no-podium` and one that landed with no payload
- * leaves it `no-payload`; the Moment is a subcollection this surface does not
- * read, so either Event keeps the acknowledgement on screen for a send that may
- * never go out. That is the safe direction for a warning the Admin can tick
- * through in one click, and the opposite direction is the defect this closes.
+ * THE UNDER-WARN RESIDUAL IS CONSOLE-ONLY, and stated rather than claimed away
+ * (#1224). This predicate is evaluated against a subscription, so ANY state
+ * change between the render that reads it and the archive transaction that
+ * re-keys the ask can leave the warning stale; an edit that leaves the ask
+ * where it is (a rename, a ban) cannot. Two are known. Another Admin enabling
+ * `settings.dailyEmailEnabled` between the render and the transaction archives
+ * an Event the console never had cause to warn about. And the finale sweep
+ * committing `frozenAt` and the podium Moment inside the quiesce round trip
+ * moves the ask from `pre-freeze` to `podium+email` after the tick was already
+ * taken, so an Admin who acknowledged `pre-freeze` can archive an Event that
+ * became frozen underneath them, with the announcement newly owed and never
+ * acknowledged. Neither is closed by a console-side re-read — that narrows the
+ * window without closing it, since the finale sweep can still commit between
+ * the read and the flip's transaction — so this stays a documented residual
+ * rather than a `podiumEmailAt` gate on `archiveEvent`.
+ *
+ * TWO FURTHER RESIDUALS over-warn instead. A podium Moment that never landed
+ * leaves the send `no-podium` and one that landed with no payload leaves it
+ * `no-payload`; the Moment is a subcollection this surface does not read, so
+ * either Event keeps the acknowledgement on screen for a send that may never
+ * go out. That is the safe direction for a warning the Admin can tick through
+ * in one click, and the opposite direction is the defect this closes.
  *
  * The archived case is deliberately the call site's rather than a further fact
  * here: the fields read the same on a frozen Event as on a live one — the send
@@ -1220,11 +1236,14 @@ export interface EventArchiveDraft {
  *    (Codex P2, PR #1139).
  *  - **Daily honours** come from `pinnedOrDerivedDailyHonors` — the write-once
  *    day-meta pin first, the roster-derived fallback for unpinned Days — over
- *    the ban-filtered roster, with the ban roster passed EXPLICITLY so a pin
- *    whose holder no longer has a Player row is KEPT rather than silently
- *    dropped (#1146, #1142 item 8). It is the same helper the live strip and the
- *    frozen podium read, so the record cannot name a different holder from the
- *    last live strip.
+ *    the FULL, RAW roster, like the headline above and for the same reason
+ *    (#1217): the selector applies the ban to its own output, so a Day whose
+ *    derived First to BINGO is banned goes UNHELD rather than passing to the
+ *    next-earliest Player. The ban roster is passed EXPLICITLY, so a pin whose
+ *    holder no longer has a Player row is KEPT rather than silently dropped
+ *    (#1146, #1142 item 8). It is the same helper the live strip and the frozen
+ *    podium read, so the record cannot name a different holder from the last
+ *    live strip.
  *
  * `freezeAt` is the resolved Standings Freeze (`resolvedStandingsFreezeAt`), so
  * the archived hall of fame cuts on the SAME instant as the live pin, the podium
@@ -1337,8 +1356,16 @@ export function draftEventArchive(params: {
   const identified = players.filter((p) => usableUid(p.uid)).map(withReadableDayStats);
   const skippedRows = players.length - identified.length;
 
-  const roster = identified.filter((p) => !isBanned(p.uid, bannedUids));
-  const ranked = sortPlayers([...roster]);
+  // RANKED FIRST, BAN-FILTERED SECOND (#1217). The two derivations below want
+  // different rosters and the same order: the standings want the filtered rows,
+  // because a rank is a row's place among the rows being shown, while the
+  // honour selections want the raw ones, because an honour names who WON and a
+  // ban can only hide it. Sorting the identified roster once and filtering the
+  // result gives both from a single comparator pass, and the filtered list is
+  // the same array `sortPlayers` over a pre-filtered roster produced — dropping
+  // rows from a sorted list cannot reorder what is left.
+  const rankedAll = sortPlayers([...identified]);
+  const ranked = rankedAll.filter((p) => !isBanned(p.uid, bannedUids));
 
   const winner = eventFirstBingoWinner(identified, isTutorialDay, freezeAt);
   const firstBingo =
@@ -1361,8 +1388,20 @@ export function draftEventArchive(params: {
   // THE HONOUR SELECTION, TAKEN ONCE SO WHAT IT DROPS CAN BE COUNTED (#1151,
   // Codex P2 on PR #1162). See `carriedHonors` for what the filter refuses and
   // why a discarded pin leaves the Day with no honour at all.
+  //
+  // OVER THE RAW RANKING, like the headline honour above and for the same
+  // reason (#1217). This passed `ranked` — the BAN-FILTERED list — and a
+  // ban-filtered input is indistinguishable from a roster the banned Player was
+  // never on, so the derived fallback picked the earliest bingo among whoever
+  // was left and froze that Day's honour on a Player who was never first. The
+  // pinned branch was already right (a pin carries its own name and is checked
+  // against `bannedUids` directly, #1146); only the fallback promoted. The
+  // selector applies the ban to its OUTPUT, so the Day now goes unheld — hidden,
+  // never reassigned (`specs/w2-ban-console.md` § Leaderboard). The live strip
+  // moved in the same change, because the record's promise is that it says what
+  // the last live strip said (#1151).
   const selectedHonors = pinnedOrDerivedDailyHonors(
-    ranked,
+    rankedAll,
     days,
     dayMetas,
     dayMetasLoaded,
