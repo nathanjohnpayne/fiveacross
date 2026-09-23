@@ -91,7 +91,14 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { confirmClaim, hideProof, rejectClaim, restoreProof, RESTORE_CLAIM_LOOKUP_LIMIT } from './admin';
+import {
+  confirmClaim,
+  hideProof,
+  rejectClaim,
+  restoreProof,
+  RESTORE_CLAIM_LOOKUP_LIMIT,
+  RESTORE_STALE_PAGE_ATTEMPTS,
+} from './admin';
 import { safetyHideStands } from './moderation';
 import { attachProof } from './proofs';
 
@@ -740,15 +747,13 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
   });
 
-  it('settles a TRUNCATED page on the sentinel alone, without spending a read on the rows it kept', async () => {
+  it('settles a TRUNCATED page on a still-pending row, re-reading the whole page including the sentinel', async () => {
     // The boundary from above. Six of the owner's pending claims, so the query's
     // cap-plus-one page comes back longer than the cap and the truncation is
-    // visible. The destination is `'pending'` — where any one of the six would
-    // have sent it anyway — and it is fixed before a single claim is re-read,
-    // because no re-read of the rows the page KEPT can say anything about the
-    // row it dropped. So the transaction spends its reads on the Proof alone,
-    // which is a smaller in-transaction fan-out than the untruncated case above,
-    // not a larger one.
+    // visible. A truncated page never publishes, and a live pending row on it is
+    // both the reason for `'pending'` and the claim Confirm will act on — so
+    // every row the page fetched is re-read, the sentinel too (#1250), and the
+    // restore settles on the first attempt.
     claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
       id: `own-${i}`,
       live: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
@@ -757,7 +762,89 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     await restoreProof('P');
 
     expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
-    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual(['events/med-2026/proofs/P']);
+    expect(getDocsMock).toHaveBeenCalledTimes(1);
+    expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
+      'events/med-2026/proofs/P',
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => `events/med-2026/claims/own-${i}`),
+    ]);
+  });
+
+  // --- a truncated page that went stale before the transaction (#1250) -------
+  //
+  // The Phase 4b P2 on #1237. The sentinel made a truncated page settle
+  // `'pending'` without reading a row, so when every row the lookup saw had
+  // resolved before the transaction ran, the Proof went back to `'pending'` with
+  // no pending claim left to Confirm — demoting one confirmation had already
+  // published, and, for a manual hide with no reports and no verdict, dropping it
+  // from the moderation queue too: no Restore, no Confirm. A stale page now
+  // writes nothing and the lookup runs again against the live claims.
+
+  /** Later lookups match the claims' LIVE state: the query snapshot has moved on. */
+  function lookupsAfterTheFirstSeeLiveState() {
+    const firstLookup = getDocsMock.getMockImplementation()!;
+    getDocsMock.mockImplementation((...args: unknown[]) => {
+      const page = firstLookup(...args);
+      for (const c of claimsForProof) delete c.snapshot;
+      return page;
+    });
+  }
+
+  it('publishes when every claim on a truncated page resolves before the restore commits', async () => {
+    // Exactly as reported: six pending claims when the lookup ran, all six
+    // confirmed before the transaction — and the confirmation already published
+    // the Proof. Nothing is left pending, so `'pending'` would strand it.
+    liveProof = { uid: 'u1', status: 'active' };
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
+      id: `own-${i}`,
+      snapshot: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+      live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+    }));
+    lookupsAfterTheFirstSeeLiveState();
+
+    await restoreProof('P');
+
+    expect(getDocsMock).toHaveBeenCalledTimes(2);
+    expect(txUpdate).toHaveBeenCalledTimes(1); // the stale attempt wrote nothing
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+  });
+
+  it('keeps a DROPPED claim that is still pending reachable when the whole fetched page resolved', async () => {
+    // Seven claims: the six the page fetched (sentinel included) resolve in the
+    // gap, the seventh the page dropped is still pending. The stale attempt must
+    // not publish (the #1237 leak), and the fresh lookup finds the seventh and
+    // settles `'pending'` with a live claim for Confirm to act on.
+    claimsForProof = [
+      ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
+        id: `own-${i}`,
+        snapshot: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+        live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+      })),
+      { id: 'own-unread', live: { status: 'pending' as const, proofId: 'P', uid: 'u1' } },
+    ];
+    lookupsAfterTheFirstSeeLiveState();
+
+    await restoreProof('P');
+
+    expect(getDocsMock).toHaveBeenCalledTimes(2);
+    expect(txUpdate).toHaveBeenCalledTimes(1);
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+  });
+
+  it('throws WITHOUT writing when the page is still stale on the last attempt, leaving Restore reachable', async () => {
+    // The lookup keeps returning a truncated page whose rows have all resolved
+    // by the re-read. Guessing either destination is wrong, so the restore fails
+    // retryably and the Proof keeps the hidden state that queues it.
+    claimsForProof = Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT + 1 }, (_, i) => ({
+      id: `own-${i}`,
+      snapshot: { status: 'pending' as const, proofId: 'P', uid: 'u1' },
+      live: { status: 'confirmed' as const, proofId: 'P', uid: 'u1' },
+    }));
+
+    await expect(restoreProof('P')).rejects.toThrow(/Try again/);
+
+    expect(RESTORE_STALE_PAGE_ATTEMPTS).toBeGreaterThan(1);
+    expect(getDocsMock).toHaveBeenCalledTimes(RESTORE_STALE_PAGE_ATTEMPTS);
+    expect(txUpdate).not.toHaveBeenCalled();
   });
 
   it('scopes the lookup with the owner from a plain read, not a transactional one', async () => {
