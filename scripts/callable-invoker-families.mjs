@@ -199,6 +199,10 @@ function analyzeModule(file, results, visited) {
       } else if (ts.isIdentifier(init)) {
         if (localBuilders.has(init.text)) kind = "builder";
         else if (localHttps.has(init.text)) kind = "https";
+        else if (exported && namespaceImports.has(init.text)) {
+          // `export const admin = grouped` of `import * as grouped` is a group.
+          for (const member of namespaceImports.get(init.text).https) analysis.https.add(`${name}-${member}`);
+        }
       } else if (ts.isObjectLiteralExpression(init)) {
         // `export const admin = { endpoint }` deploys a Firebase group whose
         // members are named `admin-endpoint`.
