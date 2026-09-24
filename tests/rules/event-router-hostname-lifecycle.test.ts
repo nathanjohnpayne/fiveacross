@@ -188,6 +188,9 @@ async function refusalCode(work: () => Promise<unknown>): Promise<string | null>
   try {
     await work();
   } catch (error) {
+    // Only the helper's own refusal type counts, so a Firestore error that
+    // happens to carry a `code` cannot pass for a named refusal.
+    if ((error as Error).name !== 'HostnameLifecycleRefusal') throw error;
     return (error as { code?: string }).code ?? null;
   }
   return null;
@@ -484,6 +487,113 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       );
       expect(await read(db, `hostnames/${APEX}`)).toBeNull();
       expect(await read(db, `routerReplicas/${APEX}`)).toMatchObject({ revision: '3', desired: { kind: 'tombstone' } });
+    });
+  });
+
+  // #1251: both conversion directions against a real transaction. Each moves a
+  // host only between non-serving states in one revision, and going live is
+  // the ordinary convergence-barriered activation afterwards.
+  it('converts a not-found mirror marker to a replacement flagship proved live at its own host, then activates it separately', async () => {
+    await trusted(async (db) => {
+      const REPLACEMENT = 'replacement.vacaybingo.com';
+      const seeded = await seedConverged(db, MIRROR, {
+        root: 'not-found',
+        edition: 'vacay',
+        pathNamespace: 'vacaybingo.com',
+        // The retired flagship's public face, which must not travel.
+        adultContent: true,
+        canonicalHost: HOST,
+        isCanonical: false,
+      });
+      await seedConverged(db, REPLACEMENT, { eventId: 'replacement-2027', edition: 'vacay', status: 'active', slug: 'replacement', pathNamespace: null });
+      const convert = mutation({
+        intent: 'convert-to-route',
+        host: MIRROR,
+        eventId: 'replacement-2027',
+        replacementHost: REPLACEMENT,
+        converged: { revision: '1', digest: committedDigest(seeded) },
+      });
+      expect(await refusalCode(() => applyHostnameMutation(convert, dependencies(db)))).toBe('replacement-event-missing');
+      expect(await read(db, `hostnames/${MIRROR}`)).toMatchObject({ root: 'not-found', adultContent: true });
+      expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '1' });
+
+      await setDoc(doc(db, 'events/replacement-2027'), { status: 'active', admins: ['nathan'] });
+      const converted = (await applyHostnameMutation(convert, dependencies(db))) as Doc;
+      expect(await read(db, `hostnames/${MIRROR}`)).toEqual({
+        eventId: 'replacement-2027',
+        slug: 'replacement',
+        status: 'disabled',
+        edition: 'vacay',
+        pathNamespace: 'vacaybingo.com',
+      });
+      expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '2', desired: { kind: 'route', status: 'disabled' } });
+
+      await applyHostnameMutation(
+        mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: { revision: '2', digest: committedDigest(converted) } }),
+        dependencies(db),
+      );
+      expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '3', desired: { kind: 'route', status: 'active' } });
+    });
+  });
+
+  it('converts a disabled, converged apex route to its doorway, and the delete barrier still holds', async () => {
+    await trusted(async (db) => {
+      const seeded = await seedConverged(db, APEX, hostnameDocument({ edition: 'vacay', pathNamespace: 'vacaybingo.com' }));
+      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      const toDoorway = (revision: string, plan: Doc) =>
+        mutation({ intent: 'convert-to-root', host: APEX, root: 'doorway', converged: { revision, digest: committedDigest(plan) } });
+      expect(await refusalCode(() => applyHostnameMutation(toDoorway('1', seeded), dependencies(db)))).toBe('convert-requires-inactive');
+      expect(await read(db, `hostnames/${APEX}`)).toMatchObject({ status: 'active', eventId: EVENT_ID });
+
+      const disabled = (await applyHostnameMutation(
+        mutation({ intent: 'update', host: APEX, changes: { status: 'disabled' } }),
+        dependencies(db),
+      )) as Doc;
+      const doorway = (await applyHostnameMutation(toDoorway('2', disabled), dependencies(db))) as Doc;
+      expect(await read(db, `hostnames/${APEX}`)).toEqual({
+        root: 'doorway',
+        edition: 'vacay',
+        pathNamespace: 'vacaybingo.com',
+        adultContent: false,
+        canonicalHost: HOST,
+        isCanonical: true,
+      });
+      expect(await read(db, `routerReplicas/${APEX}`)).toMatchObject({ revision: '3', desired: { kind: 'root', root: 'doorway' } });
+      expect(
+        await refusalCode(() =>
+          applyHostnameMutation(
+            mutation({ intent: 'delete', host: APEX, convergedRevision: '3', convergedDigest: committedDigest(doorway) }),
+            dependencies(db),
+          ),
+        ),
+      ).toBe('delete-requires-inactive');
+    });
+  });
+
+  it('refuses a conversion outside its host scope or while a mirror flagship is live, leaving both documents standing', async () => {
+    await trusted(async (db) => {
+      const doorway = await seedConverged(db, APEX, { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+      const gcb = await seedConverged(db, 'gaycruisebingo.com', hostnameDocument({ edition: 'gcb', status: 'disabled', pathNamespace: null }));
+      const mirror = await seedConverged(db, MIRROR, hostnameDocument({ edition: 'vacay', status: 'disabled', pathNamespace: 'vacaybingo.com' }));
+      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      const cases: Array<[string, Doc, Doc, string]> = [
+        [APEX, doorway, { intent: 'convert-to-route', eventId: EVENT_ID, replacementHost: HOST }, 'convert-to-route-requires-mirror'],
+        ['gaycruisebingo.com', gcb, { intent: 'convert-to-root', root: 'doorway' }, 'root-conversion-requires-archive'],
+        [MIRROR, mirror, { intent: 'convert-to-root', root: 'not-found' }, 'root-conversion-flagship-live'],
+      ];
+      for (const [host, plan, input, expected] of cases) {
+        const before = await read(db, `hostnames/${host}`);
+        expect(
+          await refusalCode(() =>
+            applyHostnameMutation(
+              mutation({ host, converged: { revision: '1', digest: committedDigest(plan) }, ...input }),
+              dependencies(db),
+            ),
+          ),
+        ).toBe(expected);
+        expect(await read(db, `hostnames/${host}`)).toEqual(before);
+        expect(await read(db, `routerReplicas/${host}`)).toMatchObject({ revision: '1' });
+      }
     });
   });
 
