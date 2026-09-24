@@ -2005,8 +2005,9 @@ service cloud.firestore {
           && validSpicyForItemPool()
           && validTargetDayIndex()
           && (nonAdminPendingMainItemCreate() || adminActiveItemCreate(eventId));
-        // Report = increment reportCount by 1 only; admins can do anything
-        // EXCEPT approve, which is the `approvePrompts` callable (#1275).
+        // Report = increment reportCount by 1 only. Admins may make any edit
+        // except the status moves `itemStatusMoveAllowedForAdminClient()` denies:
+        // approval is the `approvePrompts` callable (#1275).
         //
         // `status` is SERVER-AUTHORITATIVE for the community-hide transition
         // (#43, ADR 0004 Phase 1). A non-admin's ONLY update is the report path,
