@@ -6,7 +6,9 @@
  * traffic. PostHog reads `utm_*` off the landing URL into `$utm_*` itself; the
  * client's initial GA4 `page_view` carries the same allowlisted keys on its
  * otherwise path-only `page_location` (`src/analytics.ts`). One tag feeds both
- * sinks.
+ * sinks. The client forwards a tag set to GA4 only when every value matches
+ * this taxonomy (`CAMPAIGN_PARAM_RULES` in `src/analytics.ts`), so a change to
+ * the value shapes below must change that allowlist in the same edit.
  *
  * Only APP deep links are tagged. The unsubscribe and preference links hit the
  * `emailUnsubscribe` Cloud Function, never the app, so a tag there would be

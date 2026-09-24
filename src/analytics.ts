@@ -181,27 +181,36 @@ function currentPageLocation(): string {
 
 /**
  * The campaign keys GA4 reads off `page_location` to attribute a session
- * (#632, specs/posthog-analytics.md § Campaign attribution). Campaign labels,
- * never credentials: the app's only producer of them is its own email links
- * (`functions/src/emailCampaign.ts`).
+ * (#632, specs/posthog-analytics.md § Campaign attribution), each with the
+ * exact value shape the app's own email links produce
+ * (`functions/src/emailCampaign.ts`). Values are matched, not just keys: a
+ * hand-crafted `?utm_campaign=alice@example.com` must never reach GA4, so
+ * anything outside this taxonomy (and `utm_content` / `utm_term`, which the
+ * app never sets) is dropped.
  */
-export const CAMPAIGN_PARAM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+export const CAMPAIGN_PARAM_RULES = [
+  ['utm_source', /^(?:daily-email|podium-email)$/],
+  ['utm_medium', /^email$/],
+  ['utm_campaign', /^[A-Za-z0-9_-]{1,128}-(?:day-\d{1,3}|podium)$/],
+] as const;
 
 /**
- * The allowlisted campaign subset of a query string, as `?k=v&...` in
- * `CAMPAIGN_PARAM_KEYS` order, or `''` when none is present. Every other key
- * (invite codes, auth-handler params) is dropped, and values are re-encoded,
- * so a crafted value cannot carry a second parameter back in.
+ * The app-generated campaign subset of a query string, as
+ * `?utm_source=…&utm_medium=…&utm_campaign=…` in that order, or `''`.
+ * All-or-nothing: the set is kept only when all three keys are present and
+ * each value matches the email taxonomy, so a partial or foreign tag set
+ * (third-party UTMs, free text, PII) is never forwarded. Every other key
+ * (invite codes, auth-handler params) is dropped.
  */
 export function campaignQuery(search: string): string {
   const incoming = new URLSearchParams(search);
   const kept = new URLSearchParams();
-  for (const key of CAMPAIGN_PARAM_KEYS) {
+  for (const [key, shape] of CAMPAIGN_PARAM_RULES) {
     const value = incoming.get(key);
-    if (value) kept.set(key, value);
+    if (value === null || !shape.test(value)) return '';
+    kept.set(key, value);
   }
-  const query = kept.toString();
-  return query ? `?${query}` : '';
+  return `?${kept.toString()}`;
 }
 
 /**

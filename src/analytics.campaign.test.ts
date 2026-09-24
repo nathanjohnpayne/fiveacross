@@ -34,25 +34,41 @@ afterEach(() => {
 });
 
 describe('campaignQuery (#632)', () => {
-  it('keeps only the allowlisted utm_* keys, in a fixed order, and drops everything else', async () => {
+  it('keeps only the email utm_* set, in a fixed order, and drops everything else', async () => {
     const { campaignQuery } = await import('./analytics');
-    expect(campaignQuery('?invite=SECRET&utm_campaign=c&utm_term=t&utm_medium=m&utm_source=s&utm_content=x&code=1')).toBe(
-      '?utm_source=s&utm_medium=m&utm_campaign=c&utm_content=x&utm_term=t',
+    expect(
+      campaignQuery(
+        '?invite=SECRET&utm_campaign=bodega-bay-2026-day-3&utm_term=t&utm_medium=email&utm_source=daily-email&utm_content=x&code=1',
+      ),
+    ).toBe(`?${TAGS}`);
+    expect(campaignQuery('?utm_source=podium-email&utm_medium=email&utm_campaign=med-2026-podium')).toBe(
+      '?utm_source=podium-email&utm_medium=email&utm_campaign=med-2026-podium',
     );
   });
 
-  it('returns an empty string when no campaign key is present or every value is blank', async () => {
+  it('returns an empty string when no campaign key is present or a value is blank', async () => {
     const { campaignQuery } = await import('./analytics');
     expect(campaignQuery('')).toBe('');
     expect(campaignQuery('?invite=SECRET')).toBe('');
     expect(campaignQuery('?utm_source=&utm_medium=')).toBe('');
+    expect(campaignQuery('?utm_source=daily-email&utm_medium=email&utm_campaign=')).toBe('');
+  });
+
+  it('drops the whole set when any value falls outside the email taxonomy (no free text or PII reaches GA4)', async () => {
+    const { campaignQuery } = await import('./analytics');
+    const base = { utm_source: 'daily-email', utm_medium: 'email', utm_campaign: 'bodega-bay-2026-day-3' };
+    const withValue = (key: string, value: string) =>
+      `?${new URLSearchParams({ ...base, [key]: value }).toString()}`;
+    expect(campaignQuery(withValue('utm_campaign', 'alice@example.com'))).toBe('');
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-3 alice'))).toBe('');
+    expect(campaignQuery(withValue('utm_source', 'newsletter'))).toBe('');
+    expect(campaignQuery(withValue('utm_medium', 'social'))).toBe('');
+    expect(campaignQuery('?utm_source=daily-email&utm_medium=email')).toBe('');
   });
 
   it('never lets a campaign value smuggle another parameter in', async () => {
     const { campaignQuery } = await import('./analytics');
-    const out = campaignQuery('?utm_source=a%26invite%3DSECRET');
-    expect(new URLSearchParams(out).get('invite')).toBeNull();
-    expect(new URLSearchParams(out).get('utm_source')).toBe('a&invite=SECRET');
+    expect(campaignQuery('?utm_source=daily-email%26invite%3DSECRET&utm_medium=email&utm_campaign=e-podium')).toBe('');
   });
 });
 
