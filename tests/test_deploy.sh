@@ -122,11 +122,14 @@ skip() { echo "SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
 # Several cases below assert what a PREDEPLOY HOOK did — the write it was
 # denied, the timestamps it compared, the checkout it could not reach — and no
 # hook runs anywhere unless the deploy-scope classifier first PROVED a write
-# containment that can hold it. `ubuntu-latest`, where `app-ci` runs, can prove
-# none: `bwrap` is not installed and the kernel refuses an unprivileged user
-# namespace, so the classifier refuses every exemption before staging anything.
-# That is correct production behaviour, and it means those cases there would be
-# asserting a hook's effects on a machine that runs no hooks.
+# containment that can hold it. On a machine that can prove none the classifier
+# refuses every exemption before staging anything — correct production
+# behaviour, and it means those cases there would be asserting a hook's effects
+# on a machine that runs no hooks. `ubuntu-latest`, where `app-ci` runs, used to
+# be such a machine (no `bwrap`, and a kernel that refuses an unprivileged user
+# namespace) until the workflow started installing `bubblewrap` and failing
+# unless this same probe names a mechanism (#1164), so the cases below now run
+# there on the `bwrap` path.
 #
 # Asked of the classifier's own machinery rather than of `uname`: a Linux box
 # WITH `bwrap` runs every case exactly as this repository's development Mac
@@ -3418,7 +3421,10 @@ EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=
 EVENT_INVITATIONS_INVOKER_CONSERVATIVE=false
-EVENT_INVITATIONS_STRICT_SERVICES='
+EVENT_INVITATIONS_STRICT_SERVICES=
+ADMIN_CALLABLES_INVOKER_SELECTED=false
+ADMIN_CALLABLES_INVOKER_CONSERVATIVE=false
+ADMIN_CALLABLES_STRICT_SERVICES='
 
 run_post_classification_guard_case() {
   local case_id="$1"
@@ -3741,13 +3747,12 @@ run_detached_writer_case 36b allowed
 # Case 37 (#1107): on a machine that can prove no write containment, deploy.sh
 # still deploys — conservatively — and no predeploy hook runs.
 #
-# This is the arm `app-ci` takes on every run: `ubuntu-latest` ships no `bwrap`
-# and refuses an unprivileged user namespace, so the classifier proves nothing
-# and refuses every exemption before staging. It is what replaces the cases
-# skipped above, and it runs on EVERY machine —
+# This is the arm any machine takes when it can prove nothing, and it is what
+# replaces the cases skipped above. It runs on EVERY machine —
 # `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT=1` makes a machine that CAN
-# contain a hook answer the same way, so the refusal is never a path only CI
-# exercises.
+# contain a hook answer the same way — which is now the only way `app-ci`
+# reaches it too, its runner having gained a `bwrap` it can prove (#1164). So
+# the refusal was never, and is still not, a path only one machine exercises.
 #
 # The fixture is 28b's, which really does export one endpoint and IS exempted
 # when a containment can be proved — so the reconciliation below is attributable
@@ -3790,6 +3795,104 @@ elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-37.log"; then
   cat "$WORKDIR/gcloud-calls-37.log" >&2
 else
   pass "no-containment: a machine that can prove no write containment refuses every exemption, names the candidates it could not prove, runs no hook, and still deploys (rc=$RC37)."
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 38a-38d (#1277): the admin callables are their own invoker family.
+# unlockDayNow shipped 403 in both projects because no family reconciled it.
+# The strict set comes from the Functions exports, so the not-yet-exported
+# approvePrompts may be absent after publish while a selected unlockDayNow may
+# not; and an onCall/onRequest export that belongs to no family fails the
+# classification, naming the export, before anything is built or published.
+# ---------------------------------------------------------------------------
+init_admin_fixture() {
+  local repo="$1"
+  shift
+  init_fixture_repo "$repo"
+  mkdir -p "$repo/functions/src"
+  {
+    printf '%s\n' "import { onCall } from 'firebase-functions/v2/https';"
+    printf '%s\n' "export const unlockDayNow = onCall(async () => ({ ok: true }));"
+    for line in "$@"; do printf '%s\n' "$line"; done
+  } >"$repo/functions/src/index.ts"
+  (cd "$repo" && git add functions/src/index.ts && git commit --quiet -m "admin callable")
+}
+
+run_admin_case() {
+  local id="$1" repo="$2" missing="$3"
+  shift 3
+  : >"$WORKDIR/ofd-calls-$id.log"
+  : >"$WORKDIR/gcloud-calls-$id.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-$id.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-$id.log" \
+  GCLOUD_MISSING_SERVICE="$missing" \
+  GCLOUD_STUB_ANNOTATION=false \
+    bash -c 'cd "$1" && shift && bash "$@"' _ "$repo" "$SCRIPT" --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo "$@" \
+    >"$WORKDIR/case$id.out" 2>"$WORKDIR/case$id.err"
+  ADMIN_RC=$?
+  set -e
+}
+
+REPO38A="$WORKDIR/case38a-admin-full"
+init_admin_fixture "$REPO38A"
+run_admin_case 38a "$REPO38A" approveprompts --only functions
+if [[ $ADMIN_RC -ne 0 ]]; then
+  fail "admin-full: a full Functions deploy failed on the not-yet-exported approvePrompts (rc=$ADMIN_RC). stderr was:"
+  cat "$WORKDIR/case38a.err" >&2
+elif ! grep -qE 'update.unlockdaynow' "$WORKDIR/gcloud-calls-38a.log"; then
+  fail "admin-full: the released unlockDayNow was not reconciled after publish. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38a.log" >&2
+elif ! grep -qE 'describe.approveprompts' "$WORKDIR/gcloud-calls-38a.log"; then
+  fail "admin-full: approvePrompts was not probed, so it would stay 403 once #1275 ships. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38a.log" >&2
+else
+  pass "admin-full: a full Functions deploy reconciles unlockDayNow and tolerates the absent approvePrompts (rc=$ADMIN_RC)."
+fi
+
+REPO38B="$WORKDIR/case38b-admin-exact"
+init_admin_fixture "$REPO38B"
+run_admin_case 38b "$REPO38B" approveprompts --only functions:unlockDayNow
+if [[ $ADMIN_RC -ne 0 ]]; then
+  fail "admin-exact: an exact unlockDayNow deploy failed (rc=$ADMIN_RC). stderr was:"
+  cat "$WORKDIR/case38b.err" >&2
+elif grep -Eq 'submitbugreport|emailunsubscribe|authhandoff|eventinvitation' "$WORKDIR/gcloud-calls-38b.log"; then
+  fail "admin-exact: the exact unlockDayNow scope inspected unrelated families. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38b.log" >&2
+elif ! grep -qE 'update.unlockdaynow' "$WORKDIR/gcloud-calls-38b.log"; then
+  fail "admin-exact: the exact unlockDayNow scope did not reconcile unlockDayNow. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38b.log" >&2
+else
+  pass "admin-exact: --only functions:unlockDayNow reconciles only the admin family (rc=$ADMIN_RC)."
+fi
+
+REPO38C="$WORKDIR/case38c-admin-selected-missing"
+init_admin_fixture "$REPO38C"
+run_admin_case 38c "$REPO38C" unlockdaynow --only functions:default:unlockDayNow
+if [[ $ADMIN_RC -eq 0 ]]; then
+  fail "admin-selected-missing: an exact unlockDayNow deploy returned 0 though its released service is absent."
+elif [[ ! -s "$WORKDIR/ofd-calls-38c.log" ]]; then
+  fail "admin-selected-missing: failure occurred before publish, so strict postdeploy handling was not exercised."
+elif ! grep -q 'reconciliation FAILED and the deploy is already live' "$WORKDIR/case38c.err"; then
+  fail "admin-selected-missing: missing selected service did not emit the already-live banner. stderr was:"
+  cat "$WORKDIR/case38c.err" >&2
+else
+  pass "admin-selected-missing: a selected unlockDayNow stays strict after publish (rc=$ADMIN_RC)."
+fi
+
+REPO38D="$WORKDIR/case38d-unfamilied-callable"
+init_admin_fixture "$REPO38D" "export const brandNewCallable = onCall(async () => 1);"
+run_admin_case 38d "$REPO38D" "" --only functions
+if [[ $ADMIN_RC -eq 0 ]]; then
+  fail "unfamilied-callable: a deploy releasing an HTTPS export with no invoker family returned 0."
+elif [[ -s "$WORKDIR/ofd-calls-38d.log" || -s "$WORKDIR/gcloud-calls-38d.log" ]]; then
+  fail "unfamilied-callable: the guard fired after gcloud or Firebase had already run."
+elif ! grep -q 'brandNewCallable.*belongs to no Cloud Run invoker family' "$WORKDIR/case38d.err"; then
+  fail "unfamilied-callable: the refusal did not name the unfamilied export. stderr was:"
+  cat "$WORKDIR/case38d.err" >&2
+else
+  pass "unfamilied-callable: an HTTPS export with no invoker family fails before anything is published, naming it (rc=$ADMIN_RC)."
 fi
 
 # ---------------------------------------------------------------------------

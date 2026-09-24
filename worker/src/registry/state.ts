@@ -26,20 +26,20 @@ export type SyncResponse = {
  * closed, and neither reaches for a second source of truth.
  */
 export type RegistryLookup =
-  /** No servable address here. `revision` and `schemaVersion` are present only
-   *  for a TOMBSTONE — a committed record that reads as unknown from outside
-   *  but still has a revision the public response must carry, because
-   *  `specs/event-router-registry.md` § Audit and recovery makes the publicly
-   *  observed revision the evidence a tombstoned host's recovery lock is
-   *  cleared with. They are absent, not null, for an uninitialized object, so a
-   *  router built against the earlier shape reads the same `unknown-host` it
-   *  always did instead of failing on an unrecognised field. */
-  | { kind: 'unknown-host'; revision?: string; schemaVersion?: number }
+  /** No servable address here. `revision`, `schemaVersion` and `host` are
+   *  present only for a TOMBSTONE — a committed record that reads as unknown
+   *  from outside but still has a revision the public response must carry,
+   *  because `specs/event-router-registry.md` § Audit and recovery makes the
+   *  publicly observed revision the evidence a tombstoned host's recovery lock
+   *  is cleared with. All three are absent, not null, for an uninitialized
+   *  object, so a router reads the same bare `unknown-host` it always did
+   *  instead of failing on a field that has nothing to describe. */
+  | { kind: 'unknown-host'; revision?: string; schemaVersion?: number; host?: string }
   | { kind: 'unavailable' }
   | { kind: 'malformed' }
   /**
    * A committed projection, stamped with the SCHEMA VERSION it was committed
-   * under.
+   * under and BOUND to the canonical hostname it was projected from.
    *
    * The version is carried rather than dropped because the registry is a
    * separately deployed Worker whose schema may move ahead of this router's.
@@ -52,8 +52,23 @@ export type RegistryLookup =
    * has to be able to SEE the version to refuse it. It is typed `number`, not
    * the literal this deployment happens to accept, because the whole point is
    * that the value may be one this build does not know.
+   *
+   * `host` is carried for the same class of reason and closes the other half of
+   * the hole (#1133). Without it the router can cross-check only the shared
+   * first label, so a registry that ever answered a lookup of
+   * `bodega-bay.fiveacross.app` with the `bodega-bay.vacaybingo.com`
+   * projection would hand over a sibling host's status, Edition and revision
+   * under a slug that matches. It is `hostnameKey(host)` — byte-identical to
+   * the committed payload's `host`, which is itself identical to the object's
+   * document ID — so the consumer compares rather than parses.
    */
-  | { kind: 'committed'; schemaVersion: number; revision: string; desired: ReplicaDesired };
+  | {
+      kind: 'committed';
+      schemaVersion: number;
+      revision: string;
+      host: string;
+      desired: ReplicaDesired;
+    };
 
 /**
  * The ONLY registry capability the public router holds, declared here — beside
@@ -184,25 +199,29 @@ export async function applyPublisherSync(
  * public: `clear-lock` consumes three attestations "whose host/result/revision
  * equal committed state", and a tombstoned host whose public response carried no
  * revision could never produce them. What stays hidden is the projection — no
- * Event ID, Slug or Edition leaves this arm.
+ * Event ID, Slug or Edition leaves this arm. The canonical `host` it carries
+ * alongside the revision is the lookup key the caller already named, so binding
+ * the envelope to it discloses nothing the caller did not supply.
  */
 export function registryLookup(
   state: RegistryState,
 ): Extract<RegistryLookup, { kind: 'unknown-host' } | { kind: 'committed' }> {
   const committed = state.committed;
   if (committed === null) return { kind: 'unknown-host' };
-  // The committed record's own schema version travels with everything derived
-  // from it — the projection AND the tombstone's revision — so a consumer on
-  // the far side of the service binding can decide whether it understands this
-  // record before it reads anything else out of it.
-  const schemaVersion = committed.payload.schemaVersion;
+  // The committed record's own schema version AND the canonical hostname it
+  // was projected from travel with everything derived from it — the projection
+  // and the tombstone's revision alike — so a consumer on the far side of the
+  // service binding can decide whether it understands this record, and whether
+  // the record is even this address's, before it reads anything else out of it.
+  const { host, schemaVersion } = committed.payload;
   if (committed.payload.desired.kind === 'tombstone') {
-    return { kind: 'unknown-host', revision: committed.revision, schemaVersion };
+    return { kind: 'unknown-host', revision: committed.revision, schemaVersion, host };
   }
   return {
     kind: 'committed',
     schemaVersion,
     revision: committed.revision,
+    host,
     desired: committed.payload.desired,
   };
 }

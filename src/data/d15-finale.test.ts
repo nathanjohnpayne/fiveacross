@@ -256,6 +256,26 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     ]);
   });
 
+  // #1263 / PR #1268 (Codex P1 `4088148821`): the podium Moment posted beside a
+  // frozen `false` drops every honour pinned at or after the freeze, so the
+  // in-app podium and share card must drop the same ones, or the card prints a
+  // ceremonial honour the Feed and the winner email omit. It filters by instant
+  // and never blanks: a pre-freeze pin stays, and `true` or unknown keep all.
+  it('drops only POST-freeze honours when the frozen answer is FALSE', () => {
+    const metas = new Map([
+      [1, { firstBingo: { uid: 'alice', displayName: 'Alice', at: NOW - HOUR } }],
+      [2, { firstBingo: { uid: 'bob', displayName: 'Bob', at: NOW + HOUR } }],
+    ]);
+    const frozenEmpty = buildPodium([], DAYS, metas, true, NOW, [], false);
+    expect(frozenEmpty.dailyHonors.map((h) => h.dayIndex)).toEqual([1]);
+    // The freeze instant itself is already frozen, matching `withinFreeze`.
+    const atCutoff = new Map([[2, { firstBingo: { uid: 'bob', displayName: 'Bob', at: NOW } }]]);
+    expect(buildPodium([], DAYS, atCutoff, true, NOW, [], false).dailyHonors).toEqual([]);
+    for (const answer of [true, null, undefined]) {
+      expect(buildPodium([], DAYS, metas, true, NOW, [], answer).dailyHonors.map((h) => h.dayIndex)).toEqual([1, 2]);
+    }
+  });
+
   // #1146 / #1142 item 8: a pin is hidden by the BAN LIST and by nothing else.
   // It used to be hidden whenever its holder was absent from the supplied
   // roster, which read roster absence as a ban — so an Admin deleting a Player
@@ -382,6 +402,44 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
     );
     expect(rawTotal).toBe(2 * MAX_ARCHIVE_NUMBER);
     expect(rawTotal).toBeGreaterThan(podium.champion?.bingoCount ?? 0);
+  });
+
+  // #1192. `champion == null` is not "nobody played": the champion is the head of
+  // the standings with every ceremonial Day's contribution removed, so an Event
+  // whose only Marks sit on a ceremonial Day has no champion and was plainly
+  // played. `playRecorded` states that separately; the functions-side mirror is
+  // pinned against this by `tests/functions/finale-parity.test.ts`.
+  describe('playRecorded — whether anybody played, stated not inferred', () => {
+    it('is true for Marks on a CEREMONIAL Day the standings cannot see', () => {
+      // Day 2 is the closing Day, so its Marks are excluded from the standings —
+      // and it is NOT a Tutorial Day here, which is what keeps the honour.
+      const days = [DAYS[0], DAYS[1], day({ index: 2, pool: 'closing', tutorial: false })];
+      const players = [
+        player({
+          uid: 'logan',
+          bingoCount: 1,
+          squaresMarked: 7,
+          firstBingoAt: NOW,
+          dayStats: { 2: { bingoCount: 1, squaresMarked: 7, firstBingoAt: NOW } },
+        }),
+      ];
+      const podium = buildPodium(players, days);
+      expect(podium.champion).toBeNull();
+      expect(podium.firstBingo?.uid).toBe('logan');
+      expect(podium.playRecorded).toBe(true);
+    });
+
+    it('reads roots or buckets, and is false only when nothing anywhere is positive', () => {
+      expect(buildPodium([player({ uid: 'a', squaresMarked: 1 })], DAYS).playRecorded).toBe(true);
+      expect(
+        buildPodium(
+          [player({ uid: 'b', dayStats: { 1: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } } })],
+          DAYS,
+        ).playRecorded,
+      ).toBe(true);
+      expect(buildPodium([player({ uid: 'c' })], DAYS).playRecorded).toBe(false);
+      expect(buildPodium([], DAYS).playRecorded).toBe(false);
+    });
   });
 });
 

@@ -5,11 +5,12 @@ import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
-import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { APPROVE_PROMPTS_APP_CHECK, AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { approvePromptsCallable } from './approvePrompts';
 import {
   markAdminAlertsUnsettled,
   recordAdminAlerts,
@@ -784,9 +785,36 @@ export const repairLegacyMarkerEventIdentityOnWrite = onDocumentWritten(
  * `notifyItemModeration`/`notifyProofModeration` REACTS to the `status → hidden`
  * transition and emails the admins. moderateProof and the notifiers are
  * untouched; no secrets are needed here. Firestore triggers stay on us-central1.
+ *
+ * ALL THREE THRESHOLD TRIGGERS PIN `ADMIN_SDK_SERVICE_ACCOUNT` (#1137), and it
+ * is a fix rather than boilerplate. Every path here is a Firestore data-plane
+ * call — the `events/{eventId}` threshold read, the transactional re-read, the
+ * `status → 'hidden'` update — and the project's default Gen2 compute identity
+ * has none of that access (ADR 0008), which is the same reasoning the notifiers
+ * and the Vision hide on these very paths already rely on. Unpinned, every
+ * invocation that got past the cheap short-circuits in `applyThresholdHide` /
+ * `applyThresholdBackfill` would have failed on its first read, and because both
+ * are best-effort (ADR 0001) that failure is swallowed into a `console.error`, so
+ * every hide the shipped #43 auto-hide owed would have failed silently rather
+ * than loudly.
+ *
+ * NO `retry: true`, unlike `hideProofOnVisionFlag` on the same document path and
+ * unlike the adult-content pair below. A retry is a REDELIVERY of a delivery the
+ * platform saw fail — a rejected promise, but equally a timeout, an OOM kill or
+ * an instance crash — and neither `applyThresholdHide` nor
+ * `applyThresholdBackfill` ever rejects: both wrap everything in a try/catch that
+ * logs and returns (ADR 0001). So this module's real failure mode, a denied or
+ * transient Firestore call, is invisible to retry, and the flag would advertise a
+ * durability this module deliberately does not offer. The answer to a swallowed
+ * attempt is the "rose to at/over" gate in `shouldHideAtThreshold`, which
+ * re-attempts the hide on the next report bump instead of requiring a strict
+ * below→over crossing. This matches the #101 notifiers, which pin the identity
+ * and likewise take no retry. (The one delivery the platform WOULD see fail is a
+ * backfill sweep that outruns its timeout; see `backfillHideOnThresholdDecrease`
+ * below for why that tail is left to the next decrease and `runRolloutSweep`.)
  */
 export const hideProofAtThreshold = onDocumentWritten(
-  'events/{eventId}/proofs/{proofId}',
+  { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdHide(
       'proofs',
@@ -855,7 +883,7 @@ export const hideProofOnVisionFlag = onDocumentWritten(
 );
 
 export const hideItemAtThreshold = onDocumentWritten(
-  'events/{eventId}/items/{itemId}',
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdHide(
       'items',
@@ -876,9 +904,22 @@ export const hideItemAtThreshold = onDocumentWritten(
  * proofs and hides the ones that now meet the lower bar (active-only, update-based
  * writes; best-effort). It never writes the Event doc, so it never re-fires
  * itself; its status->hidden writes re-fire the per-write hides, which no-op.
+ *
+ * Pinned to `ADMIN_SDK_SERVICE_ACCOUNT` and left without `retry` for exactly the
+ * reasons spelled out on `hideProofAtThreshold` above: the sweep query and every
+ * hide are Firestore data-plane calls the default Gen2 compute identity cannot
+ * make, and `applyThresholdBackfill` never rejects, so retry cannot see this
+ * module's real failures. It CAN see one: this trigger sets no `timeoutSeconds`,
+ * so the 60s default applies, and an Event with a large over-threshold tail at a
+ * newly lowered bar can outrun it and leave the sweep partially applied. That
+ * tail is deliberately left to the next threshold decrease plus the
+ * operator-invokable `runRolloutSweep`, both of which re-sweep idempotently
+ * through the same transactional guard — a bounded, operator-closable gap,
+ * accepted rather than covered by a flag whose reach on the common failure is
+ * zero.
  */
 export const backfillHideOnThresholdDecrease = onDocumentWritten(
-  'events/{eventId}',
+  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     applyThresholdBackfill(
       event.params.eventId,
@@ -1073,6 +1114,50 @@ export const unlockDayNow = onCall(
     throw err;
   }
 });
+
+/**
+ * Server-side Community Prompt approval (#1275, #813, ADR 0015,
+ * specs/community-prompt-targeting.md § "The clock routing trusts"). The ONLY
+ * path that moves a pending player submission to `active`: `firestore.rules`
+ * deny the client flip, an Admin's included, so routing and the
+ * `approvedAt`/`retainedAt` stamps derive from the SERVER clock, and the
+ * transaction fences the scheduler's snapshot through the Event doc
+ * (`approvalSeq`) so the #813 phantom ordering forces a retry instead of a
+ * misreported Day. Auth, App Check (`APPROVE_PROMPTS_APP_CHECK`, off by
+ * default like the other callables), payload validation, the admin check and
+ * every HttpsError mapping live in `approvePrompts.ts`; this is the seam.
+ *
+ * `timeoutSeconds: 60` rather than 30 because a bulk approve holds N+1
+ * document locks for one transaction and contends with every other Event-doc
+ * writer. Pins `ADMIN_SDK_SERVICE_ACCOUNT` like every Admin-SDK callable.
+ *
+ * INVOKER: `scripts/deploy.sh` reconciles the Cloud Run invoker only for the
+ * services on its `INVOKER_SCRIPTS` list. #1277 added the admin-callables family
+ * (`scripts/set-admin-callables-invoker.sh`: `unlockdaynow`, `approveprompts`),
+ * so every Functions deploy that releases this callable now reconciles it; an
+ * unreconciled one would answer Google's HTML 403 while the rules in the same
+ * release deny every client approval, so approval would stop working entirely.
+ *
+ * DEPLOYING IT THE FIRST TIME IS TWO PASSES (ADR 0015 § Consequences). On
+ * CREATE firebase-tools grants `allUsers` the Cloud Run invoker role, which the
+ * org's Domain Restricted Sharing policy rejects, so the functions step reports
+ * a failure and the release chain never reaches hosting. Run a functions-only
+ * deploy first (rules and hosting untouched, every client still approves
+ * through its own transaction), let `scripts/deploy.sh` reconcile the invoker
+ * through the #1277 family, confirm the unauthenticated probe answers
+ * `401 UNAUTHENTICATED` JSON, then run the full deploy: on UPDATE the invoker is
+ * left alone and rules, functions and hosting ship together.
+ */
+export const approvePrompts = onCall(
+  { maxInstances: 10, timeoutSeconds: 60, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (request) =>
+    approvePromptsCallable(request, APPROVE_PROMPTS_APP_CHECK.value(), {
+      db: db as unknown as AdminFirestore,
+      now: Date.now,
+      deleteField: () => FieldValue.delete(),
+      logger: console,
+    }),
+);
 
 // --- Daily themed engagement email (#616) ---------------------------------------
 // Thin trigger seams only; the sweep, the content, the template and the consent

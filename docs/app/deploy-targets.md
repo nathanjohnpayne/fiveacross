@@ -39,7 +39,7 @@ Every named Five Across deploy therefore performs a read-only predeploy check **
 
 The first hostname-resolved Five Across deployment activates the server-provided `canonicalHost` as the analytics origin. Before that release, run `npm run migrate:bodega-canonical-host` through the exact Five Across deploy credential path. If the dry run reports drift, do not deploy until the reviewed migration code is merged, an explicit `--apply` succeeds, and the post-write readback confirms `bodega-bay.fiveacross.app` as the sole Bodega canonical host. The migration and rollback boundary is operationally separate from application publish.
 
-Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. #546 moved the PWA manifest to the edge Worker, which serves it per host — but only once its routes are attached, and only for shells built after #546 (`worker/README.md` § 4). The crawler-facing `<head>` is still baked per build, so until #1118 supplies per-host HTML rewriting, do not attach a non-Vacay Edition hostname to the wildcard.
+Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. #546 moved the PWA manifest to the edge Worker and #1118 the crawler-facing `<head>`, both served per host — but only once its routes are attached, and the manifest only for shells built after #546 (`worker/README.md` § 4). A hostname Firebase Hosting still serves directly gets neither, so do not attach a non-Vacay Edition hostname to the wildcard without verifying its own share block on that host afterwards.
 
 ## Target environment files
 
@@ -109,6 +109,30 @@ for HOST in https://bodega-bay.fiveacross.app https://bodega-bay.vacaybingo.com 
     echo WRONG-TARGET-OR-STALE-COMMIT
   fi
 done
+```
+
+### Cloud Run invoker families
+
+Both projects enforce Domain Restricted Sharing, which rejects the `allUsers` invoker binding Firebase adds to a Gen2 HTTPS function. Every `onCall` / `onRequest` export in `functions/src/index.ts` therefore belongs to one reconciled family, and `scripts/deploy.sh` disables the Cloud Run invoker IAM check on the selected family's services after every Functions release (Step 2.5), after a read-only check before publishing (Step 1.6). The families are listed in `scripts/callable-invoker-families.mjs`:
+
+| Family | Callables (Cloud Run service) | Wrapper | Project override |
+|---|---|---|---|
+| Bug report | `submitBugReport` | `scripts/set-bug-report-invoker.sh` | `BUG_REPORT_PROJECT` |
+| Email unsubscribe | `emailUnsubscribe` | `scripts/set-email-unsubscribe-invoker.sh` | `EMAIL_UNSUBSCRIBE_PROJECT` |
+| Auth handoff | `mintAuthHandoff`, `exchangeAuthHandoff` | `scripts/set-auth-handoff-invoker.sh` | `AUTH_HANDOFF_PROJECT` |
+| Event invitations | `mintEventInvitation`, `redeemEventInvitation`, `revokeEventInvitation` | `scripts/set-event-invitations-invoker.sh` | `EVENT_INVITATIONS_PROJECT` |
+| Admin callables (#1277) | `unlockDayNow` (`unlockdaynow`, including its `resnapshot` arm), `approvePrompts` (`approveprompts`, #1275) | `scripts/set-admin-callables-invoker.sh` | `ADMIN_CALLABLES_PROJECT` |
+
+A multi-service family derives its strict set from what the Functions index exports and what an exact `--only functions:<name>` scope names: a selected service that is missing after publish fails the deploy, while an unexported or unselected peer (such as `approveprompts` before #1275 deploys) is tolerated. A Functions deploy whose index exports an HTTPS function that is in no family, and not listed with a reason in `PRIVATE_HTTPS_EXPORTS`, fails classification naming the export before anything is built or published. Register a new callable in a family (and that family's wrapper and `deploy.sh` wiring) in the same change that exports it. For the first `approvePrompts` release in a project, follow [`phase-1-deploy.md` §1c](phase-1-deploy.md#1c-first-deploy-of-the-approveprompts-callable-1275-adr-0015) before the full deploy.
+
+The healthy probe for a reconciled `onCall` callable is an unauthenticated POST that reaches the function and answers its own `401` UNAUTHENTICATED JSON. An `onRequest` endpoint answers with its own application response instead: `emailUnsubscribe` without a query capability returns `400 text/html`, which is healthy (see the synthetic contract in `docs/app/phase-1-deploy.md`). For either kind, Google's HTML `403` ("Your client does not have permission") means the request never reached the function: rerun the family wrapper with the project pinned.
+
+```bash
+PROJECT=fiveacross   # or gaycruisebingo
+curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' -X POST \
+  -H 'Content-Type: application/json' -d '{"data":{}}' \
+  "https://us-central1-$PROJECT.cloudfunctions.net/unlockDayNow"
+# healthy: 401 application/json    unreachable: 403 text/html
 ```
 
 ## Post-deploy verification

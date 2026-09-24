@@ -930,6 +930,11 @@ export function e2eParamValues(projectId) {
     // than omitted because the emulator prompts for any declared param its
     // dotenv files do not name — and blocks on that prompt forever.
     AUTH_HANDOFF_APP_CHECK: 'false',
+    // Off for the same reason (#1275): the emulator issues no App Check tokens,
+    // and tests/e2e/d15-approvals.spec.ts approves through the `approvePrompts`
+    // callable on the Functions emulator, so enforcing attestation here would
+    // fail the one approval the e2e run makes.
+    APPROVE_PROMPTS_APP_CHECK: 'false',
     EMAIL_UNSUBSCRIBE_URL: `http://127.0.0.1:${FUNCTIONS_EMULATOR_PORT}/${projectId}/us-central1/emailUnsubscribe`,
   };
 }

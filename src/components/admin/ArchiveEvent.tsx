@@ -35,11 +35,14 @@ type Phase = 'open' | 'closing' | 'archived';
 /**
  * WHICH consequence the flip's acknowledgement is about (#1151, #1192; Codex P1
  * on PR #1215). It is the acknowledgement's KEY, not a rendering hint: the tick
- * is stored as the value of the question it answered and spent the moment the
- * Event re-keys it, so a warning that changes under a ticked box cannot be
- * archived over. A combined value is its own value rather than a pair of flags
- * because the consequences are asked as ONE question — see `ask`, which
- * documents what each value means.
+ * is stored as the value of the question it answered and spent the moment a
+ * COMMITTED RENDER sees the Event re-key it, so a warning whose change this
+ * console has rendered cannot be archived over. A re-key that lands after a
+ * handler has taken its own closure is outside that guarantee, and is the
+ * console-only residual `specs/post-sailing-archive.md` § "The pending-claim
+ * drain gate" states rather than a further fact here. A combined value is its
+ * own value rather than a pair of flags because the consequences are asked as
+ * ONE question — see `ask`, which documents what each value means.
  *
  * They are the four TRUE things this surface can ask about rather than a cross
  * product of predicates (Codex P2 on PR #1215): `frozenAt` and the Most-Loved
@@ -587,10 +590,14 @@ export default function ArchiveEvent({
   // So the state holds the SIGNATURE of the question that was ticked, and the
   // tick counts only while that signature is still the question on screen. Any
   // move in the underlying Event that changes what is being asked re-keys the
-  // ask, and the box unchecks itself — which is the explicit-acknowledgement
-  // contract stated as a data shape rather than as a list of transitions to
-  // remember. One value rather than two, because exactly one question is ever
-  // asked (`ask` below).
+  // ask, and the box unchecks itself the moment a COMMITTED RENDER sees that
+  // move — which is the explicit-acknowledgement contract stated as a data
+  // shape rather than as a list of transitions to remember. What no data shape
+  // here can catch is a re-key that lands after a handler has taken its own
+  // closure: the handlers send what their closure holds, so that window is the
+  // console-only residual `specs/post-sailing-archive.md` § "The pending-claim
+  // drain gate" states. One value rather than two, because exactly one question
+  // is ever asked (`ask` below).
   const [acknowledged, setAcknowledged] = useState<ArchiveAsk | null>(null);
   // `from` is the state the action was taken in; once the outcome's target state
   // is observed it is rebased there, so any LATER move — someone else's — clears

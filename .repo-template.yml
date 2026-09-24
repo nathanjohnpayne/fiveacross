@@ -91,6 +91,7 @@ spec_test_map:
     - worker/src/registry/routerRegistry.integration.test.ts
   event-membership:
     - src/data/eventMembership.test.ts
+    - tests/functions/approve-prompts.test.ts
     - tests/rules/membership-mark-batch-budget.test.ts
     - tests/rules/membership-enforcement-freeze.test.ts
   # event-invitations spans the generated server authorization mirror, pure and
@@ -186,6 +187,7 @@ spec_test_map:
   # approval UI, and real reshuffle path, so map each differently-named seam.
   community-squares-quota:
     - src/game/community-squares-quota.test.ts
+    - tests/functions/approve-prompts.test.ts
     - src/data/community-prompt-targeting.test.ts
     - src/components/Admin.test.tsx
     - src/components/admin-async-feedback.test.tsx
@@ -205,9 +207,10 @@ spec_test_map:
   # patterns below), so map every layer explicitly.
   # event-router's coverage is module-named (the shared Slug contract, the
   # namespace guard, the lookup's decision table, the request pipeline, the
-  # capability contract of its registry binding, and the guarded deploy) and
-  # spans two top-level directories, so none of them share the spec basename —
-  # map them all explicitly.
+  # per-hostname manifest and head rewrite, the capability contract of its
+  # registry binding, and the guarded deploy) and spans two top-level
+  # directories, so none of them share the spec basename — map them all
+  # explicitly.
   event-router:
     - src/slug.test.ts
     - worker/src/host.test.ts
@@ -217,7 +220,10 @@ spec_test_map:
     - worker/src/index.test.ts
     - worker/src/routerBinding.test.ts
     - worker/src/manifest.test.ts
+    - worker/src/htmlHead.test.ts
+    - worker/src/routerHtmlHead.integration.test.ts
     - src/web-manifest.test.ts
+    - src/html-head-identity.test.ts
     - src/sw-precache-audit.test.ts
     - scripts/worker-deploy.test.mjs
   # event-router-registry spans the control plane, the per-host Durable Object,
@@ -246,6 +252,11 @@ spec_test_map:
     - worker/src/registry/routerRegistry.integration.test.ts
     - worker/src/registry/privateTracer.integration.test.ts
     - worker/src/routerBinding.test.ts
+    - scripts/event-router-registry/hostname-projection.test.mjs
+    - scripts/event-router-registry/hostname-projection.parity.test.mjs
+    - scripts/event-router-registry/hostname-lifecycle.test.mjs
+    - scripts/event-router-registry/hostname-reconciler.test.mjs
+    - tests/rules/event-router-hostname-lifecycle.test.ts
   og-renderer-commit-safety:
     - scripts/og/og-size-guard.test.mjs
     - scripts/og/og-scratch-path.test.mjs
@@ -253,6 +264,13 @@ spec_test_map:
     - scripts/og/og-stage-commit-concurrency.test.mjs
     - scripts/og/og-commit-lock.test.mjs
     - scripts/og/og-commit-lock-atomicity.test.mjs
+    # The share-card publisher (#887) composes the same three commit-safety
+    # modules over plans/og-images/share-final-photo-*.png: its output guard,
+    # its all-or-nothing batch and its widened lock scope.
+    - scripts/og/share-raster-format.test.mjs
+    - scripts/og/png-truecolor.test.mjs
+    - scripts/og/render-share-rasters.test.mjs
+    - scripts/og/render-share-footer.test.mjs
   # cloud-vision-moderation spans five layers — the hide decision (functions:
   # the arms themselves, the scanner hand-off that keeps a verdict reaching a
   # Proof that does not exist yet from creating one, and the block pinning that

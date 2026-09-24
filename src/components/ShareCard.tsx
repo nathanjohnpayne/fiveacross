@@ -469,9 +469,10 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
       );
     });
     if (data.firstBingo) {
-      // Name only — the wireframe's timestamp stat is a recorded deviation
-      // (specs/most-loved-photo.md § Deviations): the card system renders no
-      // timezone-formatted times.
+      // Rank + name + role, no stat — an earlier draft of the wireframe gave this
+      // row a timestamp; it was dropped as a recorded deviation and the artboards
+      // now match (specs/most-loved-photo.md § Deviations, item 6): the card
+      // system renders no timezone-formatted times.
       rows.append(
         buildMostLovedRow({ rank: '👑', name: data.firstBingo.displayName, role: 'First to BINGO' }),
       );

@@ -4,12 +4,14 @@
 //   plans/og-images/share-final-photo-vacay.png
 //   plans/og-images/share-final-photo-fa.png
 //
-// Those PNGs are static pictures of a LIVE component. `ShareCard.tsx` draws
-// the real card's footer as `${appName} ${lexicon.shareMark}` (three call
-// sites), so the moment the brand table changes a share mark the shipped app
-// is already correct and only these reference pictures are stale. #681 is
-// exactly that case: #678 moved Vacay's mark from 🗺️ to 🧳 in the table, the
-// running app followed, and the wireframes' card kept showing a map.
+// Those PNGs are renders of the `.shc` artboards in
+// `plans/daily-cards-wireframes.html` (see render-share-rasters.mjs, #887).
+// `ShareCard.tsx` draws the real card's footer as
+// `${appName} ${lexicon.shareMark}` (three call sites), so the moment the
+// brand table changes a share mark the shipped app is already correct and only
+// these reference pictures are stale. #681 is exactly that case: #678 moved
+// Vacay's mark from 🗺️ to 🧳 in the table, the running app followed, and the
+// wireframes' card kept showing a map.
 //
 // So this script does not re-draw the card — it re-draws the one line the
 // brand table owns, in place, reading `appName` and `lexicon.shareMark` from
@@ -17,10 +19,37 @@
 // mark change is a table edit plus a re-run.
 //
 // SCOPE, stated plainly: everything else in these cards (the photo hero, the
-// standings rows, the honors chips) is a picture of sample data, has no design
-// source in this repo, and is deliberately left untouched. If the card's
-// LAYOUT ever changes, these references need re-screenshotting from the real
-// component, not patching here.
+// standings rows, the honors chips) comes from the artboard and is left
+// untouched here. If anything other than the footer line changes, this is the
+// wrong tool: edit the artboard and re-run
+// `render-share-rasters.mjs --edition <id>`. Repainting one 32-row band is
+// the cheaper answer only while the footer is all that moved.
+//
+// OUTPUT FORMAT (#887 round 4). The committed cards are 8-bit non-interlaced
+// truecolor (PNG colour type 2) and `src/recon-share-og.test.ts` requires
+// exactly that of the files in the tree. A 2D canvas carries an alpha channel,
+// so `toDataURL('image/png')` encodes colour type 6 no matter how opaque the
+// pixels it composited are — this tool used to write that straight over the
+// committed card while its own comment claimed the output was truecolor, and
+// the first thing that would have noticed is a red suite with the good picture
+// already replaced. Removing the earlier `pngquant` pass fixed colour type 3
+// and never touched this. The canvas bytes are now converted down to RGB
+// (`png-truecolor.mjs`, which proves every alpha byte is 255 before it drops
+// the plane and refuses by coordinate if one is not), the result is staged
+// beside its destination and validated by the SAME guard the raster generator
+// runs (`assertCapturedCardFormat` via `inspectCapture`), and only then
+// published. `--all` publishes all three or none of them, through the same
+// `commitStaged` phase.
+//
+// CONCURRENCY (#887 round 5). A band repaint is a read-modify-write of a file
+// the OTHER renderer also publishes, so the destination locks are held across
+// the read, the paint, the staging AND the commit — `readsDestination: true`
+// on the `renderCardSet` call below. Locking only the commit phase, which is
+// all a screenshot-from-an-artboard run needs, left the lost update in plain
+// sight: this process reads the card, `render-share-rasters.mjs` commits a
+// freshly rendered one while the paint is in flight, and this process then
+// takes the lock and publishes a repaint of the picture it read before any of
+// that, discarding the new render with no error anywhere.
 //
 // Usage:
 //   node scripts/og/render-share-footer.mjs --edition vacay
@@ -33,150 +62,293 @@
 // content change. Touch the Edition whose brand table row moved.
 //
 // Requirements: playwright + esbuild (dev deps), macOS for Apple Color Emoji.
-import { execFileSync } from 'node:child_process';
-import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
-import { transformSync } from 'esbuild';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadEditions } from './load-editions.mjs';
+import { toTruecolorPng } from './png-truecolor.mjs';
+import {
+  CARDS,
+  assertKnownOptions,
+  assertNoRepeatedOptions,
+  assertOneSelector,
+  optionValue,
+  renderCardSet,
+} from './render-share-rasters.mjs';
+import { footerStyleFor } from './share-card-footer-style.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
-const args = process.argv.slice(2);
-const argOf = (f) => {
-  const i = args.indexOf(f);
-  return i === -1 ? null : args[i + 1];
+
+// Which file each Edition's card is, from the raster generator that publishes
+// the same three destinations — not a second table (#887 round 7). The one
+// field this file used to add, a per-Edition `ink`, is gone: the artboard's
+// own `.shc .foot` rule and the Edition's theme token say what the footer
+// looks like, and `share-card-footer-style.mjs` reads them. Keeping a private
+// copy is how Vacay's ink came to be `#8a857b` when its theme sets `#66625a`.
+export { CARDS };
+
+// Geometry measured off the committed cards, and genuinely this tool's own:
+// the artboard lays the footer out with `margin-top:auto` inside a flex
+// column, so there is no rule to read a band offset from. The band is the
+// full-width strip the footer line occupies; it is repainted with the card's
+// own background colour, sampled from inside the band well left of the centred
+// text, so this works on Vacay's cream ground and the other two Editions' dark
+// ones alike.
+export const BAND = { y: 694, h: 32, sampleX: 90 };
+export const CENTRE_X = 300;
+export const CARD_W = 600;
+
+const DATA_URL_PREFIX = 'data:image/png;base64,';
+
+/** What this tool accepts. It repaints the committed cards in place, so there
+ *  is no `--out`: a band repaint of a card somewhere else is not a thing
+ *  anyone wants. */
+export const FOOTER_OPTIONS = {
+  valued: ['--edition'],
+  flags: ['--all', '--check', '--allow-foreign-platform'],
 };
-const only = argOf('--edition');
-const all = args.includes('--all');
-const checkOnly = args.includes('--check');
-// Skip the pngquant pass. Quantisation perturbs pixels everywhere, which makes
-// it impossible to prove the redraw stayed inside the footer band; verify with
-// this, then re-run without it to write the committed (crushed) file.
-const noCrush = args.includes('--no-crush');
-if (!only && !all) {
-  console.error(
-    'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
+
+/**
+ * Turn a band-painting step into the `capture` seam `renderCardSet` takes.
+ *
+ * This is a read-modify-write: the input is the CURRENTLY committed card, and
+ * the output replaces it. The read therefore lives HERE rather than in the
+ * CLI (#887 round 5, finding 4058679280), because `renderCardSet` calls this
+ * with the destination locks already held when it is given
+ * `readsDestination: true`. Reading in the CLI, before that call, reopened the
+ * lost update the lock exists to prevent: the footer process would snapshot
+ * the card, a full render would commit a newer one while the paint was in
+ * flight, and the footer process would then take the lock and publish a
+ * repaint of the stale snapshot over it. Inside the seam the bytes a capture
+ * reads are, by construction, the bytes its own commit replaces.
+ *
+ * `paint(id, currentCardBase64)` hands back exactly what
+ * `canvas.toDataURL('image/png')` returns: a `data:image/png;base64,…` string.
+ * Everything either side of it lives here rather than in the CLI, so the read,
+ * the conversion and its refusal are all exercised by
+ * render-share-footer.test.mjs through the same seam the raster generator's
+ * staging tests use — with a synthetic RGBA image in place of a browser.
+ */
+export function footerCaptureFrom(paint, { destDir, fileFor = (id) => CARDS[id].file, read = readFileSync } = {}) {
+  if (!destDir) throw new Error('render-share-footer.mjs: footerCaptureFrom needs the destDir it reads cards from.');
+  return async (id, scratch) => {
+    const current = read(join(destDir, fileFor(id)));
+    const dataUrl = await paint(id, current.toString('base64'));
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith(DATA_URL_PREFIX)) {
+      // Without this, a canvas that returned `data:,` on an encode failure
+      // would split to `undefined` and stage an empty file, and the reader
+      // would then blame the PNG rather than the encoder.
+      throw new Error(
+        `render-share-footer.mjs: the canvas did not return a PNG data URL for ${id} ` +
+          `(got ${typeof dataUrl === 'string' ? `${dataUrl.slice(0, 32)}…` : typeof dataUrl}).`,
+      );
+    }
+    const encoded = Buffer.from(dataUrl.slice(DATA_URL_PREFIX.length), 'base64');
+    // Converted here, not written here: the staged file is what the format
+    // guard reads, so what gets proved is the byte sequence that will become
+    // the committed card, not an intermediate nobody publishes.
+    writeFileSync(scratch, toTruecolorPng(encoded, id));
+  };
+}
+
+/** Read the card, sample its background inside the band, repaint the band and
+ *  draw the footer — all in one canvas pass, so the new type is antialiased
+ *  against the same ground the old type was. Returns the canvas data URL plus
+ *  the numbers the run reports. */
+async function paintBand(page, { b64, band, style, line, centreX, cardW }) {
+  return page.evaluate(
+    async ({ b64, band, style, line, centreX, cardW }) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const [r, g, bl] = ctx.getImageData(band.sampleX, band.y + Math.floor(band.h / 2), 1, 1).data;
+      const bg = `rgb(${r},${g},${bl})`;
+      ctx.fillStyle = bg;
+      // Clear the OLD line row by row, walking in from each edge until the
+      // pixel already matches the card's interior ground. A full-width
+      // fillRect is the obvious version and it is wrong: these cards carry a
+      // rounded outer border, so it painted over the card's own outline and
+      // left a 32-row gap in it on both sides. Deriving the interior span per
+      // row instead of hardcoding an inset keeps that true through the
+      // corner curvature, and on any Edition's border width or colour.
+      const rows = ctx.getImageData(0, band.y, cardW, band.h);
+      const matches = (i) =>
+        Math.abs(rows.data[i] - r) <= 2 &&
+        Math.abs(rows.data[i + 1] - g) <= 2 &&
+        Math.abs(rows.data[i + 2] - bl) <= 2;
+      for (let row = 0; row < band.h; row++) {
+        const base = row * cardW * 4;
+        let left = 0;
+        while (left < cardW && !matches(base + left * 4)) left++;
+        let right = cardW - 1;
+        while (right > left && !matches(base + right * 4)) right--;
+        if (right > left) ctx.fillRect(left, band.y + row, right - left + 1, 1);
+      }
+      // Every one of these comes from the artboard rule and the Edition's
+      // theme, resolved before the page was opened. Nothing about the footer's
+      // appearance is decided in this file.
+      ctx.letterSpacing = style.letterSpacing;
+      ctx.font = style.font;
+      ctx.fillStyle = style.ink;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(line, centreX, band.y + band.h / 2 + 1);
+      const w = ctx.measureText(line).width;
+      // Colour type 6, because the context has an alpha channel. The caller
+      // converts and proves; see the OUTPUT FORMAT note in the header.
+      return { png: c.toDataURL('image/png'), bg, width: Math.round(w) };
+    },
+    { b64, band, style, line, centreX, cardW },
   );
-  process.exit(1);
 }
 
-if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform')) {
-  console.error('render-share-footer.mjs: refusing to render off macOS (Apple Color Emoji / Helvetica Neue).');
-  process.exit(1);
-}
-
-function loadEditions() {
-  const src = readFileSync(join(repo, 'src', 'editions.ts'), 'utf8');
-  const js = transformSync(src, { loader: 'ts', format: 'cjs', target: 'node20' }).code;
-  const module = { exports: {} };
-  new Function('module', 'exports', 'require', js)(module, module.exports, () => ({}));
-  return module.exports;
-}
-const { editionBrand } = loadEditions();
-
-// Geometry measured off the committed cards. The band is the full-width strip
-// the footer line occupies; it is repainted with the card's own background
-// colour, sampled from inside the band well left of the centred text, so this
-// works on Vacay's cream ground and the other two Editions' dark ones alike.
-const CARDS = {
-  gcb: { file: 'share-final-photo-gcb.png', ink: '#d0a8ab' },
-  vacay: { file: 'share-final-photo-vacay.png', ink: '#8a857b' },
-  fiveacross: { file: 'share-final-photo-fa.png', ink: '#9aa3b2' },
-};
-const BAND = { y: 694, h: 32, sampleX: 90 };
-const CENTRE_X = 300;
-const CARD_W = 600;
-
-const ids = only ? [only] : Object.keys(CARDS);
-for (const id of ids) {
-  if (!CARDS[id]) {
-    console.error(`Unknown edition "${id}". Known: ${Object.keys(CARDS).join(', ')}`);
+async function main() {
+  const args = process.argv.slice(2);
+  // Both shared with the raster generator, and for the same reasons: a typo
+  // must not be the reason a run publishes (#887 round 8), and `--edition
+  // --all` must not be read as an Edition id (round 7). This tool takes no
+  // `--out`, so its option set is the raster one minus that flag.
+  assertKnownOptions('render-share-footer.mjs', args, FOOTER_OPTIONS);
+  // Second, before `optionValue` ever reads a value, same as the raster
+  // generator and for the same reason (#887, finding 4075112554): this CLI
+  // shares FOOTER_OPTIONS and `optionValue`'s first-occurrence read with that
+  // one, so without its own call here `--edition vacay --edition gcb` still
+  // republished Vacay and a trailing bare `--edition` still bypassed the
+  // missing-value check below — only the raster CLI had ever been made to
+  // refuse this.
+  assertNoRepeatedOptions('render-share-footer.mjs', args, FOOTER_OPTIONS);
+  const only = optionValue(args, '--edition');
+  const all = args.includes('--all');
+  const checkOnly = args.includes('--check');
+  if (args.includes('--edition') && !only) {
+    console.error('render-share-footer.mjs: --edition needs an Edition id.');
     process.exit(1);
   }
-}
-
-const browser = await chromium.launch();
-try {
-  for (const id of ids) {
-    const card = CARDS[id];
-    const brand = editionBrand(id);
-    const line = `${brand.appName.toUpperCase()} ${brand.lexicon.shareMark}`;
-    const path = join(repo, 'plans', 'og-images', card.file);
-
-    const page = await browser.newPage({ viewport: { width: CARD_W, height: BAND.h }, deviceScaleFactor: 1 });
-    // Read the card, sample its background inside the band, repaint the band,
-    // and draw the footer — all in one canvas pass so the new type is
-    // antialiased against the same ground the old type was.
-    const b64 = readFileSync(path).toString('base64');
-    const out = await page.evaluate(
-      async ({ b64, band, ink, line, centreX, cardW }) => {
-        const img = new Image();
-        img.src = `data:image/png;base64,${b64}`;
-        await img.decode();
-        const c = document.createElement('canvas');
-        c.width = img.naturalWidth;
-        c.height = img.naturalHeight;
-        const ctx = c.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        const [r, g, bl] = ctx.getImageData(band.sampleX, band.y + Math.floor(band.h / 2), 1, 1).data;
-        const bg = `rgb(${r},${g},${bl})`;
-        ctx.fillStyle = bg;
-        // Clear the OLD line row by row, walking in from each edge until the
-        // pixel already matches the card's interior ground. A full-width
-        // fillRect is the obvious version and it is wrong: these cards carry a
-        // rounded outer border, so it painted over the card's own outline and
-        // left a 32-row gap in it on both sides. Deriving the interior span per
-        // row instead of hardcoding an inset keeps that true through the
-        // corner curvature, and on any Edition's border width or colour.
-        const rows = ctx.getImageData(0, band.y, cardW, band.h);
-        const matches = (i) =>
-          Math.abs(rows.data[i] - r) <= 2 &&
-          Math.abs(rows.data[i + 1] - g) <= 2 &&
-          Math.abs(rows.data[i + 2] - bl) <= 2;
-        for (let row = 0; row < band.h; row++) {
-          const base = row * cardW * 4;
-          let left = 0;
-          while (left < cardW && !matches(base + left * 4)) left++;
-          let right = cardW - 1;
-          while (right > left && !matches(base + right * 4)) right--;
-          if (right > left) ctx.fillRect(left, band.y + row, right - left + 1, 1);
-        }
-        // Letter-spaced uppercase, matching the committed cards' footer.
-        ctx.letterSpacing = '3px';
-        ctx.font = '400 16px "Helvetica Neue", Helvetica, Arial, sans-serif';
-        ctx.fillStyle = ink;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(line, centreX, band.y + band.h / 2 + 1);
-        const w = ctx.measureText(line).width;
-        return { png: c.toDataURL('image/png'), bg, width: Math.round(w) };
-      },
-      { b64, band: BAND, ink: card.ink, line, centreX: CENTRE_X, cardW: CARD_W },
+  // Shared with the raster generator, after the missing-value check as there:
+  // `--all --edition vacay` used to repaint Vacay alone while the operator
+  // asked for the full set (#1264).
+  assertOneSelector('render-share-footer.mjs', args);
+  if (!only && !all) {
+    console.error(
+      'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
     );
-    await page.close();
+    process.exit(1);
+  }
 
-    console.log(`${id.padEnd(11)} "${line}"  ink ${card.ink}  ground ${out.bg}  line width ${out.width}px`);
-    if (!checkOnly) {
-      writeFileSync(path, Buffer.from(out.png.split(',')[1], 'base64'));
-      // The committed cards are pngquant-crushed. Canvas hands back a lossless
-      // PNG, so skipping this step grows a 150 KB reference asset to 240 KB for
-      // a one-emoji change — a bigger diff than the change itself.
-      try {
-        if (noCrush) throw new Error('skipped');
-        execFileSync(
-          'pngquant',
-          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${path}.quant`, path],
-          { stdio: 'inherit' },
-        );
-        renameSync(`${path}.quant`, path);
-      } catch {
-        console.warn(`${''.padEnd(11)} pngquant unavailable — keeping the lossless PNG (expect a larger file).`);
-      }
-      console.log(`${''.padEnd(11)} wrote ${path} (${(statSync(path).size / 1024).toFixed(0)} KB)`);
+  if (process.platform !== 'darwin' && !args.includes('--allow-foreign-platform')) {
+    console.error('render-share-footer.mjs: refusing to render off macOS (Apple Color Emoji / Helvetica Neue).');
+    process.exit(1);
+  }
+
+  const ids = only ? [only] : Object.keys(CARDS);
+  for (const id of ids) {
+    if (!CARDS[id]) {
+      console.error(`Unknown edition "${id}". Known: ${Object.keys(CARDS).join(', ')}`);
+      process.exit(1);
     }
   }
-} finally {
-  await browser.close();
+
+  // The brand table comes from the shared bundling loader in
+  // `load-editions.mjs` (#1254). This script used to transpile
+  // `src/editions.ts` alone and stub its `require`, which died on load once
+  // the module started importing `EDITION_IDS` and `brandFor` for real values.
+  // The import is static so `load-editions.test.mjs` can see it; the CALL is
+  // here, inside `main`, because it shells out to esbuild and importing this
+  // file for its capture seam should not.
+  //
+  // Every target's brand row is resolved here, before Chromium launches, so a
+  // brand table that loads but cannot answer for an Edition fails at this
+  // point, where `load-editions.test.mjs` reaches it without a browser (#1257).
+  const { editionBrand } = loadEditions();
+  const brands = new Map(ids.map((id) => [id, editionBrand(id)]));
+  const destDir = join(repo, 'plans', 'og-images');
+
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch();
+  let browserClosed = false;
+  const closeBrowser = async () => {
+    if (browserClosed) return;
+    browserClosed = true;
+    await browser.close();
+  };
+
+  /** One band pass, reported the way this tool has always reported it. `b64`
+   *  is the CURRENTLY committed card, handed over by the capture seam, which
+   *  reads it under the destination lock: this is a repaint of an existing
+   *  picture, not a render from the artboard. */
+  const paint = async (id, b64) => {
+    const brand = brands.get(id);
+    // `text-transform: uppercase` on the artboard rule, applied here because a
+    // canvas has no such thing — and applied to the whole line, which is what
+    // the rule does.
+    const style = footerStyleFor(id);
+    const composed = `${brand.appName} ${brand.lexicon.shareMark}`;
+    const line = style.uppercase ? composed.toUpperCase() : composed;
+    const page = await browser.newPage({ viewport: { width: CARD_W, height: BAND.h }, deviceScaleFactor: 1 });
+    try {
+      const out = await paintBand(page, {
+        b64,
+        band: BAND,
+        style,
+        line,
+        centreX: CENTRE_X,
+        cardW: CARD_W,
+      });
+      console.log(
+        `${id.padEnd(11)} "${line}"  ${style.fontPx}px/${style.letterSpacingPx}px  ink ${style.ink} ` +
+          `(${style.theme} --dim)  ground ${out.bg}  line width ${out.width}px`,
+      );
+      return out.png;
+    } finally {
+      await page.close();
+    }
+  };
+
+  try {
+    if (checkOnly) {
+      // Reported, not written, so there is nothing to lose to a concurrent
+      // render and nothing to lock: a --check run publishes nothing.
+      for (const id of ids) await paint(id, readFileSync(join(destDir, CARDS[id].file)).toString('base64'));
+      console.log('\n--check: nothing written.');
+      return;
+    }
+
+    const staged = await renderCardSet({
+      ids,
+      destDir,
+      fileFor: (id) => CARDS[id].file,
+      beforeCommit: closeBrowser,
+      capture: footerCaptureFrom(paint, { destDir }),
+      // A band repaint reads the card it replaces, so the destination locks
+      // have to span the read as well as the commit. See the note on
+      // `footerCaptureFrom` and on `renderCardSet`'s own parameter.
+      readsDestination: true,
+    });
+    for (const { id, dest, report } of staged) {
+      console.log(
+        `${''.padEnd(11)} wrote ${dest} — ${report.width}×${report.height}, colour type ${report.colorType}, ` +
+          `${(report.bytes / 1024).toFixed(0)} KB (${id})`,
+      );
+    }
+  } finally {
+    try {
+      await closeBrowser();
+    } catch {
+      // Preserve whatever brought us here; the success path closes the browser
+      // before the commit phase, so a close failure can never turn a published
+      // run into a reported failure.
+    }
+  }
 }
-if (checkOnly) console.log('\n--check: nothing written.');
+
+// Importable for its capture seam, runnable as the refresher. Nothing above
+// this line touches the filesystem, the brand table or a browser.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

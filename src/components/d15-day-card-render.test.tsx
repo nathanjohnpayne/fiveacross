@@ -320,6 +320,220 @@ describe('Board daily-cards wiring (#246)', () => {
     expect(H.setMark).not.toHaveBeenCalled();
   });
 
+  it('re-attempts the lazy deal once the JOIN lands on the Player row (#1158)', () => {
+    // `dealDayCard` fails CLOSED for a row with no identity — it will not
+    // create a Player who exists only as a `dayStats` bucket — so an attempt
+    // made before the join committed is a no-op. The identity is therefore
+    // part of what an attempt IS: without it in the in-flight key the Card
+    // would sit on "Dealing…" until some unrelated render happened along.
+    //
+    // The middle step is the one that matters: a Player ROW that exists
+    // WITHOUT the join's identity. `playerConverter` pins `uid` to the doc id
+    // on every converted read, so a subscribed row's `uid` always matches and
+    // cannot tell "the row exists" from "the join landed" — `joinedAt` can,
+    // because `joinAndDeal` is its only writer and the converter never
+    // synthesises it (#1158 review round 1, finding 1). This shape is not
+    // hypothetical: a pre-#1158 Day deal left `{dayStats}` alone, and a Theme
+    // pick from More still creates `{theme}` alone.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null; // the join has not landed yet
+
+    const { rerender } = render(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // A re-render that changes nothing else does NOT re-attempt.
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // A row APPEARS, but it carries no identity — the shape the converter
+    // yields for a `{dayStats}`- or `{theme}`-only document. The join has
+    // still not landed, so this is not a new attempt.
+    H.player = { uid: 'u1', dayStats: {} } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // The join commits and the Player row arrives with its identity.
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+
+    // …and exactly once: the identity landing is one change, not a loop.
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries for a PRE-EXISTING identity-less row that races the join repair (#1158)', async () => {
+    // The row is already there on the FIRST render — the leftover a pre-#1158
+    // Day deal wrote (`{dayStats}` and nothing else), or the `{theme}` row a
+    // Theme pick from More creates — so there is no null-to-row transition to
+    // notice. `playerConverter` pins `uid` to the doc id, so a guard reading
+    // the converted `uid` was true from that first render while `dealDayCard`,
+    // which checks the RAW stored `uid`, failed closed: the two sides
+    // disagreed for exactly the row the guard exists for, nothing in the
+    // effect's inputs moved when the join merged the identity, and the Card
+    // sat on "Dealing…" until an unrelated render. `joinedAt` is stored rather
+    // than synthesised, so the transition it names is the join COMMITTING.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    // The malformed leftover, and the fail-closed no-op it earns.
+    H.player = { uid: 'u1', dayStats: {} } as unknown as PlayerDoc;
+    H.dealDayCard.mockResolvedValue(false);
+
+    const { rerender } = render(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Dealing your card/i)).toBeInTheDocument();
+
+    // No board was written, so the Card stays dealing — and re-rendering over
+    // the same identity-less row is not a new attempt.
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Dealing your card/i)).toBeInTheDocument();
+
+    // `joinAndDeal` commits the identity onto that same row. THAT is the
+    // moment to re-attempt, and it deals once.
+    H.dealDayCard.mockResolvedValue(true);
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+    rerender(<Board />);
+    await act(async () => {});
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+  });
+
+  it('Retry clears the JOIN-QUALIFIED in-flight key, so a hung joined attempt can be retried (#1255)', async () => {
+    // The in-flight key carries the join state (#1158), so an unjoined attempt
+    // and a joined one can be in flight at once. When the unjoined attempt
+    // rejects AFTER the joined one started, the error panel appears while the
+    // joined attempt is still pending. Retry must clear that joined key too:
+    // clearing only a join-agnostic key left it in place, the effect skipped
+    // the requested retry, and a hung joined attempt sat on "Dealing…" forever.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null;
+    let rejectUnjoined: (e: Error) => void = () => {};
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectUnjoined = reject;
+        }),
+    );
+
+    const { rerender } = render(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // The join lands; the joined attempt starts and never settles.
+    H.dealDayCard.mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+
+    // The unjoined attempt rejects, surfacing Retry while the joined one hangs.
+    await act(async () => {
+      rejectUnjoined(new Error('denied'));
+    });
+    expect(screen.getByText(/couldn’t deal this day’s card/i)).toBeInTheDocument();
+
+    // Retry re-attempts: a third call, not a silent skip back onto "Dealing…".
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    });
+    expect(H.dealDayCard).toHaveBeenCalledTimes(3);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+  });
+
+  it('an attempt Retry replaced cannot resurface the error over its running replacement (#1255)', async () => {
+    // Retry evicts a still-pending joined attempt and starts a replacement
+    // under the SAME key. When the evicted attempt later rejects, it no longer
+    // owns the key: it must neither publish the error panel nor release the
+    // replacement's in-flight guard.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null;
+    let rejectUnjoined: (e: Error) => void = () => {};
+    let rejectJoined: (e: Error) => void = () => {};
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectUnjoined = reject;
+        }),
+    );
+    const { rerender } = render(<Board />);
+
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectJoined = reject;
+        }),
+    );
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    await act(async () => {
+      rejectUnjoined(new Error('denied'));
+    });
+
+    // The replacement hangs; the evicted joined attempt then rejects late.
+    H.dealDayCard.mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    });
+    expect(H.dealDayCard).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      rejectJoined(new Error('denied'));
+    });
+    expect(screen.queryByText(/couldn’t deal this day’s card/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
   it('renders the two-event "Tonight:" line on the dealt day card (schedule correction)', () => {
     const now = Date.now();
     H.event = {

@@ -15,8 +15,12 @@ const CONFIG: ResolveConfig = { lookupTimeoutMs: 2_000 };
 const HOST = 'bodega-bay.fiveacross.app';
 const SLUG = 'bodega-bay';
 
-function committed(desired: ReplicaDesired, revision = '7'): RegistryLookup {
-  return { kind: 'committed', schemaVersion: 1, revision, desired };
+/** Every committed-derived envelope names the canonical host it was projected
+ *  from (#1133), so the helper takes it — defaulting to the address these
+ *  tests look up — rather than letting it be inferred from whichever host the
+ *  assertion happens to resolve against. */
+function committed(desired: ReplicaDesired, revision = '7', host = HOST): RegistryLookup {
+  return { kind: 'committed', schemaVersion: 1, revision, host, desired };
 }
 
 const ACTIVE_ROUTE = committed({
@@ -78,21 +82,25 @@ describe('a servable committed projection', () => {
 
   it('serves the Namespace apex without a Slug cross-check', async () => {
     const { deps } = harness(
-      committed({
-        kind: 'route',
-        eventId: 'bodega-bay-2026',
-        status: 'active',
-        // The apex projection's slug names the Event's WILDCARD address, not
-        // this one, so cross-checking it here would refuse a host that is
-        // correct. It must still be PRESENT — the schema requires a non-empty
-        // slug on every route, and the apex exemption removes the comparison
-        // rather than the requirement.
-        slug: 'bodega-bay',
-        edition: 'fiveacross',
-        // The apex is a path-addressed host class, so its projection carries
-        // the matching namespace rather than null.
-        pathNamespace: 'fiveacross.app',
-      }),
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          // The apex projection's slug names the Event's WILDCARD address, not
+          // this one, so cross-checking it here would refuse a host that is
+          // correct. It must still be PRESENT — the schema requires a non-empty
+          // slug on every route, and the apex exemption removes the comparison
+          // rather than the requirement.
+          slug: 'bodega-bay',
+          edition: 'fiveacross',
+          // The apex is a path-addressed host class, so its projection carries
+          // the matching namespace rather than null.
+          pathNamespace: 'fiveacross.app',
+        },
+        '7',
+        'fiveacross.app',
+      ),
     );
     await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
   });
@@ -101,7 +109,11 @@ describe('a servable committed projection', () => {
     'serves a %s root marker: the marker controls the app’s / outcome, not whether the edge may serve',
     async (root) => {
       const { deps } = harness(
-        committed({ kind: 'root', root, edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+        committed(
+          { kind: 'root', root, edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
+          '7',
+          'fiveacross.app',
+        ),
       );
       await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
         kind: 'serve',
@@ -121,7 +133,11 @@ describe('a servable committed projection', () => {
     // reached at a LABELLED address. A Slug cross-check against a projection
     // that structurally has no slug would refuse the whole rehearsal class.
     const { deps } = harness(
-      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: null },
+        '7',
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      ),
     );
     await expect(
       resolveHost(
@@ -139,7 +155,11 @@ describe('a servable committed projection', () => {
     // class exists to exercise the SHAPE rather than a brand, so it carries
     // whichever Edition the rehearsal manifest chose.
     const { deps } = harness(
-      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null },
+        '7',
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      ),
     );
     await expect(
       resolveHost(
@@ -312,14 +332,18 @@ describe('the fail-closed decision table', () => {
     // that has lost its slug is half-written whatever host it was reached at,
     // and `expectedSlug === null` must not turn that into a serve.
     const { deps } = harness(
-      committed({
-        kind: 'route',
-        eventId: 'bodega-bay-2026',
-        status: 'active',
-        slug: '' as string,
-        edition: 'fiveacross',
-        pathNamespace: 'fiveacross.app',
-      }),
+      committed(
+        {
+          kind: 'route',
+          eventId: 'bodega-bay-2026',
+          status: 'active',
+          slug: '' as string,
+          edition: 'fiveacross',
+          pathNamespace: 'fiveacross.app',
+        },
+        '7',
+        'fiveacross.app',
+      ),
     );
     await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
       kind: 'not-found',
@@ -338,14 +362,18 @@ describe('the fail-closed decision table', () => {
       // serves an apex from a projection naming a reserved infrastructure
       // label.
       const { deps } = harness(
-        committed({
-          kind: 'route',
-          eventId: 'bodega-bay-2026',
-          status: 'active',
-          slug,
-          edition: 'fiveacross',
-          pathNamespace: 'fiveacross.app',
-        }),
+        committed(
+          {
+            kind: 'route',
+            eventId: 'bodega-bay-2026',
+            status: 'active',
+            slug,
+            edition: 'fiveacross',
+            pathNamespace: 'fiveacross.app',
+          },
+          '7',
+          'fiveacross.app',
+        ),
       );
       await expect(resolveHost('fiveacross.app', null, CONFIG, deps)).resolves.toEqual({
         kind: 'not-found',
@@ -415,7 +443,13 @@ describe('re-validating the projection at the service boundary', () => {
     ['an unrecognised desired kind', committed({ kind: 'redirect' } as never)],
     [
       'a null projection',
-      { kind: 'committed', schemaVersion: 1, revision: '7', desired: null } as unknown as RegistryLookup,
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '7',
+        host: HOST,
+        desired: null,
+      } as unknown as RegistryLookup,
     ],
     ['a lookup arm this Worker does not know', { kind: 'quarantined' } as unknown as RegistryLookup],
     ['a null envelope', null as unknown as RegistryLookup],
@@ -451,12 +485,20 @@ describe('re-validating the projection at the service boundary', () => {
     [
       'the WRONG Namespace on the apex that has one',
       'fiveacross.app',
-      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' },
+        '7',
+        'fiveacross.app',
+      ),
     ],
     [
       'a null path namespace on the apex that requires one',
       'vacaybingo.com',
-      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: null },
+        '7',
+        'vacaybingo.com',
+      ),
     ],
     [
       // A configured root origin brands itself, so a root marker whose Edition
@@ -464,17 +506,29 @@ describe('re-validating the projection at the service boundary', () => {
       // real brand domain.
       'a root marker whose Edition disagrees with its host class',
       'fiveacross.app',
-      committed({ kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'fiveacross.app' }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'fiveacross.app' },
+        '7',
+        'fiveacross.app',
+      ),
     ],
     [
       'the mirrored Edition mismatch on the other apex',
       'vacaybingo.com',
-      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'vacaybingo.com' },
+        '7',
+        'vacaybingo.com',
+      ),
     ],
     [
       'a non-null path namespace on the synthetic root-test class',
       'r2-root-abcdefghijklmnopqrst.fiveacross.app',
-      committed({ kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+      committed(
+        { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
+        '7',
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      ),
     ],
     [
       // The class accepts no route on either side of the registry.
@@ -483,14 +537,18 @@ describe('re-validating the projection at the service boundary', () => {
       // separately deployed consumer revalidates for.
       'a ROUTE projection on the synthetic root-test class, whose slug matches its label',
       'r2-root-abcdefghijklmnopqrst.fiveacross.app',
-      committed({
-        kind: 'route',
-        eventId: 'e',
-        status: 'active',
-        slug: 'r2-root-abcdefghijklmnopqrst',
-        edition: 'fiveacross',
-        pathNamespace: null,
-      }),
+      committed(
+        {
+          kind: 'route',
+          eventId: 'e',
+          status: 'active',
+          slug: 'r2-root-abcdefghijklmnopqrst',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        '7',
+        'r2-root-abcdefghijklmnopqrst.fiveacross.app',
+      ),
     ],
   ])('refuses %s', async (_label, host, lookup) => {
     const { deps } = harness(lookup);
@@ -552,6 +610,7 @@ describe('the exact key set the ENVELOPE itself may carry', () => {
         kind: 'unknown-host',
         revision: '12',
         schemaVersion: 1,
+        host: HOST,
         desired: {
           kind: 'route',
           eventId: 'e',
@@ -563,10 +622,23 @@ describe('the exact key set the ENVELOPE itself may carry', () => {
       },
     ],
     ['an unavailable arm carrying a revision', { kind: 'unavailable', revision: '12' }],
+    [
+      // `host` is a key the committed arms define, so an arm that has no
+      // record to bind may not carry one either.
+      'an unavailable arm carrying a canonical host',
+      { kind: 'unavailable', host: HOST },
+    ],
     ['a malformed arm carrying a projection', { kind: 'malformed', desired: { kind: 'tombstone' } }],
     [
       'a committed arm carrying a field the envelope does not define',
-      { kind: 'committed', schemaVersion: 1, revision: '7', desired: { kind: 'tombstone' }, host: HOST },
+      {
+        kind: 'committed',
+        schemaVersion: 1,
+        revision: '7',
+        host: HOST,
+        desired: { kind: 'tombstone' },
+        digest: 'c0ffee',
+      },
     ],
     ['an uninitialized unknown-host carrying a stray field', { kind: 'unknown-host', cached: true }],
   ])('refuses %s as replica-malformed', async (_label, lookup) => {
@@ -616,7 +688,9 @@ describe('the exact key set the ENVELOPE itself may carry', () => {
       reason: 'unknown-host',
       revision: null,
     });
-    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
+    await expect(
+      refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12', host: HOST }),
+    ).resolves.toEqual({
       reason: 'unknown-host',
       revision: '12',
     });
@@ -681,6 +755,7 @@ describe('the exact key set a `desired` arm may carry', () => {
       kind: 'committed',
       schemaVersion: 1,
       revision: '7',
+      host,
       desired: desired as unknown as ReplicaDesired,
     });
     const resolution = await resolveHost(host, expectedSlug, CONFIG, deps);
@@ -706,6 +781,7 @@ describe('the exact key set a `desired` arm may carry', () => {
         kind: 'committed',
         schemaVersion: 1,
         revision: '7',
+        host: HOST,
         desired: { kind } as unknown as ReplicaDesired,
       });
       await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
@@ -721,12 +797,16 @@ describe('the exact key set a `desired` arm may carry', () => {
     await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({ kind: 'serve' });
 
     const root = harness(
-      committed({
-        kind: 'root',
-        root: 'doorway',
-        edition: 'fiveacross',
-        pathNamespace: 'fiveacross.app',
-      }),
+      committed(
+        {
+          kind: 'root',
+          root: 'doorway',
+          edition: 'fiveacross',
+          pathNamespace: 'fiveacross.app',
+        },
+        '7',
+        'fiveacross.app',
+      ),
     );
     await expect(resolveHost('fiveacross.app', null, CONFIG, root.deps)).resolves.toMatchObject({
       kind: 'serve',
@@ -758,7 +838,13 @@ describe('the projection schema version, refused before the projection is read',
   };
 
   it('serves a version this build understands, exactly as before', async () => {
-    const { deps } = harness({ kind: 'committed', schemaVersion: 1, revision: '7', desired: ROUTE });
+    const { deps } = harness({
+      kind: 'committed',
+      schemaVersion: 1,
+      revision: '7',
+      host: HOST,
+      desired: ROUTE,
+    });
     await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toEqual({
       kind: 'serve',
       record: {
@@ -779,7 +865,10 @@ describe('the projection schema version, refused before the projection is read',
     ['a null version', null],
     ['no version at all', undefined],
   ])('refuses %s on an ACTIVE route rather than serving it', async (_label, schemaVersion) => {
-    const lookup = { kind: 'committed', revision: '7', desired: ROUTE } as Record<string, unknown>;
+    const lookup = { kind: 'committed', revision: '7', host: HOST, desired: ROUTE } as Record<
+      string,
+      unknown
+    >;
     if (schemaVersion !== undefined) lookup.schemaVersion = schemaVersion;
     await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
       reason: 'replica-malformed',
@@ -795,7 +884,7 @@ describe('the projection schema version, refused before the projection is read',
     // well-formed v2 route would pass every one of them and be served.
     for (const desired of [ROUTE, { kind: 'route', eventId: 42 } as unknown as ReplicaDesired]) {
       await expect(
-        refusalFor({ kind: 'committed', schemaVersion: 2, revision: '7', desired }),
+        refusalFor({ kind: 'committed', schemaVersion: 2, revision: '7', host: HOST, desired }),
       ).resolves.toEqual({ reason: 'replica-malformed', revision: null });
     }
   });
@@ -809,6 +898,7 @@ describe('the projection schema version, refused before the projection is read',
           kind: 'committed',
           schemaVersion: 2,
           revision: '7',
+          host: HOST,
           desired: { kind: 'root', root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' },
         },
         null,
@@ -824,8 +914,8 @@ describe('the projection schema version, refused before the projection is read',
     // cannot read would attribute a revision the router never actually
     // understood, so the version gates that arm too.
     for (const lookup of [
-      { kind: 'unknown-host', schemaVersion: 2, revision: '12' },
-      { kind: 'unknown-host', revision: '12' },
+      { kind: 'unknown-host', schemaVersion: 2, revision: '12', host: HOST },
+      { kind: 'unknown-host', revision: '12', host: HOST },
     ] as RegistryLookup[]) {
       await expect(refusalFor(lookup)).resolves.toEqual({
         reason: 'replica-malformed',
@@ -845,23 +935,173 @@ describe('the projection schema version, refused before the projection is read',
   });
 
   it.each([
-    ['a supported version with no revision', { kind: 'unknown-host', schemaVersion: 1 }],
-    ['an unsupported version with no revision', { kind: 'unknown-host', schemaVersion: 2 }],
-    ['a revision with no version', { kind: 'unknown-host', revision: '12' }],
+    ['a supported version with no revision', { kind: 'unknown-host', schemaVersion: 1, host: HOST }],
+    ['an unsupported version with no revision', { kind: 'unknown-host', schemaVersion: 2, host: HOST }],
+    ['a revision with no version', { kind: 'unknown-host', revision: '12', host: HOST }],
+    ['a canonical host with neither', { kind: 'unknown-host', host: HOST }],
+    ['a version and revision with no canonical host', { kind: 'unknown-host', schemaVersion: 1, revision: '12' }],
   ] as RegistryLookup[][])(
-    'refuses %s, because the two are stamped from one record and travel together',
+    'refuses %s, because the three are stamped from one record and travel together',
     async (_label, lookup) => {
-      // Only BOTH-absent is the ordinary unknown address. Either half alone is
-      // a half-written envelope — something committed existed to stamp one of
-      // them — and reading "no record here" off it would infer an absence from
-      // a defect. An unsupported-version tombstone that lost its revision has
-      // to raise the alert, not pass as an unknown host.
+      // Only ALL-absent is the ordinary unknown address. Any one of them alone
+      // is a half-written envelope — something committed existed to stamp it —
+      // and reading "no record here" off it would infer an absence from a
+      // defect. An unsupported-version tombstone that lost its revision has
+      // to raise the alert, not pass as an unknown host; and a registry too
+      // old to stamp the canonical host cannot have its tombstone revision
+      // accepted unbound (#1133).
       await expect(refusalFor(lookup)).resolves.toEqual({
         reason: 'replica-malformed',
         revision: null,
       });
     },
   );
+});
+
+describe('the canonical host every committed-derived envelope is bound to', () => {
+  // #1133, deferred from #1120. The registry and the router are separately
+  // deployed Workers, so what comes back is a contract this module did not
+  // write — and until the envelope carried the hostname the record was
+  // projected FROM, the only thing tying a committed record to the address it
+  // was fetched for was the denormalised `slug`, which is the host's FIRST
+  // LABEL. `bodega-bay.fiveacross.app` and `bodega-bay.vacaybingo.com` share
+  // theirs. A registry that answered a lookup of one with the other's
+  // projection therefore passed every check the router had, and the router
+  // served the sibling's status and Edition, or published its revision as this
+  // address's recovery evidence.
+  const SIBLING = 'bodega-bay.vacaybingo.com';
+  const route = (status: 'active' | 'disabled' | 'archived'): ReplicaDesired => ({
+    kind: 'route',
+    eventId: 'bodega-bay-2026',
+    status,
+    slug: SLUG,
+    edition: 'fiveacross',
+    pathNamespace: null,
+  });
+
+  it.each([
+    // Each of these would have produced a DIFFERENT outcome had the binding
+    // not been checked: a serve, an `inactive` carrying revision 12, and an
+    // `unknown-host` carrying revision 12. All three are the sibling Namespace
+    // answering for an address it does not own.
+    ['an active route that would otherwise have served', committed(route('active'), '12', SIBLING)],
+    ['a disabled route that would otherwise have published its revision', committed(route('disabled'), '12', SIBLING)],
+    ['an archived route', committed(route('archived'), '12', SIBLING)],
+    ['a committed tombstone', committed({ kind: 'tombstone' }, '12', SIBLING)],
+    [
+      'the tombstone-shaped unknown-host arm',
+      { kind: 'unknown-host', schemaVersion: 1, revision: '12', host: SIBLING } as RegistryLookup,
+    ],
+  ])('refuses %s as a malformed replica, with no revision', async (_label, lookup) => {
+    await expect(refusalFor(lookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('reports the sibling-host envelope through the diagnostic seam', async () => {
+    // § Failure semantics pages on `replica-malformed`, and a registry
+    // answering for the wrong address is exactly the standing data fact that
+    // row exists for: it will not heal on a retry and it takes one host down.
+    const events: unknown[] = [];
+    const { deps } = harness(committed(route('active'), '12', SIBLING));
+    await resolveHost(HOST, SLUG, CONFIG, {
+      ...deps,
+      diagnostics: (event) => events.push(event),
+    });
+    expect(events).toEqual([
+      { event: 'event-router.diagnostic', outcome: 'replica-malformed', host: HOST },
+    ]);
+  });
+
+  it.each([
+    ['a difference of case', 'Bodega-Bay.fiveacross.app'],
+    ['a trailing root dot', 'bodega-bay.fiveacross.app.'],
+    ['a longer name that merely ends with this one', 'www.bodega-bay.fiveacross.app'],
+    ['a name this one merely ends with', 'fiveacross.app'],
+  ])('compares byte for byte and refuses %s', async (_label, host) => {
+    // Both sides are already canonical — the registry stores `hostnameKey`
+    // and its entrypoint refuses a raw host that is not its own
+    // normalisation — so anything this comparison would have had to normalise
+    // is a defect on one side. Normalising it here would be the router
+    // quietly repairing a projection it cannot vouch for, and the trailing
+    // dot in particular names a DISTINCT browser origin that the guard
+    // already refuses before any lookup.
+    await expect(refusalFor(committed(route('active'), '12', host))).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it.each([
+    [
+      'a committed projection from a registry too old to stamp one',
+      { kind: 'committed', schemaVersion: 1, revision: '12', desired: route('active') },
+    ],
+    [
+      'a tombstone-shaped unknown-host from the same registry',
+      { kind: 'unknown-host', schemaVersion: 1, revision: '12' },
+    ],
+    ['a committed projection naming the field as undefined', { kind: 'committed', schemaVersion: 1, revision: '12', host: undefined, desired: route('active') }],
+  ])('fails closed on %s rather than reading it unbound', async (_label, lookup) => {
+    // The field is REQUIRED on every committed-derived arm, which is what
+    // makes an older registry fail closed instead of having its projection
+    // read under the pre-#1133 rules. A projection whose binding cannot be
+    // checked is exactly as unusable as one whose binding is wrong.
+    await expect(refusalFor(lookup as unknown as RegistryLookup)).resolves.toEqual({
+      reason: 'replica-malformed',
+      revision: null,
+    });
+  });
+
+  it('refuses the binding BEFORE it interprets status, Edition or revision', () => {
+    // The ordering is the property, not a detail. A sibling-host envelope
+    // whose projection is otherwise perfect must produce the SAME answer as
+    // one whose projection is nonsense — including on the two arms that
+    // publish a revision, because a revision quoted off another host's record
+    // would reach `x-event-router-revision` and, through the
+    // `canonical-after-unblock` probe, the evidence `clear-lock` compares
+    // against committed state.
+    for (const lookup of [
+      committed(route('disabled'), '12', SIBLING),
+      committed({ kind: 'tombstone' }, '12', SIBLING),
+      committed({ kind: 'route', eventId: 42 } as unknown as ReplicaDesired, '12', SIBLING),
+      { kind: 'committed', schemaVersion: 2, revision: '12', host: SIBLING, desired: route('active') },
+    ] as RegistryLookup[]) {
+      expect(decide(HOST, lookup, SLUG)).toEqual({
+        kind: 'not-found',
+        reason: 'replica-malformed' satisfies NotFoundReason,
+        revision: null,
+      });
+    }
+  });
+
+  it('still serves, and still publishes a revision, when the binding is exact', async () => {
+    // The positive control: the rule is an equality check, not a refusal of
+    // everything that now carries a hostname.
+    const { deps } = harness(committed(route('active'), '12'));
+    await expect(resolveHost(HOST, SLUG, CONFIG, deps)).resolves.toMatchObject({
+      kind: 'serve',
+      record: { eventId: 'bodega-bay-2026', revision: '12' },
+    });
+    await expect(refusalFor(committed(route('disabled'), '12'))).resolves.toEqual({
+      reason: 'inactive',
+      revision: '12',
+    });
+    await expect(
+      refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12', host: HOST }),
+    ).resolves.toEqual({ reason: 'unknown-host', revision: '12' });
+  });
+
+  it('still answers an uninitialized object, which was projected from nothing', async () => {
+    // The ordinary unknown address names no host because it has no committed
+    // record to have been projected from — so the requirement is on
+    // committed-derived arms, not on the envelope as such.
+    await expect(refusalFor({ kind: 'unknown-host' })).resolves.toEqual({
+      reason: 'unknown-host',
+      revision: null,
+    });
+  });
 });
 
 describe('a lookup that cannot be completed', () => {
@@ -967,7 +1207,9 @@ describe('the revision a refusal was decided from', () => {
     // the revision and dropping the projection. The address stays
     // indistinguishable from an unknown one in its REASON; what it does not
     // hide is a revision the threat model already calls public metadata.
-    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12' })).resolves.toEqual({
+    await expect(
+      refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '12', host: HOST }),
+    ).resolves.toEqual({
       reason: 'unknown-host',
       revision: '12',
     });
@@ -994,7 +1236,9 @@ describe('the revision a refusal was decided from', () => {
     // The shape rule belongs to the projection rather than to the arm: a
     // revision that reaches this module is canonical or the state is
     // malformed, and a tombstone is not exempt from it.
-    await expect(refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '007' })).resolves.toEqual({
+    await expect(
+      refusalFor({ kind: 'unknown-host', schemaVersion: 1, revision: '007', host: HOST }),
+    ).resolves.toEqual({
       reason: 'replica-malformed',
       revision: null,
     });

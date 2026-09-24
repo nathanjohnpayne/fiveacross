@@ -65,6 +65,10 @@ export type SeedEventModule = {
   /** Optional historic identities the live Event deliberately retained after
    *  an in-place text edit; must align one-to-one with ALL_ITEMS. */
   VERIFY_ITEM_IDS?: readonly string[];
+  /** Optional historic TEXT the live Event's doc still carries under its
+   *  VERIFY_ITEM_IDS legacy id after a source-only correction (#1019); holes
+   *  (undefined) for every prompt without one, one-to-one with ALL_ITEMS. */
+  VERIFY_ITEM_LEGACY_TEXT?: ReadonlyArray<string | undefined>;
 };
 
 export function adminRoster(raw?: string): string[];
@@ -115,5 +119,6 @@ export function verifySeedPool(
   reportHideThreshold?: number,
   verifyItemIds?: readonly string[],
   days?: unknown,
+  legacyText?: ReadonlyArray<string | undefined>,
 ): SeedPoolReport;
 export function formatDriftReport(report: SeedPoolReport, eventId: string): string;

@@ -943,6 +943,438 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     });
   });
 
+  // #1192, Codex P2 on PR #1207 — the same seam for the payload's "did anybody
+  // play" fact. A podium Moment is written once and never amended, so if the beat
+  // does not record it, no consumer can recover it: the winner-announcement email
+  // read `champion == null` as an empty board and told every recipient nobody
+  // marked a square, beside the ⭐ naming the person who bingoed.
+  it('posts a Moment recording that the Event was played, even with no champion', async () => {
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+          // Ceremonial by its stated Policy and NOT a Tutorial Day — the shape
+          // ADR 0011 exists to permit, and the one that splits the two facts.
+          { index: 9, pool: 'main', tutorial: false, scoring: 'ceremonial', unlockAt: D10_UNLOCK },
+        ] as DayLike[],
+      },
+      // Every Mark in the Event sits on that Day, so the re-aggregated standings
+      // are all zeros and there is legitimately no champion.
+      players: [
+        {
+          uid: 'logan',
+          displayName: 'Logan',
+          bingoCount: 1,
+          squaresMarked: 7,
+          firstBingoAt: D10_UNLOCK - 1_000,
+          dayStats: { 9: { bingoCount: 1, squaresMarked: 7, firstBingoAt: D10_UNLOCK - 1_000 } },
+        },
+      ],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')! as Record<string, unknown> & {
+      podium?: { champion?: unknown; firstBingo?: unknown; playRecorded?: unknown };
+    };
+    expect(podium.podium?.champion).toBeNull();
+    expect(podium.podium?.firstBingo).toMatchObject({ uid: 'logan' });
+    expect(podium.podium?.playRecorded).toBe(true);
+    // …and the OTHER half of that seam (#1218): the fact the Moment carries was
+    // captured by the freeze transaction in this same run, not derived by the
+    // beat. The describe below is where that separation is pinned.
+    expect(db.readEvent().frozenPlayRecorded).toBe(true);
+  });
+
+  // #1218, Codex P2 + CodeRabbit on PR #1242. WHERE the fact is decided, which
+  // the test above does not settle because its freeze and its podium land in one
+  // run. The podium beat is retried until its Moment actually lands, and a
+  // ceremonial Day keeps recording Marks after the freeze by design (ADR 0011) —
+  // so a delayed sweep, or a retry after a failed podium write, re-reads a LIVE
+  // roster. Every other podium field carries an instant and is resolved through
+  // the freeze cutoff; a count carries none, so the cutoff had nothing to bite on
+  // and post-freeze activity could move a value the payload's contract calls
+  // frozen: a newly marked ceremonial square turning it true, a cleared count
+  // turning it false, on a record written once and never amended.
+  //
+  // Each case below is the beat running on an ALREADY-frozen Event — the retry
+  // shape — with a roster that disagrees with the frozen fact. Revert the fix and
+  // every one of them takes the roster's answer.
+  describe('playRecorded is captured at the freeze, not re-derived by the beat (#1218)', () => {
+    /** The two-Day finale shape the ceremonial split needs: a competitive Day 9
+     *  and a Day 10 that is ceremonial by stated Policy and NOT a Tutorial Day. */
+    const ceremonialFinale = (): DayLike[] => [
+      { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+      { index: 9, pool: 'main', tutorial: false, scoring: 'ceremonial', unlockAt: D10_UNLOCK },
+    ];
+
+    /** A Player whose every Mark sits on that ceremonial Day — invisible to the
+     *  re-aggregated standings, which is what makes `playRecorded` its own fact. */
+    const ceremonialPlayer = (at: number) => ({
+      uid: 'logan',
+      displayName: 'Logan',
+      bingoCount: 1,
+      squaresMarked: 7,
+      firstBingoAt: at,
+      dayStats: { 9: { bingoCount: 1, squaresMarked: 7, firstBingoAt: at } },
+    });
+
+    const postedPodium = (db: { moments(): StoredMoment[] }) =>
+      db.moments().find((m) => m.kind === 'podium') as
+        | (Record<string, unknown> & { podium?: { playRecorded?: unknown } })
+        | undefined;
+
+    it('keeps the frozen answer when a ceremonial Mark lands AFTER the freeze', async () => {
+      const db = makeDb({
+        eventId: 'e',
+        event: {
+          days: ceremonialFinale(),
+          // An earlier sweep froze an unplayed board and recorded that; its
+          // podium write did not land, so only the beat is still owed.
+          frozenAt: D10_UNLOCK,
+          frozenPlayRecorded: false,
+        },
+        // The goodbye Mark, landing after the freeze. The live roster now says
+        // somebody played; the freeze said nobody had.
+        players: [ceremonialPlayer(D10_UNLOCK + 60_000)],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+    });
+
+    it('keeps the frozen answer when the counts behind it are CLEARED after the freeze', async () => {
+      // The other direction, and the one a live derivation gets wrong in the
+      // costlier way: the frozen Event WAS played, and a roster that has since
+      // been emptied would have the email tell every recipient nobody marked a
+      // square. `players/{uid}` validates no field (ADR 0001), so a self-write
+      // clearing a row is reachable; so is a moderation deletion.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: true },
+        players: [],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
+
+    it('says NOTHING rather than false when the freeze predates the field', async () => {
+      // An Event frozen before this contract carries no fact, and the honest
+      // answer is unknown. The Moment omits the field, which is exactly the
+      // absence `PodiumMomentPayload.playRecorded` is optional for and
+      // `podiumEmailInputFor` states a frozen-record-only fallback for.
+      // Substituting this run's live derivation would be the defect with a
+      // default's name on it.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK },
+        players: [ceremonialPlayer(D10_UNLOCK - 1_000)],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      const podium = postedPodium(db);
+      // The rest of the payload is unaffected — only the one unknowable fact is
+      // withheld.
+      expect(podium?.podium).toMatchObject({ firstBingo: { uid: 'logan' } });
+      expect(podium?.podium).not.toHaveProperty('playRecorded');
+    });
+
+    it('answers a RETRIED beat exactly as the first attempt did', async () => {
+      // End to end, with no pre-frozen seed: run one freezes and posts, the
+      // Moment is lost, the roster moves, run two re-posts. The two Moments must
+      // agree, because they describe one instant.
+      const logan = { uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null };
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [logan],
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+      expect(db.readEvent().frozenPlayRecorded).toBe(false);
+
+      // The podium write is lost (the transient failure the beat's retry guard
+      // exists for), and the Event is played on in the meantime.
+      db.moments().length = 0;
+      Object.assign(logan, ceremonialPlayer(D10_UNLOCK + 60_000));
+
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_800_000 });
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(false);
+    });
+
+    it('holds the podium back when the freeze it must quote FAILS, and posts it on the next sweep', async () => {
+      // CodeRabbit on PR #1242, the other end of the capture. Freezing and
+      // posting are independent beats, so a run that owed the freeze and lost
+      // it to a transient Firestore failure still reached the podium arm with
+      // NOTHING captured — and posted a Moment that is written once and never
+      // amended. The next sweep freezes fine, learns the fact, and has nowhere
+      // to put it: for this Event, whose only play sits on the ceremonial Day
+      // and which therefore has no champion, that is the #1192 empty-board
+      // message restored permanently.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [ceremonialPlayer(D10_UNLOCK - 1_000)],
+      });
+      // Fail ONLY the freeze transaction. It is the first one this run opens:
+      // the last-call beat is past its window once the cutoff has passed, and
+      // both the podium Moment write and the completion marker come after it.
+      // Everything else still commits, so a missing podium Moment below can
+      // only be the beat standing down — not the fake refusing to write.
+      let transactions = 0;
+      const realRunTransaction = db.runTransaction;
+      const freezeFails: AdminFirestore = {
+        ...db,
+        runTransaction: async (fn) => {
+          if (++transactions === 1) throw new Error('freeze transaction failed');
+          return realRunTransaction(fn);
+        },
+      };
+      await runFinaleBeats(freezeFails, 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The freeze really did fail — without this the podium assertion under it
+      // would pass for the wrong reason.
+      expect(db.readEvent().frozenAt).toBeUndefined();
+      expect(db.readEvent().frozenPlayRecorded).toBeUndefined();
+      // …so this run posts no podium at all. Revert the fix and the Moment is
+      // here, permanently silent about `playRecorded`.
+      expect(postedPodium(db)).toBeUndefined();
+      // And the finale is honestly unfinished, so the archive still warns.
+      expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+
+      // The next sweep finds the freeze still owed, gets it, and posts the
+      // podium carrying the fact that freeze captured.
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
+
+    it('neutralises a PRE-FREEZE value when the capture comes out unknown', async () => {
+      // Codex P2 `4058671215`. `frozenPlayRecorded` is not in the rules'
+      // no-client-writes set — the Event arm is at Firestore's expression cap
+      // (#1142) — so an Event admin can write it, and `frozenAt` independently
+      // of it. An UNFROZEN Event carrying a value is therefore reachable, and
+      // a freeze that writes only the fields it learned would stamp beside
+      // that guess and publish it as the frozen answer, on this run and on
+      // every podium retry after it. The freeze states the unknown instead.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenPlayRecorded: true },
+        players: [ceremonialPlayer(D10_UNLOCK - 1_000)],
+      });
+      // Fail the FIRST roster read only — the freeze capture. The podium's own
+      // read succeeds, so the Moment below is a real payload with the one
+      // unknowable field missing, rather than a beat whose content build died.
+      let rosterReads = 0;
+      const realCollection = db.collection;
+      const captureFails: AdminFirestore = {
+        ...db,
+        collection: (path: string) => {
+          if (path.endsWith('/players') && ++rosterReads === 1) throw new Error('roster read failed');
+          return realCollection(path);
+        },
+      };
+      await runFinaleBeats(captureFails, 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The freeze landed, and it did NOT carry the admin's value with it.
+      expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+      expect(db.readEvent().frozenPlayRecorded).toBeNull();
+      // The Moment is complete apart from the fact nobody could establish…
+      expect(postedPodium(db)?.podium).toMatchObject({ firstBingo: { uid: 'logan' } });
+      // …which it omits rather than stating the stale `true`.
+      expect(postedPodium(db)?.podium).not.toHaveProperty('playRecorded');
+    });
+
+    it('reads a PINNED honour as play, even when the roster says nothing was marked', async () => {
+      // Codex P2 `4058671218`. A Player row is client-authoritative and
+      // validates no field (ADR 0001), so its holder can clear the counts that
+      // earned a Day's honour. `meta.firstBingo` is server-written and cannot
+      // be cleared, so the two disagree — and a roster-only capture stored
+      // `false` while the podium printed the pin beside it, which is the #1192
+      // contradiction with the scheduler's own signature on it.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        // Every count zeroed after the fact: no champion, no roster bingo.
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        // …but Day 9's honour was pinned before the freeze and still stands.
+        dayHonors: {
+          8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } },
+        },
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      const podium = postedPodium(db)?.podium as { playRecorded?: unknown; dailyHonors?: unknown[] };
+      // The pin the fact was read from is on the Moment too, so the record
+      // cannot contradict itself the way it could before.
+      expect(podium?.dailyHonors).toHaveLength(1);
+      expect(podium?.playRecorded).toBe(true);
+    });
+
+    /** Fail one Day's `meta` read and leave every other read alone — the shape
+     *  `readDayHonors` turns into no entry, which is indistinguishable from a
+     *  Day that pinned nothing unless the read reports its own completeness. */
+    const honourReadFails = (db: AdminFirestore, dayIndex: number): AdminFirestore => {
+      const realDoc = db.doc;
+      return {
+        ...db,
+        doc: (path: string) => {
+          if (path.endsWith(`/days/${dayIndex}/meta/${dayIndex}`)) throw new Error('meta read failed');
+          return realDoc(path);
+        },
+      };
+    };
+
+    it('stays UNKNOWN when a roster with no Marks meets an honour read that FAILED', async () => {
+      // CodeRabbit Major on PR #1242. The honour arm above closed the gap where
+      // a cleared roster outvoted a pin — and opened a narrower one, because a
+      // pin that could not be READ leaves the same empty list a Day with no pin
+      // does. The Event below has both: nothing marked on the roster, and its
+      // one pinned honour behind a failing read. Answering `false` there would
+      // persist a claim nobody established, on a Moment written once and never
+      // amended, which is this whole ticket in miniature.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        dayHonors: { 8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } } },
+      });
+      await runFinaleBeats(honourReadFails(db, 8), 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The freeze still lands — the capture is best-effort, the freeze is not.
+      expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+      // …and it states the unknown rather than the unestablished `false`.
+      expect(db.readEvent().frozenPlayRecorded).toBeNull();
+      expect(postedPodium(db)?.podium).not.toHaveProperty('playRecorded');
+    });
+
+    it('still answers TRUE when one honour read fails and another pin IS read', async () => {
+      // The other side of the same guard: unknown is what a MISSING signal
+      // buys, never what a failed read imposes on the signals that did arrive.
+      // Evidence in hand does not need the rest of the reads to agree, so a pin
+      // that was read proves play whatever happened to its neighbour.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        dayHonors: {
+          8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } },
+          9: { firstBingo: { uid: 'nathan', displayName: 'Nathan', at: D10_UNLOCK + 1 } },
+        },
+      });
+      await runFinaleBeats(honourReadFails(db, 8), 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
+
+    it('still answers TRUE when the ROSTER read fails and a pin IS read (#1263)', async () => {
+      // Codex P2 `4074863795`. The same rule from the roster side: the two
+      // witnesses were read under one `Promise.all`, so a roster read that
+      // rejected took the honour read down with it, and the freeze stored the
+      // unknown for an Event whose pin, read successfully, proved play.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale() },
+        players: [{ uid: 'logan', displayName: 'Logan', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        dayHonors: { 8: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D9_UNLOCK + 1_000 } } },
+      });
+      // Fail the FIRST roster read only — the freeze capture's. The podium's
+      // own read succeeds, so the Moment below is a real payload.
+      let rosterReads = 0;
+      const realCollection = db.collection;
+      const rosterFails: AdminFirestore = {
+        ...db,
+        collection: (path: string) => {
+          if (path.endsWith('/players') && ++rosterReads === 1) throw new Error('roster read failed');
+          return realCollection(path);
+        },
+      };
+      await runFinaleBeats(rosterFails, 'e', { now: () => D10_UNLOCK + 1_000 });
+
+      // The capture really did lose its roster read.
+      expect(rosterReads).toBeGreaterThanOrEqual(1);
+      expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
+      expect(db.readEvent().frozenPlayRecorded).toBe(true);
+      expect(postedPodium(db)?.podium?.playRecorded).toBe(true);
+    });
+
+    it('keeps a frozen EMPTY board authoritative when a pin lands before the podium RETRY (#1263)', async () => {
+      // Codex P2 `4074863801`. The freeze read every Day's `meta` and the
+      // roster, found nothing, and stored `false`; its podium write did not
+      // land. Before the retry, the ceremonial Day pins its first bingo. The
+      // retry rereads the honours with no cutoff, so the Moment used to carry
+      // that live pin beside the frozen `false` — and the email, which asks
+      // the honours FIRST and lets any one of them outrank a stored `false`,
+      // then printed the played board the freeze had ruled out. A frozen
+      // `false` means the podium as of the freeze named nobody.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: false },
+        players: [ceremonialPlayer(D10_UNLOCK + 60_000)],
+        dayHonors: { 9: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D10_UNLOCK + 60_000 } } },
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+
+      const podium = postedPodium(db)?.podium as
+        | { playRecorded?: unknown; champion?: unknown; firstBingo?: unknown; dailyHonors?: unknown[] }
+        | undefined;
+      expect(podium?.playRecorded).toBe(false);
+      // Nothing the email reads as an honour survives beside the frozen
+      // `false`, so `recordNamesAnHonour` stays false and `boardWasEmpty`
+      // stays true (functions/src/podiumEmail.ts).
+      expect(podium?.champion).toBeNull();
+      expect(podium?.firstBingo).toBeNull();
+      expect(podium?.dailyHonors).toEqual([]);
+    });
+
+    it('does not let a frozen FALSE erase what the freeze could have seen (#1268)', async () => {
+      // Codex P1 `4088048309`. `frozenPlayRecorded` is admin-writable, so a
+      // `false` written over a played board between the freeze and a podium
+      // retry must not blank the champion, the Event-wide First to BINGO or a
+      // pin that predates the cutoff. Only the honour pinned AFTER the freeze,
+      // which no freeze could have read, is dropped beside it.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: false },
+        players: [{ uid: 'ada', displayName: 'Ada', bingoCount: 1, squaresMarked: 5, firstBingoAt: D9_UNLOCK + 1_000 }],
+        dayHonors: {
+          8: { firstBingo: { uid: 'ada', displayName: 'Ada', at: D9_UNLOCK + 1_000 } },
+          9: { firstBingo: { uid: 'ada', displayName: 'Ada', at: D10_UNLOCK + 60_000 } },
+        },
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+
+      const podium = postedPodium(db)?.podium as
+        | {
+            playRecorded?: unknown;
+            champion?: { uid?: string } | null;
+            firstBingo?: { uid?: string } | null;
+            dailyHonors?: Array<{ dayIndex: number }>;
+          }
+        | undefined;
+      expect(podium?.playRecorded).toBe(false);
+      expect(podium?.champion?.uid).toBe('ada');
+      expect(podium?.firstBingo?.uid).toBe('ada');
+      expect(podium?.dailyHonors?.map((h) => h.dayIndex)).toEqual([8]);
+    });
+
+    it('still prints a post-freeze pin when the frozen answer is TRUE (#1263)', async () => {
+      // The guard above is scoped to the frozen `false`. A board the freeze
+      // recorded as played keeps the podium it has always posted, ceremonial
+      // Day honour included.
+      const db = makeDb({
+        eventId: 'e',
+        event: { days: ceremonialFinale(), frozenAt: D10_UNLOCK, frozenPlayRecorded: true },
+        players: [ceremonialPlayer(D10_UNLOCK + 60_000)],
+        dayHonors: { 9: { firstBingo: { uid: 'logan', displayName: 'Logan', at: D10_UNLOCK + 60_000 } } },
+      });
+      await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 900_000 });
+
+      const podium = postedPodium(db)?.podium as { playRecorded?: unknown; dailyHonors?: unknown[] } | undefined;
+      expect(podium?.playRecorded).toBe(true);
+      expect(podium?.dailyHonors).toHaveLength(1);
+    });
+  });
+
   it('selects the First to BINGO by the CLAMPED instant, so the uid tie-break decides', async () => {
     const db = makeDb({
       eventId: 'e',

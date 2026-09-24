@@ -25,6 +25,16 @@
 
 import { normalizePool } from '../game/pool';
 
+// The routing block below is the ONE implementation of these decisions. The
+// `approvePrompts` callable (#1275) routes on them too, and the Functions
+// package cannot import app code (`functions/tsconfig.json` sets `rootDir:
+// "src"`), so `scripts/materialize-community-prompt-routing-functions.mjs`
+// copies the marked block byte-for-byte into
+// `functions/src/communityPromptRouting.generated.ts`. Edit it here and re-run
+// that script; its `--check` mode is pinned by the Functions suite
+// (tests/functions/community-prompt-routing-parity.test.ts). Only
+// `normalizePool` is resolved per package, outside the block.
+// <community-prompt-routing>
 /** The subset of a `DayDef` targeting reads. Structural on purpose, so callers
  *  can pass a `DayDef` straight through and tests can pass a small literal. */
 export interface TargetableDay {
@@ -126,6 +136,7 @@ export function routeApprovalToDay(
 export function isUsableTarget(targetDayIndex: unknown): targetDayIndex is number {
   return typeof targetDayIndex === 'number' && Number.isInteger(targetDayIndex) && targetDayIndex >= 0;
 }
+// </community-prompt-routing>
 
 /**
  * The submitter-facing state of their OWN Community Prompt (#559): still

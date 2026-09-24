@@ -24,6 +24,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { httpsExportGraph, resolveModule, unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
+
 const require = createRequire(import.meta.url);
 const commander = require("commander");
 const ts = require("typescript");
@@ -161,9 +163,23 @@ const EVENT_INVITATION_EXPORTS = Object.freeze([
   ["revokeEventInvitation", "revoke"],
 ]);
 
-function eventInvitationServicesFromSource(source) {
+// The admin-callables invoker family (#1277), in the order its wrapper and the
+// strict-service CSV use. approvePrompts (#1275) is inventoried from source, so
+// until it is exported every deploy tolerates its absent service.
+const ADMIN_CALLABLE_EXPORTS = Object.freeze([
+  ["unlockDayNow", "unlock"],
+  ["approvePrompts", "approve"],
+]);
+
+// `sourcePath`, when given, lets a star re-export of a local module that
+// exists be resolved through the module graph (`httpsExportGraph`) to the
+// names it really exports, so one unexported peer does not become strict. A
+// star of a package or of a module that cannot be resolved, here or anywhere
+// behind a local star, still widens to every protected callable.
+function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
+  let hasLocalExportStar = false;
   const sourceFile = ts.createSourceFile(
     "index.ts",
     source,
@@ -191,10 +207,15 @@ function eventInvitationServicesFromSource(source) {
     }
     if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
     if (!statement.exportClause) {
-      // Resolving an export-star requires traversing the module graph. Treat it
-      // as possibly exporting every protected callable instead of silently
-      // skipping invoker repair for a service Firebase may discover.
-      hasRuntimeExportStar = true;
+      const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text
+        : "";
+      // A local star is resolved through the module graph when the caller has
+      // it. Otherwise treat the star as possibly exporting every protected
+      // callable instead of silently skipping invoker repair for a service
+      // Firebase may discover.
+      if (sourcePath && resolveModule(sourcePath, specifier)) hasLocalExportStar = true;
+      else hasRuntimeExportStar = true;
       continue;
     }
     if (ts.isNamedExports(statement.exportClause)) {
@@ -204,9 +225,14 @@ function eventInvitationServicesFromSource(source) {
     }
   }
   if (hasRuntimeExportStar) {
-    for (const [exportName] of EVENT_INVITATION_EXPORTS) exportedNames.add(exportName);
+    for (const [exportName] of table) exportedNames.add(exportName);
+  } else if (hasLocalExportStar) {
+    const graph = httpsExportGraph(sourcePath);
+    for (const [exportName] of table) {
+      if (graph.opaque || graph.https.has(exportName)) exportedNames.add(exportName);
+    }
   }
-  return EVENT_INVITATION_EXPORTS.filter(([exportName]) =>
+  return table.filter(([exportName]) =>
     exportedNames.has(exportName),
   ).map(([, service]) => service);
 }
@@ -712,19 +738,27 @@ export const WRITE_CONTAINMENT_REFUSAL = Object.freeze({
  * The test-only switch that makes this machine answer as one with no usable
  * mechanism, WITHOUT running a candidate.
  *
- * WHY IT EXISTS. `ubuntu-latest` is such a machine — no `bwrap`, and an
- * unprivileged user namespace the kernel refuses — so the fail-closed arm is
- * what CI actually exercises, while the development Mac only ever exercises the
- * proved arm. A suite that could not reach the other arm locally would be
- * written blind against the one machine that runs it.
+ * WHY IT EXISTS. No machine this repository runs on reaches the fail-closed
+ * arm on its own any more. The development Mac proves `sandbox-exec`, and
+ * `app-ci` proves `bwrap` since #1164 — its workflow installs `bubblewrap`
+ * ahead of both suites and fails the job unless `probeWriteContainment` names
+ * it — so each of them exercises the PROVED arm and neither would ever reach
+ * the other. `ubuntu-latest` used to: it shipped no `bwrap`, and the kernel
+ * refused the unprivileged user namespace, so CI took the fail-closed arm by
+ * accident of the image. A machine that has candidates and can prove none of
+ * them is still real — a developer box with neither mechanism, or a runner
+ * image that drops `bwrap` again — and this is how the suites reach its answer
+ * from the machines they actually run on, rather than being written blind
+ * against whichever arm their own machine happens to take.
  *
  * WHY IT IS SAFE. It can only make this classifier answer MORE conservatively:
  * the sole thing it does is refuse the exemption before any hook, probe or
- * canary runs, which is the same answer `ubuntu-latest` reaches on its own. It
- * is read from the environment rather than taken as an argument because the
- * harness cases drive `deploy.sh`, which passes no options through — and unlike
- * `writeContainment: "unavailable"`, it reports the UNPROVED arm CI reaches
- * rather than the DISABLED one, naming the candidates it did not try.
+ * canary runs, which is the same answer a machine with no provable mechanism
+ * reaches on its own. It is read from the environment rather than taken as an
+ * argument because the harness cases drive `deploy.sh`, which passes no options
+ * through — and unlike `writeContainment: "unavailable"`, it reports the
+ * UNPROVED arm such a machine reaches rather than the DISABLED one, naming the
+ * candidates it did not try.
  */
 const FORCE_NO_CONTAINMENT_VAR = "FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT";
 
@@ -816,12 +850,16 @@ function macosSandboxProfile(writable, nestedReadOnly) {
  * how the caller is mapped into the namespace, which older util-linux releases
  * and stricter kernels each refuse in their own way.
  *
- * NOT VERIFIED HERE. The Linux forms were written against the documented
+ * NOT VERIFIED BY HAND. The Linux forms were written against the documented
  * behaviour of `bwrap` and `unshare`; this repository's development machine is
- * a Mac, so only the `sandbox-exec` form has been exercised by hand. That is
- * precisely why nothing is trusted without the canary: on a Linux machine where
- * none of the three works, the canary fails, the exemption is refused, and every
- * deploy classifies conservatively rather than silently running hooks loose.
+ * a Mac, so `sandbox-exec` is the only one anyone has exercised at a keyboard.
+ * The `bwrap` form is exercised by machine instead: `app-ci` installs
+ * `bubblewrap` and fails the job unless `probeWriteContainment` names it, so
+ * both suites take this path on every PR (#1164). The two `unshare` spellings
+ * are still exercised nowhere, which is precisely why nothing is trusted
+ * without the canary: on a Linux machine where none of the three works, the
+ * canary fails, the exemption is refused, and every deploy classifies
+ * conservatively rather than silently running hooks loose.
  */
 function writeContainmentCandidates({ writable, readOnlyRoots, nestedReadOnly, profilePath }) {
   if (process.platform === "darwin") {
@@ -1023,10 +1061,12 @@ async function establishWriteContainment({ scratchRoot, projectDir, mode }) {
     return { ok: false, reason: `${process.platform} ${WRITE_CONTAINMENT_REFUSAL.NO_MECHANISM}` };
   }
   // The forced arm, taken BEFORE the first canary so nothing runs: this is the
-  // machine that has candidates and can prove none of them, which is what
-  // `ubuntu-latest` is and what the development Mac otherwise never is. The
-  // reason is composed exactly as a real failure sweep composes it, candidate
-  // labels and all, so a caller cannot tell the simulation from the machine.
+  // machine that has candidates and can prove none of them, which since #1164
+  // is neither of the machines this repository runs on — `app-ci` proves
+  // `bwrap` and the development Mac proves `sandbox-exec` — and is still what a
+  // box with neither mechanism is. The reason is composed exactly as a real
+  // failure sweep composes it, candidate labels and all, so a caller cannot
+  // tell the simulation from the machine.
   if (forcedNoWriteContainment()) {
     const forced = candidates.map(
       (candidate) => `${candidate.label}: not attempted, ${FORCE_NO_CONTAINMENT_VAR} is set`,
@@ -1069,11 +1109,15 @@ let writeContainmentProbe = null;
  * WHO ASKS. The suites. Every case that expects an EXEMPT classification, and
  * every case whose drift is injected by a hook, needs a hook to have RUN — and
  * on a machine that can prove no containment none ever does, because
- * `establishWriteContainment` refuses before the first one. `ubuntu-latest` is
- * such a machine: no `bwrap`, and a kernel that refuses to write
- * `/proc/self/uid_map` for an unprivileged user namespace. Those cases are then
- * asserting the exemption path against a machine that has no exemption path,
- * which is not a finding about this classifier.
+ * `establishWriteContainment` refuses before the first one. Those cases are
+ * then asserting the exemption path against a machine that has no exemption
+ * path, which is not a finding about this classifier. `ubuntu-latest` used to
+ * be exactly such a machine — no `bwrap`, and a kernel that refuses to write
+ * `/proc/self/uid_map` for an unprivileged user namespace — until `app-ci`
+ * began installing `bubblewrap` and failing the job unless this probe names it
+ * (#1164); what the skip is left for is a box with neither mechanism, plus the
+ * suites that ask for that answer deliberately through
+ * `FORCE_NO_CONTAINMENT_VAR`.
  *
  * WHY A PROBE RATHER THAN A PLATFORM TEST. `process.platform === "linux"` is
  * the wrong question twice over: a Linux box WITH `bwrap` runs every case
@@ -3892,7 +3936,7 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
   return tail !== "" && !tail.includes(":") && inventory.codebaseNames.has(tail);
 }
 
-async function eventInvitationServiceInventory(configSource, configPath) {
+async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
@@ -3912,13 +3956,40 @@ async function eventInvitationServiceInventory(configSource, configPath) {
       if (error && typeof error === "object" && error.code === "ENOENT") continue;
       throw error;
     }
-    for (const service of eventInvitationServicesFromSource(source))
+    for (const service of protectedServicesFromSource(source, table, sourcePath))
       services.add(service);
   }
-  return EVENT_INVITATION_EXPORTS.map(([, service]) => service).filter(
+  return table.map(([, service]) => service).filter(
     (service) => services.has(service),
   );
 }
+
+/**
+ * The export guard (#1277): a Functions deploy whose index exports an
+ * onCall/onRequest function that no Cloud Run invoker family reconciles would
+ * publish it unreachable, so it is refused, naming the export, before anything
+ * is built. See `callable-invoker-families.mjs`.
+ */
+function assertEveryHttpsExportFamilied(configSource, configPath) {
+  const functionsConfigs = Array.isArray(configSource.functions)
+    ? configSource.functions
+    : [configSource.functions];
+  for (const functionsConfig of functionsConfigs) {
+    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    const indexPath = resolve(dirname(configPath), functionsConfig.source, "src", "index.ts");
+    if (!existsSync(indexPath)) continue;
+    const unfamilied = unfamiliedHttpsExports(indexPath);
+    if (unfamilied.length > 0) {
+      throw new UnfamiliedHttpsExportError(
+        `${relative(dirname(configPath), indexPath)} exports ${unfamilied.join(", ")}, an onCall/onRequest function that belongs to no Cloud Run invoker family, so this deploy would publish it answering an HTML 403. ` +
+          "Add it to a family in scripts/callable-invoker-families.mjs and that family's scripts/set-*-invoker.sh wrapper (with its deploy.sh registration), " +
+          "or list it in PRIVATE_HTTPS_EXPORTS there with the reason it must stay private",
+      );
+    }
+  }
+}
+
+export class UnfamiliedHttpsExportError extends Error {}
 
 /**
  * The function ids that Hosting will ADD to this deploy on its own: every
@@ -4038,8 +4109,13 @@ export async function classifyInvokerScope(
   singleEndpointExports = { byCodebase: new Map(), codebaseNames: new Set() },
   pinnedFunctionIds = [],
   pinnedOwnershipUnknown = false,
+  exportedAdminCallableServices = [],
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
+  const exportedAdminServices = new Set(exportedAdminCallableServices);
+  const exportedAdminCsv = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
+    .filter((service) => exportedAdminServices.has(service))
+    .join(",");
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
     ([, service]) => service,
   )
@@ -4051,12 +4127,15 @@ export async function classifyInvokerScope(
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
   let eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
+  let adminCallablesInvokerSelected = exportedAdminServices.size > 0;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
   let eventInvitationsInvokerConservative = false;
+  let adminCallablesInvokerConservative = false;
   let authHandoffStrictHalf = "";
   let eventInvitationsStrictServices = exportedInvitationCsv;
+  let adminCallablesStrictServices = exportedAdminCsv;
 
   if (only) {
     functionsAttempted = false;
@@ -4065,11 +4144,14 @@ export async function classifyInvokerScope(
     emailUnsubscribeInvokerSelected = false;
     authHandoffInvokerSelected = false;
     eventInvitationsInvokerSelected = false;
+    adminCallablesInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
     let fullEventInvitationScopeNamed = false;
     let unknownFunctionsSelectorNamed = false;
     const namedEventInvitationServices = new Set();
+    let fullAdminScopeNamed = false;
+    const namedAdminServices = new Set();
     // An unfamiliar Functions selector may release anything, so every invoker
     // not already selected by an explicit branch turns conservative.
     const selectEveryInvokerConservatively = () => {
@@ -4081,10 +4163,12 @@ export async function classifyInvokerScope(
       if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
       if (!eventInvitationsInvokerSelected)
         eventInvitationsInvokerConservative = true;
+      if (!adminCallablesInvokerSelected) adminCallablesInvokerConservative = true;
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
       eventInvitationsInvokerSelected = true;
+      adminCallablesInvokerSelected = true;
     };
 
     // `only` arrives already widened for pinned Hosting rewrites
@@ -4101,10 +4185,13 @@ export async function classifyInvokerScope(
         mintNamed = true;
         exchangeNamed = true;
         fullEventInvitationScopeNamed = true;
+        adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+        fullAdminScopeNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
+        adminCallablesInvokerConservative = false;
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
       ) {
@@ -4144,6 +4231,14 @@ export async function classifyInvokerScope(
         functionsAttempted = true;
         eventInvitationsInvokerSelected = true;
         namedEventInvitationServices.add("revoke");
+      } else if (/^functions:(?:[^:]+:)?unlockDayNow$/.test(selector)) {
+        functionsAttempted = true;
+        adminCallablesInvokerSelected = true;
+        namedAdminServices.add("unlock");
+      } else if (/^functions:(?:[^:]+:)?approvePrompts$/.test(selector)) {
+        functionsAttempted = true;
+        adminCallablesInvokerSelected = true;
+        namedAdminServices.add("approve");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
         // `functions:[codebase:]name` — a DOTTED tail is a group path
@@ -4196,6 +4291,23 @@ export async function classifyInvokerScope(
     } else {
       eventInvitationsStrictServices = "";
     }
+
+    // The same rule for the admin callables: named services stay strict, their
+    // unnamed peer may be absent, and an unfamiliar selector alone is lenient.
+    if (!adminCallablesInvokerSelected) {
+      adminCallablesStrictServices = "";
+    } else if (fullAdminScopeNamed) {
+      adminCallablesInvokerConservative = false;
+      adminCallablesStrictServices = exportedAdminCsv;
+    } else if (namedAdminServices.size > 0) {
+      adminCallablesInvokerConservative = false;
+      adminCallablesStrictServices = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
+        .filter((service) => namedAdminServices.has(service))
+        .join(",");
+    } else {
+      adminCallablesInvokerConservative = unknownFunctionsSelectorNamed;
+      adminCallablesStrictServices = "";
+    }
   } else if (exceptTargets) {
     for (const selector of exceptTargets.split(",")) {
       if (selector === "hosting") hostingAttempted = false;
@@ -4210,6 +4322,9 @@ export async function classifyInvokerScope(
         authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
         eventInvitationsStrictServices = "";
+        adminCallablesInvokerSelected = false;
+        adminCallablesInvokerConservative = false;
+        adminCallablesStrictServices = "";
       }
       // firebase-tools subtracts --except selectors from exact top-level
       // target names. Every colon-qualified Functions exclusion is a no-op.
@@ -4225,6 +4340,8 @@ export async function classifyInvokerScope(
       authHandoffInvokerSelected = true;
       eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
       eventInvitationsStrictServices = exportedInvitationCsv;
+      adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+      adminCallablesStrictServices = exportedAdminCsv;
     }
   }
 
@@ -4235,12 +4352,15 @@ export async function classifyInvokerScope(
     emailUnsubscribeInvokerSelected,
     authHandoffInvokerSelected,
     eventInvitationsInvokerSelected,
+    adminCallablesInvokerSelected,
     bugReportInvokerConservative,
     emailUnsubscribeInvokerConservative,
     authHandoffInvokerConservative,
     eventInvitationsInvokerConservative,
+    adminCallablesInvokerConservative,
     authHandoffStrictHalf,
     eventInvitationsStrictServices,
+    adminCallablesStrictServices,
   };
 }
 
@@ -4357,8 +4477,27 @@ export async function classifyFirebaseDeployRequest(
     project,
   });
   const effectiveOnly = pinned.only;
-  const exportedEventInvitationServices =
-    await eventInvitationServiceInventory(configSource, configPath);
+  // The protected inventories and the export guard read the materialised
+  // config: a `functions` block with no `source` still deploys the CLI default
+  // `functions/`, so the raw object would make them scan nothing.
+  const exportedEventInvitationServices = await protectedServiceInventory(
+    deployConfig.data,
+    configPath,
+    EVENT_INVITATION_EXPORTS,
+  );
+  const exportedAdminCallableServices = await protectedServiceInventory(
+    deployConfig.data,
+    configPath,
+    ADMIN_CALLABLE_EXPORTS,
+  );
+  // The export guard runs before the (slow) single-endpoint rehearsal. Whether
+  // Functions can release does not depend on that rehearsal: every
+  // `functions:` selector attempts Functions whether or not it is provably one
+  // endpoint, so the empty-inventory answer is already exact for this field.
+  const functionsMayRelease = (
+    await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
+  ).functionsAttempted;
+  if (functionsMayRelease) assertEveryHttpsExportFamilied(deployConfig.data, configPath);
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
@@ -4432,6 +4571,7 @@ export async function classifyFirebaseDeployRequest(
     singleEndpointExports,
     pinned.ids,
     pinned.ownershipUnknown,
+    exportedAdminCallableServices,
   );
 
   return {
@@ -4463,6 +4603,9 @@ function printShellClassification(result) {
     EVENT_INVITATIONS_INVOKER_CONSERVATIVE:
       result.eventInvitationsInvokerConservative,
     EVENT_INVITATIONS_STRICT_SERVICES: result.eventInvitationsStrictServices,
+    ADMIN_CALLABLES_INVOKER_SELECTED: result.adminCallablesInvokerSelected,
+    ADMIN_CALLABLES_INVOKER_CONSERVATIVE: result.adminCallablesInvokerConservative,
+    ADMIN_CALLABLES_STRICT_SERVICES: result.adminCallablesStrictServices,
   };
   for (const [key, value] of Object.entries(fields))
     console.log(`${key}=${value}`);
@@ -4493,6 +4636,12 @@ async function main() {
       console.error(`✗ The Firebase deploy preflight mutated the live checkout: ${message}`);
       console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
       process.exitCode = LIVE_CHECKOUT_DRIFT_EXIT_CODE;
+      return;
+    }
+    if (error instanceof UnfamiliedHttpsExportError) {
+      console.error(`✗ Unreconciled HTTPS Function: ${message}.`);
+      console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
+      process.exitCode = 1;
       return;
     }
     console.error(`✗ Invalid Firebase deploy request: ${message}.`);

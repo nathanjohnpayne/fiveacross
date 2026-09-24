@@ -47,12 +47,16 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
  * exemption path. That is not a finding about this classifier; it is a fact
  * about the machine, and this asks the machine directly.
  *
- * `ubuntu-latest` — where `app-ci` runs — is exactly such a machine: `bwrap` is
- * not installed, and Ubuntu 24.04 refuses an unprivileged user namespace
- * (`write failed /proc/self/uid_map: Operation not permitted`), so all three
- * Linux candidates fail and the refusal is correct production behaviour. The
- * runner-side fix belongs to the runner; what belongs here is a suite that
- * says so instead of failing 78 cases.
+ * `ubuntu-latest` — where `app-ci` runs — used to be exactly such a machine:
+ * `bwrap` was not installed, and Ubuntu 24.04 refuses an unprivileged user
+ * namespace (`write failed /proc/self/uid_map: Operation not permitted`), so
+ * all three Linux candidates failed and the refusal was correct production
+ * behaviour. That was always the runner's fix to make, and `app-ci` now makes
+ * it: a step installs `bubblewrap` and fails the job unless this same probe
+ * names a mechanism, so the cases below run there on the `bwrap` path (#1164).
+ * The skip stays because the machine, not the platform, is what decides — a
+ * developer machine with neither mechanism still gets a suite that says so
+ * instead of failing 78 cases.
  *
  * NOT `process.platform`. A Linux box WITH `bwrap` runs every case exactly as
  * this repository's development Mac does, and a Mac whose `sandbox-exec` was
@@ -640,6 +644,7 @@ const NO_INVOKER_SELECTED = {
   emailUnsubscribeInvokerSelected: false,
   authHandoffInvokerSelected: false,
   eventInvitationsInvokerSelected: false,
+  adminCallablesInvokerSelected: false,
 };
 
 const EXEMPT = { ...NO_INVOKER_SELECTED, functionsAttempted: true };
@@ -4430,10 +4435,12 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
 
   it("refuses every selector, names what it could not prove, and stages nothing", async () => {
     // On EVERY machine, including the one that can contain a hook perfectly
-    // well: `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT` is how the
-    // development Mac reaches the arm `ubuntu-latest` reaches on its own. It
-    // only ever narrows — it refuses before the first candidate is tried — so
-    // the answer under it is the answer a machine with no mechanism gives.
+    // well: `FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT` is how a machine
+    // with a working mechanism reaches the arm one without it takes on its own.
+    // It only ever narrows — it refuses before the first candidate is tried —
+    // so the answer under it is the answer a machine with no mechanism gives.
+    // Since #1164 this is also how `app-ci` reaches that arm, its runner having
+    // gained a `bwrap` it can prove.
     await withEnv({ FIREBASE_DEPLOY_CLASSIFIER_FORCE_NO_CONTAINMENT: "1" }, () =>
       expectFailClosedRefusal(),
     );
@@ -4443,10 +4450,12 @@ describe("write containment holds a rehearsal's writes inside the scratch root",
     "takes that same refusal on this machine, with no test switch at all",
     async () => {
       // The case the forced one cannot be: this is the machine, answering for
-      // itself. It is what `app-ci` on `ubuntu-latest` proves in place of every
+      // itself. It is what a machine with no mechanism proves in place of every
       // case skipped above, and it is why those skips are not a hole — the
-      // exemption path is untested here because there is none, and the path
-      // that replaces it is tested exactly here.
+      // exemption path is untested there because there is none, and the path
+      // that replaces it is tested exactly here. It no longer runs on `app-ci`,
+      // which since #1164 proves a mechanism and runs the skipped cases
+      // instead; the forced case above carries the contract there.
       await expectFailClosedRefusal();
     },
   );

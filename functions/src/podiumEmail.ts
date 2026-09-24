@@ -39,7 +39,13 @@ import {
   visibleFinaleRoster,
   type FinaleReadSource,
 } from './unlockDay';
-import { formatDayDate, placeLabel, type EmailDay } from './dailyEmailContent';
+import {
+  formatDayDate,
+  placeLabel,
+  readableDayList,
+  readableUidList,
+  type EmailDay,
+} from './dailyEmailContent';
 import {
   MAX_PERSISTED_MOST_LOVED_WINNERS,
   podiumStandings,
@@ -60,10 +66,12 @@ import type { FinalePlayer, PodiumPayload } from './finaleContent';
 import {
   buildPodiumEmailModel,
   singleLine,
+  type PodiumEmailHonours,
   type VisibleMostLovedAward,
 } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
 import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
+import { isFirestoreDocumentId } from './firestoreIds';
 
 /** Everything the beat hands over. Every field is already computed — this
  *  module reads no finale state of its own. */
@@ -74,8 +82,10 @@ export interface PodiumEmailInput {
     name?: unknown;
     settings?: { dailyEmailEnabled?: unknown; reportHideThreshold?: unknown } | undefined;
   };
-  /** The payload written to the `podium` Moment, passed through verbatim. */
-  podium: PodiumPayload;
+  /** The payload written to the `podium` Moment, passed through verbatim —
+   *  including an ABSENT `playRecorded`, which is how a Moment says the fact is
+   *  unknown (`PodiumEmailHonours`). */
+  podium: PodiumEmailHonours;
   /** `podiumStandings(...)` output, ban-filtered — the ranked roster whose head
    *  IS `podium.champion`. Doubles as the recipient list: every row carries the
    *  uid and display name the send needs, so the fan-out costs no extra read. */
@@ -1095,7 +1105,15 @@ interface PodiumEmailEvent {
 interface PodiumMomentDoc {
   kind?: unknown;
   dayIndex?: unknown;
-  podium?: PodiumPayload;
+  /** The payload as STORED, which is not quite what this process would build:
+   *  `playRecorded` postdates the contract (#1192) and a podium Moment is written
+   *  once and never amended, so every Moment posted before it exists lacks the
+   *  field — as does one the beat DELIBERATELY withheld it from, because the
+   *  freeze recorded no answer to carry (#1218). Spelled optional and `unknown`
+   *  here so the compiler cannot let either `undefined` be read as `false` —
+   *  absence means "unknown", and `podiumEmailInputFor` states the fallback
+   *  explicitly. */
+  podium?: Omit<PodiumPayload, 'playRecorded'> & { playRecorded?: unknown };
 }
 
 export type PodiumDueReason =
@@ -1248,14 +1266,8 @@ export function visibleMostLovedAward(
   // arriving one level up — a correct rule with a partial inventory reads exactly
   // like coverage. Byte length rather than string length, because the limit is
   // bytes and a multi-byte name reaches it sooner than its `.length` suggests.
-  const joinable = (id: unknown): boolean =>
-    typeof id === 'string' &&
-    id.length > 0 &&
-    Buffer.byteLength(id, 'utf8') <= 1500 &&
-    !id.includes('/') &&
-    id !== '.' &&
-    id !== '..' &&
-    !/^__.*__$/.test(id);
+  // The predicate itself now lives in `firestoreIds.ts`, shared with approvePrompts.
+  const joinable = isFirestoreDocumentId;
   const winners = bounded.filter(
     (w): w is MostLovedPhotoWinner =>
       !!w &&
@@ -1801,8 +1813,12 @@ export async function podiumEmailInputFor(
   // it is a distinct reason rather than folded into `no-podium`.
   if (!payload || !Array.isArray(payload.dailyHonors)) return { due: false, reason: 'no-payload' };
 
-  const days = (Array.isArray(event.days) ? event.days : []) as EmailDay[];
-  const banned = (Array.isArray(event.bannedUids) ? event.bannedUids : []) as string[];
+  // The SHARED coercion, not a third spelling of it (#1214). This sweep already
+  // guarded both containers inline; the rule now has one statement in
+  // `dailyEmailContent.ts`, so the daily sweep's own guard and this one cannot
+  // come apart.
+  const days = readableDayList(event.days);
+  const banned = readableUidList(event.bannedUids);
   // BOUNDED AT THE QUERY, ceiling plus one so overflow is detectable from the
   // raw page rather than from the ban-filtered roster — a banned row inside the
   // page must not hide the fact that valid participants beyond it were cut off.
@@ -1869,6 +1885,54 @@ export async function podiumEmailInputFor(
     payload.dailyHonors.map((h) => h.dayIndex),
   );
 
+  // WHETHER ANYBODY PLAYED IS CARRIED, NOT INFERRED (#1192, Codex P2 on PR
+  // #1207). `champion == null` is not that fact: the champion is the head of the
+  // standings with every ceremonial Day's contribution removed, so an Event whose
+  // only play sits on ceremonial, `tutorial: false` Days — the shape ADR 0011
+  // exists to permit — legitimately has no champion while `firstBingo`, whose
+  // exclusion is tutorial-only by design, names a real winner. Reading the first
+  // as proof of an empty board produced an email that suppressed every standings
+  // row and the reader's own placing and stated "Nobody marked a square" directly
+  // beside the ⭐ naming the person who bingoed.
+  //
+  // A MOMENT WITHOUT THE FIELD says unknown rather than `false`: the Moment is
+  // written once and never amended, so an Event that froze before this contract
+  // can still be mailed by the first sweep after deploy — and the freeze capture
+  // (#1218) leaves it unstated two further ways, a roster read that failed at the
+  // freeze and an Event stamped `frozenAt` by some path other than the finale
+  // beat. All three arrive here identically, as a payload with no field.
+  //
+  // AND UNKNOWN STAYS UNKNOWN ALL THE WAY TO THE COPY (Codex P2 `4058610372`).
+  // The frozen record can still PROVE the Event was played — it names a
+  // champion, the Event-wide ⭐, or one Day's pinned honour — and that reading
+  // is kept, because it can only ever answer `true`. What it cannot do is prove
+  // the opposite: an Event whose only play was ceremonial Squares with no bingo
+  // anywhere names no honour at all, so deriving `false` from their absence is
+  // the `champion == null` inference this whole field replaced, moved one field
+  // along. Three states, then, and the third is written as `undefined`: the
+  // record says the Event was played, the record says it was not, or the record
+  // does not say. Read off the frozen record alone either way — never off the
+  // live roster, which a post-freeze self-write can move (ADR 0001).
+  //
+  // AND A NAMED HONOUR OUTRANKS AN EXPLICIT `false` (Codex P2 `4058671218`).
+  // The scheduler's capture is the authority on this fact, and the freeze now
+  // reads the honour pins beside the roster — but a Moment is written once and
+  // never amended, so a record already carrying `false` beside a champion, a
+  // ⭐ or a pinned honour can still arrive here, and no later freeze can repair
+  // it. The two halves contradict each other and only one of them is evidence:
+  // a pin is a server-written record of a bingo, a count is a Player's own
+  // figure on a row that validates no field (ADR 0001) and that the holder can
+  // clear. So the honour reading is asked FIRST and can only ever answer
+  // `true`; the stored fact decides only what the record does not otherwise
+  // name.
+  const recordNamesAnHonour =
+    payload.champion != null || payload.firstBingo != null || payload.dailyHonors.length > 0;
+  const playRecorded: boolean | undefined = recordNamesAnHonour
+    ? true
+    : typeof payload.playRecorded === 'boolean'
+      ? payload.playRecorded
+      : undefined;
+
   return {
     due: true,
     input: {
@@ -1880,6 +1944,10 @@ export async function podiumEmailInputFor(
         firstBingo:
           payload.firstBingo && !bannedSet.has(payload.firstBingo.uid) ? payload.firstBingo : null,
         dailyHonors: payload.dailyHonors.filter((h) => !bannedSet.has(h.uid)),
+        // Unfiltered on purpose: a ban withholds an honour, it never un-plays the
+        // Event. Filtering this would recreate the second meaning `champion: null`
+        // gained and the round-2 fix removed.
+        playRecorded,
       },
       ranked,
       mostLoved: award,
@@ -1889,9 +1957,16 @@ export async function podiumEmailInputFor(
         award?.winners[0]?.dayIndex != null
           ? photoDayLabels[award.winners[0].dayIndex as number]
           : undefined,
-      // Read from the Moment BEFORE the honour filtering above, so a withheld
-      // banned champion is never mistaken for a board nobody played.
-      boardWasEmpty: payload.champion == null,
+      // The Moment's own answer, negated — never the absence of a champion, and
+      // never anything read off the live roster. Resolved from the payload BEFORE
+      // the honour filtering above, so a withheld banned champion is still never
+      // mistaken for a board nobody played. See `playRecorded` above.
+      //
+      // A KNOWN `false`, not merely a falsy one (Codex P2 `4058610372`): `!x`
+      // reads `undefined` as an empty board, which is the one thing an unknown
+      // fact does not say. The claim needs the record to make it; unknown mails
+      // the honest rows with no sentence.
+      boardWasEmpty: playRecorded === false,
       bannedUids: banned,
       closingDay,
       honorDayLabels,

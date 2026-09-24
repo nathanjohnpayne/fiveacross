@@ -3,10 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker, { type Env } from './index';
 import type { RegistryLookup } from './registry/state';
 
+const SERVING_HOST = 'bodega-bay.fiveacross.app';
+
 const SERVING: RegistryLookup = {
   kind: 'committed',
   schemaVersion: 1,
   revision: '42',
+  // Bound to the address it was projected from (#1133); the router compares it
+  // byte for byte, so the stub below answers it only for that host.
+  host: SERVING_HOST,
   desired: {
     kind: 'route',
     eventId: 'bodega-bay-2026',
@@ -28,7 +33,7 @@ function environment(overrides: Partial<Env> = {}): Env {
   return {
     ORIGIN_HOST: 'fiveacross.web.app',
     ROUTER_VERSION: 'entry-1',
-    REGISTRY: { lookup: async () => SERVING },
+    REGISTRY: { lookup: async (host: string) => (host === SERVING_HOST ? SERVING : { kind: 'unknown-host' }) },
     ...overrides,
   };
 }

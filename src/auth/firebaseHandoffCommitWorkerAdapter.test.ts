@@ -193,11 +193,21 @@ describe('Firebase handoff commit Worker adapter', () => {
     await expect(adapter.commit()).rejects.toThrow('handoff-worker-not-prepared');
   });
 
+  // A re-audit gate, not a version floor. The commit path above depends on
+  // source-level Firebase Auth behaviour that no public type pins: the exported
+  // persistence object's `type`, the explicit hierarchy's fallback destination
+  // (in-memory, never browser storage) and error propagation,
+  // the assign-then-persist order inside `updateCurrentUser`, and the IndexedDB
+  // helpers resolving a request before its transaction completes. Do NOT bump
+  // these literals to match a dependency PR. Diff the two `@firebase/auth`
+  // builds, confirm each property, then record the new audit in
+  // `specs/auth-handoff-client.md` (the pinned-SDK paragraphs in § Leg 3) in the
+  // same edit, so the next bump inherits the trail. Last audited under #1230.
   it('pins the Firebase Auth implementation whose persistence boundary is audited', () => {
     const lock = JSON.parse(readFileSync('package-lock.json', 'utf8')) as {
       packages: Record<string, { version?: string }>;
     };
-    expect(lock.packages['node_modules/firebase']?.version).toBe('12.18.0');
-    expect(lock.packages['node_modules/@firebase/auth']?.version).toBe('1.13.5');
+    expect(lock.packages['node_modules/firebase']?.version).toBe('12.19.0');
+    expect(lock.packages['node_modules/@firebase/auth']?.version).toBe('1.13.6');
   });
 });

@@ -269,6 +269,11 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
 
     expect(fns.champion).toEqual(client.champion);
     expect(fns.firstBingo).toEqual(client.firstBingo);
+    // The "did anybody play" fact is mirrored too (#1192): a field one side
+    // carries and the other does not is exactly the shape the drift this file
+    // guards against takes.
+    expect(fns.playRecorded).toBe(client.playRecorded);
+    expect(fns.playRecorded).toBe(true);
   });
 
   // The parity assertions above would still pass if BOTH sides regressed
@@ -449,10 +454,84 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
     ).toEqual(buildPodium(early, days as DayDef[], undefined, true, FREEZE).firstBingo);
   });
 
+  // `playRecorded` is the one podium fact that is NOT a scoring question, and the
+  // shape that separates it from `champion` is the all-ceremonial Event (#1192):
+  // the standings are legitimately empty of scoring play while a real bingo sits
+  // on a ceremonial, `tutorial: false` Day. Both builders must say so, or the
+  // Feed's Moment and the winner-announcement email disagree about whether the
+  // Event was played at all.
+  it('records play on a ceremonial Day that no scoring total can see', () => {
+    const days: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'> & { scoring?: string }> = [
+      { index: 0, pool: 'main', tutorial: false },
+      { index: 1, pool: 'main', tutorial: false, scoring: 'ceremonial' },
+    ];
+    const players: PlayerDoc[] = [
+      {
+        uid: 'logan',
+        displayName: 'Logan',
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount: 1,
+        squaresMarked: 7,
+        firstBingoAt: 4_000,
+        reshufflesUsed: 0,
+        dayStats: { 1: { bingoCount: 1, squaresMarked: 7, firstBingoAt: 4_000 } },
+      },
+    ];
+    const client = buildPodium(players, days as DayDef[]);
+    const fns = buildPodiumPayload(asFinalePlayers(players), asFinaleDays(days));
+
+    // The three facts, pinned rather than only compared — a symmetric regression
+    // would satisfy the comparison alone.
+    expect(fns.champion).toEqual(client.champion);
+    expect(client.champion).toBeNull();
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+    expect(client.firstBingo).toEqual({ uid: 'logan', displayName: 'Logan', at: 4_000 });
+    expect(fns.playRecorded).toBe(client.playRecorded);
+    expect(client.playRecorded).toBe(true);
+  });
+
+  // ROOTS OR BUCKETS: the two can disagree on a legacy or hybrid row, and the
+  // claim this gates ("nobody marked a square") is refused unless both agree
+  // nothing was marked.
+  it('reads play off a legacy row with no buckets, and off buckets a lagging root denies', () => {
+    const days = [{ index: 0, pool: 'main', tutorial: false }];
+    const legacy: PlayerDoc[] = [
+      { uid: 'a', displayName: 'A', photoURL: null, joinedAt: 0, bingoCount: 0, squaresMarked: 9, firstBingoAt: null, reshufflesUsed: 0 },
+    ];
+    const lagging: PlayerDoc[] = [
+      {
+        uid: 'b',
+        displayName: 'B',
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        reshufflesUsed: 0,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 4, firstBingoAt: null } },
+      },
+    ];
+    const unplayed: PlayerDoc[] = [
+      { uid: 'c', displayName: 'C', photoURL: null, joinedAt: 0, bingoCount: 0, squaresMarked: 0, firstBingoAt: null, reshufflesUsed: 0, dayStats: {} },
+    ];
+    for (const [players, expected] of [[legacy, true], [lagging, true], [unplayed, false]] as const) {
+      const client = buildPodium(players, days as DayDef[]);
+      const fns = buildPodiumPayload(asFinalePlayers(players), asFinaleDays(days));
+      expect(fns.playRecorded).toBe(client.playRecorded);
+      expect(client.playRecorded).toBe(expected);
+    }
+  });
+
   it('agrees on an empty roster and on a schedule-less Event', () => {
     expect(buildPodiumPayload([], asFinaleDays(CRUISE_SHAPE)).champion).toEqual(
       buildPodium([], CRUISE_SHAPE as DayDef[]).champion,
     );
+    // Nobody on the roster is nobody who played, on both sides.
+    expect(buildPodiumPayload([], asFinaleDays(CRUISE_SHAPE)).playRecorded).toBe(
+      buildPodium([], CRUISE_SHAPE as DayDef[]).playRecorded,
+    );
+    expect(buildPodium([], CRUISE_SHAPE as DayDef[]).playRecorded).toBe(false);
     const players = roster();
     expect(buildPodiumPayload(asFinalePlayers(players), undefined).champion).toEqual(
       buildPodium(players, undefined).champion,

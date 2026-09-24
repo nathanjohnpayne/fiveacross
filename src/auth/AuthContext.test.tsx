@@ -16,6 +16,11 @@ import {
 // a config slot onto it to observe the #340 authDomain override.
 import { auth as mockedAuth } from '../firebase';
 import { forgetHandoffAttestation, rememberHandoffAttestation } from './handoffAttestation';
+// The Event's gameplay lifecycle as the shared Event subscription observed it
+// (#1158). The real module, not a double: it is a plain in-memory store, one
+// record per Event, and the deal gate's whole contract here is what it does
+// when THIS Event's record moves.
+import { recordEventPlayPhase, resetEventPlayPhaseForTests } from '../data/eventPlayPhase';
 
 // Mock the Firebase boundary so the real AuthProvider runs under jsdom: the tests
 // drive the auth callback by hand and stub the data-layer deal.
@@ -219,6 +224,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 beforeEach(() => {
   vi.clearAllMocks();
   eventScope.eventId = 'event-a';
+  resetEventPlayPhaseForTests();
   localStorage.clear();
   forgetHandoffAttestation();
   emitAuth = () => {};
@@ -424,6 +430,155 @@ describe('handoff acknowledgement adoption', () => {
     } finally {
       delete authMock.currentUser;
     }
+  });
+});
+
+// A fully server-committed snapshot, the only kind the phase store accepts.
+const SERVER_COMMITTED = { fromCache: false, hasPendingWrites: false };
+
+describe('AuthContext resumes a join the quiesce deferred (#1158)', () => {
+  // A first-time visitor arriving during the archive quiesce has the whole join
+  // declined: `joinAndDeal` writes nothing and reports 'deferred'. Before this
+  // ticket that decline was reported as `false` — indistinguishable from a
+  // returning Player's no-op — so the gate recorded a COMPLETED deal, its
+  // inputs never mentioned the Event lifecycle, and reopening play left the
+  // visitor with no Player row and no Board until they reloaded.
+  it('reruns the join exactly ONCE when play reopens, and not before', async () => {
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    // A deferral is not a failure: no error surface, nothing left spinning.
+    await waitFor(() => expect(screen.getByTestId('dealing')).toHaveTextContent('idle'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(mocks.track).not.toHaveBeenCalledWith('join_event');
+
+    // The Event snapshot lands and confirms the quiesce. THE CLOSE EDGE IS NOT
+    // AN ATTEMPT (CodeRabbit Major, review round 3): the confirmation says the
+    // join cannot succeed, so re-running it here would only ask the rules to
+    // decline it a second time, in the middle of the quiesce. The gate records
+    // the phase — that is what the reopen below moves — and deals nothing.
+    await act(async () => {
+      recordEventPlayPhase('event-a', true, SERVER_COMMITTED);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('dealing')).toHaveTextContent('idle');
+
+    // AND IT STAYS DECLINED WHILE CLOSED. Further snapshots saying the same
+    // thing move nothing, so the gate does not re-attempt on a loop.
+    await act(async () => {
+      recordEventPlayPhase('event-a', true, SERVER_COMMITTED);
+      recordEventPlayPhase('event-a', true, SERVER_COMMITTED);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // An Admin reopens play. The join it was owed runs — once.
+    mocks.joinAndDeal.mockResolvedValue(true);
+    await act(async () => {
+      recordEventPlayPhase('event-a', false, SERVER_COMMITTED);
+    });
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2);
+    expect(mocks.track).toHaveBeenCalledWith('join_event');
+  });
+
+  it('makes NO attempt at all when the Event is already observed closed at sign-in', async () => {
+    // The cold visit that arrives after the snapshot: this device has already
+    // seen the quiesce committed before the account settles, so the very first
+    // gate evaluation reads `'closed'`. Nothing is asked of the rules, and the
+    // shell is not left spinning — the branch settles `dealing` the way the
+    // admission holds do, because no deal will follow to settle it.
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    recordEventPlayPhase('event-a', true, SERVER_COMMITTED);
+    mount();
+    await signInUser();
+    await waitFor(() => expect(screen.getByTestId('dealing')).toHaveTextContent('idle'));
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    // And the reopen still deals, exactly once.
+    mocks.joinAndDeal.mockResolvedValue(true);
+    await act(async () => {
+      recordEventPlayPhase('event-a', false, SERVER_COMMITTED);
+    });
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+    expect(mocks.track).toHaveBeenCalledWith('join_event');
+  });
+
+  it('ignores a CACHED closed snapshot — only a server-committed phase moves the gate', async () => {
+    // The same three-flag rule the Card tab's redirect and the join's own
+    // decline follow (Codex P2, PR #1157 rounds 6, 8 and 9): this device can
+    // hold `archiving: true` from before another Admin reopened play, and an
+    // Admin's own optimistic close is undecided until the rules answer.
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      recordEventPlayPhase('event-a', true, { fromCache: true, hasPendingWrites: false });
+      recordEventPlayPhase('event-a', true, { fromCache: false, hasPendingWrites: true });
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+
+  it('is not moved by another Event\'s lifecycle', async () => {
+    // The records are kept per Event, and a phase observed for a different one
+    // is not evidence about this visit's Event.
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      recordEventPlayPhase('event-b', true, SERVER_COMMITTED);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives a LATE snapshot from the Event this visit moved off', async () => {
+    // `useDocSub` hands its observer the Event id captured where the listener
+    // was OPENED, so in the window between an `EVENT_ID` switch and the old
+    // listener's cleanup a snapshot for the RETIRED Event can still land on
+    // this visit's phase store. Recorded in one shared slot it evicted this
+    // Event's `'closed'`, and the damage was double: the gate re-attempted a
+    // join the rules still deny, and — reading `'open'` from then on — the
+    // genuine reopen moved nothing across the notification, so the deferred
+    // join stayed stranded for the whole session (#1158 review round 2,
+    // finding 1).
+    mocks.joinAndDeal.mockResolvedValue('deferred');
+    mount();
+    await signInUser();
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+
+    // This Event's own quiesce, confirmed. The close edge is not an attempt,
+    // so the count holds at the one deferral the cold visit already made.
+    await act(async () => {
+      recordEventPlayPhase('event-a', true, SERVER_COMMITTED);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // The straggler, for an Event this visit is not on. It says play is open
+    // — of its own Event, about which this gate has no question.
+    await act(async () => {
+      recordEventPlayPhase('event-old', false, SERVER_COMMITTED);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // And this Event's own reopen still resumes the join it was owed, once.
+    mocks.joinAndDeal.mockResolvedValue(true);
+    await act(async () => {
+      recordEventPlayPhase('event-a', false, SERVER_COMMITTED);
+    });
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2));
+    expect(mocks.track).toHaveBeenCalledWith('join_event');
   });
 });
 

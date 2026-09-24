@@ -16,9 +16,11 @@ import { editionLexicon } from '../../editions';
  * WHERE THE FLIP ACTUALLY IS, which the obvious implementation gets wrong. A
  * player checking 🔞 changes nothing: their submission lands `status: 'pending'`
  * (#210) and the derivation only counts `status: 'active'`. It is a REQUEST. The
- * Event flips when an admin makes it active — `approveItem`, `bulkApproveItems`,
- * or `adminAddItem`, which writes `active` directly — so the confirm belongs on
- * those three, not on the player's checkbox. The `forceAdult` override is a
+ * Event flips when an admin makes it active — `approveItem` and
+ * `bulkApproveItems` (both the `approvePrompts` callable since #1275, which
+ * writes `active` on the server) or `adminAddItem`, which writes `active`
+ * directly — so the confirm belongs on those three, not on the player's
+ * checkbox. The `forceAdult` override is a
  * fourth path to the same consequence and reuses the same component, driven by
  * its `reason` rather than by a near-copy.
  *
@@ -41,6 +43,9 @@ interface PendingFlip {
   explicitCount?: number;
   totalCount?: number;
   run: () => Promise<unknown> | unknown;
+  /** Maps a rejection to the refusal's own message, or `undefined` for the
+   *  generic retry copy (the approval paths pass `approvalFailureLabel`). */
+  failureLabelFor?: (error: unknown) => string | undefined;
 }
 
 function bodyFor(pending: PendingFlip, occasion: string): ReactNode {
@@ -96,6 +101,7 @@ export function useAdultContentFlipConfirm(): {
     reason: AdultFlipReason,
     run: () => Promise<unknown> | unknown,
     counts?: { explicitCount: number; totalCount: number },
+    failureLabelFor?: (error: unknown) => string | undefined,
   ) => Promise<unknown>;
   dialog: ReactNode;
 } {
@@ -109,7 +115,10 @@ export function useAdultContentFlipConfirm(): {
   // the moment the rejection arrived, silently discarding the only report the
   // admin gets. State that belongs to an action has to outlive the DOM the
   // action was started from.
-  const [failed, setFailed] = useState(false);
+  // `false` = no failure; `true` = failed, generic copy; a string = failed with
+  // the refusal's own message (a closed Event, a batch over the cap), which a
+  // retry cannot fix and so must not be told to retry (Phase 4b P2, PR #1278).
+  const [failed, setFailed] = useState<boolean | string>(false);
   const [busy, setBusy] = useState(false);
 
   const guard = (
@@ -117,12 +126,13 @@ export function useAdultContentFlipConfirm(): {
     reason: AdultFlipReason,
     run: () => Promise<unknown> | unknown,
     counts?: { explicitCount: number; totalCount: number },
+    failureLabelFor?: (error: unknown) => string | undefined,
   ): Promise<unknown> => {
     // Already 18+, or nothing explicit in this action → straight through. The
     // posture check is deliberately the RESOLVED one, so a second explicit
     // Prompt on an already-gated Event is silent.
     if (!wouldFlip || adultContentRequired()) return Promise.resolve(run());
-    setPending({ reason, run, explicitCount: counts?.explicitCount, totalCount: counts?.totalCount });
+    setPending({ reason, run, explicitCount: counts?.explicitCount, totalCount: counts?.totalCount, failureLabelFor });
     // Resolves immediately: the caller's AsyncButton must not sit in a pending
     // state for as long as the dialog is open — the dialog owns the action now.
     return Promise.resolve();
@@ -147,7 +157,7 @@ export function useAdultContentFlipConfirm(): {
             setPending(null);
             setFailed(false);
           })
-          .catch(() => setFailed(true))
+          .catch((error: unknown) => setFailed(pending.failureLabelFor?.(error) ?? true))
           .finally(() => setBusy(false));
       }}
     />
@@ -178,7 +188,8 @@ export function AdultContentConfirmDialog({
    *  rejection, a rules denial or a dropped connection would look exactly like a
    *  successful approval. */
   busy: boolean;
-  failed: boolean;
+  /** `true` for the generic retry copy, or the refusal's own message. */
+  failed: boolean | string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -204,7 +215,9 @@ export function AdultContentConfirmDialog({
         </div>
         {failed && (
           <p className="muted" role="alert">
-            That didn&rsquo;t go through. Nothing changed &mdash; try again.
+            {typeof failed === 'string'
+              ? `That didn’t go through. Nothing changed — ${failed}`
+              : 'That didn’t go through. Nothing changed — try again.'}
           </p>
         )}
         <div className="sheet-actions">

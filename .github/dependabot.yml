@@ -44,3 +44,22 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "vite-plugin-pwa"
         update-types: ["version-update:semver-major"]
+
+  # The worker/ manifest was outside every update lane: `directory: "/"` above
+  # covers the app manifest only, so nothing proposed updates for
+  # worker/package.json and nothing noticed when a transitive dependency there
+  # went vulnerable. GHSA-g89c-p67h-r497 (sharp/libheif, high) sat open on
+  # worker/package-lock.json for that reason; it is pinned exactly by miniflare
+  # and so is not fixable by a bump today, but the next one that IS fixable
+  # should reach a PR on its own rather than waiting for an alert sweep.
+  - package-ecosystem: "npm"
+    directory: "/worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      worker-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
