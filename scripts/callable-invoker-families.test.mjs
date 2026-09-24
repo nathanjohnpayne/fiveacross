@@ -183,6 +183,7 @@ describe("callable invoker families (#1277)", () => {
         "const namespaceAlias = grouped;",
         "export const chainedNamespace = namespaceAlias;",
         "export const spreadGroup = { ...localGroup, ...grouped, ...{ inline: unlockDayNow } };",
+        "export const outerGroup = { localGroup, named: grouped };",
         "export const castAlias = (unlockDayNow as unknown);",
         "export const memberAlias = grouped.unlockDayNow!;",
         "export const castGroup = { member: grouped.unlockDayNow, cast: unlockDayNow as unknown } satisfies object;",
@@ -212,6 +213,8 @@ describe("callable invoker families (#1277)", () => {
       "objectGroup-nested-deeper-unlockDayNow",
       "objectGroup-renamed",
       "objectGroup-unlockDayNow",
+      "outerGroup-localGroup-unlockDayNow",
+      "outerGroup-named-unlockDayNow",
       "spreadGroup-inline",
       "spreadGroup-unlockDayNow",
     ]);

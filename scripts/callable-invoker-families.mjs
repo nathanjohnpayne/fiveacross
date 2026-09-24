@@ -157,11 +157,20 @@ function groupMembers(object, scope) {
       continue;
     }
     if (ts.isShorthandPropertyAssignment(property)) {
-      if (scope.https.has(property.name.text)) members.push(property.name.text);
+      const key = property.name.text;
+      if (scope.https.has(key)) members.push(key);
+      // `{ inner }` of a local group or namespace import nests that group.
+      else if (scope.groups.has(key)) for (const inner of scope.groups.get(key)) members.push(`${key}-${inner}`);
+      else if (scope.namespaces.has(key)) for (const inner of scope.namespaces.get(key).https) members.push(`${key}-${inner}`);
     } else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
       const value = unwrap(property.initializer);
       if (ts.isObjectLiteralExpression(value)) {
         for (const inner of groupMembers(value, scope)) members.push(`${property.name.text}-${inner}`);
+        continue;
+      }
+      if (ts.isIdentifier(value) && (scope.groups.has(value.text) || scope.namespaces.has(value.text))) {
+        const inner = scope.groups.get(value.text) ?? [...scope.namespaces.get(value.text).https];
+        for (const member of inner) members.push(`${property.name.text}-${member}`);
         continue;
       }
       if (!isFunctionNode(value) && valueKind(value, scope) === "https") members.push(property.name.text);
