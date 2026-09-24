@@ -21,10 +21,11 @@
  * host — and `deriveCanonicalProjection` refuses any other value, so no
  * mutation of an existing host can turn the capability on or off. Publishing it
  * is therefore a provisioning decision, and among the ordinary intents the
- * deployment barrier sits on `provision` and on one more write: the doorway
- * `convert-to-root`, which publishes no capability but is the live apex
- * repoint whose service-worker retirement the same record attests (the two
- * repair intents take it too). Converting a host between a route and a root marker is
+ * deployment barrier sits on `provision` and on the two doorway go-live
+ * writes: the doorway `convert-to-root` and an `update` moving a marker
+ * `not-found` -> `doorway`. Neither publishes a capability; each makes a
+ * doorway serve, whose service-worker retirement the same record attests (the
+ * two repair intents take it too). Converting a host between a route and a root marker is
  * never an `update`, which refuses it by name rather than letting the
  * derivation report a malformed document: the archive interlock,
  * `convert-to-root` and `convert-to-route` (#1251) are the only conversions.

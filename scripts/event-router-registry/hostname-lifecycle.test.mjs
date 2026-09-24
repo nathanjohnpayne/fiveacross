@@ -328,7 +328,7 @@ describe('ordinary update', () => {
     });
   });
 
-  it('refuses a root/route conversion by name in both directions and takes no barrier input', async () => {
+  it('refuses a root/route conversion by name in both directions and takes no barrier input outside a doorway go-live', async () => {
     // An `update` never converts: the archive interlock, `convert-to-root` and
     // `convert-to-route` own both directions, each behind its own barrier
     // (#1251), so the ordinary update refuses the move by name.
