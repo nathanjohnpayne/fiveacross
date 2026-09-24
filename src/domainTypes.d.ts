@@ -848,6 +848,75 @@ export interface ItemDoc {
   retainedAt?: number; // ms epoch
 }
 
+// --- The `approvePrompts` callable wire contract (#1275, ADR 0015) ----------------
+// Declared ONCE here so the callable (functions/src/approvePrompts.ts) and its
+// client wrapper (`approveItems`, src/data/admin.ts) compile against the same
+// shapes. The client still narrows every response at runtime before trusting
+// it, and its outcome table is typed against `ApprovalOutcome`, so adding an
+// outcome here fails the client build until the narrower learns it.
+
+/**
+ * What THIS call did to a Prompt—kept separate from what state the Prompt is
+ * in, because a caller that conflates them announces a placement for something
+ * it never approved (Phase 4b P2, PR #812).
+ *
+ *   - `placed`      — approved onto `dayIndex`.
+ *   - `untargeted`  — approved with no Day, which is only reachable on an Event
+ *                     that has no schedule at all; it means every Day, and on a
+ *                     Day-less Event that is the single board.
+ *   - `retained`    — approved, but no Day can deal it, so it is dealt nowhere.
+ *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
+ *                     and `retained` then describe where it already stands.
+ *   - `missing`     — NOT approved: no such item.
+ *   - `malformed`   — NOT approved: the caller's #558 classification for that
+ *                     row is not one approval can act on, so the row is SKIPPED
+ *                     and `reason` says what was wrong (#1070). The row stays
+ *                     `pending` and nothing is written for it, exactly as for
+ *                     `stale`/`missing`.
+ */
+export type ApprovalOutcome =
+  | 'placed'
+  | 'untargeted'
+  | 'retained'
+  | 'stale'
+  | 'missing'
+  | 'malformed';
+
+export interface ApprovalPlacement {
+  itemId: string;
+  /** The Day this Prompt is scheduled for, or `null` for none. */
+  dayIndex: number | null;
+  /** Whether the Prompt is in the retained state—dealt nowhere. */
+  retained: boolean;
+  /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
+  outcome: ApprovalOutcome;
+  /**
+   * Why a `malformed` row was skipped—one short line a console can show. It
+   * describes the CLASSIFICATION only, never the Prompt, so it carries no
+   * submitter prose. Absent on every other outcome.
+   */
+  reason?: string;
+}
+
+/** One queue row as the callable receives it. `id` is the only routing input;
+ *  `pool`/`spicy` carry the Admin's explicit #558 classification decision and
+ *  are validated only after the stored row proves it is still pending. Nothing
+ *  about time or identity travels; the server reads both from the request. */
+export interface ApprovePromptsItem {
+  id: string;
+  pool?: unknown;
+  spicy?: unknown;
+}
+
+export interface ApprovePromptsRequest {
+  eventId: string;
+  items: ApprovePromptsItem[];
+}
+
+export interface ApprovePromptsResponse {
+  placements: ApprovalPlacement[];
+}
+
 export interface Cell {
   index: number;               // 0..24
   itemId: string | null;       // null for the free center

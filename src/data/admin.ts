@@ -17,7 +17,7 @@ import {
 import { migrateClaimMode, migrateDayFields } from './converters';
 import { dayMetaRef, playersCol } from './paths';
 import { normalizePool } from '../game/pool';
-import type { Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
+import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
 const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
@@ -55,52 +55,13 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 // are "kept for audit, hidden from all non-admins" (daily-cards-spec) — and
 // moderation outlives the Event, so it is allowed on a closed one where the
 // callable refuses.
-/**
- * Where one approval landed (#557), in two independent parts: `dayIndex` /
- * `retained` say where the Prompt now STANDS, and `outcome` says what this call
- * DID to get it there.
- *
- * What THIS call did to the Prompt — kept separate from what state the Prompt is
- * in, because a caller that conflates them announces a placement for something
- * it never approved (Phase 4b P2, PR #812).
- *
- *   - `placed`      — approved onto `dayIndex`.
- *   - `untargeted`  — approved with no Day, which is only reachable on an Event
- *                     that has no schedule at all; it means every Day, and on a
- *                     Day-less Event that is the single board.
- *   - `retained`    — approved, but no Day can deal it, so it is dealt nowhere.
- *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
- *                     and `retained` then describe where it already stands.
- *   - `missing`     — NOT approved: no such item.
- *   - `malformed`   — NOT approved: the caller's #558 classification for that
- *                     row is not one approval can act on, so the row is SKIPPED
- *                     and `reason` says what was wrong (#1070). The row stays
- *                     `pending` and nothing is written for it, exactly as for
- *                     `stale`/`missing`.
- */
-export type ApprovalOutcome =
-  | 'placed'
-  | 'untargeted'
-  | 'retained'
-  | 'stale'
-  | 'missing'
-  | 'malformed';
 
-export interface ApprovalPlacement {
-  itemId: string;
-  /** The Day this Prompt is scheduled for, or `null` for none. */
-  dayIndex: number | null;
-  /** Whether the Prompt is in the retained state — dealt nowhere. */
-  retained: boolean;
-  /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
-  outcome: ApprovalOutcome;
-  /**
-   * Why a `malformed` row was skipped — one short line a console can show. It
-   * describes the CLASSIFICATION only, never the Prompt, so it carries no
-   * submitter prose. Absent on every other outcome.
-   */
-  reason?: string;
-}
+// Where one approval landed (#557): `dayIndex`/`retained` say where the Prompt
+// now STANDS, and `outcome` says what this call DID to get it there. The wire
+// contract (`ApprovalOutcome`, `ApprovalPlacement`, `ApprovePromptsRequest`) is
+// declared once in `src/domainTypes.d.ts`, shared with the callable, and
+// re-exported here for the console.
+export type { ApprovalOutcome, ApprovalPlacement };
 
 /**
  * The queue row an approval is asked about. Shaped like the Approvals-queue row
@@ -115,24 +76,18 @@ export interface ApprovalPlacement {
 export type ApprovableItem = Pick<ItemDoc, 'id'> &
   Partial<Pick<ItemDoc, 'targetDayIndex' | 'pool' | 'spicy'>>;
 
-
-/** The wire shape `approvePrompts` accepts: the Event and, per row, only the id
- *  and the Admin's #558 classification. Nothing about time or identity travels;
- *  the server reads both from the request itself. Mirrors
- *  `ApprovePromptsRequest` in functions/src/approvePrompts.ts. */
-interface ApprovePromptsRequest {
-  eventId: string;
-  items: Array<{ id: string; pool?: unknown; spicy?: unknown }>;
-}
-
-const APPROVAL_OUTCOMES: ReadonlySet<string> = new Set<ApprovalOutcome>([
-  'placed',
-  'untargeted',
-  'retained',
-  'stale',
-  'missing',
-  'malformed',
-]);
+// Keyed by the shared `ApprovalOutcome`, so an outcome added to the contract
+// fails this build until the narrower below is taught it, rather than the
+// narrower rejecting a response whose approval already committed.
+const APPROVAL_OUTCOME_TABLE: Record<ApprovalOutcome, true> = {
+  placed: true,
+  untargeted: true,
+  retained: true,
+  stale: true,
+  missing: true,
+  malformed: true,
+};
+const APPROVAL_OUTCOMES: ReadonlySet<string> = new Set(Object.keys(APPROVAL_OUTCOME_TABLE));
 
 const UNEXPECTED_RESPONSE = 'approvePrompts returned an unexpected response.';
 
