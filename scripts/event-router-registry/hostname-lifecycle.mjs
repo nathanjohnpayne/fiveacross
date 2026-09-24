@@ -9,7 +9,8 @@
  * other, "the edge is a projection of Firestore" would be a convention rather
  * than an invariant, and the reconciler's drift report would be reporting on
  * whichever writer last forgot. So every create, status, Edition, root-marker,
- * repoint and delete goes through `applyHostnameMutation`, which reads both
+ * root/route conversion, repoint and delete goes through
+ * `applyHostnameMutation`, which reads both
  * documents plus the permanent rehearsal reservation in ONE Firestore
  * transaction, derives the projection from the RESULTING hostname document
  * rather than from the caller's patch, and writes both sides together.
@@ -20,9 +21,10 @@
  * host — and `deriveCanonicalProjection` refuses any other value, so no
  * mutation of an existing host can turn the capability on or off. Publishing it
  * is therefore a provisioning decision, and the deployment barrier sits on
- * `provision` alone. Converting a host between a route and a root marker
- * outside the archive interlock has no intent here either; `planUpdate` refuses
- * it by name rather than letting the derivation report a malformed document.
+ * `provision` alone. Converting a host between a route and a root marker is
+ * never an `update`, which refuses it by name rather than letting the
+ * derivation report a malformed document: the archive interlock,
+ * `convert-to-root` and `convert-to-route` (#1251) are the only conversions.
  *
  * Deliberately NOT owned here: `adultContent` (#608) keeps updating its own
  * non-projected field with no revision, because the data contract does not copy
@@ -101,6 +103,22 @@ const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanoni
 const OWNER_RESTRICTED_FIELDS = new Set(['canonicalHost', 'isCanonical', 'preview']);
 
 /**
+ * The root host whose route only the ARCHIVE may retire. § D1 of
+ * `specs/path-addressing-and-root.md` keeps `gaycruisebingo.com` the live GCB
+ * Event's canonical surface and lets a root marker replace it "only after that
+ * replacement archive address is live" — which is the archive transaction's
+ * apex-path target, and the archive already converts the apex in the same
+ * transaction. `convert-to-root` has no way to prove that ordering, so it
+ * refuses the host rather than offering a second door around it.
+ */
+const ARCHIVE_ONLY_ROOT_HOSTS = new Set(['gaycruisebingo.com']);
+
+/** A brand mirror: a root host whose retired flagship leaves `not-found`. */
+function isBrandMirror(host) {
+  return ROOT_HOSTS.has(host) && !DOORWAY_ROOT_HOSTS.has(host);
+}
+
+/**
  * The fields only a route document may carry, which `toRootMarker` therefore
  * removes. `apexPath` belongs here rather than with the
  * non-projected fields above because it is per-Event, and the converted
@@ -149,7 +167,9 @@ function toRootMarker(hostname, rootHost, root) {
  * resetting costs nothing. Everything not named here is host-scoped and
  * survives: `pathNamespace` is a pure function of the host, `edition` and
  * `status` are barriered moves of their own, and `root` cannot appear on a
- * document this intent accepts.
+ * document this intent accepts. `convert-to-route` clears the same fields for
+ * the same reason, since the marker it replaces carries the RETIRED
+ * flagship's public face.
  */
 const EVENT_SCOPED_FIELDS = ['adultContent', 'apexPath', 'canonicalHost', 'isCanonical', 'preview'];
 
@@ -157,6 +177,8 @@ const INTENTS = new Set([
   'provision',
   'update',
   'repoint',
+  'convert-to-root',
+  'convert-to-route',
   'archive',
   'delete',
   'backfill-ledger',
@@ -316,6 +338,62 @@ async function requireLiveEvent(transaction, eventId) {
 }
 
 /**
+ * `requireLiveEvent` for a ROOT host, where a missing Event is refused rather
+ * than tolerated. A root host is not an Event's own address: it serves
+ * whichever flagship an operator deliberately put there, and § D1 lets a
+ * mirror take one only when it is an "explicitly provisioned **active**"
+ * Event. So the Event document has to exist, be `active` and carry no
+ * `archiving` quiesce — without this a later activation or repoint could
+ * publish a root host onto an Event nothing has provisioned, around the
+ * replacement proof `convert-to-route` makes.
+ */
+async function requireProvisionedLiveEvent(transaction, eventId) {
+  const event = await transaction.get(`events/${eventId}`);
+  if (event === null) refuse('replacement-event-missing');
+  if (!isRecord(event) || event.status !== 'active' || event.archiving === true) refuse('event-not-live');
+}
+
+/** The static half of the replacement proof, checked before any read. */
+function requireReplacementHost(host, replacementHost) {
+  if (!isNonempty(replacementHost)) refuse('invalid-input');
+  if (replacementHost === host || isBrandMirror(replacementHost)) refuse('replacement-host-ineligible');
+}
+
+/**
+ * The replacement flagship's proof of life at its OWN production home, made
+ * before a brand mirror is pointed at it (§ D1: a mirror is "never its only
+ * production home"). Point reads only: the named host must be an existing,
+ * source-ledger-converged, `active` route for the same Event, carrying the
+ * mirror's Edition — so a Vacay Event can never become the Five Across
+ * mirror's flagship — and may not itself be the mirror or another mirror.
+ * Its EDGE convergence is not asked for again: its own activation already
+ * required it, and the mirror route this proof admits is written `disabled`.
+ * Answers the replacement's hostname document, whose `slug` the mirror takes.
+ */
+async function requireReplacementFlagship(transaction, rootHost, eventId, replacementHost) {
+  const state = await readHostState(transaction, replacementHost);
+  guardClaimable(replacementHost, state.reservation);
+  if (state.hostname === null) refuse('replacement-not-serving');
+  const stored = requireConvergedPreState(replacementHost, state.hostname, state.ledger);
+  if (stored.desired.kind !== 'route' || stored.desired.status !== 'active') refuse('replacement-not-serving');
+  if (stored.desired.eventId !== eventId || stored.desired.edition !== rootHost.edition) refuse('replacement-mismatch');
+  return state.hostname;
+}
+
+/**
+ * A route on a root host carries that host's table Edition. The derivation
+ * pins a root host's `pathNamespace` but not a route's `edition`, so without
+ * this a mirror's flagship could be re-labelled with another Edition by an
+ * ordinary update. Checked only when `edition` is supplied, so a legacy
+ * document is never bricked by a change that does not touch it.
+ */
+function requireHostEdition(host, changes, document) {
+  const rootHost = ROOT_HOSTS.get(host);
+  if (rootHost === undefined || !Object.hasOwn(changes, 'edition') || !Object.hasOwn(document, 'eventId')) return;
+  if (changes.edition !== rootHost.edition) refuse('host-scoped-field');
+}
+
+/**
  * The operator's proof that the EDGE has accepted the projection Firestore
  * holds — not merely that Firestore holds it.
  *
@@ -470,11 +548,10 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   // the document carries, and `changes` can only ADD a field — Firestore's
   // delete sentinel is deliberately not plumbed through this helper — so a
   // conversion in either direction would merge into a document carrying both.
-  // Route → `root: 'doorway'` and `root: 'not-found'` → an active replacement
-  // flagship are the two moves `specs/path-addressing-and-root.md` § D1 names,
-  // and neither has an intent here: the archive interlock owns the only
-  // route → root conversion that exists. Refuse by name so the operator reads
-  // "this transition has no path" rather than "your document is malformed".
+  // Conversions are whole-document replacements owned by the archive
+  // interlock, `convert-to-root` and `convert-to-route`, each behind its own
+  // barrier. Refuse by name so the operator reads "use the conversion intent"
+  // rather than "your document is malformed".
   if (
     (Object.hasOwn(changes, 'root') && !Object.hasOwn(state.hostname, 'root')) ||
     (Object.hasOwn(changes, 'eventId') && !Object.hasOwn(state.hostname, 'eventId'))
@@ -512,7 +589,11 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   // document points at, which may have been archived after the mapping was
   // created disabled.
   if (statusChange && changes.status === 'active') {
-    await requireLiveEvent(transaction, { ...state.hostname, ...changes }.eventId);
+    // On a root host the Event must also EXIST (`requireProvisionedLiveEvent`):
+    // this is the step that makes a converted mirror route serve.
+    const target = { ...state.hostname, ...changes }.eventId;
+    if (ROOT_HOSTS.has(host) && isNonempty(target)) await requireProvisionedLiveEvent(transaction, target);
+    else await requireLiveEvent(transaction, target);
     // ACTIVATION IS A CONVERGENCE BARRIER TOO. "Wait for publisher acceptance
     // and edge inspection before activation" is what provision defers to, and
     // "disabled and converge, repoint, active and converge" is what the
@@ -527,6 +608,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   }
 
   const document = { ...state.hostname, ...changes };
+  requireHostEdition(host, changes, document);
   if (!projectedChange) {
     // The `adultContent` derivation's path: a non-projected field does not
     // churn the edge, so no revision is spent and the ledger is not touched.
@@ -555,7 +637,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
  * rule. Owner-restricted fields, `status` and `apexPath` are refused by name.
  */
 async function planRepoint(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(input, [...MUTATION_KEYS, 'changes', 'converged'], 'invalid-input');
+  boundedKeys(input, [...MUTATION_KEYS, 'changes', 'converged'], ['replacementHost'], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
@@ -596,6 +678,12 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
   const eventChange = Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId;
   const slugChange = Object.hasOwn(changes, 'slug') && changes.slug !== state.hostname.slug;
   if (!eventChange && !slugChange) refuse('repoint-requires-identity');
+  // A brand mirror moved to ANOTHER Event owes the same replacement-home proof
+  // `convert-to-route` makes, or one later repoint would walk around it. The
+  // proof names a host, so it is refused everywhere it proves nothing.
+  const mirrorMove = eventChange && isBrandMirror(host);
+  if (Object.hasOwn(input, 'replacementHost') && !mirrorMove) refuse('invalid-input');
+  if (mirrorMove && !Object.hasOwn(input, 'replacementHost')) refuse('replacement-proof-required');
   // Event-scoped metadata does not survive a move to ANOTHER Event. Reset
   // first, then apply `changes`, so a caller that supplies a new
   // `adultContent` replaces it and one that supplies none is left with none
@@ -613,16 +701,123 @@ async function planRepoint(input, transaction, clock, buffer, revisions, project
     refuse('adult-content-monotone');
   }
   const document = { ...retained, ...changes };
+  requireHostEdition(host, changes, document);
+  if (mirrorMove) {
+    requireReplacementHost(host, input.replacementHost);
+    const replacement = await requireReplacementFlagship(transaction, ROOT_HOSTS.get(host), document.eventId, input.replacementHost);
+    if (document.slug !== replacement.slug) refuse('replacement-mismatch');
+  }
   // The Event the host would point at AFTER the move, which is the one that
   // matters: re-homing a document onto an archived Event publishes a route
-  // to it that § D8 retired.
-  await requireLiveEvent(transaction, document.eventId);
+  // to it that § D8 retired. A root host's Event must also exist.
+  if (eventChange && ROOT_HOSTS.has(host)) await requireProvisionedLiveEvent(transaction, document.eventId);
+  else await requireLiveEvent(transaction, document.eventId);
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (sameValue(desired, stored.desired)) refuse('no-projected-change');
-  // A whole-document SET, not a patch: this is the second lifecycle write
-  // that replaces rather than merges, for the same reason the mirror-root
-  // conversion does — Firestore's delete sentinel is not plumbed through
-  // this helper, so removing a field means writing the document without it.
+  // A whole-document SET, not a patch, like the archive's mirror-root
+  // conversion and both conversion intents: Firestore's delete sentinel is not
+  // plumbed through this helper, so removing a field means writing the
+  // document without it.
+  buffer.set(`hostnames/${host}`, document);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
+  return { host, projectedChange: true, resultingHostname: document };
+}
+
+/**
+ * `convert-to-root`: a disabled, edge-converged route becomes its host's class
+ * root marker — the apex half of § D1's live repoint (`fiveacross.app` and
+ * `vacaybingo.com` to their doorways) and a brand mirror's return to
+ * `not-found` once its flagship is gone.
+ *
+ * Non-serving to non-serving, one revision, no WAF input and no barrier
+ * input. The source must already be `disabled` AND converged at the edge, so
+ * the host has stopped serving the Event before its document changes kind.
+ * The doorway it produces is serving, and the delete barrier already refuses
+ * it (`delete-requires-inactive`), so the conversion composes with that rule
+ * rather than routing around it. An exact-host WAF block would take every `/<slug>` beneath the root host
+ * down with it, and there is nothing serving left for one to withdraw. A
+ * brand mirror additionally reads its flagship: § D1 keeps a mirror on an
+ * active flagship, so the marker waits for that Event to archive (or for its
+ * document to be gone). `gaycruisebingo.com` is archive-only.
+ */
+async function planConvertToRoot(input, transaction, clock, buffer, revisions, projections) {
+  exactKeys(input, [...MUTATION_KEYS, 'root', 'converged'], 'invalid-input');
+  const { host, root } = input;
+  if (root !== 'doorway' && root !== 'not-found') refuse('invalid-input');
+  const rootHost = ROOT_HOSTS.get(host);
+  if (rootHost === undefined) refuse('root-marker-ineligible');
+  if (ARCHIVE_ONLY_ROOT_HOSTS.has(host)) refuse('root-conversion-requires-archive');
+  // The archive's class rule: a canonical apex takes a doorway, a mirror
+  // `not-found`, and the caller names which so the plan says what it does.
+  if (root !== (DOORWAY_ROOT_HOSTS.has(host) ? 'doorway' : 'not-found')) refuse('root-marker-ineligible');
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+  if (stored.desired.kind !== 'route') refuse('convert-to-root-requires-route');
+  // The same predicate `delete` reads as serving: an active route is refused,
+  // and so is an archived one, which only the archive's history explains.
+  if (state.hostname.status !== 'disabled') refuse('convert-requires-inactive');
+  requireEdgeConvergence(input.converged, stored, 'convert-requires-convergence');
+  if (isBrandMirror(host)) {
+    const event = await transaction.get(`events/${stored.desired.eventId}`);
+    if (event !== null && (!isRecord(event) || event.status !== 'archived' || event.archiving === true)) {
+      refuse('root-conversion-flagship-live');
+    }
+  }
+  const document = toRootMarker(state.hostname, rootHost, root);
+  const desired = project(() => deriveCanonicalProjection(host, document));
+  buffer.set(`hostnames/${host}`, document);
+  ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
+  return { host, projectedChange: true, resultingHostname: document };
+}
+
+/**
+ * `convert-to-route`: a brand mirror's `root: 'not-found'` marker becomes a
+ * DISABLED route to an explicitly provisioned replacement flagship — § D1's
+ * "until an explicitly provisioned **active** replacement flagship repoints
+ * that root". Going live is the ordinary convergence-barriered activation
+ * that follows, so this write never serves anything by itself.
+ *
+ * Mirrors only: `fiveacross.app` and `vacaybingo.com` never carry an Event
+ * again under § D1, and `gaycruisebingo.com` waits on a human decision about
+ * a second GCB sailing. The operator names both the Event and the replacement
+ * host; nothing is inferred, and the slug is taken from the replacement's own
+ * document rather than from the caller. One revision, no WAF input.
+ */
+async function planConvertToRoute(input, transaction, clock, buffer, revisions, projections) {
+  exactKeys(input, [...MUTATION_KEYS, 'eventId', 'replacementHost', 'converged'], 'invalid-input');
+  const { host, eventId, replacementHost } = input;
+  if (!isNonempty(eventId)) refuse('invalid-input');
+  if (!isBrandMirror(host)) refuse('convert-to-route-requires-mirror');
+  requireReplacementHost(host, replacementHost);
+  const rootHost = ROOT_HOSTS.get(host);
+  const state = await readHostState(transaction, host);
+  guardClaimable(host, state.reservation);
+  if (state.hostname === null) refuse('hostname-missing');
+  const stored = requireConvergedPreState(host, state.hostname, state.ledger);
+  if (stored.desired.kind !== 'root') refuse('convert-to-route-requires-root');
+  if (stored.desired.root === 'doorway') refuse('convert-requires-inactive');
+  requireEdgeConvergence(input.converged, stored, 'convert-requires-convergence');
+  const replacement = await requireReplacementFlagship(transaction, rootHost, eventId, replacementHost);
+  await requireProvisionedLiveEvent(transaction, eventId);
+  // The marker carries the RETIRED flagship's public face, so the Event-scoped
+  // fields go exactly as on a repoint to another Event. `adultContent` is the
+  // one inherited, and only as `true`: the acknowledgement belongs to this same
+  // Event, so inheriting it fails closed, and the #608 trigger restamps any
+  // document naming an adult Event whether or not it is carried here.
+  const document = { ...state.hostname };
+  delete document.root;
+  for (const field of EVENT_SCOPED_FIELDS) delete document[field];
+  Object.assign(document, {
+    eventId,
+    slug: replacement.slug,
+    status: 'disabled',
+    edition: rootHost.edition,
+    pathNamespace: rootHost.pathNamespace,
+  });
+  if (replacement.adultContent === true) document.adultContent = true;
+  const desired = project(() => deriveCanonicalProjection(host, document));
   buffer.set(`hostnames/${host}`, document);
   ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   return { host, projectedChange: true, resultingHostname: document };
@@ -1059,6 +1254,8 @@ const PLANNERS = {
   provision: planProvision,
   update: planUpdate,
   repoint: planRepoint,
+  'convert-to-root': planConvertToRoot,
+  'convert-to-route': planConvertToRoute,
   archive: planArchive,
   delete: planDelete,
   'backfill-ledger': planBackfill,
