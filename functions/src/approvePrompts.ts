@@ -37,12 +37,13 @@
  * stays a thin seam.
  */
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
+import type { EventDoc } from '../../src/domainTypes';
 import {
   defaultTargetDayIndex,
   isUsableTarget,
   routeApprovalToDay,
   type TargetableDay,
-} from './communityPromptRouting';
+} from './communityPromptRouting.generated';
 import { firestoreErrorCodeForLog } from './firestoreErrors';
 import { normalizePool } from './poolVocab';
 import { eventClosedToPlay, isEventAdmin, type AdminFirestore, type EventLike } from './unlockDay';
@@ -201,8 +202,10 @@ interface StoredItemRow {
   spicy?: unknown;
 }
 
-/** `EventLike` plus the fence counter, which is this module's own field. */
-type ApprovalEvent = EventLike & { approvalSeq?: unknown };
+/** `EventLike` plus the fence counter, derived from the shared `EventDoc`
+ *  declaration (`src/domainTypes.d.ts`) so the stored schema has one home. Raw
+ *  like every Functions read, so the counter is still type-checked before use. */
+type ApprovalEvent = EventLike & Partial<Pick<EventDoc, 'approvalSeq'>>;
 
 /**
  * Approve one or more pending Prompts as `uid`, routing each to its intended Day

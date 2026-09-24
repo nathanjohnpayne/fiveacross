@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   isDayTargetable as fnsIsDayTargetable,
@@ -6,7 +8,7 @@ import {
   routeApprovalToDay as fnsRouteApprovalToDay,
   isUsableTarget as fnsIsUsableTarget,
   type TargetableDay,
-} from '../../functions/src/communityPromptRouting';
+} from '../../functions/src/communityPromptRouting.generated';
 import {
   isDayTargetable as clientIsDayTargetable,
   targetableDays as clientTargetableDays,
@@ -15,18 +17,20 @@ import {
   isUsableTarget as clientIsUsableTarget,
 } from '../../src/data/communityPrompts';
 
-// Parity guard for the client/functions Community Prompt routing mirror
-// (#1275, specs/community-prompt-targeting.md; cf. timezone-normalize-parity
-// and finale-parity).
+// Parity guard for the client/functions Community Prompt routing (#1275,
+// specs/community-prompt-targeting.md; cf. the event-membership generator).
 //
-// `src/data/communityPrompts.ts` decides the Day a SUBMISSION defaults to and
-// what a submitter is told ("scheduled" vs "approved").
-// `functions/src/communityPromptRouting.ts` decides where the `approvePrompts`
-// callable ROUTES that submission on the server clock. The two packages are
-// deliberately decoupled, so the rule is restated rather than imported. If they
-// ever disagree, a Player could be promised a Day the callable then rolls past,
-// or the callable could place a Prompt on a Day the client would have called
-// closed. This feeds identical fixtures to both and requires identical answers.
+// `src/data/communityPrompts.ts` holds the ONE implementation: it decides the
+// Day a SUBMISSION defaults to and what a submitter is told ("scheduled" vs
+// "approved"). `functions/src/communityPromptRouting.generated.ts` is a
+// byte-for-byte copy of its marked block, materialized by
+// `scripts/materialize-community-prompt-routing-functions.mjs`, and it decides
+// where the `approvePrompts` callable ROUTES that submission on the server
+// clock. The first test pins the copy as current. The rest feed identical
+// fixtures to both and require identical answers, because the one thing the
+// copy does not share is `normalizePool` (`src/game/pool.ts` on the client,
+// `functions/src/poolVocab.ts` in Functions). If they ever disagreed, a Player
+// could be promised a Day the callable then rolls past.
 
 const NOW = 1_000_000;
 
@@ -92,6 +96,14 @@ function schedules(): Array<{ label: string; days: TargetableDay[] }> {
 const INTENDED = [0, 1, 2, 3, 4, 9, -1];
 
 describe('client/functions parity — Community Prompt routing (#1275)', () => {
+  it('the Functions copy is byte-current with the marked source block', () => {
+    expect(() => execFileSync(
+      process.execPath,
+      [path.join(process.cwd(), 'scripts/materialize-community-prompt-routing-functions.mjs'), '--check'],
+      { cwd: process.cwd(), stdio: 'pipe' },
+    )).not.toThrow();
+  });
+
   it('isDayTargetable agrees on every Day in the cross product, at every clock', () => {
     for (const day of dayFixtures()) {
       for (const now of [NOW - 1, NOW, NOW + 1]) {

@@ -664,6 +664,16 @@ export interface EventDoc {
    * unrelated bug.
    */
   membershipEnforcement?: MembershipEnforcement;
+  /**
+   * The Community Prompt approval fence (#813, #1275, ADR 0015). SERVER-WRITTEN
+   * ONLY: the `approvePrompts` callable bumps it in the same transaction as any
+   * approval that writes a row, so `stampDaySnapshot`, which reads and updates
+   * this document, conflicts with that approval at the document level in both
+   * orderings. Nothing reads the number for meaning; only the write matters.
+   * Optional because every Event that has never had an approval lacks it, and
+   * the callable reads a missing or malformed value as 0.
+   */
+  approvalSeq?: number;
   settings: {
     reportHideThreshold: number;
     // Target share of spicy (🔞) Prompts among a Board's 24 non-free Squares,
