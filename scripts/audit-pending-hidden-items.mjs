@@ -13,8 +13,9 @@
 // exposure is bounded to rows that already exist. This script finds them and,
 // with `--requeue`, puts them back in the Approvals queue.
 //
-// WHAT COUNTS. A `hidden` item with no `approvedAt` whose `createdBy` is neither
-// the seed (`'seed'`) nor on the Event's current `admins` roster. Every row that
+// WHAT COUNTS. A `hidden` item with no valid finite numeric `approvedAt` whose
+// `createdBy` is neither the seed (`'seed'`) nor on the Event's current `admins`
+// roster. Every row that
 // ever went `pending -> active` through approval carries `approvedAt` (the #210
 // approval flow stamped it from the start), seeded rows are `createdBy: 'seed'`,
 // and organiser Prompts (`adminAddItem`) are created `active` by an Admin. What
