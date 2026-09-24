@@ -180,48 +180,49 @@ function currentPageLocation(): string {
 }
 
 /**
- * The campaign keys GA4 reads off `page_location` to attribute a session
- * (#632, specs/posthog-analytics.md § Campaign attribution), each with the
- * exact value shape the app's own email links produce
- * (`functions/src/emailCampaign.ts`). Values are matched, not just keys: a
- * hand-crafted `?utm_campaign=alice@example.com` must never reach GA4, so
- * anything outside this taxonomy (and `utm_content` / `utm_term`, which the
- * app never sets) is dropped.
- */
-export const CAMPAIGN_PARAM_RULES = [
-  ['utm_source', /^(?:daily-email|podium-email)$/],
-  ['utm_medium', /^email$/],
-  ['utm_campaign', /^[A-Za-z0-9_-]{1,128}-(?:day-\d{1,3}|podium)$/],
-] as const;
-
-/**
- * The app-generated campaign subset of a query string, as
+ * The campaign subset of a query string that GA4 may see (#632,
+ * specs/posthog-analytics.md § Campaign attribution), as
  * `?utm_source=…&utm_medium=…&utm_campaign=…` in that order, or `''`.
- * All-or-nothing: the set is kept only when all three keys are present and
- * each value matches the email taxonomy, so a partial or foreign tag set
- * (third-party UTMs, free text, PII) is never forwarded. Every other key
- * (invite codes, auth-handler params) is dropped.
+ *
+ * Only a tag set the app's own emails could have produced for THIS Event is
+ * forwarded (`functions/src/emailCampaign.ts`): `utm_medium=email`, and either
+ * `utm_source=daily-email` with `utm_campaign=<eventId>-day-<index>` or
+ * `utm_source=podium-email` with `utm_campaign=<eventId>-podium`, where
+ * `<eventId>` is the resolved Event's id. Values are matched against those
+ * exact strings rather than a shape, so a hand-crafted link
+ * (`utm_campaign=alice-smith-podium`, an email address, a mismatched
+ * source/suffix pair, a third-party campaign) forwards nothing and no free
+ * text reaches GA4. `utm_content` / `utm_term`, which the app never sets, and
+ * every other key (invite codes, auth-handler params) are always dropped.
+ * With no resolved Event id there is nothing to match, so the result is `''`.
  */
-export function campaignQuery(search: string): string {
+export function campaignQuery(search: string, eventId: string | null): string {
+  if (!eventId) return '';
   const incoming = new URLSearchParams(search);
-  const kept = new URLSearchParams();
-  for (const [key, shape] of CAMPAIGN_PARAM_RULES) {
-    const value = incoming.get(key);
-    if (value === null || !shape.test(value)) return '';
-    kept.set(key, value);
-  }
-  return `?${kept.toString()}`;
+  const source = incoming.get('utm_source');
+  const medium = incoming.get('utm_medium');
+  const campaign = incoming.get('utm_campaign');
+  if (medium !== 'email' || campaign === null) return '';
+  const dayPrefix = `${eventId}-day-`;
+  const matches =
+    (source === 'daily-email' &&
+      campaign.startsWith(dayPrefix) &&
+      /^\d{1,3}$/.test(campaign.slice(dayPrefix.length))) ||
+    (source === 'podium-email' && campaign === `${eventId}-podium`);
+  if (!matches) return '';
+  return `?${new URLSearchParams({ utm_source: source, utm_medium: medium, utm_campaign: campaign }).toString()}`;
 }
 
 /**
- * The LANDING URL's campaign, read once at module load. `main.tsx` imports
- * this module before the Router mounts and before Event resolution, so this is
- * the URL the email click opened, even if a route change lands before the
- * initial `page_view` does.
+ * The LANDING URL's query, read once at module load. `main.tsx` imports this
+ * module before the Router mounts and before Event resolution, so this is the
+ * URL the email click opened, even if a route change lands before the initial
+ * `page_view` does. It stays in memory only: `emitInitialPageView()` forwards
+ * nothing from it but `campaignQuery()`'s matched subset.
  */
-const landingCampaignQuery: string = (() => {
+const landingSearch: string = (() => {
   try {
-    return campaignQuery(window.location.search);
+    return window.location.search;
   } catch {
     return '';
   }
@@ -483,8 +484,9 @@ export async function emitInitialPageView(): Promise<void> {
       /* no-op */
     }
   }
+  const eventId = typeof ga4Dims.event_id === 'string' ? ga4Dims.event_id : null;
   try {
-    logEvent(instance, 'page_view', { page_location: currentPageLocation() + landingCampaignQuery });
+    logEvent(instance, 'page_view', { page_location: currentPageLocation() + campaignQuery(landingSearch, eventId) });
   } catch {
     /* no-op */
   }
