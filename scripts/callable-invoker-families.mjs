@@ -123,6 +123,8 @@ function analyzeModule(file, results, visited) {
   // aliases, and factories whose own body calls one.
   const localBuilders = new Set(HTTPS_BUILDERS);
   const localHttps = new Set();
+  // `import * as admin from './admin'` of a local module, by local name.
+  const namespaceImports = new Map();
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const clause = statement.importClause;
@@ -137,6 +139,9 @@ function analyzeModule(file, results, visited) {
         if (element.isTypeOnly) continue;
         imports.push({ imported: (element.propertyName ?? element.name).text, local: element.name.text });
       }
+    }
+    if (target && clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+      namespaceImports.set(clause.namedBindings.name.text, upstream);
     }
     for (const { imported, local } of imports) {
       if (HTTPS_BUILDERS.has(imported) || upstream.factories.has(imported)) localBuilders.add(local);
@@ -201,11 +206,21 @@ function analyzeModule(file, results, visited) {
       for (const name of upstream.factories) analysis.factories.add(name);
       continue;
     }
+    // `export * as admin from './admin'` deploys admin's endpoints as a
+    // Firebase group, named `admin-<export>`.
+    if (ts.isNamespaceExport(statement.exportClause)) {
+      for (const name of upstream.https) analysis.https.add(`${statement.exportClause.name.text}-${name}`);
+      continue;
+    }
     if (!ts.isNamedExports(statement.exportClause)) continue;
     for (const element of statement.exportClause.elements) {
       if (element.isTypeOnly) continue;
       const local = (element.propertyName ?? element.name).text;
       if (upstream.https.has(local)) analysis.https.add(element.name.text);
+      // `import * as admin from './admin'; export { admin }` is the same group.
+      if (!target && namespaceImports.has(local)) {
+        for (const name of namespaceImports.get(local).https) analysis.https.add(`${element.name.text}-${name}`);
+      }
       if (upstream.factories.has(local)) analysis.factories.add(element.name.text);
     }
   }

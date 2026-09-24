@@ -170,6 +170,26 @@ describe("callable invoker families (#1277)", () => {
     ]);
   });
 
+  it("names the HTTPS functions of a namespace export as a Firebase group", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import * as grouped from './admin';",
+        "export * as admin from './admin';",
+        "export { grouped };",
+      ].join("\n"),
+      "admin.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "export const unlockDayNow = onCall(async () => 1);",
+        "export const notHttps = 1;",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "admin-unlockDayNow",
+      "grouped-unlockDayNow",
+    ]);
+  });
+
   it("scans the default functions/ source when the config names none", async () => {
     const root = await fixture({
       "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const brandNewCallable = onCall(async () => 1);\n",
