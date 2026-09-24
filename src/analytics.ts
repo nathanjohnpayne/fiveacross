@@ -16,7 +16,12 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * `bingo` + `blackout` (components/Board.tsx),
  * `attach_proof` (components/ProofSheet.tsx), `theme_change`
  * (components/ThemeSwitcher.tsx), `text_size_change` (components/More.tsx,
- * #215), `share_click` (components/Celebration.tsx).
+ * #215), `share_click` (`surface`-tagged: components/Celebration.tsx,
+ * Leaderboard.tsx, FarewellPodium.tsx, ArchivedLeaderboard.tsx).
+ * #632 audited this catalog against the launch-window surfaces shipped since
+ * #613 (Most-Loved Photo, finale/archive share, approvals, hostname/Edition)
+ * and found each covered — see specs/posthog-analytics.md § Campaign
+ * attribution, "Event coverage audit".
  * `demand_proof` (Doubt flow, #33) and `install_pwa` (install-prompt flow,
  * #30) are catalogued and type-checked here so each ticket can add its one
  * call site as a one-line `track(...)` addition; this ticket (#38) does not
@@ -173,6 +178,45 @@ function currentPageLocation(): string {
     ? `https://${host}${window.location.pathname}`
     : window.location.origin + window.location.pathname;
 }
+
+/**
+ * The campaign keys GA4 reads off `page_location` to attribute a session
+ * (#632, specs/posthog-analytics.md § Campaign attribution). Campaign labels,
+ * never credentials: the app's only producer of them is its own email links
+ * (`functions/src/emailCampaign.ts`).
+ */
+export const CAMPAIGN_PARAM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+
+/**
+ * The allowlisted campaign subset of a query string, as `?k=v&...` in
+ * `CAMPAIGN_PARAM_KEYS` order, or `''` when none is present. Every other key
+ * (invite codes, auth-handler params) is dropped, and values are re-encoded,
+ * so a crafted value cannot carry a second parameter back in.
+ */
+export function campaignQuery(search: string): string {
+  const incoming = new URLSearchParams(search);
+  const kept = new URLSearchParams();
+  for (const key of CAMPAIGN_PARAM_KEYS) {
+    const value = incoming.get(key);
+    if (value) kept.set(key, value);
+  }
+  const query = kept.toString();
+  return query ? `?${query}` : '';
+}
+
+/**
+ * The LANDING URL's campaign, read once at module load. `main.tsx` imports
+ * this module before the Router mounts and before Event resolution, so this is
+ * the URL the email click opened, even if a route change lands before the
+ * initial `page_view` does.
+ */
+const landingCampaignQuery: string = (() => {
+  try {
+    return campaignQuery(window.location.search);
+  } catch {
+    return '';
+  }
+})();
 
 /**
  * Fire an analytics event to BOTH sinks — GA4 and PostHog (#96) — from one call
@@ -401,6 +445,10 @@ export function registerDayIndexDimension(dayIndex: number | null): void {
  * resend is a harmless merge no-op (see `ga4Dims`'s own doc). The event also
  * carries the same fresh `page_location` `track()` computes — ALWAYS
  * explicit, so GA4 never derives one from the full query-bearing URL (#613).
+ * The one exception to path-only is the landing URL's allowlisted `utm_*` set
+ * (#632): GA4 attributes a session from its FIRST hit's `page_location`, so a
+ * path-only initial `page_view` would report every email click as direct
+ * traffic. Only this event carries it; `track()` stays path-only.
  *
  * IDEMPOTENT — at most one emission per page load (#613, Phase 4b round-2
  * P2): `main.tsx`'s `.catch()` also receives an exception thrown by the
@@ -427,7 +475,7 @@ export async function emitInitialPageView(): Promise<void> {
     }
   }
   try {
-    logEvent(instance, 'page_view', { page_location: currentPageLocation() });
+    logEvent(instance, 'page_view', { page_location: currentPageLocation() + landingCampaignQuery });
   } catch {
     /* no-op */
   }

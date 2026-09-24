@@ -81,6 +81,33 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
     expect(out?.$set_once?.$initial_referrer).toBe('https://ref.com/p');
   });
 
+  // #632: posthog-js parses utm_* off document.URL into $utm_* (and the
+  // $initial_utm_* person props) BEFORE before_send runs, so the path-only
+  // scrub must reach only the URL-bearing keys and leave those intact —
+  // otherwise email campaign attribution would be stripped along with the query.
+  it('keeps the SDK-parsed $utm_* campaign properties while stripping the query they came from', () => {
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: {
+        $current_url: 'https://fiveacross.app/feed?utm_source=daily-email&utm_medium=email&utm_campaign=e-day-3',
+        $utm_source: 'daily-email',
+        $utm_medium: 'email',
+        $utm_campaign: 'e-day-3',
+      },
+      $set_once: {
+        $initial_current_url: 'https://fiveacross.app/feed?utm_source=daily-email',
+        $initial_utm_source: 'daily-email',
+        $initial_utm_campaign: 'e-day-3',
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$current_url).toBe('https://fiveacross.app/feed');
+    expect(out?.properties).toMatchObject({ $utm_source: 'daily-email', $utm_medium: 'email', $utm_campaign: 'e-day-3' });
+    expect(out?.$set_once?.$initial_current_url).toBe('https://fiveacross.app/feed');
+    expect(out?.$set_once).toMatchObject({ $initial_utm_source: 'daily-email', $initial_utm_campaign: 'e-day-3' });
+  });
+
   it('scrubs rrweb Meta href inside $snapshot replay data (#197)', () => {
     const out = sanitizeUrls({
       uuid: 's',
