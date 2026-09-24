@@ -175,6 +175,31 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
       expect(Object.keys(out?.properties ?? {}).filter((k) => k.includes('utm_'))).toEqual([]);
     });
 
+    it('always drops the SDK’s non-email campaign params (click ids, mailer tags) under every prefix', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      const event = emailCampaignEvent('daily-email', 'bodega-bay-2026-day-3');
+      const out = mod.sanitizeUrls({
+        ...event,
+        properties: {
+          ...event.properties,
+          gclid: 'alice@example.com',
+          fbclid: 'x',
+          mc_cid: 'y',
+          $session_entry_gclid: 'alice@example.com',
+          $session_entry_msclkid: 'z',
+        },
+        $set_once: { ...event.$set_once, $initial_gclid: 'alice@example.com', $initial_li_fat_id: 'w' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const keys = [...Object.keys(out?.properties ?? {}), ...Object.keys(out?.$set_once ?? {})];
+      expect(keys.filter((k) => /clid|mc_cid|li_fat_id/.test(k))).toEqual([]);
+      // The matched email campaign itself is untouched.
+      expect(out?.properties.utm_campaign).toBe('bodega-bay-2026-day-3');
+      expect(out?.$set_once?.$initial_utm_campaign).toBe('bodega-bay-2026-day-3');
+    });
+
     it('drops every campaign property when no Event id is registered', async () => {
       vi.resetModules();
       const mod = await import('./posthog');
@@ -1094,7 +1119,8 @@ describe('PostHog init with a key', () => {
   it("waits for Firebase auth, then resets before the SDK's DEFERRED init-time $pageview when signed out (#613, Phase 4b P1)", async () => {
     // posthog-js does NOT capture the automatic initial $pageview inside
     // init(): the loaded step of init schedules it one macrotask later via
-    // setTimeout(..., 1) (verified in the installed 1.409.5 dist), and the
+    // setTimeout(..., 1) (verified in the 1.409.5 dist, re-verified in the
+    // installed 1.434.0 dist on #632), and the
     // capture computes distinct_id at CAPTURE time. This test mirrors that
     // scheduling in the init mock and pins our side of the contract: the
     // authoritative Firebase auth state is applied SYNCHRONOUSLY after

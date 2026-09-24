@@ -236,6 +236,31 @@ function scrubUrlBag(bag: Record<string, unknown> | undefined): void {
 }
 
 const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+/** The rest of posthog-js 1.434's `CAMPAIGN_PARAMS`: ad-click ids and
+ *  mailer tags it parses off the landing URL the same way. The app runs no
+ *  ad or third-party mail campaigns, so none is ours, and each is free text
+ *  a hand-crafted link controls: always dropped, under every prefix. */
+const NON_EMAIL_CAMPAIGN_KEYS = [
+  'gad_source',
+  'mc_cid',
+  'gclid',
+  'gclsrc',
+  'dclid',
+  'gbraid',
+  'wbraid',
+  'fbclid',
+  'msclkid',
+  'twclid',
+  'li_fat_id',
+  'igshid',
+  'ttclid',
+  'rdt_cid',
+  'epik',
+  'qclid',
+  'sccid',
+  'irclid',
+  '_kx',
+] as const;
 /** The prefixes posthog-js (1.434) spells its parsed campaign properties with:
  *  the current `utm_*` super-properties (bare), the `$initial_utm_*` person
  *  properties, and the `$session_entry_utm_*` session-entry properties. */
@@ -247,11 +272,13 @@ const UTM_PREFIXES = ['', '$initial_', '$session_entry_'] as const;
  * same `matchEmailCampaign()` gate GA4's `campaignQuery()` uses (#632): per
  * prefix, a set that is exactly this Event's email campaign keeps its three
  * keys; anything else (free text, an email address, another Event, a foreign
- * campaign) is deleted, and `utm_content` / `utm_term` always are. In place.
+ * campaign) is deleted, and `utm_content` / `utm_term` always are, as is every
+ * `NON_EMAIL_CAMPAIGN_KEYS` entry. In place.
  */
 function scrubCampaignBag(bag: Record<string, unknown> | undefined, eventId: string | null): void {
   if (!bag) return;
   for (const prefix of UTM_PREFIXES) {
+    for (const key of NON_EMAIL_CAMPAIGN_KEYS) delete bag[`${prefix}${key}`];
     if (!UTM_KEYS.some((key) => `${prefix}${key}` in bag)) continue;
     const matched = matchEmailCampaign(
       {
@@ -508,7 +535,8 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
   //
   // Ordering vs the SDK's own automatic first `$pageview` (#613, Phase 4b
   // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
-  // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
+  // init (`kn()` in the 1.409.5 dist; re-verified unchanged in the installed
+  // 1.434.0 dist on #632) SCHEDULES it one macrotask later via
   // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
   // time. Production init itself waits for Firebase's first resolved auth
   // state, then applies that baseline SYNCHRONOUSLY after `posthog.init()`
