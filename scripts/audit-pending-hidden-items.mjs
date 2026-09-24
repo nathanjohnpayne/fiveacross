@@ -34,7 +34,8 @@
 // server clock. Nothing is deleted or rejected.
 //
 // FAIL-CLOSED. The run exits 0 only when every row a fresh scan lists is
-// accepted, so a deploy checklist step that runs it stops until each row has a
+// accepted and no requeue was skipped because its row changed mid-run (a row
+// restored in that gap is invisible to the hidden-only rescan), so a deploy checklist step that runs it stops until each row has a
 // decision. An `--accept` naming a row the scan does not list is refused, so a
 // typo cannot pass for a decision.
 //
@@ -229,11 +230,23 @@ export async function runPendingHiddenAudit(
   }
 
   const after = requeue ? disposeCandidates(planPendingHiddenAudit(await readAuditInput(db)), accepted) : first;
-  const clean = after.undecided.length === 0;
+  // A skipped row changed between the scan and its transaction. It may have
+  // been RESTORED to `active` around the callable, which a hidden-only rescan
+  // can no longer see, so the run is not clean until an operator has looked at
+  // each one by hand.
+  const clean = after.undecided.length === 0 && skipped.length === 0;
+  if (skipped.length > 0) {
+    log(
+      `pending-hidden audit: NOT clean — ${skipped.length} row(s) changed after the scan and were not requeued; ` +
+        `check each by hand: ${skipped.map(candidateKey).join(', ')}.`,
+    );
+  }
   log(
     clean
       ? 'pending-hidden audit: every listed row has a decision. ✅'
-      : `pending-hidden audit: ${after.undecided.length} row(s) still undecided: accept each with --accept, or requeue with --requeue.`,
+      : after.undecided.length > 0
+        ? `pending-hidden audit: ${after.undecided.length} row(s) still undecided: accept each with --accept, or requeue with --requeue.`
+        : 'pending-hidden audit: not clean (see the rows above that changed mid-run).',
   );
   return { plan, unknown: first.unknown, undecided: after.undecided, requeued, skipped, clean };
 }

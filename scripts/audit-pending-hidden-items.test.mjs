@@ -214,5 +214,10 @@ describe('runPendingHiddenAudit', () => {
     expect(result.requeued).toEqual([]);
     expect(result.skipped.map((c) => c.itemId)).toEqual(['never']);
     expect(db.writes).toEqual([]);
+    // Restored mid-run: the hidden-only rescan cannot see it, so the run fails
+    // closed rather than reporting clean.
+    expect(result.plan.candidates.map((c) => c.itemId)).toContain('never');
+    expect(result.undecided).toEqual([]);
+    expect(result.clean).toBe(false);
   });
 });
