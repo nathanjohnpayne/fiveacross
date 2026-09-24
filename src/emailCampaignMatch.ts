@@ -17,6 +17,12 @@ import { supportedDayIndex } from './data/eventLimits';
  * another Event, a mismatched source/suffix pair, an out-of-range Day) is not
  * ours, so the caller forwards nothing. `utm_content` / `utm_term` are never
  * part of a match: the app does not set them.
+ *
+ * `eventId` is the registered `event_id` analytics dimension each caller
+ * already holds (`ga4Dims` in `src/analytics.ts`, `registeredDims` in
+ * `src/posthog.ts`). Before Event resolution registers it there is nothing to
+ * match against, so a `null` or empty id matches nothing and the campaign is
+ * dropped rather than trusted on shape alone.
  */
 export type EmailCampaignTags = { utm_source: string; utm_medium: string; utm_campaign: string };
 
