@@ -442,7 +442,8 @@ export function buildPodium(
   // The podium is "as of the freeze", not live (Phase 4b P1). This module reads
   // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
   // after the freeze — its bucket is retained so its own daily honour still
-  // renders. Without a cutoff those post-freeze Marks can mint a First to BINGO
+  // renders, except beside a frozen `false`, where an honour pinned at or after
+  // the freeze is dropped (`frozenEmptyHonourFilter`, #1263). Without a cutoff those post-freeze Marks can mint a First to BINGO
   // the scheduler's already-posted, immutable podium Moment does not have: a
   // Player whose only bingo lands after the freeze on a ceremonial,
   // `tutorial: false` Day would appear on the card while the Feed shows none.
