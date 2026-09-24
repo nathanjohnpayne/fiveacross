@@ -162,6 +162,29 @@ GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/backfill-hide.mjs <eventId> # o
 
 `scripts/backfill-hide.mjs` reuses the deployed hide core (`functions/src/autohide.ts`) verbatim—the same active-only gate and the same transactional re-read guard—so it hides only active docs whose `reportCount` meets each Event's current `reportHideThreshold`, skips flagged/pending/already-hidden content, and re-confirms live state per doc (it will not undo an admin Clear-reports mid-sweep). It is **idempotent**—safe to re-run; a second run hides nothing new. Credentials are Application Default Credentials (`gcloud auth application-default login`) or a gitignored `serviceAccountKey.json`, exactly like `scripts/seed.mjs`. This is a rollout-only step: once the functions are live, all new crossings are hidden automatically and the sweep never needs to run again.
 
+### 1c. First deploy of the `approvePrompts` callable (#1275, ADR 0015)
+
+Community Prompt approval is the `approvePrompts` callable, and the same release's `firestore.rules` deny every client `pending → active` flip, so the callable, the rules and hosting must ship together, and the first release on each project is a fixed sequence. Do it gaycruisebingo first, then fiveacross.
+
+1. **Prerequisite: #1277 has shipped.** The deploy's Cloud Run invoker reconciliation (above) must cover the admin callables (`unlockdaynow`, `approveprompts`). Without it the callable is unreachable (HTML 403) while the rules deny every other approval path.
+2. **Before anything:** add `APPROVE_PROMPTS_APP_CHECK=false` to the gitignored `functions/.env.<project>`, grep `<deployed-sha>..origin/main` for unrelated unshipped changes, and run the first audit, then ask Admins not to Hide or Restore Prompts until step 6:
+
+   ```bash
+   npm run audit:pending-hidden -- <gaycruisebingo|fiveacross>
+   ```
+
+3. **Functions only:** `npm run deploy:<project> -- -- --only functions --force`. On CREATE firebase-tools tries to grant `allUsers` the invoker role, which the org policy rejects, so this pass is expected to exit nonzero; confirm that is the only failure. Rules and hosting are untouched, so every client still approves through its own transaction.
+4. **Probe:** an unauthenticated `POST {"data":{}}` to the `approvePrompts` URL must answer `401 UNAUTHENTICATED` JSON. An HTML 403 means the invoker is not reconciled: stop here.
+5. **Full release:** `npm run deploy:<project> -- -- --force`. If it stops after the rules release but before hosting, run `npm run deploy:<project>:hosting` immediately.
+6. **Second audit, right after the rules release.** The old rules let an Admin hide a pending row until step 5, and a row hidden then would be restorable straight to `active` around the callable. It is still hidden now, so this run lists it. This run must exit 0: accept each listed row that should stay restorable by id, and requeue the rest to `pending`, where only the callable can activate them. Then lift the Hide/Restore freeze.
+
+   ```bash
+   npm run audit:pending-hidden -- <project> --accept <eventId>/<itemId> [--accept ...]
+   npm run audit:pending-hidden -- <project> [--accept ...] --requeue
+   ```
+
+The audit lists every `hidden` row not created by the seed and prints each row's author, whether that author is a current Admin, and its (unverifiable) `approvedAt`; see `scripts/audit-pending-hidden-items.mjs`. Rollback is a full redeploy of the previous main, never rules or hosting alone.
+
 ## 2. App Check (abuse protection)
 
 1. Google Cloud console → reCAPTCHA Enterprise → create a **Website** key for `gaycruisebingo.com` (+ `localhost` for dev).
@@ -194,6 +217,8 @@ This is a one-time retirement step for anyone who previously stood the renderer 
 ```bash
 npm run deploy:<target> -- --only storage,firestore:rules,firestore:indexes
 ```
+
+The first release of the #1275 rules is not a rules-only deploy: follow § 1c, because those rules deny every client approval and only the `approvePrompts` callable, released in the same deploy, can approve after them.
 
 **Do not lock player-stat writes—they stay client-authoritative by design (ADR 0001).** The honor system makes `players/{uid}` self-writable: each Player owns its own `bingoCount`, `squaresMarked`, `firstBingoAt`, and `blackout`. There is no server-side stat recompute to make those fields authoritative, so there is nothing to "harden" toward—do **not** tighten the `players/{uid}` rule to profile-fields-only / admins-only. Such a lock has nothing backing it and would break the client stat writes in `joinAndDeal` and `setMark` (`src/data/api.ts`) and in `attachProof` (`src/data/proofs.ts`), making joins and marks **fail** with a permission error.
 

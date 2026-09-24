@@ -335,6 +335,37 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     expect(screen.queryByRole('button', { name: 'Approve all' })).toBeNull();
   });
 
+  it('a reported PENDING Prompt in the Reports group shows no Hide (approval is the callable) and keeps Delete', () => {
+    // #1275: the rules bound an admin client's status moves to `pending ->
+    // rejected` and `active <-> hidden`, so Hide on a pending row would be a
+    // doomed write, and hide-then-restore would have laundered an approval
+    // around `approvePrompts`. The row stays reachable for Delete and Ban.
+    H.items = [pendingItem('r1', { text: 'Reported while pending', status: 'pending', reportCount: 2 })];
+    renderAdmin('/more/admin/queue');
+
+    // The Reports row (the Approvals row for the same Prompt is not rendered:
+    // H.pendingItems is empty), found by its report pill.
+    const row = screen.getByText('2 ⚑').closest('.row') as HTMLElement;
+    expect(within(row).queryByRole('button', { name: 'Hide' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: 'Restore' })).toBeNull();
+    expect(within(row).getByTitle('Delete')).toBeInTheDocument();
+  });
+
+  it('a reported HIDDEN Prompt still shows Restore, and a reported ACTIVE one still shows Hide', () => {
+    H.items = [
+      pendingItem('h1', { text: 'Reported and hidden', status: 'hidden', reportCount: 2 }),
+      pendingItem('a1', { text: 'Reported and active', status: 'active', reportCount: 3 }),
+    ];
+    renderAdmin('/more/admin/queue');
+
+    const hidden = screen.getByText('Reported and hidden').closest('.row') as HTMLElement;
+    expect(within(hidden).getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+    expect(within(hidden).queryByRole('button', { name: 'Hide' })).toBeNull();
+    const active = screen.getByText('Reported and active').closest('.row') as HTMLElement;
+    expect(within(active).getByRole('button', { name: 'Hide' })).toBeInTheDocument();
+    expect(within(active).queryByRole('button', { name: 'Restore' })).toBeNull();
+  });
+
   it('an entirely empty inbox shows the wireframes’ "All clear. Go enjoy the boat."', () => {
     renderAdmin('/more/admin/queue');
     expect(screen.getByText(/All clear\. Go enjoy the boat\./)).toBeInTheDocument();

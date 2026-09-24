@@ -569,31 +569,58 @@ service cloud.firestore {
     }
     // The update-side companion. An admin may write anything else on an item,
     // but there is no legitimate admin operation that MOVES a Prompt to a
-    // malformed Day: approval writes a routed integer, retention leaves the
-    // field alone, and a repair either writes a real Day or removes the field.
-    // So the one field this otherwise-unconstrained arm bounds is the target
-    // (CodeRabbit, PR #812) — the client and snapshot both fail closed on a
-    // malformed value already, and this stops one being minted through the rules
-    // in the first place.
+    // malformed Day: a re-target writes a real Day and a repair either writes a
+    // real Day or removes the field. (Approval itself no longer passes through
+    // this arm at all — it is the `approvePrompts` callable on the Admin SDK,
+    // #1275.) So the one field this otherwise-unconstrained arm bounds is the
+    // target (CodeRabbit, PR #812) — the client and snapshot both fail closed on
+    // a malformed value already, and this stops one being minted through the
+    // rules in the first place.
     //
-    // Conditioned on the field actually CHANGING, which is load-bearing: the
-    // approval of a row that ALREADY carries a malformed target stamps
-    // `retainedAt` WITHOUT touching `targetDayIndex` (see `approveItems` — the
-    // value is left in place rather than guessed at), and an unconditional check
-    // would deny exactly that write, stranding the row it is meant to retain.
-    // Removing the field stays allowed: `validTargetDayIndex()` reads an absent
-    // field as valid.
+    // Conditioned on the field actually CHANGING, which is load-bearing: a
+    // non-target edit to a row that ALREADY carries a malformed target (a text
+    // fix, a report clear, a hide) must still land, and an unconditional check
+    // would deny exactly that write, stranding the row. Removing the field stays
+    // allowed: `validTargetDayIndex()` reads an absent field as valid.
     function targetDayIndexUnchangedOrValid() {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['targetDayIndex'])
         || validTargetDayIndex();
+    }
+    // Which `status` moves an ADMIN CLIENT may make on an item (#1275, ADR 0015,
+    // specs/d15-approvals.md). Approval — `pending -> active` — is the
+    // `approvePrompts` callable and nothing else: the server routes the Prompt
+    // and stamps `approvedAt` on its own clock, so a client that could flip the
+    // status itself (a stale bundle, a hand-built write) would put the device
+    // clock back in charge of which Day a Prompt lands on. Every other admin
+    // status move stays a client write:
+    //
+    //   - `pending -> rejected`: moderation, allowed on a closed Event too.
+    //   - `active <-> hidden`: the manual hide and restore.
+    //   - no change at all: re-target, repair, spicy correction, text edit,
+    //     report clear — the ordinary admin edits, unaffected.
+    //
+    // The two-step launderings are closed by the same table. `pending ->
+    // hidden` is not listed, so a row cannot be hidden while pending and then
+    // "restored" straight to active around the callable; and nothing leaves
+    // `rejected` — a rejection is final in the rules, and an admin who changes
+    // their mind asks the Player to resubmit. `get('status', null)` reads a
+    // status-less legacy row as `null`, which matches only itself, so such a row
+    // can still take every non-status edit but must be given a status by a
+    // server write before it can be hidden.
+    function itemStatusMoveAllowedForAdminClient() {
+      let from = resource.data.get('status', null);
+      let to = request.resource.data.get('status', null);
+      return from == to
+        || (from == 'pending' && to == 'rejected')
+        || (from in ['active', 'hidden'] && to in ['active', 'hidden']);
     }
     // `retainedAt` is an APPROVAL-time fact, so a submitter may not arrive with
     // one. Unlike a forged `approvedAt` — which the approval write overwrites,
     // making it harmless — a forged `retainedAt` survives a normal approval,
     // leaving a Prompt that is active and DEALT while its durable state claims it
-    // was retained and dealt nowhere (Phase 4b P1, PR #812). `approveItems` also
-    // clears the field whenever it places a Prompt, so the two ends agree: only a
-    // retention stamps it, and anything else unstamps it.
+    // was retained and dealt nowhere (Phase 4b P1, PR #812). The `approvePrompts`
+    // callable also clears the field whenever it places a Prompt, so the two
+    // ends agree: only a retention stamps it, and anything else unstamps it.
     //
     // `spicyRevision` is likewise Admin-authored. The Approvals queue treats it
     // as a monotonic acknowledgement fence for transactional spicy corrections;
@@ -1978,7 +2005,9 @@ service cloud.firestore {
           && validSpicyForItemPool()
           && validTargetDayIndex()
           && (nonAdminPendingMainItemCreate() || adminActiveItemCreate(eventId));
-        // Report = increment reportCount by 1 only; admins can do anything.
+        // Report = increment reportCount by 1 only. Admins may make any edit
+        // except the status moves `itemStatusMoveAllowedForAdminClient()` denies:
+        // approval is the `approvePrompts` callable (#1275).
         //
         // `status` is SERVER-AUTHORITATIVE for the community-hide transition
         // (#43, ADR 0004 Phase 1). A non-admin's ONLY update is the report path,
@@ -1990,8 +2019,17 @@ service cloud.firestore {
         // manual hide/restore via the `isAdmin(eventId)` branch. This is the
         // authoritative promotion of the Phase-0 presentational `isReportHidden`
         // filter — pinned by tests/rules/w4-server-authoritative-hide.test.ts.
+        //
+        // `status` is SERVER-AUTHORITATIVE for APPROVAL too (#1275, ADR 0015).
+        // The admin arm is bounded by `itemStatusMoveAllowedForAdminClient()`:
+        // `pending -> rejected` and `active <-> hidden` are the only status moves
+        // a client may make, so `pending -> active` — and the two-step
+        // launderings through `hidden` or `rejected` — can only happen through
+        // the callable, which routes and stamps on the server clock. Pinned by
+        // tests/rules/d15-approvals.test.ts and community-prompt-targeting.
         allow update: if admitted(eventId)
           && ((isAdmin(eventId)
+                && itemStatusMoveAllowedForAdminClient()
                 && targetDayIndexUnchangedOrValid()
                 && itemPoolSpicyUnchangedOrValid())
               // #134: reporting is a player write, so it stops at the freeze.

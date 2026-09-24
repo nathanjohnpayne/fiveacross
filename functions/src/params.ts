@@ -131,6 +131,24 @@ export const BUG_REPORT_APP_CHECK = defineBoolean('BUG_REPORT_APP_CHECK', { defa
  */
 export const AUTH_HANDOFF_APP_CHECK = defineBoolean('AUTH_HANDOFF_APP_CHECK', { default: false });
 /**
+ * Enforce App Check on the `approvePrompts` callable (#1275, ADR 0015).
+ *
+ * OFF by default, like BUG_REPORT_APP_CHECK and AUTH_HANDOFF_APP_CHECK, and for
+ * the same reason: enforcing attestation before the client attests would lock
+ * every Admin out of the Approvals queue. Unlike `exchangeAuthHandoff`, this
+ * callable is already authenticated AND admin-gated inside its transaction, so
+ * the toggle is a second layer rather than the only one. Turn it on once the
+ * client initialises App Check (#549); the callable then fails closed on a
+ * request without a valid token.
+ *
+ * Declared here so it reaches `functions/.env.example` and the e2e dotenv
+ * generator (`scripts/e2e-functions-env.mjs` derives the key set from this
+ * file). The operator adds the same line to the gitignored
+ * `functions/.env.<projectId>` before deploying, or firebase-tools prompts for
+ * it mid-deploy (#767).
+ */
+export const APPROVE_PROMPTS_APP_CHECK = defineBoolean('APPROVE_PROMPTS_APP_CHECK', { default: false });
+/**
  * Public URL of the `emailUnsubscribe` endpoint (#616) — the target of every
  * daily email's visible Unsubscribe link and its `List-Unsubscribe` header.
  *

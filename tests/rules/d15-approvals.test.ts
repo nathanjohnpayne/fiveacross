@@ -15,7 +15,12 @@ import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 // what #201 deliberately left out of its own scope (a rules-only ticket that
 // proves shape over hand-built payloads, not the client write paths): the
 // CREATE side actually letting a non-admin land a `pending` row, and the
-// ADMIN-ONLY `update` gate on the pending → active/rejected transition.
+// `update` gate on the status transitions out of `pending`. Since #1275
+// (ADR 0015) APPROVAL is the `approvePrompts` callable on the Admin SDK, so
+// the rules DENY the client `pending → active` flip to everyone, an admin
+// included; `pending → rejected` is the only client transition out of
+// pending, and it is admin-only. Nothing leaves `rejected`, and `hidden` is
+// reachable only from `active`, so neither state can launder an approval.
 //
 // The PERMISSION_DENIED lines the SDK logs to stderr are the expected assertFails
 // denials, not test failures.
@@ -140,18 +145,44 @@ describe('d15-approvals — pending item read carve-out re-pinned against a writ
   });
 });
 
-describe('d15-approvals — update: only an admin can transition pending → active/rejected', () => {
-  it('ALLOWS an admin to approve (pending → active, stamping approvedBy/approvedAt)', async () => {
+describe('d15-approvals — update: approval is the approvePrompts callable; only an admin can reject', () => {
+  it('DENIES an admin client pending → active; approval is the approvePrompts callable (#1275)', async () => {
+    // The whole point of ADR 0015: routing and `approvedAt` derive from the
+    // SERVER clock, so no client — not even an admin's, not even a stale
+    // bundle's — may write the flip itself.
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), at('items/p1')), pendingPayload(ALICE));
     });
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(db(ADMIN), at('items/p1')), {
         status: 'active',
         approvedBy: ADMIN,
         approvedAt: NOW(),
       }),
     );
+    // Nor a bare status flip with no stamps at all.
+    await assertFails(updateDoc(doc(db(ADMIN), at('items/p1')), { status: 'active' }));
+  });
+
+  it('DENIES the two-step laundering: pending → hidden, then rejected → active and rejected → hidden', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at('items/p1')), pendingPayload(ALICE));
+      await setDoc(doc(ctx.firestore(), at('items/r1')), pendingPayload(ALICE, { status: 'rejected' }));
+    });
+    // `hidden` is reachable only from `active`, so a pending row cannot be
+    // hidden and then "restored" straight to active around the callable.
+    await assertFails(updateDoc(doc(db(ADMIN), at('items/p1')), { status: 'hidden' }));
+    // Nothing leaves `rejected`: a rejection is final in the rules.
+    await assertFails(updateDoc(doc(db(ADMIN), at('items/r1')), { status: 'active' }));
+    await assertFails(updateDoc(doc(db(ADMIN), at('items/r1')), { status: 'hidden' }));
+  });
+
+  it('still ALLOWS an admin the manual hide and restore on an ACTIVE row', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at('items/a1')), pendingPayload(ALICE, { status: 'active' }));
+    });
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/a1')), { status: 'hidden' }));
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/a1')), { status: 'active' }));
   });
 
   it('ALLOWS an admin to reject (pending → rejected)', async () => {

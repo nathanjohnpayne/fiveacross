@@ -584,6 +584,43 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     expect(within(approvalsSection()).queryByRole('status')).toBeNull();
   });
 
+  // Phase 4b P2 on PR #1278: a refusal a retry cannot fix says what it is,
+  // instead of "try again". The callable's messages are fixed server strings.
+  it('names a closed-Event refusal on the Approve pill, and a cap refusal on Approve all', async () => {
+    H.pendingItems = [item('i1', { text: 'Closed event row', status: 'pending' })];
+    H.approveItem.mockRejectedValueOnce({
+      code: 'functions/failed-precondition',
+      message: 'This Event is closed; approvals are frozen.',
+    });
+    H.bulkApproveItems.mockRejectedValueOnce({
+      code: 'functions/invalid-argument',
+      message: 'items must hold at most 400 rows per call.',
+    });
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Closed event row').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }));
+    expect(await within(row).findByRole('alert')).toHaveTextContent('This Event is closed; approvals are frozen.');
+
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+    expect(
+      await within(approvalsSection()).findByText('items must hold at most 400 rows per call.'),
+    ).toBeTruthy();
+  });
+
+  it('keeps the generic retry copy for a contention abort', async () => {
+    H.pendingItems = [item('i1', { text: 'Contended row', status: 'pending' })];
+    H.approveItem.mockRejectedValueOnce({
+      code: 'functions/aborted',
+      message: 'Another change collided with this approval; try again.',
+    });
+    renderAdmin('/more/admin/queue');
+
+    const row = screen.getByText('Contended row').closest('.row') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }));
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
+  });
+
   it('names a single-row Approve that was skipped as malformed', async () => {
     H.pendingItems = [item('i1', { text: 'Lone bad row', status: 'pending' })];
     H.approveItem.mockResolvedValueOnce({

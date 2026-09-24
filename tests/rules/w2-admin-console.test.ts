@@ -20,10 +20,12 @@ import { deleteDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
 //      or a status flip is denied. This is the counter the presentational
 //      threshold hide reads (the hide itself is client-side; the rules only
 //      guarantee the counter is honest-ish under the honor system, ADR 0001).
-//   2. An Admin moderates freely — hard-hide (status), restore, delete, and
-//      (rules being unconstrained for admins) a reportCount reset that would lift
-//      an auto-hide. The console ships status hide/restore/delete; #43 owns the
-//      server-authoritative hide.
+//   2. An Admin moderates — hard-hide (status) of an active row, restore of a
+//      hidden one, delete, and a reportCount reset that would lift an auto-hide.
+//      On a Prompt those are the only admin status moves besides
+//      pending -> rejected since #1275 (approval is the approvePrompts callable;
+//      tests/rules/d15-approvals.test.ts pins the denials). The console ships
+//      status hide/restore/delete; #43 owns the server-authoritative hide.
 //   3. reportHideThreshold is admin-only, numeric config.
 //   4. Ban surface (#113): the ban now lives on the admin-writable EVENT doc as
 //      `bannedUids` (presentational event-scoped hide/mute, ADR 0004 Phase 0) —
@@ -120,7 +122,7 @@ describe('firestore.rules — moderation surface (specs/w2-admin-console.md)', (
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/i1')), { status: 'active' })); // restore
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('proofs/p1')), { status: 'hidden' }));
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('proofs/p1')), { status: 'active' }));
-    // An admin update is unconstrained: resetting reportCount below the threshold
+    // An admin reportCount write is unconstrained: resetting it below the threshold
     // lifts the Phase-0 community auto-hide. This is the rules allowance the shipped
     // Clear reports control relies on (data/admin.ts clearItemReports/clearProofReports,
     // Codex P2 PR #107 finding 3); #43 owns the server-authoritative hide.

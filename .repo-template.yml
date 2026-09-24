@@ -91,6 +91,7 @@ spec_test_map:
     - worker/src/registry/routerRegistry.integration.test.ts
   event-membership:
     - src/data/eventMembership.test.ts
+    - tests/functions/approve-prompts.test.ts
     - tests/rules/membership-mark-batch-budget.test.ts
     - tests/rules/membership-enforcement-freeze.test.ts
   # event-invitations spans the generated server authorization mirror, pure and
@@ -186,6 +187,7 @@ spec_test_map:
   # approval UI, and real reshuffle path, so map each differently-named seam.
   community-squares-quota:
     - src/game/community-squares-quota.test.ts
+    - tests/functions/approve-prompts.test.ts
     - src/data/community-prompt-targeting.test.ts
     - src/components/Admin.test.tsx
     - src/components/admin-async-feedback.test.tsx
