@@ -681,6 +681,11 @@ describe('approvePromptsCallable — HttpsError mapping', () => {
     ['an item without an id', { eventId: EVENT_ID, items: [{ pool: 'main' }] }],
     ['an item with an empty id', { eventId: EVENT_ID, items: [{ id: '' }] }],
     ['an item id with a path separator', { eventId: EVENT_ID, items: [{ id: 'items/../x' }] }],
+    ['a bare dot item id', { eventId: EVENT_ID, items: [{ id: '.' }] }],
+    ['a double-dot item id', { eventId: EVENT_ID, items: [{ id: '..' }] }],
+    ['a reserved __name__-style item id', { eventId: EVENT_ID, items: [{ id: '__name__' }] }],
+    ['an item id over 1500 UTF-8 bytes but under 1500 characters', { eventId: EVENT_ID, items: [{ id: 'é'.repeat(751) }] }],
+    ['a reserved eventId', { eventId: '__x__', items: [{ id: 'p1' }] }],
     ['a non-object item', { eventId: EVENT_ID, items: ['p1'] }],
     ['duplicate ids', { eventId: EVENT_ID, items: [{ id: 'p1' }, { id: 'p1' }] }],
   ])('invalid-argument for %s, before any read', async (_label, data) => {

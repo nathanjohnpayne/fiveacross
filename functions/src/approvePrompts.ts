@@ -53,6 +53,7 @@ import {
 } from './communityPromptRouting.generated';
 import { isActiveMembershipData, membershipPath } from './eventMembership.generated';
 import { firestoreErrorCodeForLog } from './firestoreErrors';
+import { isFirestoreDocumentId } from './firestoreIds';
 import { normalizePool } from './poolVocab';
 import { eventClosedToPlay, isEventAdmin, type AdminFirestore, type EventLike } from './unlockDay';
 
@@ -367,11 +368,10 @@ export async function approvePromptsCore(
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** A document id: a non-empty string with no path separator, so it can never
- *  escape `events/{eventId}/items/{id}`. Length is bounded the way Firestore
- *  bounds ids. */
-const isDocId = (value: unknown): value is string =>
-  typeof value === 'string' && value.length > 0 && value.length <= 1500 && !value.includes('/');
+/** A document id Firestore will accept, checked in full (`firestoreIds.ts`), so a
+ *  bad id is `invalid-argument` here rather than an `internal` from the read. It
+ *  also can never escape `events/{eventId}/items/{id}`. */
+const isDocId = isFirestoreDocumentId;
 
 /**
  * Narrow the untrusted payload to the wire contract. Reads ONLY `eventId` and
