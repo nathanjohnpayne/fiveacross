@@ -4,6 +4,7 @@ import { phCapture, phRegister, type CaptureOptions } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
 import { resolvedCanonicalHost } from './canonicalHost';
+import { matchEmailCampaign } from './emailCampaignMatch';
 
 /**
  * GA4 event catalog — the single source of truth for every analytics event
@@ -185,32 +186,26 @@ function currentPageLocation(): string {
  * `?utm_source=…&utm_medium=…&utm_campaign=…` in that order, or `''`.
  *
  * Only a tag set the app's own emails could have produced for THIS Event is
- * forwarded (`functions/src/emailCampaign.ts`): `utm_medium=email`, and either
- * `utm_source=daily-email` with `utm_campaign=<eventId>-day-<index>` or
- * `utm_source=podium-email` with `utm_campaign=<eventId>-podium`, where
- * `<eventId>` is the resolved Event's id. Values are matched against those
- * exact strings rather than a shape, so a hand-crafted link
+ * forwarded, as decided by `matchEmailCampaign()` (`src/emailCampaignMatch.ts`,
+ * the same predicate PostHog's `sanitizeUrls` applies): a hand-crafted link
  * (`utm_campaign=alice-smith-podium`, an email address, a mismatched
- * source/suffix pair, a third-party campaign) forwards nothing and no free
- * text reaches GA4. `utm_content` / `utm_term`, which the app never sets, and
- * every other key (invite codes, auth-handler params) are always dropped.
- * With no resolved Event id there is nothing to match, so the result is `''`.
+ * source/suffix pair, an out-of-range Day, a third-party campaign) forwards
+ * nothing and no free text reaches GA4. `utm_content` / `utm_term`, which the
+ * app never sets, and every other key (invite codes, auth-handler params) are
+ * always dropped. With no resolved Event id there is nothing to match, so the
+ * result is `''`.
  */
 export function campaignQuery(search: string, eventId: string | null): string {
-  if (!eventId) return '';
   const incoming = new URLSearchParams(search);
-  const source = incoming.get('utm_source');
-  const medium = incoming.get('utm_medium');
-  const campaign = incoming.get('utm_campaign');
-  if (medium !== 'email' || campaign === null) return '';
-  const dayPrefix = `${eventId}-day-`;
-  const matches =
-    (source === 'daily-email' &&
-      campaign.startsWith(dayPrefix) &&
-      /^\d{1,3}$/.test(campaign.slice(dayPrefix.length))) ||
-    (source === 'podium-email' && campaign === `${eventId}-podium`);
-  if (!matches) return '';
-  return `?${new URLSearchParams({ utm_source: source, utm_medium: medium, utm_campaign: campaign }).toString()}`;
+  const matched = matchEmailCampaign(
+    {
+      utm_source: incoming.get('utm_source'),
+      utm_medium: incoming.get('utm_medium'),
+      utm_campaign: incoming.get('utm_campaign'),
+    },
+    eventId,
+  );
+  return matched ? `?${new URLSearchParams(matched).toString()}` : '';
 }
 
 /**

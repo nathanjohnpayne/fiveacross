@@ -18,6 +18,7 @@
 import posthog, { type PostHogConfig, type CaptureResult } from 'posthog-js';
 import { probeTimeoutSignal } from './canonical-redirect';
 import { resolvedCanonicalHost } from './canonicalHost';
+import { matchEmailCampaign } from './emailCampaignMatch';
 
 /** Init options — exported so the capture policy is unit-testable. */
 export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
@@ -223,6 +224,38 @@ function scrubUrlBag(bag: Record<string, unknown> | undefined): void {
   }
 }
 
+const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+/** The prefixes posthog-js (1.434) spells its parsed campaign properties with:
+ *  the current `utm_*` super-properties (bare), the `$initial_utm_*` person
+ *  properties, and the `$session_entry_utm_*` session-entry properties. */
+const UTM_PREFIXES = ['', '$initial_', '$session_entry_'] as const;
+
+/**
+ * posthog-js parses `utm_*` off the landing URL into its own properties BEFORE
+ * `before_send` runs, so the path-only URL scrub never sees them. Apply the
+ * same `matchEmailCampaign()` gate GA4's `campaignQuery()` uses (#632): per
+ * prefix, a set that is exactly this Event's email campaign keeps its three
+ * keys; anything else (free text, an email address, another Event, a foreign
+ * campaign) is deleted, and `utm_content` / `utm_term` always are. In place.
+ */
+function scrubCampaignBag(bag: Record<string, unknown> | undefined, eventId: string | null): void {
+  if (!bag) return;
+  for (const prefix of UTM_PREFIXES) {
+    if (!UTM_KEYS.some((key) => `${prefix}${key}` in bag)) continue;
+    const matched = matchEmailCampaign(
+      {
+        utm_source: bag[`${prefix}utm_source`],
+        utm_medium: bag[`${prefix}utm_medium`],
+        utm_campaign: bag[`${prefix}utm_campaign`],
+      },
+      eventId,
+    );
+    for (const key of UTM_KEYS) {
+      if (!matched || !(key in matched)) delete bag[`${prefix}${key}`];
+    }
+  }
+}
+
 /**
  * Session-replay snapshots ($snapshot events) carry the page URL separately from
  * $current_url and drive the URL shown in the replay timeline, so scrubbing only
@@ -312,6 +345,10 @@ const CONTROLLED_DIMENSION_KEYS: readonly string[] = [
  * close. The five `CONTROLLED_DIMENSION_KEYS` always win from
  * `registeredDims` (see that constant's own doc for why — #611); any OTHER
  * registered default (none exist today) keeps the general "event wins" merge.
+ *
+ * FINALLY gates the campaign properties posthog-js parsed off the landing URL
+ * (`utm_*`, `$initial_utm_*`, `$session_entry_utm_*`) through
+ * `scrubCampaignBag` (#632): only this Event's own email campaign survives.
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
@@ -341,6 +378,10 @@ export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null 
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
   scrubUrlBag(event.$set_once);
+  const campaignEventId = typeof registeredDims.event_id === 'string' ? registeredDims.event_id : null;
+  scrubCampaignBag(event.properties, campaignEventId);
+  scrubCampaignBag(event.$set, campaignEventId);
+  scrubCampaignBag(event.$set_once, campaignEventId);
   if (event.event === '$snapshot') scrubSnapshotUrls(event.properties?.$snapshot_data);
   return event;
 }

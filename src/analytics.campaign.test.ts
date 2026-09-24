@@ -72,6 +72,13 @@ describe('campaignQuery (#632)', () => {
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-3 alice'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-alice'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-1234'), EVENT_ID)).toBe('');
+    // Outside the supported Day range (0–9, `supportedDayIndex`) or not canonical decimal.
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-10'), EVENT_ID)).toBe('');
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-999'), EVENT_ID)).toBe('');
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-03'), EVENT_ID)).toBe('');
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-9'), EVENT_ID)).toBe(
+      '?utm_source=daily-email&utm_medium=email&utm_campaign=bodega-bay-2026-day-9',
+    );
     // Identifier-shaped free text that is not THIS Event's id.
     expect(
       campaignQuery('?utm_source=podium-email&utm_medium=email&utm_campaign=alice-smith-podium', EVENT_ID),
