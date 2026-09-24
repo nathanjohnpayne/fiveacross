@@ -659,7 +659,10 @@ export interface PodiumPayload {
   champion: PodiumChampion | null;
   /** Event-wide First to BINGO across non-Tutorial Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
-  /** Each Day's pinned First to BINGO, sorted by Day index (present honors only). */
+  /** Each Day's pinned First to BINGO, sorted by Day index (present honors only).
+   *  The builder returns every present pin; the podium MOMENT can carry fewer,
+   *  because `runFinaleBeats` drops every honour pinned at or after the freeze
+   *  cutoff when the Event's `frozenPlayRecorded` is `false` (#1263). */
   dailyHonors: PodiumHonor[];
   /** Whether ANY Marks were recorded across the Event as of the freeze — the
    *  frozen answer to "did anybody play", carried rather than inferred. See
