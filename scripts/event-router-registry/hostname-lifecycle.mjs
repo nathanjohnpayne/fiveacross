@@ -93,8 +93,10 @@ const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanoni
  * and those writers validate what they write. Accepting them on `update` or
  * `repoint` made this helper a second, unvalidated writer that could redirect
  * analytics and email origin selection or mint a second canonical mapping. A
- * repoint that moves the host to another Event clears them, and their owning
- * writers re-derive them.
+ * repoint that moves the host to another Event clears them. Their owning
+ * writers are pinned to the Bodega Event, so nothing re-supplies them for
+ * another Event yet (#1274); until then readers treat the host as its own
+ * canonical origin, which is safe where a caller-supplied value was not.
  */
 const OWNER_RESTRICTED_FIELDS = new Set(['canonicalHost', 'isCanonical', 'preview']);
 

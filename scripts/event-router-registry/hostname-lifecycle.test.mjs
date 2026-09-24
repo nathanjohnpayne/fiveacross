@@ -706,7 +706,8 @@ describe('repoint', () => {
   });
 
   // The repoint clears the previous Event's `preview`, `canonicalHost` and
-  // `isCanonical`; their reviewed writers re-derive them for the new Event.
+  // `isCanonical`. Their reviewed writers are Bodega-pinned, so a validated
+  // write for another Event is still missing (#1274).
   // Taking replacements from the caller would make this intent the unvalidated
   // second writer the ordinary update refuses to be.
   it.each([
