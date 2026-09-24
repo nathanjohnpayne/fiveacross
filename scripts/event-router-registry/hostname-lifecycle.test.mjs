@@ -1109,6 +1109,24 @@ describe('the root-host replacement barrier', () => {
     expect(apex.docs.get(`hostnames/${APEX}`).root).toBe('not-found');
   });
 
+  it('refuses provisioning a root-host route under another Edition, and activating a legacy one on a mirror', async () => {
+    expect(
+      await refusal(
+        mutation({ intent: 'provision', host: MIRROR, hostname: { ...mirrorRoute, edition: 'gcb' }, pathCapabilityBarrier: BARRIER }),
+        store().dependencies,
+      ),
+    ).toBe('host-scoped-field');
+    const legacy = { ...mirrorRoute, eventId: 'replacement-2027', slug: 'replacement', edition: 'fiveacross' };
+    const seeded = store({ ...seed(), ...converged(MIRROR, '5', legacy) });
+    expect(
+      await refusal(
+        mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: edgeConverged(MIRROR, '5', legacy), ...PROOF }),
+        seeded.dependencies,
+      ),
+    ).toBe('host-scoped-field');
+    expect(seeded.docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+  });
+
   it('refuses an ordinary update that relabels a root host route with another Edition', async () => {
     expect(
       await refusal(mutation({ intent: 'update', host: MIRROR, changes: { edition: 'gcb' } }), store(converged(MIRROR, '5', mirrorRoute)).dependencies),

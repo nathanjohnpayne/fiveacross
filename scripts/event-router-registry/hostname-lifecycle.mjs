@@ -451,6 +451,19 @@ function requireHostEdition(host, changes, document) {
 }
 
 /**
+ * The same rule over a WHOLE route document, for the two writes where no
+ * earlier check can have held it: a provision, whose document is all caller
+ * input, and a brand mirror's activation, which may start from a document
+ * written before `requireHostEdition` existed. Without it a mirror route
+ * provisioned under another Edition could go live under the wrong brand.
+ */
+function requireRootRouteEdition(host, document) {
+  const rootHost = ROOT_HOSTS.get(host);
+  if (rootHost === undefined || !Object.hasOwn(document, 'eventId')) return;
+  if (document.edition !== rootHost.edition) refuse('host-scoped-field');
+}
+
+/**
  * The operator's proof that the EDGE has accepted the projection Firestore
  * holds — not merely that Firestore holds it.
  *
@@ -566,6 +579,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
     : { ...input.hostname, pathNamespace: null };
   const document = Object.hasOwn(provided, 'root') ? provided : { ...provided, status: 'disabled' };
   requireRootClass(host, document.root);
+  requireRootRouteEdition(host, document);
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso));
@@ -666,6 +680,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
     if (ROOT_HOSTS.has(host) && isNonempty(target)) await requireProvisionedLiveEvent(transaction, target);
     else await requireLiveEvent(transaction, target);
     if (mirrorActivation) {
+      requireRootRouteEdition(host, { ...state.hostname, ...changes });
       await requireReplacementProof(transaction, host, target, { ...state.hostname, ...changes }.slug, input);
     }
     // ACTIVATION IS A CONVERGENCE BARRIER TOO. "Wait for publisher acceptance
