@@ -125,9 +125,10 @@ function isBrandMirror(host) {
 /**
  * § D1: "Brand mirrors ... get no doorway at all." The derivation accepts
  * either root value on every root host, so the host-class rule is enforced
- * wherever a marker's `root` is WRITTEN — a provision and an ordinary update
- * as well as the two conversions — or an update of a mirror's `not-found`
- * marker would make it serve a doorway.
+ * wherever a marker's `root` is WRITTEN or first PUBLISHED — a provision, an
+ * ordinary update and the two repair intents as well as the two conversions —
+ * or an update of a mirror's `not-found` marker, or a repair of a partial
+ * Admin write, would make it serve a doorway.
  */
 function requireRootClass(host, root) {
   if (root === 'doorway' && isBrandMirror(host)) refuse('root-marker-ineligible');
@@ -452,10 +453,11 @@ function requireHostEdition(host, changes, document) {
 }
 
 /**
- * The same rule over a WHOLE route document, for the two writes where no
- * earlier check can have held it: a provision, whose document is all caller
- * input, and a brand mirror's activation, which may start from a document
- * written before `requireHostEdition` existed. Without it a mirror route
+ * The same rule over a WHOLE route document, for the writes where no earlier
+ * check can have held it: a provision, whose document is all caller input; a
+ * brand mirror's activation, which may start from a document written before
+ * `requireHostEdition` existed; and the two repair intents, which publish a
+ * source nothing in this helper wrote. Without it a mirror route
  * provisioned under another Edition could go live under the wrong brand.
  */
 function requireRootRouteEdition(host, document) {
@@ -1240,6 +1242,12 @@ async function planDelete(input, transaction, clock, buffer, revisions, projecti
  */
 function prepareRepairSource(input, host, hostname, clock, buffer) {
   const desired = project(() => deriveCanonicalProjection(host, hostname));
+  // The host-class rules hold on a repair too, since a repair publishes
+  // whatever source it finds: a partial Admin write can leave a brand mirror
+  // with `root: 'doorway'`, or a root-host route under another Edition, and
+  // the derivation accepts both.
+  if (desired.kind === 'root') requireRootClass(host, desired.root);
+  if (desired.kind === 'route') requireRootRouteEdition(host, hostname);
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     if ((input.pathCapabilityBarrier ?? null) === null) refuse('path-capability-barrier-required');
     project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso));

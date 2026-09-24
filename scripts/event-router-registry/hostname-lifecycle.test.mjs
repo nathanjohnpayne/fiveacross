@@ -1677,6 +1677,27 @@ describe('backfill and the explicit Admin ledger advance', () => {
     });
   });
 
+  // A repair publishes whatever source it finds, so the host-class rules hold
+  // there too: a partial Admin write must not reach the edge as a mirror
+  // doorway or a root-host route under another Edition.
+  it.each([
+    ['backfill-ledger', {}],
+    ['advance-ledger', { durableObjectHighWaterRevision: '11', incidentUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/971' }],
+  ])('refuses %s on a mirror doorway or a mis-editioned mirror route', async (intent, extra) => {
+    const sources = [
+      { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
+      hostnameDocument({ status: 'disabled', edition: 'gcb', pathNamespace: 'vacaybingo.com' }),
+    ];
+    for (const source of sources) {
+      const seeded = store({ [`hostnames/${MIRROR}`]: source });
+      const expected = Object.hasOwn(source, 'root') ? 'root-marker-ineligible' : 'host-scoped-field';
+      expect(
+        await refusal(mutation({ intent, host: MIRROR, pathCapabilityBarrier: BARRIER, ...extra }), seeded.dependencies),
+      ).toBe(expected);
+      expect(seeded.docs.has(`routerReplicas/${MIRROR}`)).toBe(false);
+    }
+  });
+
   // An Event subdomain projects `pathNamespace: null`, so a repair on one
   // needs no barrier at all: there is no capability to publish.
   it('needs no barrier to repair a source that carries no capability', async () => {
