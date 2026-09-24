@@ -35,9 +35,10 @@ import { editionBrand, editionLexicon } from '../editions';
 
 /**
  * The farewell view's podium banner (#217, daily-cards-spec § "Farewell view"):
- * the champion, the Event-wide First to BINGO, and the ten daily honors,
- * shown once the standings freeze. Mounts ABOVE the goodbye banner
- * (`TutorialBanner`'s farewell copy) — Board owns that stacking order — so the
+ * the champion, the Event-wide First to BINGO, and the ten daily honors
+ * (less any pinned at or after the freeze when the freeze recorded
+ * `frozenPlayRecorded: false`, #1263), shown once the standings freeze.
+ * Mounts ABOVE the goodbye banner (`TutorialBanner`'s farewell copy) — Board owns that stacking order — so the
  * ceremony reads podium-then-goodbye. `d15-tutorial-banners` owns the goodbye
  * copy; this component owns only the podium.
  *

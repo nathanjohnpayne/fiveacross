@@ -56,7 +56,9 @@ export interface Podium {
    *  qualifies, and `null` when its holder is currently banned. */
   firstBingo: PodiumFirstBingo | null;
   /** Each Day's pinned First to BINGO, sorted by Day index (present honors
-   *  only), with a currently-banned holder's Day withheld. */
+   *  only), with a currently-banned holder's Day withheld, and, beside a frozen
+   *  `frozenPlayRecorded: false`, every honour pinned at or after `freezeAt`
+   *  dropped (#1263, `frozenEmptyHonourFilter`). */
   dailyHonors: DayHonor[];
   /**
    * The top `PODIUM_STANDING_ROWS` POSITIONS, numbered 1..n over the rows a

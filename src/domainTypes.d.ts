@@ -1260,6 +1260,9 @@ export interface LastCallMomentPayload {
 export interface PodiumMomentPayload {
   champion: { uid: string; displayName: string; bingoCount: number; squaresMarked: number } | null;
   firstBingo: { uid: string; displayName: string; at: number } | null;
+  // Every present Day pin, except that a Moment posted beside a frozen
+  // `frozenPlayRecorded: false` omits each honour pinned at or after the freeze
+  // cutoff (`runFinaleBeats`, #1263).
   dailyHonors: { dayIndex: number; uid: string; displayName: string; at: number }[];
   /**
    * Whether ANY Marks were recorded across the Event as of the freeze — Marks on
