@@ -179,7 +179,7 @@ describe("callable invoker families (#1277)", () => {
         "export const assigned = grouped;",
         "import { onRequest } from 'firebase-functions/v2/https';",
         "import { unlockDayNow } from './admin';",
-        "export const objectGroup = { unlockDayNow, renamed: unlockDayNow, inline: onRequest((req, res) => res.end()), other: 1 };",
+        "export const objectGroup = { unlockDayNow, renamed: unlockDayNow, inline: onRequest((req, res) => res.end()), other: 1, nested: { deeper: { unlockDayNow } } };",
       ].join("\n"),
       "admin.ts": [
         "import { onCall } from 'firebase-functions/v2/https';",
@@ -193,6 +193,7 @@ describe("callable invoker families (#1277)", () => {
       "assigned-unlockDayNow",
       "grouped-unlockDayNow",
       "objectGroup-inline",
+      "objectGroup-nested-deeper-unlockDayNow",
       "objectGroup-renamed",
       "objectGroup-unlockDayNow",
     ]);

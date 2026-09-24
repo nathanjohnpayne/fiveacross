@@ -108,7 +108,8 @@ function topLevelBindings(source) {
 }
 
 // The member names of an object-literal Functions group whose values are
-// HTTPS functions: `{ endpoint }`, `{ name: endpoint }` or `{ name: onCall(...) }`.
+// HTTPS functions: `{ endpoint }`, `{ name: endpoint }`, `{ name: onCall(...) }`,
+// and nested groups, which Firebase names `outer-inner-endpoint`.
 function groupMembers(object, localBuilders, localHttps) {
   const members = [];
   for (const property of object.properties) {
@@ -116,6 +117,10 @@ function groupMembers(object, localBuilders, localHttps) {
       if (localHttps.has(property.name.text)) members.push(property.name.text);
     } else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
       const value = property.initializer;
+      if (ts.isObjectLiteralExpression(value)) {
+        for (const inner of groupMembers(value, localBuilders, localHttps)) members.push(`${property.name.text}-${inner}`);
+        continue;
+      }
       const https = ts.isIdentifier(value) ? localHttps.has(value.text) : !isFunctionNode(value) && callsHttpsBuilder(value, localBuilders);
       if (https) members.push(property.name.text);
     }
