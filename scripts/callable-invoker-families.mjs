@@ -107,6 +107,22 @@ function topLevelBindings(source) {
   return bindings;
 }
 
+// The member names of an object-literal Functions group whose values are
+// HTTPS functions: `{ endpoint }`, `{ name: endpoint }` or `{ name: onCall(...) }`.
+function groupMembers(object, localBuilders, localHttps) {
+  const members = [];
+  for (const property of object.properties) {
+    if (ts.isShorthandPropertyAssignment(property)) {
+      if (localHttps.has(property.name.text)) members.push(property.name.text);
+    } else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+      const value = property.initializer;
+      const https = ts.isIdentifier(value) ? localHttps.has(value.text) : !isFunctionNode(value) && callsHttpsBuilder(value, localBuilders);
+      if (https) members.push(property.name.text);
+    }
+  }
+  return members;
+}
+
 const EMPTY = Object.freeze({ https: new Set(), factories: new Set() });
 
 // One pass over `file`. `results` persists across passes and its sets only
@@ -183,6 +199,12 @@ function analyzeModule(file, results, visited) {
       } else if (ts.isIdentifier(init)) {
         if (localBuilders.has(init.text)) kind = "builder";
         else if (localHttps.has(init.text)) kind = "https";
+      } else if (ts.isObjectLiteralExpression(init)) {
+        // `export const admin = { endpoint }` deploys a Firebase group whose
+        // members are named `admin-endpoint`.
+        if (exported) {
+          for (const member of groupMembers(init, localBuilders, localHttps)) analysis.https.add(`${name}-${member}`);
+        }
       } else if (callsHttpsBuilder(init, localBuilders)) {
         kind = "https";
       }

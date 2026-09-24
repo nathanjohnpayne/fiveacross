@@ -176,6 +176,9 @@ describe("callable invoker families (#1277)", () => {
         "import * as grouped from './admin';",
         "export * as admin from './admin';",
         "export { grouped };",
+        "import { onRequest } from 'firebase-functions/v2/https';",
+        "import { unlockDayNow } from './admin';",
+        "export const objectGroup = { unlockDayNow, renamed: unlockDayNow, inline: onRequest((req, res) => res.end()), other: 1 };",
       ].join("\n"),
       "admin.ts": [
         "import { onCall } from 'firebase-functions/v2/https';",
@@ -187,6 +190,9 @@ describe("callable invoker families (#1277)", () => {
     expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
       "admin-unlockDayNow",
       "grouped-unlockDayNow",
+      "objectGroup-inline",
+      "objectGroup-renamed",
+      "objectGroup-unlockDayNow",
     ]);
   });
 

@@ -620,9 +620,15 @@ run_postdeploy_admin_callables_invoker() {
   esac
 }
 
-# The by-hand repair flags for the admin callables, from the same strict set:
-# a service outside it may still be absent, a service inside it must exist.
+# The by-hand repair flags for the admin callables, from the same scope the
+# automatic run uses: a conservative selection tolerates both services, and
+# otherwise a service outside the strict set may still be absent while a
+# service inside it must exist.
 admin_callables_repair_flags() {
+  if [[ "$ADMIN_CALLABLES_INVOKER_CONSERVATIVE" == "true" ]]; then
+    printf '%s' " --allow-missing"
+    return
+  fi
   case "$ADMIN_CALLABLES_STRICT_SERVICES" in
     unlock) printf '%s' " --allow-missing-service approve" ;;
     approve) printf '%s' " --allow-missing-service unlock" ;;

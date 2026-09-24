@@ -125,7 +125,7 @@ Both projects enforce Domain Restricted Sharing, which rejects the `allUsers` in
 
 A multi-service family derives its strict set from what the Functions index exports and what an exact `--only functions:<name>` scope names: a selected service that is missing after publish fails the deploy, while an unexported or unselected peer (such as `approveprompts` before #1275 deploys) is tolerated. A Functions deploy whose index exports an HTTPS function that is in no family, and not listed with a reason in `PRIVATE_HTTPS_EXPORTS`, fails classification naming the export before anything is built or published. Register a new callable in a family (and that family's wrapper and `deploy.sh` wiring) in the same change that exports it.
 
-The healthy probe for any reconciled callable is an unauthenticated POST that reaches the function and answers its own `401` UNAUTHENTICATED JSON. An HTML `403` ("Your client does not have permission") means the request never reached the function: rerun the family wrapper with the project pinned.
+The healthy probe for a reconciled `onCall` callable is an unauthenticated POST that reaches the function and answers its own `401` UNAUTHENTICATED JSON. An `onRequest` endpoint answers with its own application response instead: `emailUnsubscribe` without a query capability returns `400 text/html`, which is healthy (see the synthetic contract in `docs/app/phase-1-deploy.md`). For either kind, Google's HTML `403` ("Your client does not have permission") means the request never reached the function: rerun the family wrapper with the project pinned.
 
 ```bash
 PROJECT=fiveacross   # or gaycruisebingo
