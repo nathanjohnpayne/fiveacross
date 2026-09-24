@@ -471,6 +471,40 @@ describe('operator recovery evidence controller', () => {
     }
   });
 
+  // The worker's strict `parseSyncRequest` refuses a rolled-over date, so an
+  // attestation signed over one would be unusable evidence; and `Date.parse`
+  // accepts it by rolling February 30 into March.
+  it.each([
+    ['a rolled-over calendar date', '2026-02-30T12:00:00Z'],
+    ['an offsetless local time', '2026-08-19T12:00:00'],
+  ])('refuses a ledger updatedAt that is %s before obtaining attestor credentials', async (_why, updatedAt) => {
+    const deps = dependencies({
+      readSourceTransaction: vi.fn(async () => sourceReceipt({ routerReplica: { ...ledgerDocument, updatedAt } })),
+    });
+    await expect(buildRecoveryArtifacts(recoveryInput(), deps)).rejects.toMatchObject({
+      name: 'RecoveryControllerRefusal',
+      code: 'malformed-ledger',
+    });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  // One ledger, one digest: an equivalent offset spelling of the same instant
+  // is signed and digested as the canonical `toISOString()` text.
+  it('digests and signs the canonical updatedAt whatever spelling the receipt carried', async () => {
+    const canonical = await buildRecoveryArtifacts(recoveryInput(), dependencies());
+    const offset = await buildRecoveryArtifacts(
+      recoveryInput(),
+      dependencies({
+        readSourceTransaction: vi.fn(async () =>
+          sourceReceipt({ routerReplica: { ...ledgerDocument, updatedAt: '2026-08-19T14:00:00+02:00' } }),
+        ),
+      }),
+    );
+    expect(offset.request.sourceAudit.ledgerDocumentDigest).toBe(canonical.request.sourceAudit.ledgerDocumentDigest);
+    expect(offset.request.sourceAudit.ledgerPayload.updatedAt).toBe(READ_AT);
+    expect(offset.signatureInputs.sourceAudit).toBe(canonical.signatureInputs.sourceAudit);
+  });
+
   it('derives synthetic root and tombstone projections only from the raw authoritative hostname result', async () => {
     const rootHost = 'r2-root-abcdefghijklmnopqrst.fiveacross.app';
     const rootDesired = {
