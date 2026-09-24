@@ -107,22 +107,56 @@ function topLevelBindings(source) {
   return bindings;
 }
 
+// Strip type-only and grouping wrappers: `(x)`, `x as T`, `<T>x`, `x!`,
+// `x satisfies T` all evaluate to `x`.
+function unwrap(node) {
+  while (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isNonNullExpression(node) ||
+    (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node))
+  ) {
+    node = node.expression;
+  }
+  return node;
+}
+
+// What a (non-function, non-object) value is: "builder" when calling it builds
+// an HTTPS function, "https" when it is one, else null. `scope` carries the
+// module's builders, endpoints and local namespace imports.
+function valueKind(node, scope) {
+  const value = unwrap(node);
+  if (ts.isIdentifier(value)) {
+    if (scope.builders.has(value.text)) return "builder";
+    if (scope.https.has(value.text)) return "https";
+    return null;
+  }
+  // `admin.unlockDayNow` of `import * as admin from './admin'`.
+  if (ts.isPropertyAccessExpression(value) && ts.isIdentifier(value.expression) && scope.namespaces.has(value.expression.text)) {
+    const upstream = scope.namespaces.get(value.expression.text);
+    if (upstream.factories.has(value.name.text)) return "builder";
+    if (upstream.https.has(value.name.text)) return "https";
+  }
+  return callsHttpsBuilder(value, scope.builders) ? "https" : null;
+}
+
 // The member names of an object-literal Functions group whose values are
 // HTTPS functions: `{ endpoint }`, `{ name: endpoint }`, `{ name: onCall(...) }`,
-// and nested groups, which Firebase names `outer-inner-endpoint`.
-function groupMembers(object, localBuilders, localHttps) {
+// `{ name: admin.endpoint }`, and nested groups, which Firebase names
+// `outer-inner-endpoint`.
+function groupMembers(object, scope) {
   const members = [];
   for (const property of object.properties) {
     if (ts.isShorthandPropertyAssignment(property)) {
-      if (localHttps.has(property.name.text)) members.push(property.name.text);
+      if (scope.https.has(property.name.text)) members.push(property.name.text);
     } else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
-      const value = property.initializer;
+      const value = unwrap(property.initializer);
       if (ts.isObjectLiteralExpression(value)) {
-        for (const inner of groupMembers(value, localBuilders, localHttps)) members.push(`${property.name.text}-${inner}`);
+        for (const inner of groupMembers(value, scope)) members.push(`${property.name.text}-${inner}`);
         continue;
       }
-      const https = ts.isIdentifier(value) ? localHttps.has(value.text) : !isFunctionNode(value) && callsHttpsBuilder(value, localBuilders);
-      if (https) members.push(property.name.text);
+      if (!isFunctionNode(value) && valueKind(value, scope) === "https") members.push(property.name.text);
     }
   }
   return members;
@@ -187,6 +221,7 @@ function analyzeModule(file, results, visited) {
       }
     }
   }
+  const scope = { builders: localBuilders, https: localHttps, namespaces: namespaceImports };
   const declared = topLevelBindings(source);
   // `export default <expression>` is an exported binding named `default`.
   for (const statement of source.statements) {
@@ -196,26 +231,25 @@ function analyzeModule(file, results, visited) {
   }
   for (let changed = true; changed; ) {
     changed = false;
-    for (const { name, init, exported } of declared) {
+    for (const { name, init: rawInit, exported } of declared) {
       if (localBuilders.has(name) || localHttps.has(name)) continue;
+      const init = unwrap(rawInit);
       let kind = null;
       if (isFunctionNode(init)) {
         if (init.body && callsHttpsBuilder(init.body, localBuilders)) kind = "builder";
-      } else if (ts.isIdentifier(init)) {
-        if (localBuilders.has(init.text)) kind = "builder";
-        else if (localHttps.has(init.text)) kind = "https";
-        else if (exported && namespaceImports.has(init.text)) {
-          // `export const admin = grouped` of `import * as grouped` is a group.
+      } else if (ts.isIdentifier(init) && namespaceImports.has(init.text)) {
+        // `export const admin = grouped` of `import * as grouped` is a group.
+        if (exported) {
           for (const member of namespaceImports.get(init.text).https) analysis.https.add(`${name}-${member}`);
         }
       } else if (ts.isObjectLiteralExpression(init)) {
         // `export const admin = { endpoint }` deploys a Firebase group whose
         // members are named `admin-endpoint`.
         if (exported) {
-          for (const member of groupMembers(init, localBuilders, localHttps)) analysis.https.add(`${name}-${member}`);
+          for (const member of groupMembers(init, scope)) analysis.https.add(`${name}-${member}`);
         }
-      } else if (callsHttpsBuilder(init, localBuilders)) {
-        kind = "https";
+      } else {
+        kind = valueKind(init, scope);
       }
       if (!kind) continue;
       (kind === "builder" ? localBuilders : localHttps).add(name);
