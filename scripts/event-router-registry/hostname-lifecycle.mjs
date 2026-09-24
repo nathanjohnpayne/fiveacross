@@ -101,12 +101,34 @@ const NON_PROJECTED_FIELDS = new Set(['adultContent', 'canonicalHost', 'isCanoni
 const OWNER_RESTRICTED_FIELDS = new Set(['canonicalHost', 'isCanonical', 'preview']);
 
 /**
- * The fields only a route document may carry, which the archive's mirror-root
- * conversion therefore removes. `apexPath` belongs here rather than with the
+ * The fields only a route document may carry, which `toRootMarker` therefore
+ * removes. `apexPath` belongs here rather than with the
  * non-projected fields above because it is per-Event, and the converted
  * document names no Event.
  */
 const ROUTE_ONLY_FIELDS = ['eventId', 'status', 'slug', 'apexPath'];
+
+/**
+ * The route → root-marker document, shared by the archive's mirror-root
+ * conversion and by `convert-to-root`, the two writes that turn a route into a
+ * marker. A root marker may not carry the route fields and a Firestore
+ * `update` has no way to drop them, so the whole document is replaced, and the
+ * replacement is built by REMOVING exactly the route fields from the stored
+ * document. `adultContent`, `preview`, `canonicalHost`, `isCanonical` and
+ * anything else the host carries therefore survive — those fields have their
+ * own reviewed writers (`specs/hostnames-lookup.md` § Who writes a hostname
+ * document) and neither conversion is one of them. `apexPath` goes with the
+ * route fields: it is a per-Event apex-path opt-in and the marker names no
+ * Event.
+ */
+function toRootMarker(hostname, rootHost, root) {
+  const document = { ...hostname };
+  for (const field of ROUTE_ONLY_FIELDS) delete document[field];
+  document.root = root;
+  document.edition = rootHost.edition;
+  document.pathNamespace = rootHost.pathNamespace;
+  return document;
+}
 
 /**
  * The fields that describe THE EVENT rather than the host, and are therefore
@@ -803,22 +825,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     // The marker retains the host's path capability and its Edition and keeps
     // no Event field at all, so `/` is not-found while `/<slug>` can still
     // resolve other mirrored Events.
-    //
-    // This is the one write in the helper that replaces a whole hostname
-    // document rather than patching it, because a root marker may not carry
-    // the route fields and `update` has no way to drop them. Replacement is
-    // therefore built by REMOVING exactly the route fields from the stored
-    // document, so `adultContent`, `preview`, `canonicalHost`, `isCanonical`
-    // and anything else the host carries survive the conversion — those fields
-    // have their own reviewed writers (`specs/hostnames-lookup.md` § Who
-    // writes a hostname document) and the archive transaction is not one of
-    // them. `apexPath` goes with the route fields: it is a per-Event apex-path
-    // opt-in and this document no longer names an Event.
-    const document = { ...state.hostname };
-    for (const field of ROUTE_ONLY_FIELDS) delete document[field];
-    document.root = root;
-    document.edition = rootHost.edition;
-    document.pathNamespace = rootHost.pathNamespace;
+    const document = toRootMarker(state.hostname, rootHost, root);
     const desired = project(() => deriveCanonicalProjection(host, document));
     buffer.set(`hostnames/${host}`, document);
     ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
