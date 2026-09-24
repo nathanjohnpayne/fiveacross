@@ -1,26 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import {
+  disposeCandidates,
+  formatAuditReport,
+  formatEpochMs,
   isPendingHiddenCandidate,
   parseAuditArgs,
   planPendingHiddenAudit,
   runPendingHiddenAudit,
 } from './audit-pending-hidden-items.mjs';
 
-// The pre-deploy audit for rows hidden while pending (#1275, ADR 0015). Pure
-// core first, then the runner over a small in-memory Firestore double.
+// The pre-deploy audit for rows that may have been hidden while pending (#1275,
+// ADR 0015). Pure core first, then the runner over a small in-memory Firestore
+// double.
 
 const ADMIN = 'admin-1';
 const PLAYER = 'player-1';
 
 describe('isPendingHiddenCandidate', () => {
-  it('lists a hidden player row that was never approved', () => {
+  it('lists a hidden player row', () => {
     expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: PLAYER }, [ADMIN])).toBe(true);
   });
 
-  it('skips a row that carries approval provenance, a seeded row, and an Admin-authored row', () => {
-    expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: PLAYER, approvedAt: 5 }, [ADMIN])).toBe(false);
+  it('never trusts approvedAt or approvedBy as provenance — a submitter could have forged them', () => {
+    expect(
+      isPendingHiddenCandidate({ status: 'hidden', createdBy: PLAYER, approvedAt: 5, approvedBy: ADMIN }, [ADMIN]),
+    ).toBe(true);
+  });
+
+  it('skips a seeded row and a row authored by a current Admin', () => {
     expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: 'seed' }, [ADMIN])).toBe(false);
     expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: ADMIN }, [ADMIN])).toBe(false);
+  });
+
+  it('lists a row by a FORMER Admin, for the operator to accept rather than requeue by default', () => {
+    expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: 'former-admin' }, [ADMIN])).toBe(true);
   });
 
   it('only ever lists hidden rows', () => {
@@ -29,41 +42,69 @@ describe('isPendingHiddenCandidate', () => {
     }
   });
 
-  it('fails toward listing when provenance or the roster is malformed', () => {
-    expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: PLAYER, approvedAt: 'yesterday' }, [ADMIN])).toBe(true);
-    expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: PLAYER, approvedAt: Number.NaN }, [ADMIN])).toBe(true);
+  it('fails toward listing when the roster or the author is malformed', () => {
     expect(isPendingHiddenCandidate({ status: 'hidden', createdBy: ADMIN }, 'admin-1')).toBe(true);
     expect(isPendingHiddenCandidate({ status: 'hidden' }, [ADMIN])).toBe(true);
     expect(isPendingHiddenCandidate(null, [ADMIN])).toBe(false);
   });
 });
 
-describe('planPendingHiddenAudit', () => {
-  it('collects candidates across Events in a stable order', () => {
+describe('formatEpochMs and the report', () => {
+  it('never throws on a raw timestamp Date cannot represent', () => {
+    expect(formatEpochMs(0)).toBe('1970-01-01T00:00:00.000Z');
+    expect(formatEpochMs(9e15)).toBe('(invalid 9000000000000000)');
+    expect(formatEpochMs(Number.NaN)).toBe('(none)');
+    expect(formatEpochMs('yesterday')).toBe('(none)');
+    expect(formatEpochMs(undefined)).toBe('(none)');
+  });
+
+  it('renders a row whose createdAt and approvedAt are out of range', () => {
     const plan = planPendingHiddenAudit([
-      {
-        eventId: 'b',
-        admins: [ADMIN],
-        items: [
-          { id: 'z', data: { status: 'hidden', createdBy: PLAYER, text: 'late' } },
-          { id: 'a', data: { status: 'hidden', createdBy: PLAYER, createdAt: 0, text: 'early' } },
-        ],
-      },
-      { eventId: 'a', admins: [ADMIN], items: [{ id: 'm', data: { status: 'hidden', createdBy: ADMIN } }] },
+      { eventId: 'e', admins: [], items: [{ id: 'x', data: { status: 'hidden', createdBy: PLAYER, createdAt: 9e15, approvedAt: -9e15 } }] },
     ]);
+    expect(() => formatAuditReport(plan.candidates)).not.toThrow();
+    expect(formatAuditReport(plan.candidates)).toContain('createdAt=(invalid 9000000000000000)');
+  });
+});
+
+describe('planPendingHiddenAudit and disposeCandidates', () => {
+  const plan = planPendingHiddenAudit([
+    {
+      eventId: 'b',
+      admins: [ADMIN],
+      items: [
+        { id: 'z', data: { status: 'hidden', createdBy: PLAYER, text: 'late' } },
+        { id: 'a', data: { status: 'hidden', createdBy: PLAYER, createdAt: 0, text: 'early' } },
+      ],
+    },
+    { eventId: 'a', admins: [ADMIN], items: [{ id: 'm', data: { status: 'hidden', createdBy: ADMIN } }] },
+  ]);
+
+  it('collects candidates across Events in a stable order', () => {
     expect(plan.candidates.map((c) => `${c.eventId}/${c.itemId}`)).toEqual(['b/a', 'b/z']);
     expect(plan.candidates[0]).toMatchObject({ createdBy: PLAYER, createdAt: 0, text: 'early' });
+  });
+
+  it('splits by decision, and reports an accept that names no listed row', () => {
+    const split = disposeCandidates(plan, new Set(['b/a', 'b/typo']));
+    expect(split.accepted.map((c) => c.itemId)).toEqual(['a']);
+    expect(split.undecided.map((c) => c.itemId)).toEqual(['z']);
+    expect(split.unknown).toEqual(['b/typo']);
   });
 });
 
 describe('parseAuditArgs', () => {
-  it('requires exactly one known target and accepts only --requeue', () => {
-    expect(parseAuditArgs(['fiveacross'])).toEqual({ target: 'fiveacross', projectId: 'fiveacross', requeue: false });
-    expect(parseAuditArgs(['gaycruisebingo', '--requeue'])).toMatchObject({ projectId: 'gaycruisebingo', requeue: true });
+  it('requires exactly one known target and accepts only --accept <event>/<item> and --requeue', () => {
+    expect(parseAuditArgs(['fiveacross'])).toMatchObject({ target: 'fiveacross', projectId: 'fiveacross', requeue: false });
+    const parsed = parseAuditArgs(['gaycruisebingo', '--accept', 'e/i', '--accept', 'e/j', '--requeue']);
+    expect(parsed).toMatchObject({ projectId: 'gaycruisebingo', requeue: true });
+    expect([...parsed.accepted]).toEqual(['e/i', 'e/j']);
     expect(() => parseAuditArgs([])).toThrow(/explicit target/);
     expect(() => parseAuditArgs(['staging'])).toThrow(/explicit target/);
     expect(() => parseAuditArgs(['fiveacross', 'gaycruisebingo'])).toThrow(/exactly one target/);
     expect(() => parseAuditArgs(['fiveacross', '--apply'])).toThrow(/unknown argument/);
+    expect(() => parseAuditArgs(['fiveacross', '--accept'])).toThrow(/--accept takes/);
+    expect(() => parseAuditArgs(['fiveacross', '--accept', 'just-an-item'])).toThrow(/--accept takes/);
   });
 });
 
@@ -112,41 +153,56 @@ describe('runPendingHiddenAudit', () => {
   const seedDocs = () => ({
     'events/e1': { admins: [ADMIN] },
     'events/e1/items/never': { status: 'hidden', createdBy: PLAYER, text: 'never approved' },
-    'events/e1/items/approved': { status: 'hidden', createdBy: PLAYER, approvedAt: 1 },
+    'events/e1/items/forged': { status: 'hidden', createdBy: PLAYER, approvedAt: 1 },
     'events/e1/items/seeded': { status: 'hidden', createdBy: 'seed' },
+    'events/e1/items/organiser': { status: 'hidden', createdBy: ADMIN },
     'events/e1/items/live': { status: 'active', createdBy: PLAYER },
   });
 
-  it('dry run lists the never-approved hidden row and writes nothing', async () => {
+  it('a read-only run lists every undecided row, writes nothing, and is not clean', async () => {
     const db = fakeDb(seedDocs());
-    const { plan, requeued } = await runPendingHiddenAudit(db, { log: quiet });
-    expect(plan.candidates.map((c) => c.itemId)).toEqual(['never']);
-    expect(requeued).toEqual([]);
+    const result = await runPendingHiddenAudit(db, { log: quiet });
+    expect(result.plan.candidates.map((c) => c.itemId)).toEqual(['forged', 'never']);
+    expect(result.clean).toBe(false);
     expect(db.writes).toEqual([]);
   });
 
-  it('--requeue moves exactly that row to pending and changes nothing else on it', async () => {
+  it('is clean without writing once every listed row is accepted', async () => {
     const db = fakeDb(seedDocs());
-    const { requeued, skipped } = await runPendingHiddenAudit(db, { requeue: true, log: quiet });
-    expect(requeued.map((c) => c.itemId)).toEqual(['never']);
-    expect(skipped).toEqual([]);
+    const result = await runPendingHiddenAudit(db, { accepted: new Set(['e1/forged', 'e1/never']), log: quiet });
+    expect(result.clean).toBe(true);
+    expect(db.writes).toEqual([]);
+  });
+
+  it('refuses an accept that names a row the scan does not list, changing nothing', async () => {
+    const db = fakeDb(seedDocs());
+    await expect(
+      runPendingHiddenAudit(db, { requeue: true, accepted: new Set(['e1/organiser']), log: quiet }),
+    ).rejects.toThrow(/does not list: e1\/organiser/);
+    expect(db.writes).toEqual([]);
+  });
+
+  it('--requeue moves exactly the undecided rows to pending, touching nothing else, and ends clean', async () => {
+    const db = fakeDb(seedDocs());
+    const result = await runPendingHiddenAudit(db, { requeue: true, accepted: new Set(['e1/forged']), log: quiet });
+    expect(result.requeued.map((c) => c.itemId)).toEqual(['never']);
     expect(db.writes).toEqual([{ path: 'events/e1/items/never', data: { status: 'pending' } }]);
     expect(db.read('events/e1/items/never')).toEqual({ status: 'pending', createdBy: PLAYER, text: 'never approved' });
-    const again = await runPendingHiddenAudit(db, { log: quiet });
-    expect(again.plan.candidates).toEqual([]);
+    expect(db.read('events/e1/items/forged').status).toBe('hidden');
+    expect(result.clean).toBe(true);
   });
 
   it('skips a row that stopped qualifying between the scan and its transaction', async () => {
     const db = fakeDb(seedDocs());
     const original = db.runTransaction;
     db.runTransaction = async (fn) => {
-      // An Admin was added to the roster after the scan.
+      // The author was added to the roster after the scan.
       db.read('events/e1').admins = [ADMIN, PLAYER];
       return original(fn);
     };
-    const { requeued, skipped } = await runPendingHiddenAudit(db, { requeue: true, log: quiet });
-    expect(requeued).toEqual([]);
-    expect(skipped.map((c) => c.itemId)).toEqual(['never']);
+    const result = await runPendingHiddenAudit(db, { requeue: true, log: quiet });
+    expect(result.requeued).toEqual([]);
+    expect(result.skipped.map((c) => c.itemId)).toEqual(['forged', 'never']);
     expect(db.writes).toEqual([]);
   });
 });
