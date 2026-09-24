@@ -490,9 +490,10 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     });
   });
 
-  // #1251: both conversion directions against a real transaction. Each moves a
-  // host only between non-serving states in one revision, and going live is
-  // the ordinary convergence-barriered activation afterwards.
+  // #1251: both conversion directions against a real transaction, one revision
+  // each. A mirror's going live is the convergence-barriered activation
+  // afterwards, which re-proves the replacement home; the doorway conversion
+  // is itself the apex's go-live step and carries the deployment barrier.
   it('converts a not-found mirror marker to a replacement flagship proved live at its own host, then activates it separately', async () => {
     await trusted(async (db) => {
       const REPLACEMENT = 'replacement.vacaybingo.com';
@@ -505,12 +506,13 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         canonicalHost: HOST,
         isCanonical: false,
       });
-      await seedConverged(db, REPLACEMENT, { eventId: 'replacement-2027', edition: 'vacay', status: 'active', slug: 'replacement', pathNamespace: null });
+      const flagship = await seedConverged(db, REPLACEMENT, { eventId: 'replacement-2027', edition: 'vacay', status: 'active', slug: 'replacement', pathNamespace: null });
+      const proof = { replacementHost: REPLACEMENT, replacementConverged: { revision: '1', digest: committedDigest(flagship) } };
       const convert = mutation({
         intent: 'convert-to-route',
         host: MIRROR,
         eventId: 'replacement-2027',
-        replacementHost: REPLACEMENT,
+        ...proof,
         converged: { revision: '1', digest: committedDigest(seeded) },
       });
       expect(await refusalCode(() => applyHostnameMutation(convert, dependencies(db)))).toBe('replacement-event-missing');
@@ -529,7 +531,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '2', desired: { kind: 'route', status: 'disabled' } });
 
       await applyHostnameMutation(
-        mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: { revision: '2', digest: committedDigest(converted) } }),
+        mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: { revision: '2', digest: committedDigest(converted) }, ...proof }),
         dependencies(db),
       );
       expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '3', desired: { kind: 'route', status: 'active' } });
@@ -541,7 +543,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       const seeded = await seedConverged(db, APEX, hostnameDocument({ edition: 'vacay', pathNamespace: 'vacaybingo.com' }));
       await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
       const toDoorway = (revision: string, plan: Doc) =>
-        mutation({ intent: 'convert-to-root', host: APEX, root: 'doorway', converged: { revision, digest: committedDigest(plan) } });
+        mutation({ intent: 'convert-to-root', host: APEX, root: 'doorway', converged: { revision, digest: committedDigest(plan) }, pathCapabilityBarrier: BARRIER });
       expect(await refusalCode(() => applyHostnameMutation(toDoorway('1', seeded), dependencies(db)))).toBe('convert-requires-inactive');
       expect(await read(db, `hostnames/${APEX}`)).toMatchObject({ status: 'active', eventId: EVENT_ID });
 
@@ -577,8 +579,8 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       const mirror = await seedConverged(db, MIRROR, hostnameDocument({ edition: 'vacay', status: 'disabled', pathNamespace: 'vacaybingo.com' }));
       await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
       const cases: Array<[string, Doc, Doc, string]> = [
-        [APEX, doorway, { intent: 'convert-to-route', eventId: EVENT_ID, replacementHost: HOST }, 'convert-to-route-requires-mirror'],
-        ['gaycruisebingo.com', gcb, { intent: 'convert-to-root', root: 'doorway' }, 'root-conversion-requires-archive'],
+        [APEX, doorway, { intent: 'convert-to-route', eventId: EVENT_ID, replacementHost: HOST, replacementConverged: { revision: '1', digest: committedDigest(doorway) } }, 'convert-to-route-requires-mirror'],
+        ['gaycruisebingo.com', gcb, { intent: 'convert-to-root', root: 'doorway', pathCapabilityBarrier: BARRIER }, 'root-conversion-requires-archive'],
         [MIRROR, mirror, { intent: 'convert-to-root', root: 'not-found' }, 'root-conversion-flagship-live'],
       ];
       for (const [host, plan, input, expected] of cases) {
