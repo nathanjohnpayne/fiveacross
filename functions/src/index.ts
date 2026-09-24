@@ -5,11 +5,12 @@ import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
-import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { APPROVE_PROMPTS_APP_CHECK, AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { approvePromptsCallable } from './approvePrompts';
 import {
   markAdminAlertsUnsettled,
   recordAdminAlerts,
@@ -1113,6 +1114,42 @@ export const unlockDayNow = onCall(
     throw err;
   }
 });
+
+/**
+ * Server-side Community Prompt approval (#1275, #813, ADR 0015,
+ * specs/community-prompt-targeting.md § "The clock routing trusts"). The ONLY
+ * path that moves a pending player submission to `active`: `firestore.rules`
+ * deny the client flip, an Admin's included, so routing and the
+ * `approvedAt`/`retainedAt` stamps derive from the SERVER clock, and the
+ * transaction fences the scheduler's snapshot through the Event doc
+ * (`approvalSeq`) so the #813 phantom ordering forces a retry instead of a
+ * misreported Day. Auth, App Check (`APPROVE_PROMPTS_APP_CHECK`, off by
+ * default like the other callables), payload validation, the admin check and
+ * every HttpsError mapping live in `approvePrompts.ts`; this is the seam.
+ *
+ * `timeoutSeconds: 60` rather than 30 because a bulk approve holds N+1
+ * document locks for one transaction and contends with every other Event-doc
+ * writer. Pins `ADMIN_SDK_SERVICE_ACCOUNT` like every Admin-SDK callable.
+ *
+ * DEPLOYING IT THE FIRST TIME IS TWO PASSES (ADR 0015 § Consequences). On
+ * CREATE firebase-tools grants `allUsers` the Cloud Run invoker role, which the
+ * org's Domain Restricted Sharing policy rejects, so the functions step reports
+ * a failure and the release chain never reaches hosting. Run a functions-only
+ * deploy first (rules and hosting untouched, every client still approves
+ * through its own transaction), let `scripts/deploy.sh` reconcile the invoker,
+ * then run the full deploy: on UPDATE the invoker is left alone and rules,
+ * functions and hosting ship together.
+ */
+export const approvePrompts = onCall(
+  { maxInstances: 10, timeoutSeconds: 60, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (request) =>
+    approvePromptsCallable(request, APPROVE_PROMPTS_APP_CHECK.value(), {
+      db: db as unknown as AdminFirestore,
+      now: Date.now,
+      deleteField: () => FieldValue.delete(),
+      logger: console,
+    }),
+);
 
 // --- Daily themed engagement email (#616) ---------------------------------------
 // Thin trigger seams only; the sweep, the content, the template and the consent
