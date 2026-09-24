@@ -36,8 +36,14 @@
 // FAIL-CLOSED. The run exits 0 only when every row a fresh scan lists is
 // accepted, so a deploy checklist step that runs it stops until each row has a
 // decision. An `--accept` naming a row the scan does not list is refused, so a
-// typo cannot pass for a decision. Run it against each project before the first
-// deploy of the #1275 rules (ADR 0015 § Consequences, specs/d15-approvals.md).
+// typo cannot pass for a decision.
+//
+// WHEN. Twice per project, with Admins asked not to Hide or Restore Prompts in
+// between: before the first deploy pass, and again as soon as the full deploy
+// has released the #1275 rules. Until that release the old rules still let an
+// Admin hide a pending row, and a row hidden in that window is still hidden when
+// the second run scans, so the second run is the one that must exit 0 (ADR 0015
+// § Consequences, specs/d15-approvals.md).
 //
 // Usage:
 //   npm run audit:pending-hidden -- <gaycruisebingo|fiveacross>
