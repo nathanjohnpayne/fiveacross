@@ -598,7 +598,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
  * refused by name, and any other key is `unknown-field`.
  */
 async function planUpdate(input, transaction, clock, buffer, revisions, projections) {
-  boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['converged', ...REPLACEMENT_KEYS], 'invalid-input');
+  boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['converged', 'pathCapabilityBarrier', ...REPLACEMENT_KEYS], 'invalid-input');
   const { host } = input;
   const state = await readHostState(transaction, host);
   guardClaimable(host, state.reservation);
@@ -643,6 +643,19 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
     refuse('root-route-transition-barrier');
   }
   if (Object.hasOwn(changes, 'root')) requireRootClass(host, changes.root);
+  // A marker moving `not-found` → `doorway` makes the doorway SERVE, exactly as
+  // the doorway `convert-to-root` does, so it takes the same attested
+  // deployment-barrier record (§ D1's service-worker retirement) and refuses
+  // `doorway-requires-deployment-barrier` without it. It is the only update
+  // that takes the record; every other update refuses it as `invalid-input`.
+  const doorwayGoLive =
+    Object.hasOwn(changes, 'root') && changes.root === 'doorway' && state.hostname.root !== 'doorway';
+  if (doorwayGoLive) {
+    if ((input.pathCapabilityBarrier ?? null) === null) refuse('doorway-requires-deployment-barrier');
+    project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso));
+  } else if (Object.hasOwn(input, 'pathCapabilityBarrier')) {
+    refuse('invalid-input');
+  }
   const identityChange =
     (Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId) ||
     (Object.hasOwn(changes, 'slug') && changes.slug !== state.hostname.slug);
@@ -704,8 +717,9 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
     buffer.update(`hostnames/${host}`, changes);
     return { host, projectedChange: false, resultingHostname: document };
   }
-  // No path-capability barrier is consulted here, and the intent takes no
-  // barrier input: `deriveCanonicalProjection` pins `pathNamespace` to the
+  // No path-capability barrier is consulted here for the CAPABILITY (the
+  // doorway go-live above takes the record for the service-worker retirement,
+  // not for `pathNamespace`): `deriveCanonicalProjection` pins `pathNamespace` to the
   // host's `ROOT_HOSTS` entry (or to null off the table), and
   // `requireConvergedPreState` has already forced the stored document through
   // that same derivation, so the value cannot differ before and after. A

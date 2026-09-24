@@ -317,7 +317,11 @@ describe('ordinary update', () => {
   it('moves a root marker between its two values and spends one revision', async () => {
     const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
     const { docs, dependencies } = store(converged(APEX, '3', marker));
-    await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' } }), dependencies);
+    // The doorway go-live carries the deployment barrier (#1251).
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' }, pathCapabilityBarrier: BARRIER }),
+      dependencies,
+    );
     expect(docs.get(`routerReplicas/${APEX}`)).toMatchObject({
       revision: '4',
       desired: { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
@@ -342,8 +346,9 @@ describe('ordinary update', () => {
       ),
     ).toBe('root-route-transition-barrier');
 
-    // `pathNamespace` is a constant per host, so `update` has no barrier
-    // parameter at all and offering one is a malformed envelope.
+    // `pathNamespace` is a constant per host, so an `update` takes the barrier
+    // record only for a doorway go-live, and offering one anywhere else is a
+    // malformed envelope.
     expect(
       await refusal(
         mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' }, pathCapabilityBarrier: BARRIER }),
@@ -1107,6 +1112,24 @@ describe('the root-host replacement barrier', () => {
     const apex = store(converged(APEX, '5', doorway));
     await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }), apex.dependencies);
     expect(apex.docs.get(`hostnames/${APEX}`).root).toBe('not-found');
+  });
+
+  // A `not-found` apex marker moving to `doorway` is a doorway go-live, so it
+  // owes the same deployment barrier as the doorway `convert-to-root`.
+  it('requires the deployment barrier when an update turns an apex marker into its doorway', async () => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const goLive = (extra = {}) => mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' }, ...extra });
+    const { docs, dependencies } = store(converged(APEX, '5', marker));
+    expect(await refusal(goLive(), dependencies)).toBe('doorway-requires-deployment-barrier');
+    expect(await refusal(goLive({ pathCapabilityBarrier: { ...BARRIER, armedAt: '2026-09-21T00:00:00.000Z' } }), dependencies)).toBe(
+      'path-capability-barrier',
+    );
+    expect(docs.get(`routerReplicas/${APEX}`).revision).toBe('5');
+    await applyHostnameMutation(goLive({ pathCapabilityBarrier: BARRIER }), dependencies);
+    expect(docs.get(`hostnames/${APEX}`).root).toBe('doorway');
+    expect(
+      await refusal(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' }, pathCapabilityBarrier: BARRIER }), dependencies),
+    ).toBe('invalid-input');
   });
 
   it('refuses provisioning a root-host route under another Edition, and activating a legacy one on a mirror', async () => {
