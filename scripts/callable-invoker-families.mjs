@@ -146,6 +146,21 @@ function analyzeModule(file, results, visited) {
     }
   }
   // Iterate so an alias or factory declared before what it refers to counts.
+  // `const { onCall: makeCallable } = https` destructures a builder under a
+  // new name; the binding pattern has no identifier for the pass below.
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isObjectBindingPattern(declaration.name)) continue;
+      for (const element of declaration.name.elements) {
+        if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue;
+        const property = element.propertyName ?? element.name;
+        if (!ts.isIdentifier(property) || !HTTPS_BUILDERS.has(property.text)) continue;
+        localBuilders.add(element.name.text);
+        if (isExported(statement)) analysis.factories.add(element.name.text);
+      }
+    }
+  }
   const declared = topLevelBindings(source);
   // `export default <expression>` is an exported binding named `default`.
   for (const statement of source.statements) {

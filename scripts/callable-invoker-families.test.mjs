@@ -190,8 +190,11 @@ describe("callable invoker families (#1277)", () => {
         "import { cyclic } from './cycle';",
         "import { create } from './aliases';",
         "export { make } from './aliases';",
+        "import * as https from 'firebase-functions/v2/https';",
         "const makeCallable = onCall;",
+        "const { onRequest: makeRequest } = https;",
         "export const viaBuilderAlias = makeCallable(async () => 1);",
+        "export const viaDestructuredBuilder = makeRequest((req, res) => res.end());",
         "export const viaFactoryAlias = create();",
         "export { cyclic };",
       ].join("\n"),
@@ -209,6 +212,7 @@ describe("callable invoker families (#1277)", () => {
     expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
       "cyclic",
       "viaBuilderAlias",
+      "viaDestructuredBuilder",
       "viaFactoryAlias",
     ]);
   });
