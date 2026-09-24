@@ -510,6 +510,12 @@ const STATES = [
   'reserved-class',
 ];
 
+/**
+ * Validates the reconciler's run input: schema version, mode, the `apply`
+ * flag (refused on `audit`), actor, reason and source page size. An optional
+ * `pathCapabilityBarrier` is checked later, in `reconcileHostnameReplicas`,
+ * against the run's authoritative clock.
+ */
 function validateInput(input) {
   boundedKeys(
     input,
@@ -526,14 +532,6 @@ function validateInput(input) {
   // reads to decide whether anything changed. Refused rather than quietly
   // reinterpreted, so the caller learns their intent did not survive.
   if (input.mode === 'audit' && input.apply) refuse('audit-mode-cannot-apply');
-  if ((input.pathCapabilityBarrier ?? null) !== null) {
-    try {
-      validatePathCapabilityBarrier(input.pathCapabilityBarrier, new Date().toISOString());
-    } catch (error) {
-      if (error instanceof HostnameProjectionRefusal) refuse('path-capability-barrier');
-      throw error;
-    }
-  }
   if (!isNonempty(input.actor)) refuse('invalid-input');
   if (!isNonempty(input.reason) || input.reason.trim() !== input.reason) refuse('invalid-input');
   if (!Number.isInteger(input.sourcePageSize) || input.sourcePageSize < 1 || input.sourcePageSize > 500) {
@@ -557,6 +555,17 @@ export async function reconcileHostnameReplicas(input, dependencies) {
   validateInput(input);
   validateDependencies(dependencies);
   const observedAt = authoritativeNow(dependencies);
+  // Judged against the run's authoritative clock, the one every other instant
+  // in the report comes from, rather than the process wall clock: an injected
+  // clock would otherwise have its barrier judged by the machine it ran on.
+  if ((input.pathCapabilityBarrier ?? null) !== null) {
+    try {
+      validatePathCapabilityBarrier(input.pathCapabilityBarrier, observedAt);
+    } catch (error) {
+      if (error instanceof HostnameProjectionRefusal) refuse('path-capability-barrier');
+      throw error;
+    }
+  }
 
   const { entries, pages: sourcePages } = await collectSource(dependencies, input.sourcePageSize);
   // UP FRONT, because a reconciliation that aborts halfway is worse than one

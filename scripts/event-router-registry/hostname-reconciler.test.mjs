@@ -571,6 +571,26 @@ describe('backfill', () => {
     ).toBe('path-capability-barrier');
   });
 
+  // The barrier is judged against the run's own authoritative clock, the one
+  // every other instant in the report comes from, not the process wall clock:
+  // otherwise one input could pass on one machine and refuse on another.
+  it('judges the barrier against the injected clock rather than the wall clock', async () => {
+    const early = { ...apexDeps(vi.fn()), now: () => new Date('2026-09-18T00:00:00.000Z') };
+    expect(await refusal(input({ mode: 'backfill', apply: true, pathCapabilityBarrier: BARRIER }), early)).toBe(
+      'path-capability-barrier',
+    );
+    expect(early.applyMutation).not.toHaveBeenCalled();
+
+    const applyMutation = vi.fn(async () => ({ revisions: [{ host: APEX_HOST, from: null, to: '1' }] }));
+    const later = { ...apexDeps(applyMutation), now: () => new Date('2026-09-19T00:00:00.001Z') };
+    const report = await reconcileHostnameReplicas(
+      input({ mode: 'backfill', apply: true, pathCapabilityBarrier: BARRIER }),
+      later,
+    );
+    expect(report.observedAt).toBe('2026-09-19T00:00:00.001Z');
+    expect(report.hosts[0].state).toBe('backfilled');
+  });
+
   // A capability-free listing needs no barrier at all, which is what keeps
   // the up-front refusal about capability rather than about applying.
   it('applies a backfill with no barrier when nothing in scope carries a capability', async () => {
