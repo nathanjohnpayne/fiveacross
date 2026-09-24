@@ -56,7 +56,9 @@ export interface Podium {
    *  qualifies, and `null` when its holder is currently banned. */
   firstBingo: PodiumFirstBingo | null;
   /** Each Day's pinned First to BINGO, sorted by Day index (present honors
-   *  only), with a currently-banned holder's Day withheld. */
+   *  only), with a currently-banned holder's Day withheld, and, beside a frozen
+   *  `frozenPlayRecorded: false`, every honour pinned at or after `freezeAt`
+   *  dropped (#1263, `frozenEmptyHonourFilter`). */
   dailyHonors: DayHonor[];
   /**
    * The top `PODIUM_STANDING_ROWS` POSITIONS, numbered 1..n over the rows a
@@ -428,11 +430,22 @@ export function buildPodium(
    * caller gets the promotion this parameter exists to prevent.
    */
   bannedUids: readonly string[] = [],
+  /**
+   * `EventDoc.frozenPlayRecorded`, the freeze's own answer to "did anybody
+   * play" (#1218). Only a stored `false` changes anything: the podium then drops
+   * every daily honour pinned at or after `freezeAt`, the same rule
+   * `runFinaleBeats` applies to the Moment it posts beside that `false` (#1263,
+   * Codex P1 `4088148821` on PR #1268), so the in-app podium and share card
+   * cannot print a ceremonial honour the Feed and the winner email omit.
+   * `true`, `null` and absence keep every honour.
+   */
+  frozenPlayRecorded?: boolean | null,
 ): Podium {
   // The podium is "as of the freeze", not live (Phase 4b P1). This module reads
   // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
   // after the freeze — its bucket is retained so its own daily honour still
-  // renders. Without a cutoff those post-freeze Marks can mint a First to BINGO
+  // renders, except beside a frozen `false`, where an honour pinned at or after
+  // the freeze is dropped (`frozenEmptyHonourFilter`, #1263). Without a cutoff those post-freeze Marks can mint a First to BINGO
   // the scheduler's already-posted, immutable podium Moment does not have: a
   // Player whose only bingo lands after the freeze on a ceremonial,
   // `tutorial: false` Day would appear on the card while the Feed shows none.
@@ -502,7 +515,11 @@ export function buildPodium(
       {
         champion,
         firstBingo,
-        dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
+        dailyHonors: frozenEmptyHonourFilter(
+          pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
+          frozenPlayRecorded,
+          freezeAt,
+        ),
       },
       bannedUids,
     ),
@@ -514,6 +531,26 @@ export function buildPodium(
     // no instant — the same reason the champion's own totals are not.
     playRecorded: players.some(anyMarksRecorded),
   };
+}
+
+/**
+ * A frozen `false` keeps every honour pinned AT OR AFTER the freeze off the
+ * podium (#1263): the freeze read the roster and every Day's pin and found
+ * nothing, so an honour carrying a later instant is one the freeze could not
+ * have seen. It filters by instant rather than blanking, for the reason the
+ * scheduler's twin in `runFinaleBeats` gives: the field is admin-writable, so it
+ * must not be able to erase anything the freeze could have seen. The bound is
+ * the `>= freezeAt` cutoff `withinFreeze` applies to the First to BINGO.
+ */
+function frozenEmptyHonourFilter(
+  honors: DayHonor[],
+  frozenPlayRecorded: boolean | null | undefined,
+  freezeAt: number | null | undefined,
+): DayHonor[] {
+  if (frozenPlayRecorded !== false || freezeAt == null) return honors;
+  return honors.filter(
+    (h) => typeof h.firstBingoAt === 'number' && Number.isFinite(h.firstBingoAt) && h.firstBingoAt < freezeAt,
+  );
 }
 
 /**

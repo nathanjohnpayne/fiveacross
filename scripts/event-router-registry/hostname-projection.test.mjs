@@ -10,6 +10,7 @@ import {
   projectionDigest,
   validateHostShape,
   validateLedgerDocument,
+  validatePathCapabilityBarrier,
 } from './hostname-projection.mjs';
 
 const EVENT_HOST = 'bodega-bay.fiveacross.app';
@@ -382,4 +383,41 @@ describe('the globally reserved rehearsal classes', () => {
       expect(isReservedClassHost(host)).toBe(false);
     },
   );
+});
+
+describe('the path-capability deployment barrier', () => {
+  const OBSERVED_AT = '2026-09-20T12:00:00.000Z';
+  const barrier = (armedAt) => ({
+    releaseTag: 'v2026.09.19-path-capability',
+    workerVersionId: '3f6a0b1c-0000-4000-8000-000000000001',
+    resolutionCacheSchemaVersion: 4,
+    armedAt,
+  });
+
+  it.each([
+    ['a well-formed instant', '2026-09-19T18:00:00.000Z'],
+    ['an equivalent offset spelling', '2026-09-19T20:00:00+02:00'],
+  ])('accepts %s armed before the observed instant', (_why, armedAt) => {
+    expect(code(() => validatePathCapabilityBarrier(barrier(armedAt), OBSERVED_AT))).toBeNull();
+  });
+
+  // `Date.parse` coerces these into OLD instants — "0" is 2000-01-01 and
+  // February 30 rolls into March — which would read as a satisfied barrier.
+  // The record is the evidence that forced advancement was armed before the
+  // capability was published, so a typo in it fails closed.
+  it.each([
+    ['a bare number', '0'],
+    ['a rolled-over calendar date', '2026-02-30T00:00:00Z'],
+    ['an offsetless local time', '2026-09-19T18:00:00'],
+    ['a date with no time', '2026-09-19'],
+  ])('refuses %s', (_why, armedAt) => {
+    expect(Number.isFinite(Date.parse(armedAt))).toBe(true);
+    expect(code(() => validatePathCapabilityBarrier(barrier(armedAt), OBSERVED_AT))).toBe('path-capability-barrier');
+  });
+
+  it('refuses a barrier armed after the observed instant', () => {
+    expect(code(() => validatePathCapabilityBarrier(barrier('2026-09-20T12:00:00.001Z'), OBSERVED_AT))).toBe(
+      'path-capability-barrier',
+    );
+  });
 });

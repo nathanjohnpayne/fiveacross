@@ -482,8 +482,11 @@ export interface EventDoc {
    * for. Unlike `finaleCompletedAt` beside it this is NOT in the rules'
    * no-client-writes set — the Event arm sits at Firestore's expression cap
    * (#1142) — so an Event admin can still write it, exactly as they can
-   * `frozenAt`. The exposure is one sentence of email copy rather than a gate on
-   * an irreversible write, which is why it rides the existing admin gate.
+   * `frozenAt`. The exposure is one sentence of email copy, plus the
+   * post-freeze ceremonial honours a frozen `false` drops from the podium
+   * (#1263), rather than a gate on anything the freeze could see: the beat
+   * filters by the freeze cutoff and never blanks the board on this field
+   * (#1268), which is why it rides the existing admin gate.
    *
    * AND `null` SAYS UNKNOWN TOO, deliberately (Codex P2 `4058671215`). That
    * admin-writable gate is also what makes an UNFROZEN Event carrying a
@@ -1257,6 +1260,9 @@ export interface LastCallMomentPayload {
 export interface PodiumMomentPayload {
   champion: { uid: string; displayName: string; bingoCount: number; squaresMarked: number } | null;
   firstBingo: { uid: string; displayName: string; at: number } | null;
+  // Every present Day pin, except that a Moment posted beside a frozen
+  // `frozenPlayRecorded: false` omits each honour pinned at or after the freeze
+  // cutoff (`runFinaleBeats`, #1263).
   dailyHonors: { dayIndex: number; uid: string; displayName: string; at: number }[];
   /**
    * Whether ANY Marks were recorded across the Event as of the freeze — Marks on
