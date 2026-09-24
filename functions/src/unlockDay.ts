@@ -756,12 +756,6 @@ function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
   });
 }
 
-async function queryActiveItems(db: AdminFirestore, eventId: string): Promise<SnapshotItem[]> {
-  return snapshotItemsFrom(
-    await db.collection(`events/${eventId}/items`).where('status', '==', 'active').get(),
-  );
-}
-
 async function hasMoment(db: AdminFirestore, eventId: string, kind: FinaleMomentKind): Promise<boolean> {
   const snap = await db.collection(`events/${eventId}/moments`).where('kind', '==', kind).get();
   return snap.docs.length > 0;
@@ -1750,7 +1744,10 @@ export type ResnapshotResult =
  * `UnlockPermissionError`). The zero-boards check is read inside the same transaction
  * that overwrites the Day, so a concurrent card deal that creates a board forces the
  * transaction to retry and then return `'has-boards'` instead of splitting one Day
- * across two snapshots.
+ * across two snapshots. The active-items query and the list computed from it are
+ * read in that same transaction (#1280), beside the Event doc an approval's
+ * `approvalSeq` fence moves, so a concurrent approval is either in the list or
+ * forces a retry that lists it.
  */
 export async function resnapshotDayIfNoBoards(
   db: AdminFirestore,
@@ -1775,23 +1772,13 @@ export async function resnapshotDayIfNoBoards(
   if (day.index < 3) return 'not-recoverable';
   if (day.unlockAt > now) return 'not-due';
 
-  const items = await queryActiveItems(db, eventId);
-  const snapshotItemIds = activeSnapshotIds(items, {
-    pool: day.pool,
-    pools: snapshotPoolsFor(day.pool),
-    cutoff: day.unlockAt,
-    dayIndex: day.index,
-    reportHideThreshold: pre?.settings?.reportHideThreshold,
-    bannedUids: pre?.bannedUids,
-  });
-
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
     if (!ev) return 'no-event';
     // Re-checked inside the writing transaction, beside the zero-boards guard:
-    // the pool query above is a full collection read, so an archive can easily
-    // commit between it and this write (#134).
+    // everything above is a pre-flight read, so an archive can commit between
+    // it and this write (#134).
     if (eventClosedToPlay(ev)) return 'archived';
     const arr = Array.isArray(ev.days) ? [...ev.days] : [];
     const i = arr.findIndex((d) => d.index === dayIndex);
@@ -1804,6 +1791,24 @@ export async function resnapshotDayIfNoBoards(
     if ((await tx.get(db.collection(`events/${eventId}/days/${dayIndex}/boards`))).docs.length > 0) {
       return 'has-boards';
     }
+    // Read the active pool THROUGH this transaction, exactly as `stampDaySnapshot`
+    // does (#1280). A list computed before the transaction opened would miss an
+    // approval that committed in between, and a retry forced by the approval's
+    // `approvalSeq` fence on this same Event doc (#1275) would re-run around the
+    // same stale list. The moderation inputs come from THIS transaction's Event
+    // read too, so the list and the settings it was filtered by describe one
+    // Firestore state.
+    const items = snapshotItemsFrom(
+      await tx.get(db.collection(`events/${eventId}/items`).where('status', '==', 'active')),
+    );
+    const snapshotItemIds = activeSnapshotIds(items, {
+      pool: arr[i].pool,
+      pools: snapshotPoolsFor(arr[i].pool),
+      cutoff: arr[i].unlockAt,
+      dayIndex: arr[i].index,
+      reportHideThreshold: ev.settings?.reportHideThreshold,
+      bannedUids: ev.bannedUids,
+    });
     // OVERWRITE — the deliberate difference from stampDaySnapshot's never-overwrite
     // guard. The transactional zero-boards check above is what makes this safe.
     arr[i] = {
