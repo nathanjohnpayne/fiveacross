@@ -601,8 +601,8 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * claim resolved between the query and the write is seen as resolved. Nothing
  * can appear in the gap — a Proof's claim is created in `attachProof`'s own
  * transaction, alongside the Proof itself, so an existing Proof never gains a
- * new one. The one page the transaction does NOT decide this way is a page the
- * cap truncated, which the overflow sentinel settles conservatively instead
+ * new one. The one page the transaction cannot fully decide this way is a page
+ * the cap truncated, which never publishes and, once stale, is looked up again
  * (see `RESTORE_CLAIM_LOOKUP_LIMIT` below).
  *
  * That lookup asks for the OWNER's claims, not the Proof's (Codex P2 round 2 on
@@ -668,38 +668,78 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * `RESTORE_CLAIM_LOOKUP_LIMIT + 1` rows, and a page that comes back with more
  * rows than the cap proves it is a truncation of the owner's pending claims
  * rather than all of them. The transaction then refuses to conclude "no pending
- * claim" from the rows it did keep — an unread claim may still be pending — and
- * takes the conservative destination, `'pending'`. The restore still succeeds
- * and still clears the safety marker; it simply does not publish, which hands
- * the Proof to the claim queue where Confirm can publish it. Being wrong that
- * way costs a second click; being wrong the other way puts unjudged media in
- * every Player's Feed.
+ * claim" from the rows it did keep — an unread claim may still be pending — so
+ * it never publishes on a truncated page. While a row it fetched is still
+ * pending it takes the conservative destination, `'pending'`: the restore still
+ * succeeds and still clears the safety marker; it simply does not publish, which
+ * hands the Proof to the claim queue where Confirm can publish it. Being wrong
+ * that way costs a second click; being wrong the other way puts unjudged media
+ * in every Player's Feed.
  *
- * The sentinel row itself is fetched but never re-read inside the transaction,
- * because its mere PRESENCE decides the outcome: once the page is known to be a
- * truncation the answer is `'pending'` whatever any individual row now says, so
- * reading rows could only confirm it. Worst-case fan-out is six rows on the
- * lookup, and one document inside the transaction on a truncated page (the
- * Proof) or six on a whole one (the Proof and up to five claims) — against the
- * twenty-six the old cap allowed.
+ * `'pending'` is only a recovery path while a pending claim REMAINS for Confirm
+ * to act on (#1250, the Phase 4b P2 on #1237). A truncated page whose every row
+ * — the sentinel included — has resolved by the time the transaction runs is a
+ * stale page, not a pathological one: forcing `'pending'` there can demote a
+ * Proof confirmation already published, and leaves a Proof with no pending claim
+ * to Confirm, which a manually hidden Proof with no reports and no verdict then
+ * also loses from the moderation queue — no Restore, no Confirm. So a truncated
+ * page re-reads EVERY row it fetched, the sentinel too, inside the transaction.
+ * Any one still the owner's pending claim settles `'pending'`, and that claim is
+ * the live Confirm the queue offers. None still pending proves only that the
+ * page is stale, so the transaction writes nothing and the lookup runs again
+ * against the live claims — the resolved ones now drop out of the query's
+ * `status` filter, so the fresh page is shorter and decides on its own merits.
+ * That retry is bounded (`RESTORE_STALE_PAGE_ATTEMPTS`); a page still stale on
+ * the last attempt throws WITHOUT writing, which leaves the Proof hidden, still
+ * queued, and still offering Restore — a retryable failure rather than a
+ * stranded Proof. Worst-case fan-out per attempt is six rows on the lookup and
+ * seven documents inside the transaction (the Proof and the whole page) —
+ * against the twenty-six the old cap allowed.
  *
  * Exported so the boundary is pinned by a test rather than by the number's
  * reappearance in one.
  */
 export const RESTORE_CLAIM_LOOKUP_LIMIT = 5;
 
+/**
+ * How many times `restoreProof` runs its lookup and transaction when a truncated
+ * page turns out stale — every row it fetched resolved before the transaction
+ * re-read it (#1250). Each retry re-queries the owner's LIVE pending claims, so
+ * a page goes stale again only if a further six resolve inside that window; the
+ * bound stops a pathological churn from looping, and exhausting it throws with
+ * the Proof untouched rather than guessing a destination. Exported so the test
+ * pins the boundary rather than the number.
+ */
+export const RESTORE_STALE_PAGE_ATTEMPTS = 3;
+
 export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+  for (let attempt = 0; attempt < RESTORE_STALE_PAGE_ATTEMPTS; attempt++) {
+    if (await restoreProofOnce(id, eventId)) return;
+  }
+  // Every attempt read a truncated page whose rows had all resolved before the
+  // transaction could re-read them. Nothing was written, so the Proof is exactly
+  // as hidden, as queued and as restorable as before the click (#1250).
+  throw new Error(
+    `Restore could not settle proof ${id}: its pending claims kept resolving while it looked. Try again.`,
+  );
+}
+
+/**
+ * One lookup and one transaction. Resolves `true` once the Proof is written, and
+ * `false` — having written nothing — when the page the lookup returned was a
+ * truncation whose every row has since resolved, so the caller can look again.
+ */
+async function restoreProofOnce(id: string, eventId: string): Promise<boolean> {
   // The owner, read plainly and outside the transaction: `uid` is written once at
   // create and is immutable thereafter, so there is no state here a stale read
   // could get wrong. It only SCOPES the query; the authority for the decision is
-  // the live re-read inside the transaction below, or, on a page the cap
-  // truncated, the sentinel that says the re-read cannot see the whole set.
+  // the live re-read inside the transaction below.
   const ownerSnap = await getDoc(proof(id, eventId));
   const owner = ownerSnap.exists() ? (ownerSnap.data() as Partial<ProofDoc>).uid : undefined;
-  // One row MORE than the cap: the overflow sentinel. The extra document is
-  // never a candidate — it exists so that `fetched.length` can distinguish a
-  // page that holds every one of the owner's pending claims from a page that
-  // merely holds the first `RESTORE_CLAIM_LOOKUP_LIMIT` of them.
+  // One row MORE than the cap: the overflow sentinel. It exists so that
+  // `fetched.length` can distinguish a page that holds every one of the owner's
+  // pending claims from a page that merely holds the first
+  // `RESTORE_CLAIM_LOOKUP_LIMIT` of them.
   const fetched =
     owner === undefined
       ? [] // no Proof, or no owner on it: nothing may steer the restore anyway
@@ -715,8 +755,10 @@ export async function restoreProof(id: string, eventId: string = EVENT_ID): Prom
           )
         ).docs;
   const truncated = fetched.length > RESTORE_CLAIM_LOOKUP_LIMIT;
-  const claimRefs = fetched.slice(0, RESTORE_CLAIM_LOOKUP_LIMIT).map((d) => claim(d.id, eventId));
-  await runTransaction(db, async (tx) => {
+  // A truncated page re-reads the sentinel too: on that page a live pending row
+  // is the only evidence that Confirm still has a claim to act on (#1250).
+  const claimRefs = fetched.map((d) => claim(d.id, eventId));
+  return runTransaction(db, async (tx) => {
     // The Proof first: a claim steers the restore only when it is the Proof
     // OWNER's claim. Any signed-in user can create a pending claim that names
     // someone else's Proof, and trusting it would let a stranger send another
@@ -725,32 +767,29 @@ export async function restoreProof(id: string, eventId: string = EVENT_ID): Prom
     const proofSnap = await tx.get(proof(id, eventId));
     const owner = proofSnap.exists() ? (proofSnap.data() as Partial<ProofDoc>).uid : undefined;
     let claimUndecided = false;
-    if (truncated) {
-      // The sentinel came back, so the lookup dropped at least one of the
-      // owner's claims that was PENDING when the query ran, and no re-read of
-      // the rows it kept can say anything about that one. Concluding "no
-      // pending claim" from the kept rows is exactly the publish this arm
-      // exists to prevent (Codex P2 on #1237), so the page's truncation alone
-      // settles the destination as `'pending'` and the kept rows are not read
-      // at all — reading them could only confirm an answer already fixed. The
-      // owner check still applies, for the same reason it does below: a Proof
-      // that has lost its owner has no claim that may steer its restore.
-      claimUndecided = owner !== undefined;
-    } else {
-      for (const ref of claimRefs) {
-        const snap = await tx.get(ref);
-        if (!snap.exists()) continue;
-        const data = snap.data() as Partial<ClaimDoc>;
-        if (data.status !== 'pending') continue;
-        if (data.proofId !== id) continue;
-        if (owner === undefined || data.uid !== owner) continue;
-        claimUndecided = true;
-      }
+    for (const ref of claimRefs) {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) continue;
+      const data = snap.data() as Partial<ClaimDoc>;
+      if (data.status !== 'pending') continue;
+      if (data.proofId !== id) continue;
+      if (owner === undefined || data.uid !== owner) continue;
+      claimUndecided = true;
+    }
+    if (truncated && !claimUndecided && owner !== undefined) {
+      // The lookup dropped at least one of the owner's claims that was PENDING
+      // when the query ran, and every row it kept has resolved since, so the
+      // kept rows cannot say whether that one still is. Publishing on them is
+      // the leak the sentinel exists to prevent (Codex P2 on #1237); settling
+      // `'pending'` on them strands the Proof with no claim left to Confirm
+      // (#1250). Neither: write nothing, and let the caller look again.
+      return false;
     }
     tx.update(proof(id, eventId), {
       status: claimUndecided ? 'pending' : 'active',
       safetyHide: false,
     });
+    return true;
   });
 }
 

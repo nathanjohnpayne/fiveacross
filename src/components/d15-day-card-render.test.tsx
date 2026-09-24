@@ -428,6 +428,112 @@ describe('Board daily-cards wiring (#246)', () => {
     expect(H.dealDayCard).toHaveBeenCalledTimes(2);
   });
 
+  it('Retry clears the JOIN-QUALIFIED in-flight key, so a hung joined attempt can be retried (#1255)', async () => {
+    // The in-flight key carries the join state (#1158), so an unjoined attempt
+    // and a joined one can be in flight at once. When the unjoined attempt
+    // rejects AFTER the joined one started, the error panel appears while the
+    // joined attempt is still pending. Retry must clear that joined key too:
+    // clearing only a join-agnostic key left it in place, the effect skipped
+    // the requested retry, and a hung joined attempt sat on "Dealing…" forever.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null;
+    let rejectUnjoined: (e: Error) => void = () => {};
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectUnjoined = reject;
+        }),
+    );
+
+    const { rerender } = render(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(1);
+
+    // The join lands; the joined attempt starts and never settles.
+    H.dealDayCard.mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    expect(H.dealDayCard).toHaveBeenCalledTimes(2);
+
+    // The unjoined attempt rejects, surfacing Retry while the joined one hangs.
+    await act(async () => {
+      rejectUnjoined(new Error('denied'));
+    });
+    expect(screen.getByText(/couldn’t deal this day’s card/i)).toBeInTheDocument();
+
+    // Retry re-attempts: a third call, not a silent skip back onto "Dealing…".
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    });
+    expect(H.dealDayCard).toHaveBeenCalledTimes(3);
+    expect(H.dealDayCard).toHaveBeenLastCalledWith(H.user, 0);
+  });
+
+  it('an attempt Retry replaced cannot resurface the error over its running replacement (#1255)', async () => {
+    // Retry evicts a still-pending joined attempt and starts a replacement
+    // under the SAME key. When the evicted attempt later rejects, it no longer
+    // owns the key: it must neither publish the error panel nor release the
+    // replacement's in-flight guard.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS, snapshotItemIds: ['x'] })],
+    } as unknown as EventDoc;
+    H.dayBoards.set(0, null);
+    H.player = null;
+    let rejectUnjoined: (e: Error) => void = () => {};
+    let rejectJoined: (e: Error) => void = () => {};
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectUnjoined = reject;
+        }),
+    );
+    const { rerender } = render(<Board />);
+
+    H.dealDayCard.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectJoined = reject;
+        }),
+    );
+    H.player = {
+      uid: 'u1',
+      displayName: 'Deck Daddy',
+      photoURL: null,
+      joinedAt: now,
+      dayStats: {},
+    } as unknown as PlayerDoc;
+    rerender(<Board />);
+    await act(async () => {
+      rejectUnjoined(new Error('denied'));
+    });
+
+    // The replacement hangs; the evicted joined attempt then rejects late.
+    H.dealDayCard.mockImplementationOnce(() => new Promise<boolean>(() => {}));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    });
+    expect(H.dealDayCard).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      rejectJoined(new Error('denied'));
+    });
+    expect(screen.queryByText(/couldn’t deal this day’s card/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
   it('renders the two-event "Tonight:" line on the dealt day card (schedule correction)', () => {
     const now = Date.now();
     H.event = {
