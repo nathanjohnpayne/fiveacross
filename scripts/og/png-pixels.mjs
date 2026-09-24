@@ -14,7 +14,7 @@
 // else throws by name rather than decoding to plausible nonsense — a palette
 // PNG (what `pngquant` would produce) would otherwise read as garbage
 // channels and quietly pass a colour assertion.
-import { inflateSync } from 'node:zlib';
+import { crc32, inflateSync } from 'node:zlib';
 
 const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -80,22 +80,50 @@ export function readPngPixels(bytes) {
   }
   if (header.interlace !== 0) throw new Error('PNG: interlaced images are not supported');
 
+  // Every chunk is bounds-checked and CRC-checked, and the walk must end on an
+  // IEND chunk that is empty and ends the file (#1264, #1266). The loop used
+  // to stop quietly at end-of-buffer, so a capture cut off after its last IDAT chunk — IEND and anything else
+  // missing — decoded as complete whenever the compressed payload still
+  // inflated, and a flipped byte anywhere a CRC covers went unnoticed.
   const parts = [];
   let offset = 8;
-  while (offset + 8 <= buffer.length) {
+  let sawIend = false;
+  while (offset < buffer.length) {
+    if (offset + 12 > buffer.length) throw new Error(`PNG: truncated chunk header at byte ${offset}`);
     const length = buffer.readUInt32BE(offset);
     const type = buffer.toString('ascii', offset + 4, offset + 8);
+    const end = offset + 12 + length;
+    if (end > buffer.length) {
+      throw new Error(`PNG: ${type} chunk at byte ${offset} declares ${length} bytes and runs past the end of the file`);
+    }
+    const stored = buffer.readUInt32BE(end - 4);
+    if (crc32(buffer.subarray(offset + 4, end - 4)) !== stored) {
+      throw new Error(`PNG: ${type} chunk at byte ${offset} has a CRC mismatch`);
+    }
     if (type === 'IDAT') parts.push(buffer.subarray(offset + 8, offset + 8 + length));
-    if (type === 'IEND') break;
-    offset += 12 + length;
+    offset = end;
+    if (type === 'IEND') {
+      // IEND is empty and last: a CRC-correct IEND with a payload, or any bytes
+      // after it, is not the file the chunks before it describe.
+      if (length !== 0) throw new Error(`PNG: IEND chunk at byte ${end - 12 - length} carries ${length} bytes (must be empty)`);
+      if (end !== buffer.length) throw new Error(`PNG: ${buffer.length - end} bytes follow the IEND chunk (it must be last)`);
+      sawIend = true;
+      break;
+    }
   }
+  if (!sawIend) throw new Error('PNG: no IEND chunk (the file is truncated)');
   if (parts.length === 0) throw new Error('PNG: no IDAT chunks');
 
   const { width, height } = header;
   const channels = header.colorType === 6 ? 4 : 3;
   const stride = width * channels;
   const raw = inflateSync(Buffer.concat(parts));
-  if (raw.length < height * (stride + 1)) throw new Error('PNG: truncated image data');
+  // Exactly the scanlines IHDR declares: short is truncated, long is not the
+  // image the header describes.
+  const expected = height * (stride + 1);
+  if (raw.length !== expected) {
+    throw new Error(`PNG: image data is ${raw.length} bytes, expected ${expected} (${height} scanlines of ${stride + 1})`);
+  }
 
   const data = Buffer.alloc(height * stride);
   for (let y = 0; y < height; y++) {
