@@ -37,8 +37,9 @@ set -euo pipefail
 #     org-policy rejection of the `allUsers` invoker binding as a partial
 #     FAILURE — the exact case the reconciliation below exists to repair.
 #   - Reconciles the Cloud Run invoker config for submitBugReport,
-#     emailUnsubscribe, the two auth-handoff callables, and the three
-#     event-invitation callables (#768, #548, #803;
+#     emailUnsubscribe, the two auth-handoff callables, the three
+#     event-invitation callables, and the admin callables (unlockDayNow,
+#     approvePrompts) (#768, #548, #803, #1277;
 #     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
@@ -183,12 +184,15 @@ BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
 AUTH_HANDOFF_INVOKER_SELECTED=true
 EVENT_INVITATIONS_INVOKER_SELECTED=true
+ADMIN_CALLABLES_INVOKER_SELECTED=true
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=""
 EVENT_INVITATIONS_INVOKER_CONSERVATIVE=false
 EVENT_INVITATIONS_STRICT_SERVICES="mint,redeem,revoke"
+ADMIN_CALLABLES_INVOKER_CONSERVATIVE=false
+ADMIN_CALLABLES_STRICT_SERVICES="unlock,approve"
 DEPLOY_PROJECT=""
 
 # Source integrity is independent of Firebase argv classification and remains
@@ -379,6 +383,9 @@ while IFS='=' read -r classification_key classification_value; do
     AUTH_HANDOFF_STRICT_HALF) AUTH_HANDOFF_STRICT_HALF="$classification_value" ;;
     EVENT_INVITATIONS_INVOKER_CONSERVATIVE) EVENT_INVITATIONS_INVOKER_CONSERVATIVE="$classification_value" ;;
     EVENT_INVITATIONS_STRICT_SERVICES) EVENT_INVITATIONS_STRICT_SERVICES="$classification_value" ;;
+    ADMIN_CALLABLES_INVOKER_SELECTED) ADMIN_CALLABLES_INVOKER_SELECTED="$classification_value" ;;
+    ADMIN_CALLABLES_INVOKER_CONSERVATIVE) ADMIN_CALLABLES_INVOKER_CONSERVATIVE="$classification_value" ;;
+    ADMIN_CALLABLES_STRICT_SERVICES) ADMIN_CALLABLES_STRICT_SERVICES="$classification_value" ;;
     *)
       echo "✗ Firebase deploy classification returned an unrecognized field. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
       exit 1
@@ -388,7 +395,7 @@ while IFS='=' read -r classification_key classification_value; do
 done <<EOF
 $FIREBASE_REQUEST_CLASSIFICATION
 EOF
-if [[ "$CLASSIFICATION_FIELDS" -ne 14 ]]; then
+if [[ "$CLASSIFICATION_FIELDS" -ne 17 ]]; then
   echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
@@ -438,6 +445,8 @@ INVOKER_ENV=(env
   -u EVENT_INVITATIONS_PROJECT -u EVENT_INVITATIONS_REGION
   -u EVENT_INVITATIONS_MINT_SERVICE -u EVENT_INVITATIONS_REDEEM_SERVICE
   -u EVENT_INVITATIONS_REVOKE_SERVICE
+  -u ADMIN_CALLABLES_PROJECT -u ADMIN_CALLABLES_REGION
+  -u ADMIN_CALLABLES_UNLOCK_SERVICE -u ADMIN_CALLABLES_APPROVE_SERVICE
 )
 # DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
 # `scripts/deploy.sh -- <project> ...` entry point is invoked directly, so it
@@ -461,6 +470,7 @@ if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
     EMAIL_UNSUBSCRIBE_PROJECT="$INVOKER_PIN_PROJECT"
     AUTH_HANDOFF_PROJECT="$INVOKER_PIN_PROJECT"
     EVENT_INVITATIONS_PROJECT="$INVOKER_PIN_PROJECT"
+    ADMIN_CALLABLES_PROJECT="$INVOKER_PIN_PROJECT"
   )
 fi
 # Exact-SA identity for the handoff-enabled target (#547; Codex round 2 on
@@ -589,6 +599,27 @@ run_postdeploy_event_invitations_invoker() {
   esac
 }
 
+# The admin callables (#1277) follow the same rule with two services. The
+# classifier derives the strict set from the Functions exports and the named
+# selectors, so approvePrompts stays tolerated until #1275 exports it.
+run_postdeploy_admin_callables_invoker() {
+  local script="$SCRIPT_DIR/set-admin-callables-invoker.sh"
+  if [[ "$ADMIN_CALLABLES_INVOKER_CONSERVATIVE" == "true" ]]; then
+    run_invoker "$script" --allow-missing
+    return
+  fi
+
+  case "$ADMIN_CALLABLES_STRICT_SERVICES" in
+    unlock) run_invoker "$script" --allow-missing-service approve ;;
+    approve) run_invoker "$script" --allow-missing-service unlock ;;
+    unlock,approve) run_invoker "$script" ;;
+    *)
+      echo "✗ Invalid admin-callable strict-service classification: $ADMIN_CALLABLES_STRICT_SERVICES" >&2
+      return 2
+      ;;
+  esac
+}
+
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
@@ -601,6 +632,9 @@ if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
 fi
 if [[ "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-event-invitations-invoker.sh")
+fi
+if [[ "$ADMIN_CALLABLES_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-admin-callables-invoker.sh")
 fi
 
 resolve_invoker_deploy_credential() {
@@ -817,7 +851,8 @@ else
 ✗ Could not read the Cloud Run invoker config. NOTHING HAS BEEN PUBLISHED.
 
   Step 2.5 of this deploy reconciles the invoker IAM check on submitBugReport,
-  emailUnsubscribe, auth handoff, and event invitations (#768, #548, #803). It
+  emailUnsubscribe, auth handoff, event invitations, and the admin callables
+  (#768, #548, #803, #1277). It
   runs \`gcloud\`, which resolves its own
   credential chain — NOT the temporary one op-firebase-deploy materializes and
   deletes on exit. If that chain is empty or expired, the reconciliation would
@@ -907,8 +942,8 @@ set -e
 # docs/app/bug-reports.md § Repeat-deploy hardening and
 # docs/app/phase-1-deploy.md § 1a-i. A `firebase deploy --only functions` can
 # reset that annotation and re-try the rejected `allUsers` binding, silently
-# 403ing submitBugReport, emailUnsubscribe, auth handoff, or event invitations
-# until someone notices and re-runs the fix by hand.
+# 403ing submitBugReport, emailUnsubscribe, auth handoff, event invitations, or
+# the admin callables until someone notices and re-runs the fix by hand.
 #
 # This used to be a manual post-deploy step an operator had to remember for
 # BOTH endpoints — and at different times, each one was forgotten: #158 for
@@ -1014,6 +1049,17 @@ EOF
       EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh
 EOF
   fi
+  if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$ADMIN_CALLABLES_INVOKER_SELECTED" == "true" ]]; then
+    cat >&2 <<EOF
+
+⚠️  The admin callables were RELEASED but NOT reconciled (--skip-invoker).
+
+    unlockDayNow (Unlock now / Re-snapshot) and approvePrompts may be answering
+    Google's HTML 403 instead of their own 401 JSON. Repair the project:
+
+      ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh --allow-missing-service approve
+EOF
+  fi
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
@@ -1058,6 +1104,9 @@ EOF
   if [[ "$EVENT_INVITATIONS_INVOKER_SELECTED" == "true" ]]; then
     run_postdeploy_event_invitations_invoker || RECONCILE_STATUS=$?
   fi
+  if [[ "$ADMIN_CALLABLES_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_admin_callables_invoker || RECONCILE_STATUS=$?
+  fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
@@ -1086,6 +1135,10 @@ EOF
     EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
     AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
     EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh
+    ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh
+
+  (Before approvePrompts has ever deployed, add --allow-missing-service approve
+  to the last line.)
 EOF
   fi
 fi

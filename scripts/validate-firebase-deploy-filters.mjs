@@ -24,6 +24,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
+
 const require = createRequire(import.meta.url);
 const commander = require("commander");
 const ts = require("typescript");
@@ -161,7 +163,15 @@ const EVENT_INVITATION_EXPORTS = Object.freeze([
   ["revokeEventInvitation", "revoke"],
 ]);
 
-function eventInvitationServicesFromSource(source) {
+// The admin-callables invoker family (#1277), in the order its wrapper and the
+// strict-service CSV use. approvePrompts (#1275) is inventoried from source, so
+// until it is exported every deploy tolerates its absent service.
+const ADMIN_CALLABLE_EXPORTS = Object.freeze([
+  ["unlockDayNow", "unlock"],
+  ["approvePrompts", "approve"],
+]);
+
+function protectedServicesFromSource(source, table) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
   const sourceFile = ts.createSourceFile(
@@ -204,9 +214,9 @@ function eventInvitationServicesFromSource(source) {
     }
   }
   if (hasRuntimeExportStar) {
-    for (const [exportName] of EVENT_INVITATION_EXPORTS) exportedNames.add(exportName);
+    for (const [exportName] of table) exportedNames.add(exportName);
   }
-  return EVENT_INVITATION_EXPORTS.filter(([exportName]) =>
+  return table.filter(([exportName]) =>
     exportedNames.has(exportName),
   ).map(([, service]) => service);
 }
@@ -3910,7 +3920,7 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
   return tail !== "" && !tail.includes(":") && inventory.codebaseNames.has(tail);
 }
 
-async function eventInvitationServiceInventory(configSource, configPath) {
+async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
@@ -3930,13 +3940,40 @@ async function eventInvitationServiceInventory(configSource, configPath) {
       if (error && typeof error === "object" && error.code === "ENOENT") continue;
       throw error;
     }
-    for (const service of eventInvitationServicesFromSource(source))
+    for (const service of protectedServicesFromSource(source, table))
       services.add(service);
   }
-  return EVENT_INVITATION_EXPORTS.map(([, service]) => service).filter(
+  return table.map(([, service]) => service).filter(
     (service) => services.has(service),
   );
 }
+
+/**
+ * The export guard (#1277): a Functions deploy whose index exports an
+ * onCall/onRequest function that no Cloud Run invoker family reconciles would
+ * publish it unreachable, so it is refused, naming the export, before anything
+ * is built. See `callable-invoker-families.mjs`.
+ */
+function assertEveryHttpsExportFamilied(configSource, configPath) {
+  const functionsConfigs = Array.isArray(configSource.functions)
+    ? configSource.functions
+    : [configSource.functions];
+  for (const functionsConfig of functionsConfigs) {
+    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    const indexPath = resolve(dirname(configPath), functionsConfig.source, "src", "index.ts");
+    if (!existsSync(indexPath)) continue;
+    const unfamilied = unfamiliedHttpsExports(indexPath);
+    if (unfamilied.length > 0) {
+      throw new UnfamiliedHttpsExportError(
+        `${relative(dirname(configPath), indexPath)} exports ${unfamilied.join(", ")}, an onCall/onRequest function that belongs to no Cloud Run invoker family, so this deploy would publish it answering an HTML 403. ` +
+          "Add it to a family in scripts/callable-invoker-families.mjs and that family's scripts/set-*-invoker.sh wrapper (with its deploy.sh registration), " +
+          "or list it in PRIVATE_HTTPS_EXPORTS there with the reason it must stay private",
+      );
+    }
+  }
+}
+
+export class UnfamiliedHttpsExportError extends Error {}
 
 /**
  * The function ids that Hosting will ADD to this deploy on its own: every
@@ -4056,8 +4093,13 @@ export async function classifyInvokerScope(
   singleEndpointExports = { byCodebase: new Map(), codebaseNames: new Set() },
   pinnedFunctionIds = [],
   pinnedOwnershipUnknown = false,
+  exportedAdminCallableServices = [],
 ) {
   const exportedInvitationServices = new Set(exportedEventInvitationServices);
+  const exportedAdminServices = new Set(exportedAdminCallableServices);
+  const exportedAdminCsv = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
+    .filter((service) => exportedAdminServices.has(service))
+    .join(",");
   const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
     ([, service]) => service,
   )
@@ -4069,12 +4111,15 @@ export async function classifyInvokerScope(
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
   let eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
+  let adminCallablesInvokerSelected = exportedAdminServices.size > 0;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
   let eventInvitationsInvokerConservative = false;
+  let adminCallablesInvokerConservative = false;
   let authHandoffStrictHalf = "";
   let eventInvitationsStrictServices = exportedInvitationCsv;
+  let adminCallablesStrictServices = exportedAdminCsv;
 
   if (only) {
     functionsAttempted = false;
@@ -4083,11 +4128,14 @@ export async function classifyInvokerScope(
     emailUnsubscribeInvokerSelected = false;
     authHandoffInvokerSelected = false;
     eventInvitationsInvokerSelected = false;
+    adminCallablesInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
     let fullEventInvitationScopeNamed = false;
     let unknownFunctionsSelectorNamed = false;
     const namedEventInvitationServices = new Set();
+    let fullAdminScopeNamed = false;
+    const namedAdminServices = new Set();
     // An unfamiliar Functions selector may release anything, so every invoker
     // not already selected by an explicit branch turns conservative.
     const selectEveryInvokerConservatively = () => {
@@ -4099,10 +4147,12 @@ export async function classifyInvokerScope(
       if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
       if (!eventInvitationsInvokerSelected)
         eventInvitationsInvokerConservative = true;
+      if (!adminCallablesInvokerSelected) adminCallablesInvokerConservative = true;
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
       eventInvitationsInvokerSelected = true;
+      adminCallablesInvokerSelected = true;
     };
 
     // `only` arrives already widened for pinned Hosting rewrites
@@ -4119,10 +4169,13 @@ export async function classifyInvokerScope(
         mintNamed = true;
         exchangeNamed = true;
         fullEventInvitationScopeNamed = true;
+        adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+        fullAdminScopeNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
+        adminCallablesInvokerConservative = false;
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
       ) {
@@ -4162,6 +4215,14 @@ export async function classifyInvokerScope(
         functionsAttempted = true;
         eventInvitationsInvokerSelected = true;
         namedEventInvitationServices.add("revoke");
+      } else if (/^functions:(?:[^:]+:)?unlockDayNow$/.test(selector)) {
+        functionsAttempted = true;
+        adminCallablesInvokerSelected = true;
+        namedAdminServices.add("unlock");
+      } else if (/^functions:(?:[^:]+:)?approvePrompts$/.test(selector)) {
+        functionsAttempted = true;
+        adminCallablesInvokerSelected = true;
+        namedAdminServices.add("approve");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
         // `functions:[codebase:]name` — a DOTTED tail is a group path
@@ -4214,6 +4275,23 @@ export async function classifyInvokerScope(
     } else {
       eventInvitationsStrictServices = "";
     }
+
+    // The same rule for the admin callables: named services stay strict, their
+    // unnamed peer may be absent, and an unfamiliar selector alone is lenient.
+    if (!adminCallablesInvokerSelected) {
+      adminCallablesStrictServices = "";
+    } else if (fullAdminScopeNamed) {
+      adminCallablesInvokerConservative = false;
+      adminCallablesStrictServices = exportedAdminCsv;
+    } else if (namedAdminServices.size > 0) {
+      adminCallablesInvokerConservative = false;
+      adminCallablesStrictServices = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
+        .filter((service) => namedAdminServices.has(service))
+        .join(",");
+    } else {
+      adminCallablesInvokerConservative = unknownFunctionsSelectorNamed;
+      adminCallablesStrictServices = "";
+    }
   } else if (exceptTargets) {
     for (const selector of exceptTargets.split(",")) {
       if (selector === "hosting") hostingAttempted = false;
@@ -4228,6 +4306,9 @@ export async function classifyInvokerScope(
         authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
         eventInvitationsStrictServices = "";
+        adminCallablesInvokerSelected = false;
+        adminCallablesInvokerConservative = false;
+        adminCallablesStrictServices = "";
       }
       // firebase-tools subtracts --except selectors from exact top-level
       // target names. Every colon-qualified Functions exclusion is a no-op.
@@ -4243,6 +4324,8 @@ export async function classifyInvokerScope(
       authHandoffInvokerSelected = true;
       eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
       eventInvitationsStrictServices = exportedInvitationCsv;
+      adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+      adminCallablesStrictServices = exportedAdminCsv;
     }
   }
 
@@ -4253,12 +4336,15 @@ export async function classifyInvokerScope(
     emailUnsubscribeInvokerSelected,
     authHandoffInvokerSelected,
     eventInvitationsInvokerSelected,
+    adminCallablesInvokerSelected,
     bugReportInvokerConservative,
     emailUnsubscribeInvokerConservative,
     authHandoffInvokerConservative,
     eventInvitationsInvokerConservative,
+    adminCallablesInvokerConservative,
     authHandoffStrictHalf,
     eventInvitationsStrictServices,
+    adminCallablesStrictServices,
   };
 }
 
@@ -4375,8 +4461,24 @@ export async function classifyFirebaseDeployRequest(
     project,
   });
   const effectiveOnly = pinned.only;
-  const exportedEventInvitationServices =
-    await eventInvitationServiceInventory(configSource, configPath);
+  const exportedEventInvitationServices = await protectedServiceInventory(
+    configSource,
+    configPath,
+    EVENT_INVITATION_EXPORTS,
+  );
+  const exportedAdminCallableServices = await protectedServiceInventory(
+    configSource,
+    configPath,
+    ADMIN_CALLABLE_EXPORTS,
+  );
+  // The export guard runs before the (slow) single-endpoint rehearsal. Whether
+  // Functions can release does not depend on that rehearsal: every
+  // `functions:` selector attempts Functions whether or not it is provably one
+  // endpoint, so the empty-inventory answer is already exact for this field.
+  const functionsMayRelease = (
+    await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
+  ).functionsAttempted;
+  if (functionsMayRelease) assertEveryHttpsExportFamilied(configSource, configPath);
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
@@ -4450,6 +4552,7 @@ export async function classifyFirebaseDeployRequest(
     singleEndpointExports,
     pinned.ids,
     pinned.ownershipUnknown,
+    exportedAdminCallableServices,
   );
 
   return {
@@ -4481,6 +4584,9 @@ function printShellClassification(result) {
     EVENT_INVITATIONS_INVOKER_CONSERVATIVE:
       result.eventInvitationsInvokerConservative,
     EVENT_INVITATIONS_STRICT_SERVICES: result.eventInvitationsStrictServices,
+    ADMIN_CALLABLES_INVOKER_SELECTED: result.adminCallablesInvokerSelected,
+    ADMIN_CALLABLES_INVOKER_CONSERVATIVE: result.adminCallablesInvokerConservative,
+    ADMIN_CALLABLES_STRICT_SERVICES: result.adminCallablesStrictServices,
   };
   for (const [key, value] of Object.entries(fields))
     console.log(`${key}=${value}`);
@@ -4511,6 +4617,12 @@ async function main() {
       console.error(`✗ The Firebase deploy preflight mutated the live checkout: ${message}`);
       console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
       process.exitCode = LIVE_CHECKOUT_DRIFT_EXIT_CODE;
+      return;
+    }
+    if (error instanceof UnfamiliedHttpsExportError) {
+      console.error(`✗ Unreconciled HTTPS Function: ${message}.`);
+      console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
+      process.exitCode = 1;
       return;
     }
     console.error(`✗ Invalid Firebase deploy request: ${message}.`);
