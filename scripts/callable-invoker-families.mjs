@@ -4,9 +4,9 @@
 //
 // Domain Restricted Sharing rejects the `allUsers` invoker binding Firebase
 // adds to a Gen2 HTTPS function, so an HTTPS export that no family wrapper
-// reconciles is published unreachable: an unauthenticated POST gets Google's
-// HTML 403 instead of the function's own 401 JSON. unlockDayNow shipped that
-// way. The deploy classifier (`validate-firebase-deploy-filters.mjs`) therefore
+// reconciles is published unreachable: an unauthenticated request gets Google's
+// HTML 403 instead of the function's own answer (a callable's 401 JSON, or an
+// onRequest endpoint's application response). unlockDayNow shipped that way. The deploy classifier (`validate-firebase-deploy-filters.mjs`) therefore
 // refuses any Functions deploy whose index exports an HTTPS function that is in
 // neither table below, naming the export, before anything is built.
 import { existsSync, readFileSync } from "node:fs";
@@ -244,6 +244,13 @@ function analyzeModule(file, results, visited) {
         // `export const admin = grouped` of `import * as grouped` is a group.
         if (exported) {
           for (const member of namespaceImports.get(init.text).https) analysis.https.add(`${name}-${member}`);
+        }
+      } else if (ts.isIdentifier(init) && localGroups.has(init.text)) {
+        // `const grouped = { endpoint }; export const admin = grouped`.
+        const members = localGroups.get(init.text);
+        localGroups.set(name, members);
+        if (exported) {
+          for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else if (ts.isObjectLiteralExpression(init)) {
         // `export const admin = { endpoint }` deploys a Firebase group whose
