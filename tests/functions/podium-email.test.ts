@@ -1100,6 +1100,23 @@ describe('sendPodiumEmailForEvent (#1192)', () => {
     expect(second.drained).toBe(true);
   });
 
+  // #632: the Feed CTA carries campaign attribution; the unsubscribe and
+  // preference links (a Cloud Function, not the app) stay untagged.
+  it('tags the Feed CTA with the podium-email UTM set and leaves the opt-out links untagged', async () => {
+    const { sent } = await run(seed());
+    expect(sent.length).toBeGreaterThan(0);
+    const tagged =
+      'https://gaycruisebingo.com/feed?utm_source=podium-email&utm_medium=email&utm_campaign=med-2026-podium';
+    for (const mail of sent) {
+      expect(mail.text).toContain(tagged);
+      expect(mail.html).toContain(`href="${tagged.replace(/&/g, '&amp;')}"`);
+      const optOutLines = mail.text.split('\n').filter((l) => /^(Unsubscribe|Email preferences):/.test(l));
+      expect(optOutLines).toHaveLength(2);
+      for (const line of optOutLines) expect(line).not.toContain('utm_');
+      expect(mail.headers?.['List-Unsubscribe']).not.toContain('utm_');
+    }
+  });
+
   it('stamps podiumEmailSentAt, not lastSentDayIndex', async () => {
     const { db } = await run(seed());
     const prefs = db.docs['events/med-2026/emailPrefs/zac'];
