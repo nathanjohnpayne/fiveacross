@@ -153,6 +153,23 @@ describe("callable invoker families (#1277)", () => {
     ).rejects.toThrow(/brandNewCallable.*belongs to no Cloud Run invoker family/);
   });
 
+  it("follows default exports through default imports and named re-exports", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import factory from './factory';",
+        "export { default as newCallable } from './endpoint';",
+        "export const viaDefaultFactory = factory();",
+      ].join("\n"),
+      "endpoint.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport default onCall(async () => 1);\n",
+      "factory.ts": "import { onRequest } from 'firebase-functions/v2/https';\nexport default function () { return onRequest((req, res) => res.end()); }\n",
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "newCallable",
+      "viaDefaultFactory",
+    ]);
+  });
+
   it("scans the default functions/ source when the config names none", async () => {
     const root = await fixture({
       "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const brandNewCallable = onCall(async () => 1);\n",

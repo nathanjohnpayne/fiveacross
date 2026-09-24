@@ -90,8 +90,13 @@ function isExported(statement) {
 function topLevelBindings(source) {
   const bindings = [];
   for (const statement of source.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
-      bindings.push({ name: statement.name.text, init: statement, exported: isExported(statement) });
+    if (ts.isFunctionDeclaration(statement) && statement.body) {
+      const isDefault = Boolean(statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword));
+      // `export default function () {}` is the exported binding `default`.
+      if (isDefault) bindings.push({ name: "default", init: statement, exported: isExported(statement) });
+      if (statement.name) {
+        bindings.push({ name: statement.name.text, init: statement, exported: !isDefault && isExported(statement) });
+      }
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
@@ -120,24 +125,34 @@ function analyzeModule(file, results, visited) {
   const localHttps = new Set();
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
-    const bindings = statement.importClause?.namedBindings;
-    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    const clause = statement.importClause;
+    if (!clause || clause.isTypeOnly) continue;
     const specifier = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
     const target = resolveModule(file, specifier);
     const upstream = target ? analyzeModule(target, results, visited) : EMPTY;
-    for (const element of bindings.elements) {
-      if (element.isTypeOnly) continue;
-      const imported = (element.propertyName ?? element.name).text;
-      if (HTTPS_BUILDERS.has(imported) || upstream.factories.has(imported)) {
-        localBuilders.add(element.name.text);
+    // `import x from './m'` binds m's `default` export.
+    const imports = clause.name ? [{ imported: "default", local: clause.name.text }] : [];
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const element of clause.namedBindings.elements) {
+        if (element.isTypeOnly) continue;
+        imports.push({ imported: (element.propertyName ?? element.name).text, local: element.name.text });
       }
+    }
+    for (const { imported, local } of imports) {
+      if (HTTPS_BUILDERS.has(imported) || upstream.factories.has(imported)) localBuilders.add(local);
       // An imported endpoint re-exported later (`export { x }`) or aliased
       // (`export const y = x`) is still that endpoint.
-      if (upstream.https.has(imported)) localHttps.add(element.name.text);
+      if (upstream.https.has(imported)) localHttps.add(local);
     }
   }
   // Iterate so an alias or factory declared before what it refers to counts.
   const declared = topLevelBindings(source);
+  // `export default <expression>` is an exported binding named `default`.
+  for (const statement of source.statements) {
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
+      declared.push({ name: "default", init: statement.expression, exported: true });
+    }
+  }
   for (let changed = true; changed; ) {
     changed = false;
     for (const { name, init, exported } of declared) {
