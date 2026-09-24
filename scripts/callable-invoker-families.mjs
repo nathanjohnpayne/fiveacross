@@ -222,6 +222,9 @@ function analyzeModule(file, results, visited) {
     }
   }
   const scope = { builders: localBuilders, https: localHttps, namespaces: namespaceImports };
+  // Group member names of every top-level object literal, by local name, so a
+  // later `export { grouped as admin }` names the same group.
+  const localGroups = new Map();
   const declared = topLevelBindings(source);
   // `export default <expression>` is an exported binding named `default`.
   for (const statement of source.statements) {
@@ -245,8 +248,10 @@ function analyzeModule(file, results, visited) {
       } else if (ts.isObjectLiteralExpression(init)) {
         // `export const admin = { endpoint }` deploys a Firebase group whose
         // members are named `admin-endpoint`.
+        const members = groupMembers(init, scope);
+        localGroups.set(name, members);
         if (exported) {
-          for (const member of groupMembers(init, scope)) analysis.https.add(`${name}-${member}`);
+          for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else {
         kind = valueKind(init, scope);
@@ -285,6 +290,10 @@ function analyzeModule(file, results, visited) {
       // `import * as admin from './admin'; export { admin }` is the same group.
       if (!target && namespaceImports.has(local)) {
         for (const name of namespaceImports.get(local).https) analysis.https.add(`${element.name.text}-${name}`);
+      }
+      // `const grouped = { endpoint }; export { grouped as admin }`.
+      if (!target && localGroups.has(local)) {
+        for (const member of localGroups.get(local)) analysis.https.add(`${element.name.text}-${member}`);
       }
       if (upstream.factories.has(local)) analysis.factories.add(element.name.text);
     }

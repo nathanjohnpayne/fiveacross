@@ -177,6 +177,8 @@ describe("callable invoker families (#1277)", () => {
         "export * as admin from './admin';",
         "export { grouped };",
         "export const assigned = grouped;",
+        "const localGroup = { unlockDayNow };",
+        "export { localGroup as aliasedGroup };",
         "export const castAlias = (unlockDayNow as unknown);",
         "export const memberAlias = grouped.unlockDayNow!;",
         "export const castGroup = { member: grouped.unlockDayNow, cast: unlockDayNow as unknown } satisfies object;",
@@ -193,6 +195,7 @@ describe("callable invoker families (#1277)", () => {
 
     expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
       "admin-unlockDayNow",
+      "aliasedGroup-unlockDayNow",
       "assigned-unlockDayNow",
       "castAlias",
       "castGroup-cast",
