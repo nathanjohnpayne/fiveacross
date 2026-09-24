@@ -36,6 +36,12 @@ export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
   // Content is unmasked, but URLs are not: strip query/hash from URL properties
   // so query-string secrets (auth tokens, emails) are never stored. (Codex P1 on #195.)
   before_send: sanitizeUrls,
+  // Mask ad-click ids (gclid, fbclid, …) at the SOURCE, when the SDK parses the
+  // landing URL, so a crafted `?fbclid=…` never reaches anything the SDK
+  // derives from it before `before_send` (the `$fbc` cookie value, feature-flag
+  // person properties). `sanitizeUrls` still drops those keys and `$fbc`
+  // defensively (#632, Codex on PR #1294).
+  mask_personal_data_properties: true,
   person_profiles: 'identified_only',
   // Events POST first-party through our reverse proxy (see `api_host` below,
   // #149); `ui_host` keeps the PostHog toolbar and "view in PostHog" links
@@ -279,6 +285,9 @@ const UTM_PREFIXES = ['', '$initial_', '$session_entry_'] as const;
  */
 function scrubCampaignBag(bag: Record<string, unknown> | undefined, eventId: string | null): void {
   if (!bag) return;
+  // `$fbc` is the Facebook click cookie value posthog-js derives from `fbclid`
+  // (`fb.1.<ts>.<fbclid>`), so it carries the same link-controlled text.
+  delete bag.$fbc;
   for (const prefix of UTM_PREFIXES) {
     for (const key of NON_EMAIL_CAMPAIGN_KEYS) delete bag[`${prefix}${key}`];
     if (!UTM_KEYS.some((key) => `${prefix}${key}` in bag)) continue;

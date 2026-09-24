@@ -190,11 +190,17 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
           $session_entry_gclid: 'alice@example.com',
           $session_entry_msclkid: 'z',
         },
+        $set: { $fbc: 'fb.1.1700000000000.PrivateToken123' },
         $set_once: { ...event.$set_once, $initial_gclid: 'alice@example.com', $initial_li_fat_id: 'w' },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any);
-      const keys = [...Object.keys(out?.properties ?? {}), ...Object.keys(out?.$set_once ?? {})];
-      expect(keys.filter((k) => /clid|mc_cid|li_fat_id/.test(k))).toEqual([]);
+      const keys = [
+        ...Object.keys(out?.properties ?? {}),
+        ...Object.keys(out?.$set ?? {}),
+        ...Object.keys(out?.$set_once ?? {}),
+      ];
+      expect(keys.filter((k) => /clid|mc_cid|li_fat_id|\$fbc/.test(k))).toEqual([]);
+      expect(POSTHOG_INIT_OPTIONS.mask_personal_data_properties).toBe(true);
       // The matched email campaign itself is untouched.
       expect(out?.properties.utm_campaign).toBe('bodega-bay-2026-day-3');
       expect(out?.$set_once?.$initial_utm_campaign).toBe('bodega-bay-2026-day-3');
