@@ -3421,7 +3421,10 @@ EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=
 EVENT_INVITATIONS_INVOKER_CONSERVATIVE=false
-EVENT_INVITATIONS_STRICT_SERVICES='
+EVENT_INVITATIONS_STRICT_SERVICES=
+ADMIN_CALLABLES_INVOKER_SELECTED=false
+ADMIN_CALLABLES_INVOKER_CONSERVATIVE=false
+ADMIN_CALLABLES_STRICT_SERVICES='
 
 run_post_classification_guard_case() {
   local case_id="$1"
@@ -3792,6 +3795,104 @@ elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-37.log"; then
   cat "$WORKDIR/gcloud-calls-37.log" >&2
 else
   pass "no-containment: a machine that can prove no write containment refuses every exemption, names the candidates it could not prove, runs no hook, and still deploys (rc=$RC37)."
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 38a-38d (#1277): the admin callables are their own invoker family.
+# unlockDayNow shipped 403 in both projects because no family reconciled it.
+# The strict set comes from the Functions exports, so the not-yet-exported
+# approvePrompts may be absent after publish while a selected unlockDayNow may
+# not; and an onCall/onRequest export that belongs to no family fails the
+# classification, naming the export, before anything is built or published.
+# ---------------------------------------------------------------------------
+init_admin_fixture() {
+  local repo="$1"
+  shift
+  init_fixture_repo "$repo"
+  mkdir -p "$repo/functions/src"
+  {
+    printf '%s\n' "import { onCall } from 'firebase-functions/v2/https';"
+    printf '%s\n' "export const unlockDayNow = onCall(async () => ({ ok: true }));"
+    for line in "$@"; do printf '%s\n' "$line"; done
+  } >"$repo/functions/src/index.ts"
+  (cd "$repo" && git add functions/src/index.ts && git commit --quiet -m "admin callable")
+}
+
+run_admin_case() {
+  local id="$1" repo="$2" missing="$3"
+  shift 3
+  : >"$WORKDIR/ofd-calls-$id.log"
+  : >"$WORKDIR/gcloud-calls-$id.log"
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-$id.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-$id.log" \
+  GCLOUD_MISSING_SERVICE="$missing" \
+  GCLOUD_STUB_ANNOTATION=false \
+    bash -c 'cd "$1" && shift && bash "$@"' _ "$repo" "$SCRIPT" --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo "$@" \
+    >"$WORKDIR/case$id.out" 2>"$WORKDIR/case$id.err"
+  ADMIN_RC=$?
+  set -e
+}
+
+REPO38A="$WORKDIR/case38a-admin-full"
+init_admin_fixture "$REPO38A"
+run_admin_case 38a "$REPO38A" approveprompts --only functions
+if [[ $ADMIN_RC -ne 0 ]]; then
+  fail "admin-full: a full Functions deploy failed on the not-yet-exported approvePrompts (rc=$ADMIN_RC). stderr was:"
+  cat "$WORKDIR/case38a.err" >&2
+elif ! grep -qE 'update.unlockdaynow' "$WORKDIR/gcloud-calls-38a.log"; then
+  fail "admin-full: the released unlockDayNow was not reconciled after publish. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38a.log" >&2
+elif ! grep -qE 'describe.approveprompts' "$WORKDIR/gcloud-calls-38a.log"; then
+  fail "admin-full: approvePrompts was not probed, so it would stay 403 once #1275 ships. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38a.log" >&2
+else
+  pass "admin-full: a full Functions deploy reconciles unlockDayNow and tolerates the absent approvePrompts (rc=$ADMIN_RC)."
+fi
+
+REPO38B="$WORKDIR/case38b-admin-exact"
+init_admin_fixture "$REPO38B"
+run_admin_case 38b "$REPO38B" approveprompts --only functions:unlockDayNow
+if [[ $ADMIN_RC -ne 0 ]]; then
+  fail "admin-exact: an exact unlockDayNow deploy failed (rc=$ADMIN_RC). stderr was:"
+  cat "$WORKDIR/case38b.err" >&2
+elif grep -Eq 'submitbugreport|emailunsubscribe|authhandoff|eventinvitation' "$WORKDIR/gcloud-calls-38b.log"; then
+  fail "admin-exact: the exact unlockDayNow scope inspected unrelated families. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38b.log" >&2
+elif ! grep -qE 'update.unlockdaynow' "$WORKDIR/gcloud-calls-38b.log"; then
+  fail "admin-exact: the exact unlockDayNow scope did not reconcile unlockDayNow. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-38b.log" >&2
+else
+  pass "admin-exact: --only functions:unlockDayNow reconciles only the admin family (rc=$ADMIN_RC)."
+fi
+
+REPO38C="$WORKDIR/case38c-admin-selected-missing"
+init_admin_fixture "$REPO38C"
+run_admin_case 38c "$REPO38C" unlockdaynow --only functions:default:unlockDayNow
+if [[ $ADMIN_RC -eq 0 ]]; then
+  fail "admin-selected-missing: an exact unlockDayNow deploy returned 0 though its released service is absent."
+elif [[ ! -s "$WORKDIR/ofd-calls-38c.log" ]]; then
+  fail "admin-selected-missing: failure occurred before publish, so strict postdeploy handling was not exercised."
+elif ! grep -q 'reconciliation FAILED and the deploy is already live' "$WORKDIR/case38c.err"; then
+  fail "admin-selected-missing: missing selected service did not emit the already-live banner. stderr was:"
+  cat "$WORKDIR/case38c.err" >&2
+else
+  pass "admin-selected-missing: a selected unlockDayNow stays strict after publish (rc=$ADMIN_RC)."
+fi
+
+REPO38D="$WORKDIR/case38d-unfamilied-callable"
+init_admin_fixture "$REPO38D" "export const brandNewCallable = onCall(async () => 1);"
+run_admin_case 38d "$REPO38D" "" --only functions
+if [[ $ADMIN_RC -eq 0 ]]; then
+  fail "unfamilied-callable: a deploy releasing an HTTPS export with no invoker family returned 0."
+elif [[ -s "$WORKDIR/ofd-calls-38d.log" || -s "$WORKDIR/gcloud-calls-38d.log" ]]; then
+  fail "unfamilied-callable: the guard fired after gcloud or Firebase had already run."
+elif ! grep -q 'brandNewCallable.*belongs to no Cloud Run invoker family' "$WORKDIR/case38d.err"; then
+  fail "unfamilied-callable: the refusal did not name the unfamilied export. stderr was:"
+  cat "$WORKDIR/case38d.err" >&2
+else
+  pass "unfamilied-callable: an HTTPS export with no invoker family fails before anything is published, naming it (rc=$ADMIN_RC)."
 fi
 
 # ---------------------------------------------------------------------------

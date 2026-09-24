@@ -1131,14 +1131,12 @@ export const unlockDayNow = onCall(
  * document locks for one transaction and contends with every other Event-doc
  * writer. Pins `ADMIN_SDK_SERVICE_ACCOUNT` like every Admin-SDK callable.
  *
- * PREREQUISITE: #1277 MUST SHIP FIRST. `scripts/deploy.sh` reconciles the Cloud
- * Run invoker only for the services on its `INVOKER_SCRIPTS` list, and no admin
- * callable is on it today (`unlockDayNow` answers an unauthenticated POST with
- * an HTML 403 in both projects for exactly this reason). Until #1277 adds the
- * admin-callables invoker family (`unlockdaynow`, `approveprompts`), this
- * callable would be deployed unreachable, and the rules in the same release deny
- * every client approval, so approval would stop working entirely. Do not deploy
- * this callable, and do not merge the change that introduces it, before #1277.
+ * INVOKER: `scripts/deploy.sh` reconciles the Cloud Run invoker only for the
+ * services on its `INVOKER_SCRIPTS` list. #1277 added the admin-callables family
+ * (`scripts/set-admin-callables-invoker.sh`: `unlockdaynow`, `approveprompts`),
+ * so every Functions deploy that releases this callable now reconciles it; an
+ * unreconciled one would answer Google's HTML 403 while the rules in the same
+ * release deny every client approval, so approval would stop working entirely.
  *
  * DEPLOYING IT THE FIRST TIME IS TWO PASSES (ADR 0015 § Consequences). On
  * CREATE firebase-tools grants `allUsers` the Cloud Run invoker role, which the

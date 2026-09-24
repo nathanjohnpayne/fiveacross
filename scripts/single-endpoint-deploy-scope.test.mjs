@@ -644,6 +644,7 @@ const NO_INVOKER_SELECTED = {
   emailUnsubscribeInvokerSelected: false,
   authHandoffInvokerSelected: false,
   eventInvitationsInvokerSelected: false,
+  adminCallablesInvokerSelected: false,
 };
 
 const EXEMPT = { ...NO_INVOKER_SELECTED, functionsAttempted: true };
