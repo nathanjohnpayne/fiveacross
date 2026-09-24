@@ -153,6 +153,49 @@ describe("callable invoker families (#1277)", () => {
     ).rejects.toThrow(/brandNewCallable.*belongs to no Cloud Run invoker family/);
   });
 
+  it("scans the default functions/ source when the config names none", async () => {
+    const root = await fixture({
+      "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const brandNewCallable = onCall(async () => 1);\n",
+    });
+    await writeFile(resolve(root, "firebase.json"), JSON.stringify({ functions: {} }));
+
+    await expect(
+      classifyFirebaseDeployRequest(["fiveacross", "--only", "functions"], {
+        defaultConfigPath: resolve(root, "firebase.json"),
+      }),
+    ).rejects.toThrow(/brandNewCallable.*belongs to no Cloud Run invoker family/);
+  });
+
+  it("follows builder aliases, factory aliases and factories across an import cycle", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "import { cyclic } from './cycle';",
+        "import { create } from './aliases';",
+        "export { make } from './aliases';",
+        "const makeCallable = onCall;",
+        "export const viaBuilderAlias = makeCallable(async () => 1);",
+        "export const viaFactoryAlias = create();",
+        "export { cyclic };",
+      ].join("\n"),
+      "aliases.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "export const make = () => onCall(async () => 1);",
+        "export const create = make;",
+      ].join("\n"),
+      "cycle.ts": [
+        "import { make } from './index';",
+        "export const cyclic = make();",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "cyclic",
+      "viaBuilderAlias",
+      "viaFactoryAlias",
+    ]);
+  });
+
   it("does not block a deploy that cannot release Functions", async () => {
     const root = await fixture({
       "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const brandNewCallable = onCall(async () => 1);\n",

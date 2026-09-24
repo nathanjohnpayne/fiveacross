@@ -85,31 +85,37 @@ function isExported(statement) {
   return Boolean(statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
 }
 
-// The functions a file declares at top level, by name: `function f() {}` and
-// `const f = () => ...` / `const f = function () {}`.
-function topLevelFunctions(source) {
-  const functions = [];
+// The top-level bindings a file declares, by name: `function f() {}` and every
+// `const x = <initializer>`.
+function topLevelBindings(source) {
+  const bindings = [];
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
-      functions.push({ name: statement.name.text, body: statement.body, exported: isExported(statement) });
+      bindings.push({ name: statement.name.text, init: statement, exported: isExported(statement) });
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
-        const init = declaration.initializer;
-        if (!ts.isIdentifier(declaration.name) || !init) continue;
-        if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-          functions.push({ name: declaration.name.text, body: init.body, exported: isExported(statement) });
-        }
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        bindings.push({ name: declaration.name.text, init: declaration.initializer, exported: isExported(statement) });
       }
     }
   }
-  return functions;
+  return bindings;
 }
 
-function analyzeModule(file, seen) {
-  if (seen.has(file)) return seen.get(file);
-  const analysis = { https: new Set(), factories: new Set() };
-  seen.set(file, analysis);
+const EMPTY = Object.freeze({ https: new Set(), factories: new Set() });
+
+// One pass over `file`. `results` persists across passes and its sets only
+// grow; `visited` is per pass, so a module reached again through an import
+// cycle answers with what earlier passes proved, and the caller repeats passes
+// until nothing grows.
+function analyzeModule(file, results, visited) {
+  if (!results.has(file)) results.set(file, { https: new Set(), factories: new Set() });
+  const analysis = results.get(file);
+  if (visited.has(file)) return analysis;
+  visited.add(file);
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  // Names that build an HTTPS function when called: the SDK builders, their
+  // aliases, and factories whose own body calls one.
   const localBuilders = new Set(HTTPS_BUILDERS);
   const localHttps = new Set();
   for (const statement of source.statements) {
@@ -118,7 +124,7 @@ function analyzeModule(file, seen) {
     if (!bindings || !ts.isNamedImports(bindings)) continue;
     const specifier = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
     const target = resolveModule(file, specifier);
-    const upstream = target ? analyzeModule(target, seen) : { https: new Set(), factories: new Set() };
+    const upstream = target ? analyzeModule(target, results, visited) : EMPTY;
     for (const element of bindings.elements) {
       if (element.isTypeOnly) continue;
       const imported = (element.propertyName ?? element.name).text;
@@ -130,30 +136,25 @@ function analyzeModule(file, seen) {
       if (upstream.https.has(imported)) localHttps.add(element.name.text);
     }
   }
-  // A top-level function whose own body calls a builder is a factory: calling
-  // it yields an HTTPS function. Iterate so a factory of a factory counts too.
-  const functions = topLevelFunctions(source);
-  const localFactories = new Set();
+  // Iterate so an alias or factory declared before what it refers to counts.
+  const declared = topLevelBindings(source);
   for (let changed = true; changed; ) {
     changed = false;
-    for (const fn of functions) {
-      if (localFactories.has(fn.name) || !callsHttpsBuilder(fn.body, localBuilders)) continue;
-      localFactories.add(fn.name);
-      localBuilders.add(fn.name);
-      if (fn.exported) analysis.factories.add(fn.name);
-      changed = true;
-    }
-  }
-  for (const statement of source.statements) {
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        const init = declaration.initializer;
-        if (!ts.isIdentifier(declaration.name) || !init || isFunctionNode(init)) continue;
-        const alias = ts.isIdentifier(init) && localHttps.has(init.text);
-        if (!alias && !callsHttpsBuilder(init, localBuilders)) continue;
-        localHttps.add(declaration.name.text);
-        if (isExported(statement)) analysis.https.add(declaration.name.text);
+    for (const { name, init, exported } of declared) {
+      if (localBuilders.has(name) || localHttps.has(name)) continue;
+      let kind = null;
+      if (isFunctionNode(init)) {
+        if (init.body && callsHttpsBuilder(init.body, localBuilders)) kind = "builder";
+      } else if (ts.isIdentifier(init)) {
+        if (localBuilders.has(init.text)) kind = "builder";
+        else if (localHttps.has(init.text)) kind = "https";
+      } else if (callsHttpsBuilder(init, localBuilders)) {
+        kind = "https";
       }
+      if (!kind) continue;
+      (kind === "builder" ? localBuilders : localHttps).add(name);
+      if (exported) (kind === "builder" ? analysis.factories : analysis.https).add(name);
+      changed = true;
     }
   }
   for (const statement of source.statements) {
@@ -164,7 +165,7 @@ function analyzeModule(file, seen) {
     const target = specifier ? resolveModule(file, specifier) : null;
     // A package re-export defines no endpoint here; a dangling one cannot build.
     if (specifier && !target) continue;
-    const upstream = target ? analyzeModule(target, seen) : { https: localHttps, factories: localFactories };
+    const upstream = target ? analyzeModule(target, results, visited) : { https: localHttps, factories: localBuilders };
     if (!statement.exportClause) {
       for (const name of upstream.https) analysis.https.add(name);
       for (const name of upstream.factories) analysis.factories.add(name);
@@ -182,12 +183,20 @@ function analyzeModule(file, seen) {
 }
 
 /**
- * The exported names in `file` (and the local modules it imports factories
- * from or re-exports) whose value is an onCall / onRequest function, built
- * directly or through a helper factory. Read-only, syntax-only.
+ * The exported names in `file` (and the local modules it imports from or
+ * re-exports) whose value is an onCall / onRequest function, built directly,
+ * through an alias of a builder, or through a helper factory. Import cycles are
+ * resolved to a fixed point. Read-only, syntax-only.
  */
-export function httpsFunctionExports(file, seen = new Map()) {
-  return analyzeModule(file, seen).https;
+export function httpsFunctionExports(file) {
+  const results = new Map();
+  const size = () => [...results.values()].reduce((n, a) => n + a.https.size + a.factories.size, 0);
+  let before;
+  do {
+    before = size();
+    analyzeModule(file, results, new Set());
+  } while (size() !== before);
+  return results.get(file).https;
 }
 
 /** HTTPS exports of `indexFile` that no invoker family reconciles. */

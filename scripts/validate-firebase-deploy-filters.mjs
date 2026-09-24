@@ -4461,13 +4461,16 @@ export async function classifyFirebaseDeployRequest(
     project,
   });
   const effectiveOnly = pinned.only;
+  // The protected inventories and the export guard read the materialised
+  // config: a `functions` block with no `source` still deploys the CLI default
+  // `functions/`, so the raw object would make them scan nothing.
   const exportedEventInvitationServices = await protectedServiceInventory(
-    configSource,
+    deployConfig.data,
     configPath,
     EVENT_INVITATION_EXPORTS,
   );
   const exportedAdminCallableServices = await protectedServiceInventory(
-    configSource,
+    deployConfig.data,
     configPath,
     ADMIN_CALLABLE_EXPORTS,
   );
@@ -4478,7 +4481,7 @@ export async function classifyFirebaseDeployRequest(
   const functionsMayRelease = (
     await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
   ).functionsAttempted;
-  if (functionsMayRelease) assertEveryHttpsExportFamilied(configSource, configPath);
+  if (functionsMayRelease) assertEveryHttpsExportFamilied(deployConfig.data, configPath);
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
