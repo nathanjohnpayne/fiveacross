@@ -179,14 +179,18 @@ function groupMembers(object, scope) {
   return members;
 }
 
-const EMPTY = Object.freeze({ https: new Set(), factories: new Set() });
+// `groups` maps an exported object-group name to its member names; `opaque`
+// records a star re-export this scan cannot see into (a package, or a module
+// that does not resolve), directly or through a local star.
+const newAnalysis = () => ({ https: new Set(), factories: new Set(), groups: new Map(), opaque: false });
+const EMPTY = Object.freeze(newAnalysis());
 
 // One pass over `file`. `results` persists across passes and its sets only
 // grow; `visited` is per pass, so a module reached again through an import
 // cycle answers with what earlier passes proved, and the caller repeats passes
 // until nothing grows.
 function analyzeModule(file, results, visited) {
-  if (!results.has(file)) results.set(file, { https: new Set(), factories: new Set() });
+  if (!results.has(file)) results.set(file, newAnalysis());
   const analysis = results.get(file);
   if (visited.has(file)) return analysis;
   visited.add(file);
@@ -197,6 +201,10 @@ function analyzeModule(file, results, visited) {
   const localHttps = new Set();
   // `import * as admin from './admin'` of a local module, by local name.
   const namespaceImports = new Map();
+  // Group member names of every top-level object literal (and every imported
+  // group), by local name, so a later `export { grouped as admin }` names the
+  // same group.
+  const localGroups = new Map();
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const clause = statement.importClause;
@@ -216,6 +224,8 @@ function analyzeModule(file, results, visited) {
       namespaceImports.set(clause.namedBindings.name.text, upstream);
     }
     for (const { imported, local } of imports) {
+      // `import { admin } from './admin'` of an object group keeps its members.
+      if (upstream.groups.has(imported)) localGroups.set(local, upstream.groups.get(imported));
       if (HTTPS_BUILDERS.has(imported) || upstream.factories.has(imported)) localBuilders.add(local);
       // An imported endpoint re-exported later (`export { x }`) or aliased
       // (`export const y = x`) is still that endpoint.
@@ -238,9 +248,6 @@ function analyzeModule(file, results, visited) {
       }
     }
   }
-  // Group member names of every top-level object literal, by local name, so a
-  // later `export { grouped as admin }` names the same group.
-  const localGroups = new Map();
   const scope = { builders: localBuilders, https: localHttps, namespaces: namespaceImports, groups: localGroups };
   const declared = topLevelBindings(source);
   // `export default <expression>` is an exported binding named `default`.
@@ -263,6 +270,7 @@ function analyzeModule(file, results, visited) {
         const members = [...namespaceImports.get(init.text).https];
         localGroups.set(name, members);
         if (exported) {
+          analysis.groups.set(name, members);
           for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else if (ts.isIdentifier(init) && localGroups.has(init.text)) {
@@ -270,6 +278,7 @@ function analyzeModule(file, results, visited) {
         const members = localGroups.get(init.text);
         localGroups.set(name, members);
         if (exported) {
+          analysis.groups.set(name, members);
           for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else if (ts.isObjectLiteralExpression(init)) {
@@ -278,6 +287,7 @@ function analyzeModule(file, results, visited) {
         const members = groupMembers(init, scope);
         localGroups.set(name, members);
         if (exported) {
+          analysis.groups.set(name, members);
           for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else {
@@ -295,12 +305,20 @@ function analyzeModule(file, results, visited) {
       ? statement.moduleSpecifier.text
       : null;
     const target = specifier ? resolveModule(file, specifier) : null;
-    // A package re-export defines no endpoint here; a dangling one cannot build.
-    if (specifier && !target) continue;
-    const upstream = target ? analyzeModule(target, results, visited) : { https: localHttps, factories: localBuilders };
+    // A package re-export defines no endpoint this scan can see; a dangling
+    // local one cannot build. A star of either is opaque to the inventory.
+    if (specifier && !target) {
+      if (!statement.exportClause) analysis.opaque = true;
+      continue;
+    }
+    const upstream = target
+      ? analyzeModule(target, results, visited)
+      : { https: localHttps, factories: localBuilders, groups: localGroups, opaque: false };
     if (!statement.exportClause) {
       for (const name of upstream.https) analysis.https.add(name);
       for (const name of upstream.factories) analysis.factories.add(name);
+      for (const [name, members] of upstream.groups) analysis.groups.set(name, members);
+      if (upstream.opaque) analysis.opaque = true;
       continue;
     }
     // `export * as admin from './admin'` deploys admin's endpoints as a
@@ -318,9 +336,12 @@ function analyzeModule(file, results, visited) {
       if (!target && namespaceImports.has(local)) {
         for (const name of namespaceImports.get(local).https) analysis.https.add(`${element.name.text}-${name}`);
       }
-      // `const grouped = { endpoint }; export { grouped as admin }`.
-      if (!target && localGroups.has(local)) {
-        for (const member of localGroups.get(local)) analysis.https.add(`${element.name.text}-${member}`);
+      // `const grouped = { endpoint }; export { grouped as admin }`, or a group
+      // re-exported from a local module by name.
+      const group = target ? upstream.groups.get(local) : localGroups.get(local);
+      if (group) {
+        analysis.groups.set(element.name.text, group);
+        for (const member of group) analysis.https.add(`${element.name.text}-${member}`);
       }
       if (upstream.factories.has(local)) analysis.factories.add(element.name.text);
     }
@@ -335,14 +356,29 @@ function analyzeModule(file, results, visited) {
  * resolved to a fixed point. Read-only, syntax-only.
  */
 export function httpsFunctionExports(file) {
+  return httpsExportGraph(file).https;
+}
+
+/**
+ * `httpsFunctionExports` plus `opaque`: whether `file` re-exports, directly or
+ * through local stars, a star this scan cannot see into (a package or an
+ * unresolvable module). A caller that needs the complete export list treats an
+ * opaque graph conservatively.
+ */
+export function httpsExportGraph(file) {
   const results = new Map();
-  const size = () => [...results.values()].reduce((n, a) => n + a.https.size + a.factories.size, 0);
+  const size = () =>
+    [...results.values()].reduce(
+      (n, a) => n + a.https.size + a.factories.size + a.groups.size + (a.opaque ? 1 : 0),
+      0,
+    );
   let before;
   do {
     before = size();
     analyzeModule(file, results, new Set());
   } while (size() !== before);
-  return results.get(file).https;
+  const analysis = results.get(file);
+  return { https: analysis.https, opaque: analysis.opaque };
 }
 
 /** HTTPS exports of `indexFile` that no invoker family reconciles. */

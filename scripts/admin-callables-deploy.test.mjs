@@ -85,6 +85,30 @@ describe("admin-callables deploy scope (#1277)", () => {
     }
   });
 
+  it("stays conservative when a local star re-exports a package star", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "admin-callable-package-star-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: { source: "functions" } }));
+      await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export * from './admin';\n");
+      await writeFile(
+        resolve(fixture, "functions", "src", "admin.ts"),
+        "import { onCall } from 'firebase-functions/v2/https';\nexport const unlockDayNow = onCall(async () => 1);\nexport * from 'my-admin-callables';\n",
+      );
+
+      const result = await classifyFirebaseDeployRequest(["fiveacross"], {
+        defaultConfigPath: resolve(fixture, "firebase.json"),
+      });
+      expect(result).toMatchObject({
+        adminCallablesInvokerSelected: true,
+        adminCallablesInvokerConservative: false,
+        adminCallablesStrictServices: "unlock,approve",
+      });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("keeps both services strict once approvePrompts is exported", async () => {
     const result = await withIndex(
       [

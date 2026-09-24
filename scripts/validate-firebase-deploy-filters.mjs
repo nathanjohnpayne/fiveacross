@@ -24,7 +24,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { httpsFunctionExports, resolveModule, unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
+import { httpsExportGraph, resolveModule, unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
 
 const require = createRequire(import.meta.url);
 const commander = require("commander");
@@ -172,10 +172,10 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 ]);
 
 // `sourcePath`, when given, lets a star re-export of a local module that
-// exists be resolved through the module graph (`httpsFunctionExports`) to the
+// exists be resolved through the module graph (`httpsExportGraph`) to the
 // names it really exports, so one unexported peer does not become strict. A
-// star of a package or of a module that cannot be resolved still widens to
-// every protected callable.
+// star of a package or of a module that cannot be resolved, here or anywhere
+// behind a local star, still widens to every protected callable.
 function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
@@ -227,8 +227,10 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
   if (hasRuntimeExportStar) {
     for (const [exportName] of table) exportedNames.add(exportName);
   } else if (hasLocalExportStar) {
-    const graphExports = httpsFunctionExports(sourcePath);
-    for (const [exportName] of table) if (graphExports.has(exportName)) exportedNames.add(exportName);
+    const graph = httpsExportGraph(sourcePath);
+    for (const [exportName] of table) {
+      if (graph.opaque || graph.https.has(exportName)) exportedNames.add(exportName);
+    }
   }
   return table.filter(([exportName]) =>
     exportedNames.has(exportName),

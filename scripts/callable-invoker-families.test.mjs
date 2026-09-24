@@ -220,6 +220,26 @@ describe("callable invoker families (#1277)", () => {
     ]);
   });
 
+  it("carries object groups imported or re-exported by name from a local module", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import { admin } from './groups';",
+        "export { admin };",
+        "export { admin as renamedAdmin } from './groups';",
+      ].join("\n"),
+      "groups.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "const unlockDayNow = onCall(async () => 1);",
+        "export const admin = { unlockDayNow };",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "admin-unlockDayNow",
+      "renamedAdmin-unlockDayNow",
+    ]);
+  });
+
   it("scans the default functions/ source when the config names none", async () => {
     const root = await fixture({
       "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const brandNewCallable = onCall(async () => 1);\n",
