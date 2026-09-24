@@ -36,6 +36,7 @@
     "provision:bodega-preview": "node scripts/provision-bodega-preview.mjs",
     "migrate:bodega-canonical-host": "node scripts/migrate-bodega-canonical-host.mjs",
     "migrate:marker-event-id": "node scripts/migrate-marker-event-id.mjs",
+    "audit:pending-hidden": "node scripts/audit-pending-hidden-items.mjs",
     "bugs:pull": "node scripts/bug-reports.mjs pull",
     "bugs:archive": "node scripts/bug-reports.mjs archive",
     "bugs:disposition": "node scripts/bug-reports.mjs disposition",

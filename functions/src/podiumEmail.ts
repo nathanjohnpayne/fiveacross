@@ -71,6 +71,7 @@ import {
 } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
 import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
+import { isFirestoreDocumentId } from './firestoreIds';
 
 /** Everything the beat hands over. Every field is already computed — this
  *  module reads no finale state of its own. */
@@ -1265,14 +1266,8 @@ export function visibleMostLovedAward(
   // arriving one level up — a correct rule with a partial inventory reads exactly
   // like coverage. Byte length rather than string length, because the limit is
   // bytes and a multi-byte name reaches it sooner than its `.length` suggests.
-  const joinable = (id: unknown): boolean =>
-    typeof id === 'string' &&
-    id.length > 0 &&
-    Buffer.byteLength(id, 'utf8') <= 1500 &&
-    !id.includes('/') &&
-    id !== '.' &&
-    id !== '..' &&
-    !/^__.*__$/.test(id);
+  // The predicate itself now lives in `firestoreIds.ts`, shared with approvePrompts.
+  const joinable = isFirestoreDocumentId;
   const winners = bounded.filter(
     (w): w is MostLovedPhotoWinner =>
       !!w &&

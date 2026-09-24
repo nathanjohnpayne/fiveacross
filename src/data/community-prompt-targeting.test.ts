@@ -2,10 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // specs/community-prompt-targeting.md (#557) — the client half: the pure
 // targeting decisions, the submission that records an intended Day, and the
-// approval that routes a Prompt to it (rolling forward past a closed Day, and
-// retaining rather than dropping a Prompt with nowhere left to go).
+// `approveItems` wrapper that hands the queue rows to the `approvePrompts`
+// callable (#1275).
 //
-// The snapshot half — which Prompts a Day actually freezes — is pinned in
+// The approval ROUTING — rolling forward past a closed Day, retaining rather
+// than dropping a Prompt with nowhere left to go, the stale guard, the #558
+// classification and the Event-doc fence — runs on the server now and is pinned
+// in tests/functions/approve-prompts.test.ts. The snapshot half — which Prompts
+// a Day actually freezes — is pinned in
 // tests/functions/community-prompt-targeting-snapshot.test.ts, and the write
 // permissions in tests/rules/community-prompt-targeting.test.ts. No emulator
 // here: these are pure decisions plus "what payload did the write receive",
@@ -30,6 +34,8 @@ const {
   itemDocs,
   eventScope,
   transactionGate,
+  httpsCallableMock,
+  callableMock,
 } =
   vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
@@ -37,9 +43,8 @@ const {
   eventDataMock: vi.fn((): Record<string, unknown> | undefined => ({ days: [] })),
   getDocMock: vi.fn(),
   txGetMock: vi.fn(),
-  // The AUTHORITATIVE item state the approval transaction reads. Approval routes
-  // on what is stored here, never on the queue row the caller passes — that is
-  // the stale-approval guard, so these two can deliberately disagree in tests.
+  // The AUTHORITATIVE item state `setItemSpicy`'s transaction reads (approval
+  // itself no longer reads items on the client — it is the callable).
   itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
   eventScope: { eventId: 'med-2026' },
   // The transaction lifecycle these tests need to stage: a callback that starts
@@ -52,9 +57,13 @@ const {
     attempts: 1,
     failWith: null as Error | null,
   },
+  // `httpsCallable(functions, name)` returns `callableMock`, whose resolved
+  // `{ data }` is what the wrapper narrows. Both are reset per test.
+  callableMock: vi.fn(),
+  httpsCallableMock: vi.fn(),
 }));
 
-/** Seed the stored item a later `approveItems` will read. */
+/** Seed the stored item a later `setItemSpicy` will read. */
 const putItem = (id: string, data: Record<string, unknown> = {}) => {
   itemDocs[id] = { status: 'pending', ...data };
 };
@@ -66,7 +75,11 @@ vi.mock('../firebase', () => ({
     return eventScope.eventId;
   },
 }));
-vi.mock('firebase/functions', () => ({ httpsCallable: () => async () => ({ data: {} }) }));
+// The approval wire (#1275): `approveItems` is an `httpsCallable` wrapper, so
+// the seam under test is the callable factory and the callable it returns.
+vi.mock('firebase/functions', () => ({
+  httpsCallable: (...args: unknown[]) => httpsCallableMock(...args),
+}));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   const snap = () => {
@@ -101,9 +114,9 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       getDocMock(...args);
       return Promise.resolve(snap());
     },
-    // The transaction seam approval routing depends on: the callback reads the
-    // Event through `tx.get` (the schedule read set), reads each ITEM through
-    // `tx.get` (the stale guard's authoritative state) and writes only items.
+    // The transaction seam `setItemSpicy` depends on: the callback reads the
+    // ITEM through `tx.get` (its pending-and-main guard's authoritative state)
+    // and writes only that item.
     runTransaction: async (_db: unknown, fn: (tx: unknown) => Promise<unknown>) => {
       if (transactionGate.beforeCallback) await transactionGate.beforeCallback;
       const tx = {
@@ -129,7 +142,7 @@ import {
   type TargetableDay,
 } from './communityPrompts';
 import { addItem } from './api';
-import { approveItems, approveItem, bulkApproveItems, setItemSpicy } from './admin';
+import { approveItems, approveItem, bulkApproveItems, setItemSpicy, type ApprovableItem } from './admin';
 
 const NOW = 1_000_000;
 const HOUR = 3_600_000;
@@ -149,6 +162,7 @@ beforeEach(() => {
   transactionGate.failWith = null;
   for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
+  httpsCallableMock.mockImplementation(() => callableMock);
   txGetMock.mockImplementation((ref: Ref) => {
     const at = ref.path.indexOf('/items/');
     const data =
@@ -372,424 +386,161 @@ describe('addItem — a submission records the Day it is meant for', () => {
   });
 });
 
-describe('approveItems — routing an approval into one Day', () => {
-  const written = () => updateMock.mock.calls.map(([path, data]) => ({ path, data }));
+describe('approveItems — a thin approvePrompts wrapper (#1275)', () => {
+  // The routing, stale-guard, classification and fence cases that used to live
+  // here moved with the transaction to tests/functions/approve-prompts.test.ts.
+  // What is left to pin on the client is the WIRE: what the wrapper sends, what
+  // it trusts back, and that it adds nothing of its own.
+  const placed = (itemId: string, dayIndex: number | null = 2) => ({
+    itemId,
+    dayIndex,
+    retained: false,
+    outcome: 'placed',
+  });
+  const respondWith = (placements: unknown) => {
+    callableMock.mockResolvedValue({ data: { placements } });
+  };
 
-  beforeEach(() => {
-    // Every id these tests approve, STORED as still-pending with its intended
-    // Day. Routing reads these documents, not the rows the tests pass, so a test
-    // that wants the two to disagree seeds a different stored target on purpose.
-    putItem('p1', { targetDayIndex: 2 });
-    putItem('legacy');
-    putItem('bad', { targetDayIndex: -3 });
-    putItem('nulled', { targetDayIndex: null });
-    putItem('a', { targetDayIndex: 2 });
-    putItem('b', { targetDayIndex: 1 });
-    putItem('c', { targetDayIndex: 9 });
-    putItem('d');
-    eventDataMock.mockReturnValue({
-      days: [
-        { index: 0, unlockAt: NOW - 2 * HOUR, pool: 'main', snapshotItemIds: ['a'] },
-        { index: 1, unlockAt: NOW - HOUR, pool: 'main', snapshotItemIds: [] },
-        { index: 2, unlockAt: Date.now() + 10 * HOUR, pool: 'main' },
-        { index: 3, unlockAt: Date.now() + 20 * HOUR, pool: 'main' },
+  it('sends the queue rows to the approvePrompts callable and returns its placements', async () => {
+    respondWith([placed('p1')]);
+    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'easy', spicy: false }], 'admin-uid');
+    expect(httpsCallableMock).toHaveBeenCalledWith({}, 'approvePrompts');
+    expect(callableMock).toHaveBeenCalledWith({
+      eventId: 'med-2026',
+      items: [{ id: 'p1', pool: 'easy', spicy: false }],
+    });
+    expect(placements).toEqual([placed('p1')]);
+    // No client write of any kind: the server owns the transition.
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('sends ONLY eventId and each row id/pool/spicy — never the admin uid, a clock, or the rest of the row', async () => {
+    respondWith([placed('p1')]);
+    await approveItems(
+      [
+        {
+          id: 'p1',
+          targetDayIndex: 4,
+          text: 'never leaves the client',
+          createdBy: 'player',
+          approvedAt: 0,
+          retainedAt: 5,
+        } as unknown as ApprovableItem,
+      ],
+      'admin-uid',
+    );
+    const [payload] = callableMock.mock.calls[0] as [Record<string, unknown>];
+    expect(payload).toStrictEqual({ eventId: 'med-2026', items: [{ id: 'p1' }] });
+    expect(JSON.stringify(payload)).not.toContain('admin-uid');
+  });
+
+  it('captures eventId when the call starts, so a mid-flight Event switch cannot re-aim it', async () => {
+    let finish!: (value: { data: unknown }) => void;
+    callableMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    eventScope.eventId = 'event-a';
+    const pending = approveItems([{ id: 'p1' }], 'admin-uid');
+    eventScope.eventId = 'event-b';
+    finish({ data: { placements: [placed('p1')] } });
+    await pending;
+    expect(callableMock.mock.calls[0][0]).toMatchObject({ eventId: 'event-a' });
+  });
+
+  it('honours an explicit eventId argument', async () => {
+    respondWith([placed('p1')]);
+    await approveItems([{ id: 'p1' }], 'admin-uid', 'pacific-2026');
+    expect(callableMock.mock.calls[0][0]).toMatchObject({ eventId: 'pacific-2026' });
+  });
+
+  it('is a no-op for an empty list — no callable is even constructed', async () => {
+    expect(await approveItems([], 'admin-uid')).toEqual([]);
+    expect(httpsCallableMock).not.toHaveBeenCalled();
+    expect(callableMock).not.toHaveBeenCalled();
+  });
+
+  it('approveItem takes the queue ROW and returns the first placement', async () => {
+    respondWith([placed('p1', 3)]);
+    const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
+    expect(placement).toEqual(placed('p1', 3));
+    expect(callableMock.mock.calls[0][0]).toMatchObject({ items: [{ id: 'p1' }] });
+  });
+
+  it('bulkApproveItems sends every row in ONE call and returns every placement in order', async () => {
+    respondWith([
+      placed('a'),
+      placed('b'),
+      { itemId: 'c', dayIndex: null, retained: true, outcome: 'retained' },
+      {
+        itemId: 'd',
+        dayIndex: null,
+        retained: false,
+        outcome: 'malformed',
+        reason: 'Community Prompt approval requires an easy or exploratory classification.',
+      },
+    ]);
+    const placements = await bulkApproveItems(
+      [
+        { id: 'a', pool: 'easy' },
+        { id: 'b', pool: 'main', spicy: true },
+        { id: 'c', pool: 'easy' },
+        { id: 'd', pool: 'closing' },
+      ],
+      'admin-uid',
+    );
+    expect(callableMock).toHaveBeenCalledTimes(1);
+    expect(callableMock.mock.calls[0][0]).toStrictEqual({
+      eventId: 'med-2026',
+      items: [
+        { id: 'a', pool: 'easy' },
+        { id: 'b', pool: 'main', spicy: true },
+        { id: 'c', pool: 'easy' },
+        { id: 'd', pool: 'closing' },
       ],
     });
+    expect(placements.map((p) => p.outcome)).toEqual(['placed', 'placed', 'retained', 'malformed']);
+    expect(placements[3].reason).toMatch(/easy or exploratory/);
   });
 
-  it('approves a Prompt onto the Day it was submitted for', async () => {
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    expect(written()[0].data).toMatchObject({
-      status: 'active',
-      approvedBy: 'admin-uid',
-      targetDayIndex: 2,
+  it('passes a callable rejection through as the SAME error, so the queue shows the server message', async () => {
+    // A FunctionsError is an Error whose `message` is the fixed server string
+    // (permission-denied for a stale bundle, failed-precondition on a closed
+    // Event, aborted on contention); AsyncButton surfaces `error.message`.
+    const denied = Object.assign(new Error('Only an admin of this Event can approve its Prompts.'), {
+      code: 'functions/permission-denied',
     });
-  });
-
-  it('keeps a delayed Event A approval read set and item write entirely in A', async () => {
-    let finishEventRead:
-      | ((snap: { exists: () => boolean; data: () => Record<string, unknown> | undefined }) => void)
-      | undefined;
-    txGetMock.mockImplementationOnce(
-      () => new Promise((resolve) => { finishEventRead = resolve; }),
-    );
-    eventScope.eventId = 'event-a';
-    const pending = approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-
-    expect((txGetMock.mock.calls[0][0] as Ref).path).toBe('events/event-a');
-    eventScope.eventId = 'event-b';
-    const data = eventDataMock();
-    finishEventRead!({ exists: () => data !== undefined, data: () => data });
-    await pending;
-
-    expect(txGetMock.mock.calls.map((call) => (call[0] as Ref).path)).toEqual([
-      'events/event-a',
-      'events/event-a/items/p1',
-    ]);
-    expect(written()).toHaveLength(1);
-    expect(written()[0].path).toBe('events/event-a/items/p1');
-  });
-
-  it('atomically persists the Admin-selected easy classification with approval', async () => {
-    putItem('p1', { targetDayIndex: 2, pool: 'main', spicy: true });
-
-    await approveItems([{ id: 'p1', targetDayIndex: 2, pool: 'easy' }], 'admin-uid');
-
-    expect(written()).toHaveLength(1);
-    expect(written()[0].data).toMatchObject({
-      status: 'active',
-      approvedBy: 'admin-uid',
-      targetDayIndex: 2,
-      // Writes keep using the live documents' transitional persisted spelling.
-      pool: 'embark',
-      // Easy content is never adult-gated; approval clears a stale/ticked flag
-      // in this same transaction rather than leaking it onto an ungated card.
-      spicy: false,
-    });
+    callableMock.mockRejectedValue(denied);
+    await expect(approveItems([{ id: 'p1' }], 'admin-uid')).rejects.toBe(denied);
   });
 
   it.each([
-    { stored: false, selected: true },
-    { stored: true, selected: false },
-  ])(
-    'atomically persists an immediate Exploratory spicy choice ($stored → $selected)',
-    async ({ stored, selected }) => {
-      putItem('p1', { targetDayIndex: 2, pool: 'main', spicy: stored });
-
-      await approveItems(
-        [{ id: 'p1', targetDayIndex: 2, pool: 'main', spicy: selected }],
-        'admin-uid',
-      );
-
-      expect(written()).toHaveLength(1);
-      expect(written()[0].data).toMatchObject({
-        status: 'active',
-        pool: 'main',
-        spicy: selected,
-      });
-    },
-  );
-
-  // #1070. A classification approval cannot act on is a fact about ONE row, so
-  // it is reported as that row's own outcome and skipped — it used to throw out
-  // of the transaction, taking every other row in the batch with it.
-  it('reports a closing classification as that row\'s own malformed outcome, writing nothing', async () => {
-    const placements = await approveItems(
-      [{ id: 'p1', targetDayIndex: 2, pool: 'closing' }],
-      'admin-uid',
+    ['no data', undefined],
+    ['no placements', {}],
+    ['placements that are not an array', { placements: { itemId: 'p1' } }],
+    ['too few placements', { placements: [] }],
+    ['too many placements', { placements: [placed('p1'), placed('p2')] }],
+    ['a non-object placement', { placements: ['p1'] }],
+    ['a missing itemId', { placements: [{ dayIndex: 2, retained: false, outcome: 'placed' }] }],
+    ['a string dayIndex', { placements: [{ itemId: 'p1', dayIndex: '2', retained: false, outcome: 'placed' }] }],
+    ['a non-boolean retained', { placements: [{ itemId: 'p1', dayIndex: 2, retained: 'no', outcome: 'placed' }] }],
+    ['an unknown outcome', { placements: [{ itemId: 'p1', dayIndex: 2, retained: false, outcome: 'approved' }] }],
+    ['a non-string reason', { placements: [{ itemId: 'p1', dayIndex: null, retained: false, outcome: 'malformed', reason: 7 }] }],
+  ])('throws a fixed error on a response with %s rather than announcing it', async (_label, data) => {
+    callableMock.mockResolvedValue({ data });
+    await expect(approveItems([{ id: 'p1' }], 'admin-uid')).rejects.toThrow(
+      'approvePrompts returned an unexpected response.',
     );
-    expect(placements).toEqual([
-      {
-        itemId: 'p1',
-        dayIndex: null,
-        retained: false,
-        outcome: 'malformed',
-        reason: 'Community Prompt approval requires an easy or exploratory classification.',
-      },
-    ]);
-    expect(updateMock).not.toHaveBeenCalled();
   });
 
-  it('reports a non-boolean spicy choice as malformed too, naming the spicy reason', async () => {
-    const placements = await approveItems(
-      [{ id: 'p1', targetDayIndex: 2, pool: 'main', spicy: 'yes' as never }],
-      'admin-uid',
-    );
-    expect(placements).toEqual([
-      {
-        itemId: 'p1',
-        dayIndex: null,
-        retained: false,
-        outcome: 'malformed',
-        reason: 'Community Prompt approval requires a boolean spicy classification.',
-      },
+  it('accepts a null dayIndex and an absent reason, and keeps a string reason', async () => {
+    respondWith([
+      { itemId: 'p1', dayIndex: null, retained: true, outcome: 'retained' },
+      { itemId: 'p2', dayIndex: null, retained: false, outcome: 'malformed', reason: 'why' },
     ]);
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('rolls a Prompt approved after its Day closed forward to the next open Day', async () => {
-    putItem('p1', { targetDayIndex: 1 });
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 1 }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    expect(written()[0].data).toMatchObject({ status: 'active', targetDayIndex: 2 });
-  });
-
-  it('RETAINS a Prompt with nowhere left to go, keeping its original target', async () => {
-    // Never dropped, never deleted, and never re-aimed at a Day that has dealt:
-    // the unreachable target IS the retention, and retainedAt makes it legible.
-    putItem('p1', { targetDayIndex: 9 });
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
+    const placements = await approveItems([{ id: 'p1' }, { id: 'p2' }], 'admin-uid');
     expect(placements).toEqual([
       { itemId: 'p1', dayIndex: null, retained: true, outcome: 'retained' },
+      { itemId: 'p2', dayIndex: null, retained: false, outcome: 'malformed', reason: 'why' },
     ]);
-    const { data } = written()[0];
-    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
-    expect(data).toHaveProperty('retainedAt');
-    expect(data).not.toHaveProperty('targetDayIndex');
-  });
-
-  it('RESOLVES the Day a pending row with no target should have had', async () => {
-    // A PENDING row is a player submission by construction — organiser and seed
-    // Prompts are created `active` and never enter this queue — so an absent
-    // target is a gap, not a request for every Day. Leaving it would let a
-    // crafted or cached client submit without one and be approved onto EVERY
-    // Day, around the create rule (Phase 4b P1, PR #812).
-    const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'legacy', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    const { data } = written()[0];
-    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid', targetDayIndex: 2 });
-    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
-  });
-
-  it('RETAINS an untargeted pending row when the schedule has nothing left', async () => {
-    eventDataMock.mockReturnValue({
-      days: [{ index: 0, unlockAt: NOW - HOUR, pool: 'main', snapshotItemIds: [] }],
-    });
-    const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'legacy', dayIndex: null, retained: true, outcome: 'retained' },
-    ]);
-  });
-
-  it('keeps a Prompt UNTARGETED on an Event with no schedule at all', async () => {
-    // The one honest untargeted case: there are no Days, so "every Day" is the
-    // single legacy board and narrowing it would mean nothing.
-    eventDataMock.mockReturnValue({});
-    const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'legacy', dayIndex: null, retained: false, outcome: 'untargeted' },
-    ]);
-    const { data } = written()[0];
-    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
-    expect(data).not.toHaveProperty('targetDayIndex');
-    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
-  });
-
-  it('reports a malformed target as RETAINED — dealt nowhere, so described as nowhere', async () => {
-    // The snapshot's `targetsDay` already excludes a malformed row from every
-    // Day, so it IS retained; reporting it as ordinary untargeted content would
-    // tell the organiser it is live on every Day while it is live on none
-    // (Phase 4b P2, PR #812). It is never re-aimed: guessing the intended Day
-    // would be inventing one.
-    const placements = await approveItems(
-      [{ id: 'bad', targetDayIndex: -3 as number }],
-      'admin-uid',
-    );
-    expect(placements).toEqual([
-      { itemId: 'bad', dayIndex: null, retained: true, outcome: 'retained' },
-    ]);
-    const { data } = written()[0];
-    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
-    expect(data).toHaveProperty('retainedAt');
-    // The write is a MERGE, so leaving the field out of it leaves the malformed
-    // value on the document — untouched, not repaired and not cleared.
-    expect(data).not.toHaveProperty('targetDayIndex');
-  });
-
-  it('reports a stored NULL target as retained too — a null is a value, not an absence', async () => {
-    // The mirror of `targetsDay`'s strict-`undefined` rule: the rules reject a
-    // null on create, but the admin update arm is unconstrained, so an imported
-    // or repaired row can carry one. It must not read as untargeted here either.
-    const placements = await approveItems(
-      [{ id: 'nulled', targetDayIndex: null as unknown as number }],
-      'admin-uid',
-    );
-    expect(placements).toEqual([
-      { itemId: 'nulled', dayIndex: null, retained: true, outcome: 'retained' },
-    ]);
-    expect(written()[0].data).toHaveProperty('retainedAt');
-  });
-
-  it('CLEARS a stale retainedAt when it places the Prompt', async () => {
-    // A marker left behind would describe an active, DEALT Prompt as one that
-    // was retained and dealt nowhere (Phase 4b P1, PR #812). `tx.update` is a
-    // merge, so not-writing the field is not the same as clearing it — a
-    // placement has to unstamp it explicitly. The rules now refuse a
-    // submitter-supplied `retainedAt`, so this is the second line behind that
-    // bar rather than the only one.
-    await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    const { data } = written()[0];
-    expect(data).toHaveProperty('retainedAt');
-    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
-  });
-
-  it('CLEARS it on a RESOLVED placement too — every placement, not just routed ones', async () => {
-    await approveItems([{ id: 'legacy' }], 'admin-uid');
-    const { data } = written()[0];
-    expect(data).toHaveProperty('retainedAt');
-    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
-  });
-
-  it('STAMPS retainedAt as a real instant when it retains — the two paths differ', async () => {
-    // The control for the two above: retention is the one outcome that writes a
-    // number, so "cleared" and "stamped" can never be confused for each other.
-    putItem('p1', { targetDayIndex: 9 });
-    await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
-    expect(typeof (written()[0].data as { retainedAt: unknown }).retainedAt).toBe('number');
-  });
-
-  it('REFUSES to re-approve a row that is no longer pending — the double-deal guard', async () => {
-    // The hazard: two organisers hold the same queue row. The first approval
-    // places the Prompt on Day 2 and Day 2 freezes with its id; a second
-    // approval of that stale row would find Day 2 closed, roll FORWARD, and
-    // rewrite it for Day 3 — which then freezes with it too. The Prompt would be
-    // dealt on TWO Days, the one outcome this ticket exists to prevent, and no
-    // Day is mutated on the way there so nothing downstream would catch it
-    // (Phase 4b P1, PR #812).
-    putItem('p1', { status: 'active', targetDayIndex: 2 });
-    const placements = await approveItems(
-      [{ id: 'p1', targetDayIndex: 2, pool: 'easy' }],
-      'admin-uid',
-    );
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'stale' },
-    ]);
-    // Reported where it already stands, and NOT rewritten.
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('reports an already-RETAINED row as retained, still without writing', async () => {
-    putItem('p1', { status: 'active', targetDayIndex: 9, retainedAt: NOW });
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: null, retained: true, outcome: 'stale' },
-    ]);
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('reports a row that has VANISHED rather than inventing one', async () => {
-    delete itemDocs['p1'];
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: null, retained: false, outcome: 'missing' },
-    ]);
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('routes on the STORED target, ignoring a stale one on the caller row', async () => {
-    // The queue row is a client snapshot and may be out of date; the document is
-    // not. An organiser re-aimed this Prompt at Day 3 after the queue rendered.
-    putItem('p1', { targetDayIndex: 3 });
-    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([
-      { itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' },
-    ]);
-    expect(written()[0].data).toMatchObject({ targetDayIndex: 3 });
-  });
-
-  it('never writes to a Day — an approval touches only the Prompt', async () => {
-    // The hard invariant: an already-snapshotted or dealt Day is never mutated.
-    // Routing is a write to the item, so no Day can be touched by construction.
-    await approveItems([{ id: 'p1', targetDayIndex: 1 }], 'admin-uid');
-    for (const { path } of written()) {
-      expect(path).toMatch(/^events\/med-2026\/items\//);
-    }
-  });
-
-  it('is a no-op for an empty list', async () => {
-    expect(await approveItems([], 'admin-uid')).toEqual([]);
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('routes every row of a bulk approve, sharing ONE approvedAt instant', async () => {
-    const placements = await bulkApproveItems(
-      [
-        { id: 'a', targetDayIndex: 2, pool: 'easy' },
-        { id: 'b', targetDayIndex: 1, pool: 'main' },
-        { id: 'c', targetDayIndex: 9, pool: 'easy' },
-        { id: 'd', pool: 'main' },
-      ],
-      'admin-uid',
-    );
-    expect(placements).toEqual([
-      { itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' },
-      { itemId: 'b', dayIndex: 2, retained: false, outcome: 'placed' },
-      { itemId: 'c', dayIndex: null, retained: true, outcome: 'retained' },
-      // 'd' has no stored target: a pending row is a player submission, so
-      // approval resolves the Day it should have had rather than every Day.
-      { itemId: 'd', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
-    expect(stamps.size).toBe(1);
-    expect(written().map(({ data }) => (data as { pool: string }).pool)).toEqual([
-      'embark',
-      'main',
-      'embark',
-      'main',
-    ]);
-  });
-
-  it('ignores malformed classification hints on stale/missing bulk rows and still approves a valid row', async () => {
-    putItem('stale-classification', { status: 'active', targetDayIndex: 2 });
-
-    const placements = await bulkApproveItems(
-      [
-        { id: 'stale-classification', pool: 'closing' },
-        { id: 'missing-classification', spicy: 'not-a-boolean' as never },
-        { id: 'p1', targetDayIndex: 2, pool: 'easy' },
-      ],
-      'admin-uid',
-    );
-
-    expect(placements).toEqual([
-      { itemId: 'stale-classification', dayIndex: 2, retained: false, outcome: 'stale' },
-      { itemId: 'missing-classification', dayIndex: null, retained: false, outcome: 'missing' },
-      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    expect(written()).toHaveLength(1);
-    expect(written()[0]).toMatchObject({
-      path: 'events/med-2026/items/p1',
-      data: { status: 'active', pool: 'embark', spicy: false },
-    });
-  });
-
-  // #1070, the case the whole change exists for: "Approve all" is no longer
-  // all-or-nothing on a malformed classification. One bad row is skipped as its
-  // own outcome and the rest of the batch still lands.
-  it('skips ONE malformed row in a bulk approve and still approves the other two', async () => {
-    const placements = await bulkApproveItems(
-      [
-        { id: 'a', targetDayIndex: 2, pool: 'easy' },
-        { id: 'b', targetDayIndex: 1, pool: 'closing' },
-        { id: 'd', pool: 'main', spicy: true },
-      ],
-      'admin-uid',
-    );
-
-    expect(placements).toEqual([
-      { itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' },
-      {
-        itemId: 'b',
-        dayIndex: null,
-        retained: false,
-        outcome: 'malformed',
-        reason: 'Community Prompt approval requires an easy or exploratory classification.',
-      },
-      { itemId: 'd', dayIndex: 2, retained: false, outcome: 'placed' },
-    ]);
-    // Nothing at all for the skipped row — not an approval, not a
-    // classification-only update. It is still pending, exactly as it was.
-    expect(written().map(({ path }) => path)).toEqual([
-      'events/med-2026/items/a',
-      'events/med-2026/items/d',
-    ]);
-    // And the surviving rows still share the one approvedAt instant a bulk
-    // approve promises: skipping a row does not split the batch in two.
-    const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
-    expect(stamps.size).toBe(1);
-  });
-
-  it('approveItem takes the queue ROW so a target can never be dropped', async () => {
-    putItem('p1', { targetDayIndex: 3 });
-    const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
-    expect(placement).toEqual({ itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' });
+    expect(placements[0]).not.toHaveProperty('reason');
   });
 });
 

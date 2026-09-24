@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import type { ItemDoc } from '../../types';
 
 // admin/PromptPool, component layer. Drives the REAL AdminAddItemForm with the
@@ -35,6 +35,47 @@ const renderPool = (items: ItemDoc[] = []) =>
       adminUid="admin-uid"
     />,
   );
+
+describe('Prompt row Hide/Restore follow the status moves the rules allow an admin client (#1275)', () => {
+  const item = (id: string, status: ItemDoc['status']): ItemDoc =>
+    ({
+      id,
+      text: `prompt ${id}`,
+      createdBy: `u-${id}`,
+      createdAt: 1,
+      isFreeSpace: false,
+      status,
+      reportCount: 0,
+      spicy: false,
+      pool: 'main',
+    }) as ItemDoc;
+  const rowOf = (text: string) => screen.getByText(text).closest('.row') as HTMLElement;
+
+  it('an active row offers Hide and not Restore', () => {
+    renderPool([item('a', 'active')]);
+    const row = rowOf('prompt a');
+    expect(within(row).getByRole('button', { name: 'Hide' })).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Restore' })).toBeNull();
+  });
+
+  it('a hidden row offers Restore and not Hide', () => {
+    renderPool([item('h', 'hidden')]);
+    const row = rowOf('prompt h');
+    expect(within(row).getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Hide' })).toBeNull();
+  });
+
+  it.each(['pending', 'rejected'] as const)(
+    'a %s row offers neither — approval is the approvePrompts callable and a rejection is final — but keeps Delete',
+    (status) => {
+      renderPool([item('p', status)]);
+      const row = rowOf('prompt p');
+      expect(within(row).queryByRole('button', { name: 'Hide' })).toBeNull();
+      expect(within(row).queryByRole('button', { name: 'Restore' })).toBeNull();
+      expect(within(row).getByTitle('Delete')).toBeInTheDocument();
+    },
+  );
+});
 
 describe('AdminAddItemForm (post-review #751/#754 on PR #720)', () => {
   // `data-unsaved-work` while a prompt is half-typed (Codex P2 round 5, PR

@@ -23,6 +23,7 @@ import { deleteProof, ProofBacksMarkWhileClosingError } from '../../data/proofs'
 import { trackIfCurrentEvent } from '../../eventScopedAnalytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
+import { approvalFailureLabel } from '../../data/approvalFailure';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
@@ -276,11 +277,18 @@ function ItemQueueRow({
           Clear reports
         </AsyncButton>
       )}
-      {it.status === 'hidden' ? (
+      {/* Hide and Restore are the `active <-> hidden` pair and nothing else
+          (#1275): the rules now bound an admin client's status moves to that
+          pair plus `pending -> rejected`, so a reported PENDING row gets no Hide
+          (it would be denied, and hiding-then-restoring would launder an
+          approval around the `approvePrompts` callable) and a reported REJECTED
+          row gets neither. Both keep Delete and Ban. */}
+      {it.status === 'hidden' && (
         <AsyncButton onAction={() => restoreItem(it.id)}>
           Restore
         </AsyncButton>
-      ) : (
+      )}
+      {it.status === 'active' && (
         <AsyncButton onAction={() => hideItem(it.id)}>
           Hide
         </AsyncButton>
@@ -384,6 +392,7 @@ function ApprovalQueueRow({
       )}
       <AsyncButton
         className="btn primary"
+        failureLabelFor={approvalFailureLabel}
         onAction={() =>
           onApprove({
             ...it,
@@ -698,7 +707,7 @@ export default function ReviewQueue({
         reportOutcomes(tracked ? [tracked] : []);
         return tracked;
       });
-    });
+    }, undefined, approvalFailureLabel);
   };
   const approveAll = () => {
     const ownedEventId = EVENT_ID;
@@ -727,17 +736,21 @@ export default function ReviewQueue({
         });
       },
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
+      approvalFailureLabel,
     );
   };
 
   // The empty state and the flip confirm render TOGETHER, and the dialog is
   // deliberately outside the early return (Phase 4b P2). Confirming the last
-  // pending Prompt removes it from the pending query by Firestore's latency
-  // compensation — immediately, before the server has accepted or rejected the
-  // write — so `total` hits zero and an early return that owned the dialog would
-  // unmount it mid-write. The admin would watch the confirm vanish and "All
-  // clear." appear, and a rejection would take its own error state down with it:
-  // the write silently did not happen, on the one action in this console that
+  // pending Prompt removes it from the pending query: for a REJECT, by
+  // Firestore's latency compensation, immediately, before the server has
+  // accepted or rejected the write; for an APPROVE (the `approvePrompts`
+  // callable since #1275), after the server commits and the listener echoes
+  // the flip — so `total` hits zero while the confirm's own promise may still
+  // be settling, and an early return that owned the dialog would unmount it
+  // mid-flight. The admin would watch the confirm vanish and "All clear."
+  // appear, and a failure would take its own error state down with it: the
+  // write silently did not happen, on the one action in this console that
   // cannot be undone.
   if (!total) {
     return (
@@ -797,7 +810,7 @@ export default function ReviewQueue({
           </p>
         )}
         {!!pendingItems.length && (
-          <AsyncButton onAction={approveAll}>
+          <AsyncButton onAction={approveAll} failureLabelFor={approvalFailureLabel}>
             Approve all
           </AsyncButton>
         )}

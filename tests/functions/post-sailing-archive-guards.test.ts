@@ -11,6 +11,7 @@ import {
   type DayLike,
   type EventLike,
 } from '../../functions/src/unlockDay';
+import { ApprovalClosedError, approvePromptsCore } from '../../functions/src/approvePrompts';
 
 // specs/post-sailing-archive.md § "The server-side half" (#1150, child 2 of the
 // #134 epic).
@@ -606,5 +607,37 @@ describe('runFinaleBeats — no finale state lands on a frozen Event', () => {
     });
     await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 60_000 });
     expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+  });
+});
+
+describe('approvePromptsCore — server-side approval is a gameplay writer too (#1275)', () => {
+  // Approval deals a Prompt into a future Day, so it joins the writer inventory
+  // in specs/post-sailing-archive.md § "The server-side half". Unlike the sweeps
+  // it THROWS rather than reporting 'archived': it is an admin callable like
+  // `unlockDayNow`, and the caller has to be told the approval did not happen.
+  const approvalDeps = (db: AdminFirestore) => ({ db, now: () => 1_000, deleteField: () => ({}) });
+
+  it('approves on an open Event (the control) — the row is simply reported', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: dueDay(), admins: [ADMIN] } });
+    // This fake keeps items behind its collection query, not at document paths,
+    // so the row reads as missing; what the control pins is that the call
+    // COMPLETES with a placement instead of refusing.
+    expect(await approvePromptsCore(approvalDeps(db), ADMIN, 'e', [{ id: 'prompt-1' }])).toEqual([
+      { itemId: 'prompt-1', dayIndex: null, retained: false, outcome: 'missing' },
+    ]);
+  });
+
+  it('refuses on an archived Event, and on a closing one, writing nothing', async () => {
+    for (const closed of [{ status: 'archived' }, { archiving: true }]) {
+      const db = makeDb({ eventId: 'e', event: { days: dueDay(), admins: [ADMIN], ...closed } });
+      await expect(
+        approvePromptsCore(approvalDeps(db), ADMIN, 'e', [{ id: 'prompt-1' }]),
+      ).rejects.toBeInstanceOf(ApprovalClosedError);
+      // No item write and no `approvalSeq` fence: the Event is exactly as seeded.
+      expect(db.readEvent()).toEqual({ days: dueDay(), admins: [ADMIN], ...closed });
+      // Refused on the transaction's first read — the Event was read once and
+      // no item was fetched.
+      expect(db.eventReads()).toBe(1);
+    }
   });
 });
