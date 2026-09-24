@@ -54,12 +54,13 @@ function resolveModule(fromFile, specifier) {
   return null;
 }
 
-// A variable whose initializer calls an HTTPS builder outside any nested
-// function: `onCall(...)`, `https.onRequest(...)`, or a wrapper around one.
-function initializerBuildsHttps(node, localBuilders) {
+// Whether `node` calls an HTTPS builder outside any nested function:
+// `onCall(...)`, `https.onRequest(...)`, a wrapper around one, or a local or
+// imported factory whose own body does (`createCallable(...)`).
+function callsHttpsBuilder(node, localBuilders) {
   let found = false;
   const visit = (child) => {
-    if (found || ts.isArrowFunction(child) || ts.isFunctionExpression(child)) return;
+    if (found || isFunctionNode(child)) return;
     if (ts.isCallExpression(child)) {
       const callee = child.expression;
       if (
@@ -76,36 +77,82 @@ function initializerBuildsHttps(node, localBuilders) {
   return found;
 }
 
-/**
- * The exported names in `file` (and the local modules it re-exports from)
- * whose value is an onCall / onRequest function. Read-only, syntax-only.
- */
-export function httpsFunctionExports(file, seen = new Map()) {
-  if (seen.has(file)) return seen.get(file);
-  const result = new Set();
-  seen.set(file, result);
-  const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  const localBuilders = new Set(HTTPS_BUILDERS);
-  const localHttps = new Set();
+function isFunctionNode(node) {
+  return ts.isArrowFunction(node) || ts.isFunctionExpression(node) || ts.isFunctionDeclaration(node);
+}
+
+function isExported(statement) {
+  return Boolean(statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+}
+
+// The functions a file declares at top level, by name: `function f() {}` and
+// `const f = () => ...` / `const f = function () {}`.
+function topLevelFunctions(source) {
+  const functions = [];
   for (const statement of source.statements) {
-    if (ts.isImportDeclaration(statement)) {
-      const bindings = statement.importClause?.namedBindings;
-      if (bindings && ts.isNamedImports(bindings)) {
-        for (const element of bindings.elements) {
-          const imported = (element.propertyName ?? element.name).text;
-          if (HTTPS_BUILDERS.has(imported)) localBuilders.add(element.name.text);
+    if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
+      functions.push({ name: statement.name.text, body: statement.body, exported: isExported(statement) });
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        const init = declaration.initializer;
+        if (!ts.isIdentifier(declaration.name) || !init) continue;
+        if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+          functions.push({ name: declaration.name.text, body: init.body, exported: isExported(statement) });
         }
       }
     }
   }
+  return functions;
+}
+
+function analyzeModule(file, seen) {
+  if (seen.has(file)) return seen.get(file);
+  const analysis = { https: new Set(), factories: new Set() };
+  seen.set(file, analysis);
+  const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const localBuilders = new Set(HTTPS_BUILDERS);
+  const localHttps = new Set();
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    const specifier = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
+    const target = resolveModule(file, specifier);
+    const upstream = target ? analyzeModule(target, seen) : { https: new Set(), factories: new Set() };
+    for (const element of bindings.elements) {
+      if (element.isTypeOnly) continue;
+      const imported = (element.propertyName ?? element.name).text;
+      if (HTTPS_BUILDERS.has(imported) || upstream.factories.has(imported)) {
+        localBuilders.add(element.name.text);
+      }
+      // An imported endpoint re-exported later (`export { x }`) or aliased
+      // (`export const y = x`) is still that endpoint.
+      if (upstream.https.has(imported)) localHttps.add(element.name.text);
+    }
+  }
+  // A top-level function whose own body calls a builder is a factory: calling
+  // it yields an HTTPS function. Iterate so a factory of a factory counts too.
+  const functions = topLevelFunctions(source);
+  const localFactories = new Set();
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const fn of functions) {
+      if (localFactories.has(fn.name) || !callsHttpsBuilder(fn.body, localBuilders)) continue;
+      localFactories.add(fn.name);
+      localBuilders.add(fn.name);
+      if (fn.exported) analysis.factories.add(fn.name);
+      changed = true;
+    }
+  }
   for (const statement of source.statements) {
     if (ts.isVariableStatement(statement)) {
-      const exported = statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
       for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-        if (!initializerBuildsHttps(declaration.initializer, localBuilders)) continue;
+        const init = declaration.initializer;
+        if (!ts.isIdentifier(declaration.name) || !init || isFunctionNode(init)) continue;
+        const alias = ts.isIdentifier(init) && localHttps.has(init.text);
+        if (!alias && !callsHttpsBuilder(init, localBuilders)) continue;
         localHttps.add(declaration.name.text);
-        if (exported) result.add(declaration.name.text);
+        if (isExported(statement)) analysis.https.add(declaration.name.text);
       }
     }
   }
@@ -117,19 +164,30 @@ export function httpsFunctionExports(file, seen = new Map()) {
     const target = specifier ? resolveModule(file, specifier) : null;
     // A package re-export defines no endpoint here; a dangling one cannot build.
     if (specifier && !target) continue;
-    const upstream = target ? httpsFunctionExports(target, seen) : localHttps;
+    const upstream = target ? analyzeModule(target, seen) : { https: localHttps, factories: localFactories };
     if (!statement.exportClause) {
-      for (const name of upstream) result.add(name);
+      for (const name of upstream.https) analysis.https.add(name);
+      for (const name of upstream.factories) analysis.factories.add(name);
       continue;
     }
     if (!ts.isNamedExports(statement.exportClause)) continue;
     for (const element of statement.exportClause.elements) {
       if (element.isTypeOnly) continue;
       const local = (element.propertyName ?? element.name).text;
-      if (upstream.has(local)) result.add(element.name.text);
+      if (upstream.https.has(local)) analysis.https.add(element.name.text);
+      if (upstream.factories.has(local)) analysis.factories.add(element.name.text);
     }
   }
-  return result;
+  return analysis;
+}
+
+/**
+ * The exported names in `file` (and the local modules it imports factories
+ * from or re-exports) whose value is an onCall / onRequest function, built
+ * directly or through a helper factory. Read-only, syntax-only.
+ */
+export function httpsFunctionExports(file, seen = new Map()) {
+  return analyzeModule(file, seen).https;
 }
 
 /** HTTPS exports of `indexFile` that no invoker family reconciles. */

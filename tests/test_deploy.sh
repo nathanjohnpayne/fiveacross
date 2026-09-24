@@ -3829,7 +3829,7 @@ run_admin_case() {
   GCLOUD_LOG="$WORKDIR/gcloud-calls-$id.log" \
   GCLOUD_MISSING_SERVICE="$missing" \
   GCLOUD_STUB_ANNOTATION=false \
-    bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo $*" \
+    bash -c 'cd "$1" && shift && bash "$@"' _ "$repo" "$SCRIPT" --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo "$@" \
     >"$WORKDIR/case$id.out" 2>"$WORKDIR/case$id.err"
   ADMIN_RC=$?
   set -e

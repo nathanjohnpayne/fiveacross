@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -41,6 +41,72 @@ describe("callable invoker families (#1277)", () => {
     for (const family of CALLABLE_INVOKER_FAMILIES) {
       expect(existsSync(resolve(repoRoot, family.wrapper)), family.wrapper).toBe(true);
     }
+  });
+
+  it("wires every family into deploy.sh, its wrapper and the deploy classifier", () => {
+    const deployScript = readFileSync(resolve(repoRoot, "scripts", "deploy.sh"), "utf8");
+    const classifier = readFileSync(resolve(repoRoot, "scripts", "validate-firebase-deploy-filters.mjs"), "utf8");
+    for (const family of CALLABLE_INVOKER_FAMILIES) {
+      const basename = family.wrapper.replace(/^scripts\//, "");
+      expect(deployScript, `${basename} in INVOKER_SCRIPTS`).toContain(`INVOKER_SCRIPTS+=("$SCRIPT_DIR/${basename}")`);
+      const wrapper = readFileSync(resolve(repoRoot, family.wrapper), "utf8");
+      for (const name of family.exports) {
+        expect(wrapper, `${family.wrapper} reconciles ${name.toLowerCase()}`).toContain(name.toLowerCase());
+        expect(classifier, `exact --only selector for ${name}`).toContain(`/^functions:(?:[^:]+:)?${name}$/`);
+      }
+    }
+  });
+
+  it("finds HTTPS functions built through local and imported helper factories", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "import { createRequest as makeRequest } from './factories';",
+        "export { reexportedFactory } from './factories';",
+        "function createCallable(handler: () => Promise<number>) { return onCall(handler); }",
+        "const createWrapped = () => createCallable(async () => 1);",
+        "export const viaLocalFactory = createCallable(async () => 1);",
+        "export const viaFactoryOfFactory = createWrapped();",
+        "export const viaImportedFactory = makeRequest();",
+        "export const notHttps = Math.max(1, 2);",
+      ].join("\n"),
+      "factories.ts": [
+        "import { onRequest } from 'firebase-functions/v2/https';",
+        "export const createRequest = () => onRequest((req, res) => res.end());",
+        "export function reexportedFactory() { return onRequest((req, res) => res.end()); }",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "viaFactoryOfFactory",
+      "viaImportedFactory",
+      "viaLocalFactory",
+    ]);
+  });
+
+  it("finds HTTPS functions imported from a local module, then re-exported or aliased", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import { adminCallable, other as renamedImport } from './admin';",
+        "import { helper } from './admin';",
+        "export { adminCallable };",
+        "export { renamedImport as reexported };",
+        "export const aliased = adminCallable;",
+        "export const notHttps = helper;",
+      ].join("\n"),
+      "admin.ts": [
+        "import { onCall, onRequest } from 'firebase-functions/v2/https';",
+        "export const adminCallable = onCall(async () => 1);",
+        "export const other = onRequest((req, res) => res.end());",
+        "export const helper = 42;",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "adminCallable",
+      "aliased",
+      "reexported",
+    ]);
   });
 
   it("finds direct, aliased, local-renamed and re-exported HTTPS functions but not other triggers", async () => {

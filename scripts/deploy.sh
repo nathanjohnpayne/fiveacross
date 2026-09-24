@@ -620,6 +620,16 @@ run_postdeploy_admin_callables_invoker() {
   esac
 }
 
+# The by-hand repair flags for the admin callables, from the same strict set:
+# a service outside it may still be absent, a service inside it must exist.
+admin_callables_repair_flags() {
+  case "$ADMIN_CALLABLES_STRICT_SERVICES" in
+    unlock) printf '%s' " --allow-missing-service approve" ;;
+    approve) printf '%s' " --allow-missing-service unlock" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
@@ -1057,7 +1067,7 @@ EOF
     unlockDayNow (Unlock now / Re-snapshot) and approvePrompts may be answering
     Google's HTML 403 instead of their own 401 JSON. Repair the project:
 
-      ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh --allow-missing-service approve
+      ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh$(admin_callables_repair_flags)
 EOF
   fi
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
@@ -1135,10 +1145,7 @@ EOF
     EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
     AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
     EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh
-    ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh
-
-  (Before approvePrompts has ever deployed, add --allow-missing-service approve
-  to the last line.)
+    ADMIN_CALLABLES_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-admin-callables-invoker.sh$(admin_callables_repair_flags)
 EOF
   fi
 fi
