@@ -37,75 +37,30 @@
  * stays a thin seam.
  */
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
-import type { EventDoc } from '../../src/domainTypes';
+import type {
+  ApprovalOutcome,
+  ApprovalPlacement,
+  ApprovePromptsItem,
+  ApprovePromptsRequest,
+  ApprovePromptsResponse,
+  EventDoc,
+} from '../../src/domainTypes';
 import {
   defaultTargetDayIndex,
   isUsableTarget,
   routeApprovalToDay,
   type TargetableDay,
 } from './communityPromptRouting.generated';
+import { isActiveMembershipData, membershipPath } from './eventMembership.generated';
 import { firestoreErrorCodeForLog } from './firestoreErrors';
 import { normalizePool } from './poolVocab';
 import { eventClosedToPlay, isEventAdmin, type AdminFirestore, type EventLike } from './unlockDay';
 
 // --- Wire contract ----------------------------------------------------------------
-// `ApprovalOutcome` and `ApprovalPlacement` are copied VERBATIM from
-// src/data/admin.ts, which re-exports its own copy for the console. The two
-// packages are deliberately decoupled, so the shape is restated; the client
-// wrapper narrows every response against this shape before trusting it.
-
-/**
- * What THIS call did to a Prompt — kept separate from what state the Prompt is
- * in, so a caller never announces a placement for something it never approved.
- *
- *   - `placed`      — approved onto `dayIndex`.
- *   - `untargeted`  — approved with no Day: only reachable on an Event that has
- *                     no schedule at all, where it means the single board.
- *   - `retained`    — approved, but no Day can deal it, so it is dealt nowhere.
- *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
- *                     and `retained` then describe where it already stands.
- *   - `missing`     — NOT approved: no such item.
- *   - `malformed`   — NOT approved: the caller's #558 classification for that
- *                     row is not one approval can act on; `reason` says why.
- */
-export type ApprovalOutcome =
-  | 'placed'
-  | 'untargeted'
-  | 'retained'
-  | 'stale'
-  | 'missing'
-  | 'malformed';
-
-export interface ApprovalPlacement {
-  itemId: string;
-  /** The Day this Prompt is scheduled for, or `null` for none. */
-  dayIndex: number | null;
-  /** Whether the Prompt is in the retained state — dealt nowhere. */
-  retained: boolean;
-  /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
-  outcome: ApprovalOutcome;
-  /** Why a `malformed` row was skipped — the CLASSIFICATION only, never the
-   *  Prompt, so it carries no submitter prose. Absent on every other outcome. */
-  reason?: string;
-}
-
-/** One queue row as the callable receives it. `id` is the only routing input;
- *  `pool`/`spicy` carry the Admin's explicit #558 classification decision and
- *  are validated only after the stored row proves it is still pending. */
-export interface ApprovePromptsItem {
-  id: string;
-  pool?: unknown;
-  spicy?: unknown;
-}
-
-export interface ApprovePromptsRequest {
-  eventId: string;
-  items: ApprovePromptsItem[];
-}
-
-export interface ApprovePromptsResponse {
-  placements: ApprovalPlacement[];
-}
+// Declared once in `src/domainTypes.d.ts` and consumed type-only here and by the
+// client wrapper (`approveItems`, src/data/admin.ts), so the two sides compile
+// against the same shapes. Re-exported for this package's callers and tests.
+export type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsItem, ApprovePromptsRequest, ApprovePromptsResponse };
 
 /** One transaction per call, so the batch is bounded: N item reads plus the
  *  Event, N item writes plus one. A queue over this gets `invalid-argument`
@@ -205,7 +160,7 @@ interface StoredItemRow {
 /** `EventLike` plus the fence counter, derived from the shared `EventDoc`
  *  declaration (`src/domainTypes.d.ts`) so the stored schema has one home. Raw
  *  like every Functions read, so the counter is still type-checked before use. */
-type ApprovalEvent = EventLike & Partial<Pick<EventDoc, 'approvalSeq'>>;
+type ApprovalEvent = EventLike & Partial<Pick<EventDoc, 'approvalSeq' | 'membershipEnforcement'>>;
 
 /**
  * Approve one or more pending Prompts as `uid`, routing each to its intended Day
@@ -247,6 +202,24 @@ export async function approvePromptsCore(
     // non-admin caller are the same answer, so the response reveals neither.
     if (!ev || !isEventAdmin(ev, uid)) {
       throw new ApprovalPermissionError('Only an admin of this Event can approve its Prompts.');
+    }
+    // ADMISSION, conjoined with the roster (specs/event-membership.md § The role
+    // model: anything that consults `EventDoc.admins` to authorize an action
+    // conjoins an active-membership check, and no rule runs on this Admin-SDK
+    // path). `admins` is client-writable, so on an ENFORCED Event a UID added to
+    // it without an active membership is refused here, and the membership is
+    // read inside this attempt so a revocation that commits first is honoured.
+    // On an unenforced Event (`'off'`, every Event until #805's backfill) the
+    // check admits, exactly as the `admitted()` conjunct on the client approval
+    // path did before #1275; requiring a membership there would refuse every
+    // current Admin, none of whom hold one yet. D-A's raw-roster bypass is NOT
+    // taken: enforcement is flipped per Event only after that Event's Admins are
+    // seeded, and the spec scopes D-A to the two rules files.
+    if (ev.membershipEnforcement === 'enforced') {
+      const membershipSnap = await tx.get(deps.db.doc(membershipPath(eventId, uid)));
+      if (!isActiveMembershipData(membershipSnap.exists ? membershipSnap.data() : undefined)) {
+        throw new ApprovalPermissionError('Only an admin of this Event can approve its Prompts.');
+      }
     }
     // #134: every Admin-SDK gameplay writer stands down on a closed Event, and
     // approval deals a Prompt into a future Day, so it is one of them.

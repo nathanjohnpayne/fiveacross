@@ -45,13 +45,14 @@ interface Fake extends AdminFirestore {
   attempts(): number;
 }
 
-function makeDb(seed: { event?: Doc; items?: Record<string, Doc> }): Fake {
+function makeDb(seed: { event?: Doc; items?: Record<string, Doc>; docs?: Record<string, Doc> }): Fake {
   const docs = new Map<string, Doc | undefined>();
   const eventPath = `events/${EVENT_ID}`;
   if (seed.event !== undefined) docs.set(eventPath, { ...seed.event });
   for (const [id, data] of Object.entries(seed.items ?? {})) {
     docs.set(`${eventPath}/items/${id}`, { ...data });
   }
+  for (const [path, data] of Object.entries(seed.docs ?? {})) docs.set(path, { ...data });
   const writes: Array<{ path: string; data: Doc }> = [];
   let attempts = 0;
 
@@ -468,6 +469,60 @@ describe('approvePromptsCore — admin and freeze gates run inside the transacti
     const db = makeDb({ event: openEvent(over), items: seedItems() });
     await expect(approve(db, [{ id: 'p1' }])).rejects.toBeInstanceOf(ApprovalClosedError);
     expect(db.writes()).toHaveLength(0);
+  });
+
+  // specs/event-membership.md § The role model: `admins` is client-writable, so
+  // on an ENFORCED Event the roster alone does not authorize this Admin-SDK
+  // path; the caller's own active membership is conjoined, read in the attempt.
+  const membershipOf = (uid: string, status: string): Record<string, Doc> => ({
+    [`events/${EVENT_ID}/memberships/${uid}`]: { status },
+  });
+
+  it('on an enforced Event, refuses a rostered caller with no membership, writing nothing', async () => {
+    const db = makeDb({ event: openEvent({ membershipEnforcement: 'enforced' }), items: seedItems() });
+    await expect(approve(db, [{ id: 'p1' }])).rejects.toBeInstanceOf(ApprovalPermissionError);
+    expect(db.writes()).toHaveLength(0);
+  });
+
+  it('on an enforced Event, refuses a rostered caller whose membership is revoked', async () => {
+    const db = makeDb({
+      event: openEvent({ membershipEnforcement: 'enforced' }),
+      items: seedItems(),
+      docs: membershipOf(ADMIN, 'revoked'),
+    });
+    await expect(approve(db, [{ id: 'p1' }])).rejects.toBeInstanceOf(ApprovalPermissionError);
+    expect(db.writes()).toHaveLength(0);
+  });
+
+  it('on an enforced Event, approves for a rostered caller holding an active membership', async () => {
+    const db = makeDb({
+      event: openEvent({ membershipEnforcement: 'enforced' }),
+      items: seedItems(),
+      docs: membershipOf(ADMIN, 'active'),
+    });
+    const placements = await approve(db, [{ id: 'p1' }]);
+    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' }]);
+  });
+
+  it('on an enforced Event, an active membership never stands in for the roster', async () => {
+    const db = makeDb({
+      event: openEvent({ membershipEnforcement: 'enforced' }),
+      items: seedItems(),
+      docs: membershipOf('member-uid', 'active'),
+    });
+    await expect(approvePromptsCore(deps(db), 'member-uid', EVENT_ID, [{ id: 'p1' }])).rejects.toBeInstanceOf(
+      ApprovalPermissionError,
+    );
+  });
+
+  it.each([
+    ['absent', {}],
+    ['off', { membershipEnforcement: 'off' }],
+    ['malformed', { membershipEnforcement: 'ENFORCED' }],
+  ])('on an unenforced Event (%s), the roster authorizes without a membership, as the client rules did', async (_label, over) => {
+    const db = makeDb({ event: openEvent(over), items: seedItems() });
+    const placements = await approve(db, [{ id: 'p1' }]);
+    expect(placements[0].outcome).toBe('placed');
   });
 
   it('checks the roster before the freeze — a non-admin on a closed Event is told nothing about the Event', async () => {
