@@ -209,10 +209,12 @@ function canonicalizeOrigin(value: unknown): unknown {
 // another platform) — canonicalizing those would silently overwrite real
 // referrer data with our own hostname, corrupting it rather than protecting
 // it. Referrer fields get query/hash stripped only, never an origin swap.
-// posthog-js (1.434) also copies the landing URL, pathname and referrer onto
-// every event as `$session_entry_url` / `$session_entry_pathname` /
-// `$session_entry_referrer` (`getSessionProps()`, before `before_send`), so
-// those are scrubbed alongside the `$current_url` family (#632, CodeRabbit on
+// posthog-js (1.434) also adds session-entry fields to every event
+// (`getSessionProps()`, before `before_send`): the session's landing URL and
+// path as `$session_entry_url` / `$session_entry_pathname`, scrubbed with the
+// `$current_url` family, and the referrer captured at session start as
+// `$session_entry_referrer`, which may be external and so is scrubbed with the
+// `$referrer` family (#632, CodeRabbit on
 // PR #1294).
 const SELF_URL_PROP_KEYS = [
   '$current_url',
