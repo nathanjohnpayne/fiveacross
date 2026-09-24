@@ -23,6 +23,7 @@ import { deleteProof, ProofBacksMarkWhileClosingError } from '../../data/proofs'
 import { trackIfCurrentEvent } from '../../eventScopedAnalytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
+import { approvalFailureLabel } from '../../data/approvalFailure';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
@@ -391,6 +392,7 @@ function ApprovalQueueRow({
       )}
       <AsyncButton
         className="btn primary"
+        failureLabelFor={approvalFailureLabel}
         onAction={() =>
           onApprove({
             ...it,
@@ -705,7 +707,7 @@ export default function ReviewQueue({
         reportOutcomes(tracked ? [tracked] : []);
         return tracked;
       });
-    });
+    }, undefined, approvalFailureLabel);
   };
   const approveAll = () => {
     const ownedEventId = EVENT_ID;
@@ -734,6 +736,7 @@ export default function ReviewQueue({
         });
       },
       { explicitCount: explicitPending.length, totalCount: pendingItems.length },
+      approvalFailureLabel,
     );
   };
 
@@ -807,7 +810,7 @@ export default function ReviewQueue({
           </p>
         )}
         {!!pendingItems.length && (
-          <AsyncButton onAction={approveAll}>
+          <AsyncButton onAction={approveAll} failureLabelFor={approvalFailureLabel}>
             Approve all
           </AsyncButton>
         )}

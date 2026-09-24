@@ -160,8 +160,10 @@ function narrowPlacements(data: unknown, expectedLength: number): ApprovalPlacem
  *
  * Errors arrive as `FunctionsError`s whose `message` is a fixed server string
  * (unauthenticated, permission-denied for a non-admin or a stale bundle,
- * failed-precondition on a closed Event, aborted on contention, internal), and
- * `AsyncButton` already surfaces `error.message`; nothing here rewraps them.
+ * failed-precondition on a closed Event, invalid-argument for a batch over the
+ * cap, aborted on contention, internal). Nothing here rewraps them; the
+ * approval controls pass `approvalFailureLabel` below to `AsyncButton` and the
+ * 18+ confirm so a refusal that retrying cannot fix says what it is.
  */
 export async function approveItems(
   items: readonly ApprovableItem[],

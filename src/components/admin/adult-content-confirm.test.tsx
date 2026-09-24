@@ -254,6 +254,19 @@ describe('the failure surface (Codex P2 on #615)', () => {
     expect(screen.getByText('This makes the whole Event 18+')).toBeTruthy();
   });
 
+  it('names a refusal a retry cannot fix instead of asking for a retry (Phase 4b P2, PR #1278)', async () => {
+    approveItem.mockRejectedValueOnce({
+      code: 'functions/failed-precondition',
+      message: 'This Event is closed; approvals are frozen.',
+    });
+    queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('This Event is closed; approvals are frozen.');
+    expect(alert.textContent).not.toContain('try again');
+  });
+
   it('lets the admin retry from the same dialog', async () => {
     approveItem.mockRejectedValueOnce(new Error('permission-denied'));
     queue([item('a', true)]);
