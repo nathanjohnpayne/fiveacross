@@ -366,12 +366,19 @@ export function validSlug(slug) {
  * from inside a Firestore transaction, so the barrier is an explicit attested
  * record the operator supplies; absent, the mutation fails closed.
  *
- * It lives HERE rather than in the lifecycle helper because three callers now
- * consult it and they must agree on what an armed record is: `provision`,
- * which first publishes a capability for a host; the two repair intents,
- * which are the first edge publication for a source nothing in the helper
- * wrote; and the reconciler, which forwards one into an applied backfill.
- * Two validators would be two definitions of armed.
+ * The same record serves a second purpose: the two doorway go-live writes
+ * (#1251) — `convert-to-root` to a doorway, and an `update` moving a marker
+ * `not-found` -> `doorway` — publish no capability, but each makes a doorway
+ * serve at a root the previous Event's service worker controlled, and the
+ * forced advancement and precache retirement this record attests are exactly
+ * what § D1 requires before that live repoint.
+ *
+ * It lives HERE rather than in the lifecycle helper because every caller must
+ * agree on what an armed record is: `provision`, which first publishes a
+ * capability for a host; the two repair intents, which are the first edge
+ * publication for a source nothing in the helper wrote; the two doorway
+ * go-live writes above; and the reconciler, which forwards one into an
+ * applied backfill. Two validators would be two definitions of armed.
  */
 export function validatePathCapabilityBarrier(barrier, observedAt) {
   if (!isRecord(barrier)) refuseProjection('path-capability-barrier');
