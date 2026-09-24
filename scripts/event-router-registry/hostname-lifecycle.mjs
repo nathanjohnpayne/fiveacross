@@ -416,6 +416,13 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
   return { host, projectedChange: true, resultingHostname: document };
 }
 
+/**
+ * Plans an ordinary `update` of an existing, converged, non-tombstoned host.
+ * Projected fields bump the ledger revision; `adultContent` is the only
+ * non-projected field a caller may change here, under the monotone rule. The
+ * owner-restricted fields (`OWNER_RESTRICTED_FIELDS`) and `apexPath` are
+ * refused by name, and any other key is `unknown-field`.
+ */
 async function planUpdate(input, transaction, clock, buffer, revisions, projections) {
   boundedKeys(input, [...MUTATION_KEYS, 'changes'], ['converged'], 'invalid-input');
   const { host } = input;
@@ -516,6 +523,13 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   return { host, projectedChange: true, resultingHostname: document };
 }
 
+/**
+ * Plans the middle step of the disable → repoint → re-activate barrier: a
+ * converged, disabled route whose `eventId` or `slug` actually changes. A
+ * move to another Event resets the Event-scoped fields before `changes` are
+ * applied; a slug-only move keeps them and holds the `adultContent` monotone
+ * rule. Owner-restricted fields, `status` and `apexPath` are refused by name.
+ */
 async function planRepoint(input, transaction, clock, buffer, revisions, projections) {
   exactKeys(input, [...MUTATION_KEYS, 'changes', 'converged'], 'invalid-input');
   const { host } = input;

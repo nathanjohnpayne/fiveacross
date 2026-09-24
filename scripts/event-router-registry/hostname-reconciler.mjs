@@ -510,6 +510,12 @@ const STATES = [
   'reserved-class',
 ];
 
+/**
+ * Validates the reconciler's run input: schema version, mode, the `apply`
+ * flag (refused on `audit`), actor, reason and source page size. An optional
+ * `pathCapabilityBarrier` is checked later, in `reconcileHostnameReplicas`,
+ * against the run's authoritative clock.
+ */
 function validateInput(input) {
   boundedKeys(
     input,

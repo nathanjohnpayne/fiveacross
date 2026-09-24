@@ -408,6 +408,12 @@ function validateDesired(host, desired) {
   return deriveDesired(host, syntheticSource);
 }
 
+/**
+ * Validates one atomic source-read receipt for `host`: the exact receipt and
+ * ledger key sets, the document paths, the read instant, and the router
+ * replica ledger. `updatedAt` is canonicalized by the shared strict
+ * `normalizeTimestamp` before anything is digested or signed.
+ */
 function validateSourceRead(host, receipt) {
   exactKeys(
     receipt,
