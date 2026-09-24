@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { approvePromptsCore, type ApprovePromptsDeps } from '../../functions/src/approvePrompts';
-import { stampDaySnapshot, type AdminFirestore } from '../../functions/src/unlockDay';
+import { resnapshotDayIfNoBoards, stampDaySnapshot, type AdminFirestore } from '../../functions/src/unlockDay';
 
 // specs/community-prompt-targeting.md § "Why approval runs in a transaction"
 // (#813, #1275, ADR 0015) — the phantom ordering, and the Event-doc fence that
@@ -63,6 +63,10 @@ class RetryDb implements AdminFirestore {
   conflicts = 0;
   /** Fires after each attempt's callback and before its commit check. */
   beforeCommit?: (attempt: number) => Promise<void> | void;
+  /** Fires when a transaction is entered, before its first attempt reads
+   *  anything: the gap between a caller's pre-transaction reads and the
+   *  transaction itself (#1280). */
+  beforeTransaction?: () => Promise<void> | void;
   /** The NEGATIVE CONTROL: discard the approval's Event-doc fence write, so the
    *  suite can show what happens without it. Item writes still land. */
   dropApprovalFence = false;
@@ -129,6 +133,7 @@ class RetryDb implements AdminFirestore {
   }
 
   async runTransaction<T>(fn: (tx: never) => Promise<T>): Promise<T> {
+    await this.beforeTransaction?.();
     for (let attempt = 1; attempt <= 10; attempt += 1) {
       const reads = new Map<string, number>();
       const staged: StagedWrite[] = [];
@@ -294,5 +299,112 @@ describe('the reverse ordering — approval first, scheduler stamps before its c
     expect(frozenBefore.snapshotItemIds).toBeUndefined();
     expect(dayOf(db, 0)).toMatchObject({ index: 0, snapshotItemIds: [] });
     expect(dayOf(db, 1)).not.toHaveProperty('snapshotItemIds');
+  });
+});
+
+// #1280 — the guarded re-snapshot (`resnapshotDayIfNoBoards`, reached through
+// `unlockDayNow` with `resnapshot: true`) is the one path that OVERWRITES a
+// Day's snapshot, and it used to compute its item list BEFORE its transaction
+// opened. The fence above cannot protect a list computed outside the
+// transaction: an approval committing in that gap was simply missing from the
+// list the transaction wrote, and a retry forced by the fence re-ran the
+// transaction around the same stale list. The list is now read through the
+// transaction, beside the Event doc the fence moves, so both orderings below
+// land the Prompt the approval reported for the Day.
+describe('the guarded re-snapshot computes its list inside its transaction (#1280)', () => {
+  /** A recoverable Day (index >= 3) and the Day after it. */
+  const day3 = (): Doc => ({ index: 3, pool: 'main', unlockAt: U });
+  const day4 = (): Doc => ({ index: 4, pool: 'main', unlockAt: U + 24 * HOUR });
+  const M1 = `${EVENT_PATH}/items/m1`;
+
+  function resnapshotSeed(): Record<string, Doc> {
+    return {
+      [EVENT_PATH]: { status: 'active', admins: [ADMIN], days: [day3(), day4()] },
+      // An organiser Prompt already in the pool before the Day opened.
+      [M1]: { status: 'active', pool: 'main', createdBy: ADMIN, createdAt: 1, reportCount: 0 },
+      [P1]: { status: 'pending', pool: 'main', spicy: false, createdBy: 'player', createdAt: 1, reportCount: 0, targetDayIndex: 3 },
+    };
+  }
+
+  /** Like `once`, for the gap BEFORE the transaction opens: fires on the first
+   *  transaction to be entered and disarms itself first, so the approval's own
+   *  transaction does not re-enter it. */
+  function onceBeforeTransaction(db: RetryDb, work: () => Promise<void>): void {
+    db.beforeTransaction = async () => {
+      db.beforeTransaction = undefined;
+      await work();
+    };
+  }
+
+  it('an approval committed after the pre-flight reads and before the transaction opens is in the overwritten list', async () => {
+    const db = new RetryDb(resnapshotSeed());
+    let placement: Awaited<ReturnType<typeof approvePromptsCore>> = [];
+    onceBeforeTransaction(db, async () => {
+      placement = await approvePromptsCore(approvalDeps(db, U - 1), ADMIN, EVENT_ID, [{ id: 'p1' }]);
+    });
+
+    const result = await resnapshotDayIfNoBoards(db, ADMIN, EVENT_ID, 3, { now: () => U + 1 });
+
+    expect(placement).toEqual([{ itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' }]);
+    expect(result).toBe('resnapshotted');
+    // Nothing had to retry: the approval committed before the transaction read
+    // anything. The list is right because the transaction read the pool itself.
+    expect(db.conflicts).toBe(0);
+    expect(dayOf(db, 3).snapshotItemIds).toEqual(['m1', 'p1']);
+    expect(dayOf(db, 4)).not.toHaveProperty('snapshotItemIds');
+  });
+
+  it('an approval committed inside the first attempt forces a retry that re-reads the pool', async () => {
+    const db = new RetryDb(resnapshotSeed());
+    let placement: Awaited<ReturnType<typeof approvePromptsCore>> = [];
+    once(db, async () => {
+      placement = await approvePromptsCore(approvalDeps(db, U - 1), ADMIN, EVENT_ID, [{ id: 'p1' }]);
+    });
+
+    const result = await resnapshotDayIfNoBoards(db, ADMIN, EVENT_ID, 3, { now: () => U + 1 });
+
+    expect(placement).toEqual([{ itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' }]);
+    expect(result).toBe('resnapshotted');
+    // The fence moved the Event the first attempt read, so that attempt was
+    // discarded; the re-run's own query now lists the Prompt. A list computed
+    // before the transaction would have survived the retry unchanged.
+    expect(db.conflicts).toBe(1);
+    expect(dayOf(db, 3).snapshotItemIds).toEqual(['m1', 'p1']);
+    expect(db.read(EVENT_PATH)).toMatchObject({ approvalSeq: 1 });
+  });
+
+  it('filters by the moderation settings of the Event the transaction read, not the pre-flight copy', async () => {
+    const db = new RetryDb(resnapshotSeed());
+    // The Prompt is already live; its author is banned while the re-snapshot's
+    // first attempt is in flight.
+    const p1 = db.docs.get(P1)!;
+    db.docs.set(P1, { data: { ...p1.data, status: 'active', approvedAt: U - 1 }, version: p1.version });
+    once(db, async () => {
+      await db.doc(EVENT_PATH).set({ ...db.read(EVENT_PATH)!, bannedUids: ['player'] });
+    });
+
+    const result = await resnapshotDayIfNoBoards(db, ADMIN, EVENT_ID, 3, { now: () => U + 1 });
+
+    expect(result).toBe('resnapshotted');
+    expect(db.conflicts).toBe(1);
+    expect(dayOf(db, 3).snapshotItemIds).toEqual(['m1']);
+  });
+
+  it('keeps the zero-boards guard: a dealt card still refuses the overwrite', async () => {
+    const db = new RetryDb({
+      ...resnapshotSeed(),
+      [`${EVENT_PATH}/days/3/boards/someone`]: { dealtAt: U },
+    });
+    // Stamp Day 3 first so the refusal is visibly a refusal to OVERWRITE.
+    const ev = db.docs.get(EVENT_PATH)!;
+    db.docs.set(EVENT_PATH, {
+      data: { ...ev.data, days: [{ ...day3(), snapshotItemIds: ['m1'] }, day4()] },
+      version: ev.version,
+    });
+
+    const result = await resnapshotDayIfNoBoards(db, ADMIN, EVENT_ID, 3, { now: () => U + 1 });
+
+    expect(result).toBe('has-boards');
+    expect(dayOf(db, 3).snapshotItemIds).toEqual(['m1']);
   });
 });

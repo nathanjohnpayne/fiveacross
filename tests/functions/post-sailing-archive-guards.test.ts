@@ -355,15 +355,19 @@ describe('resnapshotDayIfNoBoards — the one overwrite path stops at the freeze
     });
     expect(await resnapshotDayIfNoBoards(db, ADMIN, 'e', 3, NOW_AFTER_UNLOCK)).toBe('archived');
     expect(db.readEvent().days?.[0].snapshotItemIds).toEqual(['old']);
-    // Stopped at the admin/freeze read: the full active-pool query that this
-    // core runs BEFORE its transaction never happened.
+    // Stopped at the admin/freeze pre-flight read: no transaction was opened, so
+    // neither the boards read nor the active-pool query (both transactional
+    // since #1280) ever happened.
     expect(db.queried()).toEqual([]);
   });
 
   it('re-checks inside the transaction when the archive lands mid-flight', async () => {
-    // This core reads the whole active pool between its guard and its write, so
-    // the window is wide — and it is the ONE path in the repo that overwrites an
-    // existing snapshot rather than preserving it.
+    // The pre-flight read sees an OPEN Event; the archive commits before the
+    // transaction's own Event read. This is the ONE path in the repo that
+    // overwrites an existing snapshot rather than preserving it, so the re-check
+    // inside the writing transaction is what keeps it off a frozen record. Since
+    // #1280 the active-pool query runs inside that transaction, AFTER the Event
+    // read and the zero-boards guard, so a refusal here never reads the pool.
     const db = makeDb({
       eventId: 'e',
       event: { days: recoverableDays(), admins: [ADMIN] },
@@ -372,6 +376,7 @@ describe('resnapshotDayIfNoBoards — the one overwrite path stops at the freeze
     });
     expect(await resnapshotDayIfNoBoards(db, ADMIN, 'e', 3, NOW_AFTER_UNLOCK)).toBe('archived');
     expect(db.readEvent().days?.[0].snapshotItemIds).toEqual(['old']);
+    expect(db.queried()).toEqual([]);
   });
 });
 
