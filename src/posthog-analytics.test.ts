@@ -154,6 +154,27 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
       expect(out?.properties.$browser).toBe('Chrome');
     });
 
+    it('reduces the SDK session-entry URL, pathname and referrer to path-only when a rejected campaign is present', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      const event = emailCampaignEvent('daily-email', 'alice@example.com');
+      const out = mod.sanitizeUrls({
+        ...event,
+        properties: {
+          ...event.properties,
+          $session_entry_url: 'https://fiveacross.app/feed?utm_campaign=alice%40example.com&invite=SECRET',
+          $session_entry_pathname: '/feed',
+          $session_entry_referrer: 'https://mail.example.com/inbox?u=alice%40example.com',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      expect(out?.properties.$session_entry_url).toBe('https://fiveacross.app/feed');
+      expect(out?.properties.$session_entry_pathname).toBe('/feed');
+      expect(out?.properties.$session_entry_referrer).toBe('https://mail.example.com/inbox');
+      expect(Object.keys(out?.properties ?? {}).filter((k) => k.includes('utm_'))).toEqual([]);
+    });
+
     it('drops every campaign property when no Event id is registered', async () => {
       vi.resetModules();
       const mod = await import('./posthog');
