@@ -32,17 +32,34 @@ async function withIndex(lines, run) {
 
 describe("admin-callables deploy scope (#1277)", () => {
   it.each([{ args: [] }, { args: ["--only", "functions"] }, { args: ["--only", "functions:default"] }])(
-    "keeps the exported unlockDayNow strict and tolerates the not-yet-exported approvePrompts ($args)",
+    "keeps both admin callables the real index exports strict ($args)",
     async ({ args }) => {
       const result = await classify(args);
 
       expect(result).toMatchObject({
         adminCallablesInvokerSelected: true,
         adminCallablesInvokerConservative: false,
-        adminCallablesStrictServices: "unlock",
+        adminCallablesStrictServices: "unlock,approve",
       });
     },
   );
+
+  it("keeps an exported unlockDayNow strict and tolerates a not-yet-exported approvePrompts", async () => {
+    const result = await withIndex(
+      [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "export const unlockDayNow = onCall(async () => 1);",
+      ],
+      (configPath) =>
+        classifyFirebaseDeployRequest(["fiveacross", "--only", "functions"], { defaultConfigPath: configPath }),
+    );
+
+    expect(result).toMatchObject({
+      adminCallablesInvokerSelected: true,
+      adminCallablesInvokerConservative: false,
+      adminCallablesStrictServices: "unlock",
+    });
+  });
 
   it("keeps both services strict once approvePrompts is exported", async () => {
     const result = await withIndex(
