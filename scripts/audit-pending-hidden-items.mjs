@@ -13,24 +13,25 @@
 // client, and the server-side hide only ever hides `active` rows), so the
 // exposure is bounded to rows that already exist, and this is a one-time step.
 //
-// WHAT COUNTS. Every `hidden` item whose `createdBy` is neither the seed
-// (`'seed'`) nor on the Event's current `admins` roster. `createdBy` is the one
-// provenance a submitter cannot forge (`firestore.rules` binds it to
-// `request.auth.uid` on create). `approvedAt`/`approvedBy` are deliberately NOT
-// used to rule a row out: the non-admin create arm has no key whitelist, so a
-// submitter could have arrived with a forged `approvedAt`, and `rejectItem`
-// stamps it too. They are printed for the operator's judgement only. The list
-// therefore also includes rows that are legitimately restorable, such as an
-// approved player Prompt the community hid, or an organiser Prompt whose author
-// has since left the roster; the operator decides each one.
+// WHAT COUNTS. Every `hidden` item not created by the seed (`createdBy:
+// 'seed'`, which no client can write: `firestore.rules` binds `createdBy` to
+// `request.auth.uid` on create). Nothing else rules a row out. `approvedAt` and
+// `approvedBy` are client-writable at create and `rejectItem` stamps them too,
+// and Admin authorship proves nothing either, because an Admin can submit
+// through the ordinary player flow (`addItem` writes `pending` for anyone) and
+// could then hide that pending row under the old rules. Those fields, and
+// whether the author is on the current roster, are printed for the operator's
+// judgement only. The list therefore also includes rows that are legitimately
+// restorable, such as an approved player Prompt the community hid or an
+// organiser Prompt an Admin hid; the operator decides each one.
 //
 // HOW IT IS DISPOSED. Every listed row needs an explicit decision:
 //   --accept <eventId>/<itemId>   keep it as it is (it stays restorable). Repeatable.
 //   --requeue                     move every listed row NOT accepted to `pending`.
 // A requeue sets `status: 'pending'` and nothing else, in a transaction that
-// re-reads the row and the Event roster and skips a row that no longer
-// qualifies. From `pending` the only way to `active` is the callable, which
-// routes it and stamps it on the server clock. Nothing is deleted or rejected.
+// re-reads the row and skips one that no longer qualifies. From `pending` the
+// only way to `active` is the callable, which routes it and stamps it on the
+// server clock. Nothing is deleted or rejected.
 //
 // FAIL-CLOSED. The run exits 0 only when every row a fresh scan lists is
 // accepted, so a deploy checklist step that runs it stops until each row has a
@@ -55,16 +56,17 @@ export const SEED_AUTHOR = 'seed';
 
 /**
  * Could this stored item be a Prompt hidden while pending? Pure over the raw
- * Firestore data and the Event's raw `admins` value, both checked before use.
+ * Firestore data: every hidden row except a seeded one.
  */
-export function isPendingHiddenCandidate(item, admins) {
+export function isPendingHiddenCandidate(item) {
   if (item == null || typeof item !== 'object') return false;
   if (item.status !== 'hidden') return false;
-  if (item.createdBy === SEED_AUTHOR) return false;
-  const roster = Array.isArray(admins) ? admins : [];
-  if (typeof item.createdBy === 'string' && roster.includes(item.createdBy)) return false;
-  return true;
+  return item.createdBy !== SEED_AUTHOR;
 }
+
+/** Whether the author is on the Event's current roster, for the report only. */
+const onRoster = (createdBy, admins) =>
+  typeof createdBy === 'string' && Array.isArray(admins) && admins.includes(createdBy);
 
 /** `<eventId>/<itemId>`, the key an operator names a row by. */
 export const candidateKey = (c) => `${c.eventId}/${c.itemId}`;
@@ -85,12 +87,13 @@ export function planPendingHiddenAudit(events) {
   const candidates = [];
   for (const event of Array.isArray(events) ? events : []) {
     for (const item of Array.isArray(event.items) ? event.items : []) {
-      if (!isPendingHiddenCandidate(item.data, event.admins)) continue;
+      if (!isPendingHiddenCandidate(item.data)) continue;
       const d = item.data;
       candidates.push({
         eventId: event.eventId,
         itemId: item.id,
         createdBy: typeof d.createdBy === 'string' ? d.createdBy : null,
+        authorIsAdmin: onRoster(d.createdBy, event.admins),
         createdAt: d.createdAt,
         approvedAt: d.approvedAt,
         approvedBy: typeof d.approvedBy === 'string' ? d.approvedBy : null,
@@ -154,7 +157,8 @@ export function formatAuditReport(candidates, accepted = new Set()) {
     .map(
       (c) =>
         `  ${accepted.has(candidateKey(c)) ? 'accepted ' : 'UNDECIDED'} ${candidateKey(c)}  ` +
-        `createdBy=${c.createdBy ?? '(none)'}  createdAt=${formatEpochMs(c.createdAt)}  ` +
+        `createdBy=${c.createdBy ?? '(none)'}${c.authorIsAdmin ? ' (current Admin)' : ''}  ` +
+        `createdAt=${formatEpochMs(c.createdAt)}  ` +
         `approvedAt=${formatEpochMs(c.approvedAt)} (unverified)  approvedBy=${c.approvedBy ?? '(none)'}  ` +
         `text=${JSON.stringify(c.text.slice(0, 80))}`,
     )
@@ -203,16 +207,13 @@ export async function runPendingHiddenAudit(
   if (requeue) {
     for (const c of first.undecided) {
       const itemRef = db.doc(`events/${c.eventId}/items/${c.itemId}`);
-      const eventRef = db.doc(`events/${c.eventId}`);
       let wrote = false;
       await db.runTransaction(async (tx) => {
         // Reset per attempt: a retried callback must report only what committed.
         wrote = false;
-        const eventSnap = await tx.get(eventRef);
         const itemSnap = await tx.get(itemRef);
         if (!itemSnap.exists) return;
-        const admins = eventSnap.exists ? eventSnap.data()?.admins : undefined;
-        if (!isPendingHiddenCandidate(itemSnap.data(), admins)) return;
+        if (!isPendingHiddenCandidate(itemSnap.data())) return;
         tx.update(itemRef, { status: 'pending' });
         wrote = true;
       });
