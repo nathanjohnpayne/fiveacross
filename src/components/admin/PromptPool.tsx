@@ -208,11 +208,19 @@ function AdminItemRow({
           ✏️
         </button>
       )}
-      {it.status === 'hidden' ? (
+      {/* Hide and Restore are the `active <-> hidden` pair only (#1275). This
+          list is UNFILTERED (every status), and the rules now bound an admin
+          client's status moves to that pair plus `pending -> rejected`: a
+          pending row's approval is the `approvePrompts` callable (the Review
+          queue), and a rejected row is final. Offering Hide on either would be
+          a doomed write, and hide-then-restore on a pending row would have
+          laundered an approval around the callable. Edit and Delete stay. */}
+      {it.status === 'hidden' && (
         <AsyncButton onAction={() => restoreItem(it.id)}>
           Restore
         </AsyncButton>
-      ) : (
+      )}
+      {it.status === 'active' && (
         <AsyncButton onAction={() => hideItem(it.id)}>
           Hide
         </AsyncButton>

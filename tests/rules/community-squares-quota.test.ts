@@ -151,23 +151,33 @@ describe("Community Prompt pool/spicy resulting-state invariant (#558)", () => {
     );
   });
 
-  it("allows Easy approval only when the same resulting write clears spicy", async () => {
+  it("allows an admin to move an ACTIVE spicy row to Easy only when the same write clears spicy", async () => {
+    // The Easy APPROVAL itself is the `approvePrompts` callable since #1275
+    // (the Admin SDK bypasses these rules; tests/functions/approve-prompts
+    // pins that it writes `spicy: false` with `embark`). What the rules still
+    // hold is the RESULTING-STATE invariant on every client pool/spicy change,
+    // pinned here through a non-status write: reclassifying an active
+    // Exploratory row as Easy must clear its spicy flag in the same write.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), itemPath("reclassify")), activePayload("main", true));
+    });
+
+    await assertFails(
+      updateDoc(doc(db(), itemPath("reclassify")), { pool: "embark" }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(db(), itemPath("reclassify")), { pool: "embark", spicy: false }),
+    );
+  });
+
+  it("denies the client Easy APPROVAL write outright — approval is the approvePrompts callable (#1275)", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), itemPath("approval")), {
         ...activePayload("main", true),
         status: "pending",
       });
     });
-
     await assertFails(
-      updateDoc(doc(db(), itemPath("approval")), {
-        status: "active",
-        approvedBy: ADMIN,
-        approvedAt: Date.now(),
-        pool: "embark",
-      }),
-    );
-    await assertSucceeds(
       updateDoc(doc(db(), itemPath("approval")), {
         status: "active",
         approvedBy: ADMIN,

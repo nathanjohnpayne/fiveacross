@@ -276,11 +276,18 @@ function ItemQueueRow({
           Clear reports
         </AsyncButton>
       )}
-      {it.status === 'hidden' ? (
+      {/* Hide and Restore are the `active <-> hidden` pair and nothing else
+          (#1275): the rules now bound an admin client's status moves to that
+          pair plus `pending -> rejected`, so a reported PENDING row gets no Hide
+          (it would be denied, and hiding-then-restoring would launder an
+          approval around the `approvePrompts` callable) and a reported REJECTED
+          row gets neither. Both keep Delete and Ban. */}
+      {it.status === 'hidden' && (
         <AsyncButton onAction={() => restoreItem(it.id)}>
           Restore
         </AsyncButton>
-      ) : (
+      )}
+      {it.status === 'active' && (
         <AsyncButton onAction={() => hideItem(it.id)}>
           Hide
         </AsyncButton>

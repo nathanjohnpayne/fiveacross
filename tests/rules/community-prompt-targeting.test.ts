@@ -15,16 +15,19 @@ import { deleteField, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore'
 //   1. `targetDayIndex` is OPTIONAL but, when present, must be a non-negative
 //      int — a malformed target is rejected at the door rather than left for the
 //      snapshot filter to reason about.
-//   2. Only an ADMIN can move a Prompt's Day, and only an admin can approve it.
-//      The pre-existing `hasOnly(['reportCount'])` bound on a non-admin update is
-//      what enforces both; this file pins that it actually covers the new field,
-//      so a submitter cannot re-aim their own Prompt after the fact.
+//   2. Only an ADMIN can move a Prompt's Day, and NO client can approve it —
+//      approval is the `approvePrompts` callable since #1275 (ADR 0015), so the
+//      admin arm denies the `pending → active` flip too. The pre-existing
+//      `hasOnly(['reportCount'])` bound on a non-admin update is what keeps a
+//      submitter from re-aiming their own Prompt after the fact; this file pins
+//      that it actually covers the new field.
 //   3. A suggestion is never visible outside its Event — including to an admin
 //      of a DIFFERENT Event, which is the case a same-Event-only test would miss.
 //
 // The routing decisions themselves are pinned in
-// src/data/community-prompt-targeting.test.ts, and the snapshot admission in
-// tests/functions/community-prompt-targeting-snapshot.test.ts.
+// tests/functions/approve-prompts.test.ts (the server side, #1275) and the
+// pure helpers in src/data/community-prompt-targeting.test.ts; the snapshot
+// admission in tests/functions/community-prompt-targeting-snapshot.test.ts.
 //
 // The PERMISSION_DENIED lines the SDK logs to stderr are the expected
 // assertFails denials, not test failures.
@@ -161,15 +164,15 @@ describe('create — targetDayIndex shape', () => {
     // the approval write overwrites, making it harmless — a forged `retainedAt`
     // would survive a normal approval and leave a Prompt that is active and
     // DEALT while its durable state claims it was retained (Phase 4b P1, PR
-    // #812). The client half of the same guarantee is `approveItems` clearing
-    // the field on every placement.
+    // #812). The server half of the same guarantee is the `approvePrompts`
+    // callable clearing the field on every placement.
     await assertFails(
       setDoc(doc(db(ALICE), at('items/p11')), pendingPayload(ALICE, { retainedAt: NOW() })),
     );
   });
 });
 
-describe('update — only an admin re-targets or approves', () => {
+describe('update — only an admin re-targets; nobody approves from a client', () => {
   beforeEach(async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(
@@ -203,10 +206,11 @@ describe('update — only an admin re-targets or approves', () => {
     await assertFails(updateDoc(doc(db(OTHER_ADMIN), at('items/p1')), { targetDayIndex: 4 }));
   });
 
-  it('ALLOWS this Event’s admin to approve AND roll the Prompt forward in one write', async () => {
-    // The approval-routing write: status, attribution and the rolled-forward Day
-    // land together, which is what makes the placement atomic.
-    await assertSucceeds(
+  it('DENIES this Event’s admin approving AND rolling the Prompt forward in one client write (#1275)', async () => {
+    // This used to be the approval-routing write. It is the `approvePrompts`
+    // callable now, so the SAME payload from an admin client is refused: the
+    // server clock decides the Day, not the device that built this write.
+    await assertFails(
       updateDoc(doc(db(ADMIN), at('items/p1')), {
         status: 'active',
         approvedBy: ADMIN,
@@ -216,8 +220,8 @@ describe('update — only an admin re-targets or approves', () => {
     );
   });
 
-  it('ALLOWS this Event’s admin to stamp retainedAt instead of a new Day', async () => {
-    await assertSucceeds(
+  it('DENIES this Event’s admin stamping retainedAt with the status flip from a client', async () => {
+    await assertFails(
       updateDoc(doc(db(ADMIN), at('items/p1')), {
         status: 'active',
         approvedBy: ADMIN,
@@ -225,6 +229,14 @@ describe('update — only an admin re-targets or approves', () => {
         retainedAt: NOW(),
       }),
     );
+  });
+
+  it('ALLOWS this Event’s admin to RE-TARGET a pending Prompt to a valid Day without approving it', async () => {
+    // The organiser's re-aim is a status-neutral write, so it stays a client
+    // write: the target changes, the row stays pending, and the callable
+    // routes from the stored value when the approval comes.
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/p1')), { targetDayIndex: 5 }));
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/p1')), { targetDayIndex: 0 }));
   });
 
   it('DENIES even an ADMIN moving a Prompt to a MALFORMED Day', async () => {
@@ -241,26 +253,44 @@ describe('update — only an admin re-targets or approves', () => {
     await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/p1')), { targetDayIndex: deleteField() }));
   });
 
-  it('ALLOWS RETAINING a row that ALREADY carries a malformed target', async () => {
-    // The interaction the new bound has to survive. `approveItems` retains such a
-    // row by stamping `retainedAt` and deliberately NOT touching the malformed
-    // value (guessing the intended Day would be inventing one), so the check is
-    // conditioned on the field CHANGING. An unconditional check would deny this
-    // write and strand the very row it exists to retain — the row can predate the
-    // rule, arriving through an import on the Admin SDK, which bypasses rules.
+  it('ALLOWS a non-status edit on a row that ALREADY carries a malformed target', async () => {
+    // The interaction the target bound has to survive. The check is conditioned
+    // on the field CHANGING, so a text fix (or a report clear, or a hide of an
+    // active row) on a row with a malformed stored target still lands. An
+    // unconditional check would deny this write and strand the row — it can
+    // predate the rule, arriving through an import on the Admin SDK, which
+    // bypasses rules. (The RETENTION of such a row is the `approvePrompts`
+    // callable's job now, and it likewise leaves the malformed value alone.)
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), at('items/malformed')), {
         ...pendingPayload(ALICE),
         targetDayIndex: null,
       });
     });
-    await assertSucceeds(
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/malformed')), { text: 'Reworded by the organiser' }));
+    // … while the status flip on the same row is refused like any other.
+    await assertFails(
       updateDoc(doc(db(ADMIN), at('items/malformed')), {
         status: 'active',
         approvedBy: ADMIN,
         approvedAt: NOW(),
         retainedAt: NOW(),
       }),
+    );
+  });
+
+  it('still ALLOWS an admin ACTIVE create carrying approvedAt and a target — the trusted-admin residual, made visible', async () => {
+    // specs/community-prompt-targeting.md § "The clock routing trusts" scopes
+    // the server-clock guarantee to the APPROVAL of pending submissions. An
+    // organiser Prompt created `active` directly (`adminAddItem`, the seed) is
+    // stamped by the client that creates it, and the admin create arm still
+    // admits `approvedAt`/`targetDayIndex` on it. This case exists so that
+    // residual is a pinned fact rather than an accident.
+    await assertSucceeds(
+      setDoc(
+        doc(db(ADMIN), at('items/organiser')),
+        pendingPayload(ADMIN, { status: 'active', approvedBy: ADMIN, approvedAt: NOW(), targetDayIndex: 4 }),
+      ),
     );
   });
 
