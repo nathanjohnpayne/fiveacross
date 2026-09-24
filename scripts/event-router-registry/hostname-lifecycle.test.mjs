@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'firebase/firestore';
 import { HostnameLifecycleRefusal, applyHostnameMutation } from './hostname-lifecycle.mjs';
-import { cloneDocumentValue, deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
+import { ROOT_HOSTS, cloneDocumentValue, deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
 
 const HOST = 'bodega-bay.fiveacross.app';
 const MIRROR = 'vacaybingo.vercel.app';
@@ -317,17 +317,21 @@ describe('ordinary update', () => {
   it('moves a root marker between its two values and spends one revision', async () => {
     const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
     const { docs, dependencies } = store(converged(APEX, '3', marker));
-    await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' } }), dependencies);
+    // The doorway go-live carries the deployment barrier (#1251).
+    await applyHostnameMutation(
+      mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' }, pathCapabilityBarrier: BARRIER }),
+      dependencies,
+    );
     expect(docs.get(`routerReplicas/${APEX}`)).toMatchObject({
       revision: '4',
       desired: { kind: 'root', root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
     });
   });
 
-  it('refuses a root/route conversion by name in both directions and takes no barrier input', async () => {
-    // `specs/path-addressing-and-root.md` § D1's replacement-flagship repoint
-    // and the route → doorway move have no intent in this helper; the archive
-    // interlock owns the only route → root conversion that exists.
+  it('refuses a root/route conversion by name in both directions and takes no barrier input outside a doorway go-live', async () => {
+    // An `update` never converts: the archive interlock, `convert-to-root` and
+    // `convert-to-route` own both directions, each behind its own barrier
+    // (#1251), so the ordinary update refuses the move by name.
     const route = store(converged(HOST, '4', hostnameDocument()));
     expect(await refusal(mutation({ intent: 'update', host: HOST, changes: { root: 'doorway' } }), route.dependencies)).toBe(
       'root-route-transition-barrier',
@@ -342,8 +346,9 @@ describe('ordinary update', () => {
       ),
     ).toBe('root-route-transition-barrier');
 
-    // `pathNamespace` is a constant per host, so `update` has no barrier
-    // parameter at all and offering one is a malformed envelope.
+    // `pathNamespace` is a constant per host, so an `update` takes the barrier
+    // record only for a doorway go-live, and offering one anywhere else is a
+    // malformed envelope.
     expect(
       await refusal(
         mutation({ intent: 'update', host: HOST, changes: { status: 'disabled' }, pathCapabilityBarrier: BARRIER }),
@@ -758,9 +763,14 @@ describe('repoint', () => {
 
   // A slug move that keeps the Event is still that Event's host, so nothing
   // Event-scoped is reset and the monotone rule still holds. Only a root host
-  // can carry a route whose slug is not its own first label.
+  // can carry a route whose slug is not its own first label, the doorway hosts
+  // refuse every repoint, and a brand mirror's slug move owes the replacement
+  // proof (#1251), so this is a mirror following its flagship's new slug.
   it('keeps the Event metadata on a slug-only repoint and refuses lowering adultContent there', async () => {
-    const ROOT = 'fiveacross.app';
+    const ROOT = 'fiveacross.vercel.app';
+    const FLAGSHIP = 'bodega.fiveacross.app';
+    const flagship = hostnameDocument({ slug: 'bodega', pathNamespace: null });
+    const proof = { replacementHost: FLAGSHIP, replacementConverged: edgeConverged(FLAGSHIP, '3', flagship) };
     const before = hostnameDocument({
       canonicalHost: HOST,
       isCanonical: false,
@@ -769,7 +779,8 @@ describe('repoint', () => {
       adultContent: true,
       preview: { eventName: 'Bodega Bay' },
     });
-    const lowered = store(converged(ROOT, '5', before));
+    const seed = () => ({ ...converged(ROOT, '5', before), ...converged(FLAGSHIP, '3', flagship) });
+    const lowered = store(seed());
     expect(
       await refusal(
         mutation({
@@ -777,18 +788,34 @@ describe('repoint', () => {
           host: ROOT,
           changes: { slug: 'bodega', adultContent: false },
           converged: edgeConverged(ROOT, '5', before),
+          ...proof,
         }),
         lowered.dependencies,
       ),
     ).toBe('adult-content-monotone');
+    const slugMove = (extra = {}) =>
+      mutation({ intent: 'repoint', host: ROOT, changes: { slug: 'bodega' }, converged: edgeConverged(ROOT, '5', before), ...extra });
+    expect(await refusal(slugMove(), store(seed()).dependencies)).toBe('replacement-proof-required');
 
-    const { docs, dependencies } = store(converged(ROOT, '5', before));
-    await applyHostnameMutation(
-      mutation({ intent: 'repoint', host: ROOT, changes: { slug: 'bodega' }, converged: edgeConverged(ROOT, '5', before) }),
-      dependencies,
-    );
+    const { docs, dependencies } = store(seed());
+    await applyHostnameMutation(slugMove(proof), dependencies);
     expect(docs.get(`hostnames/${ROOT}`)).toEqual({ ...before, slug: 'bodega' });
     expect(docs.get(`routerReplicas/${ROOT}`).revision).toBe('6');
+  });
+
+  // § D1: the doorway hosts leave their Event only by becoming a root marker
+  // and never carry another one, so any identity move there is refused by name.
+  it.each([
+    ['fiveacross.app', { slug: 'bodega' }],
+    ['vacaybingo.com', { eventId: 'sonoma-2027' }],
+    ['gaycruisebingo.com', { eventId: 'sonoma-2027' }],
+  ])('refuses a repoint of the doorway host %s', async (host, changes) => {
+    const before = hostnameDocument({ status: 'disabled', ...ROOT_HOSTS.get(host) });
+    const { docs, dependencies } = store(converged(host, '5', before));
+    expect(
+      await refusal(mutation({ intent: 'repoint', host, changes, converged: edgeConverged(host, '5', before) }), dependencies),
+    ).toBe('repoint-doorway-host');
+    expect(docs.get(`hostnames/${host}`)).toEqual(before);
   });
 
   it('refuses combining the barrier with the status move it exists to separate', async () => {
@@ -817,6 +844,316 @@ describe('repoint', () => {
     ).toBe(
       'repoint-requires-identity',
     );
+  });
+});
+
+// #1251. Each conversion spends exactly one revision. A mirror conversion is
+// non-serving in both directions and its going live is the barriered
+// activation that follows; a doorway conversion IS the apex's go-live step and
+// carries the deployment barrier record.
+describe('root/route conversion', () => {
+  const REPLACEMENT = 'replacement.vacaybingo.com';
+  const EVENT = 'events/replacement-2027';
+  // The retired flagship's public face, which must not travel to the new one.
+  const MARKER = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com', adultContent: true, preview: { eventName: 'Bodega Bay' }, canonicalHost: HOST, isCanonical: false };
+  const replacementRoute = (extra = {}) => ({ eventId: 'replacement-2027', edition: 'vacay', status: 'active', slug: 'replacement', pathNamespace: null, ...extra });
+  const disabledRootRoute = (host, extra = {}) => hostnameDocument({ status: 'disabled', adultContent: true, apexPath: true, ...ROOT_HOSTS.get(host), ...extra });
+  const sourceFor = (host, extra = {}) => (ROOT_HOSTS.has(host) ? disabledRootRoute(host, extra) : hostnameDocument({ status: 'disabled', ...extra }));
+  const DISABLED_ROUTE = { eventId: 'replacement-2027', slug: 'replacement', status: 'disabled', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+
+  const routeSeed = ({ source = MARKER, replacement = replacementRoute(), event = { status: 'active' }, extra = {} } = {}) => ({
+    ...converged(MIRROR, '8', source),
+    ...(replacement === null ? {} : converged(REPLACEMENT, '2', replacement)),
+    ...(event === null ? {} : { [EVENT]: event }),
+    ...extra,
+  });
+  const REPLACEMENT_EDGE = edgeConverged(REPLACEMENT, '2', replacementRoute());
+  const PROOF = { replacementHost: REPLACEMENT, replacementConverged: REPLACEMENT_EDGE };
+  const toRoute = (extra = {}) =>
+    mutation({ intent: 'convert-to-route', host: MIRROR, eventId: 'replacement-2027', ...PROOF, converged: edgeConverged(MIRROR, '8', MARKER), ...extra });
+  // A doorway conversion is the go-live step, so it carries the deployment
+  // barrier record by default; a mirror conversion takes none.
+  const toRoot = (host, source, root, extra = {}) =>
+    mutation({
+      intent: 'convert-to-root',
+      host,
+      root,
+      converged: edgeConverged(host, '5', source),
+      ...(root === 'doorway' ? { pathCapabilityBarrier: BARRIER } : {}),
+      ...extra,
+    });
+
+  it('turns a not-found mirror marker into a disabled replacement route, then activates it separately', async () => {
+    const { docs, dependencies } = store(routeSeed());
+    const plan = await applyHostnameMutation(toRoute(), dependencies);
+    expect(docs.get(`hostnames/${MIRROR}`)).toEqual(DISABLED_ROUTE);
+    expect(plan.revisions).toEqual([{ host: MIRROR, from: '8', to: '9' }]);
+    const activate = (extra = {}) =>
+      mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: edgeConverged(MIRROR, '9', DISABLED_ROUTE), ...extra });
+    // The activation is what makes the mirror serve, so it re-proves the
+    // replacement home rather than trusting the conversion's earlier proof.
+    expect(await refusal(activate(), dependencies)).toBe('replacement-proof-required');
+    await applyHostnameMutation(activate(PROOF), dependencies);
+    expect(docs.get(`routerReplicas/${MIRROR}`)).toMatchObject({ revision: '10', desired: { kind: 'route', status: 'active' } });
+  });
+
+  it('refuses the mirror activation once the replacement stopped serving after the conversion', async () => {
+    const { docs, dependencies } = store(routeSeed());
+    await applyHostnameMutation(toRoute(), dependencies);
+    const disabled = replacementRoute({ status: 'disabled' });
+    docs.set(`hostnames/${REPLACEMENT}`, disabled);
+    docs.set(`routerReplicas/${REPLACEMENT}`, ledgerFor(REPLACEMENT, '3', disabled));
+    expect(
+      await refusal(
+        mutation({
+          intent: 'update',
+          host: MIRROR,
+          changes: { status: 'active' },
+          converged: edgeConverged(MIRROR, '9', DISABLED_ROUTE),
+          replacementHost: REPLACEMENT,
+          replacementConverged: edgeConverged(REPLACEMENT, '3', disabled),
+        }),
+        dependencies,
+      ),
+    ).toBe('replacement-not-serving');
+    expect(docs.get(`routerReplicas/${MIRROR}`).revision).toBe('9');
+  });
+
+  it('inherits adultContent only when the replacement flagship carries true', async () => {
+    const { docs, dependencies } = store(routeSeed({ replacement: replacementRoute({ adultContent: true }) }));
+    await applyHostnameMutation(toRoute(), dependencies);
+    expect(docs.get(`hostnames/${MIRROR}`)).toEqual({ ...DISABLED_ROUTE, adultContent: true });
+  });
+
+  it.each([
+    ['an apex', {}, { host: APEX }, 'convert-to-route-requires-mirror'],
+    ['the platform apex', {}, { host: 'fiveacross.app' }, 'convert-to-route-requires-mirror'],
+    ['the GCB apex', {}, { host: 'gaycruisebingo.com' }, 'convert-to-route-requires-mirror'],
+    ['the mirror as its own replacement', {}, { replacementHost: MIRROR }, 'replacement-host-ineligible'],
+    ['another mirror as the replacement', {}, { replacementHost: 'fiveacross.vercel.app' }, 'replacement-host-ineligible'],
+    // The evidence below names the marker, so these two also prove the kind
+    // and serving checks run before the convergence check.
+    ['a route source', { source: disabledRootRoute(MIRROR) }, {}, 'convert-to-route-requires-root'],
+    ['a serving doorway source', { source: { ...MARKER, root: 'doorway' } }, {}, 'convert-requires-inactive'],
+    ['stale evidence', {}, { converged: edgeConverged(MIRROR, '7', MARKER) }, 'convert-requires-convergence'],
+    ['poisoned evidence', {}, { converged: { revision: '8', digest: 'f'.repeat(64) } }, 'convert-requires-convergence'],
+    ['malformed evidence', {}, { converged: { revision: 8 } }, 'invalid-input'],
+    ['no Event named', {}, { eventId: '' }, 'invalid-input'],
+    ['no replacement named', {}, { replacementHost: '' }, 'invalid-input'],
+    ['no replacement evidence', {}, { replacementConverged: undefined }, 'invalid-input'],
+    ['stale replacement evidence', {}, { replacementConverged: edgeConverged(REPLACEMENT, '1', replacementRoute()) }, 'replacement-requires-convergence'],
+    ['poisoned replacement evidence', {}, { replacementConverged: { revision: '2', digest: 'f'.repeat(64) } }, 'replacement-requires-convergence'],
+    ['a missing replacement host', { replacement: null }, {}, 'replacement-not-serving'],
+    ['a disabled replacement', { replacement: replacementRoute({ status: 'disabled' }) }, {}, 'replacement-not-serving'],
+    ['a root-marker replacement', { extra: converged(APEX, '3', { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' }) }, { replacementHost: APEX }, 'replacement-not-serving'],
+    ['a replacement for another Event', { replacement: replacementRoute({ eventId: 'other-2027' }) }, {}, 'replacement-mismatch'],
+    ['a replacement in another Edition', { replacement: replacementRoute({ edition: 'fiveacross' }) }, {}, 'replacement-mismatch'],
+    ['a drifted replacement', { extra: { [`routerReplicas/${REPLACEMENT}`]: ledgerFor(REPLACEMENT, '2', replacementRoute({ status: 'disabled' })) } }, {}, 'source-ledger-drift'],
+    ['a missing Event document', { event: null }, {}, 'replacement-event-missing'],
+    ['an archived Event', { event: { status: 'archived' } }, {}, 'event-not-live'],
+    ['an Event in its archive quiesce', { event: { status: 'active', archiving: true } }, {}, 'event-not-live'],
+  ])('convert-to-route refuses %s and writes nothing', async (_why, seedWith, extra, expected) => {
+    const seed = routeSeed(seedWith);
+    const { docs, dependencies } = store(seed);
+    const input = toRoute(extra);
+    for (const [key, value] of Object.entries(input)) if (value === undefined) delete input[key];
+    expect(await refusal(input, dependencies)).toBe(expected);
+    expect(docs.get(`hostnames/${MIRROR}`)).toEqual(seed[`hostnames/${MIRROR}`]);
+    expect(docs.get(`routerReplicas/${MIRROR}`).revision).toBe('8');
+  });
+
+  it.each([
+    ['the Vacay apex to its doorway', APEX, 'doorway', {}],
+    ['the platform apex to its doorway', 'fiveacross.app', 'doorway', {}],
+    ['a mirror whose flagship document is gone', MIRROR, 'not-found', {}],
+    ['a mirror whose flagship archived', MIRROR, 'not-found', { 'events/bodega-bay-2026': { status: 'archived' } }],
+  ])('convert-to-root turns %s, keeping only the non-projected fields', async (_why, host, root, extra) => {
+    const source = disabledRootRoute(host);
+    const { docs, dependencies } = store({ ...converged(host, '5', source), ...extra });
+    const plan = await applyHostnameMutation(toRoot(host, source, root), dependencies);
+    expect(docs.get(`hostnames/${host}`)).toEqual({ root, ...ROOT_HOSTS.get(host), canonicalHost: HOST, isCanonical: true, adultContent: true });
+    expect(plan.revisions).toEqual([{ host, from: '5', to: '6' }]);
+  });
+
+  it.each([
+    ['the GCB apex, which only the archive retires', 'gaycruisebingo.com', {}, 'doorway', {}, 'root-conversion-requires-archive'],
+    ['an Event subdomain', HOST, {}, 'doorway', {}, 'root-marker-ineligible'],
+    ['a doorway on a mirror', MIRROR, {}, 'doorway', {}, 'root-marker-ineligible'],
+    ['not-found on an apex', APEX, {}, 'not-found', {}, 'root-marker-ineligible'],
+    ['an unknown marker', APEX, {}, 'banner', {}, 'invalid-input'],
+    // Evidence names the disabled source, so these also prove the ordering.
+    ['an active route', APEX, { status: 'active' }, 'doorway', {}, 'convert-requires-inactive'],
+    ['an archived route', APEX, { status: 'archived' }, 'doorway', {}, 'convert-requires-inactive'],
+    ['stale evidence', APEX, {}, 'doorway', { converged: { revision: '4', digest: 'f'.repeat(64) } }, 'convert-requires-convergence'],
+    // The doorway serves the moment it converges, so § D1's service-worker
+    // retirement is attested before it; a mirror marker takes no record.
+    ['a doorway without the deployment barrier', APEX, {}, 'doorway', { pathCapabilityBarrier: undefined }, 'doorway-requires-deployment-barrier'],
+    ['a doorway whose barrier is armed in the future', APEX, {}, 'doorway', { pathCapabilityBarrier: { ...BARRIER, armedAt: '2026-09-21T00:00:00.000Z' } }, 'path-capability-barrier'],
+    ['a malformed deployment barrier', 'fiveacross.app', {}, 'doorway', { pathCapabilityBarrier: { ...BARRIER, resolutionCacheSchemaVersion: 0 } }, 'path-capability-barrier'],
+    ['a deployment barrier on a mirror marker', MIRROR, {}, 'not-found', { pathCapabilityBarrier: BARRIER }, 'invalid-input'],
+    ['a mirror whose flagship is live', MIRROR, { event: { status: 'active' } }, 'not-found', {}, 'root-conversion-flagship-live'],
+    ['a mirror whose flagship is archiving', MIRROR, { event: { status: 'active', archiving: true } }, 'not-found', {}, 'root-conversion-flagship-live'],
+  ])('convert-to-root refuses %s and writes nothing', async (_why, host, { event, ...overrides }, root, extra, expected) => {
+    const source = sourceFor(host, overrides);
+    const seed = { ...converged(host, '5', source), ...(event ? { 'events/bodega-bay-2026': event } : {}) };
+    const { docs, dependencies } = store(seed);
+    const input = toRoot(host, sourceFor(host), root, extra);
+    for (const [key, value] of Object.entries(input)) if (value === undefined) delete input[key];
+    expect(await refusal(input, dependencies)).toBe(expected);
+    expect(docs.get(`hostnames/${host}`)).toEqual(source);
+    expect(docs.get(`routerReplicas/${host}`).revision).toBe('5');
+  });
+
+  it('refuses convert-to-root on a marker, and the converted doorway still refuses delete', async () => {
+    const doorway = { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    expect(await refusal(toRoot(APEX, doorway, 'doorway'), store(converged(APEX, '5', doorway)).dependencies)).toBe(
+      'convert-to-root-requires-route',
+    );
+    const source = disabledRootRoute(APEX);
+    const { docs, dependencies } = store(converged(APEX, '5', source));
+    const dry = await applyHostnameMutation(toRoot(APEX, source, 'doorway', { apply: false }), dependencies);
+    expect(docs.get(`hostnames/${APEX}`)).toEqual(source);
+    const wet = await applyHostnameMutation(toRoot(APEX, source, 'doorway'), dependencies);
+    expect(wet.writes).toEqual(dry.writes);
+    const converted = docs.get(`hostnames/${APEX}`);
+    expect(
+      await refusal(
+        mutation({ intent: 'delete', host: APEX, convergedRevision: '6', convergedDigest: edgeConverged(APEX, '6', converted).digest }),
+        dependencies,
+      ),
+    ).toBe('delete-requires-inactive');
+  });
+});
+
+// Without these, one later call walks around the replacement proof: an
+// activation onto an Event nothing provisioned, a mirror repoint to another
+// Event, or an Edition relabel of a root host route.
+describe('the root-host replacement barrier', () => {
+  const REPLACEMENT = 'replacement.vacaybingo.com';
+  const mirrorRoute = hostnameDocument({ status: 'disabled', edition: 'vacay', pathNamespace: 'vacaybingo.com' });
+  const replacement = { eventId: 'replacement-2027', edition: 'vacay', status: 'active', slug: 'replacement', pathNamespace: null };
+  const seed = (extra = {}) => ({
+    ...converged(MIRROR, '5', mirrorRoute),
+    ...converged(REPLACEMENT, '2', replacement),
+    'events/replacement-2027': { status: 'active' },
+    ...extra,
+  });
+  const PROOF = { replacementHost: REPLACEMENT, replacementConverged: edgeConverged(REPLACEMENT, '2', replacement) };
+  const repointMirror = (extra = {}) =>
+    mutation({ intent: 'repoint', host: MIRROR, changes: { eventId: 'replacement-2027', slug: 'replacement' }, converged: edgeConverged(MIRROR, '5', mirrorRoute), ...PROOF, ...extra });
+
+  it('refuses activating a root host route whose Event document is missing, but not an Event subdomain', async () => {
+    const activate = (host, document, extra = {}) =>
+      mutation({ intent: 'update', host, changes: { status: 'active' }, converged: edgeConverged(host, '5', document), ...extra });
+    expect(await refusal(activate(MIRROR, mirrorRoute, PROOF), store(converged(MIRROR, '5', mirrorRoute)).dependencies)).toBe(
+      'replacement-event-missing',
+    );
+    const subdomain = hostnameDocument({ status: 'disabled' });
+    const { docs, dependencies } = store(converged(HOST, '5', subdomain));
+    expect(await refusal(activate(HOST, subdomain, PROOF), dependencies)).toBe('invalid-input');
+    await applyHostnameMutation(activate(HOST, subdomain), dependencies);
+    expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+  });
+
+  it('refuses a mirror activation without the replacement proof, or with only half of it', async () => {
+    const { docs, dependencies } = store(seed());
+    const activate = (extra = {}) =>
+      mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: edgeConverged(MIRROR, '5', mirrorRoute), ...extra });
+    expect(await refusal(activate(), dependencies)).toBe('replacement-proof-required');
+    expect(await refusal(activate({ replacementHost: REPLACEMENT }), dependencies)).toBe('replacement-proof-required');
+    // The mirror names bodega-bay-2026, which the replacement does not serve.
+    expect(await refusal(activate(PROOF), dependencies)).toBe('replacement-event-missing');
+    expect(docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+  });
+
+  it.each([
+    ['without a replacement proof', {}, { replacementHost: undefined, replacementConverged: undefined }, 'replacement-proof-required'],
+    ['with stale replacement evidence', {}, { replacementConverged: edgeConverged(REPLACEMENT, '1', replacement) }, 'replacement-requires-convergence'],
+    ['onto a slug the replacement does not serve', {}, { changes: { eventId: 'replacement-2027', slug: 'other' } }, 'replacement-mismatch'],
+    ['onto an Event document that does not exist', { 'events/replacement-2027': undefined }, {}, 'replacement-event-missing'],
+    ['relabelled with another Edition', {}, { changes: { eventId: 'replacement-2027', slug: 'replacement', edition: 'gcb' } }, 'host-scoped-field'],
+  ])('refuses a mirror repoint %s', async (_why, seedExtra, extra, expected) => {
+    const seeded = store(Object.fromEntries(Object.entries(seed(seedExtra)).filter(([, value]) => value !== undefined)));
+    const input = repointMirror(extra);
+    for (const [key, value] of Object.entries(input)) if (value === undefined) delete input[key];
+    expect(await refusal(input, seeded.dependencies)).toBe(expected);
+    expect(seeded.docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+  });
+
+  it('repoints a mirror onto a proved replacement and refuses the proof where it proves nothing', async () => {
+    const { docs, dependencies } = store(seed());
+    await applyHostnameMutation(repointMirror(), dependencies);
+    expect(docs.get(`hostnames/${MIRROR}`)).toMatchObject({ eventId: 'replacement-2027', slug: 'replacement', status: 'disabled' });
+    const subdomain = hostnameDocument({ status: 'disabled' });
+    expect(
+      await refusal(
+        mutation({ intent: 'repoint', host: HOST, changes: { eventId: 'sonoma-2027' }, converged: edgeConverged(HOST, '5', subdomain), ...PROOF }),
+        store(converged(HOST, '5', subdomain)).dependencies,
+      ),
+    ).toBe('invalid-input');
+  });
+
+  // § D1: brand mirrors get no doorway, and the derivation accepts either root
+  // value on every root host, so the class rule holds on every root write.
+  it('refuses a doorway on a brand mirror through an update or a provision, but lets an apex doorway withdraw to not-found', async () => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const mirror = store(converged(MIRROR, '5', marker));
+    expect(await refusal(mutation({ intent: 'update', host: MIRROR, changes: { root: 'doorway' } }), mirror.dependencies)).toBe(
+      'root-marker-ineligible',
+    );
+    expect(mirror.docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+    expect(
+      await refusal(
+        mutation({ intent: 'provision', host: MIRROR, hostname: { ...marker, root: 'doorway' }, pathCapabilityBarrier: BARRIER }),
+        store().dependencies,
+      ),
+    ).toBe('root-marker-ineligible');
+    const doorway = { ...marker, root: 'doorway' };
+    const apex = store(converged(APEX, '5', doorway));
+    await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }), apex.dependencies);
+    expect(apex.docs.get(`hostnames/${APEX}`).root).toBe('not-found');
+  });
+
+  // A `not-found` apex marker moving to `doorway` is a doorway go-live, so it
+  // owes the same deployment barrier as the doorway `convert-to-root`.
+  it('requires the deployment barrier when an update turns an apex marker into its doorway', async () => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const goLive = (extra = {}) => mutation({ intent: 'update', host: APEX, changes: { root: 'doorway' }, ...extra });
+    const { docs, dependencies } = store(converged(APEX, '5', marker));
+    expect(await refusal(goLive(), dependencies)).toBe('doorway-requires-deployment-barrier');
+    expect(await refusal(goLive({ pathCapabilityBarrier: { ...BARRIER, armedAt: '2026-09-21T00:00:00.000Z' } }), dependencies)).toBe(
+      'path-capability-barrier',
+    );
+    expect(docs.get(`routerReplicas/${APEX}`).revision).toBe('5');
+    await applyHostnameMutation(goLive({ pathCapabilityBarrier: BARRIER }), dependencies);
+    expect(docs.get(`hostnames/${APEX}`).root).toBe('doorway');
+    expect(
+      await refusal(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' }, pathCapabilityBarrier: BARRIER }), dependencies),
+    ).toBe('invalid-input');
+  });
+
+  it('refuses provisioning a root-host route under another Edition, and activating a legacy one on a mirror', async () => {
+    expect(
+      await refusal(
+        mutation({ intent: 'provision', host: MIRROR, hostname: { ...mirrorRoute, edition: 'gcb' }, pathCapabilityBarrier: BARRIER }),
+        store().dependencies,
+      ),
+    ).toBe('host-scoped-field');
+    const legacy = { ...mirrorRoute, eventId: 'replacement-2027', slug: 'replacement', edition: 'fiveacross' };
+    const seeded = store({ ...seed(), ...converged(MIRROR, '5', legacy) });
+    expect(
+      await refusal(
+        mutation({ intent: 'update', host: MIRROR, changes: { status: 'active' }, converged: edgeConverged(MIRROR, '5', legacy), ...PROOF }),
+        seeded.dependencies,
+      ),
+    ).toBe('host-scoped-field');
+    expect(seeded.docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+  });
+
+  it('refuses an ordinary update that relabels a root host route with another Edition', async () => {
+    expect(
+      await refusal(mutation({ intent: 'update', host: MIRROR, changes: { edition: 'gcb' } }), store(converged(MIRROR, '5', mirrorRoute)).dependencies),
+    ).toBe('host-scoped-field');
   });
 });
 
@@ -1338,6 +1675,27 @@ describe('backfill and the explicit Admin ledger advance', () => {
       edition: 'vacay',
       pathNamespace: 'vacaybingo.com',
     });
+  });
+
+  // A repair publishes whatever source it finds, so the host-class rules hold
+  // there too: a partial Admin write must not reach the edge as a mirror
+  // doorway or a root-host route under another Edition.
+  it.each([
+    ['backfill-ledger', {}],
+    ['advance-ledger', { durableObjectHighWaterRevision: '11', incidentUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/971' }],
+  ])('refuses %s on a mirror doorway or a mis-editioned mirror route', async (intent, extra) => {
+    const sources = [
+      { root: 'doorway', edition: 'vacay', pathNamespace: 'vacaybingo.com' },
+      hostnameDocument({ status: 'disabled', edition: 'gcb', pathNamespace: 'vacaybingo.com' }),
+    ];
+    for (const source of sources) {
+      const seeded = store({ [`hostnames/${MIRROR}`]: source });
+      const expected = Object.hasOwn(source, 'root') ? 'root-marker-ineligible' : 'host-scoped-field';
+      expect(
+        await refusal(mutation({ intent, host: MIRROR, pathCapabilityBarrier: BARRIER, ...extra }), seeded.dependencies),
+      ).toBe(expected);
+      expect(seeded.docs.has(`routerReplicas/${MIRROR}`)).toBe(false);
+    }
   });
 
   // An Event subdomain projects `pathNamespace: null`, so a repair on one
