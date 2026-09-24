@@ -24,7 +24,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
+import { httpsFunctionExports, resolveModule, unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
 
 const require = createRequire(import.meta.url);
 const commander = require("commander");
@@ -171,9 +171,15 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
-function protectedServicesFromSource(source, table) {
+// `sourcePath`, when given, lets a star re-export of a local module that
+// exists be resolved through the module graph (`httpsFunctionExports`) to the
+// names it really exports, so one unexported peer does not become strict. A
+// star of a package or of a module that cannot be resolved still widens to
+// every protected callable.
+function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
+  let hasLocalExportStar = false;
   const sourceFile = ts.createSourceFile(
     "index.ts",
     source,
@@ -201,10 +207,15 @@ function protectedServicesFromSource(source, table) {
     }
     if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
     if (!statement.exportClause) {
-      // Resolving an export-star requires traversing the module graph. Treat it
-      // as possibly exporting every protected callable instead of silently
-      // skipping invoker repair for a service Firebase may discover.
-      hasRuntimeExportStar = true;
+      const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text
+        : "";
+      // A local star is resolved through the module graph when the caller has
+      // it. Otherwise treat the star as possibly exporting every protected
+      // callable instead of silently skipping invoker repair for a service
+      // Firebase may discover.
+      if (sourcePath && resolveModule(sourcePath, specifier)) hasLocalExportStar = true;
+      else hasRuntimeExportStar = true;
       continue;
     }
     if (ts.isNamedExports(statement.exportClause)) {
@@ -215,6 +226,9 @@ function protectedServicesFromSource(source, table) {
   }
   if (hasRuntimeExportStar) {
     for (const [exportName] of table) exportedNames.add(exportName);
+  } else if (hasLocalExportStar) {
+    const graphExports = httpsFunctionExports(sourcePath);
+    for (const [exportName] of table) if (graphExports.has(exportName)) exportedNames.add(exportName);
   }
   return table.filter(([exportName]) =>
     exportedNames.has(exportName),
@@ -3940,7 +3954,7 @@ async function protectedServiceInventory(configSource, configPath, table) {
       if (error && typeof error === "object" && error.code === "ENOENT") continue;
       throw error;
     }
-    for (const service of protectedServicesFromSource(source, table))
+    for (const service of protectedServicesFromSource(source, table, sourcePath))
       services.add(service);
   }
   return table.map(([, service]) => service).filter(

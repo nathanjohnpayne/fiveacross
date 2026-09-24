@@ -43,7 +43,7 @@ export const PRIVATE_HTTPS_EXPORTS = Object.freeze({});
 
 const HTTPS_BUILDERS = new Set(["onCall", "onRequest"]);
 
-function resolveModule(fromFile, specifier) {
+export function resolveModule(fromFile, specifier) {
   if (!specifier.startsWith(".")) return null;
   const base = resolve(dirname(fromFile), specifier.replace(/\.(?:c|m)?js$/, ""));
   for (const candidate of [`${base}.ts`, `${base}.tsx`, resolve(base, "index.ts")]) {
@@ -148,6 +148,14 @@ function valueKind(node, scope) {
 function groupMembers(object, scope) {
   const members = [];
   for (const property of object.properties) {
+    // `{ ...group }` spreads a local group's or a namespace import's members.
+    if (ts.isSpreadAssignment(property)) {
+      const spread = unwrap(property.expression);
+      if (ts.isIdentifier(spread) && scope.groups.has(spread.text)) members.push(...scope.groups.get(spread.text));
+      else if (ts.isIdentifier(spread) && scope.namespaces.has(spread.text)) members.push(...scope.namespaces.get(spread.text).https);
+      else if (ts.isObjectLiteralExpression(spread)) members.push(...groupMembers(spread, scope));
+      continue;
+    }
     if (ts.isShorthandPropertyAssignment(property)) {
       if (scope.https.has(property.name.text)) members.push(property.name.text);
     } else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
@@ -221,10 +229,10 @@ function analyzeModule(file, results, visited) {
       }
     }
   }
-  const scope = { builders: localBuilders, https: localHttps, namespaces: namespaceImports };
   // Group member names of every top-level object literal, by local name, so a
   // later `export { grouped as admin }` names the same group.
   const localGroups = new Map();
+  const scope = { builders: localBuilders, https: localHttps, namespaces: namespaceImports, groups: localGroups };
   const declared = topLevelBindings(source);
   // `export default <expression>` is an exported binding named `default`.
   for (const statement of source.statements) {
@@ -241,9 +249,12 @@ function analyzeModule(file, results, visited) {
       if (isFunctionNode(init)) {
         if (init.body && callsHttpsBuilder(init.body, localBuilders)) kind = "builder";
       } else if (ts.isIdentifier(init) && namespaceImports.has(init.text)) {
-        // `export const admin = grouped` of `import * as grouped` is a group.
+        // `export const admin = grouped` of `import * as grouped` is a group;
+        // recorded as a local group so a further alias keeps it.
+        const members = [...namespaceImports.get(init.text).https];
+        localGroups.set(name, members);
         if (exported) {
-          for (const member of namespaceImports.get(init.text).https) analysis.https.add(`${name}-${member}`);
+          for (const member of members) analysis.https.add(`${name}-${member}`);
         }
       } else if (ts.isIdentifier(init) && localGroups.has(init.text)) {
         // `const grouped = { endpoint }; export const admin = grouped`.
