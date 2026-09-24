@@ -732,12 +732,15 @@ export default function ReviewQueue({
 
   // The empty state and the flip confirm render TOGETHER, and the dialog is
   // deliberately outside the early return (Phase 4b P2). Confirming the last
-  // pending Prompt removes it from the pending query by Firestore's latency
-  // compensation — immediately, before the server has accepted or rejected the
-  // write — so `total` hits zero and an early return that owned the dialog would
-  // unmount it mid-write. The admin would watch the confirm vanish and "All
-  // clear." appear, and a rejection would take its own error state down with it:
-  // the write silently did not happen, on the one action in this console that
+  // pending Prompt removes it from the pending query: for a REJECT, by
+  // Firestore's latency compensation, immediately, before the server has
+  // accepted or rejected the write; for an APPROVE (the `approvePrompts`
+  // callable since #1275), after the server commits and the listener echoes
+  // the flip — so `total` hits zero while the confirm's own promise may still
+  // be settling, and an early return that owned the dialog would unmount it
+  // mid-flight. The admin would watch the confirm vanish and "All clear."
+  // appear, and a failure would take its own error state down with it: the
+  // write silently did not happen, on the one action in this console that
   // cannot be undone.
   if (!total) {
     return (

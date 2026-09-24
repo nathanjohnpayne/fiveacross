@@ -16,9 +16,11 @@ import { editionLexicon } from '../../editions';
  * WHERE THE FLIP ACTUALLY IS, which the obvious implementation gets wrong. A
  * player checking 🔞 changes nothing: their submission lands `status: 'pending'`
  * (#210) and the derivation only counts `status: 'active'`. It is a REQUEST. The
- * Event flips when an admin makes it active — `approveItem`, `bulkApproveItems`,
- * or `adminAddItem`, which writes `active` directly — so the confirm belongs on
- * those three, not on the player's checkbox. The `forceAdult` override is a
+ * Event flips when an admin makes it active — `approveItem` and
+ * `bulkApproveItems` (both the `approvePrompts` callable since #1275, which
+ * writes `active` on the server) or `adminAddItem`, which writes `active`
+ * directly — so the confirm belongs on those three, not on the player's
+ * checkbox. The `forceAdult` override is a
  * fourth path to the same consequence and reuses the same component, driven by
  * its `reason` rather than by a near-copy.
  *
