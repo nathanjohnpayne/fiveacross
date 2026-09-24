@@ -186,6 +186,7 @@ spec_test_map:
   # approval UI, and real reshuffle path, so map each differently-named seam.
   community-squares-quota:
     - src/game/community-squares-quota.test.ts
+    - tests/functions/approve-prompts.test.ts
     - src/data/community-prompt-targeting.test.ts
     - src/components/Admin.test.tsx
     - src/components/admin-async-feedback.test.tsx
