@@ -1088,6 +1088,27 @@ describe('the root-host replacement barrier', () => {
     ).toBe('invalid-input');
   });
 
+  // § D1: brand mirrors get no doorway, and the derivation accepts either root
+  // value on every root host, so the class rule holds on every root write.
+  it('refuses a doorway on a brand mirror through an update or a provision, but lets an apex doorway withdraw to not-found', async () => {
+    const marker = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com' };
+    const mirror = store(converged(MIRROR, '5', marker));
+    expect(await refusal(mutation({ intent: 'update', host: MIRROR, changes: { root: 'doorway' } }), mirror.dependencies)).toBe(
+      'root-marker-ineligible',
+    );
+    expect(mirror.docs.get(`routerReplicas/${MIRROR}`).revision).toBe('5');
+    expect(
+      await refusal(
+        mutation({ intent: 'provision', host: MIRROR, hostname: { ...marker, root: 'doorway' }, pathCapabilityBarrier: BARRIER }),
+        store().dependencies,
+      ),
+    ).toBe('root-marker-ineligible');
+    const doorway = { ...marker, root: 'doorway' };
+    const apex = store(converged(APEX, '5', doorway));
+    await applyHostnameMutation(mutation({ intent: 'update', host: APEX, changes: { root: 'not-found' } }), apex.dependencies);
+    expect(apex.docs.get(`hostnames/${APEX}`).root).toBe('not-found');
+  });
+
   it('refuses an ordinary update that relabels a root host route with another Edition', async () => {
     expect(
       await refusal(mutation({ intent: 'update', host: MIRROR, changes: { edition: 'gcb' } }), store(converged(MIRROR, '5', mirrorRoute)).dependencies),

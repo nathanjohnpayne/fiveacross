@@ -20,8 +20,11 @@
  * the host — null for every Event subdomain, the table's value for every root
  * host — and `deriveCanonicalProjection` refuses any other value, so no
  * mutation of an existing host can turn the capability on or off. Publishing it
- * is therefore a provisioning decision, and the deployment barrier sits on
- * `provision` alone. Converting a host between a route and a root marker is
+ * is therefore a provisioning decision, and among the ordinary intents the
+ * deployment barrier sits on `provision` and on one more write: the doorway
+ * `convert-to-root`, which publishes no capability but is the live apex
+ * repoint whose service-worker retirement the same record attests (the two
+ * repair intents take it too). Converting a host between a route and a root marker is
  * never an `update`, which refuses it by name rather than letting the
  * derivation report a malformed document: the archive interlock,
  * `convert-to-root` and `convert-to-route` (#1251) are the only conversions.
@@ -116,6 +119,17 @@ const ARCHIVE_ONLY_ROOT_HOSTS = new Set(['gaycruisebingo.com']);
 /** A brand mirror: a root host whose retired flagship leaves `not-found`. */
 function isBrandMirror(host) {
   return ROOT_HOSTS.has(host) && !DOORWAY_ROOT_HOSTS.has(host);
+}
+
+/**
+ * § D1: "Brand mirrors ... get no doorway at all." The derivation accepts
+ * either root value on every root host, so the host-class rule is enforced
+ * wherever a marker's `root` is WRITTEN — a provision and an ordinary update
+ * as well as the two conversions — or an update of a mirror's `not-found`
+ * marker would make it serve a doorway.
+ */
+function requireRootClass(host, root) {
+  if (root === 'doorway' && isBrandMirror(host)) refuse('root-marker-ineligible');
 }
 
 /**
@@ -551,6 +565,7 @@ async function planProvision(input, transaction, clock, buffer, revisions, proje
     ? { ...input.hostname }
     : { ...input.hostname, pathNamespace: null };
   const document = Object.hasOwn(provided, 'root') ? provided : { ...provided, status: 'disabled' };
+  requireRootClass(host, document.root);
   const desired = project(() => deriveCanonicalProjection(host, document));
   if (desired.kind !== 'tombstone' && desired.pathNamespace !== null) {
     project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier ?? null, clock.iso));
@@ -613,6 +628,7 @@ async function planUpdate(input, transaction, clock, buffer, revisions, projecti
   ) {
     refuse('root-route-transition-barrier');
   }
+  if (Object.hasOwn(changes, 'root')) requireRootClass(host, changes.root);
   const identityChange =
     (Object.hasOwn(changes, 'eventId') && changes.eventId !== state.hostname.eventId) ||
     (Object.hasOwn(changes, 'slug') && changes.slug !== state.hostname.slug);
