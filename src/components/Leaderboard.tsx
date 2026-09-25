@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
+import { useHiddenUids } from '../hooks/useBlocks';
+import { isHiddenFor, withBlockExclusions, withRanksKeepingGaps } from '../data/moderation';
 import type { ProofKindFlags } from '../hooks/useData';
 import { useOnline } from '../hooks/useOnline';
 import {
@@ -155,10 +157,14 @@ function buildShareStandings(
   players: PlayerDoc[],
   firstBingoUid: string | undefined,
   maxRows: number,
+  hidden: ReadonlySet<string> = new Set<string>(),
 ): LeaderboardShareRow[] {
   const ranked = players.map((p, i) => toShareRow(p, i + 1, firstBingoUid));
-  const top = ranked.slice(0, maxRows);
-  if (firstBingoUid && !top.some((r) => r.uid === firstBingoUid)) {
+  // A blocked counterpart (#689) is cut AFTER the top-N slice, so their rank
+  // leaves a gap on the card and nobody below moves up into it; a hidden pin
+  // holder is never appended.
+  const top = ranked.slice(0, maxRows).filter((r) => !isHiddenFor(r.uid, hidden));
+  if (firstBingoUid && !isHiddenFor(firstBingoUid, hidden) && !top.some((r) => r.uid === firstBingoUid)) {
     const pinned = ranked.find((r) => r.uid === firstBingoUid);
     if (pinned) top.push(pinned);
   }
@@ -413,6 +419,8 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     event?.days?.map((d) => d.index) ?? [],
   );
   const { kindsByUid } = useProofKindsByUid();
+  // The viewer's reciprocal hidden set (#689): rows and honours only, at render.
+  const { hidden } = useHiddenUids();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<LeaderboardFilter>('all');
   // The most recent warmed-up card render, keyed by the inputs it was built
@@ -423,6 +431,7 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     players: PlayerDoc[];
     shareCopyKey: string;
     bannedKey: string;
+    hiddenKey: string;
     promise: Promise<Blob | null>;
   } | null>(null);
 
@@ -512,7 +521,9 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   // below still come off `roster`: a rank is a position, and a position closes
   // the gap.
   const honorByDay = new Map(
-    pinnedOrDerivedDailyHonors(players, event?.days, dayMetas, dayMetasLoaded, bannedUids).map(
+    // A blocked counterpart's honour (#689) is withheld by the same rule, via
+    // the union: "—", never handed to the next Player.
+    pinnedOrDerivedDailyHonors(players, event?.days, dayMetas, dayMetasLoaded, withBlockExclusions(bannedUids, hidden)).map(
       (h) => [h.dayIndex, h],
     ),
   );
@@ -555,6 +566,10 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   // ban-filtered roster — a plain `.filter`, never a `.sort`, so the relative
   // order sortPlayers produced is always preserved.
   const visible = roster.filter((p) => matchesFilter(p, filter));
+  // …then the viewer's blocked counterparts (#689) leave AFTER numbering, so
+  // their rank stays a gap (decision 6: standings are the real population's),
+  // unlike a ban, which closes it above.
+  const rankedRows = withRanksKeepingGaps(visible, hidden);
 
   // Warm-on-intent pre-render (Codex P2, PR #111 round 2 finding 2): start
   // rasterizing when the Player signals intent to share — pointerenter
@@ -592,22 +607,24 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     // lands between warm-up and tap re-renders fresh rather than sharing a card
     // that shows (or hides) the wrong Player.
     const bannedKey = JSON.stringify(bannedUids);
+    const hiddenKey = [...hidden].sort().join(',');
     const cached = warmedCard.current;
     if (
       cached &&
       cached.players === players &&
       cached.shareCopyKey === shareCopy.cacheKey &&
-      cached.bannedKey === bannedKey
+      cached.bannedKey === bannedKey &&
+      cached.hiddenKey === hiddenKey
     ) {
       return cached.promise;
     }
     const promise = renderLeaderboardShareCard({
       eventName: shareCopy.eventName,
-      rows: buildShareStandings(roster, firstBingoUid, MAX_SHARE_ROWS),
+      rows: buildShareStandings(roster, firstBingoUid, MAX_SHARE_ROWS, hidden),
       contextLine: shareCopy.contextLine,
       statLine: shareCopy.statLine,
     }).catch(() => null);
-    warmedCard.current = { players, shareCopyKey: shareCopy.cacheKey, bannedKey, promise };
+    warmedCard.current = { players, shareCopyKey: shareCopy.cacheKey, bannedKey, hiddenKey, promise };
     return promise;
   };
 
@@ -676,21 +693,21 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
           </ul>
         </div>
       )}
-      {visible.length === 0 ? (
+      {rankedRows.length === 0 ? (
         // Compact (NOT the 70vh `.center`) so the below-list "Share leaderboard"
         // action stays reachable in an empty-filter view (Codex, #174): the share
         // card uses the full roster, so the CTA is still valid here.
         <div className="lb-empty muted">No one matches this filter yet.</div>
       ) : (
         <div className="list">
-          {visible.map((p, i) => {
+          {rankedRows.map(({ row: p, rank }) => {
             const isFirst = p.uid === firstBingoUid;
             // Presentational-only (#218, union semantics #604): decorates an
             // already-ranked row, never feeds rank/filter — see `proofChips` above.
             const chips = proofChips(kindsByUid[p.uid]);
             return (
               <div key={p.uid} className={'row' + (isFirst ? ' leader' : '')}>
-                <div className="rank">{i + 1}</div>
+                <div className="rank">{rank}</div>
                 <Avatar name={p.displayName} src={p.photoURL} />
                 <div className="grow">
                   <div className="name">{p.displayName}</div>

@@ -218,3 +218,50 @@ export interface SafetyHideState {
 export function safetyHideStands(proof: SafetyHideState | undefined): boolean {
   return proof?.safetyHide === true || proof?.status === 'flagged';
 }
+
+/**
+ * Player blocking (#689, specs/player-blocking.md § Where hiding applies): is
+ * `uid` in the viewer's reciprocal hidden set (`useHiddenUids()` from
+ * src/hooks/useBlocks.tsx)? Unlike `isBanned` a block is per viewer, reciprocal,
+ * display-only and never an Admin tool, so it never reaches an Admin surface, a
+ * server-parity mirror (`proofFeedVisible`, `buildMostLovedPhotoAward`,
+ * `draftEventArchive`) or a ranking input. The viewer is never in their own set,
+ * so every own-content exception the ban rules carry holds unchanged.
+ */
+export function isHiddenFor(uid: string | null | undefined, hidden: ReadonlySet<string>): boolean {
+  return !!uid && hidden.has(uid);
+}
+
+/**
+ * The ban roster plus the viewer's hidden set, for the DISPLAY-ONLY surfaces that
+ * already take a ban roster and withhold rather than promote
+ * (`withholdBannedHonours`, `pinnedOrDerivedDailyHonors`, `heartState`, the
+ * podium and last-call Moment gates): a hidden Player's honour goes blank and
+ * nobody inherits it, exactly as for a ban. Returns `bannedUids` itself when
+ * nothing is hidden, so an unblocked viewer's inputs stay byte-identical. Never
+ * pass the union to a server-parity mirror or to anything that numbers
+ * positions: a hidden row keeps its rank's gap (`withRanksKeepingGaps`).
+ */
+export function withBlockExclusions(
+  bannedUids: readonly string[] | undefined,
+  hidden: ReadonlySet<string>,
+): readonly string[] {
+  const banned = Array.isArray(bannedUids) ? bannedUids : [];
+  if (hidden.size === 0) return banned;
+  return [...banned, ...[...hidden].filter((uid) => !banned.includes(uid))];
+}
+
+/**
+ * Number already-ordered rows 1..n, THEN drop the viewer's hidden ones, so a
+ * hidden row leaves a gap in the ranks rather than promoting the rows below it
+ * (#689 decision 6: standings stay the real population's). A ban still closes
+ * its gap, so callers ban-filter BEFORE this and hide AFTER it.
+ */
+export function withRanksKeepingGaps<T extends { uid: string }>(
+  rows: readonly T[],
+  hidden: ReadonlySet<string>,
+): { row: T; rank: number }[] {
+  return rows
+    .map((row, i) => ({ row, rank: i + 1 }))
+    .filter(({ row }) => !isHiddenFor(row.uid, hidden));
+}

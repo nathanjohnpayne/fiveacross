@@ -60,7 +60,10 @@ export interface MostLovedAwardOptions {
  * `where('status', '==', 'active')` query plus its `isReportHidden`/`isBanned`
  * filter pair. Re-stated here rather than refactored out of the hook because
  * `useProofFeed` is a hot pre-freeze file this feature must not destabilize; if
- * the hook's filter ever changes, change this predicate with it.
+ * the hook's filter ever changes, change this predicate with it. ONE deliberate
+ * exception: the hook's per-viewer Player-block filter (#689) is display-only
+ * and is NOT mirrored here, because this predicate feeds the award computation
+ * that `functions/src/finaleContent.ts` must reproduce for every viewer alike.
  */
 export function proofFeedVisible(
   proof: Pick<ProofDoc, 'uid' | 'status' | 'reportCount'>,

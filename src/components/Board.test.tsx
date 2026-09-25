@@ -41,8 +41,11 @@ const H = vi.hoisted(() => ({
   dealDayCard: vi.fn(() => Promise.resolve(false)),
   subscribeDirectMarkAnalytics: vi.fn(() => vi.fn()),
   authReads: 0,
+  // The viewer's reciprocal hidden set (#689); empty unless a test sets it.
+  hidden: new Set<string>() as ReadonlySet<string>,
 }));
 
+vi.mock('../hooks/useBlocks', () => ({ useHiddenUids: () => ({ hidden: H.hidden, ready: true }) }));
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
   useDayMeta: () => ({ data: H.dayMeta, loading: false, hasServerData: true }),
@@ -2112,6 +2115,24 @@ describe('per-Day First to BINGO (#264)', () => {
     render(<Board />);
     const meta = document.querySelector('.daybar-meta');
     expect(meta?.textContent).toContain('First to BINGO: Theo, 11:02');
+  });
+
+  it('withholds a blocked counterpart’s pinned Day honour, promoting nobody (#689)', () => {
+    const now = Date.now();
+    H.dayMeta = { firstBingo: { uid: 'u9', displayName: 'Theo', at: Date.UTC(2026, 6, 18, 11, 2) } };
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    H.hidden = new Set(['u9']);
+    try {
+      render(<Board />);
+      expect(document.querySelector('.daybar-meta')?.textContent).not.toContain('Theo');
+    } finally {
+      H.hidden = new Set();
+    }
   });
 
   it('falls back to the port line when a pinned honor carries an invalid timestamp', () => {

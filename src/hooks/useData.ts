@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
-import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '../data/moderation';
+import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor, isHiddenFor } from '../data/moderation';
 import { useAdultContent } from './useAdultContent';
+import { useHiddenUids } from './useBlocks';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
 import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
@@ -361,6 +362,20 @@ function useEventModeration(enabled = true): { threshold: number | undefined; ba
     threshold: typeof threshold === 'number' ? threshold : undefined,
     bannedUids: event?.bannedUids ?? [],
   };
+}
+
+/**
+ * Player blocking (#689, specs/player-blocking.md § Where hiding applies): the
+ * viewer's reciprocal hidden set for the PUBLIC content hooks below, with a
+ * stable dependency key. Until the pair listener's first answer (`ready`) each
+ * of those hooks reports loading and returns NO rows, so a blocked Player never
+ * flashes in on a cold start; without a provider the set is empty and ready.
+ * Display-only: the Admin reads (useReportedProofs, usePendingItems, useNotices,
+ * useItems) and the raw useLeaderboard never apply it.
+ */
+function useBlockFilter(): { hidden: ReadonlySet<string>; ready: boolean; hiddenKey: string } {
+  const { hidden, ready } = useHiddenUids();
+  return { hidden, ready, hiddenKey: [...hidden].sort().join(',') };
 }
 
 export function useItems(enabled = true) {
@@ -860,6 +875,7 @@ export function useMyPlayer(uid: string | undefined) {
  */
 export function useTally(itemId: string | null | undefined) {
   const { bannedUids } = useEventModeration(!!itemId);
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<TallyEntry>(
     itemId ? tallyMarkersCol(itemId) : null,
     eventSubscriptionKey('tally', itemId ?? 'none'),
@@ -868,10 +884,14 @@ export function useTally(itemId: string | null | undefined) {
   // AND from the derived `count` the Square badge shows — a banned Player's mark is
   // hidden from other Players, mirroring `isReportHidden` elsewhere. Presentational
   // only; the marker doc is untouched, and admin surfaces do not read this hook.
-  const markers = [...data]
-    .filter((m) => !isBanned(m.uid, bannedUids))
-    .sort((a, b) => a.markedAt - b.markedAt);
-  return { markers, count: markers.length, loading, hasServerData };
+  // A blocked counterpart (#689) drops the same way, so the who-list has no row
+  // (and so no Doubt button) for them and the badge count matches the names.
+  const markers = ready
+    ? [...data]
+        .filter((m) => !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
+        .sort((a, b) => a.markedAt - b.markedAt)
+    : [];
+  return { markers, count: markers.length, loading: loading || !ready, hasServerData };
 }
 
 /** The signed-in User's global profile (`users/{uid}`) — display name + avatar. */
@@ -896,6 +916,9 @@ export function useLeaderboard() {
   // is a PRESENTATIONAL filter applied by the Leaderboard COMPONENT for display only
   // (src/components/Leaderboard.tsx, via `isBanned`), while this hook stays raw so
   // Board's ceremony reads the true roster. See specs/w2-ban-console.md § Leaderboard.
+  // It stays raw under a Player block (#689) for the same reason: a block hides a
+  // row at render in the Leaderboard and podium, keeping its rank's gap, and never
+  // changes who ranked or bingoed first (specs/player-blocking.md).
   //
   // `fromCache` and `hasPendingWrites` are the CURRENT snapshot's own metadata,
   // passed through beside the latch (Codex P2 on PR #1162). `useColSub` already
@@ -986,6 +1009,11 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   const liveModeration = useEventModeration(moderation === undefined);
   const threshold = moderation === undefined ? liveModeration.threshold : moderation.threshold;
   const bannedUids = moderation === undefined ? liveModeration.bannedUids : moderation.bannedUids;
+  // Player blocking (#689): a blocked counterpart's Proofs drop too, for EVERY
+  // caller, the Feed and the Most-Loved display join alike. The join then drops
+  // a hidden winner without promoting anyone (`mostLovedDisplayWinners`); the
+  // award record and `proofFeedVisible` never see the hidden set.
+  const { hidden, ready, hiddenKey } = useBlockFilter();
   const { data, loading } = useColSub<ProofDoc>(
     query(proofsCol(), where('status', '==', 'active')),
     eventSubscriptionKey('proofs'),
@@ -1000,15 +1028,21 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   // presentational hide `useReportedProofs` (Admin) deliberately does NOT apply.
   const proofs = useMemo(
     () => {
+      if (!ready) return [];
       const visible = data
-        .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
+        .filter(
+          (p) =>
+            !isReportHidden(p.reportCount, threshold) &&
+            !isBanned(p.uid, bannedUids) &&
+            !isHiddenFor(p.uid, hidden),
+        )
         .sort((a, b) => b.createdAt - a.createdAt);
       return max === null ? visible : visible.slice(0, max);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, threshold, bannedKey, max],
+    [data, threshold, bannedKey, max, ready, hiddenKey],
   );
-  return { proofs, loading };
+  return { proofs, loading: loading || !ready };
 }
 
 /**
@@ -1021,23 +1055,29 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
  */
 export function useMoments(max = 60) {
   const { bannedUids } = useEventModeration();
+  const { hidden, ready, hiddenKey } = useBlockFilter();
   const { data, loading } = useColSub<MomentDoc>(momentsCol(), eventSubscriptionKey('moments'));
   // Same fresh-array problem as `useProofFeed` — join to a stable dep key.
   const bannedKey = bannedUids.join(',');
   // The Admin ban (#108): a banned Player's broadcast beats drop from the public
   // Feed by their `uid`, mirroring the proof side above so the whole merged Feed
   // (`useFeed`) is consistent. Presentational only; admin surfaces do not read this.
+  // A blocked counterpart's beats drop the same way (#689); a server-written
+  // podium or last-call Moment (`uid: 'system'`) is never hidden whole, and
+  // withholds the counterpart's honour at render instead (ProofFeed).
   const moments = useMemo(
     () =>
-      data
-        .filter(hasCanonicalMomentId)
-        .filter((m) => !isBanned(m.uid, bannedUids))
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, max),
+      ready
+        ? data
+            .filter(hasCanonicalMomentId)
+            .filter((m) => !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, max)
+        : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, bannedKey, max],
+    [data, bannedKey, max, ready, hiddenKey],
   );
-  return { moments, loading };
+  return { moments, loading: loading || !ready };
 }
 
 /**
@@ -1241,20 +1281,30 @@ export function useTallyCards() {
     eventId,
     displayed: {},
   });
+  // Re-derive whenever the ban roster changes so a newly-banned marker drops.
+  const bannedKey = bannedUids.join(',');
+  // …and whenever the viewer's hidden set changes (#689): a blocked
+  // counterpart's Mark drops from the card, its names line and its count, and
+  // never bumps the card's Feed position. No cards until the set is ready, and
+  // the state is keyed on the set too, so cards derived under an older set are
+  // never returned after it changes.
+  const { hidden, ready, hiddenKey } = useBlockFilter();
+  const derivedKey = `${key}|${hiddenKey}`;
   const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean }>(() => ({
-    key,
+    key: derivedKey,
     cards: [],
     loading: true,
   }));
-  // Re-derive whenever the ban roster changes so a newly-banned marker drops.
-  const bannedKey = bannedUids.join(',');
   useEffect(() => {
+    if (!ready) return;
     let active = true;
     if (displayedRef.current.eventId !== eventId) {
       displayedRef.current = { eventId, displayed: {} };
     }
     setState((previous) =>
-      previous.key === key ? { ...previous, loading: true } : { key, cards: [], loading: true },
+      previous.key === derivedKey
+        ? { ...previous, loading: true }
+        : { key: derivedKey, cards: [], loading: true },
     );
     // #1072: the predicate is part of the server query, so another Event's
     // markers are never delivered over the wire. Keep the callback's path guard
@@ -1275,17 +1325,19 @@ export function useTallyCards() {
           if (!tallyDoc || tallyDoc.parent.id !== 'tally') continue;
           if (tallyDoc.parent.parent?.id !== eventId) continue;
           const data = d.data() as TallyEntry;
-          if (isBanned(data.uid, bannedUids)) continue;
+          if (isBanned(data.uid, bannedUids) || isHiddenFor(data.uid, hidden)) continue;
           rows.push({ ...data, itemId: tallyDoc.id });
         }
         const { cards, displayed } = deriveTallyCards(rows, displayedRef.current.displayed);
         displayedRef.current = { eventId, displayed };
-        setState({ key, cards, loading: false });
+        setState({ key: derivedKey, cards, loading: false });
       },
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key ? { ...previous, loading: false } : { key, cards: [], loading: false },
+          previous.key === derivedKey
+            ? { ...previous, loading: false }
+            : { key: derivedKey, cards: [], loading: false },
         );
       },
     );
@@ -1294,8 +1346,10 @@ export function useTallyCards() {
       unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, bannedKey]);
-  return state.key === key ? state : { key, cards: [], loading: true };
+  }, [derivedKey, bannedKey, ready]);
+  return ready && state.key === derivedKey
+    ? { key, cards: state.cards, loading: state.loading }
+    : { key, cards: [], loading: true };
 }
 
 /**
@@ -1573,20 +1627,29 @@ export function useAllHearts(enabled = true) {
 
 export function useAllDoubts(viewerUid?: string | null) {
   const { bannedUids } = useEventModeration();
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<DoubtDoc>(
     doubtsCol(),
     eventSubscriptionKey('doubts:all'),
   );
-  const doubts = data.filter(
-    (d) =>
-      !isBanned(d.fromUid, bannedUids) &&
-      (!isBanned(d.targetUid, bannedUids) || d.targetUid === viewerUid),
-  );
-  return { doubts, loading, hasServerData };
+  // Player blocking (#689, decision 5): a Doubt with EITHER party in the
+  // viewer's hidden set is hidden, so the pair's doubts vanish for both of them
+  // while a third Player, whose set names neither, still sees them.
+  const doubts = ready
+    ? data.filter(
+        (d) =>
+          !isBanned(d.fromUid, bannedUids) &&
+          (!isBanned(d.targetUid, bannedUids) || d.targetUid === viewerUid) &&
+          !isHiddenFor(d.fromUid, hidden) &&
+          !isHiddenFor(d.targetUid, hidden),
+      )
+    : [];
+  return { doubts, loading: loading || !ready, hasServerData };
 }
 
 export function useDoubts(itemId: string | null | undefined, viewerUid?: string | null) {
   const { bannedUids } = useEventModeration(!!itemId);
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<DoubtDoc>(
     itemId ? query(doubtsCol(), where('itemId', '==', itemId)) : null,
     eventSubscriptionKey('doubts', itemId ?? 'none'),
@@ -1602,14 +1665,19 @@ export function useDoubts(itemId: string | null | undefined, viewerUid?: string 
   //    a Doubt raised against them — otherwise the ban would silence accusations
   //    against them in their own UI, which the own-content exception forbids.
   // Presentational only; admin surfaces do not read this hook.
-  const doubts = [...data]
-    .filter((d) => {
-      if (isBanned(d.fromUid, bannedUids)) return false;
-      if (isBanned(d.targetUid, bannedUids) && d.targetUid !== viewerUid) return false;
-      return true;
-    })
-    .sort((a, b) => a.createdAt - b.createdAt);
-  return { doubts, count: doubts.length, loading, hasServerData };
+  // Player blocking (#689): a Doubt with either party hidden is hidden, as in
+  // `useAllDoubts`.
+  const doubts = ready
+    ? [...data]
+        .filter((d) => {
+          if (isBanned(d.fromUid, bannedUids)) return false;
+          if (isBanned(d.targetUid, bannedUids) && d.targetUid !== viewerUid) return false;
+          if (isHiddenFor(d.fromUid, hidden) || isHiddenFor(d.targetUid, hidden)) return false;
+          return true;
+        })
+        .sort((a, b) => a.createdAt - b.createdAt)
+    : [];
+  return { doubts, count: doubts.length, loading: loading || !ready, hasServerData };
 }
 
 /**
@@ -1667,6 +1735,7 @@ export function useMyProofs(uid: string | null | undefined) {
  */
 export function useProofsForItemText(itemText: string | null | undefined) {
   const { threshold, bannedUids } = useEventModeration();
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<ProofDoc>(
     itemText
       ? query(proofsCol(), where('itemText', '==', itemText), where('status', '==', 'active'))
@@ -1677,11 +1746,16 @@ export function useProofsForItemText(itemText: string | null | undefined) {
   // show which markers have shown a Proof — so unlike `useMyProofs` it DOES apply
   // the Admin ban (#108): a banned Player's Proof must not render "Proof shown ✓" in
   // another Player's Tally sheet. Filtered by the Proof's owner `uid`, composed with
-  // the community auto-hide.
-  const proofs = data.filter(
-    (p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids),
-  );
-  return { proofs, loading, hasServerData };
+  // the community auto-hide. A blocked counterpart's Proofs drop too (#689).
+  const proofs = ready
+    ? data.filter(
+        (p) =>
+          !isReportHidden(p.reportCount, threshold) &&
+          !isBanned(p.uid, bannedUids) &&
+          !isHiddenFor(p.uid, hidden),
+      )
+    : [];
+  return { proofs, loading: loading || !ready, hasServerData };
 }
 
 /** The distinct proof "kinds" a Leaderboard row's chip strip can show — one

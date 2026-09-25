@@ -9,7 +9,8 @@ import {
   type LeaderboardShareRow,
 } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
-import { isBanned } from '../data/moderation';
+import { isBanned, isHiddenFor, withRanksKeepingGaps } from '../data/moderation';
+import { useHiddenUids } from '../hooks/useBlocks';
 import Avatar from './Avatar';
 import { EmojiText } from './EmojiText';
 import type { ArchivedDayHonor, ArchivedStandingRow, EventArchive, EventDoc } from '../types';
@@ -120,14 +121,26 @@ export default function ArchivedLeaderboard({
   archive: EventArchive;
 }) {
   const bannedUids = event?.bannedUids ?? [];
+  // The viewer's reciprocal hidden set (#689), the other live display input: a
+  // blocked counterpart's honours vacate like a banned holder's, and their row
+  // leaves a gap in the frozen ranks rather than closing it (decision 6). The
+  // record itself is never touched.
+  const { hidden } = useHiddenUids();
   // The headline honour VACATES when its holder is banned — the hall of fame
   // shows "No one got there." rather than the next-earliest Player, matching
   // `buildEventArchive`'s own ban rule at freeze time.
   const headline =
-    archive.firstBingo && !isBanned(archive.firstBingo.uid, bannedUids) ? archive.firstBingo : null;
+    archive.firstBingo &&
+    !isBanned(archive.firstBingo.uid, bannedUids) &&
+    !isHiddenFor(archive.firstBingo.uid, hidden)
+      ? archive.firstBingo
+      : null;
   const firstBingoUid = headline?.uid;
   const standings = archive.standings.filter((row) => !isBanned(row.uid, bannedUids));
-  const dailyHonors = archive.dailyHonors.filter((h) => !isBanned(h.uid, bannedUids));
+  const rankedStandings = withRanksKeepingGaps(standings, hidden);
+  const dailyHonors = archive.dailyHonors.filter(
+    (h) => !isBanned(h.uid, bannedUids) && !isHiddenFor(h.uid, hidden),
+  );
   // THE CHIP LABEL COMES OUT OF THE RECORD (#1151, Codex P2 on PR #1139). It used
   // to be looked up in the LIVE `EventDoc.days` — the one Event field the freeze
   // deliberately leaves editable — so an Admin re-theming a Day after the archive
@@ -203,7 +216,8 @@ export default function ArchivedLeaderboard({
   // which a later ban above them therefore cannot shift).
   const shareRows = ((): LeaderboardShareRow[] => {
     const ranked = standings.map((row, i) => toShareRow(row, i + 1, firstBingoUid));
-    const rows = ranked.slice(0, MAX_SHARE_ROWS);
+    // A blocked counterpart is cut after the slice (#689): a gap, no promotion.
+    const rows = ranked.slice(0, MAX_SHARE_ROWS).filter((r) => !isHiddenFor(r.uid, hidden));
     if (firstBingoUid && !rows.some((r) => r.uid === firstBingoUid)) {
       const kept = archive.firstBingoRow;
       const pinned =
@@ -350,16 +364,17 @@ export default function ArchivedLeaderboard({
         <div className="lb-empty muted">{emptyStandingsCopy}</div>
       ) : (
         <div className="list">
-          {standings.map((row, i) => {
+          {rankedStandings.map(({ row, rank }) => {
             const isFirst = row.uid === firstBingoUid;
             return (
               <div key={row.uid} className={'row' + (isFirst ? ' leader' : '')}>
-                {/* The displayed ordinal closes the gap over the VISIBLE rows,
-                    which is what the live Leaderboard already does with a banned
-                    row: leaving a hole at #1 would advertise that a row was
-                    removed, the opposite of what hiding is for. The stored record
+                {/* The displayed ordinal closes the gap over a BANNED row, which
+                    is what the live Leaderboard already does: leaving a hole at
+                    #1 would advertise that a row was removed, the opposite of
+                    what hiding is for. A row hidden by the viewer's own block
+                    (#689) keeps its gap instead (decision 6). The stored record
                     keeps its own numbers underneath. */}
-                <div className="rank">{i + 1}</div>
+                <div className="rank">{rank}</div>
                 {/* No stored photo URL, by the `MostLovedPhotoWinner` rule: a
                     frozen record must never render a Player's identity from a
                     stale copy they have since changed. Initials it is. */}

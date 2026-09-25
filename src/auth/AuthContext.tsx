@@ -52,6 +52,7 @@ import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
 import PoolRecoveryWatcher from '../components/PoolRecoveryWatcher';
 import AdultContentWatcher from '../components/AdultContentWatcher';
+import { HiddenUidsProvider } from '../hooks/useBlocks';
 
 // Connectivity probe for the boot path (#115). The auth bootstrap and the deal
 // are both network-bound: a create-once transaction (ensureUserProfile) and a
@@ -2651,7 +2652,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           otherwise), and fires the SAME retryDeal a manual Retry does — so it inherits
           #117's online && attestedAuthoritative deal gate rather than re-deriving it. */}
       {user && admissionAllowsEventWatchers && <PoolRecoveryWatcher />}
-      {needsAttestation ? <SignIn /> : children}
+      {/* Player blocking (#689, specs/player-blocking.md): ONE pair listener
+          for the viewer's reciprocal hidden set, around the Event content only.
+          The watchers above sit outside it and need no filtering. `enabled`
+          follows the same admission gate, which is also what App requires
+          before it renders any content: every admitted viewer gets a listener
+          whose first answer makes the content hooks ready, a signed-out one is
+          ready with nothing hidden, and a held visit renders no content. */}
+      {needsAttestation ? (
+        <SignIn />
+      ) : (
+        <HiddenUidsProvider uid={user?.uid ?? null} enabled={admissionAllowsEventWatchers}>
+          {children}
+        </HiddenUidsProvider>
+      )}
     </AuthContext.Provider>
   );
 }

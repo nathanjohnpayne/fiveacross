@@ -20,6 +20,8 @@ import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
 import { withholdBannedHonours } from '../data/finale';
+import { withBlockExclusions } from '../data/moderation';
+import { useHiddenUids } from '../hooks/useBlocks';
 import type {
   BoardDoc,
   DayDef,
@@ -964,6 +966,13 @@ export default function ProofFeed() {
   // (ban semantics applied there, own-content exception included). The
   // toggle's latency-compensated echo flips the button instantly.
   const { hearts } = useAllHearts();
+  // Player blocking (#689): the ban roster plus the viewer's hidden set, for
+  // the render-time gates that already withhold a banned Player without
+  // promoting anyone — a blocked counterpart's Hearts leave every count, and
+  // their podium honour or last-call entry is withheld. The Proofs, Moments,
+  // Tally Cards and Doubts themselves are filtered in their hooks.
+  const { hidden } = useHiddenUids();
+  const displayExcluded = withBlockExclusions(event?.bannedUids, hidden);
   // `targetCreatedAt` is the post's own createdAt — the incarnation stamp
   // that both scopes the derivation and rides the write (Codex P2 on #425).
   const heartFor = (
@@ -977,7 +986,7 @@ export default function ProofFeed() {
       targetId,
       targetCreatedAt,
       user?.uid,
-      event?.bannedUids ?? [],
+      displayExcluded,
     );
     return {
       count,
@@ -1178,7 +1187,7 @@ export default function ProofFeed() {
               key={`moment-${entry.moment.id}`}
               moment={entry.moment}
               days={event?.days}
-              bannedUids={event?.bannedUids ?? []}
+              bannedUids={displayExcluded}
               heart={heartFor('moment', entry.moment.id, entry.moment.createdAt)}
             />
           );

@@ -54,6 +54,8 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
+// #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
+vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
 vi.mock('../firebase', () => ({ auth: {}, EVENT_ID: 'test-event', googleProvider: {} }));
 // AuthProvider also mounts ConfirmWinMoments (#41); stub it — this suite is about the
 // pool-recovery watcher, which is real below.
