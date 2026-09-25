@@ -88,6 +88,7 @@ describe('More menu (specs/d15-more-menu.md)', () => {
       'Support',
       'Report a bug (row)',
       '18+ guidelines (row)',
+      'Blocked players',
       'Sign out',
     ];
     const text = container.textContent ?? '';

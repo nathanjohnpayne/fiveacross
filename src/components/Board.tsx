@@ -68,6 +68,7 @@ import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonor
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
 import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
 import ReshuffleSheet from './ReshuffleSheet';
+import BlockPlayerButton from './BlockPlayerButton';
 import { THEMES } from '../theme/themes';
 import { FREE_TEXT } from '../data/seed';
 // The non-free Square prompt text with the S/M/L auto-fit guard (#215) — moved
@@ -377,6 +378,10 @@ function TallySheet({
                           the full wireframe phrase stays on stateless rows. */}
                       {isPending ? 'Doubting…' : rowHasState ? '🤨 Doubt too' : '🤨 Pics or it didn’t happen'}
                     </button>
+                  )}
+                  {/* Block (#689): every other Player's row, beside Doubt. */}
+                  {!isMe && (
+                    <BlockPlayerButton meUid={meUid} targetUid={m.uid} targetName={m.displayName} surface="board_wholist" />
                   )}
                 </div>
               );

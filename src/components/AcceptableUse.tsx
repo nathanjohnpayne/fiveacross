@@ -162,6 +162,11 @@ export default function AcceptableUse({
               anything automatically, but Admins can hide or remove anything reported or otherwise out
               of line.
             </p>
+            <p>
+              <b>How to block someone:</b> tap the block icon on their Proof in the Feed, or beside their name in
+              the list of players who marked a square. You&rsquo;ll stop seeing each other for this{' '}
+              {brand.lexicon.occasion}, and only you can undo it, from <b>More &rsaquo; Blocked players</b>.
+            </p>
 
             <div className="sheet-actions">
               <button className="btn primary" onClick={close}>

@@ -236,29 +236,30 @@ export function useHiddenUids(): HiddenUids {
 
 /**
  * The viewer's OWN direction records (`where('ownerUid', '==', uid)`), the
- * only readable ones: the Blocked-players panel lists these. Errors resolve
- * to an empty, settled list with a console.error, never a hung spinner.
+ * only readable ones: the Blocked-players panel lists these. An error settles
+ * to an empty list with `error: true` and a console.error, never a hung
+ * spinner, so the panel can say it could not load rather than "no blocks".
  */
-export function useMyBlocks(uid: string | null): { data: BlockDoc[]; loading: boolean } {
+export function useMyBlocks(uid: string | null): { data: BlockDoc[]; loading: boolean; error: boolean } {
   const eventId = EVENT_ID;
   const key = uid !== null ? eventScopeKey(eventId, 'my-blocks', uid) : null;
-  const [state, setState] = useState<{ key: string | null; data: BlockDoc[]; loading: boolean }>(
-    () => ({ key, data: [], loading: uid !== null }),
+  const [state, setState] = useState<{ key: string | null; data: BlockDoc[]; loading: boolean; error: boolean }>(
+    () => ({ key, data: [], loading: uid !== null, error: false }),
   );
   useEffect(() => {
-    setState({ key, data: [], loading: uid !== null });
+    setState({ key, data: [], loading: uid !== null, error: false });
     if (key === null || uid === null) return;
     let active = true;
     const unsub = onSnapshot(
       query(blocksCol(eventId), where('ownerUid', '==', uid)),
       (snap) => {
         if (!active) return;
-        setState({ key, data: snap.docs.map((d) => d.data()), loading: false });
+        setState({ key, data: snap.docs.map((d) => d.data()), loading: false, error: false });
       },
       (err) => {
         if (!active) return;
         console.error('[blocks] own-blocks listener failed', err);
-        setState({ key, data: [], loading: false });
+        setState({ key, data: [], loading: false, error: true });
       },
     );
     return () => {
@@ -267,6 +268,6 @@ export function useMyBlocks(uid: string | null): { data: BlockDoc[]; loading: bo
     };
   }, [key, uid, eventId]);
   return state.key === key
-    ? { data: state.data, loading: state.loading }
-    : { data: [], loading: uid !== null };
+    ? { data: state.data, loading: state.loading, error: state.error }
+    : { data: [], loading: uid !== null, error: false };
 }

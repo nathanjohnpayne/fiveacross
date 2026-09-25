@@ -231,6 +231,17 @@ describe('Board Doubts wiring (specs/w2-doubts.md)', () => {
     });
   });
 
+  it('offers Block (#689) beside Doubt on another Player’s row, never one’s own', () => {
+    H.markers = [
+      { uid: 'u1', displayName: 'Me', markedAt: 1 },
+      { uid: 'bob', displayName: 'Bob', markedAt: 2 },
+    ];
+    const { container } = render(<Board />);
+    fireEvent.click(container.querySelector('.tally-badge')!);
+    const triggers = container.querySelectorAll('.wholist-row .block-trigger');
+    expect([...triggers].map((t) => t.getAttribute('aria-label'))).toEqual(['Block Bob']);
+  });
+
   it('renders the satisfied state distinctly from an open one in the sheet', () => {
     H.markers = [
       { uid: 'u1', displayName: 'Me', markedAt: 1 },

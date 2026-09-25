@@ -414,21 +414,21 @@ describe('HiddenUidsProvider / useHiddenUids', () => {
 describe('useMyBlocks', () => {
   it('lists the viewer’s own direction records by ownerUid equality', () => {
     const view = renderHook(() => useMyBlocks('bob'));
-    expect(view.result.current).toEqual({ data: [], loading: true });
+    expect(view.result.current).toEqual({ data: [], loading: true, error: false });
     const sub = H.subscriptions[0];
     expect(pathOf(sub)).toBe('events/event-a/blocks');
     expect(whereOf(sub)).toEqual({ kind: 'where', args: ['ownerUid', '==', 'bob'] });
     const row = { ownerUid: 'bob', targetUid: 'alice', eventId: 'event-a', createdAt: 1 };
     act(() => sub.listener({ docs: [{ data: () => row }], metadata: { fromCache: false, hasPendingWrites: false } }));
-    expect(view.result.current).toEqual({ data: [row], loading: false });
+    expect(view.result.current).toEqual({ data: [row], loading: false, error: false });
   });
 
-  it('signed out: settled and empty with no listener; an error settles empty', () => {
-    expect(renderHook(() => useMyBlocks(null)).result.current).toEqual({ data: [], loading: false });
+  it('signed out: settled and empty with no listener; an error settles empty and flagged', () => {
+    expect(renderHook(() => useMyBlocks(null)).result.current).toEqual({ data: [], loading: false, error: false });
     expect(H.subscriptions).toHaveLength(0);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = renderHook(() => useMyBlocks('bob'));
     act(() => H.subscriptions[0].onError(new Error('denied')));
-    expect(view.result.current).toEqual({ data: [], loading: false });
+    expect(view.result.current).toEqual({ data: [], loading: false, error: true });
   });
 });

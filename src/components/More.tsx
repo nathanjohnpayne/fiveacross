@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, matchPath, useLocation, useNavigate } from 'react-router';
 import { FALLBACK_PATH } from './tabs';
-import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall } from 'lucide-react';
+import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall, UserX } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useEventDoc, useMyUser, usePendingItemCount } from '../hooks/useData';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
@@ -18,6 +18,7 @@ import Admin from './Admin';
 import { adminSectionFromPath } from './admin/route';
 import BugReport from './BugReport';
 import AcceptableUse from './AcceptableUse';
+import BlockedPlayersPanel from './BlockedPlayersPanel';
 import CoachOverlay from './CoachOverlay';
 import { WalkthroughContent } from './TutorialBanner';
 import { editionBrand } from '../editions';
@@ -49,7 +50,7 @@ export default function More() {
   const { count: pendingCount } = usePendingItemCount(isAdmin);
   const { standalone, deferred, showIOSHint, install } = useInstallPrompt();
 
-  const [panel, setPanel] = useState<null | 'schedule' | 'suggest' | 'howToPlay' | 'coach'>(null);
+  const [panel, setPanel] = useState<null | 'schedule' | 'suggest' | 'howToPlay' | 'coach' | 'blocked'>(null);
   // The Card/Feed "put it on tomorrow's card" entry point (#559) navigates
   // here and hands off an intent to open THIS panel — consumed once, then
   // cleared, so a later visit to More (no pending intent) opens on the menu
@@ -155,12 +156,20 @@ export default function More() {
         </div>
       </div>
 
-      {/* 5. Support — report a bug, 18+ advisory & acceptable use. */}
+      {/* 5. Support — report a bug, 18+ advisory & acceptable use, and the
+          Player's own blocks (#689, specs/player-blocking.md), the one place a
+          block is reversed. */}
       <div className="more-section">
         <h3>Support</h3>
         <div className="more-rows">
           <BugReport variant="row" />
           <AcceptableUse variant="row" attestedAdultAt={myUser?.attestedAdultAt ?? null} />
+          <MoreRow
+            icon={UserX}
+            title="Blocked players"
+            sub="See and undo the blocks you made"
+            onClick={() => setPanel('blocked')}
+          />
         </div>
       </div>
 
@@ -212,6 +221,13 @@ export default function More() {
       {panel === 'suggest' && (
         <MorePanel title="Suggest a square" onClose={closePanel}>
           <ItemPool />
+        </MorePanel>
+      )}
+      {panel === 'blocked' && (
+        // Mounted only while open, so the own-blocks listener and the roster
+        // read it needs never run for a Player who does not look.
+        <MorePanel title="Blocked players" onClose={closePanel}>
+          <BlockedPlayersPanel uid={user?.uid ?? null} />
         </MorePanel>
       )}
       {panel === 'howToPlay' && (
