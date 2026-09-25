@@ -81,6 +81,141 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
     expect(out?.$set_once?.$initial_referrer).toBe('https://ref.com/p');
   });
 
+  // #632: posthog-js (1.434) parses utm_* off document.URL into the bare
+  // `utm_*` super-properties, the `$initial_utm_*` person properties and the
+  // `$session_entry_utm_*` properties BEFORE before_send runs. The path-only
+  // scrub must leave THIS Event's own email campaign intact (otherwise email
+  // attribution would be stripped along with the query), and the campaign gate
+  // must drop every value that is not that campaign (free text, PII).
+  describe('campaign properties (#632)', () => {
+    const emailCampaignEvent = (source: string, campaign: string) => ({
+      uuid: 'u',
+      event: '$pageview',
+      properties: {
+        $current_url: `https://fiveacross.app/feed?utm_source=${source}&utm_medium=email&utm_campaign=${campaign}`,
+        utm_source: source,
+        utm_medium: 'email',
+        utm_campaign: campaign,
+        utm_term: 'free text',
+        $session_entry_utm_source: source,
+        $session_entry_utm_medium: 'email',
+        $session_entry_utm_campaign: campaign,
+        $browser: 'Chrome',
+      },
+      $set_once: {
+        $initial_current_url: `https://fiveacross.app/feed?utm_source=${source}`,
+        $initial_utm_source: source,
+        $initial_utm_medium: 'email',
+        $initial_utm_campaign: campaign,
+        $initial_utm_content: 'x',
+      },
+    });
+
+    it('keeps this Event’s email campaign under its real key names while stripping the query it came from', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const out = mod.sanitizeUrls(emailCampaignEvent('daily-email', 'bodega-bay-2026-day-3') as any);
+      expect(out?.properties.$current_url).toBe('https://fiveacross.app/feed');
+      expect(out?.properties).toMatchObject({
+        utm_source: 'daily-email',
+        utm_medium: 'email',
+        utm_campaign: 'bodega-bay-2026-day-3',
+        $session_entry_utm_source: 'daily-email',
+        $session_entry_utm_campaign: 'bodega-bay-2026-day-3',
+        $browser: 'Chrome',
+      });
+      expect(out?.properties.utm_term).toBeUndefined();
+      expect(out?.$set_once?.$initial_current_url).toBe('https://fiveacross.app/feed');
+      expect(out?.$set_once).toMatchObject({
+        $initial_utm_source: 'daily-email',
+        $initial_utm_medium: 'email',
+        $initial_utm_campaign: 'bodega-bay-2026-day-3',
+      });
+      expect(out?.$set_once?.$initial_utm_content).toBeUndefined();
+    });
+
+    it.each([
+      ['free text in the campaign', 'podium-email', 'alice-smith-podium'],
+      ['an email address', 'daily-email', 'alice@example.com'],
+      ['another Event', 'podium-email', 'med-2026-podium'],
+      ['a mismatched source/suffix pair', 'daily-email', 'bodega-bay-2026-podium'],
+      ['an out-of-range Day', 'daily-email', 'bodega-bay-2026-day-999'],
+      ['a foreign source', 'newsletter', 'bodega-bay-2026-podium'],
+    ])('drops every campaign property for %s', async (_label, source, campaign) => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const out = mod.sanitizeUrls(emailCampaignEvent(source, campaign) as any);
+      const keys = [...Object.keys(out?.properties ?? {}), ...Object.keys(out?.$set_once ?? {})];
+      expect(keys.filter((k) => k.includes('utm_'))).toEqual([]);
+      expect(out?.properties.$browser).toBe('Chrome');
+    });
+
+    it('reduces the SDK session-entry URL, pathname and referrer to path-only when a rejected campaign is present', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      const event = emailCampaignEvent('daily-email', 'alice@example.com');
+      const out = mod.sanitizeUrls({
+        ...event,
+        properties: {
+          ...event.properties,
+          $session_entry_url: 'https://fiveacross.app/feed?utm_campaign=alice%40example.com&invite=SECRET',
+          $session_entry_pathname: '/feed',
+          $session_entry_referrer: 'https://mail.example.com/inbox?u=alice%40example.com',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      expect(out?.properties.$session_entry_url).toBe('https://fiveacross.app/feed');
+      expect(out?.properties.$session_entry_pathname).toBe('/feed');
+      expect(out?.properties.$session_entry_referrer).toBe('https://mail.example.com/inbox');
+      expect(Object.keys(out?.properties ?? {}).filter((k) => k.includes('utm_'))).toEqual([]);
+    });
+
+    it('always drops the SDK’s non-email campaign params (click ids, mailer tags) under every prefix', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      mod.phRegister({ event_id: 'bodega-bay-2026' });
+      const event = emailCampaignEvent('daily-email', 'bodega-bay-2026-day-3');
+      const out = mod.sanitizeUrls({
+        ...event,
+        properties: {
+          ...event.properties,
+          gclid: 'alice@example.com',
+          fbclid: 'x',
+          mc_cid: 'y',
+          $session_entry_gclid: 'alice@example.com',
+          $session_entry_msclkid: 'z',
+        },
+        $set: { $fbc: 'fb.1.1700000000000.PrivateToken123' },
+        $set_once: { ...event.$set_once, $initial_gclid: 'alice@example.com', $initial_li_fat_id: 'w' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const keys = [
+        ...Object.keys(out?.properties ?? {}),
+        ...Object.keys(out?.$set ?? {}),
+        ...Object.keys(out?.$set_once ?? {}),
+      ];
+      expect(keys.filter((k) => /clid|mc_cid|li_fat_id|\$fbc/.test(k))).toEqual([]);
+      expect(POSTHOG_INIT_OPTIONS.mask_personal_data_properties).toBe(true);
+      // The matched email campaign itself is untouched.
+      expect(out?.properties.utm_campaign).toBe('bodega-bay-2026-day-3');
+      expect(out?.$set_once?.$initial_utm_campaign).toBe('bodega-bay-2026-day-3');
+    });
+
+    it('drops every campaign property when no Event id is registered', async () => {
+      vi.resetModules();
+      const mod = await import('./posthog');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const out = mod.sanitizeUrls(emailCampaignEvent('podium-email', 'bodega-bay-2026-podium') as any);
+      const keys = [...Object.keys(out?.properties ?? {}), ...Object.keys(out?.$set_once ?? {})];
+      expect(keys.filter((k) => k.includes('utm_'))).toEqual([]);
+    });
+  });
+
   it('scrubs rrweb Meta href inside $snapshot replay data (#197)', () => {
     const out = sanitizeUrls({
       uuid: 's',
@@ -990,7 +1125,8 @@ describe('PostHog init with a key', () => {
   it("waits for Firebase auth, then resets before the SDK's DEFERRED init-time $pageview when signed out (#613, Phase 4b P1)", async () => {
     // posthog-js does NOT capture the automatic initial $pageview inside
     // init(): the loaded step of init schedules it one macrotask later via
-    // setTimeout(..., 1) (verified in the installed 1.409.5 dist), and the
+    // setTimeout(..., 1) (verified in the 1.409.5 dist, re-verified in the
+    // installed 1.434.0 dist on #632), and the
     // capture computes distinct_id at CAPTURE time. This test mirrors that
     // scheduling in the init mock and pins our side of the contract: the
     // authoritative Firebase auth state is applied SYNCHRONOUSLY after

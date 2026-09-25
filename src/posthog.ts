@@ -18,6 +18,7 @@
 import posthog, { type PostHogConfig, type CaptureResult } from 'posthog-js';
 import { probeTimeoutSignal } from './canonical-redirect';
 import { resolvedCanonicalHost } from './canonicalHost';
+import { matchEmailCampaign } from './emailCampaignMatch';
 
 /** Init options — exported so the capture policy is unit-testable. */
 export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
@@ -35,6 +36,12 @@ export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
   // Content is unmasked, but URLs are not: strip query/hash from URL properties
   // so query-string secrets (auth tokens, emails) are never stored. (Codex P1 on #195.)
   before_send: sanitizeUrls,
+  // Mask ad-click ids (gclid, fbclid, …) at the SOURCE, when the SDK parses the
+  // landing URL, so a crafted `?fbclid=…` never reaches anything the SDK
+  // derives from it before `before_send` (the `$fbc` cookie value, feature-flag
+  // person properties). `sanitizeUrls` still drops those keys and `$fbc`
+  // defensively (#632, Codex on PR #1294).
+  mask_personal_data_properties: true,
   person_profiles: 'identified_only',
   // Events POST first-party through our reverse proxy (see `api_host` below,
   // #149); `ui_host` keeps the PostHog toolbar and "view in PostHog" links
@@ -208,8 +215,21 @@ function canonicalizeOrigin(value: unknown): unknown {
 // another platform) — canonicalizing those would silently overwrite real
 // referrer data with our own hostname, corrupting it rather than protecting
 // it. Referrer fields get query/hash stripped only, never an origin swap.
-const SELF_URL_PROP_KEYS = ['$current_url', '$pathname', '$initial_current_url'];
-const REFERRER_PROP_KEYS = ['$referrer', '$initial_referrer'];
+// posthog-js (1.434) also adds session-entry fields to every event
+// (`getSessionProps()`, before `before_send`): the session's landing URL and
+// path as `$session_entry_url` / `$session_entry_pathname`, scrubbed with the
+// `$current_url` family, and the referrer captured at session start as
+// `$session_entry_referrer`, which may be external and so is scrubbed with the
+// `$referrer` family (#632, CodeRabbit on
+// PR #1294).
+const SELF_URL_PROP_KEYS = [
+  '$current_url',
+  '$pathname',
+  '$initial_current_url',
+  '$session_entry_url',
+  '$session_entry_pathname',
+];
+const REFERRER_PROP_KEYS = ['$referrer', '$initial_referrer', '$session_entry_referrer'];
 
 /** Reduce any URL-bearing keys in a property bag to path-only, in place —
  *  the site's-own-URL keys also get their origin canonicalized (#556). */
@@ -220,6 +240,68 @@ function scrubUrlBag(bag: Record<string, unknown> | undefined): void {
   }
   for (const key of REFERRER_PROP_KEYS) {
     if (bag[key] != null) bag[key] = stripUrlSecrets(bag[key]);
+  }
+}
+
+const UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+/** The rest of posthog-js 1.434's `CAMPAIGN_PARAMS`: ad-click ids and
+ *  mailer tags it parses off the landing URL the same way. The app runs no
+ *  ad or third-party mail campaigns, so none is ours, and each is free text
+ *  a hand-crafted link controls: always dropped, under every prefix. */
+const NON_EMAIL_CAMPAIGN_KEYS = [
+  'gad_source',
+  'mc_cid',
+  'gclid',
+  'gclsrc',
+  'dclid',
+  'gbraid',
+  'wbraid',
+  'fbclid',
+  'msclkid',
+  'twclid',
+  'li_fat_id',
+  'igshid',
+  'ttclid',
+  'rdt_cid',
+  'epik',
+  'qclid',
+  'sccid',
+  'irclid',
+  '_kx',
+] as const;
+/** The prefixes posthog-js (1.434) spells its parsed campaign properties with:
+ *  the current `utm_*` super-properties (bare), the `$initial_utm_*` person
+ *  properties, and the `$session_entry_utm_*` session-entry properties. */
+const UTM_PREFIXES = ['', '$initial_', '$session_entry_'] as const;
+
+/**
+ * posthog-js parses `utm_*` off the landing URL into its own properties BEFORE
+ * `before_send` runs, so the path-only URL scrub never sees them. Apply the
+ * same `matchEmailCampaign()` gate GA4's `campaignQuery()` uses (#632): per
+ * prefix, a set that is exactly this Event's email campaign keeps its three
+ * keys; anything else (free text, an email address, another Event, a foreign
+ * campaign) is deleted, and `utm_content` / `utm_term` always are, as is every
+ * `NON_EMAIL_CAMPAIGN_KEYS` entry. In place.
+ */
+function scrubCampaignBag(bag: Record<string, unknown> | undefined, eventId: string | null): void {
+  if (!bag) return;
+  // `$fbc` is the Facebook click cookie value posthog-js derives from `fbclid`
+  // (`fb.1.<ts>.<fbclid>`), so it carries the same link-controlled text.
+  delete bag.$fbc;
+  for (const prefix of UTM_PREFIXES) {
+    for (const key of NON_EMAIL_CAMPAIGN_KEYS) delete bag[`${prefix}${key}`];
+    if (!UTM_KEYS.some((key) => `${prefix}${key}` in bag)) continue;
+    const matched = matchEmailCampaign(
+      {
+        utm_source: bag[`${prefix}utm_source`],
+        utm_medium: bag[`${prefix}utm_medium`],
+        utm_campaign: bag[`${prefix}utm_campaign`],
+      },
+      eventId,
+    );
+    for (const key of UTM_KEYS) {
+      if (!matched || !(key in matched)) delete bag[`${prefix}${key}`];
+    }
   }
 }
 
@@ -312,6 +394,10 @@ const CONTROLLED_DIMENSION_KEYS: readonly string[] = [
  * close. The five `CONTROLLED_DIMENSION_KEYS` always win from
  * `registeredDims` (see that constant's own doc for why — #611); any OTHER
  * registered default (none exist today) keeps the general "event wins" merge.
+ *
+ * FINALLY gates the campaign properties posthog-js parsed off the landing URL
+ * (`utm_*`, `$initial_utm_*`, `$session_entry_utm_*`) through
+ * `scrubCampaignBag` (#632): only this Event's own email campaign survives.
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
@@ -341,6 +427,10 @@ export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null 
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
   scrubUrlBag(event.$set_once);
+  const campaignEventId = typeof registeredDims.event_id === 'string' ? registeredDims.event_id : null;
+  scrubCampaignBag(event.properties, campaignEventId);
+  scrubCampaignBag(event.$set, campaignEventId);
+  scrubCampaignBag(event.$set_once, campaignEventId);
   if (event.event === '$snapshot') scrubSnapshotUrls(event.properties?.$snapshot_data);
   return event;
 }
@@ -456,7 +546,8 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
   //
   // Ordering vs the SDK's own automatic first `$pageview` (#613, Phase 4b
   // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
-  // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
+  // init (`kn()` in the 1.409.5 dist; re-verified unchanged in the installed
+  // 1.434.0 dist on #632) SCHEDULES it one macrotask later via
   // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
   // time. Production init itself waits for Firebase's first resolved auth
   // state, then applies that baseline SYNCHRONOUSLY after `posthog.init()`
