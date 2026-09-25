@@ -1961,6 +1961,21 @@ describe('sendDailyEmailForEvent', () => {
     expect(sent[0].text).toContain('Open the Feed: https://gaycruisebingo.com/feed');
   });
 
+  // #632: the Feed CTA carries campaign attribution so an email-driven session
+  // is not reported as direct traffic; the unsubscribe and preference links hit
+  // a Cloud Function, not the app, and stay untagged.
+  it('tags the Feed CTA with the daily-email UTM set and leaves the opt-out links untagged', async () => {
+    const { sent } = await run(seedEvent());
+    const tagged =
+      'https://gaycruisebingo.com/feed?utm_source=daily-email&utm_medium=email&utm_campaign=med-2026-day-3';
+    expect(sent[0].text).toContain(`Open the Feed: ${tagged}`);
+    expect(sent[0].html).toContain(`href="${tagged.replace(/&/g, '&amp;')}"`);
+    const optOutLines = sent[0].text.split('\n').filter((l) => /^(Unsubscribe|Email preferences):/.test(l));
+    expect(optOutLines).toHaveLength(2);
+    for (const line of optOutLines) expect(line).not.toContain('utm_');
+    expect(sent[0].headers?.['List-Unsubscribe']).not.toContain('utm_');
+  });
+
   // #671: the sender is Edition-aware, resolved from the SAME host lookup the
   // Feed CTA above uses — not the deps.from override, which these three cases
   // deliberately omit (baseDeps() always sets it, so `from: undefined` here

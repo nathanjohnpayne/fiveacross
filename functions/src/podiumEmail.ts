@@ -70,6 +70,7 @@ import {
   type VisibleMostLovedAward,
 } from './podiumEmailContent';
 import { renderPodiumEmailHtml, renderPodiumEmailText } from './podiumEmailTemplate';
+import { campaignLink, podiumEmailCampaign } from './emailCampaign';
 import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
 import { isFirestoreDocumentId } from './firestoreIds';
 
@@ -609,7 +610,8 @@ export async function sendPodiumEmailForEvent(
   // Resolved ONCE here so it can be frozen; `sendEmail` would otherwise read the
   // param on every attempt.
   const replyTo = deps.replyTo ?? (await import('./params')).EMAIL_REPLY_TO.value();
-  const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
+  // Campaign-tagged (#632); the unsubscribe/preference links stay untagged.
+  const feedUrl = campaignLink(origin, '/feed', podiumEmailCampaign(eventId));
   const eventName = typeof input.event.name === 'string' ? input.event.name : '';
 
   // GUARD AGAIN, immediately before the first send. The lookups above are
