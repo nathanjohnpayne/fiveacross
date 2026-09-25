@@ -52,11 +52,7 @@ export function lastCallLineFromPlayers(
   players: readonly LastCallCopyPlayer[],
   freezePhrase: string = DEFAULT_FREEZE_PHRASE,
 ): string {
-  const ranked = [...players].sort((a, b) => {
-    if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
-    if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;
-    return a.displayName.localeCompare(b.displayName);
-  });
+  const ranked = rankLastCallPlayers(players);
   const leader = ranked[0];
 
   if (!leader || (leader.bingoCount === 0 && leader.squaresMarked === 0)) {
@@ -76,4 +72,35 @@ export function lastCallLineFromPlayers(
     return `${leader.displayName} leads by ${squareMargin} square${squareMargin === 1 ? '' : 's'}—${freezePhrase}.`;
   }
   return `It's neck and neck at the top going into the final night—${freezePhrase}.`;
+}
+
+/**
+ * The order the last-call line reads its leader and runner-up from: bingos,
+ * then squares, then name. Exported so a display gate can ask who the line
+ * would name (the Player-block gate in `ProofFeed.tsx`, #689) without a second
+ * copy of the tie-break.
+ */
+export function rankLastCallPlayers<T extends LastCallCopyPlayer>(players: readonly T[]): T[] {
+  return [...players].sort((a, b) => {
+    if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
+    if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;
+    return a.displayName.localeCompare(b.displayName);
+  });
+}
+
+/**
+ * The Player `lastCallLineFromPlayers` names, or null when the line it builds
+ * is identity-free (an empty board, or a dead heat at the top). Decided from
+ * the ranking, never from the sentence, so a display name that happens to open
+ * an anonymous line cannot be mistaken for a naming one. Used by the
+ * Player-block gate in `ProofFeed.tsx` (#689) to withhold a line that would
+ * name a hidden leader and nothing else.
+ */
+export function lastCallNamedLeader<T extends LastCallCopyPlayer>(players: readonly T[]): T | null {
+  const [leader, runnerUp] = rankLastCallPlayers(players);
+  if (!leader || (leader.bingoCount === 0 && leader.squaresMarked === 0)) return null;
+  if (!runnerUp) return leader;
+  if (leader.bingoCount !== runnerUp.bingoCount) return leader;
+  if (leader.squaresMarked !== runnerUp.squaresMarked) return leader;
+  return null;
 }

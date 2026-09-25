@@ -18,8 +18,10 @@ import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../dat
 import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
-import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
+import { lastCallLineFromPlayers, lastCallNamedLeader, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
 import { withholdBannedHonours } from '../data/finale';
+import { isHiddenFor, withBlockExclusions } from '../data/moderation';
+import { useHiddenUids } from '../hooks/useBlocks';
 import type {
   BoardDoc,
   DayDef,
@@ -128,21 +130,35 @@ export const FEED_PAGE_SIZE = 60;
 // enough that a single scroll doesn't run through several pages at once.
 const FEED_SENTINEL_MARGIN = '400px 0px';
 
-function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): string | undefined {
+function visibleLastCallLine(
+  moment: MomentDoc,
+  bannedUids: readonly string[],
+  hiddenUids: ReadonlySet<string> = new Set<string>(),
+): string | undefined {
   if (moment.kind !== 'last_call') return undefined;
   if (moment.lastCall?.players) {
-    return lastCallLineFromPlayers(
-      moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids)),
+    const unbanned = moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids));
+    const line = lastCallLineFromPlayers(
+      unbanned,
       // #800: read the scheduler's persisted freeze-time phrase rather than a
       // hardcoded literal, so this reconstruction can never quote a different
       // freeze time than the one actually posted. Absent only on a Moment
       // posted before #800.
       moment.lastCall.freezePhrase ?? DEFAULT_FREEZE_PHRASE,
     );
+    // A ban closes its gap, so the line re-derives over the unbanned field. A
+    // Player block (#689) does not: when the line NAMES a hidden leader it is
+    // withheld for the generic copy, never handed to the runner-up. The
+    // identity-free forms ("wide open", "neck and neck") stand, and a hidden
+    // runner-up stays in the field, since the line names only the leader.
+    const named = lastCallNamedLeader(unbanned);
+    if (named && isHiddenFor(named.uid, hiddenUids)) return undefined;
+    return line;
   }
   // Legacy last-call Moments only carry a pre-rendered string, so a later ban
-  // cannot be applied safely. Fail closed when any ban is active.
-  return bannedUids.length > 0 ? undefined : moment.line;
+  // (or a viewer's block, #689) cannot be applied safely. Fail closed when any
+  // is active.
+  return bannedUids.length > 0 || hiddenUids.size > 0 ? undefined : moment.line;
 }
 
 /** The posted Moment as this reader may see it. The Moment itself is written
@@ -443,14 +459,29 @@ function NoticeCard({ notice, days }: { notice: NoticeDoc; days: DayDef[] | unde
   );
 }
 
-function MomentCard({ moment, days, bannedUids, heart }: { moment: MomentDoc; days: DayDef[] | undefined; bannedUids: readonly string[]; heart: HeartControl }) {
+function MomentCard({
+  moment,
+  days,
+  bannedUids,
+  hiddenUids,
+  heart,
+}: {
+  moment: MomentDoc;
+  days: DayDef[] | undefined;
+  bannedUids: readonly string[];
+  hiddenUids: ReadonlySet<string>;
+  heart: HeartControl;
+}) {
   const copy = MOMENT_COPY[moment.kind] ?? { icon: '🎉', line: 'made a Moment!' };
   // #266: the finale beats carry their real content when the scheduler built
   // it — the last-call standings line, and the podium's structured payload.
   // Older minimal beats keep the generic line.
   const isFinale = moment.kind === 'last_call' || moment.kind === 'podium';
-  const finaleLine = visibleLastCallLine(moment, bannedUids);
-  const podium = moment.kind === 'podium' ? visiblePodium(moment.podium, bannedUids) : undefined;
+  const finaleLine = visibleLastCallLine(moment, bannedUids, hiddenUids);
+  // The podium takes the union: a hidden holder's honour is withheld like a
+  // banned one's, and `withholdBannedHonours` never promotes (#689).
+  const podium =
+    moment.kind === 'podium' ? visiblePodium(moment.podium, withBlockExclusions(bannedUids, hiddenUids)) : undefined;
   return (
     <div className={`moment moment-${moment.kind}`}>
       <div className="row" style={{ border: 'none', background: 'none', padding: 0 }}>
@@ -932,13 +963,26 @@ function FeedWhoListSheet({
  * bare Mark now reaches the Feed as a live Tally Card (its position debounced), so
  * play is no longer invisible; Proofs and Moments keep their existing rendering.
  */
+/**
+ * The who-list's tap-time snapshot minus the viewer's hidden counterparts
+ * (#689), or null when a block removed every row it had. A snapshot with no
+ * hidden row comes back unchanged.
+ */
+function scrubWhoListSnapshot(card: TallyCardData, hidden: ReadonlySet<string>): TallyCardData | null {
+  if (hidden.size === 0) return card;
+  const markers = card.markers.filter((m) => !isHiddenFor(m.uid, hidden));
+  if (markers.length === card.markers.length) return card;
+  if (markers.length === 0) return null;
+  return { ...card, markers, count: markers.length };
+}
+
 export default function ProofFeed() {
   // The render window (#441). The Feed used to render a hard-capped 60 entries
   // and then simply END — everything older was unreachable, even though the
   // client already held it (all three streams subscribe to their whole
   // collections). One page is still 60; reaching the bottom adds another.
   const [pageCount, setPageCount] = useState(1);
-  const { entries, tallyCards, loading, hasMore } = useFeed(pageCount * FEED_PAGE_SIZE);
+  const { entries, tallyCards, tallyCardsLoading, loading, hasMore } = useFeed(pageCount * FEED_PAGE_SIZE);
   const loadMore = useCallback(() => setPageCount((n) => n + 1), []);
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -964,6 +1008,13 @@ export default function ProofFeed() {
   // (ban semantics applied there, own-content exception included). The
   // toggle's latency-compensated echo flips the button instantly.
   const { hearts } = useAllHearts();
+  // Player blocking (#689): the ban roster plus the viewer's hidden set, for
+  // the render-time gates that already withhold a banned Player without
+  // promoting anyone — a blocked counterpart's Hearts leave every count, and
+  // their podium honour or last-call entry is withheld. The Proofs, Moments,
+  // Tally Cards and Doubts themselves are filtered in their hooks.
+  const { hidden } = useHiddenUids();
+  const displayExcluded = withBlockExclusions(event?.bannedUids, hidden);
   // `targetCreatedAt` is the post's own createdAt — the incarnation stamp
   // that both scopes the derivation and rides the write (Codex P2 on #425).
   const heartFor = (
@@ -977,7 +1028,7 @@ export default function ProofFeed() {
       targetId,
       targetCreatedAt,
       user?.uid,
-      event?.bannedUids ?? [],
+      displayExcluded,
     );
     return {
       count,
@@ -1087,9 +1138,19 @@ export default function ProofFeed() {
         const live = tallyCards.find(
           (card) => card.itemId === whoListCard.itemId && card.dayIndex === whoListCard.dayIndex,
         );
+        // The snapshot predates the viewer's current hidden set, so it is
+        // scrubbed against it (#689): a block that lands while the sheet is open
+        // drops the counterpart's row (and with it their Doubt button). A
+        // snapshot left with no visible row closes the sheet below, once the
+        // Tally Cards have answered; until then the sheet stays mounted with no
+        // rows, so its focus trap survives a card that turns out to have a
+        // visible Player after all.
+        const fallback = live ? null : scrubWhoListSnapshot(whoListCard, hidden);
+        if (!live && !fallback && !tallyCardsLoading) return null;
+        const pending = live || fallback ? null : { ...whoListCard, markers: [], count: 0 };
         return (
           <FeedWhoListSheet
-            card={live ?? whoListCard}
+            card={live ?? fallback ?? pending ?? whoListCard}
             onClose={closeWhoList}
             meUid={user?.uid ?? null}
             meName={identityKnown ? displayName : undefined}
@@ -1103,6 +1164,20 @@ export default function ProofFeed() {
         );
       })()
     : null;
+
+  // Close a who-list whose snapshot a block emptied (#689), so an unblock later
+  // cannot re-open it unasked. An all-unmarked card keeps its snapshot above.
+  // Only once the Tally Cards have re-answered: a hidden-set change restarts
+  // that stream with an empty list, which is not proof the card is gone (a
+  // Player who marked after the tap may still be visible on it).
+  const whoListBlockedOut =
+    whoListCard !== null &&
+    !tallyCardsLoading &&
+    !tallyCards.some((card) => card.itemId === whoListCard.itemId && card.dayIndex === whoListCard.dayIndex) &&
+    scrubWhoListSnapshot(whoListCard, hidden) === null;
+  useEffect(() => {
+    if (whoListBlockedOut) setWhoListCard(null);
+  }, [whoListBlockedOut]);
 
   if (loading) return <div className="center muted">Loading…</div>;
   if (!entries.length)
@@ -1179,6 +1254,7 @@ export default function ProofFeed() {
               moment={entry.moment}
               days={event?.days}
               bannedUids={event?.bannedUids ?? []}
+              hiddenUids={hidden}
               heart={heartFor('moment', entry.moment.id, entry.moment.createdAt)}
             />
           );

@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
-import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '../data/moderation';
+import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor, isHiddenFor } from '../data/moderation';
 import { useAdultContent } from './useAdultContent';
+import { useHiddenUids } from './useBlocks';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { eventScopeKey } from '../data/eventScope';
 import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveConfirmation';
@@ -361,6 +362,22 @@ function useEventModeration(enabled = true): { threshold: number | undefined; ba
     threshold: typeof threshold === 'number' ? threshold : undefined,
     bannedUids: event?.bannedUids ?? [],
   };
+}
+
+/**
+ * Player blocking (#689, specs/player-blocking.md § Where hiding applies): the
+ * viewer's reciprocal hidden set for the PUBLIC content hooks below, with a
+ * stable dependency key. Until the pair listener's first answer (`ready`) each
+ * of those hooks reports loading and returns NO rows, so a blocked Player never
+ * flashes in on a cold start; without a provider the set is empty and ready.
+ * Display-only: the Admin reads (useReportedProofs, usePendingItems, useNotices,
+ * useItems) and the raw useLeaderboard never apply it.
+ */
+function useBlockFilter(): { hidden: ReadonlySet<string>; ready: boolean; hiddenKey: string } {
+  const { hidden, ready } = useHiddenUids();
+  // JSON, not a comma join: a custom Auth uid may itself contain a comma, and
+  // two different sets must never share a key.
+  return { hidden, ready, hiddenKey: JSON.stringify([...hidden].sort()) };
 }
 
 export function useItems(enabled = true) {
@@ -860,6 +877,7 @@ export function useMyPlayer(uid: string | undefined) {
  */
 export function useTally(itemId: string | null | undefined) {
   const { bannedUids } = useEventModeration(!!itemId);
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<TallyEntry>(
     itemId ? tallyMarkersCol(itemId) : null,
     eventSubscriptionKey('tally', itemId ?? 'none'),
@@ -868,10 +886,14 @@ export function useTally(itemId: string | null | undefined) {
   // AND from the derived `count` the Square badge shows — a banned Player's mark is
   // hidden from other Players, mirroring `isReportHidden` elsewhere. Presentational
   // only; the marker doc is untouched, and admin surfaces do not read this hook.
-  const markers = [...data]
-    .filter((m) => !isBanned(m.uid, bannedUids))
-    .sort((a, b) => a.markedAt - b.markedAt);
-  return { markers, count: markers.length, loading, hasServerData };
+  // A blocked counterpart (#689) drops the same way, so the who-list has no row
+  // (and so no Doubt button) for them and the badge count matches the names.
+  const markers = ready
+    ? [...data]
+        .filter((m) => !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
+        .sort((a, b) => a.markedAt - b.markedAt)
+    : [];
+  return { markers, count: markers.length, loading: loading || !ready, hasServerData };
 }
 
 /** The signed-in User's global profile (`users/{uid}`) — display name + avatar. */
@@ -896,6 +918,9 @@ export function useLeaderboard() {
   // is a PRESENTATIONAL filter applied by the Leaderboard COMPONENT for display only
   // (src/components/Leaderboard.tsx, via `isBanned`), while this hook stays raw so
   // Board's ceremony reads the true roster. See specs/w2-ban-console.md § Leaderboard.
+  // It stays raw under a Player block (#689) for the same reason: a block hides a
+  // row at render in the Leaderboard and podium, keeping its rank's gap, and never
+  // changes who ranked or bingoed first (specs/player-blocking.md).
   //
   // `fromCache` and `hasPendingWrites` are the CURRENT snapshot's own metadata,
   // passed through beside the latch (Codex P2 on PR #1162). `useColSub` already
@@ -986,6 +1011,11 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   const liveModeration = useEventModeration(moderation === undefined);
   const threshold = moderation === undefined ? liveModeration.threshold : moderation.threshold;
   const bannedUids = moderation === undefined ? liveModeration.bannedUids : moderation.bannedUids;
+  // Player blocking (#689): a blocked counterpart's Proofs drop too, for EVERY
+  // caller, the Feed and the Most-Loved display join alike. The join then drops
+  // a hidden winner without promoting anyone (`mostLovedDisplayWinners`); the
+  // award record and `proofFeedVisible` never see the hidden set.
+  const { hidden, ready, hiddenKey } = useBlockFilter();
   const { data, loading } = useColSub<ProofDoc>(
     query(proofsCol(), where('status', '==', 'active')),
     eventSubscriptionKey('proofs'),
@@ -1000,15 +1030,21 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   // presentational hide `useReportedProofs` (Admin) deliberately does NOT apply.
   const proofs = useMemo(
     () => {
+      if (!ready) return [];
       const visible = data
-        .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
+        .filter(
+          (p) =>
+            !isReportHidden(p.reportCount, threshold) &&
+            !isBanned(p.uid, bannedUids) &&
+            !isHiddenFor(p.uid, hidden),
+        )
         .sort((a, b) => b.createdAt - a.createdAt);
       return max === null ? visible : visible.slice(0, max);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, threshold, bannedKey, max],
+    [data, threshold, bannedKey, max, ready, hiddenKey],
   );
-  return { proofs, loading };
+  return { proofs, loading: loading || !ready };
 }
 
 /**
@@ -1021,23 +1057,29 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
  */
 export function useMoments(max = 60) {
   const { bannedUids } = useEventModeration();
+  const { hidden, ready, hiddenKey } = useBlockFilter();
   const { data, loading } = useColSub<MomentDoc>(momentsCol(), eventSubscriptionKey('moments'));
   // Same fresh-array problem as `useProofFeed` — join to a stable dep key.
   const bannedKey = bannedUids.join(',');
   // The Admin ban (#108): a banned Player's broadcast beats drop from the public
   // Feed by their `uid`, mirroring the proof side above so the whole merged Feed
   // (`useFeed`) is consistent. Presentational only; admin surfaces do not read this.
+  // A blocked counterpart's beats drop the same way (#689); a server-written
+  // podium or last-call Moment (`uid: 'system'`) is never hidden whole, and
+  // withholds the counterpart's honour at render instead (ProofFeed).
   const moments = useMemo(
     () =>
-      data
-        .filter(hasCanonicalMomentId)
-        .filter((m) => !isBanned(m.uid, bannedUids))
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, max),
+      ready
+        ? data
+            .filter(hasCanonicalMomentId)
+            .filter((m) => !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, max)
+        : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, bannedKey, max],
+    [data, bannedKey, max, ready, hiddenKey],
   );
-  return { moments, loading };
+  return { moments, loading: loading || !ready };
 }
 
 /**
@@ -1237,24 +1279,43 @@ export function useTallyCards() {
   const { bannedUids } = useEventModeration();
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'tally-cards');
-  const displayedRef = useRef<{ eventId: string; displayed: Record<string, number> }>({
+  const displayedRef = useRef<{ eventId: string; hiddenKey?: string; displayed: Record<string, number> }>({
     eventId,
     displayed: {},
   });
-  const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean }>(() => ({
-    key,
+  // Re-derive whenever the ban roster changes so a newly-banned marker drops.
+  const bannedKey = bannedUids.join(',');
+  // …and whenever the viewer's hidden set changes (#689): a blocked
+  // counterpart's Mark drops from the card, its names line and its count, and
+  // never bumps the card's Feed position. No cards until the set is ready, and
+  // the state is keyed on the set too, so cards derived under an older set are
+  // never returned unscrubbed after it changes: until the new listener answers
+  // they are served with the new set's Marks removed (`scrubTallyCards`).
+  const { hidden, ready, hiddenKey } = useBlockFilter();
+  const derivedKey = `${key}|${hiddenKey}`;
+  // `carried` marks cards scrubbed over from an older hidden set that the new
+  // listener has not yet re-answered (see the carry-over below).
+  const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean; carried?: boolean }>(() => ({
+    key: derivedKey,
     cards: [],
     loading: true,
   }));
-  // Re-derive whenever the ban roster changes so a newly-banned marker drops.
-  const bannedKey = bannedUids.join(',');
   useEffect(() => {
+    if (!ready) return;
     let active = true;
-    if (displayedRef.current.eventId !== eventId) {
-      displayedRef.current = { eventId, displayed: {} };
+    // The bump history is scoped to the hidden set as well as the Event: a bump
+    // never moves backward (`nextDisplayBumpTime`), so a history carried across
+    // a block would keep the Feed position a now-hidden Mark earned. A new set
+    // recomputes every bump from the visible Marks alone.
+    if (displayedRef.current.eventId !== eventId || displayedRef.current.hiddenKey !== hiddenKey) {
+      displayedRef.current = { eventId, hiddenKey, displayed: {} };
     }
     setState((previous) =>
-      previous.key === key ? { ...previous, loading: true } : { key, cards: [], loading: true },
+      previous.key === derivedKey
+        ? { ...previous, loading: true }
+        : carriesAcrossHiddenSet(previous, key)
+          ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false, carried: true }
+          : { key: derivedKey, cards: [], loading: true },
     );
     // #1072: the predicate is part of the server query, so another Event's
     // markers are never delivered over the wire. Keep the callback's path guard
@@ -1275,17 +1336,22 @@ export function useTallyCards() {
           if (!tallyDoc || tallyDoc.parent.id !== 'tally') continue;
           if (tallyDoc.parent.parent?.id !== eventId) continue;
           const data = d.data() as TallyEntry;
-          if (isBanned(data.uid, bannedUids)) continue;
+          if (isBanned(data.uid, bannedUids) || isHiddenFor(data.uid, hidden)) continue;
           rows.push({ ...data, itemId: tallyDoc.id });
         }
         const { cards, displayed } = deriveTallyCards(rows, displayedRef.current.displayed);
-        displayedRef.current = { eventId, displayed };
-        setState({ key, cards, loading: false });
+        displayedRef.current = { eventId, hiddenKey, displayed };
+        setState({ key: derivedKey, cards, loading: false });
       },
       () => {
         if (!active) return;
+        // A failed listener gives no further answer, so a carry-over (#689)
+        // is as settled as it will get: clear `carried` so consumers stop
+        // waiting on it.
         setState((previous) =>
-          previous.key === key ? { ...previous, loading: false } : { key, cards: [], loading: false },
+          previous.key === derivedKey
+            ? { ...previous, loading: false, carried: false }
+            : { key: derivedKey, cards: [], loading: false },
         );
       },
     );
@@ -1294,8 +1360,51 @@ export function useTallyCards() {
       unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, bannedKey]);
-  return state.key === key ? state : { key, cards: [], loading: true };
+  }, [derivedKey, bannedKey, ready]);
+  // `resubscribing` is true while the cards are a scrubbed carry-over rather
+  // than the new listener's answer: they render, but a consumer must not read a
+  // card's absence from them as proof the card is gone (a visible Mark may not
+  // have reached the old listener yet).
+  if (!ready) return { key, cards: [], loading: true, resubscribing: false };
+  if (state.key === derivedKey)
+    return { key, cards: state.cards, loading: state.loading, resubscribing: state.carried === true };
+  // A hidden-set change within the same Event (#689) keeps serving the cards
+  // already in hand, scrubbed against the new set, while the listener
+  // resubscribes: blanking them would drop the whole Feed to its loading state
+  // and unmount an open who-list sheet for a change that only removes rows.
+  if (carriesAcrossHiddenSet(state, key))
+    return { key, cards: scrubTallyCards(state.cards, hidden), loading: false, resubscribing: true };
+  return { key, cards: [], loading: true, resubscribing: false };
+}
+
+/** True when `state` holds settled cards for this Event under an older hidden set. */
+function carriesAcrossHiddenSet(state: { key: string; loading: boolean }, key: string): boolean {
+  return !state.loading && state.key.startsWith(`${key}|`);
+}
+
+/**
+ * Tally Cards minus the hidden set's Marks (#689): each card keeps only its
+ * visible markers, with its count and timestamps recomputed from them, and a
+ * card left with none is dropped, which is what a fresh derivation over the
+ * filtered rows would produce.
+ */
+export function scrubTallyCards(cards: TallyCard[], hidden: ReadonlySet<string>): TallyCard[] {
+  if (hidden.size === 0) return cards;
+  const out: TallyCard[] = [];
+  for (const card of cards) {
+    const markers = card.markers.filter((m) => !isHiddenFor(m.uid, hidden));
+    if (markers.length === 0) continue;
+    if (markers.length === card.markers.length) {
+      out.push(card);
+      continue;
+    }
+    // The timestamps come from the visible Marks alone, like a fresh derivation
+    // with no bump history (the history restarts on a new set anyway), so the
+    // card never keeps a position or "bumped" label a hidden Mark earned.
+    const lastMarkedAt = markers.reduce((m, x) => Math.max(m, x.markedAt), 0);
+    out.push({ ...card, markers, count: markers.length, lastMarkedAt, displayBump: lastMarkedAt });
+  }
+  return out;
 }
 
 /**
@@ -1325,7 +1434,7 @@ export function useTallyCards() {
 export function useFeed(max = 60) {
   const { proofs, loading: proofsLoading } = useProofFeed(max + 1);
   const { moments, loading: momentsLoading } = useMoments(max + 1);
-  const { cards, loading: tallyLoading } = useTallyCards();
+  const { cards, loading: tallyLoading, resubscribing: tallyResubscribing } = useTallyCards();
   const { notices, loading: noticesLoading } = useNotices();
   const entries = useMemo(
     () => mergeFeed(proofs, moments, cards, notices, max),
@@ -1344,6 +1453,11 @@ export function useFeed(max = 60) {
     // `max`-entry merge cap — a busy Feed would otherwise zero the pills on
     // any Proof whose Prompt's card fell outside the cap.
     tallyCards: cards,
+    // Whether `tallyCards` is still waiting on its (re)subscription (#689): on
+    // a hidden-set change the cards in hand are served scrubbed until the new
+    // listener answers, and a consumer must not read a card's absence from that
+    // carry-over as "this card is gone".
+    tallyCardsLoading: tallyLoading || tallyResubscribing,
     notices,
     loading: proofsLoading || momentsLoading || tallyLoading || noticesLoading,
   };
@@ -1573,20 +1687,29 @@ export function useAllHearts(enabled = true) {
 
 export function useAllDoubts(viewerUid?: string | null) {
   const { bannedUids } = useEventModeration();
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<DoubtDoc>(
     doubtsCol(),
     eventSubscriptionKey('doubts:all'),
   );
-  const doubts = data.filter(
-    (d) =>
-      !isBanned(d.fromUid, bannedUids) &&
-      (!isBanned(d.targetUid, bannedUids) || d.targetUid === viewerUid),
-  );
-  return { doubts, loading, hasServerData };
+  // Player blocking (#689, decision 5): a Doubt with EITHER party in the
+  // viewer's hidden set is hidden, so the pair's doubts vanish for both of them
+  // while a third Player, whose set names neither, still sees them.
+  const doubts = ready
+    ? data.filter(
+        (d) =>
+          !isBanned(d.fromUid, bannedUids) &&
+          (!isBanned(d.targetUid, bannedUids) || d.targetUid === viewerUid) &&
+          !isHiddenFor(d.fromUid, hidden) &&
+          !isHiddenFor(d.targetUid, hidden),
+      )
+    : [];
+  return { doubts, loading: loading || !ready, hasServerData };
 }
 
 export function useDoubts(itemId: string | null | undefined, viewerUid?: string | null) {
   const { bannedUids } = useEventModeration(!!itemId);
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<DoubtDoc>(
     itemId ? query(doubtsCol(), where('itemId', '==', itemId)) : null,
     eventSubscriptionKey('doubts', itemId ?? 'none'),
@@ -1602,14 +1725,19 @@ export function useDoubts(itemId: string | null | undefined, viewerUid?: string 
   //    a Doubt raised against them — otherwise the ban would silence accusations
   //    against them in their own UI, which the own-content exception forbids.
   // Presentational only; admin surfaces do not read this hook.
-  const doubts = [...data]
-    .filter((d) => {
-      if (isBanned(d.fromUid, bannedUids)) return false;
-      if (isBanned(d.targetUid, bannedUids) && d.targetUid !== viewerUid) return false;
-      return true;
-    })
-    .sort((a, b) => a.createdAt - b.createdAt);
-  return { doubts, count: doubts.length, loading, hasServerData };
+  // Player blocking (#689): a Doubt with either party hidden is hidden, as in
+  // `useAllDoubts`.
+  const doubts = ready
+    ? [...data]
+        .filter((d) => {
+          if (isBanned(d.fromUid, bannedUids)) return false;
+          if (isBanned(d.targetUid, bannedUids) && d.targetUid !== viewerUid) return false;
+          if (isHiddenFor(d.fromUid, hidden) || isHiddenFor(d.targetUid, hidden)) return false;
+          return true;
+        })
+        .sort((a, b) => a.createdAt - b.createdAt)
+    : [];
+  return { doubts, count: doubts.length, loading: loading || !ready, hasServerData };
 }
 
 /**
@@ -1667,6 +1795,7 @@ export function useMyProofs(uid: string | null | undefined) {
  */
 export function useProofsForItemText(itemText: string | null | undefined) {
   const { threshold, bannedUids } = useEventModeration();
+  const { hidden, ready } = useBlockFilter();
   const { data, loading, hasServerData } = useColSub<ProofDoc>(
     itemText
       ? query(proofsCol(), where('itemText', '==', itemText), where('status', '==', 'active'))
@@ -1677,11 +1806,16 @@ export function useProofsForItemText(itemText: string | null | undefined) {
   // show which markers have shown a Proof — so unlike `useMyProofs` it DOES apply
   // the Admin ban (#108): a banned Player's Proof must not render "Proof shown ✓" in
   // another Player's Tally sheet. Filtered by the Proof's owner `uid`, composed with
-  // the community auto-hide.
-  const proofs = data.filter(
-    (p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids),
-  );
-  return { proofs, loading, hasServerData };
+  // the community auto-hide. A blocked counterpart's Proofs drop too (#689).
+  const proofs = ready
+    ? data.filter(
+        (p) =>
+          !isReportHidden(p.reportCount, threshold) &&
+          !isBanned(p.uid, bannedUids) &&
+          !isHiddenFor(p.uid, hidden),
+      )
+    : [];
+  return { proofs, loading: loading || !ready, hasServerData };
 }
 
 /** The distinct proof "kinds" a Leaderboard row's chip strip can show — one
@@ -1711,8 +1845,9 @@ export interface ProofKindFlags {
  * `max` via `useFeed`, so the union is only ever built from Proofs that are
  * actually CANDIDATES for the page the chip navigates to. This also folds in
  * the same two PUBLIC-facing filters (community auto-hide + Admin ban, #108)
- * `useProofFeed` already applies, and shares its `'proofs'` subscription
- * cache key — one listener, not two.
+ * `useProofFeed` already applies, plus its per-viewer Player-block filter
+ * (#689), and shares its `'proofs'` subscription cache key — one listener, not
+ * two.
  */
 export function useProofKindsByUid(max = 60) {
   const { proofs, loading } = useProofFeed(max);
