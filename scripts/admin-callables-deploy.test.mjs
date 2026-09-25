@@ -231,6 +231,20 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         } else if (variant === "star-package-named") {
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
           await writeFile(resolve(fixture, "ops", "src", "admin.ts"), "export { unlockDayNow } from 'my-admin-callables';\n");
+        } else if (variant === "star-default-function") {
+          // `export default function approvePrompts` exports `default`, which a star skips.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + callable + "export default function approvePrompts() { return 1; }\n",
+          );
+        } else if (variant === "star-declare") {
+          // An ambient `export declare` is erased and publishes nothing.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + callable + "export declare const approvePrompts: unknown;\n",
+          );
         } else if (variant === "star-declared") {
           // A star of a module the walk models stays inventoried.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
@@ -327,6 +341,14 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-star-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-star-named-hop", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-python-inferred", ["--only", "functions:ops"], unknown, unknown],
+    // A default-modified declaration is opaque; an ambient declaration exports nothing.
+    ["ops-variant-star-default-function", ["--only", "functions:ops"], unknown, unknown],
+    [
+      "ops-variant-star-declare",
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock" },
+      { selected: false, conservative: false, strict: "" },
+    ],
     // A name exported behind a local star is exported whatever the graph traces.
     ...["star-later-assignment", "star-destructured-clause", "star-package-named"].map((variant) => [
       `ops-variant-${variant}`,

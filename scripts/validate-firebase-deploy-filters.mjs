@@ -183,7 +183,10 @@ function starExportedNames(file, seen = new Set()) {
   seen.add(file);
   const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
   for (const statement of sourceFile.statements) {
-    const exported = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    // An ambient `export declare` is erased and publishes nothing.
+    const exported =
+      statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
+      !statement.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
     if (exported && ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
@@ -222,9 +225,9 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     ts.ScriptKind.TS,
   );
   for (const statement of sourceFile.statements) {
-    const exported = statement.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-    );
+    const exported =
+      statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
+      !statement.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
     if (ts.isVariableStatement(statement) && exported) {
       for (const declaration of statement.declarationList.declarations) {
         if (ts.isIdentifier(declaration.name)) exportedNames.add(declaration.name.text);
@@ -4050,7 +4053,9 @@ function referencesCommonJsExports(source) {
       return;
     }
     if (ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
-      const modelled = ts.isVariableStatement(node)
+      // `export default function f` exports `default`, not `f`.
+      const isDefault = ts.getModifiers(node).some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
+      const modelled = isDefault ? false : ts.isVariableStatement(node)
         ? node.declarationList.declarations.every((declaration) => ts.isIdentifier(declaration.name))
         : ts.isFunctionDeclaration(node) ||
           ts.isClassDeclaration(node) ||
