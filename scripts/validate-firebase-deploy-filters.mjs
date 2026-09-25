@@ -3971,8 +3971,10 @@ async function selectorIsProvableSingleEndpoint(selector, inventory) {
  * Codebase precedence, checked BEFORE any endpoint-name branch. The pinned CLI
  * resolves a bare `functions:<name>` whose name is a CONFIGURED codebase to
  * that codebase's entire surface (`functionsDeployHelper.js:43-53`), even when
- * the same string is also the id of a protected endpoint. Such a surface may
- * carry any protected callable, so the caller treats it as an unfamiliar group.
+ * the same string is also the id of a protected endpoint. The caller answers
+ * it as a whole codebase (#1282): an inventoried codebase releases exactly the
+ * family services it exports, as `functions:default` does, and one this parse
+ * cannot inventory is treated as an unfamiliar group.
  */
 function selectorNamesConfiguredCodebase(selector, inventory) {
   if (!selector.startsWith("functions:")) return false;

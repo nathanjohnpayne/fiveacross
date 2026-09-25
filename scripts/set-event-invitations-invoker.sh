@@ -18,10 +18,12 @@ set -euo pipefail
 #   scripts/set-event-invitations-invoker.sh --allow-missing-service redeem
 #
 # `--allow-missing-service` is intentionally per service. After an exact
-# `--only functions:mintEventInvitation` release, mint must exist, while the
-# unselected redeem and revoke services may legitimately be absent on a first
-# deploy. The deploy wrapper therefore allows only those two missing services;
-# a missing selected service remains fatal.
+# `--only functions:mintEventInvitation` release whose codebase exports mint,
+# mint must exist, while the unselected redeem and revoke services may
+# legitimately be absent on a first deploy. The deploy wrapper therefore allows
+# only those two missing services; a missing selected service remains fatal.
+# When the selector's codebase does not export mint (#1282), nothing is strict
+# and the wrapper runs with every service allowed to be absent (--allow-missing).
 #
 # Environment / overrides:
 #   EVENT_INVITATIONS_PROJECT        GCP project (default: fiveacross)
