@@ -374,7 +374,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ],
-  ])("keeps an uninventoried codebase conservative (%s, %j)", async (layout, args, admin, invitation) => {
+  ])("classifies an unindexed or star-resolved codebase layout (%s, %j)", async (layout, args, admin, invitation) => {
     const result = await withUnindexedCodebase(layout, (configPath) =>
       classifyFirebaseDeployRequest(["fiveacross", ...args], { defaultConfigPath: configPath }),
     );
