@@ -14,6 +14,39 @@ async function classify(args) {
   });
 }
 
+async function classifyAt(configPath, args) {
+  return classifyFirebaseDeployRequest(["fiveacross", ...args], {
+    defaultConfigPath: configPath,
+  });
+}
+
+const ALL_INVITATIONS = [
+  "export const mintEventInvitation = 1;",
+  "export const redeemEventInvitation = 2;",
+  "export const revokeEventInvitation = 3;",
+];
+
+// A fixture project with one `functions` config per entry: `codebase` (omitted
+// for the default codebase), `source`, and the `src/index.ts` lines.
+async function withCodebases(codebases, run) {
+  const fixture = await mkdtemp(join(tmpdir(), "event-invitation-codebases-"));
+  try {
+    const configs = [];
+    for (const { codebase, source, index } of codebases) {
+      await mkdir(resolve(fixture, source, "src"), { recursive: true });
+      await writeFile(resolve(fixture, source, "src", "index.ts"), index.join("\n"));
+      configs.push(codebase ? { source, codebase } : { source });
+    }
+    await writeFile(
+      resolve(fixture, "firebase.json"),
+      JSON.stringify({ functions: configs.length === 1 ? configs[0] : configs }),
+    );
+    return await run(resolve(fixture, "firebase.json"));
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
 describe("event-invitation deploy scope", () => {
   it("does not claim services that the real Functions index does not export", async () => {
     const source = await readFile(
@@ -141,7 +174,10 @@ describe("event-invitation deploy scope", () => {
   ])(
     "keeps only explicitly selected services strict for %s",
     async (only, strict) => {
-      const result = await classify(["--only", only]);
+      const result = await withCodebases(
+        [{ source: "functions", index: ALL_INVITATIONS }],
+        (configPath) => classifyAt(configPath, ["--only", only]),
+      );
 
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
@@ -151,13 +187,27 @@ describe("event-invitation deploy scope", () => {
     },
   );
 
+  it("drops a named service the real index does not export out of the strict set (#1282)", async () => {
+    const result = await classify(["--only", "functions:mintEventInvitation"]);
+
+    // Nothing proven released, so the family is an allow-missing probe.
+    expect(result).toMatchObject({
+      eventInvitationsInvokerSelected: true,
+      eventInvitationsInvokerConservative: true,
+      eventInvitationsStrictServices: "",
+    });
+  });
+
   it.each([
     "functions:someGroup,functions:redeemEventInvitation",
     "functions:redeemEventInvitation,functions:someGroup",
   ])(
     "keeps an exact endpoint strict alongside an unfamiliar selector (%s)",
     async (only) => {
-      const result = await classify(["--only", only]);
+      const result = await withCodebases(
+        [{ source: "functions", index: ALL_INVITATIONS }],
+        (configPath) => classifyAt(configPath, ["--only", only]),
+      );
 
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
@@ -199,6 +249,55 @@ describe("event-invitation deploy scope", () => {
       eventInvitationsInvokerSelected: false,
       eventInvitationsInvokerConservative: false,
       eventInvitationsStrictServices: "",
+    });
+  });
+});
+
+describe("event-invitation deploy scope across Functions codebases (#1282)", () => {
+  // Only the non-default codebase exports protected callables.
+  const TWO_CODEBASES = [
+    { source: "functions", index: ["export const unrelated = 1;"] },
+    {
+      codebase: "invites",
+      source: "invites",
+      index: ["export const mintEventInvitation = 1;", "export const redeemEventInvitation = 2;"],
+    },
+  ];
+
+  // [args, selected, conservative, strict]. A selected family with nothing
+  // strict is an allow-missing probe, the only empty form deploy.sh accepts.
+  it.each([
+    [[], true, false, "mint,redeem"],
+    [["--only", "functions"], true, false, "mint,redeem"],
+    [["--only", "functions:default"], false, false, ""],
+    [["--only", "functions:invites"], true, false, "mint,redeem"],
+    [["--only", "functions:mintEventInvitation"], true, true, ""],
+    [["--only", "functions:default:mintEventInvitation"], true, true, ""],
+    [["--only", "functions:invites:mintEventInvitation"], true, false, "mint"],
+    [["--only", "functions:invites:revokeEventInvitation"], true, true, ""],
+    [["--only", "functions:default,functions:invites:redeemEventInvitation"], true, false, "redeem"],
+    [["--only", "functions:someGroup,functions:default"], true, true, ""],
+  ])("marks strict only what the selected codebase exports (%j)", async (args, selected, conservative, strict) => {
+    const result = await withCodebases(TWO_CODEBASES, (configPath) => classifyAt(configPath, args));
+
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      eventInvitationsInvokerSelected: selected,
+      eventInvitationsInvokerConservative: conservative,
+      eventInvitationsStrictServices: strict,
+    });
+  });
+
+  it("keeps the families this ticket does not scope conservative for a non-default codebase", async () => {
+    const result = await withCodebases(TWO_CODEBASES, (configPath) =>
+      classifyAt(configPath, ["--only", "functions:invites"]),
+    );
+
+    expect(result).toMatchObject({
+      bugReportInvokerSelected: true,
+      bugReportInvokerConservative: true,
+      emailUnsubscribeInvokerConservative: true,
+      authHandoffInvokerConservative: true,
     });
   });
 });

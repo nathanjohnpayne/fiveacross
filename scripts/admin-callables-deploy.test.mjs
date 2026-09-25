@@ -30,6 +30,52 @@ async function withIndex(lines, run) {
   }
 }
 
+describe("admin-callables deploy scope across Functions codebases (#1282)", () => {
+  // Only the non-default `ops` codebase exports a protected callable.
+  async function withTwoCodebases(run) {
+    const fixture = await mkdtemp(join(tmpdir(), "admin-callable-codebases-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
+      );
+      await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+      await writeFile(
+        resolve(fixture, "ops", "src", "index.ts"),
+        "import { onCall } from 'firebase-functions/v2/https';\nexport const unlockDayNow = onCall(async () => 1);\n",
+      );
+      return await run(resolve(fixture, "firebase.json"));
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }
+
+  // [args, selected, conservative, strict]. A selected family with nothing
+  // strict is an allow-missing probe, the only empty form deploy.sh accepts.
+  it.each([
+    [[], true, false, "unlock"],
+    [["--only", "functions"], true, false, "unlock"],
+    [["--only", "functions:default"], false, false, ""],
+    [["--only", "functions:ops"], true, false, "unlock"],
+    [["--only", "functions:unlockDayNow"], true, true, ""],
+    [["--only", "functions:ops:unlockDayNow"], true, false, "unlock"],
+    [["--only", "functions:ops:approvePrompts"], true, true, ""],
+  ])("marks strict only what the selected codebase exports (%j)", async (args, selected, conservative, strict) => {
+    const result = await withTwoCodebases((configPath) =>
+      classifyFirebaseDeployRequest(["fiveacross", ...args], { defaultConfigPath: configPath }),
+    );
+
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      adminCallablesInvokerSelected: selected,
+      adminCallablesInvokerConservative: conservative,
+      adminCallablesStrictServices: strict,
+    });
+  });
+});
+
 describe("admin-callables deploy scope (#1277)", () => {
   it.each([{ args: [] }, { args: ["--only", "functions"] }, { args: ["--only", "functions:default"] }])(
     "keeps both admin callables the real index exports strict ($args)",

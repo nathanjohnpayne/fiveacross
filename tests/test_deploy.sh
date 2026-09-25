@@ -2729,8 +2729,24 @@ else
   pass "event-invitation-full: full Functions deploy skips invitation services absent from its source inventory (rc=$RC25A)."
 fi
 
+# An exact scope is strict only for a service its codebase exports (#1282), so
+# 25b and 25c deploy from a fixture index that exports all three (and, like the
+# admin cases, skip the params check that index has no .env for).
+init_invitation_fixture() {
+  local repo="$1" name
+  init_fixture_repo "$repo"
+  mkdir -p "$repo/functions/src"
+  {
+    printf '%s\n' "import { onCall } from 'firebase-functions/v2/https';"
+    for name in mintEventInvitation redeemEventInvitation revokeEventInvitation; do
+      printf '%s\n' "export const $name = onCall(async () => ({ ok: true }));"
+    done
+  } >"$repo/functions/src/index.ts"
+  (cd "$repo" && git add functions/src/index.ts && git commit --quiet -m "invitation callables")
+}
+
 REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"
-init_fixture_repo "$REPO25B"
+init_invitation_fixture "$REPO25B"
 : >"$WORKDIR/ofd-calls-25b.log"
 : >"$WORKDIR/gcloud-calls-25b.log"
 set +e
@@ -2738,7 +2754,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-25b.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-25b.log" \
 GCLOUD_MISSING_SERVICE=redeemeventinvitation \
-  bash -c "cd '$REPO25B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintEventInvitation" \
+  bash -c "cd '$REPO25B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:mintEventInvitation" \
   >"$WORKDIR/case25b.out" 2>"$WORKDIR/case25b.err"
 RC25B=$?
 set -e
@@ -2755,13 +2771,13 @@ else
 fi
 
 REPO25C="$WORKDIR/case25c-event-invitation-selected-missing"
-init_fixture_repo "$REPO25C"
+init_invitation_fixture "$REPO25C"
 : >"$WORKDIR/ofd-calls-25c.log"
 set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-25c.log" \
 GCLOUD_MISSING_SERVICE=minteventinvitation \
-  bash -c "cd '$REPO25C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default:mintEventInvitation" \
+  bash -c "cd '$REPO25C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:default:mintEventInvitation" \
   >"$WORKDIR/case25c.out" 2>"$WORKDIR/case25c.err"
 RC25C=$?
 set -e
