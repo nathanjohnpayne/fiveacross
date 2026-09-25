@@ -3953,7 +3953,7 @@ const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
  * Whether code (not a comment or string) references the CommonJS `exports` or
  * `module` binding in any form (`exports.x`, `module.exports`,
- * `module["exports"]`, `Object.assign(exports, ...)`), uses an export
+ * `module["exports"]`, `Object.assign(exports, ...)`, a top-level `this`), uses an export
  * assignment (`export = {...}`, which compiles to `module.exports`, or
  * `export default`), or carries an `export` modifier on any statement the
  * declaration walk does not model: only identifier-named variables,
@@ -3965,8 +3965,27 @@ const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 function referencesCommonJsExports(source) {
   const sourceFile = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   let found = false;
+  // A top-level `this` is the CommonJS `exports` object (arrow functions
+  // inherit it; ordinary functions and classes bind their own).
+  const bindsOwnThis = (node) =>
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassDeclaration(node) ||
+    ts.isClassExpression(node);
   const visit = (node) => {
     if (found) return;
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+      let scope = node.parent;
+      while (scope && !bindsOwnThis(scope)) scope = scope.parent;
+      if (!scope) {
+        found = true;
+        return;
+      }
+    }
     if (ts.isExportAssignment(node)) {
       found = true;
       return;
