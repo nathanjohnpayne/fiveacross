@@ -843,3 +843,69 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     expect((screen.getByLabelText('Edit prompt text') as HTMLInputElement).value).toBe('Sharper wording');
   });
 });
+
+// #1279: Approve all is bounded to the oldest 400 pending rows, the
+// `approvePrompts` callable's per-call cap, so the whole-batch refusal is never
+// reachable from the console. One call, never chunked.
+describe('Approve all is bounded to the oldest 400 pending Community Prompts (#1279)', () => {
+  const approvalsSection = () =>
+    screen.getByRole('heading', { name: /^Approvals/ }).closest('.admin-section') as HTMLElement;
+  // Oldest-first, as `usePendingItems` delivers them.
+  const pendingQueue = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      item(`p${String(i).padStart(4, '0')}`, { status: 'pending', createdAt: 1000 + i }),
+    );
+  const sentIds = () => (H.bulkApproveItems.mock.calls[0][0] as ItemDoc[]).map((r) => r.id);
+  const boundedNote = /More than 400 are pending, so this approves the oldest 400/;
+
+  it('sends exactly the 400 oldest ids in one call and says so when more are pending', async () => {
+    const queue = pendingQueue(403);
+    H.pendingItems = queue;
+    H.bulkApproveItems.mockResolvedValueOnce([]);
+    const { rerender } = renderAdmin('/more/admin/queue');
+
+    expect(within(approvalsSection()).queryByRole('button', { name: 'Approve all' })).toBeNull();
+    expect(within(approvalsSection()).getByText(boundedNote)).toBeTruthy();
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve oldest 400' }));
+    await waitFor(() => expect(H.bulkApproveItems).toHaveBeenCalledTimes(1));
+    expect(sentIds()).toEqual(queue.slice(0, 400).map((it) => it.id));
+
+    // The server takes those rows out of the queue; the remainder is back under
+    // the cap, so the control reads as it always did.
+    H.pendingItems = queue.slice(400);
+    rerender(adminTree('/more/admin/queue'));
+    expect(within(approvalsSection()).getByRole('button', { name: 'Approve all' })).toBeTruthy();
+    expect(within(approvalsSection()).queryByText(boundedNote)).toBeNull();
+  }, 30_000);
+
+  it.each([400, 3])('sends every row with the unchanged copy when %i are pending', async (n) => {
+    const queue = pendingQueue(n);
+    H.pendingItems = queue;
+    H.bulkApproveItems.mockResolvedValueOnce([]);
+    renderAdmin('/more/admin/queue');
+
+    expect(within(approvalsSection()).queryByText(boundedNote)).toBeNull();
+    expect(within(approvalsSection()).queryByRole('button', { name: 'Approve oldest 400' })).toBeNull();
+    fireEvent.click(within(approvalsSection()).getByRole('button', { name: 'Approve all' }));
+    await waitFor(() => expect(H.bulkApproveItems).toHaveBeenCalledTimes(1));
+    expect(sentIds()).toEqual(queue.map((it) => it.id));
+  }, 30_000);
+
+  it('keeps the failure label mapping on the bounded control', async () => {
+    H.pendingItems = pendingQueue(401);
+    H.bulkApproveItems
+      .mockRejectedValueOnce({ code: 'functions/failed-precondition', message: 'This Event is closed; approvals are frozen.' })
+      .mockRejectedValueOnce({ code: 'functions/aborted', message: 'Another change collided with this approval; try again.' });
+    renderAdmin('/more/admin/queue');
+
+    const bounded = () => within(approvalsSection()).getByRole('button', { name: 'Approve oldest 400' });
+    fireEvent.click(bounded());
+    expect(
+      await within(approvalsSection()).findByText('This Event is closed; approvals are frozen.'),
+    ).toBeTruthy();
+    fireEvent.click(bounded());
+    await waitFor(() =>
+      expect(within(approvalsSection()).getByText('Failed—try again.')).toBeTruthy(),
+    );
+  }, 30_000);
+});

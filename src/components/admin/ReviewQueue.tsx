@@ -24,6 +24,7 @@ import { trackIfCurrentEvent } from '../../eventScopedAnalytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
 import { approvalFailureLabel } from '../../data/approvalFailure';
+import { MAX_APPROVE_ALL_ITEMS, approveAllBatch } from '../../data/approvalBatch';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
@@ -619,7 +620,12 @@ export default function ReviewQueue({
       });
     }
   };
-  const explicitPending = pendingItems.filter(isSpicy);
+  // What one Approve all sends (#1279): at most the oldest 400 rows, so the
+  // callable's whole-batch refusal over its cap is never reachable from here.
+  // The queue is already oldest-first; the rest stays pending for the next click.
+  const approveAllRows = approveAllBatch(pendingItems);
+  const approveAllBounded = pendingItems.length > approveAllRows.length;
+  const explicitPending = approveAllRows.filter(isSpicy);
   // What the notice says has to stay true while it is on screen (Codex P2 on PR
   // #1201). The stored list is the result of THIS admin's approve, but the queue
   // behind it is live: another admin can correct and approve — or reject — the
@@ -718,7 +724,7 @@ export default function ReviewQueue({
         setSkippedAsMalformed([]);
         return Promise.resolve(
           bulkApproveItems(
-            pendingItems.map((it) => {
+            approveAllRows.map((it) => {
               const difficulty = difficultyFor(it);
               return {
                 ...it,
@@ -735,7 +741,7 @@ export default function ReviewQueue({
           return tracked;
         });
       },
-      { explicitCount: explicitPending.length, totalCount: pendingItems.length },
+      { explicitCount: explicitPending.length, totalCount: approveAllRows.length },
       approvalFailureLabel,
     );
   };
@@ -811,8 +817,14 @@ export default function ReviewQueue({
         )}
         {!!pendingItems.length && (
           <AsyncButton onAction={approveAll} failureLabelFor={approvalFailureLabel}>
-            Approve all
+            {approveAllBounded ? `Approve oldest ${MAX_APPROVE_ALL_ITEMS}` : 'Approve all'}
           </AsyncButton>
+        )}
+        {approveAllBounded && (
+          <p className="muted" style={{ fontSize: 12 }}>
+            More than {MAX_APPROVE_ALL_ITEMS} are pending, so this approves the oldest{' '}
+            {MAX_APPROVE_ALL_ITEMS}. Run it again once the queue updates to approve the rest.
+          </p>
         )}
         {/* The skipped-row notice (#1070). One live region for the whole result
             rather than a pill per row: the approve either skipped something or it

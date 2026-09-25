@@ -30,6 +30,7 @@ When any row is written, the same transaction bumps `approvalSeq` on the Event d
 - Declaring `invoker: 'private'` on the onCall would skip the invoker grant on create, but on update firebase-tools rewrites the binding from the explicit value, and that interaction with the reconciled invoker-IAM-disabled service is untested. It is a possible follow-up, only on proof; the two-pass deploy uses only paths this repo already exercises.
 - `resnapshotDayIfNoBoards`, the guarded recovery path that overwrites a Day's snapshot, reads its active-items query and the moderation settings through the same transaction that reads the Event and writes the Day (#1280), so the fence covers it exactly as it covers `stampDaySnapshot`. It used to compute its list before that transaction opened, where an approval committing in between was missing from the overwritten list and a fence-forced retry re-ran around the same stale list.
 - Bulk approvals are capped at 400 rows per call and are not chunked; a larger queue is refused whole rather than approved in part.
+  - Amended 2026-09-25 (#1279): the Review queue's Approve all sends at most the oldest 400 pending rows (`src/data/approvalBatch.ts`), so this refusal is unreachable from the console; the Admin runs it again for the rest.
 
 ## Considered alternatives
 
