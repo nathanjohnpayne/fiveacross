@@ -3944,7 +3944,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
- * a TypeScript index), a `prefix` (the CLI renames every service), a
+ * a TypeScript index), a `prefix` (the CLI renames every service), a source
+ * directory with no `package.json` (the CLI then infers a non-Node runtime), a
  * `package.json` that is unreadable, invalid, or names a `main` other than
  * `lib/index.js`, a source directory with no `src/index.ts`, or an index, or a
  * local module it reaches through `export *`, that `referencesCommonJsExports`
@@ -4100,7 +4101,15 @@ async function protectedServiceInventory(configSource, configPath, table) {
     }
     // The CLI loads `package.json` `main` (default `index.js`); the index is
     // only authoritative when that entry is its conventional build output.
+    // With no `runtime`, the CLI picks Node only when `package.json` exists
+    // (`runtimes/node/index.js` `tryCreateDelegate`), else it tries Python
+    // (`requirements.txt`) and Dart (`pubspec.yaml`), so a source directory
+    // without one is not a Node codebase whatever TypeScript it carries.
     const packagePath = resolve(dirname(configPath), functionsConfig.source, "package.json");
+    if (!existsSync(packagePath) && existsSync(resolve(dirname(configPath), functionsConfig.source))) {
+      services.set(codebase, null);
+      continue;
+    }
     if (existsSync(packagePath)) {
       let main = null;
       try {

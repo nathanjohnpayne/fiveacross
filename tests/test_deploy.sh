@@ -2742,7 +2742,8 @@ init_invitation_fixture() {
       printf '%s\n' "export const $name = onCall(async () => ({ ok: true }));"
     done
   } >"$repo/functions/src/index.ts"
-  (cd "$repo" && git add functions/src/index.ts && git commit --quiet -m "invitation callables")
+  printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' >"$repo/functions/package.json"
+  (cd "$repo" && git add functions/src/index.ts functions/package.json && git commit --quiet -m "invitation callables")
 }
 
 REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"
@@ -3831,7 +3832,8 @@ init_admin_fixture() {
     printf '%s\n' "export const unlockDayNow = onCall(async () => ({ ok: true }));"
     for line in "$@"; do printf '%s\n' "$line"; done
   } >"$repo/functions/src/index.ts"
-  (cd "$repo" && git add functions/src/index.ts && git commit --quiet -m "admin callable")
+  printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' >"$repo/functions/package.json"
+  (cd "$repo" && git add functions/src/index.ts functions/package.json && git commit --quiet -m "admin callable")
 }
 
 run_admin_case() {

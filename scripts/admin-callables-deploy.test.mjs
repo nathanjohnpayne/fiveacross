@@ -9,6 +9,13 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+// A Node Functions source: `src/` plus the `package.json` whose presence makes
+// the CLI pick the Node runtime, with the conventional `lib/index.js` entry.
+async function nodeSource(dir) {
+  await mkdir(resolve(dir, "src"), { recursive: true });
+  await writeFile(resolve(dir, "package.json"), JSON.stringify({ main: "lib/index.js" }));
+}
+
 async function classify(args) {
   return classifyFirebaseDeployRequest(["fiveacross", ...args], {
     defaultConfigPath: resolve(repoRoot, "firebase.json"),
@@ -18,7 +25,7 @@ async function classify(args) {
 async function withIndex(lines, run) {
   const fixture = await mkdtemp(join(tmpdir(), "admin-callable-exports-"));
   try {
-    await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+    await nodeSource(resolve(fixture, "functions"));
     await writeFile(
       resolve(fixture, "firebase.json"),
       JSON.stringify({ functions: { source: "functions" } }),
@@ -35,8 +42,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
   async function withTwoCodebases(run) {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-codebases-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
-      await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
+      await nodeSource(resolve(fixture, "ops"));
       await writeFile(
         resolve(fixture, "firebase.json"),
         JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
@@ -85,7 +92,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     const callable = "export const unlockDayNow = onCall(async () => 1);\n";
     const header = "import { onCall } from 'firebase-functions/v2/https';\n";
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await mkdir(resolve(fixture, "py"), { recursive: true });
       if (layout === "ts-default-and-remote") {
         await writeFile(
@@ -99,7 +106,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         );
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
       } else if (layout === "ts-default-and-kit") {
-        await mkdir(resolve(fixture, "kit", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "kit"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({ functions: [{ source: "functions" }, { kit: "example-kit", source: "kit", instances: { daily: "kit" } }] }),
@@ -107,7 +114,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "kit", "src", "index.ts"), header + callable);
       } else if (layout === "ts-default-and-python-ops") {
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({
@@ -118,7 +125,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "ops", "main.py"), "# unlock_day_now is exported as unlockDayNow\n");
       } else if (layout === "ts-default-and-bracket-module-ops") {
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
@@ -129,7 +136,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           header + 'module["exports"].unlockDayNow = onCall(async () => 1);\n',
         );
       } else if (layout === "ts-default-and-export-equals-ops") {
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
@@ -143,7 +150,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         // One non-default TypeScript codebase exporting `unlockDayNow`, made
         // opaque by a single variant.
         const variant = layout.slice("ops-variant-".length);
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         const ops = { source: "ops", codebase: "ops", ...(variant === "prefix" ? { prefix: "tenant" } : {}) };
         await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: [{ source: "functions" }, ops] }));
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
@@ -202,6 +209,12 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             header +
               "namespace inner { export const unlockDayNow = onCall(async () => 1); }\nexport import unlockDayNow = inner.unlockDayNow;\n",
           );
+        } else if (variant === "python-inferred") {
+          // No `runtime` and no `package.json`: the CLI infers Python from
+          // `requirements.txt`, whatever TypeScript the directory also carries.
+          await rm(resolve(fixture, "ops", "package.json"));
+          await writeFile(resolve(fixture, "ops", "requirements.txt"), "firebase-functions\n");
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
         } else if (variant === "star-declared") {
           // A star of a module the walk models stays inventoried.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
@@ -221,7 +234,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), header + callable);
         }
       } else if (layout === "ts-default-and-object-assign-ops") {
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
@@ -232,7 +245,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           header + "const unlockDayNow = onCall(async () => 1);\nObject.assign(exports, { unlockDayNow });\n",
         );
       } else if (layout === "ts-default-and-commonjs-ops") {
-        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await nodeSource(resolve(fixture, "ops"));
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
@@ -297,6 +310,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-star-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-star-named-hop", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-python-inferred", ["--only", "functions:ops"], unknown, unknown],
     [
       "ops-variant-star-declared",
       ["--only", "functions:ops"],
@@ -366,7 +380,7 @@ describe("admin-callables deploy scope (#1277)", () => {
   it("resolves a local export-star to what the module exports instead of making every admin peer strict", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-star-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: { source: "functions" } }));
       await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export * from './admin';\n");
       await writeFile(
@@ -390,7 +404,7 @@ describe("admin-callables deploy scope (#1277)", () => {
   it("stays conservative when a local star re-exports a package star", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-package-star-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: { source: "functions" } }));
       await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export * from './admin';\n");
       await writeFile(

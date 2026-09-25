@@ -8,6 +8,13 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+// A Node Functions source: `src/` plus the `package.json` whose presence makes
+// the CLI pick the Node runtime, with the conventional `lib/index.js` entry.
+async function nodeSource(dir) {
+  await mkdir(resolve(dir, "src"), { recursive: true });
+  await writeFile(resolve(dir, "package.json"), JSON.stringify({ main: "lib/index.js" }));
+}
+
 async function classify(args) {
   return classifyFirebaseDeployRequest(["fiveacross", ...args], {
     defaultConfigPath: resolve(repoRoot, "firebase.json"),
@@ -33,7 +40,7 @@ async function withCodebases(codebases, run) {
   try {
     const configs = [];
     for (const { codebase, source, index } of codebases) {
-      await mkdir(resolve(fixture, source, "src"), { recursive: true });
+      await nodeSource(resolve(fixture, source));
       await writeFile(resolve(fixture, source, "src", "index.ts"), index.join("\n"));
       configs.push(codebase ? { source, codebase } : { source });
     }
@@ -79,7 +86,7 @@ describe("event-invitation deploy scope", () => {
   it("keeps every actually exported service strict for a full Functions release", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "event-invitation-exports-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await writeFile(
         resolve(fixture, "firebase.json"),
         JSON.stringify({ functions: { source: "functions" } }),
@@ -110,7 +117,7 @@ describe("event-invitation deploy scope", () => {
   it("ignores type-only export declarations that Firebase cannot deploy", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "event-invitation-type-exports-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await writeFile(
         resolve(fixture, "firebase.json"),
         JSON.stringify({ functions: { source: "functions" } }),
@@ -140,7 +147,7 @@ describe("event-invitation deploy scope", () => {
   it("fails closed for a runtime export-star whose names cannot be known locally", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "event-invitation-star-export-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await nodeSource(resolve(fixture, "functions"));
       await writeFile(
         resolve(fixture, "firebase.json"),
         JSON.stringify({ functions: { source: "functions" } }),
