@@ -31,18 +31,29 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  */
 export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
   const { data: blocks, loading, error } = useMyBlocks(uid);
-  const { players } = useLeaderboard();
+  const { players, hasServerData: rosterConfirmed } = useLeaderboard();
   const online = useOnline();
   const [confirming, setConfirming] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  // Targets whose unblock the server already confirmed, keyed to the record's
+  // createdAt: the row stays hidden (and so can't be unblocked a second time)
+  // even if the own-blocks listener is slow to deliver the deletion.
+  const [unblocked, setUnblocked] = useState<Record<string, number>>({});
   const inFlight = useRef(false);
   const occasion = editionBrand().lexicon.occasion;
 
-  const nameOf = (target: string) => players.find((p) => p.uid === target)?.displayName?.trim() || 'A player';
-  const rows = [...blocks].sort((a, b) => b.createdAt - a.createdAt);
+  // "A player" is reserved for a target with no Player row on a server-confirmed
+  // roster; until the roster resolves, an unnamed target is still loading and its
+  // Unblock stays disabled so nobody reverses a block without knowing whose it is.
+  const rosterName = (target: string) => players.find((p) => p.uid === target)?.displayName?.trim();
+  const nameKnown = (target: string) => rosterConfirmed || rosterName(target) !== undefined;
+  const nameOf = (target: string) => rosterName(target) || (rosterConfirmed ? 'A player' : 'Loading…');
+  const rows = [...blocks]
+    .filter((b) => unblocked[b.targetUid] !== b.createdAt)
+    .sort((a, b) => b.createdAt - a.createdAt);
 
-  const doUnblock = async (target: string) => {
+  const doUnblock = async (target: string, createdAt: number) => {
     if (!uid || inFlight.current) return;
     inFlight.current = true;
     const actedEventId = EVENT_ID;
@@ -52,6 +63,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
     setOutcome(null);
     try {
       const { stillHidden } = await unblockPlayer({ me: uid, target, eventId: actedEventId });
+      setUnblocked((prev) => ({ ...prev, [target]: createdAt }));
       trackIfCurrentEvent(actedEventId, 'unblock_player', { stillHidden });
       setOutcome({ kind: stillHidden ? 'still-hidden' : 'done', name });
     } catch (err) {
@@ -101,7 +113,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                     type="button"
                     className="btn"
                     aria-label={`Unblock ${name}`}
-                    disabled={!online || pending !== null}
+                    disabled={!online || pending !== null || !nameKnown(b.targetUid)}
                     onClick={() => setConfirming(b.targetUid)}
                   >
                     {pending === b.targetUid ? 'Unblocking…' : 'Unblock'}
@@ -120,8 +132,8 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                       <button
                         type="button"
                         className="btn primary"
-                        disabled={!online}
-                        onClick={() => void doUnblock(b.targetUid)}
+                        disabled={!online || !nameKnown(b.targetUid)}
+                        onClick={() => void doUnblock(b.targetUid, b.createdAt)}
                       >
                         Yes, unblock
                       </button>

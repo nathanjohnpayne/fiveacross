@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { EventDoc } from '../types';
 
@@ -64,6 +64,16 @@ vi.mock('./BugReport', () => ({
 vi.mock('./AcceptableUse', () => ({
   default: ({ variant }: { variant?: string }) => (
     <button type="button">{`18+ guidelines (${variant})`}</button>
+  ),
+}));
+// Blocked players is stubbed to what matters to the panel's focus trap: an
+// Unblock control that is disabled (offline or mid-request), which the browser
+// skips, so the trap must not count it as the panel's first control.
+vi.mock('./BlockedPlayersPanel', () => ({
+  default: () => (
+    <button type="button" disabled>
+      Unblock Bea
+    </button>
   ),
 }));
 // "How to play" reopens the REAL CoachOverlay (#214) — left un-stubbed so
@@ -193,5 +203,19 @@ describe('More menu — "How to play" replays the coach overlay (#214)', () => {
     // (the spec's own resolved default) — never cleared.
     expect(store.get(DISMISS_KEY)).not.toBeUndefined();
     vi.unstubAllGlobals();
+  });
+
+  it('the panel focus trap skips disabled controls, so Tab and Shift+Tab stay on Close', () => {
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Blocked players/ }));
+    const dialog = screen.getByRole('dialog', { name: 'Blocked players' });
+    expect(screen.getByRole('button', { name: 'Unblock Bea' })).toBeDisabled();
+    const close = screen.getByRole('button', { name: 'Close' });
+    close.focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });

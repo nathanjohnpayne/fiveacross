@@ -12,6 +12,7 @@ const H = vi.hoisted(() => ({
   unblockPlayer: vi.fn(),
   myBlocks: { data: [] as BlockDoc[], loading: false, error: false },
   players: [] as Array<{ uid: string; displayName: string }>,
+  rosterConfirmed: true,
   online: true,
 }));
 
@@ -19,7 +20,8 @@ vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
 vi.mock('../analytics', () => ({ track: H.track }));
 vi.mock('../data/blocks', () => ({ blockPlayer: vi.fn(), unblockPlayer: H.unblockPlayer }));
 vi.mock('../hooks/useBlocks', () => ({ useMyBlocks: () => H.myBlocks }));
-vi.mock('../hooks/useData', () => ({ useLeaderboard: () => ({ players: H.players, loading: false }) }));
+vi.mock('../hooks/useData', () => ({ useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: H.rosterConfirmed }),
+}));
 vi.mock('../hooks/useOnline', () => ({ useOnline: () => H.online }));
 
 import BlockPlayerButton from './BlockPlayerButton';
@@ -37,6 +39,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   H.myBlocks = { data: [], loading: false, error: false };
   H.players = [];
+  H.rosterConfirmed = true;
   H.online = true;
 });
 
@@ -172,5 +175,33 @@ describe('BlockedPlayersPanel', () => {
     expect(screen.getByText('You’re offline. Unblocking needs a connection.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Unblock A player' })).toBeDisabled();
     expect(H.unblockPlayer).not.toHaveBeenCalled();
+  });
+
+  it('a confirmed unblock drops its row at once, even before the listener delivers the deletion', async () => {
+    H.myBlocks.data = [direction('bea', 1), direction('cal', 2)];
+    H.players = [
+      { uid: 'bea', displayName: 'Bea' },
+      { uid: 'cal', displayName: 'Cal' },
+    ];
+    H.unblockPlayer.mockResolvedValue({ stillHidden: false });
+    render(<BlockedPlayersPanel uid="viewer" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Bea' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, unblock' }));
+    await flush();
+    // The listener still reports Bea's record; the row stays gone regardless.
+    expect(screen.queryByRole('button', { name: 'Unblock Bea' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Unblock Cal' })).not.toBeDisabled();
+    expect(screen.getByRole('status').textContent).toBe('Unblocked Bea.');
+    expect(H.unblockPlayer).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unnamed target waits for the roster instead of offering an anonymous unblock', () => {
+    H.rosterConfirmed = false;
+    H.myBlocks.data = [direction('bea', 1), direction('dee', 2)];
+    H.players = [{ uid: 'dee', displayName: 'Dee' }];
+    const { container } = render(<BlockedPlayersPanel uid="viewer" />);
+    expect([...container.querySelectorAll('.blocked-row .name')].map((n) => n.textContent)).toEqual(['Dee', 'Loading…']);
+    expect(screen.getByRole('button', { name: 'Unblock Loading…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Unblock Dee' })).not.toBeDisabled();
   });
 });
