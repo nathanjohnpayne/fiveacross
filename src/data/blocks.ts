@@ -1,4 +1,4 @@
-import { writeBatch } from 'firebase/firestore';
+import { runTransaction, writeBatch, type DocumentReference } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { blockPairId, blockPairRef, blockRef } from './paths';
 import type { BlockDoc, BlockPairDoc } from '../types';
@@ -51,29 +51,48 @@ export interface UnblockResult {
 }
 
 /**
+ * Delete `refs` in one SERVER-ONLY commit. A `runTransaction` (here with no
+ * reads) is never applied to the local cache before the server accepts it,
+ * unlike a `writeBatch`, whose deletes are optimistic. That matters for the
+ * pair: a pending local delete drops the pair from the viewer's query, and the
+ * SDK derives a query snapshot's `hasPendingWrites` from the documents still
+ * in the result, so the empty snapshot reads as settled (CodeRabbit on #1300)
+ * and would reveal the counterpart until the server denied the mutual unblock,
+ * indefinitely while offline. So every unblock write goes through here, and
+ * an unblock needs a connection: offline it rejects instead of queueing.
+ */
+function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<void> {
+  return runTransaction(db, async (tx) => {
+    for (const ref of refs) tx.delete(ref);
+  });
+}
+
+/**
  * Unblock `target`. Only the blocker can reverse a block, and the pair must
  * leave with the caller's direction record UNLESS the other direction still
  * stands, so the flow is two attempts: first `{delete direction, delete pair}`,
  * and, only on a permission denial (which the rules issue exactly when the
  * other direction exists), `{delete direction}` alone. The retry succeeding is
  * how the caller learns the block was mutual; reciprocity makes that
- * disclosure inherent, and the copy says so. Any other error rethrows.
+ * disclosure inherent, and the copy says so. Any other error rethrows. Every
+ * attempt is a server-only commit (`deleteOnServer`), so nothing is hidden or
+ * revealed locally before the server rules on it.
  *
  * If the retry is itself denied, the other direction left between the two
  * attempts (the other party unblocked in between), so the rules now require
  * the pair to go with ours: one more `{delete direction, delete pair}`, whose
  * success means nothing stays hidden. Any error there rethrows.
  *
- * After a landed retry, ONE best-effort `{delete pair}`, for the concurrent mutual unblock
- * (Codex P2 on #1300): if both parties unblock at once, both first attempts
- * are denied and both direction-only retries can land, each authorized while
- * the other direction still stood, leaving a pair with no direction. The
- * rules let either party delete a pair once neither direction exists, and
- * whichever retry commits LAST runs this after both directions are gone, so
- * the orphan is removed. While the other direction still stands (the ordinary
- * mutual case) the rules deny it and the result stays `stillHidden: true`;
- * any failure here is swallowed, because the caller's own unblock has
- * already landed.
+ * After a landed retry, ONE best-effort `{delete pair}`, for the concurrent
+ * mutual unblock (Codex P2 on #1300): if both parties unblock at once, both
+ * first attempts are denied and both direction-only retries can land, each
+ * authorized while the other direction still stood, leaving a pair with no
+ * direction. The rules let either party delete a pair once neither direction
+ * exists, and whichever retry commits LAST runs this after both directions are
+ * gone, so the orphan is removed. While the other direction still stands (the
+ * ordinary mutual case) the rules deny it and the result stays
+ * `stillHidden: true`; any failure here is swallowed, because the caller's own
+ * unblock has already landed.
  */
 export async function unblockPlayer({
   me,
@@ -81,34 +100,26 @@ export async function unblockPlayer({
   eventId = EVENT_ID,
 }: BlockPairParams): Promise<UnblockResult> {
   assertPair(me, target);
-  const both = writeBatch(db);
-  both.delete(blockRef(me, target, eventId));
-  both.delete(blockPairRef(me, target, eventId));
+  const direction = blockRef(me, target, eventId);
+  const pair = blockPairRef(me, target, eventId);
   try {
-    await both.commit();
+    await deleteOnServer([direction, pair]);
     return { stillHidden: false };
   } catch (err) {
     if (!isPermissionDenied(err)) throw err;
   }
-  const directionOnly = writeBatch(db);
-  directionOnly.delete(blockRef(me, target, eventId));
   try {
-    await directionOnly.commit();
+    await deleteOnServer([direction]);
   } catch (err) {
     if (!isPermissionDenied(err)) throw err;
     // The other direction left between our two attempts (an interleaved
     // mutual unblock, CodeRabbit on #1300), so the rules now require the pair
     // to leave WITH ours: the first attempt's shape, once more.
-    const again = writeBatch(db);
-    again.delete(blockRef(me, target, eventId));
-    again.delete(blockPairRef(me, target, eventId));
-    await again.commit();
+    await deleteOnServer([direction, pair]);
     return { stillHidden: false };
   }
-  const orphanedPair = writeBatch(db);
-  orphanedPair.delete(blockPairRef(me, target, eventId));
   try {
-    await orphanedPair.commit();
+    await deleteOnServer([pair]);
     return { stillHidden: false };
   } catch {
     return { stillHidden: true };
@@ -142,14 +153,14 @@ export function hiddenUidsFromPairs(
 
 /**
  * The published hidden set for one snapshot. A snapshot with pending local
- * writes publishes `current ∪ lastCommitted` (the set from the latest
- * server-acked snapshot), and a settled one publishes `current`. So a pending
- * BLOCK hides immediately (it is in `current`), a pending UNBLOCK reveals
- * nobody until the server acks it, and a DENIED unblock (the mutual case,
- * where the rules refuse the pair delete) never flashes the counterpart back
- * in: the optimistic local delete is rolled back before any committed snapshot
- * could drop them from `lastCommitted`. Offline, a pending unblock therefore
- * stays hidden until reconnect, which the spec records.
+ * writes publishes `current ∪ lastCommitted` (the set from the latest snapshot
+ * without pending writes), and a settled one publishes `current`. So a
+ * pending BLOCK hides immediately (it is in `current`) and no pending local
+ * write ever reveals anyone. This is defence in depth, not the unblock
+ * guarantee: the SDK does not flag a query snapshot whose only pending write
+ * REMOVED a document, so a pending pair delete could not be seen here at all.
+ * That is why `unblockPlayer` never deletes locally (`deleteOnServer`), and
+ * the pair leaves the viewer's query only once the server has accepted it.
  */
 export function computeHiddenSet(
   current: ReadonlySet<string>,

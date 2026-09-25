@@ -4,7 +4,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // (#689). Firestore is mocked: what is pinned is the EXACT batch contents,
 // the unblock fallback's trigger and result, and the hidden-set arithmetic.
 
-type Batch = { set: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn>; commit: ReturnType<typeof vi.fn> };
+// `kind` records how each write was sent: 'batch' (a writeBatch, applied to
+// the local cache optimistically) or 'transaction' (a runTransaction, which
+// the SDK never applies locally before the server accepts it).
+type Batch = {
+  kind: 'batch' | 'transaction';
+  set: ReturnType<typeof vi.fn>;
+  delete: ReturnType<typeof vi.fn>;
+  commit: ReturnType<typeof vi.fn>;
+};
 
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
@@ -18,18 +26,27 @@ vi.mock('../firebase', () => ({
     return H.eventId;
   },
 }));
-vi.mock('firebase/firestore', () => ({
-  writeBatch: () => {
+vi.mock('firebase/firestore', () => {
+  const open = (kind: Batch['kind']): Batch => {
     const next = H.commitResults.shift() ?? 'ok';
     const batch: Batch = {
+      kind,
       set: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => (next === 'ok' ? Promise.resolve() : Promise.reject(next))),
     };
     H.batches.push(batch);
     return batch;
-  },
-}));
+  };
+  return {
+    writeBatch: () => open('batch'),
+    runTransaction: async (_db: unknown, update: (tx: Batch) => Promise<void>) => {
+      const tx = open('transaction');
+      await update(tx);
+      return tx.commit();
+    },
+  };
+});
 vi.mock('./paths', () => ({
   blockRef: (owner: string, target: string, eventId: string) => `events/${eventId}/blocks/${owner}_${target}`,
   blockPairRef: (a: string, b: string, eventId: string) =>
@@ -69,6 +86,8 @@ describe('blockPlayer', () => {
     await blockPlayer({ me: 'bob', target: 'alice' });
     expect(H.batches).toHaveLength(1);
     const [batch] = H.batches;
+    // A batch on purpose: a block queues durably offline (ADR 0006).
+    expect(batch.kind).toBe('batch');
     expect(batch.set.mock.calls).toEqual([
       [
         'events/event-a/blocks/bob_alice',
@@ -101,6 +120,8 @@ describe('unblockPlayer', () => {
   it('deletes the direction and the pair together when the block is one-way', async () => {
     await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: false });
     expect(H.batches).toHaveLength(1);
+    // Server-only: a transaction, never an optimistic local batch delete.
+    expect(H.batches[0].kind).toBe('transaction');
     expect(H.batches[0].delete.mock.calls).toEqual([
       ['events/event-a/blocks/bob_alice'],
       ['events/event-a/blockPairs/alice_bob'],
@@ -114,6 +135,7 @@ describe('unblockPlayer', () => {
     expect(H.batches[1].delete.mock.calls).toEqual([['events/event-a/blocks/bob_alice']]);
     // The best-effort orphan cleanup, denied while Alice's direction stands.
     expect(H.batches[2].delete.mock.calls).toEqual([['events/event-a/blockPairs/alice_bob']]);
+    expect(H.batches.map((b) => b.kind)).toEqual(['transaction', 'transaction', 'transaction']);
   });
 
   it('a concurrent mutual unblock: the pair left with no direction is deleted after the retry, and nothing stays hidden', async () => {

@@ -47,42 +47,14 @@ const initial = (uid: string | null, key: string | null): HiddenState => ({
   ready: uid === null,
 });
 
-// The committed base survives a reload (Codex P1 on #1300). A pending unblock
-// is durable (ADR 0006), so after a reload the FIRST snapshot can already
-// carry `hasPendingWrites` with the pair absent; a base that started empty
-// would publish that absence and show the counterpart until reconnect, even
-// when the server then denies the mutual unblock. So the last committed set is
-// persisted per Event and viewer (the key carries both) and seeds the next
-// subscription. Browser storage is a convenience here: when it is unavailable
-// the base starts empty, as it did before. It holds only counterpart uids the
-// Firestore cache on this device already holds.
-const COMMITTED_STORAGE_PREFIX = 'fiveacross:blocks:committed:';
-
-export function readCommittedHidden(key: string): ReadonlySet<string> {
-  try {
-    const raw = localStorage.getItem(COMMITTED_STORAGE_PREFIX + key);
-    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-    if (!Array.isArray(parsed)) return EMPTY;
-    return new Set(parsed.filter((u): u is string => typeof u === 'string'));
-  } catch {
-    return EMPTY;
-  }
-}
-
-function writeCommittedHidden(key: string, hidden: ReadonlySet<string>): void {
-  try {
-    localStorage.setItem(COMMITTED_STORAGE_PREFIX + key, JSON.stringify([...hidden]));
-  } catch {
-    // Storage full, blocked or absent: the in-memory base still serves this session.
-  }
-}
-
 /**
  * ONE `includeMetadataChanges` listener on `where('uids', 'array-contains',
  * uid)`, keyed on the Event AND the uid so an Event or account switch drops
  * the old set before the new listener answers. `lastCommitted` is the set from
- * the latest server-acked snapshot; see `computeHiddenSet` for why a pending
- * snapshot publishes the union. The error path is EXPLICIT (unlike useColSub,
+ * the latest snapshot without pending writes; see `computeHiddenSet` for why a
+ * pending snapshot publishes the union. A pair only ever LEAVES this query
+ * once the server has accepted its delete (`unblockPlayer` never deletes
+ * locally), so no unblock, denied or pending, can reveal a counterpart early. The error path is EXPLICIT (unlike useColSub,
  * which swallows errors): it logs and resolves ready with the last set, so the
  * app renders unfiltered rather than blank. The same admission failure would
  * deny the content listeners too.
@@ -95,17 +67,14 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     setState(initial(uid, key));
     if (key === null || uid === null) return;
     let active = true;
-    let lastCommitted: ReadonlySet<string> = readCommittedHidden(key);
+    let lastCommitted: ReadonlySet<string> = EMPTY;
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
-        if (!snap.metadata.hasPendingWrites) {
-          lastCommitted = current;
-          writeCommittedHidden(key, current);
-        }
+        if (!snap.metadata.hasPendingWrites) lastCommitted = current;
         setState({
           key,
           hidden: computeHiddenSet(current, lastCommitted, snap.metadata.hasPendingWrites),
