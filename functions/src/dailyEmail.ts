@@ -69,6 +69,7 @@ import {
   withReadableFinaleRanking,
 } from './finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText } from './dailyEmailTemplate';
+import { campaignLink, dailyEmailCampaign } from './emailCampaign';
 // The SAME freeze predicate the scheduler's own writers use (#1150), restated at
 // this boundary rather than spelled a second time — the two must never disagree
 // about what "this Event is over" means.
@@ -752,7 +753,9 @@ export async function sendDailyEmailForEvent(
   // Edition only becomes known once the Event's host resolves.
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
   const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
-  const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
+  // Campaign-tagged (#632) so an email-driven session is attributable rather
+  // than direct traffic; the unsubscribe/preference links below stay untagged.
+  const feedUrl = campaignLink(origin, '/feed', dailyEmailCampaign(eventId, day.index));
 
   const rosterPage = await readEmailRosterPage(db, eventId, bannedUids, maxRecipients + 1);
   const roster = rosterPage.players;
