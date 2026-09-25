@@ -47,6 +47,36 @@ const initial = (uid: string | null, key: string | null): HiddenState => ({
   ready: uid === null,
 });
 
+// The committed base survives a reload (Codex P1 on #1300). A pending unblock
+// is durable (ADR 0006), so after a reload the FIRST snapshot can already
+// carry `hasPendingWrites` with the pair absent; a base that started empty
+// would publish that absence and show the counterpart until reconnect, even
+// when the server then denies the mutual unblock. So the last committed set is
+// persisted per Event and viewer (the key carries both) and seeds the next
+// subscription. Browser storage is a convenience here: when it is unavailable
+// the base starts empty, as it did before. It holds only counterpart uids the
+// Firestore cache on this device already holds.
+const COMMITTED_STORAGE_PREFIX = 'fiveacross:blocks:committed:';
+
+export function readCommittedHidden(key: string): ReadonlySet<string> {
+  try {
+    const raw = localStorage.getItem(COMMITTED_STORAGE_PREFIX + key);
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+    if (!Array.isArray(parsed)) return EMPTY;
+    return new Set(parsed.filter((u): u is string => typeof u === 'string'));
+  } catch {
+    return EMPTY;
+  }
+}
+
+function writeCommittedHidden(key: string, hidden: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(COMMITTED_STORAGE_PREFIX + key, JSON.stringify([...hidden]));
+  } catch {
+    // Storage full, blocked or absent: the in-memory base still serves this session.
+  }
+}
+
 /**
  * ONE `includeMetadataChanges` listener on `where('uids', 'array-contains',
  * uid)`, keyed on the Event AND the uid so an Event or account switch drops
@@ -65,14 +95,17 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     setState(initial(uid, key));
     if (key === null || uid === null) return;
     let active = true;
-    let lastCommitted: ReadonlySet<string> = EMPTY;
+    let lastCommitted: ReadonlySet<string> = readCommittedHidden(key);
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
-        if (!snap.metadata.hasPendingWrites) lastCommitted = current;
+        if (!snap.metadata.hasPendingWrites) {
+          lastCommitted = current;
+          writeCommittedHidden(key, current);
+        }
         setState({
           key,
           hidden: computeHiddenSet(current, lastCommitted, snap.metadata.hasPendingWrites),
@@ -90,7 +123,12 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       unsub();
     };
   }, [key, uid, eventId]);
-  return state.key === key ? { hidden: state.hidden, ready: state.ready } : initial(uid, key);
+  // With no key there is no listener, so the answer follows from `uid` alone,
+  // derived on THIS render (Codex P1 on #1300): comparing keys would let a
+  // sign-in while not yet enabled (null key before and after) return the
+  // signed-out `ready: true` for the render before the effect resets it.
+  if (key === null) return { hidden: EMPTY, ready: uid === null };
+  return state.key === key ? { hidden: state.hidden, ready: state.ready } : { hidden: EMPTY, ready: false };
 }
 
 export function HiddenUidsProvider({

@@ -45,7 +45,14 @@ vi.mock('firebase/firestore', () => ({
   },
 }));
 
-import { HiddenUidsProvider, useHiddenUids, useHiddenUidsSubscription, useMyBlocks } from './useBlocks';
+import {
+  HiddenUidsProvider,
+  readCommittedHidden,
+  useHiddenUids,
+  useHiddenUidsSubscription,
+  useMyBlocks,
+} from './useBlocks';
+import { eventScopeKey } from '../data/eventScope';
 
 const pairs = (rows: Array<[string, string]>, hasPendingWrites = false) => ({
   docs: rows.map((uids) => ({ data: () => ({ uids, eventId: H.eventId }) })),
@@ -54,12 +61,30 @@ const pairs = (rows: Array<[string, string]>, hasPendingWrites = false) => ({
 const whereOf = (sub: Subscription) => (sub.target as { args: unknown[] }).args[1];
 const pathOf = (sub: Subscription) => ((sub.target as { args: unknown[] }).args[0] as { path: string }).path;
 
+/** Minimal in-memory localStorage stand-in, as in src/updateDismissal.test.ts
+ *  (the runtime's own global is not usable here). */
+function createStorageStub(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  } as Storage;
+}
+
 beforeEach(() => {
   H.eventId = 'event-a';
   H.subscriptions = [];
+  vi.stubGlobal('localStorage', createStorageStub());
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('useHiddenUidsSubscription', () => {
@@ -101,6 +126,59 @@ describe('useHiddenUidsSubscription', () => {
     // ...and the committed snapshot is what finally reveals.
     act(() => sub.listener(pairs([])));
     expect([...view.result.current.hidden]).toEqual([]);
+  });
+
+  it('a reload with a durable pending unblock keeps the persisted committed set hidden until the server answers', () => {
+    const before = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    before.unmount();
+    // The reload: a fresh subscription whose FIRST snapshot already carries
+    // the pending pair delete.
+    const after = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[1];
+    act(() => sub.listener(pairs([], true)));
+    expect([...after.result.current.hidden]).toEqual(['alice']);
+    // The server acks the unblock: revealed, and the persisted base follows.
+    act(() => sub.listener(pairs([])));
+    expect(after.result.current.hidden.size).toBe(0);
+    expect(readCommittedHidden(eventScopeKey('event-a', 'block-pairs', 'bob')).size).toBe(0);
+  });
+
+  it('the persisted base is per viewer and survives unreadable storage', () => {
+    const bob = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    bob.unmount();
+    const carol = renderHook(() => useHiddenUidsSubscription('carol', true));
+    act(() => H.subscriptions[1].listener(pairs([], true)));
+    expect(carol.result.current.hidden.size).toBe(0);
+    carol.unmount();
+    localStorage.setItem(`fiveacross:blocks:committed:${eventScopeKey('event-a', 'block-pairs', 'dave')}`, '{not json');
+    const dave = renderHook(() => useHiddenUidsSubscription('dave', true));
+    act(() => H.subscriptions[2].listener(pairs([], true)));
+    expect(dave.result.current).toEqual({ hidden: new Set(), ready: true });
+    dave.unmount();
+    // No storage at all (a locked-down WebView): the base starts empty and nothing throws.
+    vi.stubGlobal('localStorage', undefined);
+    const erin = renderHook(() => useHiddenUidsSubscription('erin', true));
+    act(() => H.subscriptions[3].listener(pairs([['alice', 'erin']])));
+    expect([...erin.result.current.hidden]).toEqual(['alice']);
+  });
+
+  it('signing in while not yet enabled is NOT ready on the very first render (no signed-out carry-over)', () => {
+    const seen: Array<{ ready: boolean }> = [];
+    const view = renderHook(
+      ({ uid, enabled }) => {
+        const value = useHiddenUidsSubscription(uid, enabled);
+        seen.push({ ready: value.ready });
+        return value;
+      },
+      { initialProps: { uid: null as string | null, enabled: false } },
+    );
+    expect(view.result.current.ready).toBe(true);
+    const signedOutRenders = seen.length;
+    view.rerender({ uid: 'bob', enabled: false });
+    expect(seen.slice(signedOutRenders).every((v) => v.ready === false)).toBe(true);
+    expect(H.subscriptions).toHaveLength(0);
   });
 
   it('an account switch drops the old set, resubscribes, and ignores the old listener', () => {

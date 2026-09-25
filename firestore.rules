@@ -2838,9 +2838,13 @@ service cloud.firestore {
           // Bind the id to the payload so nobody can park a record at
           // another owner's slot (the doubts/hearts binding shape).
           && blockId == request.auth.uid + '_' + request.resource.data.targetUid
+          // Never ahead of the server clock, and deliberately NO lower bound
+          // (unlike the shared -24h window): a block is a safety action, and
+          // one queued offline for days (ADR 0006) must still land when the
+          // device reconnects rather than roll back unseen. A back-dated
+          // stamp buys nothing; it only orders the owner's own list.
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
-          && request.resource.data.createdAt >= request.time.toMillis() - 86400000
           && existsAfter(blockPairDoc(eventId, request.auth.uid, request.resource.data.targetUid));
         // An idempotent RE-BLOCK only: `createdAt` refreshes, nothing else
         // moves. This is what lets the client's block() be a blind set that
@@ -2849,9 +2853,9 @@ service cloud.firestore {
         allow update: if admitted(eventId)
           && isOwner(resource.data.ownerUid)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['createdAt'])
+          // The create arm's clock bound: never ahead, no lower bound.
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
-          && request.resource.data.createdAt >= request.time.toMillis() - 86400000
           && existsAfter(blockPairDoc(eventId, request.auth.uid, resource.data.targetUid));
         // Only the blocker reverses a block. The pair must leave WITH this
         // record unless the other direction still stands, in which case it

@@ -173,7 +173,13 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { note: 'extra' }));
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { eventId: 'other' }));
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { createdAt: NOW() + 3600000 }));
-        await assertFails(blockBatch(db(ALICE), ALICE, BOB, { createdAt: NOW() - 172800000 }));
+        await assertFails(blockBatch(db(ALICE), ALICE, BOB, { createdAt: String(NOW()) }));
+      });
+
+      it('a block queued offline for days still lands (no lower clock bound), and so does its re-block refresh', async () => {
+        await assertSucceeds(blockBatch(db(ALICE), ALICE, BOB, { createdAt: NOW() - 172800000 }));
+        await assertSucceeds(blockBatch(db(ALICE), ALICE, BOB, { createdAt: NOW() - 259200000 }));
+        await assertFails(updateDoc(doc(db(ALICE), blockPath(ALICE, BOB)), { createdAt: NOW() + 3600000 }));
       });
 
       it('denies a pair whose uids do not match its id, are unordered, or omit the caller', async () => {
