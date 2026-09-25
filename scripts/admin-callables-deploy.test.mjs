@@ -77,17 +77,27 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
 
   // A codebase with no `src/index.ts` (a JavaScript or Python codebase) has an
   // unknown surface, not an empty one, so its scope stays conservative.
-  it("keeps a codebase without a TypeScript index conservative", async () => {
+  it.each([
+    // A non-default Python codebase next to an inventoried default one.
+    ["functions:py", [{ source: "functions" }, { source: "py", codebase: "py" }]],
+    // A JavaScript default codebase: `functions:default` releases it whole.
+    ["functions:default", [{ source: "functions" }]],
+  ])("keeps a codebase without a TypeScript index conservative (%s)", async (selector, functions) => {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-no-index-"));
     try {
-      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await mkdir(resolve(fixture, "functions"), { recursive: true });
       await mkdir(resolve(fixture, "py"), { recursive: true });
-      await writeFile(
-        resolve(fixture, "firebase.json"),
-        JSON.stringify({ functions: [{ source: "functions" }, { source: "py", codebase: "py" }] }),
-      );
-      await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
-      const result = await classifyFirebaseDeployRequest(["fiveacross", "--only", "functions:py"], {
+      await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions }));
+      if (selector === "functions:py") {
+        await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+      } else {
+        await writeFile(
+          resolve(fixture, "functions", "index.js"),
+          "const { onCall } = require('firebase-functions/v2/https');\nexports.unlockDayNow = onCall(async () => 1);\n",
+        );
+      }
+      const result = await classifyFirebaseDeployRequest(["fiveacross", "--only", selector], {
         defaultConfigPath: resolve(fixture, "firebase.json"),
       });
 

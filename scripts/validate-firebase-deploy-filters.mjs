@@ -4238,6 +4238,16 @@ export async function classifyInvokerScope(
       if (invitationServices.length > 0) eventInvitationsInvokerSelected = true;
       if (adminServices.length > 0) adminCallablesInvokerSelected = true;
     };
+    // A selector that releases a surface this script cannot inventory selects
+    // both families conservatively: nothing is proven strict, and every
+    // service may be absent (#1282).
+    const selectFamiliesForUnknownSurface = () => {
+      functionsAttempted = true;
+      invitationScopeKnown = true;
+      adminScopeKnown = true;
+      eventInvitationsInvokerSelected = true;
+      adminCallablesInvokerSelected = true;
+    };
     // A named protected callable selects its family, and is strict only when
     // the codebase its selector resolves to exports it (#1282).
     const nameInvitation = (selector, service) => {
@@ -4274,8 +4284,12 @@ export async function classifyInvokerScope(
         adminCallablesInvokerConservative = false;
         // Bare `functions` releases every codebase, so it reads the union;
         // `functions:default` releases the default codebase alone (#1282).
+        // A default codebase with no inventory entry (no local `source`, or
+        // no `src/index.ts`) has an unknown surface, not an empty one.
         if (selector === "functions") releaseKnownSurface(invitations.union, admins.union);
-        else releaseKnownSurface(invitations.of("default") ?? [], admins.of("default") ?? []);
+        else if (invitations.of("default") && admins.of("default"))
+          releaseKnownSurface(invitations.of("default"), admins.of("default"));
+        else selectFamiliesForUnknownSurface();
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
       ) {
