@@ -3943,12 +3943,35 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * `singleEndpointInventory` (explicit `codebase`, else `default`). A codebase
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
- * `UNINVENTORIED_CODEBASE`), a source directory with no `src/index.ts`, or an
- * index that assigns CommonJS `exports`, which the declaration walk in
+ * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
+ * a TypeScript index), a source directory with no `src/index.ts`, or an index
+ * that touches the CommonJS `exports` object in any way (assignment,
+ * `Object.assign`, `defineProperty`), which the declaration walk in
  * `protectedServicesFromSource` does not model.
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
-const COMMONJS_EXPORT_ASSIGNMENT = /\b(?:module\s*\.\s*)?exports\s*(?:\.|\[|=)/;
+/** Whether code (not a comment or string) names CommonJS `exports` or `module.exports`. */
+function referencesCommonJsExports(source) {
+  const sourceFile = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isIdentifier(node) && node.text === "exports") {
+      const parent = node.parent;
+      const isMemberName =
+        (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+        ((ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent) || ts.isMethodDeclaration(parent)) &&
+          parent.name === node);
+      if (!isMemberName) found = true;
+      else if (ts.isPropertyAccessExpression(parent) && ts.isIdentifier(parent.expression) && parent.expression.text === "module")
+        found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -3962,6 +3985,10 @@ async function protectedServiceInventory(configSource, configPath, table) {
         : "default";
     if (typeof functionsConfig.source !== "string") {
       services.set("kit" in functionsConfig ? UNINVENTORIED_CODEBASE : codebase, null);
+      continue;
+    }
+    if (typeof functionsConfig.runtime === "string" && !functionsConfig.runtime.startsWith("nodejs")) {
+      services.set(codebase, null);
       continue;
     }
     const sourcePath = resolve(
@@ -3989,7 +4016,7 @@ async function protectedServiceInventory(configSource, configPath, table) {
       throw error;
     }
     if (services.get(codebase) === null) continue;
-    if (COMMONJS_EXPORT_ASSIGNMENT.test(source)) {
+    if (referencesCommonJsExports(source)) {
       services.set(codebase, null);
       continue;
     }
