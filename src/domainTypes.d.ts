@@ -1290,7 +1290,10 @@ export interface BlockDoc {
 // The PAIR record, `events/{eventId}/blockPairs/{lo}_{hi}` (lo < hi in string
 // order): no direction, no timestamp, no names. Either party may read it; it
 // is what both clients derive the reciprocal hidden set from and what the
-// Hearts rule checks. Exists iff at least one direction record exists.
+// Hearts rule checks. Invariant I (it exists iff at least one direction record
+// does) holds per commit: no single commit can break it, but concurrent
+// commits can leave a pair with no direction or a direction with no pair until
+// the provider's reconcilers repair it (specs/player-blocking.md).
 export interface BlockPairDoc {
   uids: [string, string];
   eventId: string;

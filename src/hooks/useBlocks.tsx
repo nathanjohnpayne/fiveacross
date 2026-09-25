@@ -198,7 +198,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       },
       (err) => {
         if (!active) return;
-        console.error('[blocks] hidden-set listener failed; rendering unfiltered', err);
+        console.error('[blocks] hidden-set listener failed; keeping the last published hidden set (empty if none arrived)', err);
         setState((prev) => ({ key, hidden: prev.key === key ? prev.hidden : EMPTY, ready: true }));
       },
     );
