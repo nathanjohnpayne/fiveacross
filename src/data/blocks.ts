@@ -15,7 +15,7 @@ import type { BlockDoc, BlockPairDoc } from '../types';
 // ONE atomic client commit whose result the rules check with `existsAfter`, so
 // no single commit can break Invariant I (the pair exists iff at least one
 // direction record does). A block is an optimistic `writeBatch` that queues
-// durably offline; every unblock attempt (up to three per call) is a
+// durably offline; every unblock commit (at most three per call) is a
 // server-only `runTransaction` that needs a connection. Concurrent commits
 // can still leave one of two states the rules cannot rule out: a pair with no
 // direction (two concurrent direction-only unblocks), cleaned up by
@@ -61,7 +61,14 @@ export function blockPlayer({ me, target, eventId = EVENT_ID }: BlockPairParams)
 }
 
 export interface UnblockResult {
-  /** True when the other Player has blocked the caller too, so the pair stays. */
+  /**
+   * True when the pair still stood on the server after the caller's own
+   * direction left (the other Player has blocked the caller too), OR,
+   * conservatively, when that could not be confirmed (a failed cleanup whose
+   * follow-up listing also failed). False means the pair is known to be gone.
+   * So `true` is not proof of a mutual block; the provider's pair listener,
+   * not this flag, decides what renders.
+   */
   stillHidden: boolean;
 }
 
@@ -85,16 +92,17 @@ function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<vo
 /**
  * Unblock `target`. Only the blocker can reverse a block, and the pair must
  * leave with the caller's direction record UNLESS the other direction still
- * stands. The flow is up to four server-only commits: first
+ * stands. The flow is at most three server-only commits: first
  * `{delete direction, delete pair}`; only on a permission denial (which the
- * rules issue exactly when the other direction exists), `{delete direction}`
- * alone; if THAT is denied, the full delete once more; and after a landed
- * direction-only retry, one best-effort `{delete pair}` (followed, if it is
- * denied, by one server listing of the caller's pairs to report `stillHidden`
- * truly).
- * Each is described below. The direction-only retry succeeding is
- * how the caller learns the block was mutual; reciprocity makes that
- * disclosure inherent, and the copy says so. Any other error rethrows. Every
+ * rules issue when the other direction exists, or when the pair is already
+ * missing), `{delete direction}` alone; then EITHER, if that is denied, the
+ * full delete once more, OR, if it landed, one best-effort `{delete pair}`
+ * (followed, if that is denied or fails, by one server listing of the
+ * caller's pairs to report `stillHidden`). Each is described below. A
+ * `stillHidden: true` answer is how the caller learns the block was mutual
+ * (or, conservatively, that the pair could not be confirmed gone; see
+ * `UnblockResult`); reciprocity makes that disclosure inherent, and the copy
+ * says so. Any other error rethrows. Every
  * attempt is a server-only commit (`deleteOnServer`), so nothing is hidden or
  * revealed locally before the server rules on it.
  *
@@ -165,8 +173,9 @@ export async function unblockPlayer({
  * is. The durable half of the concurrent-mutual-unblock cleanup (Codex P1 on
  * #1300): `unblockPlayer`'s own cleanup is best-effort, so if both parties'
  * direction-only retries land and both cleanups fail (a dropped connection, a
- * lost acknowledgement), the provider calls this once per session for every
- * pair it sees. It is SAFE to call on any pair: the rules allow the delete
+ * lost acknowledgement), the provider calls this for every server-confirmed
+ * pair it sees: once per app session, and again whenever that pair reappears
+ * after a subscription's first server answer. It is SAFE to call on any pair: the rules allow the delete
  * only when neither direction exists server-side, so an ordinary pair (either
  * party's direction standing) is simply denied, which is the common outcome
  * and changes nothing on the device (`deleteOnServer` is server-only).
@@ -203,7 +212,8 @@ export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: Bl
  * so a stale view can only cost a no-op write. Resolves the number of pairs
  * restored. A denied re-set (the direction left meanwhile) is skipped; a
  * failed listing or any other re-set failure rejects once every target has
- * been tried, so the provider re-arms the repair for its next server snapshot.
+ * been tried, so the provider retries it on a backoff timer (a failed write
+ * produces no snapshot to wait for) and on its next server snapshot.
  */
 export async function repairMissingPairs({
   me,

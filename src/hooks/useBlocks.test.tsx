@@ -77,6 +77,8 @@ vi.mock('firebase/firestore', () => ({
 
 import {
   HiddenUidsProvider,
+  REPAIR_RETRY_ATTEMPTS,
+  REPAIR_RETRY_BASE_MS,
   resetReconcileAttemptsForTests,
   useHiddenUids,
   useHiddenUidsSubscription,
@@ -226,6 +228,78 @@ describe('useHiddenUidsSubscription', () => {
     expect(H.ownListings).toBe(5);
     expect(H.repaired.at(-1)).toBe('events/event-a/blockPairs/bob_erin');
     back.unmount();
+  });
+
+  it('a failed repair while the listener stays server-backed is retried on a doubling timer, with no new snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      H.ownTargets = Object.assign(new Error('aborted'), { code: 'aborted' });
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      const sub = H.subscriptions[0];
+      act(() => sub.listener(pairs([['alice', 'bob']])));
+      await act(async () => {});
+      expect(H.ownListings).toBe(1);
+      // A failed write produces no snapshot; the timer retries it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS);
+      });
+      expect(H.ownListings).toBe(2);
+      H.ownTargets = ['alice', 'dave'];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS * 2);
+      });
+      expect(H.ownListings).toBe(3);
+      expect(H.repaired).toEqual(['events/event-a/blockPairs/bob_dave']);
+      // Once it lands, nothing further is scheduled.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS * 64);
+      });
+      expect(H.ownListings).toBe(3);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the repair retry is bounded, never fires while the listener is on cache, and stops at unmount', async () => {
+    vi.useFakeTimers();
+    try {
+      H.ownTargets = Object.assign(new Error('aborted'), { code: 'aborted' });
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+      await act(async () => {});
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS * 2 ** (REPAIR_RETRY_ATTEMPTS + 2));
+      });
+      expect(H.ownListings).toBe(1 + REPAIR_RETRY_ATTEMPTS);
+      view.unmount();
+
+      // A cache snapshot after the failure: the reconnection re-runs it, not the timer.
+      H.ownListings = 0;
+      const cached = renderHook(() => useHiddenUidsSubscription('bob', true));
+      const sub = H.subscriptions[1];
+      act(() => sub.listener(pairs([['alice', 'bob']])));
+      await act(async () => {});
+      act(() => sub.listener({ ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS * 4);
+      });
+      expect(H.ownListings).toBe(1);
+      cached.unmount();
+
+      // Unmounted with a retry pending: it never fires.
+      H.ownListings = 0;
+      const gone = renderHook(() => useHiddenUidsSubscription('bob', true));
+      act(() => H.subscriptions[2].listener(pairs([['alice', 'bob']])));
+      await act(async () => {});
+      gone.unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REPAIR_RETRY_BASE_MS * 4);
+      });
+      expect(H.ownListings).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('signing in while not yet enabled is NOT ready on the very first render (no signed-out carry-over)', () => {

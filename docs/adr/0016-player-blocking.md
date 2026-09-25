@@ -19,7 +19,7 @@ Blocking is **a per-pair, per-viewer narrowing of ADR 0002's attribution and of 
 
 **Scoring, records and the award stay real.** `useLeaderboard`, `players/{uid}`, the tally aggregate, `EventDoc.archive.standings`, every Functions aggregator, the Most-Loved award record and every Day snapshot are untouched and never receive a hidden set. Leaderboard rows are hidden after ranks are computed, keeping rank gaps; podium entries are withheld without promotion. A block never rewrites who was first to BINGO, and there is no rules-level Tally lockdown. A block that lands mid-Event hides retroactively at render, and an unblock restores everything.
 
-**Direction disclosure is inherent.** Reciprocal client-side hiding requires the blocked Player's client to receive the pair record naming the blocker, so a blocked Player can enumerate who blocked them; an unblocker whose direction-only retry succeeds learns the block was mutual. Accepted, and the copy is worded so it does not overclaim.
+**Direction disclosure is inherent.** Reciprocal client-side hiding requires the blocked Player's client to receive the pair record naming the blocker, so a blocked Player can enumerate who blocked them; an unblocker told the pair still stands (`stillHidden`) learns the block was mutual. Accepted, and the copy is worded so it does not overclaim.
 
 **Admins are blockable as a social hide only.** The Admin console, moderation surfaces and Notices never apply block filtering, so moderation reach is unchanged. Avatars, profiles and proof media stay globally readable under `specs/event-membership.md` D9 and are hidden in the display only. Only the blocker can reverse a block.
 

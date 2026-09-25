@@ -28,10 +28,20 @@ export interface HiddenUids {
 const EMPTY: ReadonlySet<string> = new Set();
 
 // Pairs already offered to `reconcileOrphanPair` this session, keyed on the
-// listener key and the counterpart, so each pair costs at most one (almost
-// always denied) server-only delete per app session: durable, because every
-// new session retries, and cheap, because it never repeats within one.
+// listener key and the counterpart, so a pair costs one (almost always denied)
+// server-only delete per app session, plus one each time it REAPPEARS after a
+// subscription's first server answer (the listener clears its entry then, so
+// a reappearing pair that may be a fresh orphan is offered again): durable,
+// because every new session retries, and cheap, because a pair that stays
+// put is never asked about twice in one session.
 const reconcileAttempted = new Set<string>();
+
+// The missing-pair repair's retry backoff after a failure while the listener
+// is server-backed. A failed write produces no snapshot, so without a timer a
+// stable query would never retry it (Codex P1 on #1300). Bounded: after the
+// last retry the repair waits for the next server snapshot, as before.
+export const REPAIR_RETRY_BASE_MS = 5_000;
+export const REPAIR_RETRY_ATTEMPTS = 5;
 
 /** Test seam: forget which pairs this session has already reconciled. */
 export function resetReconcileAttemptsForTests(): void {
@@ -89,6 +99,41 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     let repairChecked = false;
     // Whether this subscription has had its first server-confirmed answer.
     let reconcileSeeded = false;
+    // The latest server-confirmed counterparts and whether the listener is
+    // server-backed now, for a timer-driven repair retry.
+    let latestServer: ReadonlySet<string> = EMPTY;
+    let serverBacked = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retriesLeft = REPAIR_RETRY_ATTEMPTS;
+    let retryDelay = REPAIR_RETRY_BASE_MS;
+    const clearRetry = () => {
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    const runRepair = () => {
+      clearRetry();
+      repairChecked = true;
+      repairMissingPairs({ me: uid, knownCounterparts: latestServer, eventId }).then(
+        () => {
+          retriesLeft = REPAIR_RETRY_ATTEMPTS;
+          retryDelay = REPAIR_RETRY_BASE_MS;
+        },
+        () => {
+          if (!active) return;
+          // Re-armed for the next server snapshot in every case...
+          repairChecked = false;
+          // ...and, while the listener is server-backed, retried on a
+          // doubling timer (offline, the reconnection snapshot re-runs it).
+          if (!serverBacked || retriesLeft <= 0 || retryTimer !== null) return;
+          retriesLeft -= 1;
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (active && serverBacked && !repairChecked) runRepair();
+          }, retryDelay);
+          retryDelay *= 2;
+        },
+      );
+    };
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
@@ -112,6 +157,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         // the next server snapshot (Codex P1 on #1300): one listing per
         // reconnection.
         if (snap.metadata.fromCache) repairChecked = false;
+        serverBacked = !snap.metadata.fromCache;
         if (!snap.metadata.hasPendingWrites) lastCommitted = current;
         // Server-confirmed pairs only (offline the delete could not run, and
         // the attempt would be spent): offer each one to the reconciler once.
@@ -128,13 +174,10 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
           // subscription, and again whenever a pair disappears, which is the
           // only way that race shows on a live listener (Codex P1 on #1300).
           // An ordinary unblock also removes a pair, so it costs one server
-          // listing; a failed (offline) listing re-arms the next snapshot.
-          if (!repairChecked || lostPair) {
-            repairChecked = true;
-            repairMissingPairs({ me: uid, knownCounterparts: current, eventId }).catch(() => {
-              if (active) repairChecked = false;
-            });
-          }
+          // listing; a failed run re-arms the next snapshot and, while the
+          // listener stays server-backed, a bounded backoff timer.
+          latestServer = current;
+          if (!repairChecked || lostPair) runRepair();
         }
         setState({
           key,
@@ -150,6 +193,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     );
     return () => {
       active = false;
+      clearRetry();
       unsub();
     };
   }, [key, uid, eventId]);
