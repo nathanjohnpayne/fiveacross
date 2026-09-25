@@ -1345,9 +1345,12 @@ export function useTallyCards() {
       },
       () => {
         if (!active) return;
+        // A failed listener gives no further answer, so a carry-over (#689)
+        // is as settled as it will get: clear `carried` so consumers stop
+        // waiting on it.
         setState((previous) =>
           previous.key === derivedKey
-            ? { ...previous, loading: false }
+            ? { ...previous, loading: false, carried: false }
             : { key: derivedKey, cards: [], loading: false },
         );
       },
