@@ -71,7 +71,7 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/components/Admin.test.tsx`.
 - The Approvals group lists pending items with submitter attribution.
 - Approve invokes `approveItem` with the queue row, which calls the `approvePrompts` callable; the `active` + `approvedBy`/`approvedAt` write is the server's.
 - Reject invokes the write with `rejected`.
-- Bulk-approve approves every listed row in one action. `src/components/admin-async-feedback.test.tsx` (#1279) pins the bound: with 403 pending it sends exactly the 400 oldest ids in one call under the "Approve oldest 400" label and note, and the re-rendered remainder reads "Approve all" again; with 400 or 3 pending it sends every row under the unchanged label; and the bounded control keeps the `approvalFailureLabel` mapping.
+- Bulk-approve approves every listed row in one action when 400 or fewer are pending, and otherwise the oldest 400 in one action. `src/components/admin-async-feedback.test.tsx` (#1279) pins the bound: with 403 pending it sends exactly the 400 oldest ids in one call under the "Approve oldest 400" label and note, and the re-rendered remainder reads "Approve all" again; with 400 or 3 pending it sends every row under the unchanged label; and the bounded control keeps the `approvalFailureLabel` mapping. `src/data/approvalBatch.test.ts` pins the client bound `MAX_APPROVE_ALL_ITEMS` to the callable's `MAX_APPROVE_PROMPTS_ITEMS` in `functions/src/approvePrompts.ts`.
 
 ### Rules—the write side (create) + the transition (update)
 

@@ -8,7 +8,7 @@
  * callable refuses a larger batch whole, as `invalid-argument`, because one call
  * is one transaction and one shared `approvedAt` instant (ADR 0015). Kept as a
  * client copy rather than an import so `src/` never reaches into `functions/`;
- * change both together.
+ * `./approvalBatch.test.ts` fails when the two differ.
  */
 export const MAX_APPROVE_ALL_ITEMS = 400;
 
