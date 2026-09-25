@@ -3966,7 +3966,10 @@ function referencesCommonJsExports(source) {
   const sourceFile = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   let found = false;
   // A top-level `this` is the CommonJS `exports` object (arrow functions
-  // inherit it; ordinary functions and classes bind their own).
+  // inherit it; ordinary functions and class bodies bind their own). A class
+  // heritage expression, a computed member name and a decorator evaluate in
+  // the scope around the class or member they belong to, so they see the
+  // outer `this`.
   const bindsOwnThis = (node) =>
     ts.isFunctionDeclaration(node) ||
     ts.isFunctionExpression(node) ||
@@ -3980,7 +3983,16 @@ function referencesCommonJsExports(source) {
     if (found) return;
     if (node.kind === ts.SyntaxKind.ThisKeyword) {
       let scope = node.parent;
-      while (scope && !bindsOwnThis(scope)) scope = scope.parent;
+      while (scope && !bindsOwnThis(scope)) {
+        if (ts.isHeritageClause(scope) || ts.isComputedPropertyName(scope) || ts.isDecorator(scope)) {
+          let owner = scope.parent;
+          if (ts.isParameter(owner)) owner = owner.parent;
+          if (bindsOwnThis(owner) && !ts.isClassLike(owner)) owner = owner.parent;
+          scope = ts.isClassLike(owner) ? owner.parent : owner;
+        } else {
+          scope = scope.parent;
+        }
+      }
       if (!scope) {
         found = true;
         return;

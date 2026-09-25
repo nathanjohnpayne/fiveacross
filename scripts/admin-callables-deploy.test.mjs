@@ -155,6 +155,18 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "index.ts"),
             header + "(this as any).unlockDayNow = onCall(async () => 1);\n",
           );
+        } else if (variant === "heritage-this") {
+          // A class heritage expression sees the top-level `this`, not the class's.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + "class Holder extends ((this as any).unlockDayNow = onCall(async () => 1), Object) {}\n",
+          );
+        } else if (variant === "computed-name-this") {
+          // So does a computed member name, even on a method that binds its own.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + "class Holder { [((this as any).unlockDayNow = onCall(async () => 1), \"k\")]() { return 1; } }\n",
+          );
         } else if (variant === "import-alias") {
           await writeFile(
             resolve(fixture, "ops", "src", "index.ts"),
@@ -238,6 +250,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-binding", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-import-alias", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-top-level-this", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-heritage-this", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-computed-name-this", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
