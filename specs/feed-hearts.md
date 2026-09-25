@@ -45,7 +45,7 @@ No heart notification, no who-hearted list (the count is ambient warmth, not a r
 
 ## One frozen downstream consumer
 
-Hearts stay a live, client-derived surface with one exception: at the Standings Freeze the scheduler computes the **Most-Loved Photo** award (specs/most-loved-photo.md, #534/#560) from this collection—once, server-side, persisted onto the Event doc, never recomputed. Its eligibility deliberately DIVERGES from `heartState`'s display semantics: a Player's own heart on their own Proof does not count, and banned Players' hearts are excluded unconditionally (no own-content exception). Nothing in this spec changes: the Heart button, counts, and display filtering are untouched.
+Hearts stay a live, client-derived surface with one exception: at the Standings Freeze the scheduler computes the **Most-Loved Photo** award (specs/most-loved-photo.md, #534/#560) from this collection—once, server-side, persisted onto the Event doc, never recomputed. Its eligibility deliberately DIVERGES from `heartState`'s display semantics: a Player's own heart on their own Proof does not count, and banned Players' hearts are excluded unconditionally (no own-content exception). The award does not change the Heart button, the counts or their display filtering. The award computation also never sees a viewer's Player-block hidden set (#689): that set removes a blocked counterpart's Hearts from the counts a viewer sees, as described above, and stays display-only.
 
 ## Test coverage
 

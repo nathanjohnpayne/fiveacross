@@ -3,7 +3,9 @@
 // moderation.ts posture) so the finale surfaces, the parity test, and the
 // analytics payload all share one derivation:
 //
-//   - `proofFeedVisible` re-states the Feed's exact visibility filter;
+//   - `proofFeedVisible` re-states the Feed's three shared visibility
+//     predicates (not its per-viewer Player-block filter, #689, which is
+//     display-only and never reaches the award);
 //   - `buildMostLovedPhotoAward` MIRRORS
 //     `functions/src/finaleContent.ts#buildMostLovedPhotoAward` — the scheduler
 //     computes and persists, this mirror exists so the semantics are pinnable
