@@ -150,6 +150,12 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         if (variant === "main") {
           await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/main.js" }));
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
+        } else if (variant === "import-alias") {
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header +
+              "namespace admin { export const unlockDayNow = onCall(async () => 1); }\nexport import unlockDayNow = admin.unlockDayNow;\n",
+          );
         } else if (variant === "binding") {
           await writeFile(
             resolve(fixture, "ops", "src", "index.ts"),
@@ -225,6 +231,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // service-renaming `prefix` each make the source index unauthoritative.
     ["ops-variant-main", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-binding", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-import-alias", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],

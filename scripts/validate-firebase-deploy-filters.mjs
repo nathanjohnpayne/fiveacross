@@ -3955,8 +3955,11 @@ const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
  * `module` binding in any form (`exports.x`, `module.exports`,
  * `module["exports"]`, `Object.assign(exports, ...)`), uses an export
  * assignment (`export = {...}`, which compiles to `module.exports`, or
- * `export default`), or exports a destructuring pattern
- * (`export const { a } = ...`): any of them can add an export the declaration
+ * `export default`), or carries an `export` modifier on any statement the
+ * declaration walk does not model: only identifier-named variables,
+ * functions and classes (plus erased interfaces and type aliases) are read,
+ * so a destructured export, `export import x = ...`, `export enum` or
+ * `export namespace` makes the index opaque. Any of them can add an export the
  * walk cannot see.
  */
 function referencesCommonJsExports(source) {
@@ -3968,13 +3971,17 @@ function referencesCommonJsExports(source) {
       found = true;
       return;
     }
-    if (
-      ts.isVariableStatement(node) &&
-      node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
-      node.declarationList.declarations.some((declaration) => !ts.isIdentifier(declaration.name))
-    ) {
-      found = true;
-      return;
+    if (ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+      const modelled = ts.isVariableStatement(node)
+        ? node.declarationList.declarations.every((declaration) => ts.isIdentifier(declaration.name))
+        : ts.isFunctionDeclaration(node) ||
+          ts.isClassDeclaration(node) ||
+          ts.isInterfaceDeclaration(node) ||
+          ts.isTypeAliasDeclaration(node);
+      if (!modelled) {
+        found = true;
+        return;
+      }
     }
     if (ts.isIdentifier(node) && (node.text === "exports" || node.text === "module")) {
       const parent = node.parent;
