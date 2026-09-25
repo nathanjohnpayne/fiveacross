@@ -98,6 +98,14 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           }),
         );
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+      } else if (layout === "ts-default-and-kit") {
+        await mkdir(resolve(fixture, "kit", "src"), { recursive: true });
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { kit: "example-kit", source: "kit" }] }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        await writeFile(resolve(fixture, "kit", "src", "index.ts"), header + callable);
       } else if (layout === "ts-default-and-python-ops") {
         await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
         await writeFile(
@@ -162,6 +170,9 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // A `remoteSource` codebase has no local source to inventory.
     ["ts-default-and-remote", ["--only", "functions"], unknown, unknown],
     ["ts-default-and-remote", [], unknown, unknown],
+    // A kit with a local `source` is never the `default` codebase.
+    ["ts-default-and-kit", ["--only", "functions"], unknown, unknown],
+    ["ts-default-and-kit", ["--only", "functions:default"], { selected: false, conservative: false, strict: "" }, { selected: false, conservative: false, strict: "" }],
     // A CommonJS export assignment is a shape the source walk does not model.
     ["ts-default-and-commonjs-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-commonjs-ops", ["--only", "functions"], unknown, unknown],

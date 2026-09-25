@@ -3983,8 +3983,14 @@ async function protectedServiceInventory(configSource, configPath, table) {
       typeof functionsConfig.codebase === "string" && functionsConfig.codebase
         ? functionsConfig.codebase
         : "default";
+    // A kit is checked first: it carries a `source` of its own but expands to
+    // instance codebases, never `default`.
+    if ("kit" in functionsConfig) {
+      services.set(UNINVENTORIED_CODEBASE, null);
+      continue;
+    }
     if (typeof functionsConfig.source !== "string") {
-      services.set("kit" in functionsConfig ? UNINVENTORIED_CODEBASE : codebase, null);
+      services.set(codebase, null);
       continue;
     }
     if (typeof functionsConfig.runtime === "string" && !functionsConfig.runtime.startsWith("nodejs")) {
