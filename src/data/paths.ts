@@ -13,6 +13,8 @@ import {
   noticeConverter,
   doubtConverter,
   heartConverter,
+  blockConverter,
+  blockPairConverter,
   dayMetaConverter,
 } from './converters';
 
@@ -93,3 +95,24 @@ export const heartsCol = () =>
   collection(db, 'events', EVENT_ID, 'hearts').withConverter(heartConverter);
 export const heartRef = (id: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'hearts', id).withConverter(heartConverter);
+// Player blocking (specs/player-blocking.md): the DIRECTION records
+// events/{eventId}/blocks/{owner}_{target} and the PAIR records
+// events/{eventId}/blockPairs/{lo}_{hi}. Both ids are constructed, never
+// parsed, and the rules bind each to its payload. `eventId` is a parameter
+// for the same reason `heartRef`'s is: a block write captures the acted
+// Event once and must keep addressing it after a hostname change moves
+// `EVENT_ID` underneath it.
+export const blocksCol = (eventId: string = EVENT_ID) =>
+  collection(db, 'events', eventId, 'blocks').withConverter(blockConverter);
+export const blockRef = (ownerUid: string, targetUid: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'blocks', `${ownerUid}_${targetUid}`).withConverter(blockConverter);
+export const blockPairsCol = (eventId: string = EVENT_ID) =>
+  collection(db, 'events', eventId, 'blockPairs').withConverter(blockPairConverter);
+export const blockPairRef = (a: string, b: string, eventId: string = EVENT_ID) =>
+  doc(db, 'events', eventId, 'blockPairs', blockPairId(a, b)).withConverter(blockPairConverter);
+/** The pair id: the two uids in string order, `_`-joined — the same `<`
+ * comparison the rules' `blockPairId` makes. Firebase uids are ASCII, so the
+ * JS code-unit order and the rules' string order agree. */
+export function blockPairId(a: string, b: string): string {
+  return a < b ? `${a}_${b}` : `${b}_${a}`;
+}
