@@ -138,12 +138,7 @@ function visibleLastCallLine(
   if (moment.kind !== 'last_call') return undefined;
   if (moment.lastCall?.players) {
     const unbanned = moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids));
-    // A ban closes its gap, so the line re-derives over the unbanned field. A
-    // Player block (#689) does not: when the line would name a hidden leader it
-    // is withheld for the generic copy, never handed to the runner-up. A hidden
-    // runner-up stays in the field, since the line names only the leader.
-    if (unbanned.length > 0 && isHiddenFor(rankLastCallPlayers(unbanned)[0].uid, hiddenUids)) return undefined;
-    return lastCallLineFromPlayers(
+    const line = lastCallLineFromPlayers(
       unbanned,
       // #800: read the scheduler's persisted freeze-time phrase rather than a
       // hardcoded literal, so this reconstruction can never quote a different
@@ -151,6 +146,15 @@ function visibleLastCallLine(
       // posted before #800.
       moment.lastCall.freezePhrase ?? DEFAULT_FREEZE_PHRASE,
     );
+    // A ban closes its gap, so the line re-derives over the unbanned field. A
+    // Player block (#689) does not: when the line NAMES a hidden leader (every
+    // naming form opens with the leader's name) it is withheld for the generic
+    // copy, never handed to the runner-up. The identity-free forms ("wide
+    // open", "neck and neck") stand, and a hidden runner-up stays in the field,
+    // since the line names only the leader.
+    const leader = rankLastCallPlayers(unbanned)[0];
+    if (leader && isHiddenFor(leader.uid, hiddenUids) && line.startsWith(leader.displayName)) return undefined;
+    return line;
   }
   // Legacy last-call Moments only carry a pre-rendered string, so a later ban
   // (or a viewer's block, #689) cannot be applied safely. Fail closed when any

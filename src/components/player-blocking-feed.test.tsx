@@ -216,6 +216,29 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(line).toBe('posted the final-night standings!');
   });
 
+  it('keeps the identity-free neck-and-neck line when a hidden Player ties at the top', () => {
+    const lastCall = {
+      id: 'last_call',
+      kind: 'last_call',
+      uid: 'system',
+      displayName: '',
+      photoURL: null,
+      createdAt: 30,
+      line: '',
+      lastCall: {
+        freezePhrase: 'standings freeze at 8 a.m',
+        players: [
+          { uid: 'blocked', displayName: 'Anna Blocked', bingoCount: 2, squaresMarked: 15 },
+          { uid: 'friend', displayName: 'Friend Fin', bingoCount: 2, squaresMarked: 15 },
+        ],
+      },
+    } as MomentDoc;
+    mount({ moments: [lastCall] });
+    expect(document.querySelector('.moment-last_call .moment-line')?.textContent).toBe(
+      "It's neck and neck at the top going into the final night—standings freeze at 8 a.m.",
+    );
+  });
+
   it('keeps naming an unhidden leader when only the runner-up is hidden', () => {
     const lastCall = {
       id: 'last_call',
