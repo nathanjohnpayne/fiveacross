@@ -1,6 +1,6 @@
 ---
 status: accepted
-implemented: false
+implemented: true
 ---
 
 # Player blocking is a per-pair, per-viewer, display-only narrowing, enforced by rules only on its own records and on Hearts

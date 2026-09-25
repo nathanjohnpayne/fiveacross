@@ -107,6 +107,29 @@ describe('BlockPlayerButton', () => {
     expect(document.activeElement?.classList.contains('sheet-title')).toBe(true);
   });
 
+  it('on the Board, whose TallySheet is a bare .sheet, focus lands in that sheet too', async () => {
+    const TallySheet = ({ showRow }: { showRow: boolean }) => (
+      <div className="sheet-backdrop">
+        <div className="sheet">
+          <div className="sheet-title">Who got “Towel animal”</div>
+          {showRow && (
+            <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="board_wholist" block={() => Promise.resolve()} />
+          )}
+        </div>
+      </div>
+    );
+    const { rerender, container } = render(<TallySheet showRow />);
+    const trigger = screen.getByRole('button', { name: 'Block Bea' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    rerender(<TallySheet showRow={false} />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(container.querySelector('.sheet-title'));
+  });
+
   it('a rejected block logs and fires no event', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const rejected = vi.fn(() => Promise.reject(new Error('permission-denied')));
@@ -229,4 +252,20 @@ describe('BlockedPlayersPanel', () => {
     expect(screen.getByRole('button', { name: 'Unblock Loading…' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Unblock Dee' })).not.toBeDisabled();
   });
+
+  it('keeps keyboard focus inside the panel when the focused confirm and then the row unmount', async () => {
+    H.myBlocks.data = [direction('bea', 1)];
+    H.players = [{ uid: 'bea', displayName: 'Bea' }];
+    let land: (v: { stillHidden: boolean }) => void = () => {};
+    H.unblockPlayer.mockReturnValue(new Promise((r) => (land = r)));
+    const { container } = render(<BlockedPlayersPanel uid="viewer" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Bea' }));
+    const yes = screen.getByRole('button', { name: 'Yes, unblock' });
+    yes.focus();
+    fireEvent.click(yes);
+    expect(document.activeElement).toBe(container.firstElementChild);
+    await act(async () => land({ stillHidden: false }));
+    expect(document.activeElement).toBe(screen.getByRole('status'));
+  });
 });
+

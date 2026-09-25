@@ -108,8 +108,9 @@ function BlockConfirmSheet({
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     // The sheet a who-list trigger sat in, if any: where focus falls back to when
-    // the optimistic block unmounts the trigger's row.
-    const hostSheet = previouslyFocused?.closest<HTMLElement>('[role="dialog"]') ?? null;
+    // the optimistic block unmounts the trigger's row. The Feed who-list is a
+    // `role="dialog"`; the Board's TallySheet is a bare `.sheet`, so match both.
+    const hostSheet = previouslyFocused?.closest<HTMLElement>('[role="dialog"], .sheet') ?? null;
     titleRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -145,9 +146,15 @@ function BlockConfirmSheet({
         if (!previouslyFocused || previouslyFocused.isConnected || !hostSheet?.isConnected) return;
         const active = document.activeElement;
         if (active && active !== document.body && active.isConnected) return;
-        const target =
+        let target =
           hostSheet.querySelector<HTMLElement>('.sheet-title[tabindex]') ??
           hostSheet.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+        if (!target) {
+          // Nothing focusable left (the Board title carries no tabindex): make the
+          // title a programmatic focus target rather than lose focus to the page.
+          target = hostSheet.querySelector<HTMLElement>('.sheet-title');
+          target?.setAttribute('tabindex', '-1');
+        }
         target?.focus();
       }, 0);
     };

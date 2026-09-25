@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { unblockPlayer } from '../data/blocks';
 import { useMyBlocks } from '../hooks/useBlocks';
 import { useLeaderboard } from '../hooks/useData';
@@ -41,6 +41,8 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
   // even if the own-blocks listener is slow to deliver the deletion.
   const [unblocked, setUnblocked] = useState<Record<string, number>>({});
   const inFlight = useRef(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
   const occasion = editionBrand().lexicon.occasion;
 
   // "A player" is reserved for a target with no Player row on a server-confirmed
@@ -75,14 +77,29 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
     }
   };
 
+  // Confirming unmounts the focused "Yes, unblock", and a landed unblock removes
+  // its whole row, so keyboard focus would drop to <body> behind the open panel.
+  // Keep it inside: on the panel while the request runs, then on the outcome.
+  useEffect(() => {
+    const active = document.activeElement;
+    const lost = !active || active === document.body || !active.isConnected || active === rootRef.current;
+    if (!lost) return;
+    (outcome ? statusRef : rootRef).current?.focus();
+  }, [pending, outcome]);
+
   return (
-    <div className="blocked-panel ph-no-capture">
+    <div className="blocked-panel ph-no-capture" ref={rootRef} tabIndex={-1}>
       <p className="muted">
         A block hides you and the other player from each other for this {occasion}. Only you can undo a block you
         made.
       </p>
       {outcome && (
-        <p className={outcome.kind === 'error' ? 'block-error' : 'block-outcome'} role="status">
+        <p
+          className={outcome.kind === 'error' ? 'block-error' : 'block-outcome'}
+          role="status"
+          ref={statusRef}
+          tabIndex={-1}
+        >
           {outcome.kind === 'done' && `Unblocked ${outcome.name}.`}
           {outcome.kind === 'still-hidden' &&
             `Unblocked ${outcome.name}. You’re still hidden from each other for now—usually that means they’ve blocked you too.`}

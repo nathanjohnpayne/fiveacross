@@ -218,4 +218,15 @@ describe('More menu — "How to play" replays the coach overlay (#214)', () => {
     expect(document.activeElement).toBe(close);
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
+
+  it('the panel focus trap pulls focus that fell to <body> back inside', () => {
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Blocked players/ }));
+    const close = screen.getByRole('button', { name: 'Close' });
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+    expect(document.activeElement).toBe(close);
+  });
 });
+

@@ -338,13 +338,17 @@ function MorePanel({ title, onClose, children }: { title: string; onClose: () =>
       if (!focusable || focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
+      // Focus that has fallen outside the panel (a control inside it unmounted,
+      // dropping focus to <body>) is pulled back in rather than let loose on the
+      // obscured More page.
+      const inside = dialogRef.current?.contains(document.activeElement) ?? false;
       // The title also holds focus (tabIndex=-1, the initial landing spot) but
       // is deliberately excluded from FOCUSABLE_SELECTOR — treat it as
       // preceding `first` so Shift+Tab from it still wraps to the end.
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === titleRef.current)) {
+      if (e.shiftKey && (!inside || document.activeElement === first || document.activeElement === titleRef.current)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
         e.preventDefault();
         first.focus();
       }
