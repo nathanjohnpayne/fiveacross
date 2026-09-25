@@ -518,6 +518,19 @@ describe('PostHog client config (full capture, unlocked)', () => {
     expect(POSTHOG_INIT_OPTIONS.session_recording).toEqual({ maskAllInputs: false });
   });
 
+  it('disables every feature-flag request but keeps remote config loading (#1297)', () => {
+    // The /flags request carries persistence.get_initial_props() (raw
+    // $initial_utm_* and the full $initial_current_url) outside before_send.
+    // advanced_disable_feature_flags makes reloadFeatureFlags() return early,
+    // so no trigger (identify, signed-out reset, first remote-config load,
+    // 5-minute refresh) sends one. The broader switches also skip remote
+    // config, which would stop session-replay settings loading.
+    expect(POSTHOG_INIT_OPTIONS.advanced_disable_feature_flags).toBe(true);
+    expect(POSTHOG_INIT_OPTIONS.advanced_disable_flags).toBeUndefined();
+    expect(POSTHOG_INIT_OPTIONS.advanced_disable_decide).toBeUndefined();
+    expect(POSTHOG_INIT_OPTIONS.disable_session_recording).toBe(false);
+  });
+
   it('routes the UI to the PostHog US app while events go through the proxy (#149)', () => {
     // ui_host must stay the real US app so the toolbar / "view in PostHog" links
     // resolve even though ingestion (api_host) points at the reverse proxy.
@@ -569,11 +582,30 @@ describe('PostHog init with a key', () => {
         disable_session_recording: false,
         capture_pageview: 'history_change',
         person_profiles: 'identified_only',
+        advanced_disable_feature_flags: true,
       }),
     );
     // Once ready, an explicit event is forwarded to the SDK.
     mod.phCapture('bingo', { lines: 1 });
     expect(ph.capture).toHaveBeenCalledWith('bingo', { lines: 1 });
+  });
+
+  it('still calls identify() and reset() as before with feature-flag requests disabled (#1297)', async () => {
+    // Disabling /flags is an init option only: identity stitching and the
+    // signed-out reset keep reaching the SDK unchanged, so $identify merges and
+    // person profiles are unaffected.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    expect(ph.init).toHaveBeenCalledWith('phc_test', expect.objectContaining({ advanced_disable_feature_flags: true }));
+
+    expect(mod.phIdentify('u1')).toBe(true);
+    expect(ph.identify).toHaveBeenCalledWith('u1');
+    expect(mod.phReset()).toBe(true);
+    expect(ph.reset).toHaveBeenCalledTimes(1);
   });
 
   it('replays a capture that arrived BEFORE init settled (#513 — the startup-crash report)', async () => {
