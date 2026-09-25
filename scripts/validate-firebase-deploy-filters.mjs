@@ -171,24 +171,30 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
-// The local names a module declares ONLY as types: an interface, a type alias,
-// or an `import type` binding, with no value declaration of the same name.
-// TypeScript erases `export { name }` of such a binding even without a `type`
-// modifier, so it publishes nothing and must not become strict. Any value
+// The local names a module declares with no runtime value: an interface, a
+// type alias, an `import type` binding, or an ambient `declare` declaration,
+// with no value declaration of the same name. `export { name }` of such a
+// binding publishes nothing callable (a type is erased; an ambient binding is
+// at most an `undefined` property), so it must not become strict. Any value
 // declaration of the name (a variable, function, class, enum, namespace or a
 // value import) keeps it, since declaration merging then exports the value.
 function localTypeOnlyNames(sourceFile) {
   const types = new Set();
   const values = new Set();
-  const addBindingNames = (name) => {
-    if (ts.isIdentifier(name)) values.add(name.text);
-    else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBindingNames(element.name);
+  const addBindingNames = (name, bucket) => {
+    if (ts.isIdentifier(name)) bucket.add(name.text);
+    else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBindingNames(element.name, bucket);
   };
   for (const statement of sourceFile.statements) {
+    const ambient = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword) ?? false;
     if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
       types.add(statement.name.text);
     } else if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) addBindingNames(declaration.name);
+      for (const declaration of statement.declarationList.declarations) {
+        addBindingNames(declaration.name, ambient ? types : values);
+      }
+    } else if (ambient && statement.name && ts.isIdentifier(statement.name)) {
+      types.add(statement.name.text);
     } else if (
       (ts.isFunctionDeclaration(statement) ||
         ts.isClassDeclaration(statement) ||

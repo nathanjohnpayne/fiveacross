@@ -261,6 +261,18 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "index.ts"),
             header + callable + "type approvePrompts = { value: string };\nexport { approvePrompts };\n",
           );
+        } else if (variant === "ambient-clause") {
+          // An ambient binding is at most an `undefined` property, not an endpoint.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "declare const approvePrompts: unknown;\nexport { approvePrompts };\n",
+          );
+        } else if (variant === "star-ambient-clause") {
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + callable + "declare function approvePrompts(): void;\nexport { approvePrompts };\n",
+          );
         } else if (variant === "interface-merged-value") {
           // A value merged with a same-named interface is still exported.
           await writeFile(
@@ -386,8 +398,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ],
-    // A local type-only binding in a named export clause publishes nothing.
-    ...["star-interface-clause", "interface-clause"].map((variant) => [
+    // A local type-only or ambient binding in a named export clause publishes nothing.
+    ...["star-interface-clause", "interface-clause", "ambient-clause", "star-ambient-clause"].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
