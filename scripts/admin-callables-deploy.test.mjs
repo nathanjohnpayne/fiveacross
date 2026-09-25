@@ -249,6 +249,30 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           // A star of a module the walk models stays inventoried.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
           await writeFile(resolve(fixture, "ops", "src", "admin.ts"), header + callable);
+        } else if (variant === "star-interface-clause") {
+          // `export { name }` of a local interface is erased and publishes nothing.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + callable + "interface approvePrompts { value: string }\nexport { approvePrompts };\n",
+          );
+        } else if (variant === "interface-clause") {
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "type approvePrompts = { value: string };\nexport { approvePrompts };\n",
+          );
+        } else if (variant === "interface-merged-value") {
+          // A value merged with a same-named interface is still exported.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header +
+              callable +
+              "const approvePrompts = onCall(async () => 1);\ninterface approvePrompts { value: string }\nexport { approvePrompts };\n",
+          );
+        } else if (variant === "functions-yaml") {
+          // A discovery manifest decides the surface before the index loads.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), header + callable);
+          await writeFile(resolve(fixture, "ops", "functions.yaml"), "endpoints: {}\n");
         } else if (variant === "import-alias") {
           await writeFile(
             resolve(fixture, "ops", "src", "index.ts"),
@@ -362,6 +386,20 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ],
+    // A local type-only binding in a named export clause publishes nothing.
+    ...["star-interface-clause", "interface-clause"].map((variant) => [
+      `ops-variant-${variant}`,
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock" },
+      { selected: false, conservative: false, strict: "" },
+    ]),
+    [
+      "ops-variant-interface-merged-value",
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock,approve" },
+      { selected: false, conservative: false, strict: "" },
+    ],
+    ["ops-variant-functions-yaml", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],

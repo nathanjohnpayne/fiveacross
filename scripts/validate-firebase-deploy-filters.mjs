@@ -171,6 +171,59 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
+// The local names a module declares ONLY as types: an interface, a type alias,
+// or an `import type` binding, with no value declaration of the same name.
+// TypeScript erases `export { name }` of such a binding even without a `type`
+// modifier, so it publishes nothing and must not become strict. Any value
+// declaration of the name (a variable, function, class, enum, namespace or a
+// value import) keeps it, since declaration merging then exports the value.
+function localTypeOnlyNames(sourceFile) {
+  const types = new Set();
+  const values = new Set();
+  const addBindingNames = (name) => {
+    if (ts.isIdentifier(name)) values.add(name.text);
+    else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBindingNames(element.name);
+  };
+  for (const statement of sourceFile.statements) {
+    if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
+      types.add(statement.name.text);
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) addBindingNames(declaration.name);
+    } else if (
+      (ts.isFunctionDeclaration(statement) ||
+        ts.isClassDeclaration(statement) ||
+        ts.isEnumDeclaration(statement) ||
+        ts.isModuleDeclaration(statement) ||
+        ts.isImportEqualsDeclaration(statement)) &&
+      statement.name &&
+      ts.isIdentifier(statement.name)
+    ) {
+      values.add(statement.name.text);
+    } else if (ts.isImportDeclaration(statement) && statement.importClause) {
+      const clause = statement.importClause;
+      const bucket = clause.isTypeOnly ? types : values;
+      if (clause.name) bucket.add(clause.name.text);
+      const bindings = clause.namedBindings;
+      if (bindings && ts.isNamespaceImport(bindings)) bucket.add(bindings.name.text);
+      else if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          (clause.isTypeOnly || element.isTypeOnly ? types : values).add(element.name.text);
+        }
+      }
+    }
+  }
+  for (const name of values) types.delete(name);
+  return types;
+}
+
+// Whether a named export element publishes a runtime value: a local
+// `export { name }` of a binding declared only as a type does not.
+function exportElementIsValue(statement, element, typeOnlyNames) {
+  if (element.isTypeOnly) return false;
+  if (statement.moduleSpecifier) return true;
+  return !typeOnlyNames.has((element.propertyName ?? element.name).text);
+}
+
 // The names a local module exports through `export *`, read by name rather
 // than by value: every export-modified declaration name, every named export
 // or re-export (local or from a package), and the same through nested local
@@ -182,6 +235,7 @@ function starExportedNames(file, seen = new Set()) {
   if (seen.has(file)) return names;
   seen.add(file);
   const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile);
   for (const statement of sourceFile.statements) {
     // An ambient `export declare` is erased and publishes nothing.
     const exported =
@@ -196,7 +250,7 @@ function starExportedNames(file, seen = new Set()) {
     } else if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
       if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) {
-          if (!element.isTypeOnly) names.add(element.name.text);
+          if (exportElementIsValue(statement, element, typeOnlyNames)) names.add(element.name.text);
         }
       } else if (!statement.exportClause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
         const target = resolveModule(file, statement.moduleSpecifier.text);
@@ -224,6 +278,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     false,
     ts.ScriptKind.TS,
   );
+  const typeOnlyNames = localTypeOnlyNames(sourceFile);
   for (const statement of sourceFile.statements) {
     const exported =
       statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
@@ -257,7 +312,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     }
     if (ts.isNamedExports(statement.exportClause)) {
       for (const specifier of statement.exportClause.elements) {
-        if (!specifier.isTypeOnly) exportedNames.add(specifier.name.text);
+        if (exportElementIsValue(statement, specifier, typeOnlyNames)) exportedNames.add(specifier.name.text);
       }
     }
   }
@@ -3991,7 +4046,9 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
  * a TypeScript index), a `prefix` (the CLI renames every service), a source
- * directory with no `package.json` (the CLI then infers a non-Node runtime), a
+ * directory carrying a `functions.yaml` manifest (it decides discovery before
+ * the index loads), a source directory with no `package.json` (the CLI then
+ * infers a non-Node runtime), a
  * `package.json` that is unreadable, invalid, or names a `main` other than
  * `lib/index.js`, a source directory with no `src/index.ts`, or an index, or a
  * local module it reaches through `export *`, that `referencesCommonJsExports`
@@ -4153,6 +4210,20 @@ async function protectedServiceInventory(configSource, configPath, table) {
     // (`runtimes/node/index.js` `tryCreateDelegate`), else it tries Python
     // (`requirements.txt`) and Dart (`pubspec.yaml`), so a source directory
     // without one is not a Node codebase whatever TypeScript it carries.
+    // A `functions.yaml` manifest in the source directory decides discovery
+    // before the SDK loads the index (`runtimes/node/index.js`
+    // `discoverBuild`), so the index does not prove the published surface.
+    const sourceDir = resolve(dirname(configPath), functionsConfig.source);
+    let sourceEntries = [];
+    try {
+      sourceEntries = await readdir(sourceDir);
+    } catch {
+      sourceEntries = [];
+    }
+    if (sourceEntries.some((name) => /^functions\.ya?ml$/i.test(name))) {
+      services.set(codebase, null);
+      continue;
+    }
     const packagePath = resolve(dirname(configPath), functionsConfig.source, "package.json");
     if (!existsSync(packagePath) && existsSync(resolve(dirname(configPath), functionsConfig.source))) {
       services.set(codebase, null);
