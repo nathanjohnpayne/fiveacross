@@ -106,7 +106,7 @@ Part 3. No new route and no `App.tsx` change; every control is display-only glue
 
 ### Analytics
 
-Two catalogued events (`GA4_EVENTS`, both sinks), neither carrying a uid, a display name or anything else that identifies either Player, since a block is a private safety action. `block_player { surface }` (`'proof_card' | 'feed_wholist' | 'board_wholist'`) fires once the block batch commits, which for an offline block is on reconnect. `unblock_player { stillHidden }` fires once `unblockPlayer` resolves. Both go through `trackIfCurrentEvent` with the Event captured when the Player acted, so a write that settles after another Event activated is never reported as that Event's.
+Two catalogued events (`GA4_EVENTS`, both sinks), neither carrying a uid, a display name or anything else that identifies either Player, since a block is a private safety action. `block_player { surface }` (`'proof_card' | 'feed_wholist' | 'board_wholist'`) fires once the block batch commits, which for an offline block is on reconnect while the page that made it is still open. An accepted residual, the same as every other `trackIfCurrentEvent` caller: the event rides that page's promise, so a Player who closes or reloads the app before reconnecting still has the block enforced once the queued batch commits in a later session, but no `block_player` is sent for it. A durable analytics intent for late-committing writes is tracked in #1319. `unblock_player { stillHidden }` fires once `unblockPlayer` resolves. Both go through `trackIfCurrentEvent` with the Event captured when the Player acted, so a write that settles after another Event activated is never reported as that Event's.
 
 ## Frozen and denormalised content
 

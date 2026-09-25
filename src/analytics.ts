@@ -162,7 +162,9 @@ export const GA4_EVENTS = [
   //
   // A Player blocked another. Params: `surface` ('proof_card' |
   // 'feed_wholist' | 'board_wholist'). Fires after the block batch commits,
-  // which for a block made offline is on reconnect.
+  // which for a block made offline is on reconnect while its page is still
+  // open; a block that commits after a reload is enforced but not counted
+  // (accepted residual, #1319).
   // Call site: components/BlockPlayerButton.tsx.
   'block_player',
   // A Player reversed a block they made. Params: `stillHidden` (the pair still
