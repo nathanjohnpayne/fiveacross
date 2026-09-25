@@ -107,6 +107,9 @@ function BlockConfirmSheet({
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
+    // The sheet a who-list trigger sat in, if any: where focus falls back to when
+    // the optimistic block unmounts the trigger's row.
+    const hostSheet = previouslyFocused?.closest<HTMLElement>('[role="dialog"]') ?? null;
     titleRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -134,6 +137,19 @@ function BlockConfirmSheet({
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
       previouslyFocused?.focus();
+      // A confirmed block hides the counterpart at once, which usually unmounts
+      // the trigger (its Proof card or who-list row) in this commit or the next.
+      // Once it is detached, land focus on the host who-list sheet if it is still
+      // open, so keyboard focus never drops to <body> behind a live dialog.
+      setTimeout(() => {
+        if (!previouslyFocused || previouslyFocused.isConnected || !hostSheet?.isConnected) return;
+        const active = document.activeElement;
+        if (active && active !== document.body && active.isConnected) return;
+        const target =
+          hostSheet.querySelector<HTMLElement>('.sheet-title[tabindex]') ??
+          hostSheet.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+        target?.focus();
+      }, 0);
     };
   }, []);
 

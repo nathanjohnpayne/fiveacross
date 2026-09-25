@@ -82,6 +82,31 @@ describe('BlockPlayerButton', () => {
     document.removeEventListener('keydown', beneath);
   });
 
+  it('when the block unmounts the trigger, focus lands on the host who-list sheet, not <body>', async () => {
+    const Host = ({ showRow }: { showRow: boolean }) => (
+      <div role="dialog" aria-label="Who marked it">
+        <div className="sheet-title" tabIndex={-1}>
+          Who marked it
+        </div>
+        {showRow && (
+          <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="feed_wholist" block={() => Promise.resolve()} />
+        )}
+      </div>
+    );
+    const { rerender } = render(<Host showRow />);
+    const trigger = screen.getByRole('button', { name: 'Block Bea' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    // The optimistic block hides Bea, unmounting her row and its trigger.
+    rerender(<Host showRow={false} />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.classList.contains('sheet-title')).toBe(true);
+  });
+
   it('a rejected block logs and fires no event', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const rejected = vi.fn(() => Promise.reject(new Error('permission-denied')));
