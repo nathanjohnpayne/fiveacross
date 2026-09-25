@@ -60,6 +60,7 @@ import {
   computeHiddenSet,
   hiddenUidsFromPairs,
   isPermissionDenied,
+  reconcileOrphanPair,
   unblockPlayer,
 } from './blocks';
 
@@ -104,8 +105,9 @@ describe('blockPlayer', () => {
     expect(H.batches[0].set.mock.calls[1][0]).toBe('events/event-b/blockPairs/alice_bob');
   });
 
-  it('refuses a self-block or a missing uid before touching Firestore', () => {
+  it('refuses a self-block, the reserved system author, or a missing uid before touching Firestore', () => {
     expect(() => blockPlayer({ me: 'bob', target: 'bob' })).toThrow(/themselves/);
+    expect(() => blockPlayer({ me: 'bob', target: 'system' })).toThrow(/server-written/);
     expect(() => blockPlayer({ me: '', target: 'bob' })).toThrow(/required/);
     expect(H.batches).toHaveLength(0);
   });
@@ -184,6 +186,23 @@ describe('unblockPlayer', () => {
   it('refuses a self-unblock', async () => {
     await expect(unblockPlayer({ me: 'bob', target: 'bob' })).rejects.toThrow(/themselves/);
     expect(H.batches).toHaveLength(0);
+  });
+});
+
+describe('reconcileOrphanPair', () => {
+  it('sends ONE server-only pair delete and reports whether it landed', async () => {
+    await expect(reconcileOrphanPair({ me: 'bob', target: 'alice' })).resolves.toBe(true);
+    expect(H.batches).toHaveLength(1);
+    expect(H.batches[0].kind).toBe('transaction');
+    expect(H.batches[0].delete.mock.calls).toEqual([['events/event-a/blockPairs/alice_bob']]);
+  });
+
+  it('never rejects: a denial (a direction still stands) or any other failure resolves false', async () => {
+    H.commitResults = [denied, Object.assign(new Error('unavailable'), { code: 'unavailable' })];
+    await expect(reconcileOrphanPair({ me: 'bob', target: 'alice' })).resolves.toBe(false);
+    await expect(reconcileOrphanPair({ me: 'bob', target: 'alice' })).resolves.toBe(false);
+    await expect(reconcileOrphanPair({ me: 'bob', target: 'bob' })).resolves.toBe(false);
+    expect(H.batches).toHaveLength(2);
   });
 });
 

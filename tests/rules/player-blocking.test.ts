@@ -170,6 +170,8 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         misbound.set(doc(fs, pairPath(ALICE, BOB)), pair(ALICE, BOB));
         await assertFails(misbound.commit());
         await assertFails(blockBatch(db(ALICE), ALICE, 'bo_b'));
+        // The reserved author of server-written Moments cannot be blocked.
+        await assertFails(blockBatch(db(ALICE), ALICE, 'system'));
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { note: 'extra' }));
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { eventId: 'other' }));
         await assertFails(blockBatch(db(ALICE), ALICE, BOB, { createdAt: NOW() + 3600000 }));

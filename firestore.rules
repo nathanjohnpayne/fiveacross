@@ -71,7 +71,8 @@ service cloud.firestore {
     // #425), AND its author must not sit across a block from the caller
     // (#689). One `get()` serves both questions; the pair check adds one
     // `exists()`. A server-authored Moment (`uid: 'system'`) or a target with
-    // no author never names a pair, so it is never denied here.
+    // no author never names a pair (the block arms refuse 'system' as a
+    // target), so it is never denied here.
     function heartTargetAccepts(eventId, data) {
       let target = heartTargetData(eventId, data);
       return target.createdAt == data.targetCreatedAt
@@ -2810,11 +2811,15 @@ service cloud.firestore {
       // (2026-09-24, enforcement bar A) and recorded in the spec and ADR.
       //
       // INVARIANT I: the pair record exists if and only if at least one
-      // direction record exists. Every client write is one atomic batch, and
-      // every arm checks the batch's RESULT with `existsAfter`, so no
-      // committed state can violate it: a direction cannot be created or
-      // kept without its pair, and a pair cannot be created without the
-      // caller's own direction or deleted while either direction stands.
+      // direction record exists. Every client write is one atomic commit, and
+      // every arm checks the commit's RESULT with `existsAfter`, so no single
+      // commit can break it: a direction cannot be created or kept without
+      // its pair, and a pair cannot be created without the caller's own
+      // direction or deleted while either direction stands. The one state it
+      // does not rule out is a pair left with NO direction by two concurrent
+      // direction-only unblocks, each authorized while the other direction
+      // still stood; the pair delete arm lets either party remove such a
+      // pair, and the client reconciles it (specs/player-blocking.md).
       //
       // No `eventOpenForPlay` conjunct on purpose: blocking is a safety
       // action and stays available on a closing or archived Event. No Admin
@@ -2834,6 +2839,10 @@ service cloud.firestore {
           // No self-block. The target need not be a member or a Player:
           // checking would spend a get() and buy nothing.
           && request.resource.data.targetUid != request.auth.uid
+          // ...but never the reserved author of server-written Moments, or a
+          // pair naming it would deny the blocker's Hearts on every one of
+          // them (Codex P2 on #1300); `heartTargetAccepts` relies on this.
+          && request.resource.data.targetUid != 'system'
           && request.resource.data.eventId == eventId
           // Bind the id to the payload so nobody can park a record at
           // another owner's slot (the doubts/hearts binding shape).

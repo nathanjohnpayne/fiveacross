@@ -24,6 +24,7 @@ export interface BlockPairParams {
 function assertPair(me: string, target: string): void {
   if (!me || !target) throw new Error('[blocks] both uids are required');
   if (me === target) throw new Error('[blocks] a Player cannot block themselves');
+  if (target === 'system') throw new Error('[blocks] server-written Moments have no Player to block');
 }
 
 /**
@@ -123,6 +124,28 @@ export async function unblockPlayer({
     return { stillHidden: false };
   } catch {
     return { stillHidden: true };
+  }
+}
+
+/**
+ * Remove a pair that no direction record backs any more, if that is what it
+ * is. The durable half of the concurrent-mutual-unblock cleanup (Codex P1 on
+ * #1300): `unblockPlayer`'s own cleanup is best-effort, so if both parties'
+ * direction-only retries land and both cleanups fail (a dropped connection, a
+ * lost acknowledgement), the provider calls this once per session for every
+ * pair it sees. It is SAFE to call on any pair: the rules allow the delete
+ * only when neither direction exists server-side, so an ordinary pair (either
+ * party's direction standing) is simply denied, which is the common outcome
+ * and changes nothing on the device (`deleteOnServer` is server-only).
+ * Resolves true when a pair was removed; never rejects.
+ */
+export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: BlockPairParams): Promise<boolean> {
+  try {
+    assertPair(me, target);
+    await deleteOnServer([blockPairRef(me, target, eventId)]);
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -19,6 +19,8 @@ type Subscription = {
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
   subscriptions: [] as Subscription[],
+  // Every server-only pair delete the reconciler sends, by document path.
+  reconciled: [] as string[],
 }));
 
 vi.mock('../firebase', () => ({
@@ -29,6 +31,15 @@ vi.mock('../firebase', () => ({
 }));
 vi.mock('firebase/firestore', () => ({
   collection: (_db: unknown, ...segments: string[]) => ({ kind: 'collection', path: segments.join('/'), withConverter() { return this; } }),
+  doc: (_db: unknown, ...segments: string[]) => ({ kind: 'doc', path: segments.join('/'), withConverter() { return this; } }),
+  writeBatch: () => {
+    throw new Error('the provider never writes a batch');
+  },
+  runTransaction: async (_db: unknown, update: (tx: { delete: (ref: { path: string }) => void }) => Promise<void>) => {
+    await update({ delete: (ref) => H.reconciled.push(ref.path) });
+    // The common outcome: a direction still stands, so the rules deny it.
+    throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
+  },
   query: (...args: unknown[]) => ({ kind: 'query', args }),
   where: (...args: unknown[]) => ({ kind: 'where', args }),
   onSnapshot: (...args: unknown[]) => {
@@ -45,7 +56,13 @@ vi.mock('firebase/firestore', () => ({
   },
 }));
 
-import { HiddenUidsProvider, useHiddenUids, useHiddenUidsSubscription, useMyBlocks } from './useBlocks';
+import {
+  HiddenUidsProvider,
+  resetReconcileAttemptsForTests,
+  useHiddenUids,
+  useHiddenUidsSubscription,
+  useMyBlocks,
+} from './useBlocks';
 
 const pairs = (rows: Array<[string, string]>, hasPendingWrites = false) => ({
   docs: rows.map((uids) => ({ data: () => ({ uids, eventId: H.eventId }) })),
@@ -57,6 +74,8 @@ const pathOf = (sub: Subscription) => ((sub.target as { args: unknown[] }).args[
 beforeEach(() => {
   H.eventId = 'event-a';
   H.subscriptions = [];
+  H.reconciled = [];
+  resetReconcileAttemptsForTests();
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -103,6 +122,28 @@ describe('useHiddenUidsSubscription', () => {
     // ...and the settled snapshot is what finally reveals.
     act(() => sub.listener(pairs([])));
     expect([...view.result.current.hidden]).toEqual([]);
+  });
+
+  it('offers each server-confirmed pair to the orphan reconciler once per session, never from cache or a pending snapshot', async () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[0];
+    const cached = { ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } };
+    act(() => sub.listener(cached));
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'carol']], true)));
+    expect(H.reconciled).toEqual([]);
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'carol']])));
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'carol']])));
+    await act(async () => {});
+    expect([...H.reconciled].sort()).toEqual(['events/event-a/blockPairs/alice_bob', 'events/event-a/blockPairs/bob_carol']);
+    // A denial (a direction still stands) changes nothing the viewer sees.
+    expect([...view.result.current.hidden].sort()).toEqual(['alice', 'carol']);
+    // A remount in the same session does not ask again.
+    view.unmount();
+    const again = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.reconciled).toHaveLength(2);
+    again.unmount();
   });
 
   it('signing in while not yet enabled is NOT ready on the very first render (no signed-out carry-over)', () => {

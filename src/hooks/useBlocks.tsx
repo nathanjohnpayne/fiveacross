@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { onSnapshot, query, where } from 'firebase/firestore';
 import { EVENT_ID } from '../firebase';
 import { blockPairsCol, blocksCol } from '../data/paths';
-import { computeHiddenSet, hiddenUidsFromPairs } from '../data/blocks';
+import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair } from '../data/blocks';
 import { eventScopeKey } from '../data/eventScope';
 import type { BlockDoc } from '../types';
 
@@ -26,6 +26,17 @@ export interface HiddenUids {
 }
 
 const EMPTY: ReadonlySet<string> = new Set();
+
+// Pairs already offered to `reconcileOrphanPair` this session, keyed on the
+// listener key and the counterpart, so each pair costs at most one (almost
+// always denied) server-only delete per app session: durable, because every
+// new session retries, and cheap, because it never repeats within one.
+const reconcileAttempted = new Set<string>();
+
+/** Test seam: forget which pairs this session has already reconciled. */
+export function resetReconcileAttemptsForTests(): void {
+  reconcileAttempted.clear();
+}
 // The DEFAULT: no provider means nothing is hidden and nothing waits, so every
 // tree that predates the provider renders exactly as it did.
 const NONE: HiddenUids = { hidden: EMPTY, ready: true };
@@ -75,6 +86,16 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
         if (!snap.metadata.hasPendingWrites) lastCommitted = current;
+        // Server-confirmed pairs only (offline the delete could not run, and
+        // the attempt would be spent): offer each one to the reconciler once.
+        if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
+          for (const other of current) {
+            const attempt = `${key}|${other}`;
+            if (reconcileAttempted.has(attempt)) continue;
+            reconcileAttempted.add(attempt);
+            void reconcileOrphanPair({ me: uid, target: other, eventId });
+          }
+        }
         setState({
           key,
           hidden: computeHiddenSet(current, lastCommitted, snap.metadata.hasPendingWrites),
