@@ -32,7 +32,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
   VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
   VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
-  VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
+  VITE_FIREBASE_MEASUREMENT_ID: 'G-ZWYZ8BP43B',
   VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
   VITE_EVENT_ID: '',
   VITE_EDITION: 'vacay',
@@ -289,7 +289,7 @@ describe('build target selection', () => {
     ).toThrow(`VITE_FIREBASE_API_KEY=${JSON.stringify(DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY)}`);
   });
 
-  it('requires Five Across to name the shared GA4 stream explicitly', () => {
+  it('requires Five Across to name its own GA4 stream explicitly', () => {
     expect(() =>
       buildEnvironment(
         'fiveacross',
@@ -300,7 +300,7 @@ describe('build target selection', () => {
         {},
         REQUIRED_VITE_KEYS,
       ),
-    ).toThrow('VITE_FIREBASE_MEASUREMENT_ID="G-42N7WYDYT5"');
+    ).toThrow('VITE_FIREBASE_MEASUREMENT_ID="G-ZWYZ8BP43B"');
   });
 
   it('rejects a production PostHog host override', () => {
