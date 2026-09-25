@@ -538,12 +538,12 @@ function projectionOrNull(derive) {
  */
 function candidateCondition(candidate, mirror) {
   if (candidate.row.state === 'no-documents') return 'missing';
-  const source = candidate.source;
+  const { source, host } = candidate;
   if (source === null) return 'unreadable';
   if (source.kind === 'tombstone') return 'deleted';
   if (source.kind === 'root') return 'root-marker';
   if (source.eventId !== mirror.eventId || source.slug !== mirror.slug) return 'repointed';
-  if (source.edition !== mirror.edition) return 'edition-mismatch';
+  if ([source, ROOT_HOSTS.get(host) ?? source].some((s) => s.edition !== mirror.edition)) return 'edition-mismatch';
   if (source.status !== 'active') return source.status;
   return CONVERGED_STATES.has(candidate.row.state) ? 'serving' : 'not-edge-converged';
 }

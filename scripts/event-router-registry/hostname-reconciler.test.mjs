@@ -1061,6 +1061,11 @@ describe('brand-mirror replacement audit (#1295)', () => {
     ]);
   });
 
+  it('accepts no home at a root host of another Edition, whatever Edition its route claims', async () => {
+    const audit = await auditOf(mirror(), host('vacaybingo.com', mirrorDocument({ pathNamespace: 'vacaybingo.com' })));
+    expect(audit.findings[0].candidates).toEqual([expect.objectContaining({ condition: 'edition-mismatch' })]);
+  });
+
   it('reports findings without refusing, and still refuses an unreadable audit page', async () => {
     const report = await reconcileHostnameReplicas(
       input(),
