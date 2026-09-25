@@ -5,9 +5,14 @@ import type { BlockDoc, BlockPairDoc } from '../types';
 
 // Player blocking (#689, specs/player-blocking.md, ADR 0016): the write flows
 // and the pure hidden-set derivations. No React, no callable: every write is
-// ONE client `writeBatch` whose result the rules check with `existsAfter`, so
-// no committed state can violate Invariant I (the pair exists iff at least one
-// direction record does). Firestore-free, React-free derivations live here so
+// ONE atomic client commit whose result the rules check with `existsAfter`, so
+// no single commit can break Invariant I (the pair exists iff at least one
+// direction record does). A block is an optimistic `writeBatch` that queues
+// durably offline; every unblock attempt (up to three per call) is a
+// server-only `runTransaction` that needs a connection. The one state the
+// rules cannot rule out, a pair left with no direction by two concurrent
+// direction-only unblocks, is cleaned up by `unblockPlayer` and, durably, by
+// `reconcileOrphanPair`. Firestore-free, React-free derivations live here so
 // the provider (src/hooks/useBlocks.tsx) and its tests share one definition.
 
 export { blockPairId };
