@@ -609,7 +609,7 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     // lands between warm-up and tap re-renders fresh rather than sharing a card
     // that shows (or hides) the wrong Player.
     const bannedKey = JSON.stringify(bannedUids);
-    const hiddenKey = [...hidden].sort().join(',');
+    const hiddenKey = JSON.stringify([...hidden].sort());
     const cached = warmedCard.current;
     if (
       cached &&

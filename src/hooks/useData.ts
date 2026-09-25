@@ -375,7 +375,9 @@ function useEventModeration(enabled = true): { threshold: number | undefined; ba
  */
 function useBlockFilter(): { hidden: ReadonlySet<string>; ready: boolean; hiddenKey: string } {
   const { hidden, ready } = useHiddenUids();
-  return { hidden, ready, hiddenKey: [...hidden].sort().join(',') };
+  // JSON, not a comma join: a custom Auth uid may itself contain a comma, and
+  // two different sets must never share a key.
+  return { hidden, ready, hiddenKey: JSON.stringify([...hidden].sort()) };
 }
 
 export function useItems(enabled = true) {
