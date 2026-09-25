@@ -1,5 +1,4 @@
 import {
-  getDocFromServer,
   getDocsFromServer,
   query,
   runTransaction,
@@ -8,7 +7,7 @@ import {
   type DocumentReference,
 } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
-import { blockPairId, blockPairRef, blockRef, blocksCol } from './paths';
+import { blockPairId, blockPairRef, blockPairsCol, blockRef, blocksCol } from './paths';
 import type { BlockDoc, BlockPairDoc } from '../types';
 
 // Player blocking (#689, specs/player-blocking.md, ADR 0016): the write flows
@@ -91,7 +90,8 @@ function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<vo
  * rules issue exactly when the other direction exists), `{delete direction}`
  * alone; if THAT is denied, the full delete once more; and after a landed
  * direction-only retry, one best-effort `{delete pair}` (followed, if it is
- * denied, by one server read of the pair to report `stillHidden` truly).
+ * denied, by one server listing of the caller's pairs to report `stillHidden`
+ * truly).
  * Each is described below. The direction-only retry succeeding is
  * how the caller learns the block was mutual; reciprocity makes that
  * disclosure inherent, and the copy says so. Any other error rethrows. Every
@@ -145,10 +145,15 @@ export async function unblockPlayer({
     // Denied is the ordinary mutual case, but a MISSING pair is denied too
     // (a direction that had lost its pair to a concurrent delete; Codex P2 on
     // #1300), so ask the server whether the pair still stands rather than
-    // assume it. An unreadable answer keeps the conservative `true`.
+    // assume it. Not by a direct get: the read arm tests the caller against
+    // `resource.data.uids`, so a get of a MISSING pair is denied exactly like
+    // the delete was (CodeRabbit on #1300). The caller's own pair listing (the
+    // provider's query, which the rules allow whatever it contains) answers
+    // for a missing pair too. An unreadable answer keeps the conservative `true`.
     try {
-      const standing = await getDocFromServer(pair);
-      return { stillHidden: standing.exists() };
+      const mine = await getDocsFromServer(query(blockPairsCol(eventId), where('uids', 'array-contains', me)));
+      const id = blockPairId(me, target);
+      return { stillHidden: mine.docs.some((row) => row.id === id) };
     } catch {
       return { stillHidden: true };
     }

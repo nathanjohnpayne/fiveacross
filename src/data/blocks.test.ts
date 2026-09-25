@@ -22,8 +22,10 @@ const H = vi.hoisted(() => ({
   // targets, or an Error for an offline read.
   ownTargets: [] as string[] | Error,
   ownQueries: [] as unknown[],
-  // What a server read of the pair answers after a denied cleanup.
+  // Whether the caller's server pair listing (after a denied cleanup)
+  // contains alice_bob, or an Error for an offline read.
   pairExists: true as boolean | Error,
+  pairQueries: [] as unknown[],
 }));
 
 vi.mock('../firebase', () => ({
@@ -47,12 +49,15 @@ vi.mock('firebase/firestore', () => {
   return {
     query: (...args: unknown[]) => ({ kind: 'query', args }),
     where: (...args: unknown[]) => ({ kind: 'where', args }),
-    getDocFromServer: async () => {
-      if (H.pairExists instanceof Error) throw H.pairExists;
-      const exists = H.pairExists;
-      return { exists: () => exists };
-    },
-    getDocsFromServer: async (q: unknown) => {
+    getDocsFromServer: async (q: { args: unknown[] }) => {
+      if (q.args[0] === `events/${H.eventId}/blockPairs`) {
+        H.pairQueries.push(q);
+        if (H.pairExists instanceof Error) throw H.pairExists;
+        // An unrelated pair naming the caller is always listed, so only the
+        // id match can report the unblocked pair as standing.
+        const ids = H.pairExists ? ['alice_bob', 'bob_carol'] : ['bob_carol'];
+        return { docs: ids.map((id) => ({ id })) };
+      }
       H.ownQueries.push(q);
       if (H.ownTargets instanceof Error) throw H.ownTargets;
       return { docs: H.ownTargets.map((targetUid) => ({ data: () => ({ targetUid }) })) };
@@ -68,6 +73,7 @@ vi.mock('firebase/firestore', () => {
 vi.mock('./paths', () => ({
   blocksCol: (eventId: string) => `events/${eventId}/blocks`,
   blockRef: (owner: string, target: string, eventId: string) => `events/${eventId}/blocks/${owner}_${target}`,
+  blockPairsCol: (eventId: string) => `events/${eventId}/blockPairs`,
   blockPairRef: (a: string, b: string, eventId: string) =>
     `events/${eventId}/blockPairs/${a < b ? `${a}_${b}` : `${b}_${a}`}`,
   blockPairId: (a: string, b: string) => (a < b ? `${a}_${b}` : `${b}_${a}`),
@@ -95,6 +101,7 @@ beforeEach(() => {
   H.ownTargets = [];
   H.ownQueries = [];
   H.pairExists = true;
+  H.pairQueries = [];
   vi.useFakeTimers({ now: 1_700_000_000_000 });
 });
 
@@ -163,10 +170,19 @@ describe('unblockPlayer', () => {
     expect(H.batches.map((b) => b.kind)).toEqual(['transaction', 'transaction', 'transaction']);
   });
 
-  it('a direction that had lost its pair: the denied cleanup is followed by a server read, and a missing pair reports nothing hidden', async () => {
+  it('a direction that had lost its pair: the denied cleanup is followed by a server listing of the caller’s pairs (never a get, which the rules deny for a missing pair), and a missing pair reports nothing hidden', async () => {
     H.commitResults = [denied, 'ok', denied];
     H.pairExists = false;
     await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: false });
+    expect(H.pairQueries).toEqual([
+      {
+        kind: 'query',
+        args: ['events/event-a/blockPairs', { kind: 'where', args: ['uids', 'array-contains', 'bob'] }],
+      },
+    ]);
+    H.commitResults = [denied, 'ok', denied];
+    H.pairExists = true;
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });
     H.commitResults = [denied, 'ok', denied];
     H.pairExists = Object.assign(new Error('unavailable'), { code: 'unavailable' });
     await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });

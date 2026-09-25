@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -255,6 +255,26 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         await assertFails(setDoc(doc(db(ALICE), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
         await assertFails(setDoc(doc(db(CAROL), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
         await assertSucceeds(setDoc(doc(db(BOB), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
+      });
+
+      it('unblocking a direction that lost its pair: the direction-only delete lands, a get or delete of the missing pair is denied, and the owner’s pair listing still answers', async () => {
+        await seeded(async (s) => {
+          await setDoc(doc(s, blockPath(BOB, ALICE)), block(BOB, ALICE));
+          // An unrelated pair naming Bob, so the listing is not trivially empty.
+          await setDoc(doc(s, blockPath(CAROL, BOB)), block(CAROL, BOB));
+          await setDoc(doc(s, pairPath(BOB, CAROL)), pair(BOB, CAROL));
+        });
+        await assertFails(unblockBatch(db(BOB), BOB, ALICE));
+        await assertSucceeds(deleteDoc(doc(db(BOB), blockPath(BOB, ALICE))));
+        // The read arm tests `resource.data.uids`, so a MISSING pair is
+        // unreadable by get and undeletable, even by a party...
+        await assertFails(deleteDoc(doc(db(BOB), pairPath(ALICE, BOB))));
+        await assertFails(getDoc(doc(db(BOB), pairPath(ALICE, BOB))));
+        // ...which is why unblockPlayer reports stillHidden from this listing.
+        const listed = await assertSucceeds(
+          getDocs(query(collection(db(BOB), at('blockPairs')), where('uids', 'array-contains', BOB))),
+        );
+        expect(listed.docs.map((row) => row.id)).toEqual([pairId(BOB, CAROL)]);
       });
 
       it('a pair left with no direction (a concurrent mutual unblock) is deletable by either party and nobody else', async () => {
