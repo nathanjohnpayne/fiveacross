@@ -1,6 +1,6 @@
-import { runTransaction, writeBatch, type DocumentReference } from 'firebase/firestore';
+import { getDocsFromServer, query, runTransaction, where, writeBatch, type DocumentReference } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
-import { blockPairId, blockPairRef, blockRef } from './paths';
+import { blockPairId, blockPairRef, blockRef, blocksCol } from './paths';
 import type { BlockDoc, BlockPairDoc } from '../types';
 
 // Player blocking (#689, specs/player-blocking.md, ADR 0016): the write flows
@@ -9,10 +9,12 @@ import type { BlockDoc, BlockPairDoc } from '../types';
 // no single commit can break Invariant I (the pair exists iff at least one
 // direction record does). A block is an optimistic `writeBatch` that queues
 // durably offline; every unblock attempt (up to three per call) is a
-// server-only `runTransaction` that needs a connection. The one state the
-// rules cannot rule out, a pair left with no direction by two concurrent
-// direction-only unblocks, is cleaned up by `unblockPlayer` and, durably, by
-// `reconcileOrphanPair`. Firestore-free, React-free derivations live here so
+// server-only `runTransaction` that needs a connection. Concurrent commits
+// can still leave one of two states the rules cannot rule out: a pair with no
+// direction (two concurrent direction-only unblocks), cleaned up by
+// `unblockPlayer` and durably by `reconcileOrphanPair`; and a direction with
+// no pair (a block racing a pair delete), restored durably by
+// `repairMissingPairs`. Firestore-free, React-free derivations live here so
 // the provider (src/hooks/useBlocks.tsx) and its tests share one definition.
 
 export { blockPairId };
@@ -152,6 +154,52 @@ export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: Bl
   } catch {
     return false;
   }
+}
+
+/**
+ * The mirror of `reconcileOrphanPair`: restore the pair behind any of the
+ * caller's OWN direction records that has lost it (Codex P1 on #1300). A block
+ * batch and a concurrent pair delete (the other party unblocking a one-way
+ * block, or an orphan reconcile) can each be authorized from the state before
+ * the other, and if the delete lands last the direction is left with no pair,
+ * so the block would stop hiding anyone. Reading the pair inside the deleting
+ * transaction would not serialize them: the block's pair write is
+ * content-identical, and Firestore does not advance a document's update time
+ * for a write that changes nothing, so there is no version to conflict on.
+ * Repair is therefore by reconciliation, from the one party who can see the
+ * gap: the provider calls this once per session with the server-confirmed
+ * pair counterparts, it lists the caller's own directions FROM THE SERVER,
+ * and re-sets the pair (server-only) for every target missing from
+ * `knownCounterparts`. The pair arm allows that only while the caller's
+ * direction exists, and the content is deterministic, so a stale view can
+ * only cost a no-op write. Resolves the number of pairs restored; rejects
+ * only when the server listing fails (offline), so the caller can retry.
+ */
+export async function repairMissingPairs({
+  me,
+  knownCounterparts,
+  eventId = EVENT_ID,
+}: {
+  me: string;
+  knownCounterparts: ReadonlySet<string>;
+  eventId?: string;
+}): Promise<number> {
+  const own = await getDocsFromServer(query(blocksCol(eventId), where('ownerUid', '==', me)));
+  let restored = 0;
+  for (const row of own.docs) {
+    const target = row.data().targetUid;
+    if (typeof target !== 'string' || target === me || knownCounterparts.has(target)) continue;
+    const pair: BlockPairDoc = { uids: me < target ? [me, target] : [target, me], eventId };
+    try {
+      await runTransaction(db, async (tx) => {
+        tx.set(blockPairRef(me, target, eventId), pair);
+      });
+      restored += 1;
+    } catch {
+      // Denied (the direction left meanwhile) or transient: the next session retries.
+    }
+  }
+  return restored;
 }
 
 /** The FirebaseError code a rules denial carries, whatever the SDK build. */

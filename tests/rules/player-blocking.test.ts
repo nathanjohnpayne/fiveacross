@@ -245,6 +245,15 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         await assertSucceeds(unblockBatch(db(BOB), BOB, ALICE));
       });
 
+      it('a direction left without its pair (a block racing a pair delete) can have its pair restored by its owner alone', async () => {
+        await seeded(async (s) => {
+          await setDoc(doc(s, blockPath(BOB, ALICE)), block(BOB, ALICE));
+        });
+        await assertFails(setDoc(doc(db(ALICE), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
+        await assertFails(setDoc(doc(db(CAROL), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
+        await assertSucceeds(setDoc(doc(db(BOB), pairPath(ALICE, BOB)), pair(ALICE, BOB)));
+      });
+
       it('a pair left with no direction (a concurrent mutual unblock) is deletable by either party and nobody else', async () => {
         await seeded(async (s) => {
           await setDoc(doc(s, pairPath(ALICE, BOB)), pair(ALICE, BOB));

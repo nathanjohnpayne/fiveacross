@@ -21,6 +21,10 @@ const H = vi.hoisted(() => ({
   subscriptions: [] as Subscription[],
   // Every server-only pair delete the reconciler sends, by document path.
   reconciled: [] as string[],
+  // Every server-only pair re-set the repair sends, and its own-direction listings.
+  repaired: [] as string[],
+  ownListings: 0,
+  ownTargets: [] as string[] | Error,
 }));
 
 vi.mock('../firebase', () => ({
@@ -35,10 +39,25 @@ vi.mock('firebase/firestore', () => ({
   writeBatch: () => {
     throw new Error('the provider never writes a batch');
   },
-  runTransaction: async (_db: unknown, update: (tx: { delete: (ref: { path: string }) => void }) => Promise<void>) => {
-    await update({ delete: (ref) => H.reconciled.push(ref.path) });
-    // The common outcome: a direction still stands, so the rules deny it.
-    throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
+  runTransaction: async (
+    _db: unknown,
+    update: (tx: { delete: (ref: { path: string }) => void; set: (ref: { path: string }) => void }) => Promise<void>,
+  ) => {
+    let deleted = false;
+    await update({
+      delete: (ref) => {
+        deleted = true;
+        H.reconciled.push(ref.path);
+      },
+      set: (ref) => H.repaired.push(ref.path),
+    });
+    // The common reconcile outcome: a direction still stands, so the rules deny it.
+    if (deleted) throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
+  },
+  getDocsFromServer: async () => {
+    H.ownListings += 1;
+    if (H.ownTargets instanceof Error) throw H.ownTargets;
+    return { docs: H.ownTargets.map((targetUid) => ({ data: () => ({ targetUid }) })) };
   },
   query: (...args: unknown[]) => ({ kind: 'query', args }),
   where: (...args: unknown[]) => ({ kind: 'where', args }),
@@ -75,6 +94,9 @@ beforeEach(() => {
   H.eventId = 'event-a';
   H.subscriptions = [];
   H.reconciled = [];
+  H.repaired = [];
+  H.ownListings = 0;
+  H.ownTargets = [];
   resetReconcileAttemptsForTests();
 });
 afterEach(() => {
@@ -144,6 +166,30 @@ describe('useHiddenUidsSubscription', () => {
     await act(async () => {});
     expect(H.reconciled).toHaveLength(2);
     again.unmount();
+  });
+
+  it('once per session, restores the pair behind an own direction that lost it; an offline listing is retried on the next server snapshot', async () => {
+    H.ownTargets = new Error('unavailable');
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[0];
+    const cached = { ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } };
+    act(() => sub.listener(cached));
+    await act(async () => {});
+    expect(H.ownListings).toBe(0);
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(1);
+    expect(H.repaired).toEqual([]);
+    // Back online: Bob's direction toward Dave lost its pair to a concurrent delete.
+    H.ownTargets = ['alice', 'dave'];
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(2);
+    expect(H.repaired).toEqual(['events/event-a/blockPairs/bob_dave']);
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'dave']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(2);
+    view.unmount();
   });
 
   it('signing in while not yet enabled is NOT ready on the very first render (no signed-out carry-over)', () => {

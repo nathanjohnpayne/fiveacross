@@ -18,6 +18,10 @@ const H = vi.hoisted(() => ({
   eventId: 'event-a',
   batches: [] as Batch[],
   commitResults: [] as Array<'ok' | Error>,
+  // The server listing `repairMissingPairs` reads: the caller's own direction
+  // targets, or an Error for an offline read.
+  ownTargets: [] as string[] | Error,
+  ownQueries: [] as unknown[],
 }));
 
 vi.mock('../firebase', () => ({
@@ -39,6 +43,13 @@ vi.mock('firebase/firestore', () => {
     return batch;
   };
   return {
+    query: (...args: unknown[]) => ({ kind: 'query', args }),
+    where: (...args: unknown[]) => ({ kind: 'where', args }),
+    getDocsFromServer: async (q: unknown) => {
+      H.ownQueries.push(q);
+      if (H.ownTargets instanceof Error) throw H.ownTargets;
+      return { docs: H.ownTargets.map((targetUid) => ({ data: () => ({ targetUid }) })) };
+    },
     writeBatch: () => open('batch'),
     runTransaction: async (_db: unknown, update: (tx: Batch) => Promise<void>) => {
       const tx = open('transaction');
@@ -48,6 +59,7 @@ vi.mock('firebase/firestore', () => {
   };
 });
 vi.mock('./paths', () => ({
+  blocksCol: (eventId: string) => `events/${eventId}/blocks`,
   blockRef: (owner: string, target: string, eventId: string) => `events/${eventId}/blocks/${owner}_${target}`,
   blockPairRef: (a: string, b: string, eventId: string) =>
     `events/${eventId}/blockPairs/${a < b ? `${a}_${b}` : `${b}_${a}`}`,
@@ -61,6 +73,7 @@ import {
   hiddenUidsFromPairs,
   isPermissionDenied,
   reconcileOrphanPair,
+  repairMissingPairs,
   unblockPlayer,
 } from './blocks';
 
@@ -72,6 +85,8 @@ beforeEach(() => {
   H.eventId = 'event-a';
   H.batches = [];
   H.commitResults = [];
+  H.ownTargets = [];
+  H.ownQueries = [];
   vi.useFakeTimers({ now: 1_700_000_000_000 });
 });
 
@@ -203,6 +218,32 @@ describe('reconcileOrphanPair', () => {
     await expect(reconcileOrphanPair({ me: 'bob', target: 'alice' })).resolves.toBe(false);
     await expect(reconcileOrphanPair({ me: 'bob', target: 'bob' })).resolves.toBe(false);
     expect(H.batches).toHaveLength(2);
+  });
+});
+
+describe('repairMissingPairs', () => {
+  it('lists the caller’s own directions from the server and re-sets, server-only, only the pairs missing from the known set', async () => {
+    H.ownTargets = ['alice', 'carol', 'dave'];
+    await expect(
+      repairMissingPairs({ me: 'bob', knownCounterparts: new Set(['alice']) }),
+    ).resolves.toBe(2);
+    expect(H.ownQueries).toEqual([
+      { kind: 'query', args: ['events/event-a/blocks', { kind: 'where', args: ['ownerUid', '==', 'bob'] }] },
+    ]);
+    expect(H.batches.map((b) => b.kind)).toEqual(['transaction', 'transaction']);
+    expect(H.batches.map((b) => b.set.mock.calls[0])).toEqual([
+      ['events/event-a/blockPairs/bob_carol', { uids: ['bob', 'carol'], eventId: 'event-a' }],
+      ['events/event-a/blockPairs/bob_dave', { uids: ['bob', 'dave'], eventId: 'event-a' }],
+    ]);
+  });
+
+  it('a denied re-set (the direction left meanwhile) is skipped, not thrown; an offline listing rejects so the caller can retry', async () => {
+    H.ownTargets = ['alice', 'carol'];
+    H.commitResults = [denied, 'ok'];
+    await expect(repairMissingPairs({ me: 'bob', knownCounterparts: new Set() })).resolves.toBe(1);
+    const offline = Object.assign(new Error('unavailable'), { code: 'unavailable' });
+    H.ownTargets = offline;
+    await expect(repairMissingPairs({ me: 'bob', knownCounterparts: new Set() })).rejects.toBe(offline);
   });
 });
 

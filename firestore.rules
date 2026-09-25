@@ -2815,11 +2815,12 @@ service cloud.firestore {
       // every arm checks the commit's RESULT with `existsAfter`, so no single
       // commit can break it: a direction cannot be created or kept without
       // its pair, and a pair cannot be created without the caller's own
-      // direction or deleted while either direction stands. The one state it
-      // does not rule out is a pair left with NO direction by two concurrent
-      // direction-only unblocks, each authorized while the other direction
-      // still stood; the pair delete arm lets either party remove such a
-      // pair, and the client reconciles it (specs/player-blocking.md).
+      // direction or deleted while either direction stands. Concurrent
+      // commits, each authorized against the state before the other, can
+      // still leave a pair with NO direction (two direction-only unblocks) or
+      // a direction with no pair (a block racing a pair delete); the pair
+      // delete and create arms let the parties repair either, and the client
+      // reconciles both durably (specs/player-blocking.md).
       //
       // No `eventOpenForPlay` conjunct on purpose: blocking is a safety
       // action and stays available on a closing or archived Event. No Admin

@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { onSnapshot, query, where } from 'firebase/firestore';
 import { EVENT_ID } from '../firebase';
 import { blockPairsCol, blocksCol } from '../data/paths';
-import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair } from '../data/blocks';
+import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs } from '../data/blocks';
 import { eventScopeKey } from '../data/eventScope';
 import type { BlockDoc } from '../types';
 
@@ -32,10 +32,14 @@ const EMPTY: ReadonlySet<string> = new Set();
 // always denied) server-only delete per app session: durable, because every
 // new session retries, and cheap, because it never repeats within one.
 const reconcileAttempted = new Set<string>();
+// Listener keys whose own directions have been checked by `repairMissingPairs`
+// this session (once each; a failed server listing clears the mark to retry).
+const repairAttempted = new Set<string>();
 
 /** Test seam: forget which pairs this session has already reconciled. */
 export function resetReconcileAttemptsForTests(): void {
   reconcileAttempted.clear();
+  repairAttempted.clear();
 }
 // The DEFAULT: no provider means nothing is hidden and nothing waits, so every
 // tree that predates the provider renders exactly as it did.
@@ -94,6 +98,14 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
             if (reconcileAttempted.has(attempt)) continue;
             reconcileAttempted.add(attempt);
             void reconcileOrphanPair({ me: uid, target: other, eventId });
+          }
+          // ...and, once, restore the pair behind any own direction that
+          // lost it to a concurrent delete (see `repairMissingPairs`).
+          if (!repairAttempted.has(key)) {
+            repairAttempted.add(key);
+            repairMissingPairs({ me: uid, knownCounterparts: current, eventId }).catch(() => {
+              repairAttempted.delete(key);
+            });
           }
         }
         setState({
