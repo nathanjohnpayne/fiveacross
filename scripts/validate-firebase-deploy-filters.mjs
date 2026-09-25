@@ -3953,14 +3953,20 @@ const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
  * Whether code (not a comment or string) references the CommonJS `exports` or
  * `module` binding in any form (`exports.x`, `module.exports`,
- * `module["exports"]`, `Object.assign(exports, ...)`): any of them can add an
- * export the declaration walk cannot see.
+ * `module["exports"]`, `Object.assign(exports, ...)`), or uses an export
+ * assignment (`export = {...}`, which compiles to `module.exports`, or
+ * `export default`): any of them can add an export the declaration walk cannot
+ * see.
  */
 function referencesCommonJsExports(source) {
   const sourceFile = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   let found = false;
   const visit = (node) => {
     if (found) return;
+    if (ts.isExportAssignment(node)) {
+      found = true;
+      return;
+    }
     if (ts.isIdentifier(node) && (node.text === "exports" || node.text === "module")) {
       const parent = node.parent;
       const isMemberName =

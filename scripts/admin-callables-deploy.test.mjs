@@ -128,6 +128,17 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           resolve(fixture, "ops", "src", "index.ts"),
           header + 'module["exports"].unlockDayNow = onCall(async () => 1);\n',
         );
+      } else if (layout === "ts-default-and-export-equals-ops") {
+        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        await writeFile(
+          resolve(fixture, "ops", "src", "index.ts"),
+          header + "const unlockDayNow = onCall(async () => 1);\nexport = { unlockDayNow };\n",
+        );
       } else if (layout === "ts-default-and-object-assign-ops") {
         await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
         await writeFile(
@@ -189,6 +200,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ts-default-and-commonjs-ops", ["--only", "functions"], unknown, unknown],
     ["ts-default-and-object-assign-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-bracket-module-ops", ["--only", "functions:ops"], unknown, unknown],
+    ["ts-default-and-export-equals-ops", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-python-ops", ["--only", "functions"], unknown, unknown],
