@@ -300,6 +300,22 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             await writeFile(resolve(fixture, "ops", "src", "index.ts"), module);
           }
           await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface AdminCallable { value: string }\n");
+        } else if (variant === "star-hop-type-reexport") {
+          // The re-exported name reaches an interface through a local star.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { AdminCallable as approvePrompts } from './middle';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "middle.ts"), "export * from './types';\n");
+          await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface AdminCallable { value: string }\n");
+        } else if (variant === "merged-type-value-reexport") {
+          // A type and a value exported under one name emit the value.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export { Foo as unlockDayNow } from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            "export interface Foo { value: string }\nexport { callable as Foo } from './callable';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "callable.ts"), header + "export const callable = onCall(async () => 1);\n");
         } else if (variant === "value-reexport") {
           // A named re-export of a local value stays a value.
           await writeFile(
@@ -440,6 +456,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "star-ambient-clause",
       "type-reexport",
       "star-type-reexport",
+      "star-hop-type-reexport",
+      "merged-type-value-reexport",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],

@@ -222,12 +222,18 @@ function localTypeOnlyNames(sourceFile) {
   return types;
 }
 
-// Whether the local module `file` exports `name` with no runtime value: it
-// declares it only as a type (or ambient), or re-exports it, possibly under
-// another name and through further local modules, from where it is one. A
-// re-export TypeScript can only erase (`export { T as x } from './types'` of
-// an interface) emits no property at all. A module that cannot be read, or a
-// package, is not proven type-only, so its name stays a value.
+// Whether the local module `file` exports `name` with no runtime value. Every
+// export of the name is weighed, because TypeScript lets a type and a value
+// share one exported name and then emits the value: the name is type-only
+// only when some export of it is a type (an exported interface, type alias or
+// ambient declaration, a type-only clause element, or a re-export, followed
+// through further local modules, of a name that is type-only there) and none
+// is a value. A name the module does not export directly is looked up through
+// its local `export *` targets, where a local declaration would otherwise
+// shadow it. A re-export TypeScript can only erase (`export { T as x } from
+// './types'` of an interface) emits no property at all. A module that cannot
+// be read, a package, or a star it cannot resolve is not proven type-only, so
+// its name stays a value.
 function moduleExportIsTypeOnly(file, name, seen = new Set()) {
   const key = `${file}\0${name}`;
   if (seen.has(key)) return false;
@@ -239,16 +245,60 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
     return false;
   }
   const typeOnlyNames = localTypeOnlyNames(sourceFile);
-  if (typeOnlyNames.has(name)) return true;
+  let typeSeen = false;
+  let valueSeen = false;
+  const stars = [];
+  const declaredNames = (statement) => {
+    if (ts.isVariableStatement(statement)) {
+      const names = [];
+      const collect = (binding) => {
+        if (ts.isIdentifier(binding)) names.push(binding.text);
+        else for (const element of binding.elements) if (!ts.isOmittedExpression(element)) collect(element.name);
+      };
+      for (const declaration of statement.declarationList.declarations) collect(declaration.name);
+      return names;
+    }
+    return statement.name && ts.isIdentifier(statement.name) ? [statement.name.text] : [];
+  };
   for (const statement of sourceFile.statements) {
-    if (!ts.isExportDeclaration(statement) || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
+    const modifiers = statement.modifiers ?? [];
+    if (modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+      if (!declaredNames(statement).includes(name)) continue;
+      const erased =
+        ts.isInterfaceDeclaration(statement) ||
+        ts.isTypeAliasDeclaration(statement) ||
+        modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
+      if (erased) typeSeen = true;
+      else valueSeen = true;
+      continue;
+    }
+    if (!ts.isExportDeclaration(statement)) continue;
+    if (!statement.exportClause) {
+      if (statement.isTypeOnly) continue;
+      stars.push(statement);
+      continue;
+    }
+    if (!ts.isNamedExports(statement.exportClause)) {
+      // `export * as ns from` binds a namespace object, a value.
+      if (statement.exportClause.name.text === name && !statement.isTypeOnly) valueSeen = true;
+      continue;
+    }
     for (const element of statement.exportClause.elements) {
       if (element.name.text !== name) continue;
-      if (statement.isTypeOnly || element.isTypeOnly) return true;
-      return !exportElementIsValue(statement, element, typeOnlyNames, file, seen);
+      if (statement.isTypeOnly || !exportElementIsValue(statement, element, typeOnlyNames, file, seen)) typeSeen = true;
+      else valueSeen = true;
     }
   }
-  return false;
+  if (valueSeen) return false;
+  if (typeSeen) return true;
+  let starTypeOnly = false;
+  for (const statement of stars) {
+    const target = ts.isStringLiteral(statement.moduleSpecifier) ? resolveModule(file, statement.moduleSpecifier.text) : null;
+    if (!target) return false;
+    if (starExportedNames(target).has(name)) return false;
+    if (moduleExportIsTypeOnly(target, name, seen)) starTypeOnly = true;
+  }
+  return starTypeOnly;
 }
 
 // Whether a named export element publishes a runtime value: a local
