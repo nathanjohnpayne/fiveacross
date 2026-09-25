@@ -159,12 +159,19 @@ describe('useHiddenUidsSubscription', () => {
     expect([...H.reconciled].sort()).toEqual(['events/event-a/blockPairs/alice_bob', 'events/event-a/blockPairs/bob_carol']);
     // A denial (a direction still stands) changes nothing the viewer sees.
     expect([...view.result.current.hidden].sort()).toEqual(['alice', 'carol']);
+    // A pair that appears later in the subscription (here a new block,
+    // or a repair write recreating an orphan) is offered again, even one
+    // already offered this session.
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'carol']])));
+    await act(async () => {});
+    expect(H.reconciled.filter((p) => p.endsWith('bob_carol'))).toHaveLength(2);
     // A remount in the same session does not ask again.
     view.unmount();
     const again = renderHook(() => useHiddenUidsSubscription('bob', true));
     act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
     await act(async () => {});
-    expect(H.reconciled).toHaveLength(2);
+    expect(H.reconciled).toHaveLength(3);
     again.unmount();
   });
 

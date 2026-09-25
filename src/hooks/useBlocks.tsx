@@ -87,6 +87,8 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     // P1 on #1300): a gap while unsubscribed (signed out, another Event) can
     // hide a lost pair that no later snapshot would show disappearing.
     let repairChecked = false;
+    // Whether this subscription has had its first server-confirmed answer.
+    let reconcileSeeded = false;
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
@@ -94,6 +96,15 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
         const lostPair = [...previous].some((other) => !current.has(other));
+        // A pair that APPEARS after this subscription's first server answer
+        // (a new block, or a repair write that landed after an unblock and so
+        // recreated an orphan; Codex P1 on #1300) is offered to the orphan
+        // reconciler again, whatever an earlier offer this session said.
+        if (reconcileSeeded) {
+          for (const other of current) {
+            if (!previous.has(other)) reconcileAttempted.delete(`${key}|${other}`);
+          }
+        }
         previous = current;
         // A cache snapshot means the listener lost the server (an outage, or
         // the SDK's offline fallback). A pair created AND deleted during that
@@ -111,6 +122,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
             reconcileAttempted.add(attempt);
             void reconcileOrphanPair({ me: uid, target: other, eventId });
           }
+          reconcileSeeded = true;
           // ...and restore the pair behind any own direction that lost it to
           // a concurrent delete (see `repairMissingPairs`): once per
           // subscription, and again whenever a pair disappears, which is the

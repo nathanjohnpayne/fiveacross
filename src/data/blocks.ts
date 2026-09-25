@@ -1,4 +1,12 @@
-import { getDocsFromServer, query, runTransaction, where, writeBatch, type DocumentReference } from 'firebase/firestore';
+import {
+  getDocFromServer,
+  getDocsFromServer,
+  query,
+  runTransaction,
+  where,
+  writeBatch,
+  type DocumentReference,
+} from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { blockPairId, blockPairRef, blockRef, blocksCol } from './paths';
 import type { BlockDoc, BlockPairDoc } from '../types';
@@ -82,8 +90,9 @@ function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<vo
  * `{delete direction, delete pair}`; only on a permission denial (which the
  * rules issue exactly when the other direction exists), `{delete direction}`
  * alone; if THAT is denied, the full delete once more; and after a landed
- * direction-only retry, one best-effort `{delete pair}`. Each is described
- * below. The direction-only retry succeeding is
+ * direction-only retry, one best-effort `{delete pair}` (followed, if it is
+ * denied, by one server read of the pair to report `stillHidden` truly).
+ * Each is described below. The direction-only retry succeeding is
  * how the caller learns the block was mutual; reciprocity makes that
  * disclosure inherent, and the copy says so. Any other error rethrows. Every
  * attempt is a server-only commit (`deleteOnServer`), so nothing is hidden or
@@ -133,7 +142,16 @@ export async function unblockPlayer({
     await deleteOnServer([pair]);
     return { stillHidden: false };
   } catch {
-    return { stillHidden: true };
+    // Denied is the ordinary mutual case, but a MISSING pair is denied too
+    // (a direction that had lost its pair to a concurrent delete; Codex P2 on
+    // #1300), so ask the server whether the pair still stands rather than
+    // assume it. An unreadable answer keeps the conservative `true`.
+    try {
+      const standing = await getDocFromServer(pair);
+      return { stillHidden: standing.exists() };
+    } catch {
+      return { stillHidden: true };
+    }
   }
 }
 

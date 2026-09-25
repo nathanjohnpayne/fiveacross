@@ -22,6 +22,8 @@ const H = vi.hoisted(() => ({
   // targets, or an Error for an offline read.
   ownTargets: [] as string[] | Error,
   ownQueries: [] as unknown[],
+  // What a server read of the pair answers after a denied cleanup.
+  pairExists: true as boolean | Error,
 }));
 
 vi.mock('../firebase', () => ({
@@ -45,6 +47,11 @@ vi.mock('firebase/firestore', () => {
   return {
     query: (...args: unknown[]) => ({ kind: 'query', args }),
     where: (...args: unknown[]) => ({ kind: 'where', args }),
+    getDocFromServer: async () => {
+      if (H.pairExists instanceof Error) throw H.pairExists;
+      const exists = H.pairExists;
+      return { exists: () => exists };
+    },
     getDocsFromServer: async (q: unknown) => {
       H.ownQueries.push(q);
       if (H.ownTargets instanceof Error) throw H.ownTargets;
@@ -87,6 +94,7 @@ beforeEach(() => {
   H.commitResults = [];
   H.ownTargets = [];
   H.ownQueries = [];
+  H.pairExists = true;
   vi.useFakeTimers({ now: 1_700_000_000_000 });
 });
 
@@ -153,6 +161,15 @@ describe('unblockPlayer', () => {
     // The best-effort orphan cleanup, denied while Alice's direction stands.
     expect(H.batches[2].delete.mock.calls).toEqual([['events/event-a/blockPairs/alice_bob']]);
     expect(H.batches.map((b) => b.kind)).toEqual(['transaction', 'transaction', 'transaction']);
+  });
+
+  it('a direction that had lost its pair: the denied cleanup is followed by a server read, and a missing pair reports nothing hidden', async () => {
+    H.commitResults = [denied, 'ok', denied];
+    H.pairExists = false;
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: false });
+    H.commitResults = [denied, 'ok', denied];
+    H.pairExists = Object.assign(new Error('unavailable'), { code: 'unavailable' });
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });
   });
 
   it('a concurrent mutual unblock: the pair left with no direction is deleted after the retry, and nothing stays hidden', async () => {
