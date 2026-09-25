@@ -17,3 +17,4 @@ So "the Board is private" means *layout and progress* stay private, while the *f
 - Do not "lock down" mark visibility—publishing each mark to its Prompt's Tally is intended, even though the Board that holds the mark is unreadable to others.
 - **No anonymity.** If a Player marks a Prompt, their identity appears in that Prompt's Tally. Acceptable for a single 18+ friend group (see [ADR 0001](0001-honor-system-trust-model.md)); revisit if the audience ever widens.
 - "Community-editable pool" and "frozen board" interact here: the Tally is only rich when boards share prompts, which favours a small, stable pool over an ever-growing one.
+- A Player block ([ADR 0016](0016-player-blocking.md)) is the one narrowing of this boundary: per pair, per viewer, and display-only. The Tally, Feed and standings stay public and unchanged; each of the two Players' clients simply stops rendering the other.

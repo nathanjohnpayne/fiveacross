@@ -23,6 +23,8 @@ import type {
   NoticeDoc,
   DoubtDoc,
   HeartDoc,
+  BlockDoc,
+  BlockPairDoc,
   DayMetaDoc,
 } from '../types';
 
@@ -366,6 +368,11 @@ export const doubtConverter: FirestoreDataConverter<DoubtDoc> = {
     id: snap.id,
   }),
 };
+
+// The two block records (specs/player-blocking.md). Neither stores nor needs
+// an `id`: both ids are recomputed from the uids (src/data/blocks.ts).
+export const blockConverter = passthrough<BlockDoc>();
+export const blockPairConverter = passthrough<BlockPairDoc>();
 
 // A per-Day honor doc (daily-cards-spec § "Data model"), read from
 // events/{EVENT_ID}/days/{dayIndex}/meta/{dayIndex} — a `meta` subcollection
