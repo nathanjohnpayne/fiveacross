@@ -74,6 +74,36 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       adminCallablesStrictServices: strict,
     });
   });
+
+  // A codebase with no `src/index.ts` (a JavaScript or Python codebase) has an
+  // unknown surface, not an empty one, so its scope stays conservative.
+  it("keeps a codebase without a TypeScript index conservative", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "admin-callable-no-index-"));
+    try {
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
+      await mkdir(resolve(fixture, "py"), { recursive: true });
+      await writeFile(
+        resolve(fixture, "firebase.json"),
+        JSON.stringify({ functions: [{ source: "functions" }, { source: "py", codebase: "py" }] }),
+      );
+      await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+      const result = await classifyFirebaseDeployRequest(["fiveacross", "--only", "functions:py"], {
+        defaultConfigPath: resolve(fixture, "firebase.json"),
+      });
+
+      expect(result).toMatchObject({
+        functionsAttempted: true,
+        adminCallablesInvokerSelected: true,
+        adminCallablesInvokerConservative: true,
+        adminCallablesStrictServices: "",
+        eventInvitationsInvokerSelected: true,
+        eventInvitationsInvokerConservative: true,
+        eventInvitationsStrictServices: "",
+      });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("admin-callables deploy scope (#1277)", () => {

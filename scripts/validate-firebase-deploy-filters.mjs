@@ -3941,7 +3941,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * in table order: a selector deploys one codebase's surface, so a callable
  * only another codebase exports must not turn strict. Keys mirror
  * `singleEndpointInventory` (explicit `codebase`, else `default`); a codebase
- * with no local `source` (kit, remote) has no entry and stays conservative.
+ * with no local `source` (kit, remote) or no readable `src/index.ts` has no
+ * entry and stays conservative.
  */
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
@@ -3954,8 +3955,6 @@ async function protectedServiceInventory(configSource, configPath, table) {
       typeof functionsConfig.codebase === "string" && functionsConfig.codebase
         ? functionsConfig.codebase
         : "default";
-    const found = services.get(codebase) ?? new Set();
-    services.set(codebase, found);
     const sourcePath = resolve(
       dirname(configPath),
       functionsConfig.source,
@@ -3966,9 +3965,14 @@ async function protectedServiceInventory(configSource, configPath, table) {
     try {
       source = await readFile(sourcePath, "utf8");
     } catch (error) {
+      // No conventional index (a JavaScript or Python codebase): the surface
+      // is unknown, not empty, so the codebase gets no entry and stays
+      // conservative.
       if (error && typeof error === "object" && error.code === "ENOENT") continue;
       throw error;
     }
+    const found = services.get(codebase) ?? new Set();
+    services.set(codebase, found);
     for (const service of protectedServicesFromSource(source, table, sourcePath))
       found.add(service);
   }
