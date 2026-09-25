@@ -146,6 +146,22 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           resolve(fixture, "ops", "src", "index.ts"),
           header + "const unlockDayNow = onCall(async () => 1);\nexport = { unlockDayNow };\n",
         );
+      } else if (layout === "inline-config-unlock-codebase" || layout === "imported-config-unlock-codebase") {
+        // A codebase named like a protected callable, configured inline or
+        // through an imported functions config the CLI materialises.
+        await nodeSource(resolve(fixture, "ops"));
+        const functions = [{ source: "functions" }, { source: "ops", codebase: "unlockDayNow" }];
+        if (layout === "imported-config-unlock-codebase") {
+          await writeFile(resolve(fixture, "functions.config.json"), JSON.stringify(functions));
+          await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: "functions.config.json" }));
+        } else {
+          await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions }));
+        }
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        await writeFile(
+          resolve(fixture, "ops", "src", "index.ts"),
+          header + "export const mintEventInvitation = onCall(async () => 1);\n",
+        );
       } else if (layout.startsWith("ops-variant-")) {
         // One non-default TypeScript codebase exporting `unlockDayNow`, made
         // opaque by a single variant.
@@ -442,6 +458,13 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: false, conservative: false, strict: "" },
     ],
     ["ops-variant-functions-yaml", ["--only", "functions:ops"], unknown, unknown],
+    // Codebase precedence holds for an imported functions config too.
+    ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
+      layout,
+      ["--only", "functions:unlockDayNow"],
+      { selected: false, conservative: false, strict: "" },
+      { selected: true, conservative: false, strict: "mint" },
+    ]),
     ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],

@@ -4254,11 +4254,16 @@ async function protectedServiceInventory(configSource, configPath, table) {
     // before the SDK loads the index (`runtimes/node/index.js`
     // `discoverBuild`), so the index does not prove the published surface.
     const sourceDir = resolve(dirname(configPath), functionsConfig.source);
+    // A missing source directory has nothing to list; one that exists but
+    // cannot be listed cannot rule the manifest out, so it stays unknown.
     let sourceEntries = [];
     try {
       sourceEntries = await readdir(sourceDir);
     } catch {
-      sourceEntries = [];
+      if (existsSync(sourceDir)) {
+        services.set(codebase, null);
+        continue;
+      }
     }
     if (sourceEntries.some((name) => /^functions\.ya?ml$/i.test(name))) {
       services.set(codebase, null);
@@ -4952,8 +4957,17 @@ export async function classifyFirebaseDeployRequest(
     await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
   ).functionsAttempted;
   if (functionsMayRelease) assertEveryHttpsExportFamilied(deployConfig.data, configPath);
+  // An imported `"functions": "functions.config.json"` is a STRING in the raw
+  // parse, so the codebase names and their precedence over an endpoint name
+  // come from the CLI's materialised copy instead (a clone, so nothing the
+  // inventory writes lands in `deployConfig`). An inline block keeps the raw
+  // object, whose un-defaulted `source` the inventory reads as written.
+  const inventorySource =
+    typeof configSource.functions === "string"
+      ? { ...configSource, functions: structuredClone(deployConfig.data.functions) }
+      : configSource;
   const singleEndpointExports = await singleEndpointInventory(
-    configSource,
+    inventorySource,
     configPath,
     { project, projectAlias },
     effectiveOnly,
