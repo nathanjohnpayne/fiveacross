@@ -3988,9 +3988,11 @@ function referencesCommonJsExports(source) {
       let scope = node.parent;
       while (scope && !bindsOwnThis(scope)) {
         if (ts.isHeritageClause(scope) || ts.isComputedPropertyName(scope) || ts.isDecorator(scope)) {
+          // Climb past the member (method, field, accessor, or a decorated
+          // parameter's method) to its class or object literal, then past a class.
           let owner = scope.parent;
           if (ts.isParameter(owner)) owner = owner.parent;
-          if (bindsOwnThis(owner) && !ts.isClassLike(owner)) owner = owner.parent;
+          if (!ts.isClassLike(owner) && (ts.isClassElement(owner) || ts.isObjectLiteralElementLike(owner))) owner = owner.parent;
           scope = ts.isClassLike(owner) ? owner.parent : owner;
         } else {
           scope = scope.parent;

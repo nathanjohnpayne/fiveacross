@@ -167,6 +167,18 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "index.ts"),
             header + "class Holder { [((this as any).unlockDayNow = onCall(async () => 1), \"k\")]() { return 1; } }\n",
           );
+        } else if (variant === "computed-field-this") {
+          // And a computed field name, whose member does not bind `this` itself.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + "class Holder { [((this as any).unlockDayNow = onCall(async () => 1), \"k\")] = 1; }\n",
+          );
+        } else if (variant === "decorator-this") {
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + "const mark = (..._: unknown[]) => undefined;\n" +
+              "class Holder { @mark(((this as any).unlockDayNow = onCall(async () => 1))) run() { return 1; } }\n",
+          );
         } else if (variant === "star-commonjs") {
           // A local star copies whatever a CommonJS mutation put on the module's exports.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
@@ -270,6 +282,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-top-level-this", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-heritage-this", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-computed-name-this", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-computed-field-this", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-decorator-this", ["--only", "functions:ops"], unknown, unknown],
     // So does a local module the index reaches through `export *`.
     ["ops-variant-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-star-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
