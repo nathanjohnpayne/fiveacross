@@ -22,7 +22,10 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  * transactions, so it needs a connection. While the browser reports offline the
  * button is disabled with a note rather than started (`useOnline` can only
  * trust a `false`); started online, the row reads "Unblocking…" until the
- * server answers. Every settle is reported here, at the panel level, because a
+ * server answers. A row whose block batch is still queued reads "Saving this
+ * block…" with Unblock disabled until it commits, since the server-only unblock
+ * would not see it, and an empty list reads "Loading…" rather than "no blocks"
+ * until the server has answered the listener. Every settle is reported here, at the panel level, because a
  * landed unblock removes its row from the listener: "Unblocked", the
  * `stillHidden` note (worded as likely, not proven, since an orphaned pair or an
  * unanswered listing reports the same), or, for any error `unblockPlayer`
@@ -30,7 +33,7 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  * retry note with the row left in place.
  */
 export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
-  const { data: blocks, loading, error } = useMyBlocks(uid);
+  const { data: blocks, loading, error, confirmed, pendingTargets } = useMyBlocks(uid);
   const { players, hasServerData: rosterConfirmed } = useLeaderboard();
   const online = useOnline();
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -63,6 +66,12 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
   const rows = [...blocks]
     .filter((b) => unblocked[b.targetUid] !== b.createdAt)
     .sort((a, b) => b.createdAt - a.createdAt);
+  // An empty list is "no blocks" only once the server has answered; a cache-only
+  // empty snapshot (a first open while offline) keeps the panel loading.
+  const awaitingServer = rows.length === 0 && !confirmed;
+  // A row that is still a queued block batch can't be reversed yet: the unblock's
+  // server-only transactions would not see it, fail, and the block would land after.
+  const reversible = (target: string) => online && nameKnown(target) && !pendingTargets.has(target);
 
   const doUnblock = async (target: string, createdAt: number) => {
     if (!uid || inFlight.current) return;
@@ -130,11 +139,15 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
           {outcome.kind === 'error' && `Couldn’t unblock ${outcome.name}. Check your connection and try again.`}
         </p>
       )}
-      {!online && rows.length > 0 && <p className="muted">You&rsquo;re offline. Unblocking needs a connection.</p>}
+      {!online && (rows.length > 0 || awaitingServer) && (
+        <p className="muted">You&rsquo;re offline. Unblocking needs a connection.</p>
+      )}
       {loading ? (
         <p className="muted">Loading…</p>
       ) : error ? (
         <p className="block-error">Couldn&rsquo;t load your blocked players. Check your connection and try again.</p>
+      ) : awaitingServer ? (
+        <p className="muted">Loading…</p>
       ) : rows.length === 0 ? (
         <p className="muted">You haven&rsquo;t blocked anyone.</p>
       ) : (
@@ -148,6 +161,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                 </div>
                 <div className="grow">
                   <div className="name">{name}</div>
+                  {pendingTargets.has(b.targetUid) && <div className="sub">Saving this block…</div>}
                 </div>
                 {confirming !== b.targetUid && (
                   <button
@@ -158,7 +172,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                       else unblockButtons.current.delete(b.targetUid);
                     }}
                     aria-label={`Unblock ${name}`}
-                    disabled={!online || pending !== null || !nameKnown(b.targetUid)}
+                    disabled={pending !== null || !reversible(b.targetUid)}
                     onClick={() => setConfirming(b.targetUid)}
                   >
                     {pending === b.targetUid ? 'Unblocking…' : 'Unblock'}
@@ -177,7 +191,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                       <button
                         type="button"
                         className="btn primary"
-                        disabled={!online || !nameKnown(b.targetUid)}
+                        disabled={!reversible(b.targetUid)}
                         onClick={() => void doUnblock(b.targetUid, b.createdAt)}
                       >
                         Yes, unblock

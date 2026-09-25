@@ -412,23 +412,60 @@ describe('HiddenUidsProvider / useHiddenUids', () => {
 });
 
 describe('useMyBlocks', () => {
-  it('lists the viewer’s own direction records by ownerUid equality', () => {
+  const direction = (targetUid: string, createdAt = 1) => ({ ownerUid: 'bob', targetUid, eventId: 'event-a', createdAt });
+  const own = (
+    rows: Array<{ row: ReturnType<typeof direction>; pending?: boolean }>,
+    fromCache = false,
+  ) => ({
+    docs: rows.map(({ row, pending = false }) => ({ data: () => row, metadata: { fromCache, hasPendingWrites: pending } })),
+    metadata: { fromCache, hasPendingWrites: rows.some((r) => r.pending) },
+  });
+
+  it('lists the viewer’s own direction records by ownerUid equality, with metadata changes', () => {
     const view = renderHook(() => useMyBlocks('bob'));
-    expect(view.result.current).toEqual({ data: [], loading: true, error: false });
+    expect(view.result.current).toEqual({ data: [], loading: true, error: false, confirmed: false, pendingTargets: new Set() });
     const sub = H.subscriptions[0];
     expect(pathOf(sub)).toBe('events/event-a/blocks');
     expect(whereOf(sub)).toEqual({ kind: 'where', args: ['ownerUid', '==', 'bob'] });
-    const row = { ownerUid: 'bob', targetUid: 'alice', eventId: 'event-a', createdAt: 1 };
-    act(() => sub.listener({ docs: [{ data: () => row }], metadata: { fromCache: false, hasPendingWrites: false } }));
-    expect(view.result.current).toEqual({ data: [row], loading: false, error: false });
+    expect(sub.options).toEqual({ includeMetadataChanges: true });
+    const row = direction('alice');
+    act(() => sub.listener(own([{ row }])));
+    expect(view.result.current).toEqual({ data: [row], loading: false, error: false, confirmed: true, pendingTargets: new Set() });
+  });
+
+  it('an empty cache-only snapshot is not confirmed; the first server snapshot latches it', () => {
+    const view = renderHook(() => useMyBlocks('bob'));
+    const sub = H.subscriptions[0];
+    act(() => sub.listener(own([], true)));
+    expect(view.result.current).toMatchObject({ data: [], loading: false, confirmed: false });
+    act(() => sub.listener(own([], false)));
+    expect(view.result.current.confirmed).toBe(true);
+    // Going offline afterwards serves the same list from cache; the server already answered.
+    act(() => sub.listener(own([], true)));
+    expect(view.result.current.confirmed).toBe(true);
+  });
+
+  it('names the rows that are still an uncommitted local block, until the server commits them', () => {
+    const view = renderHook(() => useMyBlocks('bob'));
+    const sub = H.subscriptions[0];
+    act(() => sub.listener(own([{ row: direction('alice', 2), pending: true }, { row: direction('cara') }])));
+    expect(view.result.current.pendingTargets).toEqual(new Set(['alice']));
+    act(() => sub.listener(own([{ row: direction('alice', 2) }, { row: direction('cara') }])));
+    expect(view.result.current.pendingTargets).toEqual(new Set());
   });
 
   it('signed out: settled and empty with no listener; an error settles empty and flagged', () => {
-    expect(renderHook(() => useMyBlocks(null)).result.current).toEqual({ data: [], loading: false, error: false });
+    expect(renderHook(() => useMyBlocks(null)).result.current).toEqual({
+      data: [],
+      loading: false,
+      error: false,
+      confirmed: true,
+      pendingTargets: new Set(),
+    });
     expect(H.subscriptions).toHaveLength(0);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = renderHook(() => useMyBlocks('bob'));
     act(() => H.subscriptions[0].onError(new Error('denied')));
-    expect(view.result.current).toEqual({ data: [], loading: false, error: true });
+    expect(view.result.current).toEqual({ data: [], loading: false, error: true, confirmed: false, pendingTargets: new Set() });
   });
 });

@@ -10,7 +10,13 @@ import type { BlockDoc } from '../types';
 const H = vi.hoisted(() => ({
   track: vi.fn(),
   unblockPlayer: vi.fn(),
-  myBlocks: { data: [] as BlockDoc[], loading: false, error: false },
+  myBlocks: {
+    data: [] as BlockDoc[],
+    loading: false,
+    error: false,
+    confirmed: true,
+    pendingTargets: new Set<string>() as ReadonlySet<string>,
+  },
   players: [] as Array<{ uid: string; displayName: string }>,
   rosterConfirmed: true,
   online: true,
@@ -37,7 +43,7 @@ const flush = () => act(async () => {});
 
 beforeEach(() => {
   vi.clearAllMocks();
-  H.myBlocks = { data: [], loading: false, error: false };
+  H.myBlocks = { data: [], loading: false, error: false, confirmed: true, pendingTargets: new Set() };
   H.players = [];
   H.rosterConfirmed = true;
   H.online = true;
@@ -188,10 +194,40 @@ describe('BlockedPlayersPanel', () => {
   it('shows an empty state, and an error state distinct from it', () => {
     const { rerender } = render(<BlockedPlayersPanel uid="viewer" />);
     expect(screen.getByText('You haven’t blocked anyone.')).toBeTruthy();
-    H.myBlocks = { data: [], loading: false, error: true };
+    H.myBlocks = { ...H.myBlocks, error: true, confirmed: false };
     rerender(<BlockedPlayersPanel uid="viewer" />);
     expect(screen.queryByText('You haven’t blocked anyone.')).toBeNull();
     expect(screen.getByText(/Couldn’t load your blocked players/)).toBeTruthy();
+  });
+
+  it('an empty cache-only list waits for the server instead of claiming no blocks', () => {
+    H.online = false;
+    H.myBlocks = { ...H.myBlocks, confirmed: false };
+    const { rerender } = render(<BlockedPlayersPanel uid="viewer" />);
+    expect(screen.queryByText('You haven’t blocked anyone.')).toBeNull();
+    expect(screen.getByText('Loading…')).toBeTruthy();
+    expect(screen.getByText('You’re offline. Unblocking needs a connection.')).toBeTruthy();
+    H.online = true;
+    H.myBlocks = { ...H.myBlocks, confirmed: true };
+    rerender(<BlockedPlayersPanel uid="viewer" />);
+    expect(screen.getByText('You haven’t blocked anyone.')).toBeTruthy();
+  });
+
+  it('a row whose block batch is still queued cannot be unblocked until it commits', () => {
+    H.myBlocks.data = [direction('bea', 1), direction('cal', 2)];
+    H.myBlocks.pendingTargets = new Set(['bea']);
+    H.players = [
+      { uid: 'bea', displayName: 'Bea' },
+      { uid: 'cal', displayName: 'Cal' },
+    ];
+    const { rerender } = render(<BlockedPlayersPanel uid="viewer" />);
+    expect(screen.getByRole('button', { name: 'Unblock Bea' })).toBeDisabled();
+    expect(screen.getByText('Saving this block…')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Unblock Cal' })).not.toBeDisabled();
+    H.myBlocks = { ...H.myBlocks, pendingTargets: new Set() };
+    rerender(<BlockedPlayersPanel uid="viewer" />);
+    expect(screen.getByRole('button', { name: 'Unblock Bea' })).not.toBeDisabled();
+    expect(screen.queryByText('Saving this block…')).toBeNull();
   });
 
   it('confirms, unblocks, reports it and fires unblock_player with no identity', async () => {
