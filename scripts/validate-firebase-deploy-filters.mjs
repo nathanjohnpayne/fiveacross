@@ -3941,8 +3941,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * in table order: a selector deploys one codebase's surface, so a callable
  * only another codebase exports must not turn strict. Keys mirror
  * `singleEndpointInventory` (explicit `codebase`, else `default`); a codebase
- * with no local `source` (kit, remote) or no readable `src/index.ts` has no
- * entry and stays conservative.
+ * with no local `source` (kit, remote) has no entry, and one whose source
+ * directory has no `src/index.ts` maps to `null`; both stay conservative.
  */
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
@@ -3965,12 +3965,21 @@ async function protectedServiceInventory(configSource, configPath, table) {
     try {
       source = await readFile(sourcePath, "utf8");
     } catch (error) {
-      // No conventional index (a JavaScript or Python codebase): the surface
-      // is unknown, not empty, so the codebase gets no entry and stays
-      // conservative.
-      if (error && typeof error === "object" && error.code === "ENOENT") continue;
+      // A source directory with no conventional index (a JavaScript or Python
+      // codebase) has an unknown surface, not an empty one: it is recorded as
+      // `null`, and every selector that releases it stays conservative. A
+      // missing source directory has nothing the CLI could publish.
+      if (error && typeof error === "object" && error.code === "ENOENT") {
+        if (existsSync(resolve(dirname(configPath), functionsConfig.source))) {
+          services.set(codebase, null);
+        } else if (!services.has(codebase)) {
+          services.set(codebase, new Set());
+        }
+        continue;
+      }
       throw error;
     }
+    if (services.get(codebase) === null) continue;
     const found = services.get(codebase) ?? new Set();
     services.set(codebase, found);
     for (const service of protectedServicesFromSource(source, table, sourcePath))
@@ -3980,29 +3989,41 @@ async function protectedServiceInventory(configSource, configPath, table) {
   for (const [codebase, found] of services) {
     inventory.set(
       codebase,
-      table.map(([, service]) => service).filter((service) => found.has(service)),
+      found === null
+        ? null
+        : table.map(([, service]) => service).filter((service) => found.has(service)),
     );
   }
   return inventory;
 }
 
 /**
- * `union` answers a selector releasing every codebase; `of(codebase)` one
- * codebase, `null` when it has no entry. A plain list (a caller with no
- * codebase ownership) is taken as every codebase's export list.
+ * `union` answers a selector releasing every codebase, and `complete` says
+ * whether every local codebase was inventoried (a `null` entry is a codebase
+ * with no readable index, whose surface is unknown); `of(codebase)` answers
+ * one codebase, `null` when it has no usable entry. A plain list (a caller
+ * with no codebase ownership) is taken as every codebase's export list.
  */
 function familyInventory(inventory, table) {
   const order = table.map(([, service]) => service);
   const inOrder = (services) => order.filter((service) => services.has(service));
   if (!(inventory instanceof Map)) {
     const all = inOrder(new Set(inventory ?? []));
-    return { union: all, of: () => all };
+    return { union: all, complete: true, of: () => all };
   }
   const all = new Set();
-  for (const services of inventory.values()) for (const service of services) all.add(service);
+  let complete = true;
+  for (const services of inventory.values()) {
+    if (services === null) complete = false;
+    else for (const service of services) all.add(service);
+  }
   return {
     union: inOrder(all),
-    of: (codebase) => (inventory.has(codebase) ? inOrder(new Set(inventory.get(codebase))) : null),
+    complete,
+    of: (codebase) => {
+      const services = inventory.get(codebase);
+      return Array.isArray(services) ? inOrder(new Set(services)) : null;
+    },
   };
 }
 
@@ -4169,18 +4190,24 @@ export async function classifyInvokerScope(
   const admins = familyInventory(exportedAdminCallableServices, ADMIN_CALLABLE_EXPORTS);
   const exportedAdminCsv = admins.union.join(",");
   const exportedInvitationCsv = invitations.union.join(",");
+  // A deploy of every codebase selects a family its inventory proves exported,
+  // and also, conservatively, one an uninventoried codebase might export.
+  const wholeInvitationsSelected = invitations.union.length > 0 || !invitations.complete;
+  const wholeInvitationsConservative = invitations.union.length === 0 && !invitations.complete;
+  const wholeAdminsSelected = admins.union.length > 0 || !admins.complete;
+  const wholeAdminsConservative = admins.union.length === 0 && !admins.complete;
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = true;
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
-  let eventInvitationsInvokerSelected = invitations.union.length > 0;
-  let adminCallablesInvokerSelected = admins.union.length > 0;
+  let eventInvitationsInvokerSelected = wholeInvitationsSelected;
+  let adminCallablesInvokerSelected = wholeAdminsSelected;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
-  let eventInvitationsInvokerConservative = false;
-  let adminCallablesInvokerConservative = false;
+  let eventInvitationsInvokerConservative = wholeInvitationsConservative;
+  let adminCallablesInvokerConservative = wholeAdminsConservative;
   let authHandoffStrictHalf = "";
   let eventInvitationsStrictServices = exportedInvitationCsv;
   let adminCallablesStrictServices = exportedAdminCsv;
@@ -4193,6 +4220,8 @@ export async function classifyInvokerScope(
     authHandoffInvokerSelected = false;
     eventInvitationsInvokerSelected = false;
     adminCallablesInvokerSelected = false;
+    eventInvitationsInvokerConservative = false;
+    adminCallablesInvokerConservative = false;
     let mintNamed = false;
     let exchangeNamed = false;
     let unknownFunctionsSelectorNamed = false;
@@ -4286,8 +4315,10 @@ export async function classifyInvokerScope(
         // `functions:default` releases the default codebase alone (#1282).
         // A default codebase with no inventory entry (no local `source`, or
         // no `src/index.ts`) has an unknown surface, not an empty one.
-        if (selector === "functions") releaseKnownSurface(invitations.union, admins.union);
-        else if (invitations.of("default") && admins.of("default"))
+        if (selector === "functions") {
+          releaseKnownSurface(invitations.union, admins.union);
+          if (!invitations.complete || !admins.complete) selectFamiliesForUnknownSurface();
+        } else if (invitations.of("default") && admins.of("default"))
           releaseKnownSurface(invitations.of("default"), admins.of("default"));
         else selectFamiliesForUnknownSurface();
       } else if (
@@ -4429,9 +4460,11 @@ export async function classifyInvokerScope(
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
-      eventInvitationsInvokerSelected = invitations.union.length > 0;
+      eventInvitationsInvokerSelected = wholeInvitationsSelected;
+      eventInvitationsInvokerConservative = wholeInvitationsConservative;
       eventInvitationsStrictServices = exportedInvitationCsv;
-      adminCallablesInvokerSelected = admins.union.length > 0;
+      adminCallablesInvokerSelected = wholeAdminsSelected;
+      adminCallablesInvokerConservative = wholeAdminsConservative;
       adminCallablesStrictServices = exportedAdminCsv;
     }
   }

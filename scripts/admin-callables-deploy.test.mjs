@@ -77,42 +77,66 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
 
   // A codebase with no `src/index.ts` (a JavaScript or Python codebase) has an
   // unknown surface, not an empty one, so its scope stays conservative.
-  it.each([
-    // A non-default Python codebase next to an inventoried default one.
-    ["functions:py", [{ source: "functions" }, { source: "py", codebase: "py" }]],
-    // A JavaScript default codebase: `functions:default` releases it whole.
-    ["functions:default", [{ source: "functions" }]],
-  ])("keeps a codebase without a TypeScript index conservative (%s)", async (selector, functions) => {
+  // A codebase with no `src/index.ts` (a JavaScript or Python codebase) has an
+  // unknown surface, not an empty one, so a selector that releases it keeps
+  // each family it might carry selected with every service allowed absent.
+  async function withUnindexedCodebase(layout, run) {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-no-index-"));
+    const callable = "export const unlockDayNow = onCall(async () => 1);\n";
+    const header = "import { onCall } from 'firebase-functions/v2/https';\n";
     try {
-      await mkdir(resolve(fixture, "functions"), { recursive: true });
+      await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
       await mkdir(resolve(fixture, "py"), { recursive: true });
-      await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions }));
-      if (selector === "functions:py") {
-        await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
-        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
-      } else {
+      if (layout === "js-default") {
+        await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: [{ source: "functions" }] }));
         await writeFile(
           resolve(fixture, "functions", "index.js"),
           "const { onCall } = require('firebase-functions/v2/https');\nexports.unlockDayNow = onCall(async () => 1);\n",
         );
+      } else {
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { source: "py", codebase: "py" }] }),
+        );
+        await writeFile(
+          resolve(fixture, "functions", "src", "index.ts"),
+          layout === "ts-default-unlock-and-py" ? header + callable : "export const unrelated = 1;\n",
+        );
       }
-      const result = await classifyFirebaseDeployRequest(["fiveacross", "--only", selector], {
-        defaultConfigPath: resolve(fixture, "firebase.json"),
-      });
-
-      expect(result).toMatchObject({
-        functionsAttempted: true,
-        adminCallablesInvokerSelected: true,
-        adminCallablesInvokerConservative: true,
-        adminCallablesStrictServices: "",
-        eventInvitationsInvokerSelected: true,
-        eventInvitationsInvokerConservative: true,
-        eventInvitationsStrictServices: "",
-      });
+      return await run(resolve(fixture, "firebase.json"));
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
+  }
+
+  const unknown = { selected: true, conservative: true, strict: "" };
+  it.each([
+    ["ts-default-and-py", ["--only", "functions:py"], unknown, unknown],
+    ["js-default", ["--only", "functions:default"], unknown, unknown],
+    ["js-default", ["--only", "functions"], unknown, unknown],
+    ["js-default", [], unknown, unknown],
+    ["ts-default-unlock-and-py", ["--only", "functions"], { selected: true, conservative: false, strict: "unlock" }, unknown],
+    ["ts-default-unlock-and-py", [], { selected: true, conservative: false, strict: "unlock" }, unknown],
+    [
+      "ts-default-unlock-and-py",
+      ["--only", "functions:default"],
+      { selected: true, conservative: false, strict: "unlock" },
+      { selected: false, conservative: false, strict: "" },
+    ],
+  ])("keeps an uninventoried codebase conservative (%s, %j)", async (layout, args, admin, invitation) => {
+    const result = await withUnindexedCodebase(layout, (configPath) =>
+      classifyFirebaseDeployRequest(["fiveacross", ...args], { defaultConfigPath: configPath }),
+    );
+
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      adminCallablesInvokerSelected: admin.selected,
+      adminCallablesInvokerConservative: admin.conservative,
+      adminCallablesStrictServices: admin.strict,
+      eventInvitationsInvokerSelected: invitation.selected,
+      eventInvitationsInvokerConservative: invitation.conservative,
+      eventInvitationsStrictServices: invitation.strict,
+    });
   });
 });
 
