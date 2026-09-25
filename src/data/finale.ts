@@ -4,7 +4,7 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
-import { isBanned } from './moderation';
+import { isBanned, isHiddenFor, withBlockExclusions } from './moderation';
 import { clampReaggregatedTotal, supportedDayIndex } from './eventLimits';
 import { THEMES } from '../theme/themes';
 import {
@@ -108,7 +108,10 @@ export interface Podium {
  *     numbered 1..n — `specs/w2-leaderboard.md` § Design decisions, the live
  *     Leaderboard, both Share Cards, and `ArchivedLeaderboard`, whose own
  *     comment gives the reason: a hole at #1 advertises that a row was removed,
- *     which is the opposite of what hiding is for.
+ *     which is the opposite of what hiding is for. The one exception is a
+ *     Player block (#689): a row hidden by the viewer's own block keeps its
+ *     gap (`withRanksKeepingGaps`), while its honours go through this rule via
+ *     `withBlockExclusions`.
  *
  * So this function takes ONLY the honours. The positions beside them
  * (`Podium.standings`) are built from the ban-filtered rows instead, and the two
@@ -424,7 +427,8 @@ export function buildPodium(
   dayMetasLoaded = true,
   freezeAt?: number | null,
   /**
-   * The Event's ban roster — the ONLY thing that hides a Player here. Passing
+   * The Event's ban roster — the only EVENT-WIDE hide here (the viewer's
+   * per-viewer block set arrives separately as `hiddenUids`, #689). Passing
    * `[]` renders everybody, which is right for a caller with no ban roster in
    * hand and wrong for one that has simply filtered its roster instead: that
    * caller gets the promotion this parameter exists to prevent.
@@ -440,7 +444,16 @@ export function buildPodium(
    * `true`, `null` and absence keep every honour.
    */
   frozenPlayRecorded?: boolean | null,
+  /**
+   * The viewer's reciprocal hidden set (#689, specs/player-blocking.md): a
+   * hidden Player's honours are withheld exactly as a ban's are, and their
+   * standings row is dropped AFTER numbering and the top-three cut, so its rank
+   * leaves a gap and nobody moves up into view (decision 6). Empty by default,
+   * which leaves the output identical to the unblocked podium.
+   */
+  hiddenUids: ReadonlySet<string> = new Set<string>(),
 ): Podium {
+  const excluded = withBlockExclusions(bannedUids, hiddenUids);
   // The podium is "as of the freeze", not live (Phase 4b P1). This module reads
   // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
   // after the freeze — its bucket is retained so its own daily honour still
@@ -502,7 +515,8 @@ export function buildPodium(
       displayName: r.displayName,
       bingoCount: r.bingoCount,
       squaresMarked: r.squaresMarked,
-    }));
+    }))
+    .filter((r) => !isHiddenFor(r.uid, hiddenUids));
 
   return {
     // The honours strip is ban-aware on BOTH sides of this call, and deliberately
@@ -516,12 +530,12 @@ export function buildPodium(
         champion,
         firstBingo,
         dailyHonors: frozenEmptyHonourFilter(
-          pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, bannedUids),
+          pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded, excluded),
           frozenPlayRecorded,
           freezeAt,
         ),
       },
-      bannedUids,
+      excluded,
     ),
     standings,
     // OVER THE RAW ROSTER, not over `standings` (#1192): the re-aggregated rows

@@ -26,6 +26,8 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
+// #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
+vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
 vi.mock('../firebase', () => ({ auth: {}, EVENT_ID: 'test-event', googleProvider: {} }));
 // AuthProvider now mounts the confirm-path listener (#41) beside the attestation
 // gate; stub it — this suite exercises the profile-bootstrap signal, not the listener.

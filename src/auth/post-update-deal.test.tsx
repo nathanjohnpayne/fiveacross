@@ -47,6 +47,8 @@ vi.mock('firebase/auth', () => ({
   signOut: vi.fn().mockResolvedValue(undefined),
   GoogleAuthProvider: class {},
 }));
+// #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
+vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
 vi.mock('../firebase', () => ({ auth: {}, EVENT_ID: 'test-event', googleProvider: {} }));
 // The shell watchers AuthProvider mounts beside the tree are irrelevant here; stubbing
 // PoolRecoveryWatcher also keeps this suite off the live pool subscription (#70 owns it).

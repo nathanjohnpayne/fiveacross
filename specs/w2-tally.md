@@ -77,7 +77,7 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/data/w2-proof-capture.test.ts` (t
 
 Runner: `npm test` (Vitest, jsdom). Test: `src/hooks/w2-tally.test.tsx`.
 
-- `useTally(itemId)` subscribes to the Prompt's marker subcollection and returns `count` = the number of markers and a who-list of every marker, sorted by `markedAt` (chronological).
+- `useTally(itemId)` subscribes to the Prompt's marker subcollection and returns `count` = the number of markers and a who-list of every marker, sorted by `markedAt` (chronological). Both leave out a banned Player's marker and, per viewer, a Player in the viewer's Player-block hidden set (#689, `specs/player-blocking.md`), so the count always equals the rows shown.
 - A `null`/`undefined` `itemId` (e.g. the free centre) opens no subscription and returns an empty Tally.
 
 ### RTL—Board passes the marker attribution only when the saved row is KNOWN

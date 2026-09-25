@@ -41,7 +41,7 @@ The verbatim rules (decided 2026-08-04) map onto the data model as follows; each
 
 | Verbatim rule | Data-model mapping |
 |---|---|
-| visible, moderation-eligible photo Proof | `type === 'photo'` AND the Feed's exact filter (`useProofFeed`): `status === 'active'`, NOT report-hidden (fail-open threshold, `isReportHidden`), owner not banned (`isBanned`) |
+| visible, moderation-eligible photo Proof | `type === 'photo'` AND the Feed's three public predicates (`useProofFeed`): `status === 'active'`, NOT report-hidden (fail-open threshold, `isReportHidden`), owner not banned (`isBanned`). The hook's fourth, per-viewer filter (a Player block, `specs/player-blocking.md`) is display-only and deliberately NOT part of the award: the award is one record for every viewer, so a block never changes who wins, only whether this viewer sees that winner's photo |
 | hidden, deleted, retracted excluded | hidden = the status/report filters; deleted = doc removal, absent from the read set by construction; retracted has no Proof state (see § Deviations #2) |
 | a Heart counts for a Proof | `targetKind === 'proof'`, `targetId` match, incarnation match (`targetCreatedAt === proof.createdAt`, the `heartState` rule), Firestore server `createTime <= cutoff` (not the client-set Feed-ordering `createdAt`) |
 | own Heart on own Proof does NOT count | `heart.uid !== proof.uid`—new logic existing nowhere else; `heartState` deliberately counts self-hearts for display and that stays unchanged |
@@ -53,7 +53,7 @@ The verbatim rules (decided 2026-08-04) map onto the data model as follows; each
 
 ## Client mirror, display gate, and parity
 
-`src/data/mostLoved.ts` (pure, Firestore-free, React-free) exports `proofFeedVisible` (the Feed's three-predicate filter as one named function; `useProofFeed` itself is NOT refactored—it is a hot pre-freeze file), `buildMostLovedPhotoAward` (the mirror, same semantics as the functions builder), `mostLovedDisplayWinners` (the render-time gate: persisted winners joined against live, already-Feed-filtered proofs by `proofId` AND `proofCreatedAt` AND `type === 'photo'`; a winner with no surviving live proof is dropped from display while the award record is untouched, and the finale falls back to photo highlights), and `mostLovedFrozenEventPayload` (§ Analytics). `tests/functions/most-loved-parity.test.ts` feeds one fixture set to BOTH builders and asserts deep-equal output plus pinned literals—the #551 finale-parity pattern, per ADR 0011's pre-commitment that a mirror ships with its parity test.
+`src/data/mostLoved.ts` (pure, Firestore-free, React-free) exports `proofFeedVisible` (the Feed's three public predicates as one named function, without the per-viewer block filter `useProofFeed` also applies; `useProofFeed` itself is NOT refactored—it is a hot pre-freeze file), `buildMostLovedPhotoAward` (the mirror, same semantics as the functions builder), `mostLovedDisplayWinners` (the render-time gate: persisted winners joined against live, already-Feed-filtered proofs by `proofId` AND `proofCreatedAt` AND `type === 'photo'`; a winner with no surviving live proof is dropped from display while the award record is untouched, and the finale falls back to photo highlights), and `mostLovedFrozenEventPayload` (§ Analytics). `tests/functions/most-loved-parity.test.ts` feeds one fixture set to BOTH builders and asserts deep-equal output plus pinned literals—the #551 finale-parity pattern, per ADR 0011's pre-commitment that a mirror ships with its parity test.
 
 ## The share credit line reports the TRUE tie (#659)
 

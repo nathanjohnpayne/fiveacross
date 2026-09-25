@@ -4,6 +4,7 @@ import { phCapture, phRegister, type CaptureOptions } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
 import { resolvedCanonicalHost } from './canonicalHost';
+import { matchEmailCampaign } from './emailCampaignMatch';
 
 /**
  * GA4 event catalog — the single source of truth for every analytics event
@@ -16,7 +17,12 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * `bingo` + `blackout` (components/Board.tsx),
  * `attach_proof` (components/ProofSheet.tsx), `theme_change`
  * (components/ThemeSwitcher.tsx), `text_size_change` (components/More.tsx,
- * #215), `share_click` (components/Celebration.tsx).
+ * #215), `share_click` (`surface`-tagged: components/Celebration.tsx,
+ * Leaderboard.tsx, FarewellPodium.tsx, ArchivedLeaderboard.tsx).
+ * #632 audited this catalog against the launch-window surfaces shipped since
+ * #613 (Most-Loved Photo, finale/archive share, approvals, hostname/Edition)
+ * and found each covered — see specs/posthog-analytics.md § Campaign
+ * attribution, "Event coverage audit".
  * `demand_proof` (Doubt flow, #33) and `install_pwa` (install-prompt flow,
  * #30) are catalogued and type-checked here so each ticket can add its one
  * call site as a one-line `track(...)` addition; this ticket (#38) does not
@@ -173,6 +179,49 @@ function currentPageLocation(): string {
     ? `https://${host}${window.location.pathname}`
     : window.location.origin + window.location.pathname;
 }
+
+/**
+ * The campaign subset of a query string that GA4 may see (#632,
+ * specs/posthog-analytics.md § Campaign attribution), as
+ * `?utm_source=…&utm_medium=…&utm_campaign=…` in that order, or `''`.
+ *
+ * Only a tag set the app's own emails could have produced for THIS Event is
+ * forwarded, as decided by `matchEmailCampaign()` (`src/emailCampaignMatch.ts`,
+ * the same predicate PostHog's `sanitizeUrls` applies): a hand-crafted link
+ * (`utm_campaign=alice-smith-podium`, an email address, a mismatched
+ * source/suffix pair, an out-of-range Day, a third-party campaign) forwards
+ * nothing and no free text reaches GA4. `utm_content` / `utm_term`, which the
+ * app never sets, and every other key (invite codes, auth-handler params) are
+ * always dropped. With no resolved Event id there is nothing to match, so the
+ * result is `''`.
+ */
+export function campaignQuery(search: string, eventId: string | null): string {
+  const incoming = new URLSearchParams(search);
+  const matched = matchEmailCampaign(
+    {
+      utm_source: incoming.get('utm_source'),
+      utm_medium: incoming.get('utm_medium'),
+      utm_campaign: incoming.get('utm_campaign'),
+    },
+    eventId,
+  );
+  return matched ? `?${new URLSearchParams(matched).toString()}` : '';
+}
+
+/**
+ * The LANDING URL's query, read once at module load. `main.tsx` imports this
+ * module before the Router mounts and before Event resolution, so this is the
+ * URL the email click opened, even if a route change lands before the initial
+ * `page_view` does. It stays in memory only: `emitInitialPageView()` forwards
+ * nothing from it but `campaignQuery()`'s matched subset.
+ */
+const landingSearch: string = (() => {
+  try {
+    return window.location.search;
+  } catch {
+    return '';
+  }
+})();
 
 /**
  * Fire an analytics event to BOTH sinks — GA4 and PostHog (#96) — from one call
@@ -401,6 +450,10 @@ export function registerDayIndexDimension(dayIndex: number | null): void {
  * resend is a harmless merge no-op (see `ga4Dims`'s own doc). The event also
  * carries the same fresh `page_location` `track()` computes — ALWAYS
  * explicit, so GA4 never derives one from the full query-bearing URL (#613).
+ * The one exception to path-only is the landing URL's allowlisted `utm_*` set
+ * (#632): GA4 attributes a session from its FIRST hit's `page_location`, so a
+ * path-only initial `page_view` would report every email click as direct
+ * traffic. Only this event carries it; `track()` stays path-only.
  *
  * IDEMPOTENT — at most one emission per page load (#613, Phase 4b round-2
  * P2): `main.tsx`'s `.catch()` also receives an exception thrown by the
@@ -426,8 +479,9 @@ export async function emitInitialPageView(): Promise<void> {
       /* no-op */
     }
   }
+  const eventId = typeof ga4Dims.event_id === 'string' ? ga4Dims.event_id : null;
   try {
-    logEvent(instance, 'page_view', { page_location: currentPageLocation() });
+    logEvent(instance, 'page_view', { page_location: currentPageLocation() + campaignQuery(landingSearch, eventId) });
   } catch {
     /* no-op */
   }

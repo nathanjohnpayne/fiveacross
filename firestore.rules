@@ -38,6 +38,46 @@ service cloud.firestore {
       return exists(membershipDoc(eventId, uid))
         && get(membershipDoc(eventId, uid)).data.status == 'active';
     }
+    // Player blocking (#689, specs/player-blocking.md). Two records per block,
+    // both under the Event and both with ids computable from the two uids so
+    // no rule or client ever needs a query to find them:
+    //   - the DIRECTION record `blocks/{owner}_{target}`, the blocker's own
+    //     private list entry (owner-only read);
+    //   - the PAIR record `blockPairs/{lo}_{hi}` (lo < hi in string order),
+    //     which carries no direction and is what both parties' clients and
+    //     the Hearts arm consult.
+    // `_` joins, as the doubts and hearts slot ids do: it appears in no
+    // Firebase-minted uid, and the block arms below refuse a target uid that
+    // contains one so the ordered pair id cannot collide across two pairs.
+    function blockPairId(a, b) {
+      return a < b ? a + '_' + b : b + '_' + a;
+    }
+    function blockPairDoc(eventId, a, b) {
+      return /databases/$(database)/documents/events/$(eventId)/blockPairs/$(blockPairId(a, b));
+    }
+    function blockDoc(eventId, owner, target) {
+      return /databases/$(database)/documents/events/$(eventId)/blocks/$(owner + '_' + target);
+    }
+    // The Hearts arm's target read. `targetKind` is already pinned to
+    // 'proof' | 'moment' before this is asked, so the else branch IS the
+    // moment branch; a phantom id errors inside `get()` and denies exactly as
+    // the inline pair of reads did before #689 hoisted them here.
+    function heartTargetData(eventId, data) {
+      return data.targetKind == 'proof'
+        ? get(/databases/$(database)/documents/events/$(eventId)/proofs/$(data.targetId)).data
+        : get(/databases/$(database)/documents/events/$(eventId)/moments/$(data.targetId)).data;
+    }
+    // The hearted post must carry the Heart's incarnation stamp (Codex P2 on
+    // #425), AND its author must not sit across a block from the caller
+    // (#689). One `get()` serves both questions; the pair check adds one
+    // `exists()`. A server-authored Moment (`uid: 'system'`) or a target with
+    // no author never names a pair (the block arms refuse 'system' as a
+    // target), so it is never denied here.
+    function heartTargetAccepts(eventId, data) {
+      let target = heartTargetData(eventId, data);
+      return target.createdAt == data.targetCreatedAt
+        && !exists(blockPairDoc(eventId, request.auth.uid, target.get('uid', '')));
+    }
     // Canonical transitional Decision D-A predicate (#801/#802/#804/#1079).
     // Keeping the Event data threaded makes the enforcement switch and Admin
     // bypass one access; the membership path remains exists()-then-get() so
@@ -2758,6 +2798,115 @@ service cloud.firestore {
       // Prompt — social pressure ("pics or it didn't happen"), never a gate. It
       // never blocks, unmarks, or discounts the Mark; attaching a Proof merely
       // satisfies it. Public read.
+      // Player blocking (#689, specs/player-blocking.md, ADR 0016). A Player's
+      // per-Event, reciprocal, self-serviceable hide of another Player. What
+      // these arms ENFORCE is the privacy and integrity of the block records
+      // themselves, plus (in the Hearts arm below) a Heart aimed across a
+      // block. What they do NOT enforce, and cannot: the shared read paths.
+      // Rules are not filters, so a per-document author predicate on the
+      // proofs/moments/markers/doubts/hearts list arms would deny every
+      // reader's whole listen (#294/#314); the client hides the counterpart
+      // instead, and a blocked Player who queries Firestore directly still
+      // receives the other Player's content. Accepted by the owner
+      // (2026-09-24, enforcement bar A) and recorded in the spec and ADR.
+      //
+      // INVARIANT I: the pair record exists if and only if at least one
+      // direction record exists. Every client write is one atomic commit, and
+      // every arm checks the commit's RESULT with `existsAfter`, so no single
+      // commit can break it: a direction cannot be created or kept without
+      // its pair, and a pair cannot be created without the caller's own
+      // direction or deleted while either direction stands. Concurrent
+      // commits, each authorized against the state before the other, can
+      // still leave a pair with NO direction (two direction-only unblocks) or
+      // a direction with no pair (a block racing a pair delete); the pair
+      // delete and create arms let the parties repair either, and the client
+      // reconciles both durably (specs/player-blocking.md).
+      //
+      // No `eventOpenForPlay` conjunct on purpose: blocking is a safety
+      // action and stays available on a closing or archived Event. No Admin
+      // read or delete path: the list is the blocker's own. No `{path=**}`
+      // rule for either collection, so a collectionGroup listen is denied.
+      match /blocks/{blockId} {
+        // Owner-only, get and list alike: the client's one query is
+        // `where('ownerUid', '==', me)`, which proves the predicate for every
+        // candidate row. The blocked Player can never read this record.
+        allow read: if admitted(eventId) && isOwner(resource.data.ownerUid);
+        allow create: if admitted(eventId)
+          && request.resource.data.keys().hasOnly(['ownerUid', 'targetUid', 'eventId', 'createdAt'])
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.targetUid is string
+          && request.resource.data.targetUid.size() > 0
+          && !request.resource.data.targetUid.matches('.*_.*')
+          // No self-block. The target need not be a member or a Player:
+          // checking would spend a get() and buy nothing.
+          && request.resource.data.targetUid != request.auth.uid
+          // ...but never the reserved author of server-written Moments, or a
+          // pair naming it would deny the blocker's Hearts on every one of
+          // them (Codex P2 on #1300); `heartTargetAccepts` relies on this.
+          && request.resource.data.targetUid != 'system'
+          && request.resource.data.eventId == eventId
+          // Bind the id to the payload so nobody can park a record at
+          // another owner's slot (the doubts/hearts binding shape).
+          && blockId == request.auth.uid + '_' + request.resource.data.targetUid
+          // Never ahead of the server clock, and deliberately NO lower bound
+          // (unlike the shared -24h window): a block is a safety action, and
+          // one queued offline for days (ADR 0006) must still land when the
+          // device reconnects rather than roll back unseen. A back-dated
+          // stamp buys nothing; it only orders the owner's own list.
+          && request.resource.data.createdAt is number
+          && request.resource.data.createdAt <= request.time.toMillis() + 60000
+          && existsAfter(blockPairDoc(eventId, request.auth.uid, request.resource.data.targetUid));
+        // An idempotent RE-BLOCK only: `createdAt` refreshes, nothing else
+        // moves. This is what lets the client's block() be a blind set that
+        // never fails "already blocked" when its own-blocks listener has not
+        // loaded yet or another device blocked first.
+        allow update: if admitted(eventId)
+          && isOwner(resource.data.ownerUid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['createdAt'])
+          // The create arm's clock bound: never ahead, no lower bound.
+          && request.resource.data.createdAt is number
+          && request.resource.data.createdAt <= request.time.toMillis() + 60000
+          && existsAfter(blockPairDoc(eventId, request.auth.uid, resource.data.targetUid));
+        // Only the blocker reverses a block. The pair must leave WITH this
+        // record unless the other direction still stands, in which case it
+        // must stay: `existsAfter(pair) == existsAfter(other direction)`.
+        allow delete: if admitted(eventId)
+          && isOwner(resource.data.ownerUid)
+          && existsAfter(blockPairDoc(eventId, resource.data.ownerUid, resource.data.targetUid))
+              == existsAfter(blockDoc(eventId, resource.data.targetUid, resource.data.ownerUid));
+      }
+      match /blockPairs/{pairId} {
+        // Either party reads it: both clients derive the reciprocal hidden
+        // set from `where('uids', 'array-contains', me)`. A third Player
+        // cannot. RESIDUAL, inherent to client-side reciprocal hiding: a
+        // Player can list the pairs naming them, so a pair whose counterpart
+        // is not among their own direction records tells them who blocked
+        // them. The spec records it; the confirmation copy does not overclaim.
+        allow read: if admitted(eventId) && request.auth.uid in resource.data.uids;
+        // Deterministic content, so a re-set from either party is a no-op
+        // update under the same validation. The caller's OWN direction record
+        // must exist once the batch lands (Invariant I).
+        allow create, update: if admitted(eventId)
+          && request.resource.data.keys().hasOnly(['uids', 'eventId'])
+          && request.resource.data.eventId == eventId
+          && request.resource.data.uids is list
+          && request.resource.data.uids.size() == 2
+          && request.resource.data.uids[0] is string
+          && request.resource.data.uids[1] is string
+          && request.resource.data.uids[0] < request.resource.data.uids[1]
+          && pairId == request.resource.data.uids[0] + '_' + request.resource.data.uids[1]
+          && request.auth.uid in request.resource.data.uids
+          && existsAfter(blockDoc(eventId, request.auth.uid,
+              request.resource.data.uids[0] == request.auth.uid
+                ? request.resource.data.uids[1]
+                : request.resource.data.uids[0]));
+        // Gone only when neither direction survives the batch.
+        allow delete: if admitted(eventId)
+          && request.auth.uid in resource.data.uids
+          && !existsAfter(blockDoc(eventId, resource.data.uids[0], resource.data.uids[1]))
+          && !existsAfter(blockDoc(eventId, resource.data.uids[1], resource.data.uids[0]));
+      }
+
       match /doubts/{doubtId} {
         allow read: if admitted(eventId);
         // Raised BY the caller, ON someone else's Mark (no self-doubt); a forged
@@ -2869,12 +3018,9 @@ service cloud.firestore {
           // inheriting the old incarnation's, and a stranded heart can never
           // resurface on a lookalike.
           && request.resource.data.targetCreatedAt is number
-          && (
-            (request.resource.data.targetKind == 'proof'
-              && get(/databases/$(database)/documents/events/$(eventId)/proofs/$(request.resource.data.targetId)).data.createdAt == request.resource.data.targetCreatedAt)
-            || (request.resource.data.targetKind == 'moment'
-              && get(/databases/$(database)/documents/events/$(eventId)/moments/$(request.resource.data.targetId)).data.createdAt == request.resource.data.targetCreatedAt)
-          )
+          // ...and, on the SAME read, its author must not sit across a block
+          // from the caller (#689): the one interaction the rules deny.
+          && heartTargetAccepts(eventId, request.resource.data)
           // Same near-now window as proofs/moments/doubts: client clocks
           // drift, forged far-future stamps don't.
           && request.resource.data.createdAt is number

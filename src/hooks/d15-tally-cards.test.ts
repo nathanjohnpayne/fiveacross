@@ -22,7 +22,7 @@ vi.mock('firebase/firestore', () => ({
   onSnapshot: vi.fn(() => () => {}),
 }));
 
-import { deriveTallyCards, mergeFeed, type TallyMarkerRow } from './useData';
+import { deriveTallyCards, mergeFeed, scrubTallyCards, type TallyMarkerRow } from './useData';
 import { BUMP_DEBOUNCE_MS } from '../game/logic';
 
 // specs/d15-tally-cards.md — the Feed's third stream (#216). Two pure pieces:
@@ -154,5 +154,35 @@ describe('mergeFeed — 3-way Proofs + Moments + Tally Cards (specs/d15-tally-ca
   it('stays backward-compatible: no Tally Cards yields the old Proofs+Moments stream', () => {
     const merged = mergeFeed([proof('pr', 1)], [moment('mo', 2)]);
     expect(merged.map((e) => e.feedKind)).toEqual(['moment', 'proof']);
+  });
+});
+
+describe('scrubTallyCards (#689, the carry-over while the listener resubscribes)', () => {
+  const card = (markers: { uid: string; markedAt: number }[]): TallyCard => ({
+    itemId: 'i1',
+    dayIndex: 0,
+    itemText: 'Balcony photo',
+    count: markers.length,
+    markers: markers.map((m) => ({ ...m, displayName: m.uid })),
+    lastMarkedAt: Math.max(...markers.map((m) => m.markedAt)),
+    displayBump: Math.max(...markers.map((m) => m.markedAt)),
+  });
+
+  it('recomputes the count and timestamps from the visible Marks, so a hidden Mark keeps no bump', () => {
+    const [scrubbed] = scrubTallyCards(
+      [card([{ uid: 'a', markedAt: 10 }, { uid: 'blocked', markedAt: 99 }])],
+      new Set(['blocked']),
+    );
+    expect(scrubbed.markers.map((m) => m.uid)).toEqual(['a']);
+    expect(scrubbed.count).toBe(1);
+    expect(scrubbed.lastMarkedAt).toBe(10);
+    expect(scrubbed.displayBump).toBe(10);
+  });
+
+  it('drops a card left with no visible Mark and returns untouched cards as-is', () => {
+    const untouched = card([{ uid: 'a', markedAt: 1 }]);
+    const out = scrubTallyCards([card([{ uid: 'blocked', markedAt: 5 }]), untouched], new Set(['blocked']));
+    expect(out).toEqual([untouched]);
+    expect(out[0]).toBe(untouched);
   });
 });
