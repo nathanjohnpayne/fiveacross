@@ -76,9 +76,11 @@ const initial = (uid: string | null, key: string | null): HiddenState => ({
  * pending snapshot publishes the union. A pair only ever LEAVES this query
  * once the server has accepted its delete (`unblockPlayer` never deletes
  * locally), so no unblock, denied or pending, can reveal a counterpart early. The error path is EXPLICIT (unlike useColSub,
- * which swallows errors): it logs and resolves ready with the last set, so the
- * app renders unfiltered rather than blank. The same admission failure would
- * deny the content listeners too.
+ * which swallows errors): it logs and resolves ready with the last set it
+ * published, never blank. Before a first answer that is the empty set, so the
+ * app renders unfiltered (the same admission failure would deny the content
+ * listeners too); after one, the last hidden set stays until a remount or
+ * reload resubscribes.
  */
 export function useHiddenUidsSubscription(uid: string | null, enabled: boolean): HiddenUids {
   const eventId = EVENT_ID;
