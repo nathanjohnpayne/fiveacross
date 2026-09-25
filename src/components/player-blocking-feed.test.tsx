@@ -252,6 +252,22 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(document.body.textContent).not.toContain('Blocked Bea');
   });
 
+  it('keeps an open who-list open when a block empties its snapshot but a later Player is still on the card', () => {
+    H.blocks = { hidden: new Set(), ready: true };
+    const first = { itemId: 'item-1', entry: marker('blocked', 'Blocked Bea', 1) };
+    const later = { itemId: 'item-1', entry: marker('friend', 'Friend Fin', 2) };
+    const { view, deliverMarkers } = mount({ markers: [first] });
+    fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
+    act(() => deliverMarkers([first, later]));
+    H.blocks = { hidden: new Set(['blocked']), ready: true };
+    // The Tally stream restarts on the new set; before it re-answers, the card
+    // is absent and the tap-time snapshot (Bea only) scrubs to nothing.
+    view.rerender(<ProofFeed />);
+    act(() => deliverMarkers([first, later]));
+    const rows = [...document.querySelectorAll('.sheet .list .row')];
+    expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Friend Fin']);
+  });
+
   it('renders nothing but the loading state until the hidden set is ready', () => {
     H.blocks = { hidden: new Set(), ready: false };
     mount({ proofs: [proof('p-blocked', 'blocked', 'Blocked Bea', 20)] });

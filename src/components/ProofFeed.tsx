@@ -979,7 +979,7 @@ export default function ProofFeed() {
   // client already held it (all three streams subscribe to their whole
   // collections). One page is still 60; reaching the bottom adds another.
   const [pageCount, setPageCount] = useState(1);
-  const { entries, tallyCards, loading, hasMore } = useFeed(pageCount * FEED_PAGE_SIZE);
+  const { entries, tallyCards, tallyCardsLoading, loading, hasMore } = useFeed(pageCount * FEED_PAGE_SIZE);
   const loadMore = useCallback(() => setPageCount((n) => n + 1), []);
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -1160,8 +1160,12 @@ export default function ProofFeed() {
 
   // Close a who-list whose snapshot a block emptied (#689), so an unblock later
   // cannot re-open it unasked. An all-unmarked card keeps its snapshot above.
+  // Only once the Tally Cards have re-answered: a hidden-set change restarts
+  // that stream with an empty list, which is not proof the card is gone (a
+  // Player who marked after the tap may still be visible on it).
   const whoListBlockedOut =
     whoListCard !== null &&
+    !tallyCardsLoading &&
     !tallyCards.some((card) => card.itemId === whoListCard.itemId && card.dayIndex === whoListCard.dayIndex) &&
     scrubWhoListSnapshot(whoListCard, hidden) === null;
   useEffect(() => {

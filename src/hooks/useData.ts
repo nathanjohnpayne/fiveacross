@@ -1402,6 +1402,10 @@ export function useFeed(max = 60) {
     // `max`-entry merge cap — a busy Feed would otherwise zero the pills on
     // any Proof whose Prompt's card fell outside the cap.
     tallyCards: cards,
+    // Whether `tallyCards` is still waiting on its (re)subscription, which a
+    // hidden-set change restarts with an empty list (#689): a consumer must not
+    // read that transient empty list as "this card is gone".
+    tallyCardsLoading: tallyLoading,
     notices,
     loading: proofsLoading || momentsLoading || tallyLoading || noticesLoading,
   };
