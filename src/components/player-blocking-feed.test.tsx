@@ -285,8 +285,10 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     // The Tally stream restarts on the new set. Until it re-answers, the
     // scrubbed carry-over has no card and the tap-time snapshot (Bea only)
     // scrubs to nothing, but neither is proof the card is gone: Fin's Mark
-    // reaches only the new listener.
+    // reaches only the new listener. The sheet stays mounted, with no rows.
     view.rerender(<ProofFeed />);
+    expect(document.querySelector('.sheet')).toBeTruthy();
+    expect(document.querySelector('.sheet')?.textContent).not.toContain('Blocked Bea');
     act(() => deliverMarkers([first, later]));
     const rows = [...document.querySelectorAll('.sheet .list .row')];
     expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Friend Fin']);

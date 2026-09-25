@@ -1141,12 +1141,16 @@ export default function ProofFeed() {
         // The snapshot predates the viewer's current hidden set, so it is
         // scrubbed against it (#689): a block that lands while the sheet is open
         // drops the counterpart's row (and with it their Doubt button). A
-        // snapshot left with no visible row closes the sheet below.
+        // snapshot left with no visible row closes the sheet below, once the
+        // Tally Cards have answered; until then the sheet stays mounted with no
+        // rows, so its focus trap survives a card that turns out to have a
+        // visible Player after all.
         const fallback = live ? null : scrubWhoListSnapshot(whoListCard, hidden);
-        if (!live && !fallback) return null;
+        if (!live && !fallback && !tallyCardsLoading) return null;
+        const pending = live || fallback ? null : { ...whoListCard, markers: [], count: 0 };
         return (
           <FeedWhoListSheet
-            card={live ?? fallback ?? whoListCard}
+            card={live ?? fallback ?? pending ?? whoListCard}
             onClose={closeWhoList}
             meUid={user?.uid ?? null}
             meName={identityKnown ? displayName : undefined}

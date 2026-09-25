@@ -427,7 +427,8 @@ export function buildPodium(
   dayMetasLoaded = true,
   freezeAt?: number | null,
   /**
-   * The Event's ban roster — the ONLY thing that hides a Player here. Passing
+   * The Event's ban roster — the only EVENT-WIDE hide here (the viewer's
+   * per-viewer block set arrives separately as `hiddenUids`, #689). Passing
    * `[]` renders everybody, which is right for a caller with no ban roster in
    * hand and wrong for one that has simply filtered its roster instead: that
    * caller gets the promotion this parameter exists to prevent.
