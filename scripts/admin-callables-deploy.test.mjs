@@ -65,6 +65,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     [[], true, false, "unlock"],
     [["--only", "functions"], true, false, "unlock"],
     [["--only", "functions:default"], false, false, ""],
+    [["--only", "functions:default:unlockDayNow"], true, true, ""],
     [["--only", "functions:ops"], true, false, "unlock"],
     [["--only", "functions:unlockDayNow"], true, true, ""],
     [["--only", "functions:ops:unlockDayNow"], true, false, "unlock"],
