@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -171,11 +171,45 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
+// The names a local module exports through `export *`, read by name rather
+// than by value: every export-modified declaration name, every named export
+// or re-export (local or from a package), and the same through nested local
+// stars. A name `httpsExportGraph` cannot trace to a builder (a later
+// assignment, a destructured local, a package re-export) is still exported
+// under that name, so it must not read as absent.
+function starExportedNames(file, seen = new Set()) {
+  const names = new Set();
+  if (seen.has(file)) return names;
+  seen.add(file);
+  const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  for (const statement of sourceFile.statements) {
+    const exported = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    if (exported && ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
+      }
+    } else if (exported && (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) {
+      names.add(statement.name.text);
+    } else if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
+      if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) {
+          if (!element.isTypeOnly) names.add(element.name.text);
+        }
+      } else if (!statement.exportClause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+        const target = resolveModule(file, statement.moduleSpecifier.text);
+        if (target) for (const name of starExportedNames(target, seen)) names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
 // `sourcePath`, when given, lets a star re-export of a local module that
-// exists be resolved through the module graph (`httpsExportGraph`) to the
-// names it really exports, so one unexported peer does not become strict. A
-// star of a package or of a module that cannot be resolved, here or anywhere
-// behind a local star, still widens to every protected callable.
+// exists be resolved through the module graph (`httpsExportGraph`) and the
+// names it exports (`starExportedNames`), so one unexported peer does not
+// become strict. A star of a package or of a module that cannot be resolved,
+// here or anywhere behind a local star, still widens to every protected
+// callable.
 function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
@@ -228,8 +262,15 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     for (const [exportName] of table) exportedNames.add(exportName);
   } else if (hasLocalExportStar) {
     const graph = httpsExportGraph(sourcePath);
+    const starNames = new Set();
+    for (const statement of sourceFile.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
+      const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
+      const target = resolveModule(sourcePath, specifier);
+      if (target) for (const name of starExportedNames(target)) starNames.add(name);
+    }
     for (const [exportName] of table) {
-      if (graph.opaque || graph.https.has(exportName)) exportedNames.add(exportName);
+      if (graph.opaque || graph.https.has(exportName) || starNames.has(exportName)) exportedNames.add(exportName);
     }
   }
   return table.filter(([exportName]) =>
