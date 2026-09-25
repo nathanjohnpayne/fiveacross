@@ -18,7 +18,7 @@ import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../dat
 import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
-import { lastCallLineFromPlayers, rankLastCallPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
+import { lastCallLineFromPlayers, lastCallNamedLeader, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
 import { withholdBannedHonours } from '../data/finale';
 import { isHiddenFor, withBlockExclusions } from '../data/moderation';
 import { useHiddenUids } from '../hooks/useBlocks';
@@ -147,13 +147,12 @@ function visibleLastCallLine(
       moment.lastCall.freezePhrase ?? DEFAULT_FREEZE_PHRASE,
     );
     // A ban closes its gap, so the line re-derives over the unbanned field. A
-    // Player block (#689) does not: when the line NAMES a hidden leader (every
-    // naming form opens with the leader's name) it is withheld for the generic
-    // copy, never handed to the runner-up. The identity-free forms ("wide
-    // open", "neck and neck") stand, and a hidden runner-up stays in the field,
-    // since the line names only the leader.
-    const leader = rankLastCallPlayers(unbanned)[0];
-    if (leader && isHiddenFor(leader.uid, hiddenUids) && line.startsWith(leader.displayName)) return undefined;
+    // Player block (#689) does not: when the line NAMES a hidden leader it is
+    // withheld for the generic copy, never handed to the runner-up. The
+    // identity-free forms ("wide open", "neck and neck") stand, and a hidden
+    // runner-up stays in the field, since the line names only the leader.
+    const named = lastCallNamedLeader(unbanned);
+    if (named && isHiddenFor(named.uid, hiddenUids)) return undefined;
     return line;
   }
   // Legacy last-call Moments only carry a pre-rendered string, so a later ban

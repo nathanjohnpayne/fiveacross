@@ -1293,7 +1293,9 @@ export function useTallyCards() {
   // they are served with the new set's Marks removed (`scrubTallyCards`).
   const { hidden, ready, hiddenKey } = useBlockFilter();
   const derivedKey = `${key}|${hiddenKey}`;
-  const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean }>(() => ({
+  // `carried` marks cards scrubbed over from an older hidden set that the new
+  // listener has not yet re-answered (see the carry-over below).
+  const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean; carried?: boolean }>(() => ({
     key: derivedKey,
     cards: [],
     loading: true,
@@ -1312,7 +1314,7 @@ export function useTallyCards() {
       previous.key === derivedKey
         ? { ...previous, loading: true }
         : carriesAcrossHiddenSet(previous, key)
-          ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false }
+          ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false, carried: true }
           : { key: derivedKey, cards: [], loading: true },
     );
     // #1072: the predicate is part of the server query, so another Event's
@@ -1356,14 +1358,20 @@ export function useTallyCards() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [derivedKey, bannedKey, ready]);
-  if (!ready) return { key, cards: [], loading: true };
-  if (state.key === derivedKey) return { key, cards: state.cards, loading: state.loading };
+  // `resubscribing` is true while the cards are a scrubbed carry-over rather
+  // than the new listener's answer: they render, but a consumer must not read a
+  // card's absence from them as proof the card is gone (a visible Mark may not
+  // have reached the old listener yet).
+  if (!ready) return { key, cards: [], loading: true, resubscribing: false };
+  if (state.key === derivedKey)
+    return { key, cards: state.cards, loading: state.loading, resubscribing: state.carried === true };
   // A hidden-set change within the same Event (#689) keeps serving the cards
   // already in hand, scrubbed against the new set, while the listener
   // resubscribes: blanking them would drop the whole Feed to its loading state
   // and unmount an open who-list sheet for a change that only removes rows.
-  if (carriesAcrossHiddenSet(state, key)) return { key, cards: scrubTallyCards(state.cards, hidden), loading: false };
-  return { key, cards: [], loading: true };
+  if (carriesAcrossHiddenSet(state, key))
+    return { key, cards: scrubTallyCards(state.cards, hidden), loading: false, resubscribing: true };
+  return { key, cards: [], loading: true, resubscribing: false };
 }
 
 /** True when `state` holds settled cards for this Event under an older hidden set. */
@@ -1423,7 +1431,7 @@ export function scrubTallyCards(cards: TallyCard[], hidden: ReadonlySet<string>)
 export function useFeed(max = 60) {
   const { proofs, loading: proofsLoading } = useProofFeed(max + 1);
   const { moments, loading: momentsLoading } = useMoments(max + 1);
-  const { cards, loading: tallyLoading } = useTallyCards();
+  const { cards, loading: tallyLoading, resubscribing: tallyResubscribing } = useTallyCards();
   const { notices, loading: noticesLoading } = useNotices();
   const entries = useMemo(
     () => mergeFeed(proofs, moments, cards, notices, max),
@@ -1442,10 +1450,11 @@ export function useFeed(max = 60) {
     // `max`-entry merge cap — a busy Feed would otherwise zero the pills on
     // any Proof whose Prompt's card fell outside the cap.
     tallyCards: cards,
-    // Whether `tallyCards` is still waiting on its (re)subscription, which a
-    // hidden-set change restarts with an empty list (#689): a consumer must not
-    // read that transient empty list as "this card is gone".
-    tallyCardsLoading: tallyLoading,
+    // Whether `tallyCards` is still waiting on its (re)subscription (#689): on
+    // a hidden-set change the cards in hand are served scrubbed until the new
+    // listener answers, and a consumer must not read a card's absence from that
+    // carry-over as "this card is gone".
+    tallyCardsLoading: tallyLoading || tallyResubscribing,
     notices,
     loading: proofsLoading || momentsLoading || tallyLoading || noticesLoading,
   };

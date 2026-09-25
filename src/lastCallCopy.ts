@@ -87,3 +87,20 @@ export function rankLastCallPlayers<T extends LastCallCopyPlayer>(players: reado
     return a.displayName.localeCompare(b.displayName);
   });
 }
+
+/**
+ * The Player `lastCallLineFromPlayers` names, or null when the line it builds
+ * is identity-free (an empty board, or a dead heat at the top). Decided from
+ * the ranking, never from the sentence, so a display name that happens to open
+ * an anonymous line cannot be mistaken for a naming one. Used by the
+ * Player-block gate in `ProofFeed.tsx` (#689) to withhold a line that would
+ * name a hidden leader and nothing else.
+ */
+export function lastCallNamedLeader<T extends LastCallCopyPlayer>(players: readonly T[]): T | null {
+  const [leader, runnerUp] = rankLastCallPlayers(players);
+  if (!leader || (leader.bingoCount === 0 && leader.squaresMarked === 0)) return null;
+  if (!runnerUp) return leader;
+  if (leader.bingoCount !== runnerUp.bingoCount) return leader;
+  if (leader.squaresMarked !== runnerUp.squaresMarked) return leader;
+  return null;
+}

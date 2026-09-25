@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE, type LastCallCopyPlayer } from './lastCallCopy';
+import { lastCallLineFromPlayers, lastCallNamedLeader, DEFAULT_FREEZE_PHRASE, type LastCallCopyPlayer } from './lastCallCopy';
 
 // Extracted from src/components/ProofFeed.tsx (#800) so the client's last-call
 // reconstruction is a pure, package-decoupled module — the same posture
@@ -42,5 +42,26 @@ describe('lastCallLineFromPlayers', () => {
       player({ uid: 'Rex', bingoCount: 1, squaresMarked: 15 }),
     ]);
     expect(line).toContain('Jess leads by 7 squares—');
+  });
+});
+
+describe('lastCallNamedLeader (#689)', () => {
+  const p = (uid: string, displayName: string, bingoCount: number, squaresMarked: number) => ({ uid, displayName, bingoCount, squaresMarked });
+
+  it('names the leader exactly when the line does, decided from the ranking rather than the text', () => {
+    const cases = [
+      [p('a', "It's", 2, 10), p('b', 'Bo', 2, 10)], // dead heat: anonymous
+      [p('a', "The board's", 0, 0), p('b', 'Bo', 0, 0)], // empty board: anonymous
+      [p('a', 'Ann', 3, 10), p('b', 'Bo', 2, 10)], // leads by bingos
+      [p('a', 'Ann', 2, 12), p('b', 'Bo', 2, 10)], // leads by squares
+      [p('a', 'Ann', 1, 5)], // alone
+    ];
+    const named = cases.map((players) => lastCallNamedLeader(players)?.uid ?? null);
+    expect(named).toEqual([null, null, 'a', 'a', 'a']);
+    for (const players of cases) {
+      const leader = lastCallNamedLeader(players);
+      const line = lastCallLineFromPlayers(players, 'standings freeze at 8 a.m');
+      if (leader) expect(line.startsWith(leader.displayName)).toBe(true);
+    }
   });
 });

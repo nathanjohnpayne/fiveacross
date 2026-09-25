@@ -281,10 +281,11 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     const later = { itemId: 'item-1', entry: marker('friend', 'Friend Fin', 2) };
     const { view, deliverMarkers } = mount({ markers: [first] });
     fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
-    act(() => deliverMarkers([first, later]));
     H.blocks = { hidden: new Set(['blocked']), ready: true };
-    // The Tally stream restarts on the new set; before it re-answers, the card
-    // is absent and the tap-time snapshot (Bea only) scrubs to nothing.
+    // The Tally stream restarts on the new set. Until it re-answers, the
+    // scrubbed carry-over has no card and the tap-time snapshot (Bea only)
+    // scrubs to nothing, but neither is proof the card is gone: Fin's Mark
+    // reaches only the new listener.
     view.rerender(<ProofFeed />);
     act(() => deliverMarkers([first, later]));
     const rows = [...document.querySelectorAll('.sheet .list .row')];
