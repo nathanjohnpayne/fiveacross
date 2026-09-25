@@ -204,20 +204,26 @@ describe('useHiddenUidsSubscription', () => {
     await act(async () => {});
     expect(H.ownListings).toBe(3);
     expect(H.repaired).toEqual(['events/event-a/blockPairs/bob_dave', 'events/event-a/blockPairs/bob_dave']);
-    // A pending snapshot never lists; an unchanged settled one does not either.
+    // A pending snapshot never lists; a loss seen on one is owed to the next
+    // settled snapshot, which lists once; an unchanged settled one does not.
     act(() => sub.listener(pairs([], true)));
     act(() => sub.listener(pairs([['alice', 'bob']], true)));
-    act(() => sub.listener(pairs([['alice', 'bob']])));
-    await act(async () => {});
-    expect(H.ownListings).toBe(3);
-    // An outage (a cache snapshot) and the reconnect: the first server
-    // snapshot after it checks again, even with no pair disappearing.
-    act(() => sub.listener({ ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } }));
     await act(async () => {});
     expect(H.ownListings).toBe(3);
     act(() => sub.listener(pairs([['alice', 'bob']])));
     await act(async () => {});
     expect(H.ownListings).toBe(4);
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(4);
+    // An outage (a cache snapshot) and the reconnect: the first server
+    // snapshot after it checks again, even with no pair disappearing.
+    act(() => sub.listener({ ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    await act(async () => {});
+    expect(H.ownListings).toBe(4);
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(5);
     view.unmount();
     // A later subscription to the SAME key (after a sign-out or an Event
     // switch) checks again: a pair lost during the gap shows no disappearance.
@@ -225,9 +231,34 @@ describe('useHiddenUidsSubscription', () => {
     const back = renderHook(() => useHiddenUidsSubscription('bob', true));
     act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
     await act(async () => {});
-    expect(H.ownListings).toBe(5);
+    expect(H.ownListings).toBe(6);
     expect(H.repaired.at(-1)).toBe('events/event-a/blockPairs/bob_erin');
     back.unmount();
+  });
+
+  it('a pair that disappears on a PENDING snapshot is still repaired on the next settled one', async () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[0];
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(1);
+    // Bob blocks Carol (pending) while a concurrent delete drops the Alice
+    // pair: the loss shows only on a pending snapshot...
+    H.ownTargets = ['alice', 'carol'];
+    act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'carol']], true)));
+    act(() => sub.listener(pairs([['bob', 'carol']], true)));
+    await act(async () => {});
+    expect(H.ownListings).toBe(1);
+    // ...and the settled snapshot, where nothing new disappears, still owes it.
+    act(() => sub.listener(pairs([['bob', 'carol']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(2);
+    expect(H.repaired).toEqual(['events/event-a/blockPairs/alice_bob']);
+    // Paid once: the next unchanged settled snapshot does not list again.
+    act(() => sub.listener(pairs([['bob', 'carol']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(2);
+    view.unmount();
   });
 
   it('a failed repair while the listener stays server-backed is retried on a doubling timer, with no new snapshot', async () => {

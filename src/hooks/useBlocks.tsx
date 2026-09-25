@@ -99,6 +99,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     let repairChecked = false;
     // Whether this subscription has had its first server-confirmed answer.
     let reconcileSeeded = false;
+    // A pair disappearance seen on ANY snapshot, owed a repair on the next
+    // server-confirmed one. `previous` advances on pending and cache
+    // snapshots too, so a loss seen there would otherwise be forgotten before
+    // a settled snapshot could act on it (Phase 4b on #1300).
+    let repairOwed = false;
     // The latest server-confirmed counterparts and whether the listener is
     // server-backed now, for a timer-driven repair retry.
     let latestServer: ReadonlySet<string> = EMPTY;
@@ -140,7 +145,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       (snap) => {
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
-        const lostPair = [...previous].some((other) => !current.has(other));
+        if ([...previous].some((other) => !current.has(other))) repairOwed = true;
         // A pair that APPEARS after this subscription's first server answer
         // (a new block, or a repair write that landed after an unblock and so
         // recreated an orphan; Codex P1 on #1300) is offered to the orphan
@@ -171,13 +176,17 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
           reconcileSeeded = true;
           // ...and restore the pair behind any own direction that lost it to
           // a concurrent delete (see `repairMissingPairs`): once per
-          // subscription, and again whenever a pair disappears, which is the
-          // only way that race shows on a live listener (Codex P1 on #1300).
+          // subscription, and again whenever a pair has disappeared on any
+          // snapshot since the last server-confirmed one, which is the only
+          // way that race shows on a live listener (Codex P1 on #1300).
           // An ordinary unblock also removes a pair, so it costs one server
           // listing; a failed run re-arms the next snapshot and, while the
           // listener stays server-backed, a bounded backoff timer.
           latestServer = current;
-          if (!repairChecked || lostPair) runRepair();
+          if (!repairChecked || repairOwed) {
+            repairOwed = false;
+            runRepair();
+          }
         }
         setState({
           key,

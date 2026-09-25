@@ -206,8 +206,8 @@ export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: Bl
  * Repair is therefore by reconciliation, from the one party who can see the
  * gap: the provider calls this with the server-confirmed pair counterparts on
  * the first server-confirmed snapshot of every subscription, on the first one
- * after any cache snapshot (a reconnection), and on any server-confirmed
- * snapshot from which a pair has disappeared; it lists the
+ * after any cache snapshot (a reconnection), and on the first one after any
+ * snapshot (pending included) from which a pair has disappeared; it lists the
  * caller's own directions FROM THE SERVER and re-sets the pair (server-only)
  * for every target missing from `knownCounterparts`. The pair arm allows that
  * only while the caller's direction exists, and the content is deterministic,
