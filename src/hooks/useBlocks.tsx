@@ -95,6 +95,12 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
         const lostPair = [...previous].some((other) => !current.has(other));
         previous = current;
+        // A cache snapshot means the listener lost the server (an outage, or
+        // the SDK's offline fallback). A pair created AND deleted during that
+        // gap never shows as disappearing, so the direction check re-arms for
+        // the next server snapshot (Codex P1 on #1300): one listing per
+        // reconnection.
+        if (snap.metadata.fromCache) repairChecked = false;
         if (!snap.metadata.hasPendingWrites) lastCommitted = current;
         // Server-confirmed pairs only (offline the delete could not run, and
         // the attempt would be spent): offer each one to the reconciler once.

@@ -78,9 +78,12 @@ function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<vo
 /**
  * Unblock `target`. Only the blocker can reverse a block, and the pair must
  * leave with the caller's direction record UNLESS the other direction still
- * stands, so the flow is two attempts: first `{delete direction, delete pair}`,
- * and, only on a permission denial (which the rules issue exactly when the
- * other direction exists), `{delete direction}` alone. The retry succeeding is
+ * stands. The flow is up to four server-only commits: first
+ * `{delete direction, delete pair}`; only on a permission denial (which the
+ * rules issue exactly when the other direction exists), `{delete direction}`
+ * alone; if THAT is denied, the full delete once more; and after a landed
+ * direction-only retry, one best-effort `{delete pair}`. Each is described
+ * below. The direction-only retry succeeding is
  * how the caller learns the block was mutual; reciprocity makes that
  * disclosure inherent, and the copy says so. Any other error rethrows. Every
  * attempt is a server-only commit (`deleteOnServer`), so nothing is hidden or
@@ -120,7 +123,7 @@ export async function unblockPlayer({
     await deleteOnServer([direction]);
   } catch (err) {
     if (!isPermissionDenied(err)) throw err;
-    // The other direction left between our two attempts (an interleaved
+    // The other direction left between our first two attempts (an interleaved
     // mutual unblock, CodeRabbit on #1300), so the rules now require the pair
     // to leave WITH ours: the first attempt's shape, once more.
     await deleteOnServer([direction, pair]);
@@ -168,8 +171,9 @@ export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: Bl
  * for a write that changes nothing, so there is no version to conflict on.
  * Repair is therefore by reconciliation, from the one party who can see the
  * gap: the provider calls this with the server-confirmed pair counterparts on
- * the first server-confirmed snapshot of every subscription and again on any
- * server-confirmed snapshot from which a pair has disappeared; it lists the
+ * the first server-confirmed snapshot of every subscription, on the first one
+ * after any cache snapshot (a reconnection), and on any server-confirmed
+ * snapshot from which a pair has disappeared; it lists the
  * caller's own directions FROM THE SERVER and re-sets the pair (server-only)
  * for every target missing from `knownCounterparts`. The pair arm allows that
  * only while the caller's direction exists, and the content is deterministic,

@@ -201,6 +201,14 @@ describe('useHiddenUidsSubscription', () => {
     act(() => sub.listener(pairs([['alice', 'bob']])));
     await act(async () => {});
     expect(H.ownListings).toBe(3);
+    // An outage (a cache snapshot) and the reconnect: the first server
+    // snapshot after it checks again, even with no pair disappearing.
+    act(() => sub.listener({ ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    await act(async () => {});
+    expect(H.ownListings).toBe(3);
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(4);
     view.unmount();
     // A later subscription to the SAME key (after a sign-out or an Event
     // switch) checks again: a pair lost during the gap shows no disappearance.
@@ -208,7 +216,7 @@ describe('useHiddenUidsSubscription', () => {
     const back = renderHook(() => useHiddenUidsSubscription('bob', true));
     act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
     await act(async () => {});
-    expect(H.ownListings).toBe(4);
+    expect(H.ownListings).toBe(5);
     expect(H.repaired.at(-1)).toBe('events/event-a/blockPairs/bob_erin');
     back.unmount();
   });

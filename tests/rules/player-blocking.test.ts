@@ -26,8 +26,11 @@ import {
 // Two records per block under events/{eventId}: the owner-only DIRECTION record
 // `blocks/{owner}_{target}` and the PAIR record `blockPairs/{lo}_{hi}` either
 // party may read. Pinned here:
-//   - Invariant I (pair exists iff a direction exists) holds after every
-//     committed batch, in both directions and in the mutual case;
+//   - Invariant I (pair exists iff a direction exists): no single commit can
+//     break it, in both directions and in the mutual case; the two states
+//     concurrent commits can leave (a pair with no direction, a direction
+//     with no pair) are repairable by the parties, which the client
+//     reconcilers rely on;
 //   - the direction record is private to its owner (get, list, no Admin path)
 //     and the pair is readable by its two parties only; no collectionGroup;
 //   - a Heart aimed across a pair is denied in BOTH directions, even though
