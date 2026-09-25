@@ -1273,6 +1273,29 @@ export interface HeartDoc {
   createdAt: number; // ms epoch
 }
 
+// Player blocking (#689, specs/player-blocking.md, ADR 0016): a Player's
+// per-Event, reciprocal, self-serviceable hide of another Player. Two records
+// per block, each at an id computable from the two uids.
+//
+// The DIRECTION record, `events/{eventId}/blocks/{ownerUid}_{targetUid}`: the
+// blocker's own list entry, readable by its owner alone. Only `createdAt` ever
+// changes after create (an idempotent re-block).
+export interface BlockDoc {
+  ownerUid: string; // the blocker (== auth.uid at write)
+  targetUid: string; // the blocked Player
+  eventId: string; // == the path's Event
+  createdAt: number; // ms epoch
+}
+
+// The PAIR record, `events/{eventId}/blockPairs/{lo}_{hi}` (lo < hi in string
+// order): no direction, no timestamp, no names. Either party may read it; it
+// is what both clients derive the reciprocal hidden set from and what the
+// Hearts rule checks. Exists iff at least one direction record exists.
+export interface BlockPairDoc {
+  uids: [string, string];
+  eventId: string;
+}
+
 export interface DoubtDoc {
   id: string;
   itemId: string; // the doubted Prompt
