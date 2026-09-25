@@ -43,13 +43,22 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
   const inFlight = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement>(null);
+  const unblockButtons = useRef(new Map<string, HTMLButtonElement>());
+  const prevConfirming = useRef<string | null>(null);
   const occasion = editionBrand().lexicon.occasion;
 
-  // "A player" is reserved for a target with no Player row on a server-confirmed
+  // "A player" is reserved for a target with no usable name on a server-confirmed
   // roster; until the roster resolves, an unnamed target is still loading and its
   // Unblock stays disabled so nobody reverses a block without knowing whose it is.
-  const rosterName = (target: string) => players.find((p) => p.uid === target)?.displayName?.trim();
-  const nameKnown = (target: string) => rosterConfirmed || rosterName(target) !== undefined;
+  // The name is read defensively: the Player row's rules validate ownership, not
+  // the field's type, so a target could store a non-string (or a blank) name, and
+  // neither may crash or unlock the one place a block is reversed.
+  const rosterName = (target: string): string => {
+    const raw: unknown = players.find((p) => p.uid === target)?.displayName;
+    return typeof raw === 'string' ? raw.trim() : '';
+  };
+  const nameKnown = (target: string) => rosterConfirmed || rosterName(target) !== '';
   const nameOf = (target: string) => rosterName(target) || (rosterConfirmed ? 'A player' : 'Loading…');
   const rows = [...blocks]
     .filter((b) => unblocked[b.targetUid] !== b.createdAt)
@@ -76,6 +85,21 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
       setPending(null);
     }
   };
+
+  // Opening the inline confirmation unmounts the focused Unblock, and Cancel
+  // unmounts the confirmation, so move focus with them: onto the confirmation's
+  // Cancel when it opens, and back onto that row's Unblock when it is cancelled.
+  // "Yes, unblock" also closes it, but sets `pending` in the same render, and the
+  // effect below owns focus from there.
+  useEffect(() => {
+    const prev = prevConfirming.current;
+    prevConfirming.current = confirming;
+    if (confirming !== null) {
+      confirmCancelRef.current?.focus();
+    } else if (prev !== null && pending === null) {
+      unblockButtons.current.get(prev)?.focus();
+    }
+  }, [confirming, pending]);
 
   // Confirming unmounts the focused "Yes, unblock", and a landed unblock removes
   // its whole row, so keyboard focus would drop to <body> behind the open panel.
@@ -129,6 +153,10 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                   <button
                     type="button"
                     className="btn"
+                    ref={(el) => {
+                      if (el) unblockButtons.current.set(b.targetUid, el);
+                      else unblockButtons.current.delete(b.targetUid);
+                    }}
                     aria-label={`Unblock ${name}`}
                     disabled={!online || pending !== null || !nameKnown(b.targetUid)}
                     onClick={() => setConfirming(b.targetUid)}
@@ -143,7 +171,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
                       you&rsquo;ll stay hidden from each other.
                     </p>
                     <div className="sheet-actions">
-                      <button type="button" className="btn" onClick={() => setConfirming(null)}>
+                      <button type="button" className="btn" ref={confirmCancelRef} onClick={() => setConfirming(null)}>
                         Cancel
                       </button>
                       <button

@@ -23,7 +23,13 @@ const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:
  * which would otherwise re-anchor this sheet's fixed backdrop to that sheet.
  * Its keyboard handling runs in the CAPTURE phase and stops there, so Escape
  * and the Tab trap act on this sheet alone and never also close the who-list
- * underneath.
+ * underneath. Its backdrop click stops propagating for the same reason: React
+ * bubbles a portalled event through the component tree, into the host
+ * who-list's own backdrop, which would otherwise close too.
+ *
+ * Both the trigger and the portalled sheet carry `ph-no-capture` (as the
+ * Blocked players panel does), so PostHog autocapture and session replay never
+ * record whom a Player blocked; the `block_player` event carries no identity.
  *
  * Confirming commits `blockPlayer`'s batch and closes at once. The batch is
  * optimistic and durable (ADR 0006): the counterpart hides immediately, even
@@ -54,7 +60,7 @@ export default function BlockPlayerButton({
     <>
       <button
         type="button"
-        className="iconbtn block-trigger"
+        className="iconbtn block-trigger ph-no-capture"
         title={`Block ${name}`}
         aria-label={`Block ${name}`}
         onClick={() => setOpen(true)}
@@ -161,7 +167,13 @@ function BlockConfirmSheet({
   }, []);
 
   return (
-    <div className="sheet-backdrop" onClick={onCancel}>
+    <div
+      className="sheet-backdrop ph-no-capture"
+      onClick={(e) => {
+        e.stopPropagation();
+        onCancel();
+      }}
+    >
       <div
         ref={dialogRef}
         className="sheet block-sheet"

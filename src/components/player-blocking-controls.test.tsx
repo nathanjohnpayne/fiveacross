@@ -140,6 +140,31 @@ describe('BlockPlayerButton', () => {
     expect(err).toHaveBeenCalled();
   });
 
+  it('keeps whom a Player blocked out of autocapture and replay: trigger and sheet are ph-no-capture', () => {
+    const dialog = open(vi.fn(() => Promise.resolve()));
+    expect(screen.getByRole('button', { name: 'Block Bea' }).classList.contains('ph-no-capture')).toBe(true);
+    // The sheet is portalled out of any ph-no-capture ancestor, so it needs its own.
+    expect(dialog.closest('.ph-no-capture')).not.toBeNull();
+  });
+
+  it('a backdrop click closes this sheet only, never the host who-list backdrop beneath it', () => {
+    const hostClose = vi.fn();
+    render(
+      <div className="sheet-backdrop" onClick={hostClose}>
+        <div className="sheet" role="dialog" aria-label="Who marked it">
+          <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="feed_wholist" block={() => Promise.resolve()} />
+        </div>
+      </div>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Block Bea' }));
+    hostClose.mockClear();
+    const sheet = screen.getByRole('dialog', { name: 'Block Bea?' });
+    fireEvent.click(sheet.parentElement as HTMLElement);
+    expect(screen.queryByRole('dialog', { name: 'Block Bea?' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Who marked it' })).toBeTruthy();
+    expect(hostClose).not.toHaveBeenCalled();
+  });
+
   it('a refused block keeps the sheet open with an error', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const refused = vi.fn(() => {
@@ -251,6 +276,52 @@ describe('BlockedPlayersPanel', () => {
     expect([...container.querySelectorAll('.blocked-row .name')].map((n) => n.textContent)).toEqual(['Dee', 'Loading…']);
     expect(screen.getByRole('button', { name: 'Unblock Loading…' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Unblock Dee' })).not.toBeDisabled();
+  });
+
+  it('a blank or whitespace-only cached name stays disabled until the roster confirms', () => {
+    H.rosterConfirmed = false;
+    H.myBlocks.data = [direction('bea', 1), direction('cal', 2)];
+    H.players = [
+      { uid: 'bea', displayName: '' },
+      { uid: 'cal', displayName: '   ' },
+    ];
+    const { container, rerender } = render(<BlockedPlayersPanel uid="viewer" />);
+    expect([...container.querySelectorAll('.blocked-row .name')].map((n) => n.textContent)).toEqual([
+      'Loading…',
+      'Loading…',
+    ]);
+    for (const button of screen.getAllByRole('button', { name: 'Unblock Loading…' })) expect(button).toBeDisabled();
+    H.rosterConfirmed = true;
+    rerender(<BlockedPlayersPanel uid="viewer" />);
+    for (const button of screen.getAllByRole('button', { name: 'Unblock A player' })) expect(button).not.toBeDisabled();
+  });
+
+  it('a non-string roster name neither crashes the panel nor names the target', () => {
+    H.myBlocks.data = [direction('bea', 1), direction('cal', 2)];
+    // The Player row's rules do not type-check displayName, so a target can store anything.
+    H.players = [
+      { uid: 'bea', displayName: { trim: null } as unknown as string },
+      { uid: 'cal', displayName: 42 as unknown as string },
+    ];
+    const { container } = render(<BlockedPlayersPanel uid="viewer" />);
+    expect([...container.querySelectorAll('.blocked-row .name')].map((n) => n.textContent)).toEqual([
+      'A player',
+      'A player',
+    ]);
+    for (const button of screen.getAllByRole('button', { name: 'Unblock A player' })) expect(button).not.toBeDisabled();
+  });
+
+  it('moves focus onto the confirmation when it opens, and back to Unblock when it is cancelled', () => {
+    H.myBlocks.data = [direction('bea', 1)];
+    H.players = [{ uid: 'bea', displayName: 'Bea' }];
+    render(<BlockedPlayersPanel uid="viewer" />);
+    const unblock = screen.getByRole('button', { name: 'Unblock Bea' });
+    unblock.focus();
+    fireEvent.click(unblock);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Unblock Bea' }));
+    expect(H.unblockPlayer).not.toHaveBeenCalled();
   });
 
   it('keeps keyboard focus inside the panel when the focused confirm and then the row unmount', async () => {
