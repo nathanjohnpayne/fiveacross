@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { EventDoc } from '../types';
 
 // Covers specs/d15-more-menu.md (#208) — the full More tab: profile, theme,
-// Play (schedule / suggest / how-to-play / install), Support (bug / 18+), an
+// Play (schedule / suggest / how-to-play / install), Support (bug / 18+ /
+// blocked players), an
 // admin-only Admin row badged with the pending count, sign out, and a version
 // footer, in that fixed spec order. Drives the REAL `More.tsx` composition
 // with its child components and data hooks stubbed (each has its own focused
@@ -66,6 +67,16 @@ vi.mock('./AcceptableUse', () => ({
     <button type="button">{`18+ guidelines (${variant})`}</button>
   ),
 }));
+// Blocked players is stubbed to what matters to the panel's focus trap: an
+// Unblock control that is disabled (offline or mid-request), which the browser
+// skips, so the trap must not count it as the panel's first control.
+vi.mock('./BlockedPlayersPanel', () => ({
+  default: () => (
+    <button type="button" disabled>
+      Unblock Bea
+    </button>
+  ),
+}));
 // "How to play" reopens the REAL CoachOverlay (#214) — left un-stubbed so
 // the tests below exercise it; it imports EVENT_ID from '../firebase',
 // mocked like every other component suite stubs that module.
@@ -88,6 +99,7 @@ describe('More menu (specs/d15-more-menu.md)', () => {
       'Support',
       'Report a bug (row)',
       '18+ guidelines (row)',
+      'Blocked players',
       'Sign out',
     ];
     const text = container.textContent ?? '';
@@ -193,4 +205,29 @@ describe('More menu — "How to play" replays the coach overlay (#214)', () => {
     expect(store.get(DISMISS_KEY)).not.toBeUndefined();
     vi.unstubAllGlobals();
   });
+
+  it('the panel focus trap skips disabled controls, so Tab and Shift+Tab stay on Close', () => {
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Blocked players/ }));
+    const dialog = screen.getByRole('dialog', { name: 'Blocked players' });
+    expect(screen.getByRole('button', { name: 'Unblock Bea' })).toBeDisabled();
+    const close = screen.getByRole('button', { name: 'Close' });
+    close.focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('the panel focus trap pulls focus that fell to <body> back inside', () => {
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Blocked players/ }));
+    const close = screen.getByRole('button', { name: 'Close' });
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(false);
+    expect(document.activeElement).toBe(close);
+  });
 });
+

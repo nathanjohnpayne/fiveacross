@@ -234,31 +234,67 @@ export function useHiddenUids(): HiddenUids {
   return useContext(HiddenUidsContext);
 }
 
+/** What `useMyBlocks` reports; see the hook for each field. */
+export interface MyBlocks {
+  data: BlockDoc[];
+  loading: boolean;
+  error: boolean;
+  /** The server has answered this listener at least once, so an empty `data` means no blocks. */
+  confirmed: boolean;
+  /** Targets whose direction record is still an optimistic local write the server has not committed. */
+  pendingTargets: ReadonlySet<string>;
+}
+
+const NO_PENDING: ReadonlySet<string> = new Set();
+
 /**
  * The viewer's OWN direction records (`where('ownerUid', '==', uid)`), the
- * only readable ones: the Blocked-players panel lists these. Errors resolve
- * to an empty, settled list with a console.error, never a hung spinner.
+ * only readable ones: the Blocked-players panel lists these. An error settles
+ * to an empty list with `error: true` and a console.error, never a hung
+ * spinner, so the panel can say it could not load rather than "no blocks".
+ *
+ * The listener includes metadata changes, for two answers the panel acts on.
+ * `confirmed` latches once a snapshot comes from the server: a first open while
+ * offline can deliver an empty cache-only snapshot, which is not proof the
+ * viewer has blocked nobody. `pendingTargets` names the rows that are still a
+ * queued block batch: `unblockPlayer` sends server-only transactions, which do
+ * not see an uncommitted local write, so such a row is not yet reversible.
  */
-export function useMyBlocks(uid: string | null): { data: BlockDoc[]; loading: boolean } {
+export function useMyBlocks(uid: string | null): MyBlocks {
   const eventId = EVENT_ID;
   const key = uid !== null ? eventScopeKey(eventId, 'my-blocks', uid) : null;
-  const [state, setState] = useState<{ key: string | null; data: BlockDoc[]; loading: boolean }>(
-    () => ({ key, data: [], loading: uid !== null }),
-  );
+  const [state, setState] = useState<MyBlocks & { key: string | null }>(() => ({
+    key,
+    data: [],
+    loading: uid !== null,
+    error: false,
+    confirmed: uid === null,
+    pendingTargets: NO_PENDING,
+  }));
   useEffect(() => {
-    setState({ key, data: [], loading: uid !== null });
+    setState({ key, data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING });
     if (key === null || uid === null) return;
     let active = true;
     const unsub = onSnapshot(
       query(blocksCol(eventId), where('ownerUid', '==', uid)),
+      { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
-        setState({ key, data: snap.docs.map((d) => d.data()), loading: false });
+        const data = snap.docs.map((d) => d.data());
+        const pending = snap.docs.filter((d) => d.metadata.hasPendingWrites).map((d) => d.data().targetUid);
+        setState((prev) => ({
+          key,
+          data,
+          loading: false,
+          error: false,
+          confirmed: (prev.key === key && prev.confirmed) || !snap.metadata.fromCache,
+          pendingTargets: pending.length > 0 ? new Set(pending) : NO_PENDING,
+        }));
       },
       (err) => {
         if (!active) return;
         console.error('[blocks] own-blocks listener failed', err);
-        setState({ key, data: [], loading: false });
+        setState({ key, data: [], loading: false, error: true, confirmed: false, pendingTargets: NO_PENDING });
       },
     );
     return () => {
@@ -267,6 +303,12 @@ export function useMyBlocks(uid: string | null): { data: BlockDoc[]; loading: bo
     };
   }, [key, uid, eventId]);
   return state.key === key
-    ? { data: state.data, loading: state.loading }
-    : { data: [], loading: uid !== null };
+    ? {
+        data: state.data,
+        loading: state.loading,
+        error: state.error,
+        confirmed: state.confirmed,
+        pendingTargets: state.pendingTargets,
+      }
+    : { data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING };
 }

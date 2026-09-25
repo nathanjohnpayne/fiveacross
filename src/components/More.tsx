@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, matchPath, useLocation, useNavigate } from 'react-router';
 import { FALLBACK_PATH } from './tabs';
-import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall } from 'lucide-react';
+import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall, UserX } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useEventDoc, useMyUser, usePendingItemCount } from '../hooks/useData';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
@@ -18,6 +18,7 @@ import Admin from './Admin';
 import { adminSectionFromPath } from './admin/route';
 import BugReport from './BugReport';
 import AcceptableUse from './AcceptableUse';
+import BlockedPlayersPanel from './BlockedPlayersPanel';
 import CoachOverlay from './CoachOverlay';
 import { WalkthroughContent } from './TutorialBanner';
 import { editionBrand } from '../editions';
@@ -26,7 +27,7 @@ import { useOpenSuggestPanelIntent, clearOpenSuggestPanel } from '../hooks/useOp
 /**
  * The More tab (#208, daily-cards-spec § "More menu"): profile, theme, text
  * size, Play (schedule / suggest / how-to-play / install), Support (bug /
- * 18+), an admin-only Admin row, sign out, and a version footer — in that
+ * 18+ / blocked players), an admin-only Admin row, sign out, and a version footer — in that
  * fixed order. Replaces `d15-tab-contract`'s interim placeholder (#203,
  * specs/d15-tab-contract.md) wholesale. `ItemPool` and `Admin` mount here as
  * sub-panels instead of top-level routes (their own internals are
@@ -49,7 +50,7 @@ export default function More() {
   const { count: pendingCount } = usePendingItemCount(isAdmin);
   const { standalone, deferred, showIOSHint, install } = useInstallPrompt();
 
-  const [panel, setPanel] = useState<null | 'schedule' | 'suggest' | 'howToPlay' | 'coach'>(null);
+  const [panel, setPanel] = useState<null | 'schedule' | 'suggest' | 'howToPlay' | 'coach' | 'blocked'>(null);
   // The Card/Feed "put it on tomorrow's card" entry point (#559) navigates
   // here and hands off an intent to open THIS panel — consumed once, then
   // cleared, so a later visit to More (no pending intent) opens on the menu
@@ -155,12 +156,20 @@ export default function More() {
         </div>
       </div>
 
-      {/* 5. Support — report a bug, 18+ advisory & acceptable use. */}
+      {/* 5. Support — report a bug, 18+ advisory & acceptable use, and the
+          Player's own blocks (#689, specs/player-blocking.md), the one place a
+          block is reversed. */}
       <div className="more-section">
         <h3>Support</h3>
         <div className="more-rows">
           <BugReport variant="row" />
           <AcceptableUse variant="row" attestedAdultAt={myUser?.attestedAdultAt ?? null} />
+          <MoreRow
+            icon={UserX}
+            title="Blocked players"
+            sub="See and undo the blocks you made"
+            onClick={() => setPanel('blocked')}
+          />
         </div>
       </div>
 
@@ -212,6 +221,13 @@ export default function More() {
       {panel === 'suggest' && (
         <MorePanel title="Suggest a square" onClose={closePanel}>
           <ItemPool />
+        </MorePanel>
+      )}
+      {panel === 'blocked' && (
+        // Mounted only while open, so the own-blocks listener and the roster
+        // read it needs never run for a Player who does not look.
+        <MorePanel title="Blocked players" onClose={closePanel}>
+          <BlockedPlayersPanel uid={user?.uid ?? null} />
         </MorePanel>
       )}
       {panel === 'howToPlay' && (
@@ -287,8 +303,12 @@ function TextSizeSwitcher() {
 }
 
 /** Elements the Tab-trap below will cycle between while a panel is open —
- *  mirrors AcceptableUse.tsx's `FOCUSABLE_SELECTOR`. */
-const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+ *  mirrors AcceptableUse.tsx's `FOCUSABLE_SELECTOR`, minus disabled controls:
+ *  the browser skips a disabled button, so counting one as `first`/`last` (the
+ *  Blocked players panel disables Unblock offline or mid-request) would let
+ *  Tab stall or Shift+Tab escape into the obscured More menu. */
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * A More sub-panel (the schedule / Suggest a square / How to play / Admin):
@@ -318,13 +338,17 @@ function MorePanel({ title, onClose, children }: { title: string; onClose: () =>
       if (!focusable || focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
+      // Focus that has fallen outside the panel (a control inside it unmounted,
+      // dropping focus to <body>) is pulled back in rather than let loose on the
+      // obscured More page.
+      const inside = dialogRef.current?.contains(document.activeElement) ?? false;
       // The title also holds focus (tabIndex=-1, the initial landing spot) but
       // is deliberately excluded from FOCUSABLE_SELECTOR — treat it as
       // preceding `first` so Shift+Tab from it still wraps to the end.
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === titleRef.current)) {
+      if (e.shiftKey && (!inside || document.activeElement === first || document.activeElement === titleRef.current)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
         e.preventDefault();
         first.focus();
       }

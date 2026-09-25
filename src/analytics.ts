@@ -154,6 +154,23 @@ export const GA4_EVENTS = [
   // Params: `dayIndex`, `count` (Community Prompt Squares on this card).
   // Call site: data/api.ts (joinAndDeal, dealDayCard, reshuffleBoard).
   'community_prompt_dealt',
+  // Player blocking (#689, specs/player-blocking.md § Analytics). Neither
+  // event carries a uid, a display name or anything else that identifies
+  // either Player: a block is a private safety action, so the catalog records
+  // only that one happened and where. Each fires once its write persists, under
+  // the Event it was acted in (`trackIfCurrentEvent`).
+  //
+  // A Player blocked another. Params: `surface` ('proof_card' |
+  // 'feed_wholist' | 'board_wholist'). Fires after the block batch commits,
+  // which for a block made offline is on reconnect while its page is still
+  // open; a block that commits after a reload is enforced but not counted
+  // (accepted residual, #1319).
+  // Call site: components/BlockPlayerButton.tsx.
+  'block_player',
+  // A Player reversed a block they made. Params: `stillHidden` (the pair still
+  // stood after their direction left, usually a mutual block; see
+  // `UnblockResult`). Call site: components/BlockedPlayersPanel.tsx.
+  'unblock_player',
 ] as const;
 
 export type GA4EventName = (typeof GA4_EVENTS)[number];

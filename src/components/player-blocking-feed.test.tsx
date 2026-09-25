@@ -317,3 +317,31 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(screen.queryByText(/Blocked Bea/)).toBeNull();
   });
 });
+
+describe('the Feed’s block entry points (#689 part 3)', () => {
+  it('offers Block on another Player’s Proof beside an unchanged Report, never on the viewer’s own', () => {
+    mount({ proofs: [proof('p-friend', 'friend', 'Friend Fin', 20), proof('p-mine', 'viewer', 'Vic Viewer', 10)] });
+    const [friends, mine] = [...document.querySelectorAll('.proof')];
+    expect(friends.querySelector('button[title="Report"]')).toBeTruthy();
+    expect(friends.querySelector('button[title="Block Friend Fin"]')).toBeTruthy();
+    expect(mine.querySelector('button[title="Report"]')).toBeTruthy();
+    expect(mine.querySelector('.block-trigger')).toBeNull();
+    // No Moment carries a per-Moment control.
+    expect(document.querySelector('.moment .block-trigger')).toBeNull();
+  });
+
+  it('offers Block on every other who-list row, never the viewer’s', () => {
+    mount({
+      markers: [
+        { itemId: 'item-1', entry: marker('viewer', 'Vic Viewer', 1) },
+        { itemId: 'item-1', entry: marker('friend', 'Friend Fin', 2) },
+      ],
+    });
+    fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
+    const rows = [...document.querySelectorAll('.sheet .list .row')];
+    expect(rows.map((r) => r.querySelector('.block-trigger')?.getAttribute('aria-label') ?? null)).toEqual([
+      null,
+      'Block Friend Fin',
+    ]);
+  });
+});

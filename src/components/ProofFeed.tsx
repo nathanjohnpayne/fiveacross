@@ -11,6 +11,7 @@ import { reportProof, deleteProof } from '../data/proofs';
 import { resolveDisplayName } from '../data/api';
 import { track } from '../analytics';
 import Avatar from './Avatar';
+import BlockPlayerButton from './BlockPlayerButton';
 import { safeMediaUrl } from './safeMediaUrl';
 import { resolveProofMediaUrl } from '../data/proofMediaUrl';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
@@ -307,6 +308,12 @@ function ProofCard({
         <button className="iconbtn" title="Report" onClick={() => { reportProof(proof.id).catch(console.error); track('report_item'); }}>
           ⚑
         </button>
+        {/* Block (#689): another Player's Proof only, beside Report, which is
+            unchanged. Mutually exclusive with Delete, so a card never carries
+            more than two icon buttons. */}
+        {!!viewerUid && viewerUid !== proof.uid && (
+          <BlockPlayerButton meUid={viewerUid} targetUid={proof.uid} targetName={proof.displayName} surface="proof_card" />
+        )}
         {viewerUid === proof.uid && (
           <button
             className="iconbtn"
@@ -941,6 +948,9 @@ function FeedWhoListSheet({
                           on stateless rows. */}
                       {isPending ? 'Doubting…' : rowHasState ? '🤨 Doubt too' : '🤨 Pics or it didn’t happen'}
                     </button>
+                  )}
+                  {!!meUid && !isMe && (
+                    <BlockPlayerButton meUid={meUid} targetUid={m.uid} targetName={m.displayName} surface="feed_wholist" />
                   )}
                 </div>
               );

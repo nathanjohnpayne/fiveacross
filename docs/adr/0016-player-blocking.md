@@ -1,6 +1,6 @@
 ---
 status: accepted
-implemented: false
+implemented: true
 ---
 
 # Player blocking is a per-pair, per-viewer, display-only narrowing, enforced by rules only on its own records and on Hearts
@@ -29,7 +29,7 @@ Blocking is **a per-pair, per-viewer narrowing of ADR 0002's attribution and of 
 - The Hearts arm costs one more `exists()`; Doubts and the Mark batch are unchanged. No collectionGroup rule exists for either block collection.
 - Every surface that renders another Player must read the viewer's hidden set. The `useHiddenUids()` leaf provider is the one source, and server-parity mirrors (`proofFeedVisible`, `buildMostLovedPhotoAward`, `draftEventArchive`) must never be fed it: a union input there would promote someone else.
 - Reader-scoped server projections remain the only way to meet "holds against a direct Firestore read" for list reads, and are not commissioned. A store reviewer reading "rules-enforced" as covering reads should be pointed at the spec's enforcement table.
-- A report-a-Player flow, a block cap and block-aware server aggregators are follow-ups, not part of this decision.
+- A report-a-Player flow (#1306), a block cap and block-aware server aggregators are follow-ups, not part of this decision.
 
 ## Considered alternatives
 

@@ -1989,6 +1989,30 @@ textarea.input {
   font-size: 11.5px;
   margin: 8px 2px 0;
 }
+/* Player blocking (#689): the compact block trigger on Proof cards and
+   who-list rows, and the Blocked players panel in More. */
+.block-trigger {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.block-trigger-icon {
+  width: 16px;
+  height: 16px;
+}
+.block-error {
+  color: var(--danger, #ff6b7a);
+  font-size: 12px;
+}
+.block-outcome {
+  font-size: 13px;
+}
+.blocked-row {
+  flex-wrap: wrap;
+}
+.blocked-confirm {
+  flex-basis: 100%;
+}
 .doubt-badge {
   position: absolute;
   top: 2px;
