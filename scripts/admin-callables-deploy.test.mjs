@@ -316,6 +316,27 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             "export interface Foo { value: string }\nexport { callable as Foo } from './callable';\n",
           );
           await writeFile(resolve(fixture, "ops", "src", "callable.ts"), header + "export const callable = onCall(async () => 1);\n");
+        } else if (variant === "default-type-import" || variant === "named-type-import" || variant === "default-type-reexport") {
+          // An imported type re-exported under a callable's name is erased.
+          const statements = {
+            "default-type-import": "import AdminCallable from './types';\nexport { AdminCallable as approvePrompts };\n",
+            "named-type-import": "import { AdminCallable } from './types';\nexport { AdminCallable as approvePrompts };\n",
+            "default-type-reexport": "export { default as approvePrompts } from './types';\n",
+          }[variant];
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), header + callable + statements);
+          await writeFile(
+            resolve(fixture, "ops", "src", "types.ts"),
+            variant === "named-type-import"
+              ? "export interface AdminCallable { value: string }\n"
+              : "export default interface AdminCallable { value: string }\n",
+          );
+        } else if (variant === "default-value-import") {
+          // A default-imported value re-exported under a callable's name stays a value.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "import approve from './approve';\nexport { approve as approvePrompts };\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "approve.ts"), header + "export default onCall(async () => 1);\n");
         } else if (variant === "value-reexport") {
           // A named re-export of a local value stays a value.
           await writeFile(
@@ -458,18 +479,21 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "star-type-reexport",
       "star-hop-type-reexport",
       "merged-type-value-reexport",
+      "default-type-import",
+      "named-type-import",
+      "default-type-reexport",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ]),
-    [
-      "ops-variant-value-reexport",
+    ...["value-reexport", "default-value-import"].map((variant) => [
+      `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock,approve" },
       { selected: false, conservative: false, strict: "" },
-    ],
+    ]),
     [
       "ops-variant-interface-merged-value",
       ["--only", "functions:ops"],

@@ -178,9 +178,16 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 // at most an `undefined` property), so it must not become strict. Any value
 // declaration of the name (a variable, function, class, enum, namespace or a
 // value import) keeps it, since declaration merging then exports the value.
-function localTypeOnlyNames(sourceFile) {
+// A value import is itself type-only when the local module it names (resolved
+// from `file`, the module holding `sourceFile`) exports the imported binding
+// only as a type: `import T from './types'` of an `export default interface`
+// binds nothing at runtime, so TypeScript erases it and any `export { T }` of
+// it. That lookup is lazy, made only for a name a caller asks about, and a
+// package or unresolvable module keeps the import a value.
+function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
   const types = new Set();
   const values = new Set();
+  const imports = new Map();
   const addBindingNames = (name, bucket) => {
     if (ts.isIdentifier(name)) bucket.add(name.text);
     else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBindingNames(element.name, bucket);
@@ -208,27 +215,48 @@ function localTypeOnlyNames(sourceFile) {
     } else if (ts.isImportDeclaration(statement) && statement.importClause) {
       const clause = statement.importClause;
       const bucket = clause.isTypeOnly ? types : values;
-      if (clause.name) bucket.add(clause.name.text);
+      const specifier = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : null;
+      if (clause.name) {
+        bucket.add(clause.name.text);
+        if (!clause.isTypeOnly && specifier !== null) imports.set(clause.name.text, [specifier, "default"]);
+      }
       const bindings = clause.namedBindings;
       if (bindings && ts.isNamespaceImport(bindings)) bucket.add(bindings.name.text);
       else if (bindings && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) {
-          (clause.isTypeOnly || element.isTypeOnly ? types : values).add(element.name.text);
+          const typeOnly = clause.isTypeOnly || element.isTypeOnly;
+          (typeOnly ? types : values).add(element.name.text);
+          if (!typeOnly && specifier !== null) {
+            imports.set(element.name.text, [specifier, (element.propertyName ?? element.name).text]);
+          }
         }
       }
     }
   }
   for (const name of values) types.delete(name);
-  return types;
+  const importedTypeOnly = new Map();
+  return {
+    has(name) {
+      if (types.has(name)) return true;
+      if (!file || !imports.has(name)) return false;
+      if (!importedTypeOnly.has(name)) {
+        const [specifier, imported] = imports.get(name);
+        const target = resolveModule(file, specifier);
+        importedTypeOnly.set(name, Boolean(target) && moduleExportIsTypeOnly(target, imported, new Set(seen)));
+      }
+      return importedTypeOnly.get(name);
+    },
+  };
 }
 
 // Whether the local module `file` exports `name` with no runtime value. Every
 // export of the name is weighed, because TypeScript lets a type and a value
 // share one exported name and then emits the value: the name is type-only
 // only when some export of it is a type (an exported interface, type alias or
-// ambient declaration, a type-only clause element, or a re-export, followed
-// through further local modules, of a name that is type-only there) and none
-// is a value. A name the module does not export directly is looked up through
+// ambient declaration, a type-only clause element, a re-export, followed
+// through further local modules, of a name that is type-only there, or, for
+// `default`, an `export default` interface or type-only binding) and none is a
+// value. A name the module does not export directly is looked up through
 // its local `export *` targets, where a local declaration would otherwise
 // shadow it. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
@@ -244,7 +272,7 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
   } catch {
     return false;
   }
-  const typeOnlyNames = localTypeOnlyNames(sourceFile);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, file, seen);
   let typeSeen = false;
   let valueSeen = false;
   const stars = [];
@@ -263,13 +291,26 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
   for (const statement of sourceFile.statements) {
     const modifiers = statement.modifiers ?? [];
     if (modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
-      if (!declaredNames(statement).includes(name)) continue;
+      // `export default interface T` exports `default`, not `T`.
+      const exportsDefault = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
+      if (exportsDefault ? name !== "default" : !declaredNames(statement).includes(name)) continue;
       const erased =
         ts.isInterfaceDeclaration(statement) ||
         ts.isTypeAliasDeclaration(statement) ||
         modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
       if (erased) typeSeen = true;
       else valueSeen = true;
+      continue;
+    }
+    if (ts.isExportAssignment(statement)) {
+      // `export default T` of a type-only binding is erased; any other
+      // `export default` expression is a value, and an `export =` makes
+      // every name the module exposes unknown.
+      if (statement.isExportEquals) valueSeen = true;
+      else if (name === "default") {
+        if (ts.isIdentifier(statement.expression) && typeOnlyNames.has(statement.expression.text)) typeSeen = true;
+        else valueSeen = true;
+      }
       continue;
     }
     if (!ts.isExportDeclaration(statement)) continue;
@@ -325,7 +366,7 @@ function starExportedNames(file, seen = new Set()) {
   if (seen.has(file)) return names;
   seen.add(file);
   const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  const typeOnlyNames = localTypeOnlyNames(sourceFile);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, file);
   for (const statement of sourceFile.statements) {
     // An ambient `export declare` is erased and publishes nothing.
     const exported =
@@ -368,7 +409,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     false,
     ts.ScriptKind.TS,
   );
-  const typeOnlyNames = localTypeOnlyNames(sourceFile);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, sourcePath);
   for (const statement of sourceFile.statements) {
     const exported =
       statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
