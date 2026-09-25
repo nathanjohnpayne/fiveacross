@@ -3944,9 +3944,12 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
- * a TypeScript index), a source directory with no `src/index.ts`, or an index
- * that touches the CommonJS `exports` object in any way (assignment,
- * `Object.assign`, `defineProperty`), which the declaration walk in
+ * a TypeScript index), a `prefix` (the CLI renames every service), a
+ * `package.json` that is unreadable, invalid, or names a `main` other than
+ * `lib/index.js`, a source directory with no `src/index.ts`, or an index, or a
+ * local module it reaches through `export *`, that `referencesCommonJsExports`
+ * flags: a CommonJS `exports`, `module` or top-level `this` reference, an
+ * `export =` or `export default`, or an exported declaration the walk in
  * `protectedServicesFromSource` does not model.
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
@@ -4030,6 +4033,34 @@ function referencesCommonJsExports(source) {
   visit(sourceFile);
   return found;
 }
+/**
+ * Whether a local module the index reaches through `export *` chains is one
+ * `referencesCommonJsExports` flags. The compiled `__exportStar` copies every
+ * property that module's `exports` object carries, including one a CommonJS
+ * mutation added, so the declaration walk cannot bound what the star
+ * re-exports. A star of a package or an unresolvable module is left to
+ * `protectedServicesFromSource`, which widens it to every protected callable.
+ */
+async function starReexportsOpaqueModule(indexPath, indexSource) {
+  const seen = new Set([indexPath]);
+  const queue = [[indexPath, indexSource]];
+  while (queue.length > 0) {
+    const [file, source] = queue.shift();
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    for (const statement of sourceFile.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
+      if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+      const target = resolveModule(file, statement.moduleSpecifier.text);
+      if (!target || seen.has(target)) continue;
+      seen.add(target);
+      const targetSource = await readFile(target, "utf8");
+      if (referencesCommonJsExports(targetSource)) return true;
+      queue.push([target, targetSource]);
+    }
+  }
+  return false;
+}
+
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -4100,7 +4131,7 @@ async function protectedServiceInventory(configSource, configPath, table) {
       throw error;
     }
     if (services.get(codebase) === null) continue;
-    if (referencesCommonJsExports(source)) {
+    if (referencesCommonJsExports(source) || (await starReexportsOpaqueModule(sourcePath, source))) {
       services.set(codebase, null);
       continue;
     }

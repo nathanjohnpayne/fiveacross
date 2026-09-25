@@ -167,6 +167,24 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "index.ts"),
             header + "class Holder { [((this as any).unlockDayNow = onCall(async () => 1), \"k\")]() { return 1; } }\n",
           );
+        } else if (variant === "star-commonjs") {
+          // A local star copies whatever a CommonJS mutation put on the module's exports.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + "exports.unlockDayNow = onCall(async () => 1);\n",
+          );
+        } else if (variant === "star-star-commonjs") {
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './group';\n");
+          await writeFile(resolve(fixture, "ops", "src", "group.ts"), "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header + "Object.assign(exports, { unlockDayNow: onCall(async () => 1) });\n",
+          );
+        } else if (variant === "star-declared") {
+          // A star of a module the walk models stays inventoried.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+          await writeFile(resolve(fixture, "ops", "src", "admin.ts"), header + callable);
         } else if (variant === "import-alias") {
           await writeFile(
             resolve(fixture, "ops", "src", "index.ts"),
@@ -252,6 +270,15 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-top-level-this", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-heritage-this", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-computed-name-this", ["--only", "functions:ops"], unknown, unknown],
+    // So does a local module the index reaches through `export *`.
+    ["ops-variant-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-star-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
+    [
+      "ops-variant-star-declared",
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock" },
+      { selected: false, conservative: false, strict: "" },
+    ],
     ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
