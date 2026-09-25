@@ -417,7 +417,9 @@ export default function FarewellPodium(props: FarewellPodiumProps) {
 /**
  * Mounted only when `event.mostLovedPhoto` exists: opens the Feed's own proof
  * hook — literally the same visibility filters as the Feed, because it IS the
- * Feed's hook (status=='active' query + report-threshold + banned-owner) — and
+ * Feed's hook (status=='active' query + report-threshold + banned-owner, plus
+ * the viewer's Player-block filter, #689, so a blocked co-winner's photo drops
+ * from THIS viewer's display only; the award itself is computed without it) — and
  * fires the `most_loved_photo_frozen` analytics beat on first observation of
  * the persisted award (#560 § Analytics). It deliberately retains every
  * Feed-visible proof: an older winner can legitimately fall below the Feed's
@@ -483,8 +485,10 @@ function FarewellPodiumInner({
   const freezeAt = resolvedStandingsFreezeAt(event ?? null);
   // A blocked counterpart (#689) is hidden on the podium and its share card the
   // same way, and only here: their honours are withheld, their standings row
-  // leaves a gap, nobody is promoted, and the frozen record is untouched.
-  const { hidden } = useHiddenUids();
+  // leaves a gap, nobody is promoted, and the frozen record is untouched. The
+  // podium renders nothing (and sharing waits) until the pair listener answers,
+  // so a cold start never paints or bakes a blocked counterpart into the card.
+  const { hidden, ready: hiddenReady } = useHiddenUids();
   // `players` arrives RAW from `Board` and the ban roster does the hiding, which
   // is what keeps the champion and the headline honour WITHHELD rather than
   // handed to whoever is next (`buildPodium`). Roster absence is not a ban and
@@ -686,7 +690,7 @@ function FarewellPodiumInner({
   // rationale, since an early tap would bake the photo-less composition while
   // the hero was still on its way. The explicit no-award record (winners: [])
   // is photo-less by definition and waits for nothing.
-  const shareReady = dayMetasLoaded && (!award || award.winners.length === 0 || proofsLoaded);
+  const shareReady = hiddenReady && dayMetasLoaded && (!award || award.winners.length === 0 || proofsLoaded);
 
   // ONE eager render as soon as sharing is allowed (#712 round 3) — the
   // Celebration treatment, and for the Celebration reason: the payload is
@@ -714,6 +718,7 @@ function FarewellPodiumInner({
     ? { onShare: () => void shareFinalStandings(), onWarm: () => void warmShareCard() }
     : undefined;
 
+  if (!hiddenReady) return null;
   return (
     <FarewellPodiumView podium={podium} dayLabel={dayLabel} share={share} mostLoved={mostLoved} />
   );

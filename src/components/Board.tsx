@@ -821,7 +821,9 @@ export default function Board() {
   // The viewer's reciprocal hidden set (#689): display-only, so it withholds a
   // blocked counterpart's pinned Day honour below and never touches the RAW
   // roster above that the First-to-BINGO ceremony reads.
-  const { hidden } = useHiddenUids();
+  // Until the pair listener answers (`ready`), the honour is withheld rather than
+  // shown, so a cold start never paints a blocked holder's name.
+  const { hidden, ready: hiddenReady } = useHiddenUids();
   // Codex P3 (PR #66): the pool only matters before a Board is dealt, so once
   // a Board exists this Player has no use for a live listener on every other
   // Player's prompt add/report. Gate the subscription to the no-board state.
@@ -2616,6 +2618,7 @@ export default function Board() {
           <DayBar
             day={viewedDay}
             honor={
+              hiddenReady &&
               viewedDayMeta?.firstBingo &&
               !isBanned(viewedDayMeta.firstBingo.uid, event?.bannedUids ?? []) &&
               !isHiddenFor(viewedDayMeta.firstBingo.uid, hidden)

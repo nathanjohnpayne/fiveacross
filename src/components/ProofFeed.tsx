@@ -18,9 +18,9 @@ import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../dat
 import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
-import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
+import { lastCallLineFromPlayers, rankLastCallPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
 import { withholdBannedHonours } from '../data/finale';
-import { withBlockExclusions } from '../data/moderation';
+import { isHiddenFor, withBlockExclusions } from '../data/moderation';
 import { useHiddenUids } from '../hooks/useBlocks';
 import type {
   BoardDoc,
@@ -130,11 +130,21 @@ export const FEED_PAGE_SIZE = 60;
 // enough that a single scroll doesn't run through several pages at once.
 const FEED_SENTINEL_MARGIN = '400px 0px';
 
-function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): string | undefined {
+function visibleLastCallLine(
+  moment: MomentDoc,
+  bannedUids: readonly string[],
+  hiddenUids: ReadonlySet<string> = new Set<string>(),
+): string | undefined {
   if (moment.kind !== 'last_call') return undefined;
   if (moment.lastCall?.players) {
+    const unbanned = moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids));
+    // A ban closes its gap, so the line re-derives over the unbanned field. A
+    // Player block (#689) does not: when the line would name a hidden leader it
+    // is withheld for the generic copy, never handed to the runner-up. A hidden
+    // runner-up stays in the field, since the line names only the leader.
+    if (unbanned.length > 0 && isHiddenFor(rankLastCallPlayers(unbanned)[0].uid, hiddenUids)) return undefined;
     return lastCallLineFromPlayers(
-      moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids)),
+      unbanned,
       // #800: read the scheduler's persisted freeze-time phrase rather than a
       // hardcoded literal, so this reconstruction can never quote a different
       // freeze time than the one actually posted. Absent only on a Moment
@@ -143,8 +153,9 @@ function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): 
     );
   }
   // Legacy last-call Moments only carry a pre-rendered string, so a later ban
-  // cannot be applied safely. Fail closed when any ban is active.
-  return bannedUids.length > 0 ? undefined : moment.line;
+  // (or a viewer's block, #689) cannot be applied safely. Fail closed when any
+  // is active.
+  return bannedUids.length > 0 || hiddenUids.size > 0 ? undefined : moment.line;
 }
 
 /** The posted Moment as this reader may see it. The Moment itself is written
@@ -445,14 +456,29 @@ function NoticeCard({ notice, days }: { notice: NoticeDoc; days: DayDef[] | unde
   );
 }
 
-function MomentCard({ moment, days, bannedUids, heart }: { moment: MomentDoc; days: DayDef[] | undefined; bannedUids: readonly string[]; heart: HeartControl }) {
+function MomentCard({
+  moment,
+  days,
+  bannedUids,
+  hiddenUids,
+  heart,
+}: {
+  moment: MomentDoc;
+  days: DayDef[] | undefined;
+  bannedUids: readonly string[];
+  hiddenUids: ReadonlySet<string>;
+  heart: HeartControl;
+}) {
   const copy = MOMENT_COPY[moment.kind] ?? { icon: '🎉', line: 'made a Moment!' };
   // #266: the finale beats carry their real content when the scheduler built
   // it — the last-call standings line, and the podium's structured payload.
   // Older minimal beats keep the generic line.
   const isFinale = moment.kind === 'last_call' || moment.kind === 'podium';
-  const finaleLine = visibleLastCallLine(moment, bannedUids);
-  const podium = moment.kind === 'podium' ? visiblePodium(moment.podium, bannedUids) : undefined;
+  const finaleLine = visibleLastCallLine(moment, bannedUids, hiddenUids);
+  // The podium takes the union: a hidden holder's honour is withheld like a
+  // banned one's, and `withholdBannedHonours` never promotes (#689).
+  const podium =
+    moment.kind === 'podium' ? visiblePodium(moment.podium, withBlockExclusions(bannedUids, hiddenUids)) : undefined;
   return (
     <div className={`moment moment-${moment.kind}`}>
       <div className="row" style={{ border: 'none', background: 'none', padding: 0 }}>
@@ -934,6 +960,19 @@ function FeedWhoListSheet({
  * bare Mark now reaches the Feed as a live Tally Card (its position debounced), so
  * play is no longer invisible; Proofs and Moments keep their existing rendering.
  */
+/**
+ * The who-list's tap-time snapshot minus the viewer's hidden counterparts
+ * (#689), or null when a block removed every row it had. A snapshot with no
+ * hidden row comes back unchanged.
+ */
+function scrubWhoListSnapshot(card: TallyCardData, hidden: ReadonlySet<string>): TallyCardData | null {
+  if (hidden.size === 0) return card;
+  const markers = card.markers.filter((m) => !isHiddenFor(m.uid, hidden));
+  if (markers.length === card.markers.length) return card;
+  if (markers.length === 0) return null;
+  return { ...card, markers, count: markers.length };
+}
+
 export default function ProofFeed() {
   // The render window (#441). The Feed used to render a hard-capped 60 entries
   // and then simply END — everything older was unreachable, even though the
@@ -1096,9 +1135,15 @@ export default function ProofFeed() {
         const live = tallyCards.find(
           (card) => card.itemId === whoListCard.itemId && card.dayIndex === whoListCard.dayIndex,
         );
+        // The snapshot predates the viewer's current hidden set, so it is
+        // scrubbed against it (#689): a block that lands while the sheet is open
+        // drops the counterpart's row (and with it their Doubt button). A
+        // snapshot left with no visible row closes the sheet below.
+        const fallback = live ? null : scrubWhoListSnapshot(whoListCard, hidden);
+        if (!live && !fallback) return null;
         return (
           <FeedWhoListSheet
-            card={live ?? whoListCard}
+            card={live ?? fallback ?? whoListCard}
             onClose={closeWhoList}
             meUid={user?.uid ?? null}
             meName={identityKnown ? displayName : undefined}
@@ -1112,6 +1157,16 @@ export default function ProofFeed() {
         );
       })()
     : null;
+
+  // Close a who-list whose snapshot a block emptied (#689), so an unblock later
+  // cannot re-open it unasked. An all-unmarked card keeps its snapshot above.
+  const whoListBlockedOut =
+    whoListCard !== null &&
+    !tallyCards.some((card) => card.itemId === whoListCard.itemId && card.dayIndex === whoListCard.dayIndex) &&
+    scrubWhoListSnapshot(whoListCard, hidden) === null;
+  useEffect(() => {
+    if (whoListBlockedOut) setWhoListCard(null);
+  }, [whoListBlockedOut]);
 
   if (loading) return <div className="center muted">Loading…</div>;
   if (!entries.length)
@@ -1187,7 +1242,8 @@ export default function ProofFeed() {
               key={`moment-${entry.moment.id}`}
               moment={entry.moment}
               days={event?.days}
-              bannedUids={displayExcluded}
+              bannedUids={event?.bannedUids ?? []}
+              hiddenUids={hidden}
               heart={heartFor('moment', entry.moment.id, entry.moment.createdAt)}
             />
           );

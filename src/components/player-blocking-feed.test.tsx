@@ -76,7 +76,16 @@ function mount(streams: {
     else cbs.byName[String(args[3])] = onNext;
     return () => {};
   });
-  render(<ProofFeed />);
+  const view = render(<ProofFeed />);
+  const deliverMarkers = (markers: { itemId: string; entry: TallyEntry }[]) =>
+    cbs.byName.markers?.(
+      col(
+        markers.map(({ itemId, entry }) => ({
+          data: () => entry,
+          ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
+        })),
+      ),
+    );
   act(() => {
     cbs.docs.forEach((cb) =>
       cb({ exists: () => true, data: () => ({ admins: [], bannedUids: [] }), metadata: settled }),
@@ -87,15 +96,9 @@ function mount(streams: {
     cbs.byName.notices?.(col([]));
     cbs.byName.doubts?.(col((streams.doubts ?? []).map(row)));
     cbs.byName.hearts?.(col((streams.hearts ?? []).map(row)));
-    cbs.byName.markers?.(
-      col(
-        (streams.markers ?? []).map(({ itemId, entry }) => ({
-          data: () => entry,
-          ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
-        })),
-      ),
-    );
+    deliverMarkers(streams.markers ?? []);
   });
+  return { view, deliverMarkers };
 }
 
 const proof = (id: string, uid: string, displayName: string, createdAt: number) =>
@@ -187,6 +190,66 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(rows.some((t) => t.includes('Blocked Bea') || t.includes('🏆'))).toBe(false);
     expect(rows).toContain('👑 First to BINGO: Friend Fin');
     expect(rows.some((t) => t.includes('D2 Friend Fin') && !t.includes('D1'))).toBe(true);
+  });
+
+  it('withholds a last-call line that would name a hidden leader, rather than naming the runner-up', () => {
+    const lastCall = {
+      id: 'last_call',
+      kind: 'last_call',
+      uid: 'system',
+      displayName: '',
+      photoURL: null,
+      createdAt: 30,
+      line: 'Blocked Bea leads by 1 bingo—standings freeze at 8 a.m.',
+      lastCall: {
+        freezePhrase: 'standings freeze at 8 a.m',
+        players: [
+          { uid: 'blocked', displayName: 'Blocked Bea', bingoCount: 3, squaresMarked: 20 },
+          { uid: 'friend', displayName: 'Friend Fin', bingoCount: 2, squaresMarked: 15 },
+        ],
+      },
+    } as MomentDoc;
+    mount({ moments: [lastCall] });
+    const line = document.querySelector('.moment-last_call .moment-line')?.textContent ?? '';
+    expect(line).not.toContain('Blocked Bea');
+    expect(line).not.toContain('Friend Fin');
+    expect(line).toBe('posted the final-night standings!');
+  });
+
+  it('keeps naming an unhidden leader when only the runner-up is hidden', () => {
+    const lastCall = {
+      id: 'last_call',
+      kind: 'last_call',
+      uid: 'system',
+      displayName: '',
+      photoURL: null,
+      createdAt: 30,
+      line: '',
+      lastCall: {
+        freezePhrase: 'standings freeze at 8 a.m',
+        players: [
+          { uid: 'friend', displayName: 'Friend Fin', bingoCount: 3, squaresMarked: 20 },
+          { uid: 'blocked', displayName: 'Blocked Bea', bingoCount: 2, squaresMarked: 15 },
+        ],
+      },
+    } as MomentDoc;
+    mount({ moments: [lastCall] });
+    expect(document.querySelector('.moment-last_call .moment-line')?.textContent).toBe(
+      'Friend Fin leads by 1 bingo—standings freeze at 8 a.m.',
+    );
+  });
+
+  it('closes an open who-list when a block lands on the only Player in it', () => {
+    H.blocks = { hidden: new Set(), ready: true };
+    const onlyBlocked = [{ itemId: 'item-1', entry: marker('blocked', 'Blocked Bea', 1) }];
+    const { view, deliverMarkers } = mount({ markers: onlyBlocked });
+    fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
+    expect(document.querySelector('.sheet')?.textContent).toContain('Blocked Bea');
+    H.blocks = { hidden: new Set(['blocked']), ready: true };
+    view.rerender(<ProofFeed />);
+    act(() => deliverMarkers(onlyBlocked));
+    expect(document.querySelector('.sheet')).toBeNull();
+    expect(document.body.textContent).not.toContain('Blocked Bea');
   });
 
   it('renders nothing but the loading state until the hidden set is ready', () => {

@@ -420,7 +420,9 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
   );
   const { kindsByUid } = useProofKindsByUid();
   // The viewer's reciprocal hidden set (#689): rows and honours only, at render.
-  const { hidden } = useHiddenUids();
+  // `ready` gates the render like the content hooks' loading flag, so a cold
+  // start never paints a blocked counterpart before the pair listener answers.
+  const { hidden, ready: hiddenReady } = useHiddenUids();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<LeaderboardFilter>('all');
   // The most recent warmed-up card render, keyed by the inputs it was built
@@ -435,7 +437,7 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     promise: Promise<Blob | null>;
   } | null>(null);
 
-  if (loading) return <LoadingState label="Tallying the leaderboard…" />;
+  if (loading || !hiddenReady) return <LoadingState label="Tallying the leaderboard…" />;
   if (!players.length) return <div className="center muted">No players yet. Be the first.</div>;
 
   // Event-wide First to BINGO is the earliest bingo across non-tutorial Days —

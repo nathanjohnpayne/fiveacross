@@ -75,6 +75,13 @@ describe('Leaderboard (#689)', () => {
     ]);
   });
 
+  it('renders its loading state, not the raw rows, until the hidden set is ready', () => {
+    H.blocks = { hidden: new Set(), ready: false };
+    const { container } = render(<Leaderboard />, { wrapper: MemoryRouter });
+    expect(screen.getByText('Tallying the leaderboard…')).toBeTruthy();
+    expect(container.textContent).not.toContain('BLOCKED');
+  });
+
   it('renders every row, numbered 1..n, for a viewer who has hidden nobody', () => {
     H.blocks = { hidden: new Set(), ready: true };
     const { container } = render(<Leaderboard />, { wrapper: MemoryRouter });
@@ -117,6 +124,25 @@ describe('ArchivedLeaderboard (#689)', () => {
     expect(archive.standings).toHaveLength(3);
     expect(archive.firstBingo?.uid).toBe('blocked');
   });
+
+  it('renders its loading state, not the frozen rows, until the hidden set is ready', () => {
+    H.blocks = { hidden: new Set(), ready: false };
+    const { container } = render(
+      <ArchivedLeaderboard event={{ archivedAt: 10_000, bannedUids: [] }} archive={archive} />,
+    );
+    expect(screen.getByText('Tallying the leaderboard…')).toBeTruthy();
+    expect(container.textContent).not.toContain('BLOCKED');
+  });
+
+  it('shows the empty state, without blaming moderation, when a block hides every remaining row', () => {
+    H.blocks = { hidden: new Set(['alpha', 'blocked', 'charlie']), ready: true };
+    const { container } = render(
+      <ArchivedLeaderboard event={{ archivedAt: 10_000, bannedUids: [] }} archive={archive} />,
+    );
+    expect(container.querySelector('.list')).toBeNull();
+    const empty = container.querySelector('.lb-empty')?.textContent ?? '';
+    expect(empty).toBe('3 players were on the board—every row this record carries is hidden.');
+  });
 });
 
 describe('the farewell podium (#689)', () => {
@@ -135,6 +161,12 @@ describe('the farewell podium (#689)', () => {
     const plain = buildPodium([alpha, blocked, charlie], undefined);
     const withEmpty = buildPodium([alpha, blocked, charlie], undefined, undefined, true, null, [], null, new Set());
     expect(withEmpty).toEqual(plain);
+  });
+
+  it('FarewellPodium renders nothing until the hidden set is ready', () => {
+    H.blocks = { hidden: new Set(), ready: false };
+    const { container } = render(<FarewellPodium players={[alpha, blocked, charlie]} days={undefined} />);
+    expect(container.textContent).toBe('');
   });
 
   it('FarewellPodium never renders a hidden champion or First to BINGO, and promotes nobody', () => {

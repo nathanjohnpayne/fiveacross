@@ -12,6 +12,7 @@ import { editionBrand, editionLexicon } from '../editions';
 import { isBanned, isHiddenFor, withRanksKeepingGaps } from '../data/moderation';
 import { useHiddenUids } from '../hooks/useBlocks';
 import Avatar from './Avatar';
+import LoadingState from './LoadingState';
 import { EmojiText } from './EmojiText';
 import type { ArchivedDayHonor, ArchivedStandingRow, EventArchive, EventDoc } from '../types';
 
@@ -124,8 +125,10 @@ export default function ArchivedLeaderboard({
   // The viewer's reciprocal hidden set (#689), the other live display input: a
   // blocked counterpart's honours vacate like a banned holder's, and their row
   // leaves a gap in the frozen ranks rather than closing it (decision 6). The
-  // record itself is never touched.
-  const { hidden } = useHiddenUids();
+  // record itself is never touched. Until the pair listener answers (`ready`)
+  // the archive renders its loading state and skips the eager card render, so a
+  // cold start never paints or bakes a blocked counterpart.
+  const { hidden, ready: hiddenReady } = useHiddenUids();
   // The headline honour VACATES when its holder is banned — the hall of fame
   // shows "No one got there." rather than the next-earliest Player, matching
   // `buildEventArchive`'s own ban rule at freeze time.
@@ -175,9 +178,11 @@ export default function ArchivedLeaderboard({
   // the frozen count rather than denying it, and scopes itself to the rows THIS
   // RECORD CARRIES — which on a truncated archive is the retained prefix, not the
   // whole roster it counts.
+  // A row can also be hidden by the viewer's own block (#689), so when every
+  // remaining row is a blocked counterpart's the copy does not blame moderation.
   const emptyStandingsCopy =
     archive.playerCount > 0
-      ? `${archive.playerCount} player${archive.playerCount === 1 ? ' was' : 's were'} on the board—every row this record carries is hidden by moderation.`
+      ? `${archive.playerCount} player${archive.playerCount === 1 ? ' was' : 's were'} on the board—every row this record carries is hidden${standings.length > 0 ? '' : ' by moderation'}.`
       : 'No players were on the board.';
 
   // THE RETAINED PREFIX IS THE STORED ONE, NOT WHAT IS CURRENTLY VISIBLE (#1152,
@@ -285,7 +290,7 @@ export default function ArchivedLeaderboard({
   // Deliberately ONE, guarded by a ref rather than a dep list: a later ban changes
   // the key and simply falls back to warm-on-intent.
   useEffect(() => {
-    if (eagerRenderStarted.current) return;
+    if (!hiddenReady || eagerRenderStarted.current) return;
     eagerRenderStarted.current = true;
     void warmShareCard();
     // Intentionally re-checked on every commit: `warmShareCard` closes over the
@@ -324,6 +329,7 @@ export default function ArchivedLeaderboard({
     }
   };
 
+  if (!hiddenReady) return <LoadingState label="Tallying the leaderboard…" />;
   return (
     <>
       <div className="lb-archived-banner" role="status">
@@ -360,7 +366,7 @@ export default function ArchivedLeaderboard({
         )}
       </div>
 
-      {standings.length === 0 ? (
+      {rankedStandings.length === 0 ? (
         <div className="lb-empty muted">{emptyStandingsCopy}</div>
       ) : (
         <div className="list">

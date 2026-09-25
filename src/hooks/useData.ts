@@ -1277,7 +1277,7 @@ export function useTallyCards() {
   const { bannedUids } = useEventModeration();
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'tally-cards');
-  const displayedRef = useRef<{ eventId: string; displayed: Record<string, number> }>({
+  const displayedRef = useRef<{ eventId: string; hiddenKey?: string; displayed: Record<string, number> }>({
     eventId,
     displayed: {},
   });
@@ -1298,8 +1298,12 @@ export function useTallyCards() {
   useEffect(() => {
     if (!ready) return;
     let active = true;
-    if (displayedRef.current.eventId !== eventId) {
-      displayedRef.current = { eventId, displayed: {} };
+    // The bump history is scoped to the hidden set as well as the Event: a bump
+    // never moves backward (`nextDisplayBumpTime`), so a history carried across
+    // a block would keep the Feed position a now-hidden Mark earned. A new set
+    // recomputes every bump from the visible Marks alone.
+    if (displayedRef.current.eventId !== eventId || displayedRef.current.hiddenKey !== hiddenKey) {
+      displayedRef.current = { eventId, hiddenKey, displayed: {} };
     }
     setState((previous) =>
       previous.key === derivedKey
@@ -1329,7 +1333,7 @@ export function useTallyCards() {
           rows.push({ ...data, itemId: tallyDoc.id });
         }
         const { cards, displayed } = deriveTallyCards(rows, displayedRef.current.displayed);
-        displayedRef.current = { eventId, displayed };
+        displayedRef.current = { eventId, hiddenKey, displayed };
         setState({ key: derivedKey, cards, loading: false });
       },
       () => {
@@ -1785,8 +1789,9 @@ export interface ProofKindFlags {
  * `max` via `useFeed`, so the union is only ever built from Proofs that are
  * actually CANDIDATES for the page the chip navigates to. This also folds in
  * the same two PUBLIC-facing filters (community auto-hide + Admin ban, #108)
- * `useProofFeed` already applies, and shares its `'proofs'` subscription
- * cache key — one listener, not two.
+ * `useProofFeed` already applies, plus its per-viewer Player-block filter
+ * (#689), and shares its `'proofs'` subscription cache key — one listener, not
+ * two.
  */
 export function useProofKindsByUid(max = 60) {
   const { proofs, loading } = useProofFeed(max);
