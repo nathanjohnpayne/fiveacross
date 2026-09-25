@@ -32,14 +32,10 @@ const EMPTY: ReadonlySet<string> = new Set();
 // always denied) server-only delete per app session: durable, because every
 // new session retries, and cheap, because it never repeats within one.
 const reconcileAttempted = new Set<string>();
-// Listener keys whose own directions have been checked by `repairMissingPairs`
-// this session (once each; a failed server listing clears the mark to retry).
-const repairAttempted = new Set<string>();
 
 /** Test seam: forget which pairs this session has already reconciled. */
 export function resetReconcileAttemptsForTests(): void {
   reconcileAttempted.clear();
-  repairAttempted.clear();
 }
 // The DEFAULT: no provider means nothing is hidden and nothing waits, so every
 // tree that predates the provider renders exactly as it did.
@@ -86,6 +82,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     // The counterparts of the previous snapshot (pending or settled), so a
     // pair DISAPPEARING from a server-confirmed snapshot can be seen.
     let previous: ReadonlySet<string> = EMPTY;
+    // Whether `repairMissingPairs` has checked the viewer's own directions in
+    // THIS subscription's lifetime. Per subscription, not per session (Codex
+    // P1 on #1300): a gap while unsubscribed (signed out, another Event) can
+    // hide a lost pair that no later snapshot would show disappearing.
+    let repairChecked = false;
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
@@ -105,14 +106,15 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
             void reconcileOrphanPair({ me: uid, target: other, eventId });
           }
           // ...and restore the pair behind any own direction that lost it to
-          // a concurrent delete (see `repairMissingPairs`): once per session,
-          // and again whenever a pair disappears, which is the only way that
-          // race shows on this listener (Codex P1 on #1300). An ordinary
-          // unblock also removes a pair, so it costs one server listing.
-          if (!repairAttempted.has(key) || lostPair) {
-            repairAttempted.add(key);
+          // a concurrent delete (see `repairMissingPairs`): once per
+          // subscription, and again whenever a pair disappears, which is the
+          // only way that race shows on a live listener (Codex P1 on #1300).
+          // An ordinary unblock also removes a pair, so it costs one server
+          // listing; a failed (offline) listing re-arms the next snapshot.
+          if (!repairChecked || lostPair) {
+            repairChecked = true;
             repairMissingPairs({ me: uid, knownCounterparts: current, eventId }).catch(() => {
-              repairAttempted.delete(key);
+              if (active) repairChecked = false;
             });
           }
         }

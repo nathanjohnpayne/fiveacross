@@ -168,7 +168,7 @@ describe('useHiddenUidsSubscription', () => {
     again.unmount();
   });
 
-  it('once per session, restores the pair behind an own direction that lost it; an offline listing is retried on the next server snapshot', async () => {
+  it('once per subscription, restores the pair behind an own direction that lost it; an offline listing is retried on the next server snapshot', async () => {
     H.ownTargets = new Error('unavailable');
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const sub = H.subscriptions[0];
@@ -202,6 +202,15 @@ describe('useHiddenUidsSubscription', () => {
     await act(async () => {});
     expect(H.ownListings).toBe(3);
     view.unmount();
+    // A later subscription to the SAME key (after a sign-out or an Event
+    // switch) checks again: a pair lost during the gap shows no disappearance.
+    H.ownTargets = ['alice', 'erin'];
+    const back = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(4);
+    expect(H.repaired.at(-1)).toBe('events/event-a/blockPairs/bob_erin');
+    back.unmount();
   });
 
   it('signing in while not yet enabled is NOT ready on the very first render (no signed-out carry-over)', () => {
