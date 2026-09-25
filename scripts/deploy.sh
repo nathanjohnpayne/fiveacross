@@ -526,13 +526,16 @@ run_invoker() {
 INVOKER_REPAIR_PROJECT="${INVOKER_PIN_PROJECT:-<project-id>}"
 
 # A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
-# selected for Functions release must exist once Firebase returns. The one
-# exception is an endpoint selected only because an unfamiliar
-# `functions:<selector>` might be a group/codebase containing it. That
-# conservative probe must not make a valid unrelated first deploy fail on a
-# service Firebase had no reason to create; credential and permission failures
-# remain fatal because set-cloud-run-invoker only tolerates its narrowly
-# matched missing-service diagnostics.
+# selected for Functions release must exist once Firebase returns. There are
+# two exceptions, both reported by the classifier as conservative: an endpoint
+# selected only because an unfamiliar `functions:<selector>` might be a
+# group/codebase containing it, and a selected family with no strict service
+# because the codebase the selector resolves to does not export the family's
+# callables or cannot be inventoried (#1282). Such a probe must not make a
+# valid unrelated first deploy fail on a service Firebase had no reason to
+# create; credential and permission failures remain fatal because
+# set-cloud-run-invoker only tolerates its narrowly matched missing-service
+# diagnostics.
 run_postdeploy_invoker() {
   local invoker_script="$1"
   local selected_conservatively="$2"

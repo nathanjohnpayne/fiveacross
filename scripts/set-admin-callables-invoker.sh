@@ -24,7 +24,10 @@ set -euo pipefail
 # `--allow-missing-service` is intentionally per service. approvePrompts does
 # not exist in either project until #1275 deploys, so a release that selects
 # only unlockDayNow tolerates an absent approveprompts service, while a missing
-# selected service remains fatal.
+# strict service remains fatal. A selected service is strict only when the
+# codebase the selector resolves to exports it (#1282); when it does not, or
+# the codebase cannot be inventoried, the deploy wrapper runs this script with
+# every service allowed to be absent (--allow-missing).
 #
 # Environment / overrides:
 #   ADMIN_CALLABLES_PROJECT          GCP project (default: fiveacross)
