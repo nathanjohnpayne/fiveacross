@@ -58,6 +58,17 @@ export interface UnblockResult {
  * other direction exists), `{delete direction}` alone. The retry succeeding is
  * how the caller learns the block was mutual; reciprocity makes that
  * disclosure inherent, and the copy says so. Any other error rethrows.
+ *
+ * Then ONE best-effort `{delete pair}`, for the concurrent mutual unblock
+ * (Codex P2 on #1300): if both parties unblock at once, both first attempts
+ * are denied and both direction-only retries can land, each authorized while
+ * the other direction still stood, leaving a pair with no direction. The
+ * rules let either party delete a pair once neither direction exists, and
+ * whichever retry commits LAST runs this after both directions are gone, so
+ * the orphan is removed. While the other direction still stands (the ordinary
+ * mutual case) the rules deny it and the result stays `stillHidden: true`;
+ * any failure here is swallowed, because the caller's own unblock has
+ * already landed.
  */
 export async function unblockPlayer({
   me,
@@ -77,7 +88,14 @@ export async function unblockPlayer({
   const directionOnly = writeBatch(db);
   directionOnly.delete(blockRef(me, target, eventId));
   await directionOnly.commit();
-  return { stillHidden: true };
+  const orphanedPair = writeBatch(db);
+  orphanedPair.delete(blockPairRef(me, target, eventId));
+  try {
+    await orphanedPair.commit();
+    return { stillHidden: false };
+  } catch {
+    return { stillHidden: true };
+  }
 }
 
 /** The FirebaseError code a rules denial carries, whatever the SDK build. */

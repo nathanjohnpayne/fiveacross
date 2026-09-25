@@ -225,6 +225,15 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         await assertSucceeds(unblockBatch(db(BOB), BOB, ALICE));
       });
 
+      it('a pair left with no direction (a concurrent mutual unblock) is deletable by either party and nobody else', async () => {
+        await seeded(async (s) => {
+          await setDoc(doc(s, pairPath(ALICE, BOB)), pair(ALICE, BOB));
+        });
+        await assertFails(deleteDoc(doc(db(CAROL), pairPath(ALICE, BOB))));
+        await assertFails(deleteDoc(doc(db(ADMIN), pairPath(ALICE, BOB))));
+        await assertSucceeds(deleteDoc(doc(db(BOB), pairPath(ALICE, BOB))));
+      });
+
       it('blocking is a safety action: the batch lands on an archived Event, and so does the unblock', async () => {
         await seeded(async (s) => {
           await updateDoc(doc(s, `events/${EVENT}`), { status: 'archived', archivedAt: NOW() });

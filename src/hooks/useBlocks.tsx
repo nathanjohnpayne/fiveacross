@@ -18,7 +18,10 @@ export interface HiddenUids {
   hidden: ReadonlySet<string>;
   /** True once the first snapshot (cache or server) has arrived, the viewer is
    * signed out, or no provider is mounted. Content hooks gate their loading
-   * state on this so a blocked Player never flashes in on a cold start. */
+   * state on this so a blocked Player never flashes in before the listener's
+   * first answer. Deliberately not server-gated (ADR 0006 offline play): a
+   * stale cached pair set shows until the server snapshot lands, the
+   * staleness every cached read accepts (specs/player-blocking.md). */
   ready: boolean;
 }
 

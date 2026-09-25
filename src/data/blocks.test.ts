@@ -108,10 +108,32 @@ describe('unblockPlayer', () => {
   });
 
   it('on permission-denied (the other direction stands) retries with the direction alone and reports stillHidden', async () => {
-    H.commitResults = [denied, 'ok'];
+    H.commitResults = [denied, 'ok', denied];
     await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });
-    expect(H.batches).toHaveLength(2);
+    expect(H.batches).toHaveLength(3);
     expect(H.batches[1].delete.mock.calls).toEqual([['events/event-a/blocks/bob_alice']]);
+    // The best-effort orphan cleanup, denied while Alice's direction stands.
+    expect(H.batches[2].delete.mock.calls).toEqual([['events/event-a/blockPairs/alice_bob']]);
+  });
+
+  it('a concurrent mutual unblock: the pair left with no direction is deleted after the retry, and nothing stays hidden', async () => {
+    H.commitResults = [denied, 'ok', 'ok'];
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: false });
+    expect(H.batches).toHaveLength(3);
+    expect(H.batches[2].delete.mock.calls).toEqual([['events/event-a/blockPairs/alice_bob']]);
+  });
+
+  it('a failed orphan cleanup never fails the unblock that already landed', async () => {
+    const offline = Object.assign(new Error('unavailable'), { code: 'unavailable' });
+    H.commitResults = [denied, 'ok', offline];
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });
+  });
+
+  it('a failed direction-only retry rethrows and attempts no cleanup', async () => {
+    const offline = Object.assign(new Error('unavailable'), { code: 'unavailable' });
+    H.commitResults = [denied, offline];
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).rejects.toBe(offline);
+    expect(H.batches).toHaveLength(2);
   });
 
   it('rethrows any other error without a second attempt', async () => {
