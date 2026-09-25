@@ -129,6 +129,22 @@ describe('unblockPlayer', () => {
     await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: true });
   });
 
+  it('an interleaved mutual unblock: the direction-only retry denied (the other direction left meanwhile) retries the full batch once', async () => {
+    H.commitResults = [denied, denied, 'ok'];
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).resolves.toEqual({ stillHidden: false });
+    expect(H.batches).toHaveLength(3);
+    expect(H.batches[2].delete.mock.calls).toEqual([
+      ['events/event-a/blocks/bob_alice'],
+      ['events/event-a/blockPairs/alice_bob'],
+    ]);
+  });
+
+  it('a denial of that final full batch rethrows', async () => {
+    H.commitResults = [denied, denied, denied];
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).rejects.toBe(denied);
+    expect(H.batches).toHaveLength(3);
+  });
+
   it('a failed direction-only retry rethrows and attempts no cleanup', async () => {
     const offline = Object.assign(new Error('unavailable'), { code: 'unavailable' });
     H.commitResults = [denied, offline];

@@ -59,7 +59,12 @@ export interface UnblockResult {
  * how the caller learns the block was mutual; reciprocity makes that
  * disclosure inherent, and the copy says so. Any other error rethrows.
  *
- * Then ONE best-effort `{delete pair}`, for the concurrent mutual unblock
+ * If the retry is itself denied, the other direction left between the two
+ * attempts (the other party unblocked in between), so the rules now require
+ * the pair to go with ours: one more `{delete direction, delete pair}`, whose
+ * success means nothing stays hidden. Any error there rethrows.
+ *
+ * After a landed retry, ONE best-effort `{delete pair}`, for the concurrent mutual unblock
  * (Codex P2 on #1300): if both parties unblock at once, both first attempts
  * are denied and both direction-only retries can land, each authorized while
  * the other direction still stood, leaving a pair with no direction. The
@@ -87,7 +92,19 @@ export async function unblockPlayer({
   }
   const directionOnly = writeBatch(db);
   directionOnly.delete(blockRef(me, target, eventId));
-  await directionOnly.commit();
+  try {
+    await directionOnly.commit();
+  } catch (err) {
+    if (!isPermissionDenied(err)) throw err;
+    // The other direction left between our two attempts (an interleaved
+    // mutual unblock, CodeRabbit on #1300), so the rules now require the pair
+    // to leave WITH ours: the first attempt's shape, once more.
+    const again = writeBatch(db);
+    again.delete(blockRef(me, target, eventId));
+    again.delete(blockPairRef(me, target, eventId));
+    await again.commit();
+    return { stillHidden: false };
+  }
   const orphanedPair = writeBatch(db);
   orphanedPair.delete(blockPairRef(me, target, eventId));
   try {

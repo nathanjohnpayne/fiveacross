@@ -231,6 +231,18 @@ describe.each([{ enforcement: 'off' }, { enforcement: 'enforced' }])(
         await assertSucceeds(unblockBatch(db(BOB), BOB, ALICE));
       });
 
+      it('an interleaved mutual unblock: once one direction-only delete lands, the other party must take the pair with theirs', async () => {
+        await assertSucceeds(blockBatch(db(ALICE), ALICE, BOB));
+        await assertSucceeds(blockBatch(db(BOB), BOB, ALICE));
+        await assertFails(unblockBatch(db(ALICE), ALICE, BOB));
+        await assertFails(unblockBatch(db(BOB), BOB, ALICE));
+        await assertSucceeds(deleteDoc(doc(db(ALICE), blockPath(ALICE, BOB))));
+        // Bob's direction-only retry would now orphan the pair...
+        await assertFails(deleteDoc(doc(db(BOB), blockPath(BOB, ALICE))));
+        // ...so the full batch, retried once, is what lands.
+        await assertSucceeds(unblockBatch(db(BOB), BOB, ALICE));
+      });
+
       it('a pair left with no direction (a concurrent mutual unblock) is deletable by either party and nobody else', async () => {
         await seeded(async (s) => {
           await setDoc(doc(s, pairPath(ALICE, BOB)), pair(ALICE, BOB));
