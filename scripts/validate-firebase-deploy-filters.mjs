@@ -182,11 +182,14 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 // from `file`, the module holding `sourceFile`) exports the imported binding
 // only as a type: `import T from './types'` of an `export default interface`
 // binds nothing at runtime, so TypeScript erases it and any `export { T }` of
-// it. That lookup is lazy, made only for a name a caller asks about, and a
-// package or unresolvable module keeps the import a value.
-function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
+// it. A local value declaration of the same name still keeps it a value,
+// since it merges with the imported type and is what an export emits. That
+// lookup is lazy, made only for a name a caller asks about, and a package or
+// unresolvable module keeps the import a value.
+function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   const types = new Set();
   const values = new Set();
+  const localValues = new Set();
   const imports = new Map();
   const addBindingNames = (name, bucket) => {
     if (ts.isIdentifier(name)) bucket.add(name.text);
@@ -199,6 +202,7 @@ function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         addBindingNames(declaration.name, ambient ? types : values);
+        if (!ambient) addBindingNames(declaration.name, localValues);
       }
     } else if (ambient && statement.name && ts.isIdentifier(statement.name)) {
       types.add(statement.name.text);
@@ -212,6 +216,7 @@ function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
       ts.isIdentifier(statement.name)
     ) {
       values.add(statement.name.text);
+      localValues.add(statement.name.text);
     } else if (ts.isImportDeclaration(statement) && statement.importClause) {
       const clause = statement.importClause;
       const bucket = clause.isTypeOnly ? types : values;
@@ -238,15 +243,28 @@ function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
   return {
     has(name) {
       if (types.has(name)) return true;
-      if (!file || !imports.has(name)) return false;
+      if (!file || !imports.has(name) || localValues.has(name)) return false;
       if (!importedTypeOnly.has(name)) {
         const [specifier, imported] = imports.get(name);
         const target = resolveModule(file, specifier);
-        importedTypeOnly.set(name, Boolean(target) && moduleExportIsTypeOnly(target, imported, new Set(seen)));
+        importedTypeOnly.set(name, Boolean(target) && moduleExportIsTypeOnly(target, imported, walk));
       }
       return importedTypeOnly.get(name);
     },
   };
+}
+
+// One traversal's recursion state for the mutually recursive export walks
+// (`localTypeOnlyNames`, `moduleExportIsTypeOnly`, `exportElementIsValue`,
+// `starExportedNames`): the type-only lookups (`file\0name`) and star-name
+// collections (`file`) currently on the call path. Every recursion between
+// the walks passes one of the two, so a re-export cycle ends at its first
+// repeated key: a type-only lookup is then not proven type-only (a value),
+// and a star collection adds nothing, since the frame already collecting
+// that module adds its names. A key leaves the path when its frame returns,
+// so a module reached twice without a cycle is read in full each time.
+function newExportWalk() {
+  return { types: new Set(), stars: new Set() };
 }
 
 // Whether the local module `file` exports `name` with no runtime value. Every
@@ -261,18 +279,27 @@ function localTypeOnlyNames(sourceFile, file = null, seen = new Set()) {
 // shadow it. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
 // be read, a package, or a star it cannot resolve is not proven type-only, so
-// its name stays a value.
-function moduleExportIsTypeOnly(file, name, seen = new Set()) {
+// its name stays a value, as does a lookup that re-enters itself through a
+// re-export cycle (`walk`, see `newExportWalk`).
+function moduleExportIsTypeOnly(file, name, walk = newExportWalk()) {
   const key = `${file}\0${name}`;
-  if (seen.has(key)) return false;
-  seen.add(key);
+  if (walk.types.has(key)) return false;
+  walk.types.add(key);
+  try {
+    return exportIsTypeOnlyIn(file, name, walk);
+  } finally {
+    walk.types.delete(key);
+  }
+}
+
+function exportIsTypeOnlyIn(file, name, walk) {
   let sourceFile;
   try {
     sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
   } catch {
     return false;
   }
-  const typeOnlyNames = localTypeOnlyNames(sourceFile, file, seen);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, file, walk);
   let typeSeen = false;
   let valueSeen = false;
   const stars = [];
@@ -326,7 +353,7 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
     }
     for (const element of statement.exportClause.elements) {
       if (element.name.text !== name) continue;
-      if (statement.isTypeOnly || !exportElementIsValue(statement, element, typeOnlyNames, file, seen)) typeSeen = true;
+      if (statement.isTypeOnly || !exportElementIsValue(statement, element, typeOnlyNames, file, walk)) typeSeen = true;
       else valueSeen = true;
     }
   }
@@ -336,8 +363,8 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
   for (const statement of stars) {
     const target = ts.isStringLiteral(statement.moduleSpecifier) ? resolveModule(file, statement.moduleSpecifier.text) : null;
     if (!target) return false;
-    if (starExportedNames(target).has(name)) return false;
-    if (moduleExportIsTypeOnly(target, name, seen)) starTypeOnly = true;
+    if (starExportedNames(target, walk).has(name)) return false;
+    if (moduleExportIsTypeOnly(target, name, walk)) starTypeOnly = true;
   }
   return starTypeOnly;
 }
@@ -346,13 +373,13 @@ function moduleExportIsTypeOnly(file, name, seen = new Set()) {
 // `export { name }` of a binding declared only as a type does not, and
 // neither does a re-export from a local module (`file` is the module holding
 // the statement) that exports that name only as a type.
-function exportElementIsValue(statement, element, typeOnlyNames, file = null, seen = new Set()) {
+function exportElementIsValue(statement, element, typeOnlyNames, file = null, walk = newExportWalk()) {
   if (element.isTypeOnly) return false;
   const local = (element.propertyName ?? element.name).text;
   if (!statement.moduleSpecifier) return !typeOnlyNames.has(local);
   if (!file || !ts.isStringLiteral(statement.moduleSpecifier)) return true;
   const target = resolveModule(file, statement.moduleSpecifier.text);
-  return !(target && moduleExportIsTypeOnly(target, local, seen));
+  return !(target && moduleExportIsTypeOnly(target, local, walk));
 }
 
 // The names a local module exports through `export *`, read by name rather
@@ -360,13 +387,24 @@ function exportElementIsValue(statement, element, typeOnlyNames, file = null, se
 // or re-export (local or from a package), and the same through nested local
 // stars. A name `httpsExportGraph` cannot trace to a builder (a later
 // assignment, a destructured local, a package re-export) is still exported
-// under that name, so it must not read as absent.
-function starExportedNames(file, seen = new Set()) {
+// under that name, so it must not read as absent. A module already being
+// collected on this path (a star cycle, see `newExportWalk`) adds nothing
+// more.
+function starExportedNames(file, walk = newExportWalk()) {
   const names = new Set();
-  if (seen.has(file)) return names;
-  seen.add(file);
+  if (walk.stars.has(file)) return names;
+  walk.stars.add(file);
+  try {
+    collectStarExportedNames(file, walk, names);
+  } finally {
+    walk.stars.delete(file);
+  }
+  return names;
+}
+
+function collectStarExportedNames(file, walk, names) {
   const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  const typeOnlyNames = localTypeOnlyNames(sourceFile, file);
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, file, walk);
   for (const statement of sourceFile.statements) {
     // An ambient `export declare` is erased and publishes nothing.
     const exported =
@@ -381,15 +419,14 @@ function starExportedNames(file, seen = new Set()) {
     } else if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
       if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) {
-          if (exportElementIsValue(statement, element, typeOnlyNames, file)) names.add(element.name.text);
+          if (exportElementIsValue(statement, element, typeOnlyNames, file, walk)) names.add(element.name.text);
         }
       } else if (!statement.exportClause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
         const target = resolveModule(file, statement.moduleSpecifier.text);
-        if (target) for (const name of starExportedNames(target, seen)) names.add(name);
+        if (target) for (const name of starExportedNames(target, walk)) names.add(name);
       }
     }
   }
-  return names;
 }
 
 // `sourcePath`, when given, lets a star re-export of a local module that
@@ -4177,6 +4214,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
  * a TypeScript index), a `prefix` (the CLI renames every service), a source
+ * directory that does not exist yet under a `predeploy` hook (which can
+ * generate it), a source
  * directory carrying a `functions.yaml` manifest (it decides discovery before
  * the index loads), a source directory with no `package.json` (the CLI then
  * infers a non-Node runtime), a
@@ -4345,8 +4384,9 @@ async function protectedServiceInventory(configSource, configPath, table) {
     // before the SDK loads the index (`runtimes/node/index.js`
     // `discoverBuild`), so the index does not prove the published surface.
     const sourceDir = resolve(dirname(configPath), functionsConfig.source);
-    // A missing source directory has nothing to list; one that exists but
-    // cannot be listed cannot rule the manifest out, so it stays unknown.
+    // A missing source directory has nothing to list (the index read below
+    // decides it); one that exists but cannot be listed cannot rule the
+    // manifest out, so it stays unknown.
     let sourceEntries = [];
     try {
       sourceEntries = await readdir(sourceDir);
@@ -4389,10 +4429,15 @@ async function protectedServiceInventory(configSource, configPath, table) {
     } catch (error) {
       // A source directory with no conventional index (a JavaScript or Python
       // codebase) has an unknown surface, not an empty one: it is recorded as
-      // `null`, and every selector that releases it stays conservative. A
-      // missing source directory has nothing the CLI could publish.
+      // `null`, and every selector that releases it stays conservative. So is
+      // a missing source directory whose codebase configures a `predeploy`
+      // hook, which runs before Functions prepare reads the directory and can
+      // generate it. A missing source directory with no hook has nothing the
+      // CLI could publish.
+      const predeploy = functionsConfig.predeploy;
+      const hasPredeploy = Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
       if (error && typeof error === "object" && error.code === "ENOENT") {
-        if (existsSync(resolve(dirname(configPath), functionsConfig.source))) {
+        if (hasPredeploy || existsSync(resolve(dirname(configPath), functionsConfig.source))) {
           services.set(codebase, null);
         } else if (!services.has(codebase)) {
           services.set(codebase, new Set());

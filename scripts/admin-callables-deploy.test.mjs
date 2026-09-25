@@ -125,6 +125,15 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "ops", "main.py"), "# unlock_day_now is exported as unlockDayNow\n");
+      } else if (layout === "ts-default-and-generated-ops" || layout === "ts-default-and-missing-ops") {
+        // A source directory a predeploy hook generates does not exist yet;
+        // with no hook, a missing directory has nothing to publish.
+        const hook = layout === "ts-default-and-generated-ops" ? { predeploy: ["node generate-ops.js"] } : {};
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { source: "generated-ops", codebase: "ops", ...hook }] }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
       } else if (layout === "ts-default-and-bracket-module-ops") {
         await nodeSource(resolve(fixture, "ops"));
         await writeFile(
@@ -330,6 +339,24 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
               ? "export interface AdminCallable { value: string }\n"
               : "export default interface AdminCallable { value: string }\n",
           );
+        } else if (variant === "merged-import-value") {
+          // A local value merged with an imported interface is what the export emits.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header +
+              callable +
+              "import { AdminCallable } from './types';\nconst AdminCallable = onCall(async () => 1);\nexport { AdminCallable as approvePrompts };\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface AdminCallable { value: string }\n");
+        } else if (variant === "cyclic-type-reexport") {
+          // A re-export cycle through stars ends; the name is not proven type-only.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { T as approvePrompts } from './a';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "a.ts"), "export * from './b';\n");
+          await writeFile(resolve(fixture, "ops", "src", "b.ts"), "export interface T { value: string }\nexport * from './c';\n");
+          await writeFile(resolve(fixture, "ops", "src", "c.ts"), "export { T } from './a';\n");
         } else if (variant === "default-value-import") {
           // A default-imported value re-exported under a callable's name stays a value.
           await writeFile(
@@ -488,7 +515,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ]),
-    ...["value-reexport", "default-value-import"].map((variant) => [
+    ...["value-reexport", "default-value-import", "merged-import-value", "cyclic-type-reexport"].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock,approve" },
@@ -512,6 +539,16 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-python-ops", ["--only", "functions"], unknown, unknown],
+    // A source directory a predeploy hook may generate has an unknown surface;
+    // a missing one with no hook publishes nothing.
+    ["ts-default-and-generated-ops", ["--only", "functions:ops"], unknown, unknown],
+    ["ts-default-and-generated-ops", ["--only", "functions"], unknown, unknown],
+    [
+      "ts-default-and-missing-ops",
+      ["--only", "functions:ops"],
+      { selected: false, conservative: false, strict: "" },
+      { selected: false, conservative: false, strict: "" },
+    ],
     ["ts-default-unlock-and-py", ["--only", "functions"], { selected: true, conservative: false, strict: "unlock" }, unknown],
     ["ts-default-unlock-and-py", [], { selected: true, conservative: false, strict: "unlock" }, unknown],
     [
