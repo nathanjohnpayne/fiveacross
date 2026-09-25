@@ -193,6 +193,15 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "admin.ts"),
             header + "Object.assign(exports, { unlockDayNow: onCall(async () => 1) });\n",
           );
+        } else if (variant === "star-named-hop") {
+          // A named re-export behind a star carries a name out of an opaque module.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './middle';\n");
+          await writeFile(resolve(fixture, "ops", "src", "middle.ts"), "export { unlockDayNow } from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            header +
+              "namespace inner { export const unlockDayNow = onCall(async () => 1); }\nexport import unlockDayNow = inner.unlockDayNow;\n",
+          );
         } else if (variant === "star-declared") {
           // A star of a module the walk models stays inventoried.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
@@ -287,6 +296,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // So does a local module the index reaches through `export *`.
     ["ops-variant-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-star-star-commonjs", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-star-named-hop", ["--only", "functions:ops"], unknown, unknown],
     [
       "ops-variant-star-declared",
       ["--only", "functions:ops"],

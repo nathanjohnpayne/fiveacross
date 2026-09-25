@@ -4040,7 +4040,9 @@ function referencesCommonJsExports(source) {
  * `referencesCommonJsExports` flags. The compiled `__exportStar` copies every
  * property that module's `exports` object carries, including one a CommonJS
  * mutation added, so the declaration walk cannot bound what the star
- * re-exports. A star of a package or an unresolvable module is left to
+ * re-exports. Past the first star, a named re-export (`export { x } from`) is
+ * followed too, since it carries a name from an opaque module through the
+ * star. A star of a package or an unresolvable module is left to
  * `protectedServicesFromSource`, which widens it to every protected callable.
  */
 async function starReexportsOpaqueModule(indexPath, indexSource) {
@@ -4050,7 +4052,10 @@ async function starReexportsOpaqueModule(indexPath, indexSource) {
     const [file, source] = queue.shift();
     const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
     for (const statement of sourceFile.statements) {
-      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
+      // The index's own named re-exports are read by name in
+      // `protectedServicesFromSource`; only its stars need the walk.
+      if (statement.exportClause && file === indexPath) continue;
       if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
       const target = resolveModule(file, statement.moduleSpecifier.text);
       if (!target || seen.has(target)) continue;
