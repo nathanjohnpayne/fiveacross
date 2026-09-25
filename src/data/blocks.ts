@@ -63,7 +63,8 @@ export function blockPlayer({ me, target, eventId = EVENT_ID }: BlockPairParams)
 export interface UnblockResult {
   /**
    * True when the pair still stood on the server after the caller's own
-   * direction left (the other Player has blocked the caller too), OR,
+   * direction left (usually because the other Player has blocked the caller
+   * too, though an orphaned pair that no direction backs reads the same), OR,
    * conservatively, when that could not be confirmed (a failed cleanup whose
    * follow-up listing also failed). False means the pair is known to be gone.
    * So `true` is not proof of a mutual block; the provider's pair listener,
@@ -98,9 +99,10 @@ function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<vo
  * missing), `{delete direction}` alone; then EITHER, if that is denied, the
  * full delete once more, OR, if it landed, one best-effort `{delete pair}`
  * (followed, if that is denied or fails, by one server listing of the
- * caller's pairs to report `stillHidden`). Each is described below. A
- * `stillHidden: true` answer is how the caller learns the block was mutual
- * (or, conservatively, that the pair could not be confirmed gone; see
+ * caller's pairs to report `stillHidden`). Each is described below. A pair
+ * confirmed still standing after the caller's direction left is how the
+ * caller can infer the block was mutual, but `stillHidden: true` alone is not
+ * proof (an orphaned pair, or an unanswered listing, reports the same; see
  * `UnblockResult`); reciprocity makes that disclosure inherent, and the copy
  * says so. Any other error rethrows. Every
  * attempt is a server-only commit (`deleteOnServer`), so nothing is hidden or
