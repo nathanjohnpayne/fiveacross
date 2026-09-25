@@ -273,6 +273,23 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "admin.ts"),
             header + callable + "declare function approvePrompts(): void;\nexport { approvePrompts };\n",
           );
+        } else if (variant === "type-reexport" || variant === "star-type-reexport") {
+          // A named re-export of an interface is erased and emits no property.
+          const module = header + callable + "export { AdminCallable as approvePrompts } from './types';\n";
+          if (variant === "star-type-reexport") {
+            await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
+            await writeFile(resolve(fixture, "ops", "src", "admin.ts"), module);
+          } else {
+            await writeFile(resolve(fixture, "ops", "src", "index.ts"), module);
+          }
+          await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface AdminCallable { value: string }\n");
+        } else if (variant === "value-reexport") {
+          // A named re-export of a local value stays a value.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { approve as approvePrompts } from './approve';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "approve.ts"), header + "export const approve = onCall(async () => 1);\n");
         } else if (variant === "interface-merged-value") {
           // A value merged with a same-named interface is still exported.
           await writeFile(
@@ -399,12 +416,25 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: false, conservative: false, strict: "" },
     ],
     // A local type-only or ambient binding in a named export clause publishes nothing.
-    ...["star-interface-clause", "interface-clause", "ambient-clause", "star-ambient-clause"].map((variant) => [
+    ...[
+      "star-interface-clause",
+      "interface-clause",
+      "ambient-clause",
+      "star-ambient-clause",
+      "type-reexport",
+      "star-type-reexport",
+    ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ]),
+    [
+      "ops-variant-value-reexport",
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock,approve" },
+      { selected: false, conservative: false, strict: "" },
+    ],
     [
       "ops-variant-interface-merged-value",
       ["--only", "functions:ops"],

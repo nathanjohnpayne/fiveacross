@@ -222,12 +222,46 @@ function localTypeOnlyNames(sourceFile) {
   return types;
 }
 
+// Whether the local module `file` exports `name` with no runtime value: it
+// declares it only as a type (or ambient), or re-exports it, possibly under
+// another name and through further local modules, from where it is one. A
+// re-export TypeScript can only erase (`export { T as x } from './types'` of
+// an interface) emits no property at all. A module that cannot be read, or a
+// package, is not proven type-only, so its name stays a value.
+function moduleExportIsTypeOnly(file, name, seen = new Set()) {
+  const key = `${file}\0${name}`;
+  if (seen.has(key)) return false;
+  seen.add(key);
+  let sourceFile;
+  try {
+    sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  } catch {
+    return false;
+  }
+  const typeOnlyNames = localTypeOnlyNames(sourceFile);
+  if (typeOnlyNames.has(name)) return true;
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExportDeclaration(statement) || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
+    for (const element of statement.exportClause.elements) {
+      if (element.name.text !== name) continue;
+      if (statement.isTypeOnly || element.isTypeOnly) return true;
+      return !exportElementIsValue(statement, element, typeOnlyNames, file, seen);
+    }
+  }
+  return false;
+}
+
 // Whether a named export element publishes a runtime value: a local
-// `export { name }` of a binding declared only as a type does not.
-function exportElementIsValue(statement, element, typeOnlyNames) {
+// `export { name }` of a binding declared only as a type does not, and
+// neither does a re-export from a local module (`file` is the module holding
+// the statement) that exports that name only as a type.
+function exportElementIsValue(statement, element, typeOnlyNames, file = null, seen = new Set()) {
   if (element.isTypeOnly) return false;
-  if (statement.moduleSpecifier) return true;
-  return !typeOnlyNames.has((element.propertyName ?? element.name).text);
+  const local = (element.propertyName ?? element.name).text;
+  if (!statement.moduleSpecifier) return !typeOnlyNames.has(local);
+  if (!file || !ts.isStringLiteral(statement.moduleSpecifier)) return true;
+  const target = resolveModule(file, statement.moduleSpecifier.text);
+  return !(target && moduleExportIsTypeOnly(target, local, seen));
 }
 
 // The names a local module exports through `export *`, read by name rather
@@ -256,7 +290,7 @@ function starExportedNames(file, seen = new Set()) {
     } else if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
       if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) {
-          if (exportElementIsValue(statement, element, typeOnlyNames)) names.add(element.name.text);
+          if (exportElementIsValue(statement, element, typeOnlyNames, file)) names.add(element.name.text);
         }
       } else if (!statement.exportClause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
         const target = resolveModule(file, statement.moduleSpecifier.text);
@@ -318,7 +352,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     }
     if (ts.isNamedExports(statement.exportClause)) {
       for (const specifier of statement.exportClause.elements) {
-        if (exportElementIsValue(statement, specifier, typeOnlyNames)) exportedNames.add(specifier.name.text);
+        if (exportElementIsValue(statement, specifier, typeOnlyNames, sourcePath)) exportedNames.add(specifier.name.text);
       }
     }
   }

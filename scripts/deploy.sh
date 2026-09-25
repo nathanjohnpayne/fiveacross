@@ -846,11 +846,14 @@ fi
 # missing credential, PERMISSION_DENIED, or any other describe failure still
 # aborts below exactly as before. Step 2.5's post-deploy reconciliation omits
 # this flag on purpose for exactly selected endpoints — by then the service
-# should exist, so a 404 stays a real, fatal signal. A service selected only
-# conservatively from an unfamiliar codebase/group selector is the exception:
-# the post-deploy call also allows it to be absent, because that selector may
-# have been an unrelated function Firebase validly deployed without creating
-# either protected service.
+# should exist, so a 404 stays a real, fatal signal. A family the classifier
+# selects conservatively is the exception, and the post-deploy call also allows
+# its services to be absent: one selected only from an unfamiliar
+# codebase/group selector, which may have been an unrelated function Firebase
+# validly deployed without creating either protected service, and one with no
+# strict service because the codebase an exact or whole-codebase selector
+# resolves to does not export the family's callables or cannot be inventoried
+# (#1282).
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker credential check skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
