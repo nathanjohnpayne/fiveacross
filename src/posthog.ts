@@ -43,6 +43,17 @@ export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
   // defensively (#632, Codex on PR #1294).
   mask_personal_data_properties: true,
   person_profiles: 'identified_only',
+  // No feature-flag requests at all (#1297, owner decision 2026-09-25). The
+  // SDK's /flags request carries persistence.get_initial_props(), which holds
+  // the raw landing-URL values ($initial_utm_* and the full
+  // $initial_current_url) and never passes through `before_send`. It fires on
+  // identify(), on every signed-out reset(), on the first remote-config load
+  // and on the 5-minute refresh; with this option reloadFeatureFlags() returns
+  // early, so none of the four sends it. The app calls no feature-flag, survey
+  // or setPersonProperties API. Never use advanced_disable_flags or
+  // advanced_disable_decide instead: they also skip remote config, which would
+  // stop the session-replay settings from loading.
+  advanced_disable_feature_flags: true,
   // Events POST first-party through our reverse proxy (see `api_host` below,
   // #149); `ui_host` keeps the PostHog toolbar and "view in PostHog" links
   // pointed at the real US app rather than the proxy domain. Region-fixed, so
