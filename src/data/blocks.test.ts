@@ -237,11 +237,16 @@ describe('repairMissingPairs', () => {
     ]);
   });
 
-  it('a denied re-set (the direction left meanwhile) is skipped, not thrown; an offline listing rejects so the caller can retry', async () => {
+  it('a denied re-set (the direction left meanwhile) is skipped, not thrown; an offline listing or a transient re-set failure rejects so the caller can retry', async () => {
     H.ownTargets = ['alice', 'carol'];
     H.commitResults = [denied, 'ok'];
     await expect(repairMissingPairs({ me: 'bob', knownCounterparts: new Set() })).resolves.toBe(1);
     const offline = Object.assign(new Error('unavailable'), { code: 'unavailable' });
+    H.batches = [];
+    H.commitResults = [offline, 'ok'];
+    await expect(repairMissingPairs({ me: 'bob', knownCounterparts: new Set() })).rejects.toBe(offline);
+    // Every target is still tried before the rejection.
+    expect(H.batches).toHaveLength(2);
     H.ownTargets = offline;
     await expect(repairMissingPairs({ me: 'bob', knownCounterparts: new Set() })).rejects.toBe(offline);
   });

@@ -167,13 +167,16 @@ export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: Bl
  * content-identical, and Firestore does not advance a document's update time
  * for a write that changes nothing, so there is no version to conflict on.
  * Repair is therefore by reconciliation, from the one party who can see the
- * gap: the provider calls this once per session with the server-confirmed
- * pair counterparts, it lists the caller's own directions FROM THE SERVER,
- * and re-sets the pair (server-only) for every target missing from
- * `knownCounterparts`. The pair arm allows that only while the caller's
- * direction exists, and the content is deterministic, so a stale view can
- * only cost a no-op write. Resolves the number of pairs restored; rejects
- * only when the server listing fails (offline), so the caller can retry.
+ * gap: the provider calls this with the server-confirmed pair counterparts on
+ * the first server-confirmed snapshot of every subscription and again on any
+ * server-confirmed snapshot from which a pair has disappeared; it lists the
+ * caller's own directions FROM THE SERVER and re-sets the pair (server-only)
+ * for every target missing from `knownCounterparts`. The pair arm allows that
+ * only while the caller's direction exists, and the content is deterministic,
+ * so a stale view can only cost a no-op write. Resolves the number of pairs
+ * restored. A denied re-set (the direction left meanwhile) is skipped; a
+ * failed listing or any other re-set failure rejects once every target has
+ * been tried, so the provider re-arms the repair for its next server snapshot.
  */
 export async function repairMissingPairs({
   me,
@@ -186,6 +189,7 @@ export async function repairMissingPairs({
 }): Promise<number> {
   const own = await getDocsFromServer(query(blocksCol(eventId), where('ownerUid', '==', me)));
   let restored = 0;
+  let transient: unknown = null;
   for (const row of own.docs) {
     const target = row.data().targetUid;
     if (typeof target !== 'string' || target === me || knownCounterparts.has(target)) continue;
@@ -195,10 +199,12 @@ export async function repairMissingPairs({
         tx.set(blockPairRef(me, target, eventId), pair);
       });
       restored += 1;
-    } catch {
-      // Denied (the direction left meanwhile) or transient: the next session retries.
+    } catch (err) {
+      // Denied: the direction left meanwhile, so there is nothing to restore.
+      if (!isPermissionDenied(err)) transient = err;
     }
   }
+  if (transient !== null) throw transient;
   return restored;
 }
 
