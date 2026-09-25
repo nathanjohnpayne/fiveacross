@@ -47,7 +47,7 @@ Static browser/PWA identity is a separate constraint. The trusted target registr
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
-The measurement id is part of that verified identity: the Gay Cruise Bingo target bakes `G-42N7WYDYT5` (GA4 property 544472132) and the Five Across target bakes `G-ZWYZ8BP43B` (GA4 property 555955246, web stream 15841650261, linked to the fiveacross Firebase project on 2026-09-25 under [#632](https://github.com/nathanjohnpayne/fiveacross/issues/632)). Changing either id takes the target's `.env` file and the registry in one reviewed change, and the Vercel mirrors carry the same value in their own production environment; the operator checklist is in `specs/posthog-analytics.md` § Campaign attribution.
+The measurement id is part of that verified identity: the Gay Cruise Bingo target bakes `G-42N7WYDYT5` (GA4 property 544472132) and the Five Across target bakes `G-ZWYZ8BP43B` (GA4 property 555955246, web stream 15841650261, linked to the fiveacross Firebase project on 2026-09-25 under [#632](https://github.com/nathanjohnpayne/fiveacross/issues/632)). Changing either id is three separate operator actions that must agree: the registry value and its test fixture in one reviewed change; the gitignored target `.env` file on the deploying machine, which the registry verifies at build time but which no commit carries; and each Vercel mirror's own production `VITE_FIREBASE_MEASUREMENT_ID`, which takes effect only when that mirror is redeployed. The operator checklist is in `specs/posthog-analytics.md` § Campaign attribution.
 
 ## Deploying Gay Cruise Bingo
 
