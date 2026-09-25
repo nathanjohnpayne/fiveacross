@@ -136,6 +136,61 @@ describe('BlockPlayerButton', () => {
     expect(document.activeElement).toBe(container.querySelector('.sheet-title'));
   });
 
+  it('lands focus in the host sheet even when the hide renders after the sheet has closed', async () => {
+    const Host = ({ showRow }: { showRow: boolean }) => (
+      <div role="dialog" aria-label="Who marked it">
+        <div className="sheet-title" tabIndex={-1}>
+          Who marked it
+        </div>
+        {showRow && (
+          <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="feed_wholist" block={() => Promise.resolve()} />
+        )}
+      </div>
+    );
+    const { rerender } = render(<Host showRow />);
+    const trigger = screen.getByRole('button', { name: 'Block Bea' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    // The pair listener has not rendered the optimistic hide yet when the
+    // zero-delay check runs: the trigger is still there and keeps focus.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(trigger);
+    // The hide lands afterwards and unmounts the row.
+    rerender(<Host showRow={false} />);
+    await act(async () => {});
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.classList.contains('sheet-title')).toBe(true);
+  });
+
+  it('a cancelled block leaves focus on its trigger and never watches the host sheet', async () => {
+    const Host = ({ showRow }: { showRow: boolean }) => (
+      <div role="dialog" aria-label="Who marked it">
+        <div className="sheet-title" tabIndex={-1}>
+          Who marked it
+        </div>
+        {showRow && (
+          <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="feed_wholist" block={() => Promise.resolve()} />
+        )}
+      </div>
+    );
+    const { rerender } = render(<Host showRow />);
+    const trigger = screen.getByRole('button', { name: 'Block Bea' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(trigger);
+    // A later, unrelated removal of the row is not this sheet's to repair.
+    rerender(<Host showRow={false} />);
+    await act(async () => {});
+    expect(document.activeElement?.classList.contains('sheet-title')).toBe(false);
+  });
+
   it('a rejected block logs and fires no event', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const rejected = vi.fn(() => Promise.reject(new Error('permission-denied')));

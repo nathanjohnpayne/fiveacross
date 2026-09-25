@@ -11,6 +11,9 @@ export type BlockSurface = 'proof_card' | 'feed_wholist' | 'board_wholist';
 
 const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
+/** How long a confirmed block watches the host who-list for its trigger to leave. */
+const HOST_FOCUS_WATCH_MS = 5000;
+
 /**
  * The block entry point (#689, specs/player-blocking.md § Block and unblock
  * controls): a compact icon button on another Player's Proof card and on each
@@ -110,6 +113,9 @@ function BlockConfirmSheet({
   // the effect below, which would pull focus back to the title mid-sheet.
   const cancelRef = useRef(onCancel);
   cancelRef.current = onCancel;
+  // Set once Block commits, so closing after a confirm (not a cancel) is what
+  // arms the host-sheet focus fallback in the effect's cleanup.
+  const confirmedRef = useRef(false);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -144,12 +150,26 @@ function BlockConfirmSheet({
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
       previouslyFocused?.focus();
-      // A confirmed block hides the counterpart at once, which usually unmounts
-      // the trigger (its Proof card or who-list row) in this commit or the next.
-      // Once it is detached, land focus on the host who-list sheet if it is still
-      // open, so keyboard focus never drops to <body> behind a live dialog.
-      setTimeout(() => {
-        if (!previouslyFocused || previouslyFocused.isConnected || !hostSheet?.isConnected) return;
+      // A confirmed block hides the counterpart, which unmounts the trigger (its
+      // Proof card or who-list row) once the pair listener renders the optimistic
+      // write: in this commit, or in a later one after the sheet has closed. So
+      // watch the host who-list sheet until the trigger detaches, then land focus
+      // on that sheet if it is still open, so keyboard focus never drops to <body>
+      // behind a live dialog. Only a confirmed block watches, and for at most
+      // HOST_FOCUS_WATCH_MS: a rejected write rolls back and may leave the row.
+      if (!confirmedRef.current || !previouslyFocused || !hostSheet) return;
+      let observer: MutationObserver | null = null;
+      let expiry: ReturnType<typeof setTimeout> | undefined;
+      const stop = () => {
+        observer?.disconnect();
+        observer = null;
+        clearTimeout(expiry);
+      };
+      const settle = () => {
+        if (!observer) return;
+        if (!hostSheet.isConnected) return stop();
+        if (previouslyFocused.isConnected) return;
+        stop();
         const active = document.activeElement;
         if (active && active !== document.body && active.isConnected) return;
         let target =
@@ -162,7 +182,11 @@ function BlockConfirmSheet({
           target?.setAttribute('tabindex', '-1');
         }
         target?.focus();
-      }, 0);
+      };
+      observer = new MutationObserver(settle);
+      observer.observe(hostSheet, { childList: true, subtree: true });
+      expiry = setTimeout(stop, HOST_FOCUS_WATCH_MS);
+      setTimeout(settle, 0);
     };
   }, []);
 
@@ -207,8 +231,10 @@ function BlockConfirmSheet({
             className="btn danger"
             onClick={() => {
               try {
+                confirmedRef.current = true;
                 onConfirm();
               } catch (err) {
+                confirmedRef.current = false;
                 console.error('[blocks] block refused', err);
                 setError(`Couldn’t block ${name}. Try again.`);
               }
