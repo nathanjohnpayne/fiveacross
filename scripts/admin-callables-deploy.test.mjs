@@ -139,6 +139,25 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           resolve(fixture, "ops", "src", "index.ts"),
           header + "const unlockDayNow = onCall(async () => 1);\nexport = { unlockDayNow };\n",
         );
+      } else if (layout.startsWith("ops-variant-")) {
+        // One non-default TypeScript codebase exporting `unlockDayNow`, made
+        // opaque by a single variant.
+        const variant = layout.slice("ops-variant-".length);
+        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        const ops = { source: "ops", codebase: "ops", ...(variant === "prefix" ? { prefix: "tenant" } : {}) };
+        await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: [{ source: "functions" }, ops] }));
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        if (variant === "main") {
+          await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/main.js" }));
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
+        } else if (variant === "binding") {
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + "export const { unlockDayNow } = { unlockDayNow: onCall(async () => 1) };\n",
+          );
+        } else {
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), header + callable);
+        }
       } else if (layout === "ts-default-and-object-assign-ops") {
         await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
         await writeFile(
@@ -201,6 +220,11 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ts-default-and-object-assign-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-bracket-module-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-export-equals-ops", ["--only", "functions:ops"], unknown, unknown],
+    // An entry point other than the index build, a destructured export, and a
+    // service-renaming `prefix` each make the source index unauthoritative.
+    ["ops-variant-main", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-binding", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-python-ops", ["--only", "functions"], unknown, unknown],

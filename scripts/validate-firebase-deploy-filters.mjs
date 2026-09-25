@@ -21,7 +21,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { httpsExportGraph, resolveModule, unfamiliedHttpsExports } from "./callable-invoker-families.mjs";
@@ -3953,10 +3953,11 @@ const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
  * Whether code (not a comment or string) references the CommonJS `exports` or
  * `module` binding in any form (`exports.x`, `module.exports`,
- * `module["exports"]`, `Object.assign(exports, ...)`), or uses an export
+ * `module["exports"]`, `Object.assign(exports, ...)`), uses an export
  * assignment (`export = {...}`, which compiles to `module.exports`, or
- * `export default`): any of them can add an export the declaration walk cannot
- * see.
+ * `export default`), or exports a destructuring pattern
+ * (`export const { a } = ...`): any of them can add an export the declaration
+ * walk cannot see.
  */
 function referencesCommonJsExports(source) {
   const sourceFile = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -3964,6 +3965,14 @@ function referencesCommonJsExports(source) {
   const visit = (node) => {
     if (found) return;
     if (ts.isExportAssignment(node)) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isVariableStatement(node) &&
+      node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
+      node.declarationList.declarations.some((declaration) => !ts.isIdentifier(declaration.name))
+    ) {
       found = true;
       return;
     }
@@ -4004,9 +4013,29 @@ async function protectedServiceInventory(configSource, configPath, table) {
       services.set(codebase, null);
       continue;
     }
-    if (typeof functionsConfig.runtime === "string" && !functionsConfig.runtime.startsWith("nodejs")) {
+    // A non-Node runtime, or a `prefix` (the CLI renames every service, so
+    // the family's fixed service names are not what it publishes), is opaque.
+    if (
+      (typeof functionsConfig.runtime === "string" && !functionsConfig.runtime.startsWith("nodejs")) ||
+      (typeof functionsConfig.prefix === "string" && functionsConfig.prefix !== "")
+    ) {
       services.set(codebase, null);
       continue;
+    }
+    // The CLI loads `package.json` `main` (default `index.js`); the index is
+    // only authoritative when that entry is its conventional build output.
+    const packagePath = resolve(dirname(configPath), functionsConfig.source, "package.json");
+    if (existsSync(packagePath)) {
+      let main = null;
+      try {
+        main = JSON.parse(await readFile(packagePath, "utf8")).main ?? "index.js";
+      } catch {
+        main = null;
+      }
+      if (typeof main !== "string" || posix.normalize(main.replaceAll("\\", "/")) !== "lib/index.js") {
+        services.set(codebase, null);
+        continue;
+      }
     }
     const sourcePath = resolve(
       dirname(configPath),
