@@ -27,7 +27,7 @@ import { useOpenSuggestPanelIntent, clearOpenSuggestPanel } from '../hooks/useOp
 /**
  * The More tab (#208, daily-cards-spec § "More menu"): profile, theme, text
  * size, Play (schedule / suggest / how-to-play / install), Support (bug /
- * 18+), an admin-only Admin row, sign out, and a version footer — in that
+ * 18+ / blocked players), an admin-only Admin row, sign out, and a version footer — in that
  * fixed order. Replaces `d15-tab-contract`'s interim placeholder (#203,
  * specs/d15-tab-contract.md) wholesale. `ItemPool` and `Admin` mount here as
  * sub-panels instead of top-level routes (their own internals are

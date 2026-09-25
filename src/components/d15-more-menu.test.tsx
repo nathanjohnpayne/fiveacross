@@ -4,7 +4,8 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import type { EventDoc } from '../types';
 
 // Covers specs/d15-more-menu.md (#208) — the full More tab: profile, theme,
-// Play (schedule / suggest / how-to-play / install), Support (bug / 18+), an
+// Play (schedule / suggest / how-to-play / install), Support (bug / 18+ /
+// blocked players), an
 // admin-only Admin row badged with the pending count, sign out, and a version
 // footer, in that fixed spec order. Drives the REAL `More.tsx` composition
 // with its child components and data hooks stubbed (each has its own focused
