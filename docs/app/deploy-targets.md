@@ -47,6 +47,8 @@ Static browser/PWA identity is a separate constraint. The trusted target registr
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
+The measurement id is part of that verified identity, and both targets currently bake `G-42N7WYDYT5`. Pointing the Five Across target at its own GA4 stream therefore takes the new id in `.env.fiveacross` and in the registry in one reviewed change; the operator checklist is in `specs/posthog-analytics.md` § Campaign attribution ([#632](https://github.com/nathanjohnpayne/fiveacross/issues/632)).
+
 ## Deploying Gay Cruise Bingo
 
 Ordinary path — from `main` in the main checkout, no flags:
