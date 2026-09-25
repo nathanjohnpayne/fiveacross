@@ -136,6 +136,45 @@ describe('BlockPlayerButton', () => {
     expect(document.activeElement).toBe(container.querySelector('.sheet-title'));
   });
 
+  it('skips another row’s disabled Doubt button for an enabled control, or the title when none is left (#1321)', async () => {
+    const TallySheet = ({ showRow, enabled }: { showRow: boolean; enabled: boolean }) => (
+      <div className="sheet-backdrop">
+        <div className="sheet">
+          <div className="sheet-title">Who got “Towel animal”</div>
+          <button type="button" disabled>
+            Doubt Cal
+          </button>
+          <div aria-hidden="true">
+            <button type="button">Hidden control</button>
+          </div>
+          <div inert>
+            <button type="button">Inert control</button>
+          </div>
+          {showRow && (
+            <BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="board_wholist" block={() => Promise.resolve()} />
+          )}
+          {enabled && <button type="button">Doubt Dee</button>}
+        </div>
+      </div>
+    );
+    for (const enabled of [true, false]) {
+      const { rerender, container, unmount } = render(<TallySheet showRow enabled={enabled} />);
+      const trigger = screen.getByRole('button', { name: 'Block Bea' });
+      trigger.focus();
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+      rerender(<TallySheet showRow={false} enabled={enabled} />);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement).toBe(
+        enabled ? screen.getByRole('button', { name: 'Doubt Dee' }) : container.querySelector('.sheet-title'),
+      );
+      unmount();
+    }
+  });
+
   it('lands focus in the host sheet even when the hide renders after the sheet has closed', async () => {
     const Host = ({ showRow }: { showRow: boolean }) => (
       <div role="dialog" aria-label="Who marked it">

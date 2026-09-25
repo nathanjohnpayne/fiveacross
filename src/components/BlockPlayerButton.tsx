@@ -14,6 +14,17 @@ const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:
 /** How long a confirmed block watches the host who-list for its trigger to leave. */
 const HOST_FOCUS_WATCH_MS = 5000;
 
+/** The first control in `root` that can actually take focus: a disabled one
+ *  (another row's Doubt button while its request is pending) or one inside an
+ *  aria-hidden or inert subtree ignores focus(), dropping focus to <body>. */
+function firstEnabledControl(root: Element): HTMLElement | null {
+  for (const el of root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)) {
+    if (el.matches(':disabled') || el.closest('[aria-hidden="true"], [inert]')) continue;
+    return el;
+  }
+  return null;
+}
+
 /**
  * The block entry point (#689, specs/player-blocking.md § Block and unblock
  * controls): a compact icon button on another Player's Proof card and on each
@@ -174,10 +185,11 @@ function BlockConfirmSheet({
         if (active && active !== document.body && active.isConnected) return;
         let target =
           hostSheet.querySelector<HTMLElement>('.sheet-title[tabindex]') ??
-          hostSheet.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+          firstEnabledControl(hostSheet);
         if (!target) {
-          // Nothing focusable left (the Board title carries no tabindex): make the
-          // title a programmatic focus target rather than lose focus to the page.
+          // Nothing enabled left to focus (the Board title carries no tabindex):
+          // make the title a programmatic focus target rather than lose focus to
+          // the page.
           target = hostSheet.querySelector<HTMLElement>('.sheet-title');
           target?.setAttribute('tabindex', '-1');
         }

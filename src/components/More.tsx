@@ -341,14 +341,25 @@ function MorePanel({ title, onClose, children }: { title: string; onClose: () =>
       // Focus that has fallen outside the panel (a control inside it unmounted,
       // dropping focus to <body>) is pulled back in rather than let loose on the
       // obscured More page.
-      const inside = dialogRef.current?.contains(document.activeElement) ?? false;
-      // The title also holds focus (tabIndex=-1, the initial landing spot) but
-      // is deliberately excluded from FOCUSABLE_SELECTOR — treat it as
-      // preceding `first` so Shift+Tab from it still wraps to the end.
-      if (e.shiftKey && (!inside || document.activeElement === first || document.activeElement === titleRef.current)) {
+      const active = document.activeElement;
+      const inside = dialogRef.current?.contains(active) ?? false;
+      // Programmatic focus targets (tabIndex=-1) also hold focus but are
+      // deliberately excluded from FOCUSABLE_SELECTOR: the title (the initial
+      // landing spot), and the Blocked players panel's root while an unblock
+      // runs and its outcome message afterwards (#1314). The browser tabs from
+      // one to the nearest trapped control in document order, so when none
+      // precedes it Shift+Tab wraps to `last`, and when none follows it Tab
+      // wraps to `first`, instead of escaping into the obscured More menu.
+      const controls = Array.from(focusable);
+      const untracked = inside && active !== null && !controls.includes(active as HTMLElement);
+      const hasControl = (position: number) =>
+        controls.some((el) => (active!.compareDocumentPosition(el) & position) !== 0);
+      const atStart = untracked && !hasControl(Node.DOCUMENT_POSITION_PRECEDING);
+      const atEnd = untracked && !hasControl(Node.DOCUMENT_POSITION_FOLLOWING);
+      if (e.shiftKey && (!inside || active === first || atStart)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+      } else if (!e.shiftKey && (!inside || active === last || atEnd)) {
         e.preventDefault();
         first.focus();
       }

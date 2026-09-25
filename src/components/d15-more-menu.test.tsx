@@ -70,11 +70,19 @@ vi.mock('./AcceptableUse', () => ({
 // Blocked players is stubbed to what matters to the panel's focus trap: an
 // Unblock control that is disabled (offline or mid-request), which the browser
 // skips, so the trap must not count it as the panel's first control.
+// It keeps the real panel's programmatic focus targets too (#1314): the
+// tabIndex=-1 root it focuses while an unblock runs, and the tabIndex=-1
+// outcome message it focuses afterwards, ahead of the rows.
 vi.mock('./BlockedPlayersPanel', () => ({
   default: () => (
-    <button type="button" disabled>
-      Unblock Bea
-    </button>
+    <div className="blocked-panel" data-testid="blocked-panel" tabIndex={-1}>
+      <p role="status" tabIndex={-1}>
+        Unblocked Cal.
+      </p>
+      <button type="button" disabled>
+        Unblock Bea
+      </button>
+    </div>
   ),
 }));
 // "How to play" reopens the REAL CoachOverlay (#214) — left un-stubbed so
@@ -218,6 +226,29 @@ describe('More menu — "How to play" replays the coach overlay (#214)', () => {
     expect(fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })).toBe(false);
     expect(document.activeElement).toBe(close);
     expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('Shift+Tab from the Blocked players panel’s programmatic focus targets wraps to Close, not the More menu (#1314)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Blocked players/ }));
+    const dialog = screen.getByRole('dialog', { name: 'Blocked players' });
+    const close = screen.getByRole('button', { name: 'Close' });
+    // While an unblock runs the panel focuses its root; once it lands, the
+    // outcome message. Reverse-tab from each, then forward from the message.
+    for (const target of [screen.getByTestId('blocked-panel'), screen.getByRole('status')]) {
+      target.focus();
+      expect(document.activeElement).toBe(target);
+      await user.tab({ shift: true });
+      expect(document.activeElement).toBe(close);
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+    screen.getByRole('status').focus();
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab();
+    expect(document.activeElement).toBe(close);
   });
 
   it('the panel focus trap pulls focus that fell to <body> back inside', () => {
