@@ -43,6 +43,8 @@ vi.mock('firebase/auth', () => ({
   GoogleAuthProvider: class {},
 }));
 const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
+// #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
+vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
 vi.mock('../firebase', () => ({
   auth: {},
   googleProvider: {},

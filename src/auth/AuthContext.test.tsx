@@ -49,6 +49,8 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
   GoogleAuthProvider: class {},
 }));
+// #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
+vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
 vi.mock('../firebase', () => ({
   auth: {},
   googleProvider: {},
