@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { EventArchive, EventDoc, PlayerDoc } from '../types';
 
@@ -25,7 +25,9 @@ vi.mock('./ShareCard', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./ShareCard')>()),
   renderLeaderboardShareCard: vi.fn(() => Promise.resolve(null)),
   renderFarewellShareCard: vi.fn(() => Promise.resolve(null)),
+  shareCardBlob: vi.fn(() => Promise.resolve('shared')),
 }));
+vi.mock('../data/currentEvent', () => ({ isCurrentEvent: () => true }));
 vi.mock('../hooks/useData', () => ({
   useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),
   useDayMetas: () => new Map(),
@@ -42,6 +44,7 @@ import Leaderboard from './Leaderboard';
 import ArchivedLeaderboard from './ArchivedLeaderboard';
 import FarewellPodium from './FarewellPodium';
 import { buildPodium } from '../data/finale';
+import { renderLeaderboardShareCard, shareCardBlob } from './ShareCard';
 import { withBlockExclusions, withRanksKeepingGaps } from '../data/moderation';
 
 const player = (uid: string, bingoCount: number, firstBingoAt: number | null): PlayerDoc =>
@@ -80,6 +83,21 @@ describe('Leaderboard (#689)', () => {
     const { container } = render(<Leaderboard />, { wrapper: MemoryRouter });
     expect(screen.getByText('Tallying the leaderboard…')).toBeTruthy();
     expect(container.textContent).not.toContain('BLOCKED');
+  });
+
+  it('cancels a share whose card was rendering when a block landed, so the card never goes out', async () => {
+    H.blocks = { hidden: new Set(), ready: true };
+    let finish: (blob: Blob) => void = () => {};
+    vi.mocked(renderLeaderboardShareCard).mockImplementationOnce(
+      () => new Promise<Blob>((resolve) => (finish = resolve)),
+    );
+    vi.mocked(shareCardBlob).mockClear();
+    const view = render(<Leaderboard />, { wrapper: MemoryRouter });
+    fireEvent.click(screen.getByText('Share leaderboard'));
+    H.blocks = { hidden: new Set(['blocked']), ready: true };
+    view.rerender(<Leaderboard />);
+    await act(async () => finish(new Blob(['card'])));
+    expect(shareCardBlob).not.toHaveBeenCalled();
   });
 
   it('renders every row, numbered 1..n, for a viewer who has hidden nobody', () => {

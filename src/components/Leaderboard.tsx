@@ -436,6 +436,11 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     hiddenKey: string;
     promise: Promise<Blob | null>;
   } | null>(null);
+  // The hidden set as of the latest render (#689), read by an in-flight share
+  // after its render resolves: a block that lands mid-render cancels the share
+  // rather than sending a card that names the newly hidden Player.
+  const hiddenKeyNow = useRef('');
+  hiddenKeyNow.current = JSON.stringify([...hidden].sort());
 
   if (loading || !hiddenReady) return <LoadingState label="Tallying the leaderboard…" />;
   if (!players.length) return <div className="center muted">No players yet. Be the first.</div>;
@@ -639,8 +644,10 @@ function LiveLeaderboard({ event }: { event: EventDoc | null | undefined }) {
     const actedEventId = EVENT_ID;
     // Reuses the warmed render when its inputs still match, else renders
     // fresh (the cold-tap path — same behavior as before the warm-up).
+    const hiddenKeyAtTap = hiddenKeyNow.current;
     const blob = await warmShareCard();
     if (!isCurrentEvent(actedEventId)) return;
+    if (hiddenKeyNow.current !== hiddenKeyAtTap) return;
     try {
       await shareCardBlob({
         blob,
