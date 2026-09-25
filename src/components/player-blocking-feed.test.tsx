@@ -268,6 +268,22 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Friend Fin']);
   });
 
+  it('keeps the Feed and an open who-list mounted while the Tally Cards resubscribe on a new set', () => {
+    H.blocks = { hidden: new Set(), ready: true };
+    const first = { itemId: 'item-1', entry: marker('blocked', 'Blocked Bea', 1) };
+    const later = { itemId: 'item-1', entry: marker('friend', 'Friend Fin', 2) };
+    const { view } = mount({ markers: [first, later] });
+    fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
+    H.blocks = { hidden: new Set(['blocked']), ready: true };
+    // No marker snapshot is delivered after the rerender: the listener is still
+    // resubscribing, and the cards already in hand are scrubbed in the meantime.
+    view.rerender(<ProofFeed />);
+    expect(screen.queryByText('Loading…')).toBeNull();
+    const rows = [...document.querySelectorAll('.sheet .list .row')];
+    expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Friend Fin']);
+    expect(document.body.textContent).not.toContain('Blocked Bea');
+  });
+
   it('renders nothing but the loading state until the hidden set is ready', () => {
     H.blocks = { hidden: new Set(), ready: false };
     mount({ proofs: [proof('p-blocked', 'blocked', 'Blocked Bea', 20)] });

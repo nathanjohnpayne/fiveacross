@@ -1289,7 +1289,8 @@ export function useTallyCards() {
   // counterpart's Mark drops from the card, its names line and its count, and
   // never bumps the card's Feed position. No cards until the set is ready, and
   // the state is keyed on the set too, so cards derived under an older set are
-  // never returned after it changes.
+  // never returned unscrubbed after it changes: until the new listener answers
+  // they are served with the new set's Marks removed (`scrubTallyCards`).
   const { hidden, ready, hiddenKey } = useBlockFilter();
   const derivedKey = `${key}|${hiddenKey}`;
   const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean }>(() => ({
@@ -1310,7 +1311,9 @@ export function useTallyCards() {
     setState((previous) =>
       previous.key === derivedKey
         ? { ...previous, loading: true }
-        : { key: derivedKey, cards: [], loading: true },
+        : carriesAcrossHiddenSet(previous, key)
+          ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false }
+          : { key: derivedKey, cards: [], loading: true },
     );
     // #1072: the predicate is part of the server query, so another Event's
     // markers are never delivered over the wire. Keep the callback's path guard
@@ -1353,9 +1356,35 @@ export function useTallyCards() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [derivedKey, bannedKey, ready]);
-  return ready && state.key === derivedKey
-    ? { key, cards: state.cards, loading: state.loading }
-    : { key, cards: [], loading: true };
+  if (!ready) return { key, cards: [], loading: true };
+  if (state.key === derivedKey) return { key, cards: state.cards, loading: state.loading };
+  // A hidden-set change within the same Event (#689) keeps serving the cards
+  // already in hand, scrubbed against the new set, while the listener
+  // resubscribes: blanking them would drop the whole Feed to its loading state
+  // and unmount an open who-list sheet for a change that only removes rows.
+  if (carriesAcrossHiddenSet(state, key)) return { key, cards: scrubTallyCards(state.cards, hidden), loading: false };
+  return { key, cards: [], loading: true };
+}
+
+/** True when `state` holds settled cards for this Event under an older hidden set. */
+function carriesAcrossHiddenSet(state: { key: string; loading: boolean }, key: string): boolean {
+  return !state.loading && state.key.startsWith(`${key}|`);
+}
+
+/**
+ * Tally Cards minus the hidden set's Marks (#689): each card keeps only its
+ * visible markers and their count, and a card left with none is dropped, which
+ * is what a fresh derivation over the filtered rows would produce.
+ */
+function scrubTallyCards(cards: TallyCard[], hidden: ReadonlySet<string>): TallyCard[] {
+  if (hidden.size === 0) return cards;
+  const out: TallyCard[] = [];
+  for (const card of cards) {
+    const markers = card.markers.filter((m) => !isHiddenFor(m.uid, hidden));
+    if (markers.length === 0) continue;
+    out.push(markers.length === card.markers.length ? card : { ...card, markers, count: markers.length });
+  }
+  return out;
 }
 
 /**
