@@ -3940,21 +3940,30 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * One invoker family's protected callables KEYED BY FUNCTIONS CODEBASE (#1282),
  * in table order: a selector deploys one codebase's surface, so a callable
  * only another codebase exports must not turn strict. Keys mirror
- * `singleEndpointInventory` (explicit `codebase`, else `default`); a codebase
- * with no local `source` (kit, remote) has no entry, and one whose source
- * directory has no `src/index.ts` maps to `null`; both stay conservative.
+ * `singleEndpointInventory` (explicit `codebase`, else `default`). A codebase
+ * whose surface this parse cannot prove maps to `null` and stays conservative:
+ * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
+ * `UNINVENTORIED_CODEBASE`), a source directory with no `src/index.ts`, or an
+ * index that assigns CommonJS `exports`, which the declaration walk in
+ * `protectedServicesFromSource` does not model.
  */
+const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
+const COMMONJS_EXPORT_ASSIGNMENT = /\b(?:module\s*\.\s*)?exports\s*(?:\.|\[|=)/;
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
   const services = new Map();
   for (const functionsConfig of functionsConfigs) {
-    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
+    if (!functionsConfig || typeof functionsConfig !== "object") continue;
     const codebase =
       typeof functionsConfig.codebase === "string" && functionsConfig.codebase
         ? functionsConfig.codebase
         : "default";
+    if (typeof functionsConfig.source !== "string") {
+      services.set("kit" in functionsConfig ? UNINVENTORIED_CODEBASE : codebase, null);
+      continue;
+    }
     const sourcePath = resolve(
       dirname(configPath),
       functionsConfig.source,
@@ -3980,6 +3989,10 @@ async function protectedServiceInventory(configSource, configPath, table) {
       throw error;
     }
     if (services.get(codebase) === null) continue;
+    if (COMMONJS_EXPORT_ASSIGNMENT.test(source)) {
+      services.set(codebase, null);
+      continue;
+    }
     const found = services.get(codebase) ?? new Set();
     services.set(codebase, found);
     for (const service of protectedServicesFromSource(source, table, sourcePath))

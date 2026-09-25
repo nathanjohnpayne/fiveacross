@@ -87,7 +87,29 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     try {
       await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
       await mkdir(resolve(fixture, "py"), { recursive: true });
-      if (layout === "js-default") {
+      if (layout === "ts-default-and-remote") {
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({
+            functions: [
+              { source: "functions" },
+              { remoteSource: { repository: "https://github.com/example/ops", ref: "main" }, codebase: "remote", runtime: "nodejs22" },
+            ],
+          }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+      } else if (layout === "ts-default-and-commonjs-ops") {
+        await mkdir(resolve(fixture, "ops", "src"), { recursive: true });
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops" }] }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        await writeFile(
+          resolve(fixture, "ops", "src", "index.ts"),
+          header + "exports.unlockDayNow = onCall(async () => 1);\n",
+        );
+      } else if (layout === "js-default") {
         await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: [{ source: "functions" }] }));
         await writeFile(
           resolve(fixture, "functions", "index.js"),
@@ -115,6 +137,12 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["js-default", ["--only", "functions:default"], unknown, unknown],
     ["js-default", ["--only", "functions"], unknown, unknown],
     ["js-default", [], unknown, unknown],
+    // A `remoteSource` codebase has no local source to inventory.
+    ["ts-default-and-remote", ["--only", "functions"], unknown, unknown],
+    ["ts-default-and-remote", [], unknown, unknown],
+    // A CommonJS export assignment is a shape the source walk does not model.
+    ["ts-default-and-commonjs-ops", ["--only", "functions:ops"], unknown, unknown],
+    ["ts-default-and-commonjs-ops", ["--only", "functions"], unknown, unknown],
     ["ts-default-unlock-and-py", ["--only", "functions"], { selected: true, conservative: false, strict: "unlock" }, unknown],
     ["ts-default-unlock-and-py", [], { selected: true, conservative: false, strict: "unlock" }, unknown],
     [
