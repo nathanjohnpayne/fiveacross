@@ -300,8 +300,8 @@ export async function setItemSpicy(
 }
 
 /**
- * Bulk-approve every row in `items` (the Approvals queue's full pending list) —
- * "Bulk approve works on the full pending list in one action" (#210 AC). One
+ * Bulk-approve every row in `items` (the Approvals queue's pending list, at most
+ * its oldest 400 since #1279) in one action (#210 AC). One
  * atomic write covering every row, so the queue clears in one go rather than
  * firing an update per row, and every row carries the SAME `approvedAt` instant:
  * a single bulk click is one approval EVENT even though it touches many rows,
@@ -313,7 +313,11 @@ export async function setItemSpicy(
  * that means one `approvePrompts` call carrying every row: the server runs the
  * batch in one transaction and stamps one server instant across it, so the
  * shared `approvedAt` survives the move to the callable, and a batch over the
- * server's row cap is refused whole rather than approved in part.
+ * server's row cap is refused whole rather than approved in part. The Review
+ * queue never sends one (#1279): Approve all passes `approveAllBatch(pending)`
+ * (./approvalBatch.ts), the oldest `MAX_APPROVE_ALL_ITEMS` rows, and the Admin
+ * runs it again for the rest. Not chunked here, so one call stays one
+ * transaction and one instant.
  */
 export function bulkApproveItems(
   items: readonly ApprovableItem[],
