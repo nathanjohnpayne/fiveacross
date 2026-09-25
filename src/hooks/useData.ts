@@ -1373,16 +1373,25 @@ function carriesAcrossHiddenSet(state: { key: string; loading: boolean }, key: s
 
 /**
  * Tally Cards minus the hidden set's Marks (#689): each card keeps only its
- * visible markers and their count, and a card left with none is dropped, which
- * is what a fresh derivation over the filtered rows would produce.
+ * visible markers, with its count and timestamps recomputed from them, and a
+ * card left with none is dropped, which is what a fresh derivation over the
+ * filtered rows would produce.
  */
-function scrubTallyCards(cards: TallyCard[], hidden: ReadonlySet<string>): TallyCard[] {
+export function scrubTallyCards(cards: TallyCard[], hidden: ReadonlySet<string>): TallyCard[] {
   if (hidden.size === 0) return cards;
   const out: TallyCard[] = [];
   for (const card of cards) {
     const markers = card.markers.filter((m) => !isHiddenFor(m.uid, hidden));
     if (markers.length === 0) continue;
-    out.push(markers.length === card.markers.length ? card : { ...card, markers, count: markers.length });
+    if (markers.length === card.markers.length) {
+      out.push(card);
+      continue;
+    }
+    // The timestamps come from the visible Marks alone, like a fresh derivation
+    // with no bump history (the history restarts on a new set anyway), so the
+    // card never keeps a position or "bumped" label a hidden Mark earned.
+    const lastMarkedAt = markers.reduce((m, x) => Math.max(m, x.markedAt), 0);
+    out.push({ ...card, markers, count: markers.length, lastMarkedAt, displayBump: lastMarkedAt });
   }
   return out;
 }
