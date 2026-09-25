@@ -189,6 +189,18 @@ describe('useHiddenUidsSubscription', () => {
     act(() => sub.listener(pairs([['alice', 'bob'], ['bob', 'dave']])));
     await act(async () => {});
     expect(H.ownListings).toBe(2);
+    // Later in the SAME session a concurrent delete drops the Dave pair
+    // again: a pair disappearing re-arms the repair at once.
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(3);
+    expect(H.repaired).toEqual(['events/event-a/blockPairs/bob_dave', 'events/event-a/blockPairs/bob_dave']);
+    // A pending snapshot never lists; an unchanged settled one does not either.
+    act(() => sub.listener(pairs([], true)));
+    act(() => sub.listener(pairs([['alice', 'bob']], true)));
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    await act(async () => {});
+    expect(H.ownListings).toBe(3);
     view.unmount();
   });
 

@@ -83,12 +83,17 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     if (key === null || uid === null) return;
     let active = true;
     let lastCommitted: ReadonlySet<string> = EMPTY;
+    // The counterparts of the previous snapshot (pending or settled), so a
+    // pair DISAPPEARING from a server-confirmed snapshot can be seen.
+    let previous: ReadonlySet<string> = EMPTY;
     const unsub = onSnapshot(
       query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
+        const lostPair = [...previous].some((other) => !current.has(other));
+        previous = current;
         if (!snap.metadata.hasPendingWrites) lastCommitted = current;
         // Server-confirmed pairs only (offline the delete could not run, and
         // the attempt would be spent): offer each one to the reconciler once.
@@ -99,9 +104,12 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
             reconcileAttempted.add(attempt);
             void reconcileOrphanPair({ me: uid, target: other, eventId });
           }
-          // ...and, once, restore the pair behind any own direction that
-          // lost it to a concurrent delete (see `repairMissingPairs`).
-          if (!repairAttempted.has(key)) {
+          // ...and restore the pair behind any own direction that lost it to
+          // a concurrent delete (see `repairMissingPairs`): once per session,
+          // and again whenever a pair disappears, which is the only way that
+          // race shows on this listener (Codex P1 on #1300). An ordinary
+          // unblock also removes a pair, so it costs one server listing.
+          if (!repairAttempted.has(key) || lostPair) {
             repairAttempted.add(key);
             repairMissingPairs({ me: uid, knownCounterparts: current, eventId }).catch(() => {
               repairAttempted.delete(key);
