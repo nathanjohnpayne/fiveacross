@@ -72,6 +72,16 @@ export const ROOT_HOSTS = new Map([
 export const DOORWAY_ROOT_HOSTS = new Set(['fiveacross.app', 'vacaybingo.com', 'gaycruisebingo.com']);
 
 /**
+ * A brand mirror: a root host whose retired flagship leaves `not-found`
+ * rather than a doorway. Exported so the reconciler's replacement audit
+ * (#1295) classifies mirrors by the same two tables the lifecycle helper's
+ * § D1 replacement proof reads, rather than by a second host list.
+ */
+export function isBrandMirror(host) {
+  return ROOT_HOSTS.has(host) && !DOORWAY_ROOT_HOSTS.has(host);
+}
+
+/**
  * The path Namespaces whose APEX may carry an archive address today.
  *
  * MIRROR of the apex entries in `FIRST_PARTY_AUTH_HOSTS`

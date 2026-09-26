@@ -910,3 +910,181 @@ describe('the reconciler boundary', () => {
     expect(await refusal(input(overrides), dependencies())).toBe('invalid-input');
   });
 });
+
+describe('brand-mirror replacement audit (#1295)', () => {
+  const MIRROR = 'fiveacross.vercel.app';
+  const APEX = 'fiveacross.app';
+  const GCB_APEX = 'gaycruisebingo.com';
+  const mirrorDocument = (overrides = {}) => ({
+    eventId: 'bodega-bay-2026',
+    edition: 'fiveacross',
+    status: 'active',
+    slug: 'bodega-bay',
+    pathNamespace: 'fiveacross.app',
+    ...overrides,
+  });
+
+  // One listing entry plus the audit page of an edge that committed
+  // `committedRevision` of `committedDocument`: by default exactly what the
+  // ledger holds, so the host classifies `already-correct`.
+  function host(name, document, { revision = '4', committedRevision = revision, committedDocument = document } = {}) {
+    return {
+      entry: { host: name, hostname: document, routerReplica: ledgerFor(name, revision, document) },
+      audit: auditPage({
+        committed: { revision: committedRevision, digest: digestOf(name, committedRevision, committedDocument) },
+        lookup: { kind: 'committed', revision: committedRevision },
+      }),
+    };
+  }
+
+  async function auditOf(...hosts) {
+    const deps = dependencies({
+      pages: [{ entries: hosts.map(({ entry }) => entry), nextPageToken: null }],
+      audits: Object.fromEntries(hosts.map(({ entry, audit }) => [entry.host, [audit]])),
+    });
+    const report = await reconcileHostnameReplicas(input(), deps);
+    expect(report.dryRun).toBe(true);
+    expect(deps.applyMutation).not.toHaveBeenCalled();
+    return report.mirrorReplacementAudit;
+  }
+
+  const mirror = () => host(MIRROR, mirrorDocument());
+
+  it('lists nothing for a mirror whose replacement is active and edge-converged', async () => {
+    expect(await auditOf(mirror(), host(HOST, hostnameDocument()))).toEqual({ activeMirrors: 1, findings: [] });
+  });
+
+  it('lists a mirror whose replacement was disabled, naming the replacement state', async () => {
+    const audit = await auditOf(mirror(), host(HOST, hostnameDocument({ status: 'disabled' })));
+    expect(audit).toEqual({
+      activeMirrors: 1,
+      findings: [
+        {
+          mirrorHost: MIRROR,
+          mirrorState: 'already-correct',
+          eventId: 'bodega-bay-2026',
+          edition: 'fiveacross',
+          slug: 'bodega-bay',
+          candidates: [
+            {
+              host: HOST,
+              condition: 'disabled',
+              state: 'already-correct',
+              kind: 'route',
+              eventId: 'bodega-bay-2026',
+              edition: 'fiveacross',
+              slug: 'bodega-bay',
+              status: 'disabled',
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('lists a mirror whose replacement was repointed to another Event', async () => {
+    const audit = await auditOf(mirror(), host(HOST, hostnameDocument({ eventId: 'bodega-bay-2027' })));
+    expect(audit.findings).toHaveLength(1);
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'repointed', eventId: 'bodega-bay-2027', status: 'active' }),
+    ]);
+  });
+
+  it('lists a mirror whose replacement was deleted, from the tombstone the delete left', async () => {
+    const audit = await auditOf(mirror(), host(HOST, null));
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'deleted', kind: 'tombstone', eventId: null, status: null }),
+    ]);
+  });
+
+  it('lists a mirror whose replacement is active in Firestore but not yet edge-converged', async () => {
+    const replacement = host(HOST, hostnameDocument(), {
+      revision: '5',
+      committedRevision: '4',
+      committedDocument: hostnameDocument({ status: 'disabled' }),
+    });
+    const audit = await auditOf(mirror(), replacement);
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'not-edge-converged', state: 'edge-behind', status: 'active' }),
+    ]);
+  });
+
+  it('names a missing namesake host and a same-Edition root that no longer carries a route', async () => {
+    const doorway = { root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' };
+    const missing = {
+      entry: { host: HOST, hostname: null, routerReplica: null },
+      audit: auditPage({ committed: null, lookup: { kind: 'uninitialized' } }),
+    };
+    const audit = await auditOf(mirror(), missing, host(APEX, doorway));
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'missing', state: 'no-documents', kind: null }),
+      expect.objectContaining({ host: APEX, condition: 'root-marker', kind: 'root', eventId: null }),
+    ]);
+  });
+
+  it('lists a mirror with no candidate at all as a finding with an empty candidate list', async () => {
+    const audit = await auditOf(mirror());
+    expect(audit.findings).toEqual([expect.objectContaining({ mirrorHost: MIRROR, candidates: [] })]);
+  });
+
+  it('does not list a mirror whose Event has a second healthy non-mirror route elsewhere', async () => {
+    const disabled = host(HOST, hostnameDocument({ status: 'disabled' }));
+    const audit = await auditOf(mirror(), disabled, host(APEX, mirrorDocument()));
+    expect(audit).toEqual({ activeMirrors: 1, findings: [] });
+  });
+
+  it('never lists a non-mirror active route, however alone it is', async () => {
+    const gcb = { eventId: 'gcb-2026', edition: 'gcb', status: 'active', slug: 'gcb-2026' };
+    const audit = await auditOf(host(GCB_APEX, gcb), host(APEX, mirrorDocument()), host(HOST, hostnameDocument()));
+    expect(audit).toEqual({ activeMirrors: 0, findings: [] });
+  });
+
+  it('does not count a disabled mirror, nor a mirror carrying the not-found marker', async () => {
+    const notFound = { root: 'not-found', edition: 'fiveacross', pathNamespace: 'fiveacross.app' };
+    const none = { activeMirrors: 0, findings: [] };
+    expect(await auditOf(host(MIRROR, mirrorDocument({ status: 'disabled' })))).toEqual(none);
+    expect(await auditOf(host(MIRROR, notFound))).toEqual(none);
+  });
+
+  it('accepts no home under another slug, and no route whose ledger has drifted from its source', async () => {
+    // The apex carries the same Event under another slug, which is not the
+    // address the mirror mirrors; the namesake host's ledger lags its source.
+    const disabled = hostnameDocument({ status: 'disabled' });
+    const drifted = {
+      entry: { host: HOST, hostname: hostnameDocument(), routerReplica: ledgerFor(HOST, '4', disabled) },
+      audit: auditPage({ committed: { revision: '4', digest: digestOf(HOST, '4', disabled) } }),
+    };
+    const audit = await auditOf(mirror(), drifted, host(APEX, mirrorDocument({ slug: 'bodega-bay-reunion' })));
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'not-edge-converged', state: 'drifted' }),
+      expect.objectContaining({ host: APEX, condition: 'repointed', slug: 'bodega-bay-reunion' }),
+    ]);
+  });
+
+  it('accepts no home at a root host of another Edition, whatever Edition its route claims', async () => {
+    const audit = await auditOf(mirror(), host('vacaybingo.com', mirrorDocument({ pathNamespace: 'vacaybingo.com' })));
+    expect(audit.findings[0].candidates).toEqual([expect.objectContaining({ condition: 'edition-mismatch' })]);
+  });
+
+  it('accepts no home whose recovery lock is held, because a WAF block contains it', async () => {
+    const locked = { ...host(HOST, hostnameDocument()), audit: auditPage({ recoveryLock: HELD_LOCK }) };
+    const audit = await auditOf(mirror(), locked);
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'locked', state: 'already-correct' }),
+    ]);
+  });
+
+  it('reports findings without refusing, and still refuses an unreadable audit page', async () => {
+    const report = await reconcileHostnameReplicas(
+      input(),
+      dependencies({ pages: [{ entries: [mirror().entry], nextPageToken: null }], audits: { [MIRROR]: [mirror().audit] } }),
+    );
+    expect(report.mirrorReplacementAudit.findings).toHaveLength(1);
+    expect(report.applied).toEqual([]);
+    const broken = dependencies({
+      pages: [{ entries: [mirror().entry], nextPageToken: null }],
+      audits: { [MIRROR]: [auditPage({ committed: { revision: '4', digest: 'not-hex' } })] },
+    });
+    expect(await refusal(input(), broken)).toBe('malformed-audit-page');
+  });
+});

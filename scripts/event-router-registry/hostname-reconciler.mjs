@@ -25,11 +25,14 @@
  * exactly the host whose history most needs reading.
  */
 import {
+  apexPathNamespace,
   carriesPathCapability,
   deriveCanonicalProjection,
   HostnameProjectionRefusal,
+  isBrandMirror,
   isExactRehearsalHost,
   isRecord,
+  ROOT_HOSTS,
   sameValue,
   validateHostShape,
   validateLedgerDocument,
@@ -511,6 +514,114 @@ const STATES = [
 ];
 
 /**
+ * Source, ledger and edge agree: the reconciler's reading of the two checks
+ * § D1's replacement proof makes in `hostname-lifecycle.mjs`
+ * (`requireConvergedPreState`, then `requireEdgeConvergence`), taken from the
+ * audit itself rather than from operator-supplied evidence.
+ */
+const CONVERGED_STATES = new Set(['already-correct', 'recovered']);
+
+/** A projection, or null when the document it reads will not derive. */
+function projectionOrNull(derive) {
+  try {
+    return derive();
+  } catch (error) {
+    if (error instanceof HostnameProjectionRefusal) return null;
+    throw error;
+  }
+}
+
+/**
+ * What one candidate replacement host is doing now, in the vocabulary an
+ * operator acts on. Only a `serving` candidate is a replacement home; every
+ * other condition says why this one is not.
+ */
+function candidateCondition(candidate, mirror) {
+  if (candidate.row.state === 'no-documents') return 'missing';
+  const { source, host } = candidate;
+  if (source === null) return 'unreadable';
+  if (source.kind === 'tombstone') return 'deleted';
+  if (source.kind === 'root') return 'root-marker';
+  if (source.eventId !== mirror.eventId || source.slug !== mirror.slug) return 'repointed';
+  if ([source, ROOT_HOSTS.get(host) ?? source].some((s) => s.edition !== mirror.edition)) return 'edition-mismatch';
+  if (source.status !== 'active') return source.status;
+  // A held recovery lock means an exact-host WAF block contains the host.
+  if (candidate.row.flags.includes('locked')) return 'locked';
+  return CONVERGED_STATES.has(candidate.row.state) ? 'serving' : 'not-edge-converged';
+}
+
+/**
+ * The brand-mirror replacement audit (#1295): every ACTIVE brand-mirror route
+ * whose Event has no other active, converged route at a non-mirror host.
+ * § D1's replacement proof is point-in-time — the replacement can later be
+ * disabled, repointed or deleted by ordinary writes, and nothing records
+ * which host the proof named — and interlocking those writes would refuse
+ * the emergency disable, so this is detection only: it reads what the run
+ * already read, writes nothing and refuses nothing.
+ *
+ * A home is a non-mirror host whose source is an `active` route for the
+ * mirror's Event, host Edition and slug (the proof's three) and whose
+ * classification is converged, with no recovery lock held. A finding lists
+ * every host in the listing that was or could be that home: any non-mirror
+ * host whose source or ledger names the Event, the Event subdomain labelled
+ * with the mirror's slug, and every non-mirror root host of its Edition.
+ */
+function auditMirrorReplacements(entries, rows) {
+  const hosts = entries.map((entry, index) => {
+    const row = rows[index];
+    const audited = row.state !== 'reserved-class' && row.state !== 'invalid-host';
+    return {
+      host: entry.host,
+      row,
+      audited,
+      source: audited ? projectionOrNull(() => deriveCanonicalProjection(entry.host, entry.hostname ?? null)) : null,
+      ledger:
+        audited && isRecord(entry.routerReplica)
+          ? projectionOrNull(() => validateLedgerDocument(entry.host, entry.routerReplica).desired)
+          : null,
+    };
+  });
+  let activeMirrors = 0;
+  const findings = [];
+  for (const candidateMirror of hosts) {
+    const { host, source } = candidateMirror;
+    if (!isBrandMirror(host) || source?.kind !== 'route' || source.status !== 'active') continue;
+    activeMirrors += 1;
+    const mirror = { eventId: source.eventId, edition: ROOT_HOSTS.get(host).edition, slug: source.slug };
+    const candidates = hosts.filter((other) => {
+      if (!other.audited || other.host === host || isBrandMirror(other.host)) return false;
+      const namesEvent = [other.source, other.ledger].some(
+        (desired) => desired?.kind === 'route' && desired.eventId === mirror.eventId,
+      );
+      const namesake = apexPathNamespace(other.host) !== null && other.host.split('.')[0] === mirror.slug;
+      const flagshipRoot = ROOT_HOSTS.get(other.host)?.edition === mirror.edition;
+      return namesEvent || namesake || flagshipRoot;
+    });
+    const conditions = candidates.map((candidate) => candidateCondition(candidate, mirror));
+    if (conditions.includes('serving')) continue;
+    findings.push({
+      mirrorHost: host,
+      mirrorState: candidateMirror.row.state,
+      ...mirror,
+      candidates: candidates.map((candidate, index) => {
+        const route = candidate.source?.kind === 'route' ? candidate.source : null;
+        return {
+          host: candidate.host,
+          condition: conditions[index],
+          state: candidate.row.state,
+          kind: candidate.row.state === 'no-documents' ? null : (candidate.source?.kind ?? null),
+          eventId: route?.eventId ?? null,
+          edition: route?.edition ?? null,
+          slug: route?.slug ?? null,
+          status: route?.status ?? null,
+        };
+      }),
+    });
+  }
+  return { activeMirrors, findings };
+}
+
+/**
  * Validates the reconciler's run input: schema version, mode, the `apply`
  * flag (refused on `audit`), actor, reason and source page size. An optional
  * `pathCapabilityBarrier` is checked later, in `reconcileHostnameReplicas`,
@@ -685,6 +796,8 @@ export async function reconcileHostnameReplicas(input, dependencies) {
     hosts,
     applied,
     pages: { source: sourcePages, audit: auditPages },
+    // Detection only (#1295): a finding is a row here, never a refusal.
+    mirrorReplacementAudit: auditMirrorReplacements(entries, hosts),
     // The report carries host and revision identifiers only: no OIDC token, no
     // signature, no route payload, and no credential material of any kind.
     credentialMaterialOmitted: true,
