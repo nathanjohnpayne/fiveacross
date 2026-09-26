@@ -421,6 +421,53 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     });
   });
 
+  // The GCB apex becomes its Edition doorway exactly at the archive, and that
+  // doorway serves as soon as its revision converges at a root the retired
+  // Event's service worker controlled. So the archive takes the same attested
+  // deployment-barrier record every other doorway go-live takes (#1296); the
+  // apex carries no `pathNamespace` and, by the owner's decision, takes that
+  // same record rather than a GCB-specific one.
+  it('archives the GCB apex to its doorway only with the deployment barrier, and refuses without it', async () => {
+    await trusted(async (db) => {
+      await seedConverged(db, HOST, hostnameDocument());
+      await seedConverged(db, 'gaycruisebingo.com', hostnameDocument({ edition: 'gcb', pathNamespace: null, canonicalHost: HOST, isCanonical: false }));
+      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      const archive = (extra: Doc = {}) =>
+        mutation({
+          intent: 'archive',
+          eventId: EVENT_ID,
+          mappings: [HOST],
+          apexPathHost: HOST,
+          mirrorRootConversions: [{ host: 'gaycruisebingo.com', root: 'doorway' }],
+          ...extra,
+        });
+
+      for (const [extra, expected] of [
+        [{}, 'doorway-requires-deployment-barrier'],
+        [{ pathCapabilityBarrier: { ...BARRIER, armedAt: '2026-09-21T00:00:00.000Z' } }, 'path-capability-barrier'],
+      ] as Array<[Doc, string]>) {
+        expect(await refusalCode(() => applyHostnameMutation(archive(extra), dependencies(db)))).toBe(expected);
+        expect(await read(db, 'hostnames/gaycruisebingo.com')).toMatchObject({ eventId: EVENT_ID, status: 'active' });
+        expect(await read(db, 'routerReplicas/gaycruisebingo.com')).toMatchObject({ revision: '1' });
+        expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'active' });
+        expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'active' });
+      }
+
+      await applyHostnameMutation(archive({ pathCapabilityBarrier: BARRIER }), dependencies(db));
+      expect(await read(db, 'hostnames/gaycruisebingo.com')).toEqual({
+        root: 'doorway',
+        edition: 'gcb',
+        pathNamespace: null,
+        adultContent: false,
+        canonicalHost: HOST,
+        isCanonical: false,
+      });
+      expect(await read(db, 'routerReplicas/gaycruisebingo.com')).toMatchObject({ revision: '2', desired: { kind: 'root', root: 'doorway' } });
+      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'archived', apexPath: true });
+      expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'archived' });
+    });
+  });
+
   it('deletes the source and leaves a permanent tombstone the address cannot be reclaimed from', async () => {
     await trusted(async (db) => {
       const seeded = await seedConverged(db, HOST, hostnameDocument({ status: 'disabled' }));
