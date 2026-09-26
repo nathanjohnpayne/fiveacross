@@ -171,6 +171,16 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
+// The single-service invoker families (#1299), inventoried as one table because
+// each service name is unique across them: the bug report, the email
+// unsubscribe endpoint, and the two auth-handoff halves.
+const SINGLE_SERVICE_EXPORTS = Object.freeze([
+  ["submitBugReport", "bugReport"],
+  ["emailUnsubscribe", "emailUnsubscribe"],
+  ["mintAuthHandoff", "mint"],
+  ["exchangeAuthHandoff", "exchange"],
+]);
+
 const parseModule = (name, source) =>
   ts.createSourceFile(name, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
 
@@ -4270,32 +4280,39 @@ export async function classifyInvokerScope(
   pinnedFunctionIds = [],
   pinnedOwnershipUnknown = false,
   exportedAdminCallableServices = [],
+  // Direct callers that predate #1299 assume the default codebase exports all four.
+  exportedSingleServiceCallables = SINGLE_SERVICE_EXPORTS.map(([, service]) => service),
 ) {
-  // Per Functions codebase (#1282). A scope that releases every codebase reads
-  // the union (Q3), and an uninventoried codebase in it keeps both families
-  // selected with every service not in the union allowed absent.
+  // Per Functions codebase (#1282, #1299). A scope that releases every codebase
+  // reads the union (Q3), and an uninventoried codebase in it keeps every
+  // family selected with every service not in the union allowed absent.
   const invitations = familyInventory(exportedEventInvitationServices, EVENT_INVITATION_EXPORTS);
   const admins = familyInventory(exportedAdminCallableServices, ADMIN_CALLABLE_EXPORTS);
-  const everyCodebaseInventoried = invitations.complete && admins.complete;
+  const singles = familyInventory(exportedSingleServiceCallables, SINGLE_SERVICE_EXPORTS);
+  const everyCodebaseInventoried = invitations.complete && admins.complete && singles.complete;
   const exportedInvitationCsv = invitations.union.join(",");
   const exportedAdminCsv = admins.union.join(",");
   const allInvitationsSelected = exportedInvitationCsv !== "" || !everyCodebaseInventoried;
   const allAdminsSelected = exportedAdminCsv !== "" || !everyCodebaseInventoried;
+  const unionSelects = (...services) =>
+    services.some((service) => singles.union.includes(service)) || !everyCodebaseInventoried;
+  const allBugReportsSelected = unionSelects("bugReport");
+  const allUnsubscribesSelected = unionSelects("emailUnsubscribe");
+  const allAuthHandoffsSelected = unionSelects("mint", "exchange");
   let functionsAttempted = true;
   let hostingAttempted = true;
-  let bugReportInvokerSelected = true;
-  let emailUnsubscribeInvokerSelected = true;
-  let authHandoffInvokerSelected = true;
+  let bugReportInvokerSelected = allBugReportsSelected;
+  let emailUnsubscribeInvokerSelected = allUnsubscribesSelected;
+  let authHandoffInvokerSelected = allAuthHandoffsSelected;
   let eventInvitationsInvokerSelected = allInvitationsSelected;
   let adminCallablesInvokerSelected = allAdminsSelected;
-  let bugReportInvokerConservative = false;
-  let emailUnsubscribeInvokerConservative = false;
-  let authHandoffInvokerConservative = false;
   let eventInvitationsInvokerConservative = allInvitationsSelected && exportedInvitationCsv === "";
   let adminCallablesInvokerConservative = allAdminsSelected && exportedAdminCsv === "";
-  let authHandoffStrictHalf = "";
   let eventInvitationsStrictServices = exportedInvitationCsv;
   let adminCallablesStrictServices = exportedAdminCsv;
+  // The single-service families' proven services; their conservative and
+  // strict-half fields are derived from this set once the scope is read.
+  let strictSingleServices = new Set(singles.union);
 
   if (only) {
     functionsAttempted = false;
@@ -4305,43 +4322,48 @@ export async function classifyInvokerScope(
     authHandoffInvokerSelected = false;
     eventInvitationsInvokerSelected = false;
     adminCallablesInvokerSelected = false;
-    let mintNamed = false;
-    let exchangeNamed = false;
-    // The services each multi-service family's selectors prove released.
+    // The services each family's selectors prove released.
     const strictInvitationServices = new Set();
     const strictAdminServices = new Set();
-    // The bug-report, email-unsubscribe and auth-handoff families are not
-    // scoped by codebase (#1299): an unfamiliar selector or any non-default
-    // codebase may release them, so each not already selected turns
-    // conservative.
-    const selectUnscopedInvokersConservatively = () => {
+    strictSingleServices = new Set();
+    const selectSingleFamily = (service) => {
+      if (service === "bugReport") bugReportInvokerSelected = true;
+      else if (service === "emailUnsubscribe") emailUnsubscribeInvokerSelected = true;
+      else authHandoffInvokerSelected = true;
+    };
+    // An unfamiliar Functions selector may release anything, so every invoker
+    // is selected, and each stays conservative unless an explicit branch proves
+    // one of its services.
+    const selectEveryInvokerConservatively = () => {
       functionsAttempted = true;
-      if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
-      if (!emailUnsubscribeInvokerSelected)
-        emailUnsubscribeInvokerConservative = true;
-      if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
-    };
-    // An unfamiliar Functions selector may release anything, so every invoker
-    // not already selected by an explicit branch turns conservative.
-    const selectEveryInvokerConservatively = () => {
-      selectUnscopedInvokersConservatively();
       eventInvitationsInvokerSelected = true;
       adminCallablesInvokerSelected = true;
     };
     // A whole-codebase scope (Q1), or every codebase for `null` (Q3): the
     // services that surface exports are strict, and one this parse could not
-    // inventory keeps both families selected with nothing proven.
+    // inventory keeps every family selected with nothing proven.
     const releaseProtectedCallables = (codebase) => {
+      functionsAttempted = true;
       const invitationServices = codebase === null ? invitations.union : invitations.of(codebase);
       const adminServices = codebase === null ? admins.union : admins.of(codebase);
-      const unknown = invitationServices === null || adminServices === null || (codebase === null && !everyCodebaseInventoried);
+      const singleServices = codebase === null ? singles.union : singles.of(codebase);
+      if (
+        invitationServices === null ||
+        adminServices === null ||
+        singleServices === null ||
+        (codebase === null && !everyCodebaseInventoried)
+      ) {
+        selectEveryInvokerConservatively();
+      }
       for (const service of invitationServices ?? []) strictInvitationServices.add(service);
       for (const service of adminServices ?? []) strictAdminServices.add(service);
-      if (unknown || invitationServices.length > 0) eventInvitationsInvokerSelected = true;
-      if (unknown || adminServices.length > 0) adminCallablesInvokerSelected = true;
+      for (const service of singleServices ?? []) strictSingleServices.add(service);
+      for (const service of singleServices ?? []) selectSingleFamily(service);
+      if (invitationServices?.length > 0) eventInvitationsInvokerSelected = true;
+      if (adminServices?.length > 0) adminCallablesInvokerSelected = true;
     };
     // A named protected callable selects its family, and is strict only when
     // the codebase its selector resolves to exports it (Q2): the one named in
@@ -4360,6 +4382,11 @@ export async function classifyInvokerScope(
       adminCallablesInvokerSelected = true;
       if (exportedByResolvedCodebase(admins, selector, service)) strictAdminServices.add(service);
     };
+    const nameSingle = (selector, service) => {
+      functionsAttempted = true;
+      selectSingleFamily(service);
+      if (exportedByResolvedCodebase(singles, selector, service)) strictSingleServices.add(service);
+    };
 
     // `only` arrives already widened for pinned Hosting rewrites
     // (`pinnedRewriteWidening`), the same selector hook planning saw.
@@ -4367,15 +4394,6 @@ export async function classifyInvokerScope(
       if (selector === "hosting" || selector.startsWith("hosting:")) {
         hostingAttempted = true;
       } else if (selector === "functions" || selector === "functions:default") {
-        functionsAttempted = true;
-        bugReportInvokerSelected = true;
-        emailUnsubscribeInvokerSelected = true;
-        authHandoffInvokerSelected = true;
-        mintNamed = true;
-        exchangeNamed = true;
-        bugReportInvokerConservative = false;
-        emailUnsubscribeInvokerConservative = false;
-        authHandoffInvokerConservative = false;
         releaseProtectedCallables(selector === "functions" ? null : "default");
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
@@ -4383,24 +4401,15 @@ export async function classifyInvokerScope(
         // A configured codebase that happens to share a protected endpoint's
         // name deploys its whole surface, not that endpoint: precedence must
         // win before the name branches below can read it as one callable.
-        selectUnscopedInvokersConservatively();
         releaseProtectedCallables(selector.slice("functions:".length));
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
-        functionsAttempted = true;
-        bugReportInvokerSelected = true;
-        bugReportInvokerConservative = false;
+        nameSingle(selector, "bugReport");
       } else if (/^functions:(?:[^:]+:)?emailUnsubscribe$/.test(selector)) {
-        functionsAttempted = true;
-        emailUnsubscribeInvokerSelected = true;
-        emailUnsubscribeInvokerConservative = false;
+        nameSingle(selector, "emailUnsubscribe");
       } else if (/^functions:(?:[^:]+:)?mintAuthHandoff$/.test(selector)) {
-        functionsAttempted = true;
-        authHandoffInvokerSelected = true;
-        mintNamed = true;
+        nameSingle(selector, "mint");
       } else if (/^functions:(?:[^:]+:)?exchangeAuthHandoff$/.test(selector)) {
-        functionsAttempted = true;
-        authHandoffInvokerSelected = true;
-        exchangeNamed = true;
+        nameSingle(selector, "exchange");
       } else if (/^functions:(?:[^:]+:)?mintEventInvitation$/.test(selector)) {
         nameInvitation(selector, "mint");
       } else if (
@@ -4436,18 +4445,6 @@ export async function classifyInvokerScope(
     // release anything (Phase 4b P2, run 4): every invoker turns conservative.
     if (pinnedOwnershipUnknown && pinnedFunctionIds.length > 0) selectEveryInvokerConservatively();
 
-    if (authHandoffInvokerSelected) {
-      if (mintNamed && exchangeNamed) {
-        authHandoffInvokerConservative = false;
-      } else if (mintNamed) {
-        authHandoffInvokerConservative = false;
-        authHandoffStrictHalf = "mint";
-      } else if (exchangeNamed) {
-        authHandoffInvokerConservative = false;
-        authHandoffStrictHalf = "exchange";
-      }
-    }
-
     // A proven service is a fact even when an unfamiliar selector appears in
     // the same request: it stays strict and only its peers may be absent. A
     // selected family with nothing proven is lenient, because deploy.sh has no
@@ -4471,9 +4468,6 @@ export async function classifyInvokerScope(
         emailUnsubscribeInvokerSelected = false;
         authHandoffInvokerSelected = false;
         eventInvitationsInvokerSelected = false;
-        bugReportInvokerConservative = false;
-        emailUnsubscribeInvokerConservative = false;
-        authHandoffInvokerConservative = false;
         eventInvitationsInvokerConservative = false;
         eventInvitationsStrictServices = "";
         adminCallablesInvokerSelected = false;
@@ -4489,9 +4483,9 @@ export async function classifyInvokerScope(
     // invoker included. Undo the exclusion above rather than trust it.
     if (hostingAttempted && pinnedFunctionIds.length > 0 && !functionsAttempted) {
       functionsAttempted = true;
-      bugReportInvokerSelected = true;
-      emailUnsubscribeInvokerSelected = true;
-      authHandoffInvokerSelected = true;
+      bugReportInvokerSelected = allBugReportsSelected;
+      emailUnsubscribeInvokerSelected = allUnsubscribesSelected;
+      authHandoffInvokerSelected = allAuthHandoffsSelected;
       eventInvitationsInvokerSelected = allInvitationsSelected;
       eventInvitationsInvokerConservative = allInvitationsSelected && exportedInvitationCsv === "";
       eventInvitationsStrictServices = exportedInvitationCsv;
@@ -4500,6 +4494,18 @@ export async function classifyInvokerScope(
       adminCallablesStrictServices = exportedAdminCsv;
     }
   }
+
+  // A selected single-service family is strict for what the scope proved and
+  // allows its service absent otherwise; auth handoff names its strict half
+  // when only one of its two services is proven.
+  const mintStrict = strictSingleServices.has("mint");
+  const exchangeStrict = strictSingleServices.has("exchange");
+  const bugReportInvokerConservative = bugReportInvokerSelected && !strictSingleServices.has("bugReport");
+  const emailUnsubscribeInvokerConservative =
+    emailUnsubscribeInvokerSelected && !strictSingleServices.has("emailUnsubscribe");
+  const authHandoffInvokerConservative = authHandoffInvokerSelected && !mintStrict && !exchangeStrict;
+  const authHandoffStrictHalf =
+    authHandoffInvokerSelected && mintStrict !== exchangeStrict ? (mintStrict ? "mint" : "exchange") : "";
 
   return {
     functionsAttempted,
@@ -4646,6 +4652,11 @@ export async function classifyFirebaseDeployRequest(
     configPath,
     ADMIN_CALLABLE_EXPORTS,
   );
+  const exportedSingleServiceCallables = await protectedServiceInventory(
+    deployConfig.data,
+    configPath,
+    SINGLE_SERVICE_EXPORTS,
+  );
   // The advisory export scan runs before the (slow) single-endpoint rehearsal.
   // Whether Functions can release does not depend on that rehearsal: every
   // `functions:` selector attempts Functions whether or not it is provably one
@@ -4731,6 +4742,7 @@ export async function classifyFirebaseDeployRequest(
     pinned.ids,
     pinned.ownershipUnknown,
     exportedAdminCallableServices,
+    exportedSingleServiceCallables,
   );
 
   return {

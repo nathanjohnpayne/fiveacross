@@ -363,7 +363,16 @@ init_fixture_repo() {
     git config commit.gpgsign false
     echo "initial" > README.md
     printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions"},"firestore":{"rules":"firestore.rules"},"storage":{"rules":"storage.rules"}}' > firebase.json
-    git add README.md firebase.json
+    # The single-service families are inventoried from the index (#1299), so
+    # the fixture exports their callables; one declared param, set in
+    # functions/.env, keeps the param-coverage guard satisfied.
+    mkdir -p functions/src
+    printf '%s\n' "import { defineString } from 'firebase-functions/params';" \
+      "const fixtureParam = defineString('FIXTURE_PARAM');" \
+      "export const submitBugReport = 1;" "export const emailUnsubscribe = 1;" \
+      "export const mintAuthHandoff = 1;" "export const exchangeAuthHandoff = 1;" > functions/src/index.ts
+    printf 'FIXTURE_PARAM=fixture\n' > functions/.env
+    git add README.md firebase.json functions/src/index.ts functions/.env
     git commit --quiet -m "initial"
   )
 }

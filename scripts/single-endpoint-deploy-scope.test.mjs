@@ -1771,18 +1771,26 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     // precedence over any endpoint id, and a filter with no second fragment
     // carries no idChunks — so endpointMatchesFilter admits EVERY endpoint in
     // that codebase, including protected callables. Reading it as the
-    // same-named single endpoint would release them with no reconciliation.
+    // same-named single endpoint would release them with no reconciliation;
+    // read as the codebase, it selects exactly what that codebase exports.
     await withCodebases(
       {
         api: [
           BUILDER_IMPORT,
           "export const api = onSchedule('every day 00:00', () => {});",
           "export const alsoHere = onSchedule('every day 00:00', () => {});",
+          "export const mintAuthHandoff = onSchedule('every day 00:00', () => {});",
         ].join("\n"),
       },
       async (configPath) => {
         const result = await classify(["--only", "functions:api"], configPath);
-        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+        expect(result).toMatchObject({
+          authHandoffInvokerSelected: true,
+          authHandoffInvokerConservative: false,
+          authHandoffStrictHalf: "mint",
+          bugReportInvokerSelected: false,
+          emailUnsubscribeInvokerSelected: false,
+        });
       },
     );
   });
@@ -1803,16 +1811,24 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
       },
       async (configPath) => {
         const result = await classify(["--only", "functions:submitBugReport"], configPath);
-        expect(result).toMatchObject(ALL_INVOKERS_CONSERVATIVE);
+        expect(result).toMatchObject({
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          authHandoffInvokerSelected: true,
+          authHandoffInvokerConservative: false,
+          authHandoffStrictHalf: "mint",
+          emailUnsubscribeInvokerSelected: false,
+        });
       },
     );
     // Control: with no such codebase the same selector is still the one
-    // protected endpoint, selecting only its own invoker, non-conservatively.
+    // protected endpoint, selecting only its own invoker, allowed absent
+    // because the default codebase does not export it (#1299).
     await withCodebases({ default: endpoint("unrelated") }, async (configPath) => {
       const result = await classify(["--only", "functions:submitBugReport"], configPath);
       expect(result).toMatchObject({
         bugReportInvokerSelected: true,
-        bugReportInvokerConservative: false,
+        bugReportInvokerConservative: true,
         authHandoffInvokerSelected: false,
         emailUnsubscribeInvokerSelected: false,
       });
@@ -4646,10 +4662,14 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
       rewrites: [{ source: "/api/bug", function: { functionId: "submitBugReport", pinTag: true, ...extra } }],
     },
   });
+  // The default codebase exports the pinned callable, so the widened selector
+  // is strict for it (#1299: a named callable its codebase does not export is
+  // allowed absent).
+  const pinnedSource = `${endpoint("daily")}\nexport const submitBugReport = onSchedule('every day 00:00', () => {});`;
 
   itContained("selects the pinned callable's invoker for an otherwise exact selector", async () => {
     await withFunctionsProject(
-      { config: pinned(), files: { "public/index.html": "" } },
+      { config: pinned(), source: pinnedSource, files: { "public/index.html": "" } },
       async (configPath) => {
         const result = await classify(["--only", "functions:daily,hosting"], configPath);
         expect(result).toMatchObject({
@@ -4697,6 +4717,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
     await withFunctionsProject(
       {
         config: { hosting: "hosting.config.json" },
+        source: pinnedSource,
         files: {
           "hosting.config.json": JSON.stringify(pinned().hosting),
           "public/index.html": "",
@@ -4851,7 +4872,7 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
 
   itContained("widens a codebase-qualified request to the pinned callable as well", async () => {
     await withFunctionsProject(
-      { config: pinned(), files: { "public/index.html": "" } },
+      { config: pinned(), source: pinnedSource, files: { "public/index.html": "" } },
       async (configPath) => {
         const result = await classify(["--only", "functions:default:daily,hosting"], configPath);
         expect(result).toMatchObject({
@@ -4865,16 +4886,19 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
   });
 
   it("re-adds the whole Functions target when only Hosting was asked for", async () => {
+    // The whole codebase comes back, so each family is what its index exports
+    // (#1299): the bug report strictly, and neither family it does not export.
     await withFunctionsProject(
-      { config: pinned(), files: { "public/index.html": "" } },
+      { config: pinned(), source: pinnedSource, files: { "public/index.html": "" } },
       async (configPath) => {
         const result = await classify(["--except", "functions"], configPath);
         expect(result).toMatchObject({
           hostingAttempted: true,
           functionsAttempted: true,
           bugReportInvokerSelected: true,
-          emailUnsubscribeInvokerSelected: true,
-          authHandoffInvokerSelected: true,
+          bugReportInvokerConservative: false,
+          emailUnsubscribeInvokerSelected: false,
+          authHandoffInvokerSelected: false,
         });
       },
     );

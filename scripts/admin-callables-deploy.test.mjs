@@ -255,9 +255,9 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     });
   });
 
-  it("leaves the families #1299 owns conservative for a codebase selector", async () => {
+  it("does not select a single-service family a codebase selector's index does not export (#1299)", async () => {
     const result = await withCodebases(TWO_CODEBASES, ["--only", "functions:ops"]);
-    expect(result).toMatchObject({ bugReportInvokerConservative: true, emailUnsubscribeInvokerConservative: true, authHandoffInvokerConservative: true });
+    expect(result).toMatchObject({ bugReportInvokerSelected: false, emailUnsubscribeInvokerSelected: false, authHandoffInvokerSelected: false });
   });
 
   // A codebase with no TypeScript index (JavaScript, Python), or an index the
@@ -334,5 +334,71 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       eventInvitationsInvokerConservative: false, eventInvitationsStrictServices: "mint,redeem,revoke",
       adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock,approve",
     });
+  });
+});
+
+// The single-service families follow the same per-codebase rules (#1299). Only
+// the non-default `ops` codebase exports submitBugReport and mintAuthHandoff;
+// no codebase exports emailUnsubscribe or exchangeAuthHandoff.
+describe("single-service invoker families across Functions codebases (#1299)", () => {
+  const OPS_SINGLES = [
+    "import { onCall } from 'firebase-functions/v2/https';",
+    "export const submitBugReport = onCall(async () => 1);",
+    "export const mintAuthHandoff = onCall(async () => 1);",
+  ];
+  const TWO_CODEBASES = [UNRELATED, { codebase: "ops", source: "ops", index: OPS_SINGLES }];
+  // Per family: "-" not selected, "S" selected strict, "C" selected with the
+  // service allowed absent, "mint" auth handoff strict for its mint half only.
+  const fields = (bug, email, auth) => ({
+    bugReportInvokerSelected: bug !== "-",
+    bugReportInvokerConservative: bug === "C",
+    emailUnsubscribeInvokerSelected: email !== "-",
+    emailUnsubscribeInvokerConservative: email === "C",
+    authHandoffInvokerSelected: auth !== "-",
+    authHandoffInvokerConservative: auth === "C",
+    authHandoffStrictHalf: auth === "mint" ? "mint" : "",
+  });
+
+  it.each([
+    [[], "S", "-", "mint"],
+    [["--only", "functions"], "S", "-", "mint"],
+    [["--only", "functions:default"], "-", "-", "-"],
+    [["--only", "functions:ops"], "S", "-", "mint"],
+    [["--only", "functions:submitBugReport"], "C", "-", "-"],
+    [["--only", "functions:default:submitBugReport"], "C", "-", "-"],
+    [["--only", "functions:ops:submitBugReport"], "S", "-", "-"],
+    [["--only", "functions:emailUnsubscribe"], "-", "C", "-"],
+    [["--only", "functions:ops:emailUnsubscribe"], "-", "C", "-"],
+    [["--only", "functions:mintAuthHandoff"], "-", "-", "C"],
+    [["--only", "functions:default:mintAuthHandoff"], "-", "-", "C"],
+    [["--only", "functions:ops:mintAuthHandoff"], "-", "-", "mint"],
+    [["--only", "functions:exchangeAuthHandoff"], "-", "-", "C"],
+    [["--only", "functions:ops:exchangeAuthHandoff"], "-", "-", "C"],
+    [["--only", "functions:ops:mintAuthHandoff,functions:ops:exchangeAuthHandoff"], "-", "-", "mint"],
+    [["--only", "functions:default,functions:ops:submitBugReport"], "S", "-", "-"],
+  ])("marks strict only what the selected codebase exports (%j)", async (args, bug, email, auth) => {
+    expect(await withCodebases(TWO_CODEBASES, args)).toMatchObject({ functionsAttempted: true, ...fields(bug, email, auth) });
+  });
+
+  it("keeps both auth-handoff halves strict when the selected codebase exports both", async () => {
+    const ops = { codebase: "ops", source: "ops", index: [...OPS_SINGLES, "export const exchangeAuthHandoff = onCall(async () => 1);"] };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(fields("S", "-", "S"));
+  });
+
+  // An index the scan does not read (here CommonJS) is unknown, not empty: a
+  // scope that releases its codebase keeps all three families selected with
+  // every service allowed absent, while an inventoried peer stays exact.
+  const OPAQUE = [
+    UNRELATED,
+    { codebase: "ops", source: "ops", index: ["import { onCall } from 'firebase-functions/v2/https';", "exports.submitBugReport = onCall(async () => 1);"] },
+  ];
+  it.each([
+    [[], "C", "C", "C"],
+    [["--only", "functions"], "C", "C", "C"],
+    [["--only", "functions:ops"], "C", "C", "C"],
+    [["--only", "functions:ops:submitBugReport"], "C", "-", "-"],
+    [["--only", "functions:default"], "-", "-", "-"],
+  ])("keeps the families conservative for an uninventoried codebase (%j)", async (args, bug, email, auth) => {
+    expect(await withCodebases(OPAQUE, args)).toMatchObject(fields(bug, email, auth));
   });
 });
