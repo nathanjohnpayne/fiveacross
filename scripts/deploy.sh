@@ -981,7 +981,11 @@ set -e
 #
 # It runs whenever this deploy could have RELEASED Functions
 # (FUNCTIONS_ATTEMPTED, computed from the argument list at the top of this
-# script) — on success AND on failure, whatever the failure was.
+# script) — on success AND on failure, whatever the failure was — and only
+# for the invoker families the classifier selected for that scope (#1282,
+# #1299): an inventoried codebase that exports none of a family's callables
+# selects none of its wrappers, and an uninventoried codebase keeps every
+# family selected conservatively.
 #
 # The previous rule ran it only on success or on a failure whose text matched
 # the org-policy invoker rejection, and that rule was wrong in the direction
