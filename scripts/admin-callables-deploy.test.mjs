@@ -192,15 +192,34 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             scripts: { build: "tsc && cp src/index.js lib/index.js" },
             exportsUnlock: false,
           },
+          // Another codebase's or target's hook runs before ops is loaded too.
+          "default-generator": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          "hosting-generator": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          // tsc compiles a root index.ts, not src/index.ts, to lib/index.js.
+          "root-dir": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          "no-tsconfig": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
         }[variant];
         await nodeSource(resolve(fixture, "ops"));
         await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+        const compilerOptions = variant === "root-dir" ? { rootDir: ".", outDir: "lib" } : { rootDir: "src", outDir: "lib" };
+        if (variant !== "no-tsconfig") {
+          await writeFile(
+            resolve(fixture, "ops", "tsconfig.json"),
+            JSON.stringify({ compilerOptions, include: variant === "root-dir" ? ["index.ts", "src"] : ["src"] }),
+          );
+        }
+        const defaultConfig =
+          variant === "default-generator" ? { source: "functions", predeploy: ["node generate-ops.js"] } : { source: "functions" };
         await writeFile(
           resolve(fixture, "firebase.json"),
-          JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops", predeploy }] }),
+          JSON.stringify({
+            functions: [defaultConfig, { source: "ops", codebase: "ops", predeploy }],
+            ...(variant === "hosting-generator" ? { hosting: { public: "dist", predeploy: ["node generate-ops.js"] } } : {}),
+          }),
         );
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "ops", "src", "index.ts"), exportsUnlock ? header + callable : "export const unrelated = 1;\n");
+        if (variant === "root-dir") await writeFile(resolve(fixture, "ops", "index.ts"), header + callable);
         if (variant === "compile-string-mirror-copy") {
           await writeFile(resolve(fixture, "ops", "src", "contract.cjs"), "module.exports = {};\n");
         } else if (variant === "index-copy") {
@@ -421,6 +440,28 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             );
             await writeFile(resolve(fixture, "ops", "src", "admin.ts"), alias + "export { Foo };\n");
           }
+        } else if (variant === "star-type-import-equals") {
+          // `import type x = require(...)` is erased, so its export publishes nothing.
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), header + callable + "export * from './admin';\n");
+          await writeFile(
+            resolve(fixture, "ops", "src", "admin.ts"),
+            "import type approvePrompts = require('./types');\nexport { approvePrompts };\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface AdminCallable { value: string }\n");
+        } else if (variant === "type-namespace-clause" || variant === "value-namespace-clause") {
+          // A namespace of interfaces is not instantiated; one holding a value is.
+          const member =
+            variant === "type-namespace-clause" ? "export interface Shape { value: string }" : "export const version = 1;";
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + `namespace approvePrompts { ${member} }\nexport { approvePrompts };\n`,
+          );
+        } else if (variant === "const-enum-clause") {
+          // A const enum is erased unless compiler options preserve it.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "const enum approvePrompts { A }\nexport { approvePrompts };\n",
+          );
         } else if (variant === "diamond-type-reexport") {
           // Twenty layers of two local stars into one shared module reach the
           // interface along 2^20 paths; each module is analysed once.
@@ -586,6 +627,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "named-type-import",
       "default-type-reexport",
       "diamond-type-reexport",
+      "star-type-import-equals",
+      "type-namespace-clause",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
@@ -599,6 +642,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "cyclic-type-reexport",
       "ambient-default-reexport",
       "ambient-function-default-reexport",
+      "value-namespace-clause",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
@@ -615,6 +659,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // An exported `import Foo = Types.Foo` alias may be a type or a value.
     ["ops-variant-import-alias-clause", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-reexported-import-alias", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-const-enum-clause", ["--only", "functions:ops"], unknown, unknown],
     // Codebase precedence holds for an imported functions config too.
     ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
       layout,
@@ -632,7 +677,16 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ts-default-and-generated-ops", ["--only", "functions"], unknown, unknown],
     // So does an existing index whose hook can generate or rewrite it before
     // Functions prepare loads it; the generated compile hook alone cannot.
-    ...["generator", "build-generates", "prebuild", "index-copy"].map((variant) => [
+    ...[
+      "generator",
+      "build-generates",
+      "prebuild",
+      "index-copy",
+      "default-generator",
+      "hosting-generator",
+      "root-dir",
+      "no-tsconfig",
+    ].map((variant) => [
       `ops-hook-${variant}`,
       ["--only", "functions:ops"],
       unknown,

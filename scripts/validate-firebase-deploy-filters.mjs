@@ -172,14 +172,18 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 ]);
 
 // The local names a module declares with no runtime value: an interface, a
-// type alias, an `import type` binding, or an ambient `declare` declaration,
-// with no value declaration of the same name. `export { name }` of such a
-// binding publishes nothing callable (a type is erased; an ambient binding is
-// at most an `undefined` property), so it must not become strict. `export
-// default name` of an ambient binding is different: TypeScript emits a read of
-// it, so `ambient(name)` lets that caller keep it a value. Any value
-// declaration of the name (a variable, function, class, enum, namespace or a
-// value import) keeps it, since declaration merging then exports the value.
+// type alias, an `import type` binding (including `import type x =
+// require(...)`), a namespace holding only types, or an ambient `declare`
+// declaration, with no value declaration of the same name. `export { name }`
+// of such a binding publishes nothing callable (a type is erased; an ambient
+// binding is at most an `undefined` property), so it must not become strict.
+// `export default name` of an ambient binding is different: TypeScript emits a
+// read of it, so `ambient(name)` lets that caller keep it a value. A name
+// whose emit depends on what it names or on compiler options (`import x =
+// a.b`, `const enum`) is `unclassified(name)`, and the walks raise
+// `UnmodelledExportError` for its export. Any value declaration of the name (a
+// variable, function, class, enum, instantiated namespace or a value import)
+// keeps it, since declaration merging then exports the value.
 // A value import is itself type-only when the local module it names (resolved
 // from `file`, the module holding `sourceFile`) exports the imported binding
 // only as a type: `import T from './types'` of an `export default interface`
@@ -193,7 +197,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   const values = new Set();
   const localValues = new Set();
   const ambientValues = new Set();
-  const aliases = new Set();
+  const unclassified = new Set();
   const imports = new Map();
   const addBindingNames = (name, bucket) => {
     if (ts.isIdentifier(name)) bucket.add(name.text);
@@ -220,9 +224,14 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
       statement.name &&
       ts.isIdentifier(statement.name)
     ) {
-      values.add(statement.name.text);
-      localValues.add(statement.name.text);
-      if (isEntityImportAlias(statement)) aliases.add(statement.name.text);
+      const emits = declarationEmits(statement);
+      if (emits === "type") {
+        types.add(statement.name.text);
+      } else {
+        values.add(statement.name.text);
+        localValues.add(statement.name.text);
+        if (emits === "unknown") unclassified.add(statement.name.text);
+      }
     } else if (ts.isImportDeclaration(statement) && statement.importClause) {
       const clause = statement.importClause;
       const bucket = clause.isTypeOnly ? types : values;
@@ -251,9 +260,10 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     ambient(name) {
       return types.has(name) && ambientValues.has(name);
     },
-    // Whether `name` is an `import name = a.b` alias (see `isEntityImportAlias`).
-    alias(name) {
-      return aliases.has(name);
+    // Whether `name` is declared by a declaration whose emit this parse cannot
+    // decide (see `declarationEmits`).
+    unclassified(name) {
+      return unclassified.has(name);
     },
     has(name) {
       if (types.has(name)) return true;
@@ -268,16 +278,43 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   };
 }
 
-// An `import name = a.b` alias of an entity (not `import name = require(...)`):
-// TypeScript emits it only when the entity it names is a value, and a namespace
-// member (`declare namespace Types { interface Foo {} }`) can be a type, so
-// the walks cannot say whether exporting the alias publishes anything.
-function isEntityImportAlias(statement) {
-  return ts.isImportEqualsDeclaration(statement) && !ts.isExternalModuleReference(statement.moduleReference);
+// What TypeScript emits for a non-ambient function, class, enum, namespace or
+// `import name = ...` declaration: "value", "type" (erased, no runtime
+// binding) or "unknown". `import type name = require(...)` is erased. A
+// namespace holding only interfaces, type aliases and such namespaces is not
+// instantiated, so it is erased too. An `import name = a.b` alias is emitted
+// only when the entity it names is a value, which a namespace member
+// (`declare namespace Types { interface Foo {} }`) need not be, and a `const
+// enum` is erased unless compiler options preserve it, so both are unknown.
+function declarationEmits(statement) {
+  if (ts.isImportEqualsDeclaration(statement)) {
+    if (statement.isTypeOnly) return "type";
+    return ts.isExternalModuleReference(statement.moduleReference) ? "value" : "unknown";
+  }
+  if (ts.isEnumDeclaration(statement)) {
+    return statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ConstKeyword) ? "unknown" : "value";
+  }
+  if (ts.isModuleDeclaration(statement)) return namespaceIsInstantiated(statement) ? "value" : "type";
+  return "value";
+}
+
+function namespaceIsInstantiated(declaration) {
+  const body = declaration.body;
+  if (!body) return false;
+  if (ts.isModuleDeclaration(body)) return namespaceIsInstantiated(body);
+  if (!ts.isModuleBlock(body)) return true;
+  return body.statements.some(
+    (statement) =>
+      !(
+        ts.isInterfaceDeclaration(statement) ||
+        ts.isTypeAliasDeclaration(statement) ||
+        (ts.isModuleDeclaration(statement) && !namespaceIsInstantiated(statement))
+      ),
+  );
 }
 
 // Raised by the export walks for an export they cannot classify as a value or
-// a type (an export of an `isEntityImportAlias` binding); the inventory then
+// a type (a binding `declarationEmits` calls unknown); the inventory then
 // records the codebase as uninventoried.
 class UnmodelledExportError extends Error {}
 
@@ -344,13 +381,15 @@ function parsedExportModule(file, walk) {
 // Whether the local module `file` exports `name` with no runtime value. Every
 // export of the name is weighed, because TypeScript lets a type and a value
 // share one exported name and then emits the value: the name is type-only
-// only when some export of it is a type (an exported interface, type alias or
-// ambient declaration, a type-only clause element, a re-export, followed
-// through further local modules, of a name that is type-only there, or, for
-// `default`, an `export default` interface or a binding declared only as a
-// type, not an ambient one) and none is a value. A name the module does not export directly is looked up through
-// its local `export *` targets, where a local declaration would otherwise
-// shadow it. A re-export TypeScript can only erase (`export { T as x } from
+// only when some export of it is a type (an exported interface, type alias,
+// namespace holding only types or ambient declaration, a type-only clause
+// element, a re-export, followed through further local modules, of a name that
+// is type-only there, or, for `default`, an `export default` interface or a
+// binding declared only as a type, not an ambient one) and none is a value. An
+// export whose emit cannot be decided (see `declarationEmits`) raises
+// `UnmodelledExportError`. A name the module does not export directly is
+// looked up through its local `export *` targets, where a local declaration
+// would otherwise shadow it. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
 // be read, a package, or a star it cannot resolve is not proven type-only, so
 // its name stays a value, as does a lookup that re-enters itself through a
@@ -388,12 +427,18 @@ function exportIsTypeOnlyIn(file, name, walk) {
       // `export default interface T` exports `default`, not `T`.
       const exportsDefault = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
       if (exportsDefault ? name !== "default" : !declaredNames(statement).includes(name)) continue;
-      if (isEntityImportAlias(statement)) throw new UnmodelledExportError(`export import ${name}`);
-      const erased =
-        ts.isInterfaceDeclaration(statement) ||
-        ts.isTypeAliasDeclaration(statement) ||
-        modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
-      if (erased) typeSeen = true;
+      const ambient = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
+      let emits = "value";
+      if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ambient) emits = "type";
+      else if (
+        ts.isEnumDeclaration(statement) ||
+        ts.isModuleDeclaration(statement) ||
+        ts.isImportEqualsDeclaration(statement)
+      ) {
+        emits = declarationEmits(statement);
+      }
+      if (emits === "unknown") throw new UnmodelledExportError(`an exported declaration of ${name}`);
+      if (emits === "type") typeSeen = true;
       else valueSeen = true;
       continue;
     }
@@ -406,8 +451,8 @@ function exportIsTypeOnlyIn(file, name, walk) {
       if (statement.isExportEquals) valueSeen = true;
       else if (name === "default") {
         const expression = statement.expression;
-        if (ts.isIdentifier(expression) && typeOnlyNames.alias(expression.text)) {
-          throw new UnmodelledExportError(`export default of the import alias ${expression.text}`);
+        if (ts.isIdentifier(expression) && typeOnlyNames.unclassified(expression.text)) {
+          throw new UnmodelledExportError(`export default of ${expression.text}`);
         }
         if (ts.isIdentifier(expression) && typeOnlyNames.has(expression.text) && !typeOnlyNames.ambient(expression.text)) {
           typeSeen = true;
@@ -452,7 +497,7 @@ function exportElementIsValue(statement, element, typeOnlyNames, file = null, wa
   if (element.isTypeOnly) return false;
   const local = (element.propertyName ?? element.name).text;
   if (!statement.moduleSpecifier) {
-    if (typeOnlyNames.alias(local)) throw new UnmodelledExportError(`export of the import alias ${local}`);
+    if (typeOnlyNames.unclassified(local)) throw new UnmodelledExportError(`an export of ${local}`);
     return !typeOnlyNames.has(local);
   }
   if (!file || !ts.isStringLiteral(statement.moduleSpecifier)) return true;
@@ -4290,9 +4335,10 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
- * a TypeScript index), a `prefix` (the CLI renames every service), a
- * `predeploy` hook other than the codebase's own compile step
- * (`predeployOnlyCompiles`), whether or not its index exists yet (a hook runs
+ * a TypeScript index), a `prefix` (the CLI renames every service), any
+ * `predeploy` hook in the project, in any codebase or target, other than a
+ * codebase's own compile step into its entry (`everyPredeployHookOnlyCompiles`,
+ * `predeployOnlyCompiles`), whether or not the index exists yet (a hook runs
  * before Functions prepare loads the source and can generate or rewrite it), a
  * source directory that does not exist yet under any `predeploy` hook, a
  * source directory carrying a `functions.yaml` manifest (it decides discovery
@@ -4304,7 +4350,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * `module` or top-level `this` reference, an `export =` or `export default`,
  * or an exported declaration the walk in `protectedServicesFromSource` does
  * not model), or an export the walks cannot classify as a value or a type
- * (`UnmodelledExportError`: an exported `import name = a.b` alias).
+ * (`UnmodelledExportError`: an exported `import name = a.b` alias or `const
+ * enum`).
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
@@ -4435,14 +4482,16 @@ const COMPILE_PREDEPLOY_HOOKS = new Set([
 const TSC_OUTPUT_SOURCES = Object.freeze({ ".js": [".ts", ".tsx"], ".cjs": [".cts"], ".mjs": [".mts"] });
 
 /**
- * Whether a codebase's `predeploy` hooks only compile its index. Every hook
- * runs before Functions prepare loads the source, so the index is the surface
- * the CLI discovers only when each hook is the generated compile hook, and the
- * `build` script it runs is `tsc`, optionally followed by copies
- * `cp src/<file> lib/<file>` of one relative path, none onto a file tsc emits
- * from a TypeScript source there, with no `prebuild` or `postbuild` script
- * (npm runs both around `build`). Any other hook or build step can generate or
- * rewrite what the CLI publishes, so the codebase stays uninventoried.
+ * Whether a codebase's `predeploy` hooks only compile its index into its
+ * entry. Every hook runs before Functions prepare loads the source, so the
+ * index is the surface the CLI discovers only when each hook is the generated
+ * compile hook, and the `build` script it runs is `tsc`, optionally followed by
+ * copies `cp src/<file> lib/<file>` of one relative path, none onto a file tsc
+ * emits from a TypeScript source there, with no `prebuild` or `postbuild`
+ * script (npm runs both around `build`), and the source directory's
+ * `tsconfig.json` compiles `src/index.ts` to `lib/index.js`
+ * (`tscCompilesIndexToEntry`). Any other hook, build step or output layout can
+ * generate or rewrite what the CLI publishes.
  */
 function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
   const hooks = Array.isArray(predeploy) ? predeploy : [predeploy];
@@ -4452,6 +4501,7 @@ function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
   if (typeof scripts.build !== "string") return false;
   const [compile, ...copies] = scripts.build.split("&&").map((step) => step.trim());
   if (compile !== "tsc") return false;
+  if (!tscCompilesIndexToEntry(sourceDir)) return false;
   return copies.every((step) => {
     const match = /^cp src\/(\S+) lib\/(\S+)$/.exec(step);
     if (!match || match[1] !== match[2]) return false;
@@ -4463,11 +4513,71 @@ function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
   });
 }
 
+/**
+ * Whether a bare `tsc` run in `sourceDir` (npm runs the script there) compiles
+ * `src/index.ts` to `lib/index.js`: its `tsconfig.json` parses without error,
+ * includes the index, emits (no `noEmit` or `outFile`), and maps the index to
+ * that output. The mapping also keeps every output under `lib/`, since the
+ * common root of the inputs is then `src/`, so the build cannot write into
+ * another codebase.
+ */
+function tscCompilesIndexToEntry(sourceDir) {
+  const configFile = resolve(sourceDir, "tsconfig.json");
+  if (!existsSync(configFile)) return false;
+  try {
+    const read = ts.readConfigFile(configFile, ts.sys.readFile);
+    if (read.error) return false;
+    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, sourceDir, undefined, configFile);
+    if (parsed.errors.length > 0 || parsed.options.noEmit || parsed.options.outFile || parsed.options.out) return false;
+    const index = resolve(sourceDir, "src", "index.ts");
+    if (!parsed.fileNames.some((fileName) => resolve(fileName) === index)) return false;
+    const outputs = ts.getOutputFileNames(parsed, index, !ts.sys.useCaseSensitiveFileNames);
+    return outputs.some((output) => resolve(output) === resolve(sourceDir, "lib", "index.js"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether every `predeploy` hook in the project is a Functions codebase's own
+ * compile step (`predeployOnlyCompiles`). Firebase runs the hooks of every
+ * selected target before Functions prepare loads any source, including every
+ * Functions config with no `codebase` key whatever the selectors name
+ * (`relevantFunctionsConfigs`), and a hook can write anywhere in the project.
+ * So one hook that is not a compile step, in any Functions codebase or any
+ * other target (whether or not this deploy selects it), leaves every codebase
+ * uninventoried, not only its own.
+ */
+async function everyPredeployHookOnlyCompiles(configSource, configPath) {
+  const hasHooks = (config) => {
+    const predeploy = config?.predeploy;
+    return Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
+  };
+  for (const target of VALID_DEPLOY_TARGETS) {
+    const raw = configSource[target];
+    if (raw === undefined || raw === null) continue;
+    for (const config of Array.isArray(raw) ? raw : [raw]) {
+      if (!config || typeof config !== "object" || !hasHooks(config)) continue;
+      if (target !== "functions" || typeof config.source !== "string") return false;
+      const sourceDir = resolve(dirname(configPath), config.source);
+      let scripts = null;
+      try {
+        scripts = JSON.parse(await readFile(resolve(sourceDir, "package.json"), "utf8")).scripts ?? null;
+      } catch {
+        return false;
+      }
+      if (!predeployOnlyCompiles(config.predeploy, scripts, sourceDir)) return false;
+    }
+  }
+  return true;
+}
+
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
   const services = new Map();
+  const hooksOnlyCompile = await everyPredeployHookOnlyCompiles(configSource, configPath);
   for (const functionsConfig of functionsConfigs) {
     if (!functionsConfig || typeof functionsConfig !== "object") continue;
     const codebase =
@@ -4478,6 +4588,13 @@ async function protectedServiceInventory(configSource, configPath, table) {
     // instance codebases, never `default`.
     if ("kit" in functionsConfig) {
       services.set(UNINVENTORIED_CODEBASE, null);
+      continue;
+    }
+    // A hook that can change any codebase's surface before Functions prepare
+    // loads it leaves every codebase uninventoried, whether or not its index
+    // exists yet.
+    if (!hooksOnlyCompile) {
+      services.set(codebase, null);
       continue;
     }
     if (typeof functionsConfig.source !== "string") {
@@ -4528,21 +4645,12 @@ async function protectedServiceInventory(configSource, configPath, table) {
     const hasPredeploy = Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
     if (existsSync(packagePath)) {
       let main = null;
-      let scripts = null;
       try {
-        const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
-        main = packageJson.main ?? "index.js";
-        scripts = packageJson.scripts ?? null;
+        main = JSON.parse(await readFile(packagePath, "utf8")).main ?? "index.js";
       } catch {
         main = null;
       }
       if (typeof main !== "string" || posix.normalize(main.replaceAll("\\", "/")) !== "lib/index.js") {
-        services.set(codebase, null);
-        continue;
-      }
-      // A hook that can change the surface before Functions prepare loads it
-      // leaves the codebase uninventoried whether or not its index exists yet.
-      if (hasPredeploy && !predeployOnlyCompiles(predeploy, scripts, sourceDir)) {
         services.set(codebase, null);
         continue;
       }
