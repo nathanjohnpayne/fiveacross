@@ -3965,12 +3965,19 @@ async function protectedServiceInventory(configSource, configPath, table) {
 }
 
 /**
- * The export guard (#1277): a Functions deploy whose index exports an
- * onCall/onRequest function that no Cloud Run invoker family reconciles would
- * publish it unreachable, so it is refused, naming the export, before anything
- * is built. See `callable-invoker-families.mjs`.
+ * The export guard's ADVISORY half (#1277, demoted by #1283): a Functions
+ * deploy whose index appears, by the syntax scan in
+ * `callable-invoker-families.mjs`, to export an onCall/onRequest function that
+ * no Cloud Run invoker family reconciles gets a warning on stderr, naming the
+ * export, before anything is built. It never refuses: no syntactic scan is
+ * complete over TypeScript, so a form it misreads must not block a deploy, and
+ * a form it misses must not be what stands between an unfamilied endpoint and
+ * release. The authoritative check is the Functions `predeploy` hook
+ * `scripts/check-callable-families-predeploy.mjs`, which asks the SDK's own
+ * discovery about the built artifact and stops `firebase deploy` before
+ * anything is released.
  */
-function assertEveryHttpsExportFamilied(configSource, configPath) {
+function warnUnfamiliedHttpsExports(configSource, configPath) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
@@ -3978,18 +3985,61 @@ function assertEveryHttpsExportFamilied(configSource, configPath) {
     if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
     const indexPath = resolve(dirname(configPath), functionsConfig.source, "src", "index.ts");
     if (!existsSync(indexPath)) continue;
-    const unfamilied = unfamiliedHttpsExports(indexPath);
+    let unfamilied;
+    try {
+      unfamilied = unfamiliedHttpsExports(indexPath);
+    } catch {
+      // Advisory: a scan that cannot run says nothing, and the predeploy check
+      // still reads the artifact.
+      continue;
+    }
     if (unfamilied.length > 0) {
-      throw new UnfamiliedHttpsExportError(
-        `${relative(dirname(configPath), indexPath)} exports ${unfamilied.join(", ")}, an onCall/onRequest function that belongs to no Cloud Run invoker family, so this deploy would publish it answering an HTML 403. ` +
+      console.error(
+        `⚠ HTTPS export guard (advisory, syntax only): ${relative(dirname(configPath), indexPath)} appears to export ${unfamilied.join(", ")}, ` +
+          "an onCall/onRequest function that belongs to no Cloud Run invoker family. " +
+          "The Functions predeploy check (scripts/check-callable-families-predeploy.mjs) reads the built artifact and stops the deploy before release if it really ships. " +
           "Add it to a family in scripts/callable-invoker-families.mjs and that family's scripts/set-*-invoker.sh wrapper (with its deploy.sh registration), " +
-          "or list it in PRIVATE_HTTPS_EXPORTS there with the reason it must stay private",
+          "or list it in PRIVATE_HTTPS_EXPORTS there with the reason it must stay private.",
       );
     }
   }
 }
 
-export class UnfamiliedHttpsExportError extends Error {}
+/**
+ * The export guard's wiring (#1283; Phase 4b P1 on #1328): the authoritative
+ * check is a hook of the Functions `predeploy` chain in the DEFAULT config,
+ * this repository's firebase.json, which `deploy.sh` names and a vitest case
+ * pins. A `-c/--config` naming any other file replaces that chain with whatever
+ * the other file declares, so a deploy that may release Functions under it could
+ * skip the guard, and it is refused before anything is built. A named target
+ * already refuses every `-c/--config`; this closes the same door for a plain
+ * `deploy.sh` run whose deploy may release Functions.
+ *
+ * The same FILE is not enough: firebase-tools takes the project directory from
+ * the `-c` path as given (`detectProjectRoot`), and runs the relative
+ * `node scripts/...` hook from there, so a symlink to firebase.json planted in
+ * another directory would run that directory's `scripts/` instead (CodeRabbit
+ * P1 on #1328). The selected config must also sit in the default's directory.
+ * Both are compared by real path, so the logical `$PWD` `deploy.sh` passes and
+ * the physical cwd a relative `-c` resolves against still agree.
+ */
+async function assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigPath) {
+  const real = async (path) => {
+    try {
+      return await realpath(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const sameFile = (await real(configPath)) === (await real(defaultConfigPath));
+  const sameDirectory = (await real(dirname(resolve(configPath)))) === (await real(dirname(resolve(defaultConfigPath))));
+  if (sameFile && sameDirectory) return;
+  throw new Error(
+    `-c/--config ${configPath} replaces the default ${resolve(defaultConfigPath)}, whose Functions predeploy chain runs the HTTPS export guard ` +
+      "(scripts/check-callable-families-predeploy.mjs), so a deploy that may release Functions cannot use it. " +
+      "Deploy Functions with the default config, or scope this deploy away from Functions",
+  );
+}
 
 /**
  * The function ids that Hosting will ADD to this deploy on its own: every
@@ -4477,7 +4527,7 @@ export async function classifyFirebaseDeployRequest(
     project,
   });
   const effectiveOnly = pinned.only;
-  // The protected inventories and the export guard read the materialised
+  // The protected inventories and the advisory export scan read the materialised
   // config: a `functions` block with no `source` still deploys the CLI default
   // `functions/`, so the raw object would make them scan nothing.
   const exportedEventInvitationServices = await protectedServiceInventory(
@@ -4490,14 +4540,17 @@ export async function classifyFirebaseDeployRequest(
     configPath,
     ADMIN_CALLABLE_EXPORTS,
   );
-  // The export guard runs before the (slow) single-endpoint rehearsal. Whether
-  // Functions can release does not depend on that rehearsal: every
+  // The advisory export scan runs before the (slow) single-endpoint rehearsal.
+  // Whether Functions can release does not depend on that rehearsal: every
   // `functions:` selector attempts Functions whether or not it is provably one
   // endpoint, so the empty-inventory answer is already exact for this field.
   const functionsMayRelease = (
     await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
   ).functionsAttempted;
-  if (functionsMayRelease) assertEveryHttpsExportFamilied(deployConfig.data, configPath);
+  if (functionsMayRelease) {
+    await assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigPath);
+    warnUnfamiliedHttpsExports(deployConfig.data, configPath);
+  }
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
@@ -4636,12 +4689,6 @@ async function main() {
       console.error(`✗ The Firebase deploy preflight mutated the live checkout: ${message}`);
       console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
       process.exitCode = LIVE_CHECKOUT_DRIFT_EXIT_CODE;
-      return;
-    }
-    if (error instanceof UnfamiliedHttpsExportError) {
-      console.error(`✗ Unreconciled HTTPS Function: ${message}.`);
-      console.error("  NOTHING HAS BEEN BUILT OR PUBLISHED.");
-      process.exitCode = 1;
       return;
     }
     console.error(`✗ Invalid Firebase deploy request: ${message}.`);

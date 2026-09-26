@@ -3798,12 +3798,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Cases 38a-38d (#1277): the admin callables are their own invoker family.
+# Cases 38a-38c (#1277): the admin callables are their own invoker family.
 # unlockDayNow shipped 403 in both projects because no family reconciled it.
 # The strict set comes from the Functions exports, so the not-yet-exported
 # approvePrompts may be absent after publish while a selected unlockDayNow may
-# not; and an onCall/onRequest export that belongs to no family fails the
-# classification, naming the export, before anything is built or published.
+# not. Cases 38d-38f below cover an export that belongs to no family.
 # ---------------------------------------------------------------------------
 init_admin_fixture() {
   local repo="$1"
@@ -3881,18 +3880,194 @@ else
   pass "admin-selected-missing: a selected unlockDayNow stays strict after publish (rc=$ADMIN_RC)."
 fi
 
+# ---------------------------------------------------------------------------
+# Cases 38d-38f (#1283): the HTTPS export guard is authoritative from the BUILT
+# artifact, in the Functions predeploy chain; the classifier's syntax scan only
+# warns. A stub `firebase` stands in for `firebase deploy`: it runs the
+# fixture's Functions predeploy hooks through firebase-tools' own
+# `lifecycleHooks` (the code `deploy/index.js` chains before it prepares any
+# target) and records a release only when every hook passed. The fixture
+# carries this repository's real Functions predeploy chain, read from
+# firebase.json, so the hooks under test are the ones the deploy runs: the build
+# step reaches the stub `npm` (the artifact is prebuilt, as tsc emits it), and
+# the guard step runs the real scripts/check-callable-families-predeploy.mjs
+# against the real Firebase Functions SDK discovery.
+#
+#   38d  an unfamilied callable the scan sees: the classifier warns and does not
+#        refuse, then the predeploy guard refuses, naming it, and nothing is
+#        released.
+#   38e  an unfamilied callable the scan cannot see (the late-assigned binding
+#        #1283 was filed for): no warning, and the guard still refuses it.
+#   38f  the control: a familied artifact passes the guard after the build hook
+#        and is released, so 38d/38e's refusals are attributable to the guard.
+# ---------------------------------------------------------------------------
+HOOK_CHAIN_STUB_DIR="$WORKDIR/stub-bin-hook-chain"
+mkdir -p "$HOOK_CHAIN_STUB_DIR"
+# The real wrapper's last step, without the credential it establishes first.
+cat >"$HOOK_CHAIN_STUB_DIR/op-firebase-deploy" <<'STUB'
+#!/usr/bin/env bash
+project="$1"
+shift
+exec firebase deploy --project "$project" --non-interactive "$@"
+STUB
+cat >"$HOOK_CHAIN_STUB_DIR/firebase" <<'STUB'
+#!/usr/bin/env bash
+exec node "$(dirname "$0")/firebase-hook-chain.cjs" "$@"
+STUB
+cat >"$HOOK_CHAIN_STUB_DIR/firebase-hook-chain.cjs" <<'STUB'
+"use strict";
+const { appendFileSync, readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const tools = process.env.HOOK_CHAIN_FIREBASE_TOOLS;
+const { Config } = require(join(tools, "lib", "config"));
+const { lifecycleHooks } = require(join(tools, "lib", "deploy", "lifecycleHooks"));
+const args = process.argv.slice(2);
+if (args[0] !== "deploy") {
+  console.error(`stub-firebase: unexpected command ${args[0]}`);
+  process.exit(2);
+}
+let project = "";
+let only;
+for (let i = 1; i < args.length; i += 1) {
+  if (args[i] === "--project") project = args[++i];
+  else if (args[i] === "--only") only = args[++i];
+}
+const projectDir = process.cwd();
+const config = new Config(JSON.parse(readFileSync(join(projectDir, "firebase.json"), "utf8")), {
+  projectDir,
+  cwd: projectDir,
+  configPath: "firebase.json",
+});
+lifecycleHooks("functions", "predeploy")({}, { config, projectRoot: projectDir, project, only }).then(
+  () => appendFileSync(process.env.HOOK_CHAIN_RELEASE_LOG, `released ${project} ${only ?? ""}\n`),
+  (error) => {
+    console.error(`Error: ${error.message}`);
+    process.exitCode = 2;
+  },
+);
+STUB
+chmod +x "$HOOK_CHAIN_STUB_DIR/op-firebase-deploy" "$HOOK_CHAIN_STUB_DIR/firebase"
+
+REAL_FUNCTIONS_PREDEPLOY="$(node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).functions.predeploy))' "$ROOT/firebase.json")"
+
+init_hook_chain_repo() {
+  local repo="$1" src_body="$2" lib_body="$3"
+  local entry
+  mkdir -p "$repo/functions/src" "$repo/functions/lib" "$repo/functions/node_modules"
+  for entry in "$FUNCTIONS_TOOLCHAIN"/* "$FUNCTIONS_TOOLCHAIN"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    ln -s "$entry" "$repo/functions/node_modules/$(basename "$entry")"
+  done
+  # This repository's scripts/, where the real hook finds the guard.
+  ln -s "$ROOT/scripts" "$repo/scripts"
+  (
+    cd "$repo"
+    git init --quiet -b feature/deploy-test
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    printf '%s\n' 'functions/node_modules/' '/scripts' > .gitignore
+    printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js","engines":{"node":"22"}}' > functions/package.json
+    printf '%s\n' "$src_body" > functions/src/index.ts
+    printf '%s\n' "$lib_body" > functions/lib/index.js
+    printf '{"functions":{"source":"functions","predeploy":%s}}\n' "$REAL_FUNCTIONS_PREDEPLOY" > firebase.json
+    git add .gitignore firebase.json functions/package.json functions/src/index.ts functions/lib/index.js
+    git commit --quiet -m "initial"
+  )
+}
+
+run_hook_chain_case() {
+  local id="$1" repo="$2"
+  : >"$WORKDIR/gcloud-calls-$id.log"
+  : >"$WORKDIR/npm-calls-$id.log"
+  : >"$WORKDIR/release-$id.log"
+  set +e
+  PATH="$HOOK_CHAIN_STUB_DIR:$STUB_DIR:$PATH" \
+  HOOK_CHAIN_FIREBASE_TOOLS="$ROOT/node_modules/firebase-tools" \
+  HOOK_CHAIN_RELEASE_LOG="$WORKDIR/release-$id.log" \
+  NPM_LOG="$WORKDIR/npm-calls-$id.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-$id.log" \
+  GCLOUD_MISSING_SERVICE=approveprompts \
+  GCLOUD_STUB_ANNOTATION=false \
+    bash -c 'cd "$1" && shift && bash "$@"' _ "$repo" "$SCRIPT" --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions \
+    >"$WORKDIR/case$id.out" 2>"$WORKDIR/case$id.err"
+  HOOK_CHAIN_RC=$?
+  set -e
+  cat "$WORKDIR/case$id.out" "$WORKDIR/case$id.err" >"$WORKDIR/case$id.all"
+}
+
+HOOK_CHAIN_SDK_IMPORT="import { onCall } from 'firebase-functions/v2/https';"
+HOOK_CHAIN_LIB_HEAD='"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const https_1 = require("firebase-functions/v2/https");
+exports.unlockDayNow = (0, https_1.onCall)(async () => ({ ok: true }));'
+
 REPO38D="$WORKDIR/case38d-unfamilied-callable"
-init_admin_fixture "$REPO38D" "export const brandNewCallable = onCall(async () => 1);"
-run_admin_case 38d "$REPO38D" "" --only functions
-if [[ $ADMIN_RC -eq 0 ]]; then
-  fail "unfamilied-callable: a deploy releasing an HTTPS export with no invoker family returned 0."
-elif [[ -s "$WORKDIR/ofd-calls-38d.log" || -s "$WORKDIR/gcloud-calls-38d.log" ]]; then
-  fail "unfamilied-callable: the guard fired after gcloud or Firebase had already run."
-elif ! grep -q 'brandNewCallable.*belongs to no Cloud Run invoker family' "$WORKDIR/case38d.err"; then
-  fail "unfamilied-callable: the refusal did not name the unfamilied export. stderr was:"
-  cat "$WORKDIR/case38d.err" >&2
+init_hook_chain_repo "$REPO38D" \
+  "$HOOK_CHAIN_SDK_IMPORT
+export const unlockDayNow = onCall(async () => ({ ok: true }));
+export const brandNewCallable = onCall(async () => 1);" \
+  "$HOOK_CHAIN_LIB_HEAD
+exports.brandNewCallable = (0, https_1.onCall)(async () => 1);"
+run_hook_chain_case 38d "$REPO38D"
+if [[ $HOOK_CHAIN_RC -eq 0 ]]; then
+  fail "unfamilied-callable: a deploy releasing an HTTPS endpoint with no invoker family returned 0."
+elif [[ -s "$WORKDIR/release-38d.log" ]]; then
+  fail "unfamilied-callable: the stub firebase recorded a release, so the predeploy guard did not stop it."
+elif ! grep -q 'advisory, syntax only.*brandNewCallable' "$WORKDIR/case38d.all"; then
+  fail "unfamilied-callable: the classifier did not warn about the export its scan sees. Output was:"
+  cat "$WORKDIR/case38d.all" >&2
+elif ! grep -q 'Unreconciled HTTPS Function: the built Functions artifact .* deploys brandNewCallable' "$WORKDIR/case38d.all"; then
+  fail "unfamilied-callable: the predeploy guard did not refuse the built endpoint by name. Output was:"
+  cat "$WORKDIR/case38d.all" >&2
 else
-  pass "unfamilied-callable: an HTTPS export with no invoker family fails before anything is published, naming it (rc=$ADMIN_RC)."
+  pass "unfamilied-callable: the classifier only warns, and the predeploy guard refuses the built endpoint by name before any release (rc=$HOOK_CHAIN_RC)."
+fi
+
+REPO38E="$WORKDIR/case38e-unseen-callable"
+init_hook_chain_repo "$REPO38E" \
+  "$HOOK_CHAIN_SDK_IMPORT
+export const unlockDayNow = onCall(async () => ({ ok: true }));
+let hiddenCallable;
+hiddenCallable = onCall(async () => 1);
+export { hiddenCallable };" \
+  "$HOOK_CHAIN_LIB_HEAD
+let hiddenCallable;
+hiddenCallable = (0, https_1.onCall)(async () => 1);
+exports.hiddenCallable = hiddenCallable;"
+run_hook_chain_case 38e "$REPO38E"
+if [[ $HOOK_CHAIN_RC -eq 0 || -s "$WORKDIR/release-38e.log" ]]; then
+  fail "unseen-callable: an HTTPS endpoint the syntax scan cannot see was released (rc=$HOOK_CHAIN_RC)."
+elif grep -q 'advisory, syntax only' "$WORKDIR/case38e.all"; then
+  fail "unseen-callable: the syntax scan saw the late-assigned binding, so this case no longer proves the artifact is what decides. Output was:"
+  cat "$WORKDIR/case38e.all" >&2
+elif ! grep -q 'Unreconciled HTTPS Function: the built Functions artifact .* deploys hiddenCallable' "$WORKDIR/case38e.all"; then
+  fail "unseen-callable: the predeploy guard did not refuse the built endpoint by name. Output was:"
+  cat "$WORKDIR/case38e.all" >&2
+else
+  pass "unseen-callable: an endpoint the syntax scan misses is refused from the built artifact (rc=$HOOK_CHAIN_RC)."
+fi
+
+REPO38F="$WORKDIR/case38f-familied-control"
+init_hook_chain_repo "$REPO38F" \
+  "$HOOK_CHAIN_SDK_IMPORT
+export const unlockDayNow = onCall(async () => ({ ok: true }));" \
+  "$HOOK_CHAIN_LIB_HEAD"
+run_hook_chain_case 38f "$REPO38F"
+if [[ $HOOK_CHAIN_RC -ne 0 ]]; then
+  fail "familied-control: a familied artifact did not deploy (rc=$HOOK_CHAIN_RC). Output was:"
+  cat "$WORKDIR/case38f.all" >&2
+elif ! grep -q 'released gaycruisebingo functions' "$WORKDIR/release-38f.log"; then
+  fail "familied-control: the stub firebase recorded no release. Output was:"
+  cat "$WORKDIR/case38f.all" >&2
+elif ! grep -q 'every HTTPS endpoint in the built Functions artifact belongs to an invoker family (1 checked)' "$WORKDIR/case38f.all"; then
+  fail "familied-control: the predeploy guard did not run over the built artifact. Output was:"
+  cat "$WORKDIR/case38f.all" >&2
+elif ! grep -qE 'npm.--prefix.*/functions.run.build' "$WORKDIR/npm-calls-38f.log"; then
+  fail "familied-control: the Functions build hook did not run. npm log was:"
+  cat "$WORKDIR/npm-calls-38f.log" >&2
+else
+  pass "familied-control: the build hook, then the guard, pass a familied artifact and it is released (rc=$HOOK_CHAIN_RC)."
 fi
 
 # ---------------------------------------------------------------------------
