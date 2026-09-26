@@ -2731,6 +2731,13 @@ fi
 
 REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"
 init_fixture_repo "$REPO25B"
+# An exact scope is strict only for what its codebase exports (#1282), so 25b
+# and 25c export mint (and skip the params check a Functions source triggers).
+export_mint_invitation() {
+  mkdir -p "$1/functions/src" && printf '%s\n' "export const mintEventInvitation = 1;" >"$1/functions/src/index.ts"
+  (cd "$1" && git add functions/src/index.ts && git commit --quiet -m "mint callable")
+}
+export_mint_invitation "$REPO25B"
 : >"$WORKDIR/ofd-calls-25b.log"
 : >"$WORKDIR/gcloud-calls-25b.log"
 set +e
@@ -2738,7 +2745,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-25b.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-25b.log" \
 GCLOUD_MISSING_SERVICE=redeemeventinvitation \
-  bash -c "cd '$REPO25B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintEventInvitation" \
+  bash -c "cd '$REPO25B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:mintEventInvitation" \
   >"$WORKDIR/case25b.out" 2>"$WORKDIR/case25b.err"
 RC25B=$?
 set -e
@@ -2756,12 +2763,13 @@ fi
 
 REPO25C="$WORKDIR/case25c-event-invitation-selected-missing"
 init_fixture_repo "$REPO25C"
+export_mint_invitation "$REPO25C"
 : >"$WORKDIR/ofd-calls-25c.log"
 set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-25c.log" \
 GCLOUD_MISSING_SERVICE=minteventinvitation \
-  bash -c "cd '$REPO25C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default:mintEventInvitation" \
+  bash -c "cd '$REPO25C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-env-check -- gaycruisebingo --only functions:default:mintEventInvitation" \
   >"$WORKDIR/case25c.out" 2>"$WORKDIR/case25c.err"
 RC25C=$?
 set -e

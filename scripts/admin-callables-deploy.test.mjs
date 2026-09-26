@@ -198,3 +198,141 @@ describe("admin-callables deploy scope (#1277)", () => {
     expect(result.stdout.trim().split("\n")).toHaveLength(17);
   });
 });
+
+// One `functions` config per entry (#1282): `codebase` (omitted for the default
+// codebase), `source`, and the `src/index.ts` lines. With no `index` the source
+// directory has no TypeScript index; each of `dirs` is an unreadable module, and
+// `modules` maps a further `src/` file name to its lines.
+async function withCodebases(codebases, args) {
+  const fixture = await mkdtemp(join(tmpdir(), "admin-callable-codebases-"));
+  try {
+    for (const { source, index, dirs = [], modules = {} } of codebases) {
+      await mkdir(resolve(fixture, source, "src"), { recursive: true });
+      if (index) await writeFile(resolve(fixture, source, "src", "index.ts"), index.join("\n"));
+      for (const dir of dirs) await mkdir(resolve(fixture, source, "src", dir));
+      for (const [name, lines] of Object.entries(modules)) {
+        await writeFile(resolve(fixture, source, "src", name), lines.join("\n"));
+      }
+    }
+    const configs = codebases.map(({ codebase, source }) => (codebase ? { source, codebase } : { source }));
+    await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: configs }));
+    return await classifyFirebaseDeployRequest(["fiveacross", ...args], {
+      defaultConfigPath: resolve(fixture, "firebase.json"),
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+const UNRELATED = { source: "functions", index: ["export const unrelated = 1;"] };
+const UNLOCK = ["import { onCall } from 'firebase-functions/v2/https';", "export const unlockDayNow = onCall(async () => 1);"];
+const BOTH_FAMILIES_CONSERVATIVE = {
+  eventInvitationsInvokerSelected: true, eventInvitationsInvokerConservative: true, eventInvitationsStrictServices: "",
+  adminCallablesInvokerSelected: true, adminCallablesInvokerConservative: true, adminCallablesStrictServices: "",
+};
+
+describe("admin-callables deploy scope across Functions codebases (#1282)", () => {
+  // Only the non-default `ops` codebase exports a protected callable.
+  const TWO_CODEBASES = [UNRELATED, { codebase: "ops", source: "ops", index: UNLOCK }];
+
+  // [args, selected, conservative, strict]. A selected family with nothing
+  // strict is an allow-missing probe, the only empty form deploy.sh accepts.
+  it.each([
+    [[], true, false, "unlock"],
+    [["--only", "functions"], true, false, "unlock"],
+    [["--only", "functions:default"], false, false, ""],
+    [["--only", "functions:ops"], true, false, "unlock"],
+    [["--only", "functions:unlockDayNow"], true, true, ""],
+    [["--only", "functions:default:unlockDayNow"], true, true, ""],
+    [["--only", "functions:ops:unlockDayNow"], true, false, "unlock"],
+    [["--only", "functions:ops:approvePrompts"], true, true, ""],
+  ])("marks strict only what the selected codebase exports (%j)", async (args, selected, conservative, strict) => {
+    expect(await withCodebases(TWO_CODEBASES, args)).toMatchObject({
+      functionsAttempted: true,
+      adminCallablesInvokerSelected: selected,
+      adminCallablesInvokerConservative: conservative,
+      adminCallablesStrictServices: strict,
+    });
+  });
+
+  it("leaves the families #1299 owns conservative for a codebase selector", async () => {
+    const result = await withCodebases(TWO_CODEBASES, ["--only", "functions:ops"]);
+    expect(result).toMatchObject({ bugReportInvokerConservative: true, emailUnsubscribeInvokerConservative: true, authHandoffInvokerConservative: true });
+  });
+
+  // A codebase with no TypeScript index (JavaScript, Python), or an index the
+  // syntax scan cannot follow, has an unknown surface rather than an empty one
+  // and is never refused (#1283): a scope that releases it keeps both families
+  // selected with every service allowed absent.
+  const NO_INDEX = [UNRELATED, { codebase: "ops", source: "ops" }];
+  const UNFOLLOWABLE = [{ source: "functions", index: ["export * from './admin';"], dirs: ["admin.ts"] }];
+  it.each([
+    [NO_INDEX, []],
+    [NO_INDEX, ["--only", "functions"]],
+    [NO_INDEX, ["--only", "functions:ops"]],
+    [UNFOLLOWABLE, ["--only", "functions:default"]],
+  ])("keeps both families selected conservatively for an uninventoried codebase (%#)", async (codebases, args) => {
+    expect(await withCodebases(codebases, args)).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  // The scan reads only ESM export declarations. An index that reaches its
+  // exports object any other way, itself or behind a local star, is unknown
+  // rather than empty, so its codebase keeps both families selected
+  // conservatively instead of skipping the wrapper for a callable it publishes.
+  const ON_CALL = "import { onCall } from 'firebase-functions/v2/https';";
+  const CJS_ADMIN = ["import { onCall } from 'firebase-functions/v2/https';", "exports.unlockDayNow = onCall(async () => 1);"];
+  it.each([
+    ["Object.assign(exports, ...)", [ON_CALL, "Object.assign(exports, { unlockDayNow: onCall(async () => 1) });"]],
+    ["exports.x = onCall(...)", [ON_CALL, "exports.unlockDayNow = onCall(async () => 1);"]],
+    ["module.exports = {...}", [ON_CALL, "module.exports = { unlockDayNow: onCall(async () => 1) };"]],
+    ["Object.defineProperty(exports, ...)", [ON_CALL, "Object.defineProperty(exports, 'unlockDayNow', { enumerable: true, value: onCall(async () => 1) });"]],
+    ["a computed member export", [ON_CALL, "const name = 'unlockDayNow';", "exports[name] = onCall(async () => 1);"]],
+    ["a top-level this", [ON_CALL, "(this as any).unlockDayNow = onCall(async () => 1);"]],
+    ["export =", [ON_CALL, "export = { unlockDayNow: onCall(async () => 1) };"]],
+    ["a destructured export", [ON_CALL, "export const { unlockDayNow } = { unlockDayNow: onCall(async () => 1) };"]],
+    ["export import", ["export import unlockDayNow = require('./admin');"]],
+  ])("keeps both families selected conservatively for an index exporting through %s", async (_form, index) => {
+    const ops = { codebase: "ops", source: "ops", index };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  it.each([
+    [[{ source: "functions", index: CJS_ADMIN }], ["--only", "functions:default"]],
+    [[{ source: "functions", index: CJS_ADMIN }], []],
+    [[{ source: "functions", index: ["export * from './admin';"], modules: { "admin.ts": CJS_ADMIN } }], ["--only", "functions:default"]],
+  ])("treats CommonJS exports in the default codebase, or behind a local star, as unknown (%#)", async (codebases, args) => {
+    expect(await withCodebases(codebases, args)).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  it("keeps an index inventoried when exports, module and this appear only where they are not the module's", async () => {
+    const ops = {
+      codebase: "ops",
+      source: "ops",
+      index: [
+        "const box = { exports: 1, module: 2 };",
+        "export const size = box.exports + box.module;",
+        "export function self(this: unknown) { return this; }",
+        "export class Holder { value = this; }",
+      ],
+    };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
+      eventInvitationsInvokerSelected: false,
+      adminCallablesInvokerSelected: false,
+      adminCallablesInvokerConservative: false,
+      adminCallablesStrictServices: "",
+    });
+  });
+
+  it("answers functions:default from its own inventory beside an uninventoried codebase", async () => {
+    const result = await withCodebases([{ source: "functions", index: UNLOCK }, NO_INDEX[1]], ["--only", "functions:default"]);
+    expect(result).toMatchObject({ eventInvitationsInvokerSelected: false, adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock" });
+  });
+
+  it("keeps strict what the export rule before #1282 counts in the selected codebase", async () => {
+    const ops = { codebase: "ops", source: "ops", index: ["export * from 'admin-callables-package';"] };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
+      eventInvitationsInvokerConservative: false, eventInvitationsStrictServices: "mint,redeem,revoke",
+      adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock,approve",
+    });
+  });
+});
