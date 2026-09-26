@@ -8,10 +8,13 @@ set -euo pipefail
 #
 # ONE WRAPPER FOR TWO SERVICES, unlike its siblings, because mintAuthHandoff and
 # exchangeAuthHandoff are two halves of a single sign-in flow: either one left
-# 403ing breaks authentication on every Event origin, they are always released
-# together, and there is no deploy in which reconciling one without the other is
-# the correct outcome. Splitting them would double deploy.sh's per-endpoint
-# selection state to buy a distinction nothing can act on.
+# 403ing breaks authentication on every Event origin, so every deploy that could
+# release either half reconciles the pair in one call. A scope that proves only
+# one half released (a named selector, or a Functions codebase whose index
+# exports only that half, #1299) holds that half strict and lets its peer be
+# absent via --allow-missing-half below; it never skips the wrapper. Splitting
+# them would double deploy.sh's per-endpoint selection state to buy a
+# distinction the strict-half field already expresses.
 #
 # The org policy on these projects rejects an `allUsers` Cloud Run invoker IAM
 # binding (Domain Restricted Sharing), which is the binding `firebase deploy`

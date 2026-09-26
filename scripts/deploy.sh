@@ -544,8 +544,8 @@ run_postdeploy_invoker() {
 }
 
 # The handoff pair needs a third state the two-way flag above cannot express:
-# ONE named half strict, its partner allowed to be absent. See
-# AUTH_HANDOFF_STRICT_HALF.
+# ONE proven half strict (named, or the only half its codebase exports, #1299),
+# its partner allowed to be absent. See AUTH_HANDOFF_STRICT_HALF.
 run_postdeploy_handoff_invoker() {
   local script="$SCRIPT_DIR/set-auth-handoff-invoker.sh"
   if [[ "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" == "true" ]]; then
