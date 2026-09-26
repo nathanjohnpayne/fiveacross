@@ -414,4 +414,46 @@ describe("single-service invoker families across Functions codebases (#1299)", (
   ])("keeps the families conservative for an uninventoried codebase (%j)", async (args, bug, email, auth) => {
     expect(await withCodebases(OPAQUE, args)).toMatchObject(fields(bug, email, auth));
   });
+
+  // A protected name a local star reaches with a value the scan cannot classify
+  // is unknown, not absent (Phase 4b P1 on #1335): every family stays selected
+  // conservatively instead of skipping a wrapper for a service the build may publish.
+  const V2 = "import { https } from 'firebase-functions/v2';";
+  const UNREAD_HANDOFF = {
+    "an element-access builder": { "handoff.ts": [V2, "export const mintAuthHandoff = https['onCall'](async () => 1);"] },
+    "a call through a local alias": { "handoff.ts": [V2, "const make = https.onCall;", "export const mintAuthHandoff = make(async () => 1);"] },
+    "a let assigned later": { "handoff.ts": [V2, "export let mintAuthHandoff: unknown;", "mintAuthHandoff = https.onCall(async () => 1);"] },
+    "a nested named re-export": {
+      "handoff.ts": ["export * from './callables';"],
+      "callables.ts": [V2, "const mint = https['onCall'](async () => 1);", "export { mint as mintAuthHandoff };"],
+    },
+    "a package re-export": { "handoff.ts": ["export { mintAuthHandoff } from 'handoff-package';"] },
+  };
+  const ALL_CONSERVATIVE = { ...BOTH_FAMILIES_CONSERVATIVE, ...fields("C", "C", "C") };
+  const starCases = Object.entries(UNREAD_HANDOFF).flatMap(([form, modules]) => [
+    [form, [{ source: "functions", index: ["export * from './handoff';"], modules }], []],
+    [form, [{ source: "functions", index: ["export * from './handoff';"], modules }], ["--only", "functions"]],
+    [form, [{ source: "functions", index: ["export * from './handoff';"], modules }], ["--only", "functions:default"]],
+    [form, [UNRELATED, { codebase: "ops", source: "ops", index: ["export * from './handoff';"], modules }], ["--only", "functions:ops"]],
+  ]);
+  it.each(starCases)("treats mintAuthHandoff behind a local star through %s as unknown (%#)", async (_form, codebases, args) => {
+    expect(await withCodebases(codebases, args)).toMatchObject(ALL_CONSERVATIVE);
+  });
+
+  it("keeps a recognized builder behind a local star strict and inert or unrelated exports absent", async () => {
+    const handoff = [
+      "import * as https from 'firebase-functions/v2/https';",
+      "import { getFirestore } from 'firebase-admin/firestore';",
+      "export const mintAuthHandoff = https.onCall(async () => 1);",
+      "export const db = getFirestore();",
+      "export function submitBugReport() { return 1; }",
+      "export const emailUnsubscribe = 'inert';",
+    ];
+    const codebases = [{ source: "functions", index: ["export * from './handoff';"], modules: { "handoff.ts": handoff } }];
+    expect(await withCodebases(codebases, ["--only", "functions:default"])).toMatchObject({
+      ...fields("-", "-", "mint"),
+      eventInvitationsInvokerSelected: false,
+      adminCallablesInvokerSelected: false,
+    });
+  });
 });

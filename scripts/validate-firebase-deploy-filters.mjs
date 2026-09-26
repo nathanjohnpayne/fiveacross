@@ -266,7 +266,8 @@ function localStarLeavesEsmForms(file, sourceFile, seen = new Set([file])) {
 // star of a package or of a module that cannot be resolved, here or anywhere
 // behind a local star, still widens to every protected callable. An index that
 // reaches its exports object outside the ESM forms read here, itself or behind
-// a local star, is unknown (`null`, #1282): see `exportsOutsideEsmForms`.
+// a local star, is unknown (`null`, #1282): see `exportsOutsideEsmForms`. So is
+// one whose star reaches a protected name the scan cannot classify (#1299).
 function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
@@ -317,6 +318,8 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     const graph = httpsExportGraph(sourcePath);
     for (const [exportName] of table) {
       if (graph.opaque || graph.https.has(exportName)) exportedNames.add(exportName);
+      // Exported with a value the scan could not classify (#1299): unknown.
+      else if (graph.unread.has(exportName) && !exportedNames.has(exportName)) return null;
     }
   }
   return table.filter(([exportName]) =>
